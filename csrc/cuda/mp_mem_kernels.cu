@@ -2,6 +2,11 @@
 
 #include "mp_mem_kernels.cuh"
 
+#include "phase_timing_recorder.cuh"
+
+#include <deque>
+#include <mutex>
+
 namespace {
 
 /**
@@ -433,6 +438,47 @@ void multi_layer_block_kv_transfer_templated(
 #undef DISPATCH_FORMAT
 #undef LAUNCH_KERNEL
 
+/**
+ * Calculate the bytes the staging sections of one step move: the sum of
+ * its staging copies, i.e. whole memory objects.
+ */
+int64_t calculate_staging_section_bytes(const BatchStep& step) {
+  int64_t bytes = 0;
+  for (const auto& copy : step.staging) {
+    bytes += static_cast<int64_t>(copy.nbytes);
+  }
+  return bytes;
+}
+
+/**
+ * Calculate the bytes the kernel section of one step moves. Derived from
+ * the launches rather than the staged payload, because a launch may skip
+ * leading blocks (skip_prefix_n_blocks) that the staging copies still
+ * carried. Launches with an out-of-range group_idx contribute nothing;
+ * the executor's launch loop rejects such a plan via TORCH_CHECK.
+ */
+int64_t calculate_kernel_section_bytes(
+    const BatchStep& step,
+    const std::vector<KernelGroupSpec>& kernel_group_specs) {
+  int64_t bytes = 0;
+  for (const auto& launch : step.launches) {
+    if (launch.group_idx < 0 ||
+        launch.group_idx >= static_cast<int>(kernel_group_specs.size())) {
+      continue;
+    }
+    const PageBufferShapeDesc& desc =
+        kernel_group_specs[launch.group_idx].shape_desc;
+    const int64_t block_bytes = static_cast<int64_t>(desc.kv_size) * desc.nl *
+                                desc.bs * desc.nh * desc.hs * desc.element_size;
+    const int64_t moved_blocks =
+        static_cast<int64_t>(launch.total_blocks) - launch.skip_prefix_n_blocks;
+    if (moved_blocks > 0) {
+      bytes += block_bytes * moved_blocks;
+    }
+  }
+  return bytes;
+}
+
 }  // namespace
 
 #define LAUNCH_TEMPLATED(type)                                             \
@@ -478,10 +524,13 @@ void execute_object_group_transfer(
     TransferDirection direction, const torch::Device& device,
     size_t host_buffer_alignment,
     const std::vector<KernelGroupSpec>& kernel_group_specs,
-    const std::vector<BatchStep>& batch_steps) {
+    const std::vector<BatchStep>& batch_steps, bool phase_timing_enabled,
+    const std::string& session_id) {
   // Set the device guard once for the whole plan so every staging copy and
   // kernel launch below is enqueued on this device's current stream, in order.
   const at::cuda::OptionalCUDAGuard device_guard(device);
+  // Hoisted: evaluated per section otherwise, even with timing off.
+  const cudaStream_t transfer_stream = at::cuda::getCurrentCUDAStream();
   const bool is_h2d = (direction == TransferDirection::H2D);
   const auto int64_opts = at::TensorOptions().dtype(at::kLong).device(device);
 
@@ -492,66 +541,87 @@ void execute_object_group_transfer(
     }
   };
 
+  PhaseTimer phase_timer(
+      phase_timing_enabled, transfer_stream, static_cast<int>(direction),
+      static_cast<int>(device.index()), batch_steps.size() * 2, session_id);
+
   for (const auto& step : batch_steps) {
+    const int64_t step_bytes = calculate_staging_section_bytes(step);
+    const int64_t kernel_bytes =
+        calculate_kernel_section_bytes(step, kernel_group_specs);
+
     // H2D stages CPU->GPU temp buffers before the kernel reads them; D2H stages
     // GPU->CPU after the kernel writes them. The per-step ordering must be
     // preserved because temp buffers are reused across steps.
     if (is_h2d) {
+      auto section = phase_timer.section(TransferPhase::STAGING, step_bytes,
+                                         transfer_stream);
       do_staging(step.staging);
     }
-    for (const auto& launch : step.launches) {
-      TORCH_CHECK(
-          launch.group_idx >= 0 &&
-              launch.group_idx < static_cast<int>(kernel_group_specs.size()),
-          "LaunchVar.group_idx out of range: ", launch.group_idx);
-      const KernelGroupSpec& group = kernel_group_specs[launch.group_idx];
-      TORCH_CHECK(launch.num_objects >= 1 &&
-                      launch.num_objects <=
-                          static_cast<int>(group.lmcache_objects_ptrs.size()),
-                  "LaunchVar.num_objects (", launch.num_objects,
-                  ") exceeds available temp buffers (",
-                  group.lmcache_objects_ptrs.size(), ")");
-      // Bounds-check the block_ids slice before the kernel dereferences it on
-      // device: an out-of-range offset/length would otherwise be a silent
-      // out-of-bounds device read (CUDA fault or garbage), not a clean error.
-      TORCH_CHECK(launch.block_ids_offset >= 0,
-                  "LaunchVar.block_ids_offset must be non-negative, got ",
-                  launch.block_ids_offset);
-      TORCH_CHECK(launch.total_blocks >= 0,
-                  "LaunchVar.total_blocks must be non-negative, got ",
-                  launch.total_blocks);
-      TORCH_CHECK(launch.block_ids_offset + launch.total_blocks <=
-                      group.block_ids_capacity,
-                  "LaunchVar block_ids slice [", launch.block_ids_offset, ", ",
-                  launch.block_ids_offset + launch.total_blocks,
-                  ") exceeds block_ids capacity ", group.block_ids_capacity);
+    {
+      auto section = phase_timer.section(TransferPhase::KERNEL, kernel_bytes,
+                                         transfer_stream);
+      for (const auto& launch : step.launches) {
+        TORCH_CHECK(
+            launch.group_idx >= 0 &&
+                launch.group_idx < static_cast<int>(kernel_group_specs.size()),
+            "LaunchVar.group_idx out of range: ", launch.group_idx);
+        const KernelGroupSpec& group = kernel_group_specs[launch.group_idx];
+        TORCH_CHECK(launch.num_objects >= 1 &&
+                        launch.num_objects <=
+                            static_cast<int>(group.lmcache_objects_ptrs.size()),
+                    "LaunchVar.num_objects (", launch.num_objects,
+                    ") exceeds available temp buffers (",
+                    group.lmcache_objects_ptrs.size(), ")");
+        // Bounds-check the block_ids slice before the kernel dereferences it on
+        // device: an out-of-range offset/length would otherwise be a silent
+        // out-of-bounds device read (CUDA fault or garbage), not a clean error.
+        TORCH_CHECK(launch.block_ids_offset >= 0,
+                    "LaunchVar.block_ids_offset must be non-negative, got ",
+                    launch.block_ids_offset);
+        TORCH_CHECK(launch.total_blocks >= 0,
+                    "LaunchVar.total_blocks must be non-negative, got ",
+                    launch.total_blocks);
+        TORCH_CHECK(launch.block_ids_offset + launch.total_blocks <=
+                        group.block_ids_capacity,
+                    "LaunchVar block_ids slice [", launch.block_ids_offset,
+                    ", ", launch.block_ids_offset + launch.total_blocks,
+                    ") exceeds block_ids capacity ", group.block_ids_capacity);
 
-      // Wrap the plan's pre-resolved raw device addresses as non-owning tensor
-      // views so we can reuse the existing multi_layer_block_kv_transfer entry
-      // point without touching any of its code. The backing storage is owned by
-      // the caller's tensors (kept alive for the duration of this call); these
-      // views only carry the pointer/shape each launch needs. Downstream only
-      // reads paged_buffer_ptrs_tensor.data_ptr() and block_ids.{data_ptr,
-      // size(0)}.
-      const uintptr_t block_ids_addr =
-          group.block_ids_base +
-          static_cast<uintptr_t>(launch.block_ids_offset) * sizeof(int64_t);
-      const at::Tensor paged_buffer_ptrs_tensor = at::from_blob(
-          reinterpret_cast<void*>(group.paged_buffer_ptrs), {1}, int64_opts);
-      const at::Tensor block_ids = at::from_blob(
-          reinterpret_cast<void*>(block_ids_addr),
-          {static_cast<int64_t>(launch.total_blocks)}, int64_opts);
-      std::vector<int64_t> lmcache_objects_ptrs(
-          group.lmcache_objects_ptrs.begin(),
-          group.lmcache_objects_ptrs.begin() + launch.num_objects);
+        // Wrap the plan's pre-resolved raw device addresses as non-owning
+        // tensor views so we can reuse the existing
+        // multi_layer_block_kv_transfer entry point without touching any of its
+        // code. The backing storage is owned by the caller's tensors (kept
+        // alive for the duration of this call); these views only carry the
+        // pointer/shape each launch needs. Downstream only reads
+        // paged_buffer_ptrs_tensor.data_ptr() and block_ids.{data_ptr,
+        // size(0)}.
+        const uintptr_t block_ids_addr =
+            group.block_ids_base +
+            static_cast<uintptr_t>(launch.block_ids_offset) * sizeof(int64_t);
+        const at::Tensor paged_buffer_ptrs_tensor = at::from_blob(
+            reinterpret_cast<void*>(group.paged_buffer_ptrs), {1}, int64_opts);
+        const at::Tensor block_ids = at::from_blob(
+            reinterpret_cast<void*>(block_ids_addr),
+            {static_cast<int64_t>(launch.total_blocks)}, int64_opts);
+        std::vector<int64_t> lmcache_objects_ptrs(
+            group.lmcache_objects_ptrs.begin(),
+            group.lmcache_objects_ptrs.begin() + launch.num_objects);
 
-      multi_layer_block_kv_transfer(
-          paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs), block_ids,
-          device, direction, group.shape_desc, group.lmcache_chunk_size,
-          group.engine_kv_format, launch.skip_prefix_n_blocks);
+        multi_layer_block_kv_transfer(
+            paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs),
+            block_ids, device, direction, group.shape_desc,
+            group.lmcache_chunk_size, group.engine_kv_format,
+            launch.skip_prefix_n_blocks);
+      }
     }
     if (!is_h2d) {
+      auto section = phase_timer.section(TransferPhase::STAGING, step_bytes,
+                                         transfer_stream);
       do_staging(step.staging);
     }
   }
+
+  // Publish only after the whole plan enqueued successfully.
+  phase_timer.commit();
 }
