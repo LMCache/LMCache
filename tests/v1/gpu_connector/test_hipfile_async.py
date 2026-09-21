@@ -11,6 +11,7 @@ covered by the on-hardware roundtrip tests in ``test_gds_context.py``.
 """
 
 # Standard
+from collections.abc import Iterator
 from types import SimpleNamespace
 import ctypes
 
@@ -60,11 +61,12 @@ def backend() -> ha.HipFileBackend:
 
 
 @pytest.fixture(autouse=True)
-def _fake_lib(backend: ha.HipFileBackend, monkeypatch) -> _FakeLib:
-    """Replace the ``_lib`` seam with a fake and reset module driver state."""
+def _fake_lib(backend: ha.HipFileBackend, monkeypatch) -> Iterator[_FakeLib]:
+    """Replace the native library and release ownership before unpatching it."""
     lib = _FakeLib()
     monkeypatch.setattr(backend, "library", lambda: lib)
-    return lib
+    yield lib
+    backend.close_driver()
 
 
 def _fake_gpu_tensor(ptr: int = 0x1000, nbytes: int = 4096):

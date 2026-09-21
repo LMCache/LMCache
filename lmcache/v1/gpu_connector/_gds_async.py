@@ -37,10 +37,11 @@ class Submission:
 
 
 class GDSBackend(ABC):
-    """Storage operations owned by the process's GDS context.
+    """Storage operations owned by one GDS context.
 
     Construction must not load native libraries. Implementations load their
-    driver on first use and release it only after all handles and DMA are done.
+    driver on first use. Closing a backend releases its driver ownership only
+    after its handles and DMA are done; other backend instances remain valid.
     The base class imposes no platform restrictions.
     """
 
@@ -89,7 +90,7 @@ class GDSBackend(ABC):
 
     @abstractmethod
     def close_driver(self) -> None:
-        """Release driver state after all registrations and handles are closed."""
+        """Release this owner's driver state, leaving other owners unaffected."""
 
 
 class GDSHandle(ABC):

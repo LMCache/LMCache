@@ -11,7 +11,7 @@ The real ctypes ABI and end-to-end DMA path are covered by the opt-in
 """
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
 import ctypes
@@ -70,11 +70,14 @@ def backend() -> ua.UgdsBackend:
 
 
 @pytest.fixture(autouse=True)
-def _fake_lib(backend: ua.UgdsBackend, monkeypatch: pytest.MonkeyPatch) -> _FakeLib:
-    """Replace the lazy-loaded CDLL and reset process-global driver state."""
+def _fake_lib(
+    backend: ua.UgdsBackend, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[_FakeLib]:
+    """Replace the native library and release ownership before unpatching it."""
     lib = _FakeLib()
     monkeypatch.setattr(backend, "library", lambda: lib)
-    return lib
+    yield lib
+    backend.close_driver()
 
 
 def _fake_gpu_tensor(ptr: int = 0x1000, nbytes: int = 4096) -> SimpleNamespace:

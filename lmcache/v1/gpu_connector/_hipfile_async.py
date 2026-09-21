@@ -16,6 +16,7 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector._gds_async import GDSHandle, Submission
+from lmcache.v1.gpu_connector._gds_driver import SharedDriver
 from lmcache.v1.gpu_connector._gds_file import FileGDSBackend
 
 _LIBHIPFILE_SONAME = "libhipfile.so"
@@ -120,6 +121,7 @@ class HipFileBackend(FileGDSBackend):
     """Own the hipfile driver and its registration operations."""
 
     name = "hipfile"
+    _driver = SharedDriver()
 
     def __init__(self) -> None:
         self._driver_opened = False
@@ -146,21 +148,17 @@ class HipFileBackend(FileGDSBackend):
         return AsyncHandle(self, fd, handle, path)
 
     def close_driver(self) -> None:
-        """Close the hipFile driver (thread-safe). Optional — useful in tests.
+        """Release this backend's driver ownership after its IO has completed.
 
         Raises:
             RuntimeError: If ``hipFileDriverClose`` reports a non-success status.
         """
         if not self._driver_opened:
             return
-        lib = self.library()
-        with self._init_lock:
-            if not self._driver_opened:
-                return
-            try:
-                self.check_error(lib.hipFileDriverClose(), "hipFileDriverClose")
-            finally:
-                self._driver_opened = False
+        try:
+            self._driver.release(self, self._close_driver)
+        finally:
+            self._driver_opened = False
 
     def register_handle(self, fd: int) -> int:
         """Register an open fd with hipFile and return the ``hipFileHandle_t``.
@@ -318,14 +316,14 @@ class HipFileBackend(FileGDSBackend):
         """
         if self._driver_opened:
             return
-        # Load the library before taking the non-reentrant initialization lock.
-        # the (non-reentrant) lock is never acquired twice on the same thread.
-        lib = self.library()
-        with self._init_lock:
-            if self._driver_opened:
-                return
-            self.check_error(lib.hipFileDriverOpen(), "hipFileDriverOpen")
-            self._driver_opened = True
+        self._driver.acquire(self, self._open_driver)
+        self._driver_opened = True
+
+    def _open_driver(self) -> None:
+        self.check_error(self.library().hipFileDriverOpen(), "hipFileDriverOpen")
+
+    def _close_driver(self) -> None:
+        self.check_error(self.library().hipFileDriverClose(), "hipFileDriverClose")
 
     def _op_error_string(self, err_code: int) -> str:
         """Return the human-readable name for a ``hipFileOpError_t`` value."""

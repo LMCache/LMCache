@@ -15,6 +15,7 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector._gds_async import GDSHandle, Submission
+from lmcache.v1.gpu_connector._gds_driver import SharedDriver
 from lmcache.v1.gpu_connector._gds_file import FileGDSBackend
 
 if TYPE_CHECKING:
@@ -73,6 +74,7 @@ class CuFileBackend(FileGDSBackend):
     """Own the cufile driver and its registration operations."""
 
     name = "cufile"
+    _driver = SharedDriver()
 
     def __init__(self) -> None:
         self._driver_opened = False
@@ -97,14 +99,14 @@ class CuFileBackend(FileGDSBackend):
         return AsyncHandle(self, fd, handle, path)
 
     def close_driver(self) -> None:
-        """Close the cuFile driver. Optional — useful in tests."""
+        """Release this backend's driver ownership after its IO has completed."""
         if not self._driver_opened:
             return
         # Third Party
         from cufile.bindings import cuFileDriverClose
 
         try:
-            cuFileDriverClose()
+            self._driver.release(self, cuFileDriverClose)
         finally:
             self._driver_opened = False
 
@@ -141,6 +143,7 @@ class CuFileBackend(FileGDSBackend):
         """
         if not buf.is_cuda:
             raise ValueError("register_buffer: tensor must be on CUDA")
+        self._ensure_driver_open()
         # Third Party
         from cufile.bindings import libcufile
 
@@ -202,12 +205,15 @@ class CuFileBackend(FileGDSBackend):
         """Idempotently open the cuFile driver and declare async signatures."""
         if self._driver_opened:
             return
+        self._driver.acquire(self, self._open_driver)
+        self._driver_opened = True
+
+    def _open_driver(self) -> None:
         # Third Party
         from cufile.bindings import cuFileDriverOpen
 
-        cuFileDriverOpen()
         _declare_signatures()
-        self._driver_opened = True
+        cuFileDriverOpen()
 
 
 class AsyncHandle(GDSHandle):

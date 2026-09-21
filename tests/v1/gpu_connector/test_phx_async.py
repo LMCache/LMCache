@@ -18,6 +18,7 @@ hardware via the GDS L1 tier (``--gds-l1-backend phx``).
 """
 
 # Standard
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -93,12 +94,15 @@ def backend() -> pa.PhxBackend:
 
 
 @pytest.fixture(autouse=True)
-def _fake_lib(backend: pa.PhxBackend, monkeypatch: pytest.MonkeyPatch) -> _FakeLib:
+def _fake_lib(
+    backend: pa.PhxBackend, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[_FakeLib]:
     """Replace the lazy-loaded CDLL with the fake frozen-ABI library."""
     lib = _FakeLib()
     monkeypatch.setattr(pa.ctypes, "CDLL", lambda path: lib)
     monkeypatch.setattr(pa.ctypes.util, "find_library", lambda name: None)
-    return lib
+    yield lib
+    backend.close_driver()
 
 
 def _gpu_tensor(

@@ -72,6 +72,8 @@ The async GDS wrapper tests and the pure tests in
 libraries. Keep hardware skips on individual DMA roundtrip tests, not on the
 whole module. On macOS, mock Linux-only `os.posix_fallocate` and `os.O_DIRECT`
 with `raising=False`; do not assume Linux device-number encoding in sysfs mocks.
+Native-driver mock fixtures must call `backend.close_driver()` before restoring
+the mocked library, so process-wide driver ownership cannot leak between tests.
 
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 

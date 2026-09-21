@@ -17,6 +17,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector._gds_async import GDSHandle, Submission
+from lmcache.v1.gpu_connector._gds_driver import SharedDriver
 from lmcache.v1.gpu_connector._gds_file import FileGDSBackend
 
 logger = init_logger(__name__)
@@ -109,9 +110,11 @@ class PhxBackend(FileGDSBackend):
     """Own the phx driver and its registration operations."""
 
     name = "phx"
+    _driver = SharedDriver()
 
     def __init__(self) -> None:
         self._lib: Optional[ctypes.CDLL] = None
+        self._driver_opened = False
 
     def validate_environment(self) -> None:
         """Preserve this implementation's existing PyTorch-build requirement."""
@@ -238,26 +241,40 @@ class PhxBackend(FileGDSBackend):
         )
 
     def close_driver(self) -> None:
-        """Release every shim-side registration and close all opened devices.
+        """Release this backend's ownership; the last owner closes the shim.
 
         Wraps ``phxFileDriverClose``: the shim sweeps any buffer registration
         still in its table, closes every phxfs device it opened, and resets
         its caches. Individual cleanup failures are reported by the shim on
         stderr and do not raise.
         """
-        if self._lib is not None:
-            _check(self._lib.phxFileDriverClose(), "phxFileDriverClose")
+        if not self._driver_opened:
+            return
+        try:
+            self._driver.release(self, self._close_driver)
+        finally:
+            self._driver_opened = False
 
     def library(self) -> ctypes.CDLL:
         """Load ``libphxfile.so`` on first use and declare the frozen ABI."""
-        if self._lib is not None:
-            return self._lib
-        search = ctypes.util.find_library("phxfile")
-        path = search or "libphxfile.so"
-        lib = ctypes.CDLL(path)
-        _declare_signatures(lib, path)
-        self._lib = lib
-        return lib
+        if self._lib is None:
+            search = ctypes.util.find_library("phxfile")
+            path = search or "libphxfile.so"
+            lib = ctypes.CDLL(path)
+            _declare_signatures(lib, path)
+            self._lib = lib
+        if not self._driver_opened:
+            self._driver.acquire(self, self._open_driver)
+            self._driver_opened = True
+        return self._lib
+
+    def _open_driver(self) -> None:
+        # phx opens devices lazily during registration, not at library load.
+        pass
+
+    def _close_driver(self) -> None:
+        assert self._lib is not None
+        _check(self._lib.phxFileDriverClose(), "phxFileDriverClose")
 
 
 class AsyncHandle(GDSHandle):

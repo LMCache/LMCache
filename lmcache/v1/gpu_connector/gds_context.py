@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Process-global GPUDirect Storage data path for the GDS L1 tier.
 
-The context owns a GDSBackend and calls its object interface. Each backend
-prepares its own slab and owns its native driver and registration operations.
+The context exclusively owns a GDSBackend and calls its object interface. Each
+backend prepares its own slab and retains the shared native driver until its
+registrations and DMA are done. Injected backends must not be shared by contexts.
 
 One :class:`GDSContext` per worker process owns the slab, its GDS handle,
 the registered GPU staging buffers, and the stream-ordered GDS submissions.

@@ -2,6 +2,7 @@
 """Exercise the cuFile backend against fake native bindings, without CUDA."""
 
 # Standard
+from collections.abc import Iterator
 from unittest.mock import Mock
 import ctypes
 import sys
@@ -31,8 +32,16 @@ def bindings(monkeypatch: pytest.MonkeyPatch) -> Mock:
     return bindings
 
 
-def test_driver_opens_once_and_can_reopen_after_close(bindings: Mock) -> None:
+@pytest.fixture
+def backend(bindings: Mock) -> Iterator[CuFileBackend]:
     backend = CuFileBackend()
+    yield backend
+    backend.close_driver()
+
+
+def test_driver_opens_once_and_can_reopen_after_close(
+    bindings: Mock, backend: CuFileBackend
+) -> None:
     backend.register_stream(7)
     backend.register_stream(7)
     bindings.cuFileDriverOpen.assert_called_once()
@@ -45,8 +54,9 @@ def test_driver_opens_once_and_can_reopen_after_close(bindings: Mock) -> None:
 
 
 @pytest.mark.parametrize("operation", ["read", "write"])
-def test_io_retains_native_argument_storage(bindings: Mock, operation: str) -> None:
-    backend = CuFileBackend()
+def test_io_retains_native_argument_storage(
+    bindings: Mock, backend: CuFileBackend, operation: str
+) -> None:
     handle = backend.open_handle(7, "/slab")
     submit = handle.read_async if operation == "read" else handle.write_async
     sub = submit(0x1000, 4096, 8192, 512, 13)
@@ -67,8 +77,7 @@ def test_io_retains_native_argument_storage(bindings: Mock, operation: str) -> N
     assert sub.bytes_done == 4096
 
 
-def test_io_submission_error_propagates(bindings: Mock) -> None:
-    backend = CuFileBackend()
+def test_io_submission_error_propagates(bindings: Mock, backend: CuFileBackend) -> None:
     handle = backend.open_handle(7, "/slab")
     bindings.libcufile.cuFileReadAsync.return_value = _Error(err=5, cu_err=700)
     with pytest.raises(RuntimeError, match="cuFileReadAsync"):

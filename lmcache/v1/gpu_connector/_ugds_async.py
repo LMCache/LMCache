@@ -18,6 +18,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector._gds_async import GDSBackend, GDSHandle, Submission
+from lmcache.v1.gpu_connector._gds_driver import SharedDriver
 
 logger = init_logger(__name__)
 
@@ -136,6 +137,7 @@ class UgdsBackend(GDSBackend):
     """Own the ugds driver and its registration operations."""
 
     name = "ugds"
+    _driver = SharedDriver()
 
     def __init__(self) -> None:
         self._driver_opened = False
@@ -184,11 +186,11 @@ class UgdsBackend(GDSBackend):
         return AsyncHandle(self, fd, handle, path)
 
     def close_driver(self) -> None:
+        """Release this backend's driver ownership after its IO has completed."""
         if not self._driver_opened:
             return
-        lib = self.library()
         try:
-            _check(lib.uGDSDriverClose(), "uGDSDriverClose")
+            self._driver.release(self, self._close_driver)
         finally:
             self._driver_opened = False
 
@@ -294,9 +296,14 @@ class UgdsBackend(GDSBackend):
     def _ensure_driver_open(self) -> None:
         if self._driver_opened:
             return
-        lib = self.library()
-        _check(lib.uGDSDriverOpen(), "uGDSDriverOpen")
+        self._driver.acquire(self, self._open_driver)
         self._driver_opened = True
+
+    def _open_driver(self) -> None:
+        _check(self.library().uGDSDriverOpen(), "uGDSDriverOpen")
+
+    def _close_driver(self) -> None:
+        _check(self.library().uGDSDriverClose(), "uGDSDriverClose")
 
 
 class AsyncHandle(GDSHandle):
