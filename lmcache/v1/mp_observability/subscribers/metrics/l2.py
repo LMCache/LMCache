@@ -125,6 +125,24 @@ class L2MetricsSubscriber(EventSubscriber):
             unit="chunks",
         )
 
+        # Prefetch deadline (recompute fallback) counters, labeled by phase
+        # (queued/lookup/load).
+        self._prefetch_deadline = meter.create_counter(
+            "lmcache_mp.l2_prefetch_deadline",
+            description="Total L2 prefetch requests that hit their load deadline",
+            unit="requests",
+        )
+        self._prefetch_deadline_retained = meter.create_counter(
+            "lmcache_mp.l2_prefetch_deadline_retained",
+            description="Prefix chunks served from the deadline fallback subset",
+            unit="chunks",
+        )
+        self._prefetch_deadline_missed = meter.create_counter(
+            "lmcache_mp.l2_prefetch_deadline_missed",
+            description="Chunks reported as misses (recompute) on a deadline",
+            unit="chunks",
+        )
+
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {
             EventType.L2_STORE_SUBMITTED: self._on_store_submitted,
@@ -134,8 +152,19 @@ class L2MetricsSubscriber(EventSubscriber):
             EventType.L2_PREFETCH_LOOKUP_COMPLETED: self._on_lookup_completed,
             EventType.L2_PREFETCH_LOAD_SUBMITTED: self._on_load_submitted,
             EventType.L2_PREFETCH_LOAD_COMPLETED: self._on_load_completed,
+            EventType.L2_PREFETCH_DEADLINE: self._on_deadline,
             EventType.L2_KEYS_EVICTED: self._on_evicted,
         }
+
+    def _on_deadline(self, event: Event) -> None:
+        attrs = {"phase": event.metadata["phase"]}
+        self._prefetch_deadline.add(1, attributes=attrs)
+        self._prefetch_deadline_retained.add(
+            event.metadata["retained_chunks"], attributes=attrs
+        )
+        self._prefetch_deadline_missed.add(
+            event.metadata["missed_chunks"], attributes=attrs
+        )
 
     def _on_store_submitted(self, event: Event) -> None:
         self._store_submitted.add(1)

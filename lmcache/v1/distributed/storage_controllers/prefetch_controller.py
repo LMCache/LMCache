@@ -50,10 +50,12 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from itertools import groupby
 from operator import attrgetter
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 import enum
+import math
 import select
 import threading
+import time
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -186,6 +188,32 @@ class PrefetchPhase(enum.Enum):
     PLAN_AND_LOAD = enum.auto()
 
 
+class CallerState(enum.Enum):
+    """Caller-facing lifecycle of a prefetch request's result.
+
+    ``ACTIVE`` until a result is published exactly once, then either
+    ``PUBLISHED`` (normal completion) or ``PUBLISHED_TIMEOUT`` (deadline
+    fallback). The caller reads one immutable result.
+    """
+
+    ACTIVE = enum.auto()
+    PUBLISHED = enum.auto()
+    PUBLISHED_TIMEOUT = enum.auto()
+
+
+class ResourceState(enum.Enum):
+    """Lifecycle of the locks and buffers a prefetch request holds.
+
+    Normal completion goes ``ACTIVE`` -> ``RETIRED`` in one step. A timeout
+    goes ``ACTIVE`` -> ``DRAINING`` (late I/O keeps its buffers and locks) ->
+    ``RETIRED`` once that I/O has completed.
+    """
+
+    ACTIVE = enum.auto()
+    DRAINING = enum.auto()
+    RETIRED = enum.auto()
+
+
 @dataclass
 class InFlightPrefetchRequest:
     """Tracks a single prefetch request across its lifecycle phases."""
@@ -238,6 +266,17 @@ class InFlightPrefetchRequest:
     """Maps object_group_id to that group's layout (one ``MemoryLayoutDesc``
     describes a single group's MemoryObj). Covers every object group."""
 
+    caller_state: CallerState = CallerState.ACTIVE
+    """The caller-facing result lifecycle (see :class:`CallerState`)."""
+    resource_state: ResourceState = ResourceState.ACTIVE
+    """The lock/buffer lifecycle (see :class:`ResourceState`)."""
+    deadline_at: float | None = None
+    """Absolute monotonic deadline, or ``None`` when unarmed (feature off, WARM,
+    or already published)."""
+    published_retained: Bitmap | None = None
+    """The key indices published to the caller. Their L1 read locks are the
+    caller's; a drain keeps them and releases every other lock."""
+
     def all_lookups_done(self) -> bool:
         return len(self.pending_lookup_tasks) == 0
 
@@ -266,6 +305,12 @@ class PrefetchController(StorageControllerInterface):
         adapter_descriptors: Descriptors for each L2 adapter (same order).
         policy: The prefetch policy for load plan decisions.
         max_in_flight: Maximum number of concurrent prefetch requests.
+        l2_load_timeout: Optional monotonic deadline (seconds) for a
+            ``LOOKUP``-mode request, covering queueing + L2 lookup + load.
+            ``None`` (default) disables the feature and keeps behavior
+            unchanged; on expiry the caller gets the trim-policy subset already
+            usable and the rest is reported as a miss to recompute.
+        clock: Monotonic clock used for deadlines; injectable for tests.
     """
 
     # Singleton dispatch for the in-flight load gauges: tests may construct
@@ -282,6 +327,8 @@ class PrefetchController(StorageControllerInterface):
         adapter_descriptors: list[AdapterDescriptor],
         policy: PrefetchPolicy,
         max_in_flight: int = 8,
+        l2_load_timeout: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._l1_manager = l1_manager
         self._l2_adapters: dict[int, L2AdapterInterface] = {
@@ -293,6 +340,30 @@ class PrefetchController(StorageControllerInterface):
         }
         self._policy = policy
         self._max_in_flight = max_in_flight
+
+        # Optional monotonic L2 load deadline. ``None`` disables it; when
+        # disabled ``_armed`` stays empty and the loop never reads the clock, so
+        # the hot path is unchanged. ``_clock`` is injectable for deterministic
+        # tests.
+        if l2_load_timeout is not None and not (
+            math.isfinite(l2_load_timeout) and l2_load_timeout > 0
+        ):
+            # NaN is unordered and ``inf > 0`` is true, so validate as "finite
+            # and positive" rather than "not <= 0". Mirrors the check in
+            # validate_storage_manager_config for direct construction.
+            raise ValueError(
+                "l2_load_timeout must be a finite positive number of seconds "
+                f"or None to disable (got {l2_load_timeout})"
+            )
+        self._l2_load_timeout = l2_load_timeout
+        self._clock = clock
+        # request_id -> absolute deadline for every armed in-flight request.
+        # Bounds the loop's wait and drives the in-flight expiry sweep; an entry
+        # is removed the instant its result is published.
+        self._armed: dict[PrefetchRequestId, float] = {}
+        # Shadow counters (loop thread only), surfaced via report_status.
+        self._status_deadline_timeouts: int = 0
+        self._status_draining_count: int = 0
 
         # Adapters that are being drained and will be removed after all
         # the in-flight operations are done.
@@ -306,7 +377,11 @@ class PrefetchController(StorageControllerInterface):
 
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
-        self._pending_queue: list[tuple[PrefetchRequestId, PrefetchRequestSpec]] = []
+        # Each queued item carries its absolute deadline (or None when unarmed)
+        # so queueing time counts toward the budget even before admission.
+        self._pending_queue: list[
+            tuple[PrefetchRequestId, PrefetchRequestSpec, float | None]
+        ] = []
 
         # Shadow counters for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
@@ -316,7 +391,9 @@ class PrefetchController(StorageControllerInterface):
 
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
-        self._submission_queue: list[tuple[PrefetchRequestId, PrefetchRequestSpec]] = []
+        self._submission_queue: list[
+            tuple[PrefetchRequestId, PrefetchRequestSpec, float | None]
+        ] = []
         self._next_request_id: PrefetchRequestId = 0
         self._submission_efd = create_event_notifier()
 
@@ -429,10 +506,18 @@ class PrefetchController(StorageControllerInterface):
         Returns:
             A request ID for tracking via query_prefetch_result.
         """
+        # Arm the deadline at submission so it also covers queueing time. Only
+        # LOOKUP-mode requests (a caller is waiting) are armed; WARM is
+        # speculative with no caller to fall back to. Stamp under the lock so
+        # later request ids never get an earlier deadline -- the armed entries of
+        # the pending queue then stay monotonic (unarmed WARM entries carry no
+        # deadline and are simply skipped by the expiry and poll-bound scans).
+        timeout = self._l2_load_timeout if spec.mode is PrefetchMode.LOOKUP else None
         with self._submission_lock:
             request_id = self._next_request_id
             self._next_request_id += 1
-            self._submission_queue.append((request_id, spec))
+            deadline_at = None if timeout is None else self._clock() + timeout
+            self._submission_queue.append((request_id, spec, deadline_at))
         self._submission_efd.notify()
         return request_id
 
@@ -530,6 +615,8 @@ class PrefetchController(StorageControllerInterface):
             "num_l2_adapters": len(self._l2_adapters),
             "num_active_adapters": len(self._l2_adapters) - len(self._draining),
             "num_draining_adapters": len(self._draining),
+            "deadline_timeout_count": self._status_deadline_timeouts,
+            "draining_request_count": self._status_draining_count,
         }
 
     def get_adapter_state_observations(
@@ -688,7 +775,7 @@ class PrefetchController(StorageControllerInterface):
             # First, apply runtime add/remove of the L2 adapters.
             self._apply_pending_adapter_ops(poller)
 
-            ready = poller.poll(PREFETCH_LOOP_POLL_TIMEOUT_MS)
+            ready = poller.poll(self._next_poll_timeout_ms())
 
             signaled_adapters: dict[PrefetchPhase, set[int]] = {
                 phase: set() for phase in PrefetchPhase
@@ -728,6 +815,20 @@ class PrefetchController(StorageControllerInterface):
                             "Unexpected error advancing in-flight prefetch request %d",
                             request.request_id,
                         )
+
+            # Expire due requests AFTER advancing, so any completion signaled in
+            # this same wake is fully processed first (completion wins the race);
+            # only genuinely-pending adapters remain when expiry computes the
+            # fallback. Runs every iteration, cheap and a no-op when disabled.
+            try:
+                # Read the clock only when the feature is on: a disabled
+                # controller must not touch it on any loop iteration.
+                if self._l2_load_timeout is not None:
+                    self._expire_due_requests(self._clock())
+            except Exception:
+                logger.exception(
+                    "Unexpected error expiring deadline-due prefetch requests"
+                )
 
             try:
                 self._start_pending_requests()
@@ -811,13 +912,23 @@ class PrefetchController(StorageControllerInterface):
         self._status_pending_count += len(items)
 
     def _start_pending_requests(self) -> None:
-        """Start pending requests up to the max in-flight limit."""
+        """Start pending requests up to the max in-flight limit.
+
+        A request can go past its deadline between the expiry sweep and its own
+        admission (the sweep runs once per iteration, and starting the requests
+        ahead of it in the queue takes time). Re-check at admission and route
+        such a request through the queued-fallback path instead of starting L2
+        work whose result is already too late to publish.
+        """
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, spec = self._pending_queue.pop(0)
+            request_id, spec, deadline_at = self._pending_queue.pop(0)
             self._status_pending_count -= 1
-            self._start_lookup_phase(request_id, spec)
+            if deadline_at is not None and deadline_at <= self._clock():
+                self._expire_queued_request(request_id, spec, deadline_at)
+            else:
+                self._start_lookup_phase(request_id, spec, deadline_at)
 
     # =========================================================================
     # Lookup phase
@@ -878,9 +989,17 @@ class PrefetchController(StorageControllerInterface):
         self,
         request_id: PrefetchRequestId,
         spec: PrefetchRequestSpec,
+        deadline_at: float | None = None,
     ) -> None:
         """Read-lock L1-resident keys, then submit lookup_and_lock to all
-        live (non-draining) adapters for a new request."""
+        live (non-draining) adapters for a new request.
+
+        Args:
+            request_id: The request's controller id.
+            spec: The prefetch request inputs.
+            deadline_at: Absolute monotonic deadline stamped at submission, or
+                ``None`` when the feature is off or the request is ``WARM``.
+        """
         l1_readlocks = self._lock_l1_keys(
             spec.keys, spec.num_kv_readers, spec.policy, spec.attn_desc
         )
@@ -894,6 +1013,7 @@ class PrefetchController(StorageControllerInterface):
             mode=spec.mode,
             group_layout_descs=spec.group_layout_descs,
             l1_readlocks=l1_readlocks,
+            deadline_at=deadline_at,
         )
 
         # Skip adapters being drained so a new request never locks keys on
@@ -914,6 +1034,8 @@ class PrefetchController(StorageControllerInterface):
             )
             request.pending_lookup_tasks[adapter_id] = task_id
         self._in_flight_requests[request_id] = request
+        if deadline_at is not None:
+            self._armed[request_id] = deadline_at
         self._status_in_flight_count += 1
         self._status_lookup_phase_count += 1
 
@@ -1224,13 +1346,39 @@ class PrefetchController(StorageControllerInterface):
         phase_adapters = signaled_adapters[request.phase]
         if not phase_adapters:
             return
+        draining = request.resource_state is ResourceState.DRAINING
         if request.phase == PrefetchPhase.LOOKUP:
             self._poll_lookup_results(request, phase_adapters)
-            if request.all_lookups_done():
+            if draining:
+                # A timed-out lookup plans no load; drain once the late lookups
+                # (each carrying an L2 lock) have all reported.
+                if request.all_lookups_done():
+                    self._finish_drain(request)
+            elif request.all_lookups_done():
+                # Completion handling precedes the loop's expiry sweep. A late
+                # lookup may be consumed now, but must not start a new load
+                # after the request's waiting budget has expired.
+                if request.deadline_at is not None:
+                    now = self._clock()
+                    if request.deadline_at <= now:
+                        self._enter_drain_only(request, now)
+                        # Every lookup has returned and no load was submitted.
+                        self._finish_drain(request)
+                        return
                 self._transition_to_load_phase(request)
         elif request.phase == PrefetchPhase.PLAN_AND_LOAD:
             self._poll_load_results(request, phase_adapters)
-            if request.all_loads_done():
+            if draining:
+                if request.all_loads_done():
+                    self._finish_drain(request)
+                elif request.published_retained is not None:
+                    # A late task returned while others are still pending: give
+                    # back everything that task owned (loaded and failed) now
+                    # instead of holding it until the slowest adapter finishes.
+                    self._finalize_completed_load_tasks(
+                        request, request.published_retained
+                    )
+            elif request.all_loads_done():
                 self._finish_request(request)
 
     def _poll_lookup_results(
@@ -1308,51 +1456,28 @@ class PrefetchController(StorageControllerInterface):
         """
         num_keys = len(request.keys)
 
-        # Scatter per-adapter local load results into global positions.
-        # Each adapter's load bitmap is locally indexed (size == adapter's
-        # key count).  The plan bitmap maps local → global indices via
-        # get_indices_list().
-        result_bitmap = Bitmap(num_keys)
-        for adapter_idx, plan_bitmap in request.load_plan.items():
-            load_bitmap = request.load_results.get(adapter_idx)
-            if load_bitmap is None:
-                continue
-            plan_indices = plan_bitmap.get_indices_list()
-            for global_i in load_bitmap.gather(plan_indices):
-                result_bitmap.set(global_i)
-
-        # Separate loaded vs. failed among write-reserved keys
-        loaded_keys: list[ObjectKey] = result_bitmap.gather(request.keys)
-        loaded_set = set(loaded_keys)
-        failed_keys = [k for k in request.write_reserved_keys if k not in loaded_set]
+        result_bitmap = self._scatter_load_results(request)
+        loaded_set = set(result_bitmap.gather(request.keys))
 
         # Return every L2 read lock still held.
         self._release_l2_locks(request, keep={})
 
         l1_mgr = self._l1_manager
 
-        # Finish — failed loads delete their buffer; the fold below decides
-        # the final retained set and every read lock outside it is released.
+        # Finalize every write-reserved buffer. LOOKUP read-locks the loaded keys
+        # for the retriever (the fold below then releases those outside the
+        # retained set); WARM makes them resident and unlocked. Failed loads
+        # delete their buffer.
         # SW keys in L2 (and not in L1):
         # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
         #                               ^ L1 hit length               ^ L1+L2 hit length
         # |       -        |     -      |       -        |load→locked |     -      |
         # SW keys in L1:
         # |     unlock     |   unlock   |     unlock     |   locked   |   unlock   |
-        if loaded_keys:
-            if request.mode is PrefetchMode.WARM:
-                # Warm: make ready, lock nothing.
-                l1_mgr.finish_write(loaded_keys)
-            else:
-                # write-locked -> read-locked; num_kv_readers so each TP
-                # worker gets its own read lock.
-                l1_mgr.finish_write_and_reserve_read(
-                    loaded_keys, read_locks=request.num_kv_readers
-                )
-
-        # Clean up failed keys
-        if failed_keys:
-            l1_mgr.finish_write_and_delete(failed_keys)
+        readlock = set() if request.mode is PrefetchMode.WARM else loaded_set
+        loaded_keys, failed_keys = self._finalize_write_reserved(
+            request, list(request.write_reserved_keys), loaded_set, readlock
+        )
 
         self._event_bus.publish(
             Event(
@@ -1410,13 +1535,11 @@ class PrefetchController(StorageControllerInterface):
         if retained_keys:
             l1_mgr.touch_keys(retained_keys)
 
-        # No-load finishes reach here without a reported hit; the load path
-        # already reported at submit time (so the engine never waits on the
-        # load) and is not re-reported.
-        if not request.hit_reported:
-            self._report_lookup_hit(request, hit_length)
-
-        self._complete_request(request.request_id, retained)
+        # Publish the retained bitmap and retire in one step (normal completion).
+        # _publish_result_once reports the lookup hit unless the load path
+        # already did at submit time (so the engine never waits on the load).
+        self._publish_result_once(request, retained, hit_length, timed_out=False)
+        self._retire_request_once(request)
 
     # =========================================================================
     # Unlock helpers
@@ -1452,34 +1575,470 @@ class PrefetchController(StorageControllerInterface):
     # Completion and cleanup
     # =========================================================================
 
-    def _complete_request(self, request_id: PrefetchRequestId, result: Bitmap) -> None:
-        """Store the retained-key bitmap and remove from in-flight tracking."""
+    def _scatter_load_results(self, request: InFlightPrefetchRequest) -> Bitmap:
+        """Scatter each adapter's local load bitmap into global key positions.
+
+        Each adapter's load bitmap is locally indexed (size == that adapter's
+        key count); the plan bitmap maps local -> global indices via
+        ``get_indices_list()``.
+
+        Args:
+            request: The in-flight request whose ``load_results`` to scatter.
+
+        Returns:
+            A ``len(request.keys)``-sized bitmap of the globally-indexed keys
+            that have finished loading so far.
+        """
+        result_bitmap = Bitmap(len(request.keys))
+        for adapter_idx, plan_bitmap in request.load_plan.items():
+            load_bitmap = request.load_results.get(adapter_idx)
+            if load_bitmap is None:
+                continue
+            plan_indices = plan_bitmap.get_indices_list()
+            for global_i in load_bitmap.gather(plan_indices):
+                result_bitmap.set(global_i)
+        return result_bitmap
+
+    def _finalize_write_reserved(
+        self,
+        request: InFlightPrefetchRequest,
+        keys: list[ObjectKey],
+        loaded: set[ObjectKey],
+        readlock: set[ObjectKey],
+    ) -> tuple[list[ObjectKey], list[ObjectKey]]:
+        """Finalize a set of write-reserved buffers and drop them from tracking.
+
+        The single place that resolves a reserved L1 write buffer, shared by
+        normal completion, the load-phase deadline finalize, and the drain: a
+        key that loaded and is in ``readlock`` becomes read-locked for the
+        retriever; one that loaded but is not in ``readlock`` becomes
+        resident-but-unlocked (reusable by a later request); one that did not
+        load has its buffer deleted. All ``keys`` are removed from
+        ``write_reserved_keys``/``write_reserved_objs`` so no later step touches
+        them again.
+
+        Args:
+            request: The in-flight request owning the reservations.
+            keys: The write-reserved keys to finalize (a subset of
+                ``request.write_reserved_keys``).
+            loaded: The keys whose load succeeded.
+            readlock: The loaded keys to read-lock for the retriever; loaded
+                keys outside it are made resident and unlocked.
+
+        Returns:
+            ``(loaded_keys, failed_keys)`` — the finalized loaded and deleted
+            keys, for the caller's completion events.
+        """
+        to_readlock = [k for k in keys if k in loaded and k in readlock]
+        to_resident = [k for k in keys if k in loaded and k not in readlock]
+        failed_keys = [k for k in keys if k not in loaded]
+        if to_readlock:
+            self._l1_manager.finish_write_and_reserve_read(
+                to_readlock, read_locks=request.num_kv_readers
+            )
+        if to_resident:
+            self._l1_manager.finish_write(to_resident)
+        if failed_keys:
+            self._l1_manager.finish_write_and_delete(failed_keys)
+        if keys:
+            finalized = set(keys)
+            request.write_reserved_keys = [
+                k for k in request.write_reserved_keys if k not in finalized
+            ]
+            for key in keys:
+                request.write_reserved_objs.pop(key, None)
+        return to_readlock + to_resident, failed_keys
+
+    def _publish_result_once(
+        self,
+        request: InFlightPrefetchRequest,
+        result: Bitmap,
+        hit_length: int,
+        *,
+        timed_out: bool,
+    ) -> None:
+        """Publish the caller-facing result exactly once and disarm the deadline.
+
+        The caller lifecycle's single terminal transition (success or timeout
+        fallback). Idempotent: a second call for the same request (e.g. a late
+        completion after a timeout publish) is a no-op, so the caller sees one
+        immutable result. Does NOT retire the request -- resource retirement is
+        a separate lifecycle handled by :meth:`_retire_request_once`.
+
+        Args:
+            request: The in-flight request being published.
+            result: The retained-key bitmap the caller receives.
+            hit_length: Chunk-level prefix hit to report as the lookup hit.
+            timed_out: Whether this publish is a timeout fallback.
+        """
+        if request.caller_state is not CallerState.ACTIVE:
+            return
+        request.caller_state = (
+            CallerState.PUBLISHED_TIMEOUT if timed_out else CallerState.PUBLISHED
+        )
+        self._armed.pop(request.request_id, None)
+        # Report the lookup hit unless the load path already did at submit time.
+        # A timeout fallback may report retained < the hit reported at submit;
+        # that is the same shrink the existing partial-load-failure path
+        # produces, and the caller sizes its retrieve from this published
+        # bitmap (query_prefetch_status), never from the earlier hit.
+        if not request.hit_reported:
+            self._report_lookup_hit(request, hit_length)
         with self._prefetch_results_lock:
-            self._completed_results[request_id] = result
+            self._completed_results[request.request_id] = result
             # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
             self._prefetch_results_cv.notify_all()
-        removed = self._in_flight_requests.pop(request_id, None)
+        logger.debug(
+            "Prefetch request %d %s: %d retained keys",
+            request.request_id,
+            "timed out (fallback published)" if timed_out else "completed",
+            result.popcount(),
+        )
+
+    def _retire_request_once(self, request: InFlightPrefetchRequest) -> None:
+        """Remove a request from in-flight tracking exactly once.
+
+        The resource lifecycle's terminal transition to ``RETIRED``. Idempotent.
+        On the timeout path this runs only after every late completion has
+        drained; on the normal path right after :meth:`_publish_result_once`.
+
+        Args:
+            request: The request whose tracking entry to remove.
+        """
+        if request.resource_state is ResourceState.RETIRED:
+            return
+        was_draining = request.resource_state is ResourceState.DRAINING
+        request.resource_state = ResourceState.RETIRED
+        self._armed.pop(request.request_id, None)
+        removed = self._in_flight_requests.pop(request.request_id, None)
         if removed is not None:
             self._status_in_flight_count -= 1
+            if was_draining:
+                self._status_draining_count -= 1
             if removed.phase == PrefetchPhase.LOOKUP:
                 self._status_lookup_phase_count -= 1
             elif removed.phase == PrefetchPhase.PLAN_AND_LOAD:
                 self._status_load_phase_count -= 1
-        logger.debug(
-            "Prefetch request %d completed: %d retained keys",
+        logger.debug("Prefetch request %d retired", request.request_id)
+
+    def _next_poll_timeout_ms(self) -> int:
+        """Poll timeout bounded by the nearest deadline, in-flight or queued.
+
+        Returns the constant poll timeout when the feature is off or nothing is
+        armed (no clock read on that path). Otherwise the wait is
+        ``min(poll, nearest_deadline - now)``, rounded up so a sub-millisecond
+        remainder does not busy-spin at ``poll(0)``.
+
+        Armed deadlines are monotonic along the pending queue (stamped under the
+        submission lock), but unarmed WARM entries are interleaved with no
+        deadline at all, so the scan walks to the *first armed* entry instead of
+        looking only at the head -- otherwise a WARM request parked at the head
+        would hide an armed one behind it and the loop would sleep the full
+        default poll past its deadline.
+        """
+        if self._l2_load_timeout is None:
+            return PREFETCH_LOOP_POLL_TIMEOUT_MS
+        nearest: float | None = min(self._armed.values()) if self._armed else None
+        for _request_id, _spec, queued_deadline in self._pending_queue:
+            if queued_deadline is None:
+                continue
+            if nearest is None or queued_deadline < nearest:
+                nearest = queued_deadline
+            break
+        if nearest is None:
+            return PREFETCH_LOOP_POLL_TIMEOUT_MS
+        remaining_ms = (nearest - self._clock()) * 1000.0
+        if remaining_ms <= 0.0:
+            return 0
+        # Clamp before rounding: a very large (but finite) budget would make
+        # ``math.ceil`` build a huge int only to throw it away, and poll()
+        # rejects a timeout wider than a C int.
+        return math.ceil(min(float(PREFETCH_LOOP_POLL_TIMEOUT_MS), remaining_ms))
+
+    def _expire_due_requests(self, now: float) -> None:
+        """Fire the deadline for every request whose budget has elapsed.
+
+        In-flight requests enter drain-only (publish the usable subset, keep
+        late I/O draining); still-queued requests publish their L1-only subset
+        and are dropped (they hold no L2 resources). A no-op when disabled.
+
+        Args:
+            now: The current monotonic time.
+        """
+        if self._l2_load_timeout is None:
+            return
+        for request_id, deadline in list(self._armed.items()):
+            if deadline > now:
+                continue
+            request = self._in_flight_requests.get(request_id)
+            if request is None or request.caller_state is not CallerState.ACTIVE:
+                # Retired or already published in this same iteration; disarm.
+                self._armed.pop(request_id, None)
+                continue
+            self._enter_drain_only(request, now)
+        # Expire queued (not yet admitted) requests. Armed deadlines are
+        # monotonic along the queue: walk from the front, keep unarmed (WARM)
+        # entries, collect the due ones, and stop at the first armed entry not
+        # yet due (index ``cut``); the tail from ``cut`` is untouched.
+        keep: list[tuple[PrefetchRequestId, PrefetchRequestSpec, float | None]] = []
+        expired: list[tuple[PrefetchRequestId, PrefetchRequestSpec, float]] = []
+        cut = len(self._pending_queue)
+        for i, (request_id, spec, queued_deadline) in enumerate(self._pending_queue):
+            if queued_deadline is None:
+                keep.append((request_id, spec, queued_deadline))
+            elif queued_deadline <= now:
+                expired.append((request_id, spec, queued_deadline))
+            else:
+                cut = i
+                break
+        if not expired:
+            return
+        self._pending_queue = keep + self._pending_queue[cut:]
+        for request_id, spec, deadline in expired:
+            self._status_pending_count -= 1
+            self._expire_queued_request(request_id, spec, deadline)
+
+    def _expire_queued_request(
+        self,
+        request_id: PrefetchRequestId,
+        spec: PrefetchRequestSpec,
+        deadline_at: float,
+    ) -> None:
+        """Publish the L1-only fallback for a request that timed out while queued.
+
+        A queued request never reached L2, so its budget is spent entirely on
+        an L2 that never ran. It still does the cheap synchronous L1 lock + trim
+        (skipping only L2) so an L1-resident hit is not discarded as a miss, then
+        publishes that subset through the single publish path. The caller owns
+        the published L1 read locks and releases them via free_lookup_locks;
+        there is nothing left to drain. It emits a ``LOOKUP_SUBMITTED`` (to zero
+        L2 adapters) so the ``LOOKUP_COMPLETED`` the publish emits still pairs.
+
+        Args:
+            request_id: The queued request's controller id.
+            spec: The queued request's inputs.
+            deadline_at: The request's absolute deadline (for the timeout event).
+        """
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
+                metadata={
+                    "request_id": request_id,
+                    "key_count": len(spec.keys),
+                    "adapter_count": 0,
+                    "key_count_per_salt": Counter(k.cache_salt for k in spec.keys),
+                },
+            )
+        )
+        l1_readlocks = self._lock_l1_keys(
+            spec.keys, spec.num_kv_readers, spec.policy, spec.attn_desc
+        )
+        hit_length, retained = build_trim_mask(
+            l1_readlocks, len(spec.keys), spec.policy, spec.attn_desc
+        )
+        release = (l1_readlocks & (~retained)).gather(spec.keys)
+        if release:
+            self._l1_manager.finish_read(release, read_locks=spec.num_kv_readers)
+        request = InFlightPrefetchRequest(
+            request_id=request_id,
+            keys=spec.keys,
+            phase=PrefetchPhase.LOOKUP,
+            num_kv_readers=spec.num_kv_readers,
+            policy=spec.policy,
+            attn_desc=spec.attn_desc,
+            mode=spec.mode,
+            group_layout_descs=spec.group_layout_descs,
+            l1_readlocks=l1_readlocks & retained,
+            published_retained=retained,
+        )
+        # LRU parity with the normal completion path: the retained keys are the
+        # ones this request actually serves, and locking never refreshes recency.
+        retained_keys = retained.gather(spec.keys)
+        if retained_keys:
+            self._l1_manager.touch_keys(retained_keys)
+        self._status_deadline_timeouts += 1
+        self._emit_deadline_timeout(
+            "queued",
             request_id,
-            result.popcount(),
+            spec.attn_desc,
+            len(spec.keys),
+            hit_length,
+            deadline_at,
+        )
+        self._publish_result_once(request, retained, hit_length, timed_out=True)
+
+    def _emit_deadline_timeout(
+        self,
+        phase: str,
+        request_id: PrefetchRequestId,
+        attn_desc: AttnWindowDesc,
+        num_keys: int,
+        retained_chunks: int,
+        deadline_at: float | None,
+    ) -> None:
+        """Publish one ``L2_PREFETCH_DEADLINE`` event for a timed-out request.
+
+        Low-cardinality only: ``phase`` (queued/lookup/load), the configured
+        budget, the elapsed time since the request entered the controller, and
+        the retained vs missed (recompute) chunk counts. No request-id label.
+        """
+        stride = attn_desc.num_object_groups * attn_desc.world_size
+        total_chunks = num_keys // stride if stride else 0
+        budget = self._l2_load_timeout
+        elapsed = (
+            self._clock() - (deadline_at - budget)
+            if deadline_at is not None and budget is not None
+            else budget
+        )
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_DEADLINE,
+                metadata={
+                    "request_id": request_id,
+                    "phase": phase,
+                    "budget_seconds": budget,
+                    "elapsed_seconds": elapsed,
+                    "retained_chunks": retained_chunks,
+                    "missed_chunks": max(0, total_chunks - retained_chunks),
+                },
+            )
         )
 
+    def _enter_drain_only(self, request: InFlightPrefetchRequest, now: float) -> None:
+        """Publish the timeout fallback and switch the request to drain-only.
+
+        The usable subset is the trim policy applied to what is safely available
+        *now*: L1 read-locked hits, plus (in the load phase) the loads already
+        completed and finalized. Pending adapters keep their buffers and L2
+        locks -- nothing they still own is freed here. Late completions drain via
+        :meth:`_finish_drain`.
+
+        Args:
+            request: The in-flight request whose deadline fired.
+            now: The current monotonic time (for observability only).
+        """
+        num_keys = len(request.keys)
+        if request.phase == PrefetchPhase.LOOKUP:
+            # Only finalized L1 hits are usable; L2 lookups that returned but
+            # never loaded into L1 do not count.
+            usable = request.l1_readlocks
+        else:
+            usable = self._scatter_load_results(request) | request.l1_readlocks
+        hit_length, retained = build_trim_mask(
+            usable, num_keys, request.policy, request.attn_desc
+        )
+        if request.phase == PrefetchPhase.PLAN_AND_LOAD:
+            self._finalize_completed_load_tasks(request, retained)
+        # Release the L1 read locks outside the published set now, not at the end
+        # of the drain: pending adapters do not use them, so holding them would
+        # pin L1 entries against eviction for a whole slow-L2 drain. Only the
+        # pending tasks' buffers and L2 locks must outlive the publish.
+        stale = (request.l1_readlocks & (~retained)).gather(request.keys)
+        if stale:
+            self._l1_manager.finish_read(stale, read_locks=request.num_kv_readers)
+            request.l1_readlocks = request.l1_readlocks & retained
+        request.published_retained = retained
+        request.resource_state = ResourceState.DRAINING
+        self._status_deadline_timeouts += 1
+        self._status_draining_count += 1
+        phase = "lookup" if request.phase == PrefetchPhase.LOOKUP else "load"
+        self._emit_deadline_timeout(
+            phase,
+            request.request_id,
+            request.attn_desc,
+            num_keys,
+            hit_length,
+            request.deadline_at,
+        )
+        self._publish_result_once(request, retained, hit_length, timed_out=True)
+
+    def _finalize_completed_load_tasks(
+        self, request: InFlightPrefetchRequest, retained: Bitmap
+    ) -> None:
+        """Finalize every buffer owned by an adapter whose load task has returned.
+
+        The unit of ownership is the adapter *task*, not the individual key: once
+        an adapter has reported, nothing it owns is still being written, so its
+        whole load plan is resolvable -- the keys that loaded and the keys that
+        did **not**. Resolving only the loaded ones would pin a failed key's
+        buffer (and its L1 write reservation) until the slowest adapter in the
+        request finally returns.
+
+        Keys that loaded and fall inside the published ``retained`` set become
+        read-locked for the caller; keys that loaded outside it become
+        resident-but-unlocked (reusable by a later request); keys that did not
+        load have their buffer deleted. All of them leave the write-reservation
+        bookkeeping, so only still-pending adapters' reservations remain.
+
+        Idempotent: keys already finalized are no longer write-reserved and are
+        skipped, so this may run at the deadline and again on each late
+        completion during the drain.
+
+        Args:
+            request: The timed-out in-flight request (load phase).
+            retained: The published retained-key bitmap.
+        """
+        completed_plan = merge_bitmaps(
+            (
+                plan
+                for adapter_idx, plan in request.load_plan.items()
+                if adapter_idx in request.load_results
+            ),
+            len(request.keys),
+        )
+        reserved = set(request.write_reserved_keys)
+        completed_keys = [
+            key for key in completed_plan.gather(request.keys) if key in reserved
+        ]
+        if not completed_keys:
+            return
+        loaded = set(self._scatter_load_results(request).gather(request.keys))
+        self._finalize_write_reserved(
+            request, completed_keys, loaded, set(retained.gather(request.keys))
+        )
+
+    def _finish_drain(self, request: InFlightPrefetchRequest) -> None:
+        """Drain a timed-out request once its late I/O has all completed.
+
+        Finalizes any still-reserved buffers (loaded -> resident-but-unlocked so
+        a later same-key request can hit them; failed -> deleted), returns every
+        remaining L2 lock, and retires the request. The L1 read locks outside the
+        published set were already released at publish time, and the published
+        ones belong to the caller. Never re-publishes and never re-serves the
+        (already-answered) caller.
+
+        Args:
+            request: The drain-only request whose late I/O has finished.
+        """
+        if request.write_reserved_keys:
+            completed = self._scatter_load_results(request)
+            loaded_set = set(completed.gather(request.keys))
+            # No retriever remains, so nothing is read-locked (empty readlock):
+            # loaded -> resident-unlocked, failed -> deleted.
+            self._finalize_write_reserved(
+                request, list(request.write_reserved_keys), loaded_set, set()
+            )
+        self._release_l2_locks(request, keep={})
+        self._retire_request_once(request)
+
     def _cleanup_in_flight_requests(self) -> None:
-        """Release resources for any in-flight requests during shutdown."""
+        """Release resources for any in-flight requests during shutdown.
+
+        Runs after the loop thread has joined. ``write_reserved_keys`` holds only
+        buffers not yet finalized (a drained request already dropped its
+        completed ones), so deleting them frees exactly the pending reservations.
+        A draining request's remaining L1 read locks are the published set the
+        caller owns and will release itself, so they are left held here to avoid
+        a double release; an unpublished request's locks are ours to return.
+        """
         l1_mgr = self._l1_manager
         for request in self._in_flight_requests.values():
             if request.phase == PrefetchPhase.PLAN_AND_LOAD:
                 if request.write_reserved_keys:
                     l1_mgr.finish_write_and_delete(request.write_reserved_keys)
             self._release_l2_locks(request, keep={})
-            if request.l1_readlocks.popcount() > 0:
+            caller_owns_locks = request.resource_state is ResourceState.DRAINING
+            if not caller_owns_locks and request.l1_readlocks.popcount() > 0:
                 l1_mgr.finish_read(
                     request.l1_readlocks.gather(request.keys),
                     read_locks=request.num_kv_readers,
@@ -1490,3 +2049,8 @@ class PrefetchController(StorageControllerInterface):
                 len(request.keys),
             )
         self._in_flight_requests.clear()
+        self._armed.clear()
+        self._status_in_flight_count = 0
+        self._status_draining_count = 0
+        self._status_lookup_phase_count = 0
+        self._status_load_phase_count = 0

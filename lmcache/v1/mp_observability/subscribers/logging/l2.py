@@ -24,8 +24,21 @@ class L2LoggingSubscriber(EventSubscriber):
             EventType.L2_PREFETCH_LOOKUP_COMPLETED: self._on_lookup_completed,
             EventType.L2_PREFETCH_LOAD_SUBMITTED: self._on_load_submitted,
             EventType.L2_PREFETCH_LOAD_COMPLETED: self._on_load_completed,
+            EventType.L2_PREFETCH_DEADLINE: self._on_deadline,
             EventType.L2_KEYS_EVICTED: self._on_evicted,
         }
+
+    def _on_deadline(self, event: Event) -> None:
+        logger.debug(
+            "L2 prefetch deadline in %s phase: request %d, budget %.3fs, "
+            "elapsed %.3fs, %d retained / %d recompute chunks",
+            event.metadata["phase"],
+            event.metadata["request_id"],
+            event.metadata["budget_seconds"],
+            event.metadata["elapsed_seconds"],
+            event.metadata["retained_chunks"],
+            event.metadata["missed_chunks"],
+        )
 
     def _on_store_submitted(self, event: Event) -> None:
         logger.debug(

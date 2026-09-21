@@ -53,6 +53,10 @@ class EventType(Enum):
     # L2_PREFETCH_LOAD_* events above which aggregate across adapters.
     L2_LOAD_TASK_SUBMITTED = "l2.load_task.submitted"
     L2_LOAD_TASK_COMPLETED = "l2.load_task.completed"
+    # An L2 prefetch hit its configurable load deadline; the caller received the
+    # already-usable subset and recomputes the rest. Metadata carries ``phase``
+    # (queued/lookup/load), budget, elapsed, and retained/missed chunk counts.
+    L2_PREFETCH_DEADLINE = "l2.prefetch.deadline"
 
     # L2 Eviction Controller events
     L2_KEYS_EVICTED = "l2.keys.evicted"

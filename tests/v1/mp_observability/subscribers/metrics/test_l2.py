@@ -273,6 +273,29 @@ class TestL2PrefetchMetrics:
         delta = snapshot()
         assert delta["lmcache_mp.l2_prefetch_hit"] == 10
 
+    def test_deadline_counts_retained_and_missed(self, bus, subscriber, snapshot):
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_DEADLINE,
+                metadata={
+                    "request_id": 1,
+                    "phase": "load",
+                    "budget_seconds": 0.2,
+                    "elapsed_seconds": 0.25,
+                    "retained_chunks": 3,
+                    "missed_chunks": 5,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        delta = snapshot()
+        assert delta["lmcache_mp.l2_prefetch_deadline"] == 1
+        assert delta["lmcache_mp.l2_prefetch_deadline_retained"] == 3
+        assert delta["lmcache_mp.l2_prefetch_deadline_missed"] == 5
+
     def test_load_submitted_counts(self, bus, subscriber, snapshot):
         bus.start()
         keys = _make_keys(10)
@@ -410,8 +433,9 @@ class TestL2MetricsSubscriptions:
         assert EventType.L2_PREFETCH_LOOKUP_COMPLETED in subs
         assert EventType.L2_PREFETCH_LOAD_SUBMITTED in subs
         assert EventType.L2_PREFETCH_LOAD_COMPLETED in subs
+        assert EventType.L2_PREFETCH_DEADLINE in subs
         assert EventType.L2_KEYS_EVICTED in subs
-        assert len(subs) == 8
+        assert len(subs) == 9
 
 
 # ---------------------------------------------------------------------------
