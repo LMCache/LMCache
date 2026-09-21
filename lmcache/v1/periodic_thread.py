@@ -190,7 +190,10 @@ class PeriodicThread(ABC):
     @property
     def is_running(self) -> bool:
         """Check if the thread is currently running."""
-        return self._running and self._thread is not None and self._thread.is_alive()
+        with self._lock:
+            return (
+                self._running and self._thread is not None and self._thread.is_alive()
+            )
 
     @property
     def stop_requested(self) -> bool:
@@ -227,23 +230,26 @@ class PeriodicThread(ABC):
         Start the periodic thread.
 
         Returns:
-            Optional[threading.Thread]: The started thread, or None if already running
+            Optional[threading.Thread]: The started thread, or None if a previous
+                worker is still alive
         """
-        if self._running:
-            logger.warning("PeriodicThread %s is already running", self._name)
-            return None
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                logger.warning("PeriodicThread %s worker is still alive", self._name)
+                return None
 
-        self._stop_event.clear()
-        self._wake_event.clear()
-        self._running = True
-        self._start_time = time.time()
+            self._stop_event.clear()
+            self._wake_event.clear()
+            self._running = True
+            self._start_time = time.time()
 
-        self._thread = threading.Thread(
-            target=self._run_loop,
-            daemon=True,
-            name=self._name,
-        )
-        self._thread.start()
+            thread = threading.Thread(
+                target=self._run_loop,
+                daemon=True,
+                name=self._name,
+            )
+            self._thread = thread
+            thread.start()
 
         logger.info(
             "Started PeriodicThread: %s (level=%s, interval=%.1fs, init_wait=%.1fs)",
@@ -252,7 +258,7 @@ class PeriodicThread(ABC):
             self._interval,
             self._init_wait,
         )
-        return self._thread
+        return thread
 
     def stop(self, timeout: float = 5.0) -> None:
         """
@@ -261,23 +267,25 @@ class PeriodicThread(ABC):
         Args:
             timeout: Maximum time to wait for thread termination in seconds
         """
-        if not self._running:
-            return
+        with self._lock:
+            thread = self._thread
+            if thread is None or not thread.is_alive():
+                self._running = False
+                return
 
-        logger.info("Stopping PeriodicThread: %s", self._name)
-        self._running = False
-        self._stop_event.set()
-        # Break the interval sleep so the loop notices stop immediately.
-        self._wake_event.set()
+            logger.info("Stopping PeriodicThread: %s", self._name)
+            self._running = False
+            self._stop_event.set()
+            # Break the interval sleep so the loop notices stop immediately.
+            self._wake_event.set()
 
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=timeout)
-            if self._thread.is_alive():
-                logger.warning(
-                    "PeriodicThread %s did not terminate within %.1fs timeout",
-                    self._name,
-                    timeout,
-                )
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            logger.warning(
+                "PeriodicThread %s did not terminate within %.1fs timeout",
+                self._name,
+                timeout,
+            )
 
     def wake(self) -> None:
         """Trigger one execution now instead of waiting for the next tick.
@@ -368,7 +376,9 @@ class PeriodicThread(ABC):
             if self._stop_event.is_set():
                 break
 
-        self._running = False
+        with self._lock:
+            if self._thread is threading.current_thread():
+                self._running = False
         logger.info("PeriodicThread %s loop stopped", self._name)
 
     @abstractmethod
