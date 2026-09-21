@@ -1,60 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
-"""ctypes wrapper around the uGDS async C API (libugds.so).
+"""ugds implementation of the object-based async GDS interface.
 
-Drop-in replacement for :mod:`_cufile_async` that uses uGDS's user-space
-NVMe path instead of cuFile. Its common GDS operations are compatible with
-the other backends, while :func:`get_device_capacity` is uGDS-specific because
-raw devices cannot rely on file allocation to validate the requested slab.
-
-LMCache expects ``libugds.so`` to match the active NVIDIA CUDA or AMD ROCm
-platform.
-
-uGDS operates on raw character devices (/dev/ugds_drv*), not filesystem files.
-The fd/handle split is the same as _cufile_async: the caller opens the
-device (O_RDWR, no O_DIRECT since uGDS IO bypasses the kernel), passes the
-fd to register_handle, and wraps the pair via AsyncHandle.from_fd.
+Native libraries are loaded lazily. The backend owns driver state; its handles
+keep it alive, and the context retains submissions until their DMA completes.
 """
 
 # Standard
-from typing import Any, Optional
+from typing import Optional
 import ctypes
 import ctypes.util
 import os
+import stat
 
 # Third Party
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector._gds_backend import GDSAsyncBackend, TorchPlatform
+from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector._gds_async import GDSBackend, GDSHandle, Submission
 
-# --- libugds.so lazy loading -----------------------------------------
-
-_lib: Optional[ctypes.CDLL] = None
-
-
-class UgdsAsyncBackend(GDSAsyncBackend):
-    """Async GDS backend implemented by the uGDS wrapper in this module."""
-
-    name = "ugds"
-    required_platforms = frozenset({TorchPlatform.CUDA, TorchPlatform.ROCM})
-
-    def get_device_capacity(self, fd: int, handle: int) -> int:
-        """Return usable raw-device capacity reported by uGDS."""
-        return get_device_capacity(fd, handle)
-
-
-def _get_lib() -> ctypes.CDLL:
-    global _lib
-    if _lib is not None:
-        return _lib
-    search = ctypes.util.find_library("ugds")
-    path = search or "libugds.so"
-    _lib = ctypes.CDLL(path)
-    _declare_signatures(_lib)
-    return _lib
-
-
-# --- uGDS C types ----------------------------------------------------
+logger = init_logger(__name__)
 
 
 class _uGDSError_t(ctypes.Structure):
@@ -148,9 +113,6 @@ def _declare_signatures(lib: ctypes.CDLL) -> None:
     lib.uGDSStreamDeregister.restype = _uGDSError_t
 
 
-# --- Error checking --------------------------------------------------
-
-
 def _check(err: _uGDSError_t, op: str) -> None:
     if err.err != 0:
         raise RuntimeError(
@@ -158,92 +120,6 @@ def _check(err: _uGDSError_t, op: str) -> None:
         )
 
 
-# --- Driver lifecycle ------------------------------------------------
-
-_driver_opened = False
-
-
-def _ensure_driver_open() -> None:
-    global _driver_opened
-    if _driver_opened:
-        return
-    lib = _get_lib()
-    _check(lib.uGDSDriverOpen(), "uGDSDriverOpen")
-    _driver_opened = True
-
-
-def close_driver() -> None:
-    global _driver_opened
-    if not _driver_opened:
-        return
-    lib = _get_lib()
-    try:
-        _check(lib.uGDSDriverClose(), "uGDSDriverClose")
-    finally:
-        _driver_opened = False
-
-
-# --- Handle registration --------------------------------------------
-
-
-def register_handle(fd: int) -> int:
-    """Register an open uGDS device fd and return the raw uGDSHandle_t.
-
-    Mirrors _cufile_async.register_handle(fd): the caller owns the fd
-    (typically an O_RDWR open of /dev/ugds_drvX) and closes it on
-    registration failure; wrap the pair via AsyncHandle.from_fd.
-    """
-    _ensure_driver_open()
-    lib = _get_lib()
-    handle = ctypes.c_void_p()
-    descr = _uGDSDescr_t()
-    descr.type = _UGDS_HANDLE_TYPE_OPAQUE_FD
-    descr.handle.fd = fd
-    _check(
-        lib.uGDSHandleRegister(ctypes.byref(handle), ctypes.byref(descr)),
-        "uGDSHandleRegister",
-    )
-    if handle.value is None:
-        raise RuntimeError("uGDSHandleRegister returned a null handle")
-    return handle.value
-
-
-def deregister_handle(handle: int) -> None:
-    """Reverse of register_handle (uGDSHandleDeregister)."""
-    lib = _get_lib()
-    lib.uGDSHandleDeregister(ctypes.c_void_p(handle))
-
-
-def get_device_capacity(fd: int, handle: int) -> int:
-    """Return the NVMe namespace capacity associated with a uGDS handle.
-
-    Args:
-        fd: Open uGDS character-device descriptor. It is accepted for API
-            consistency with the file-based GDS backends and is not inspected.
-        handle: Registered ``uGDSHandle_t`` whose namespace capacity to query.
-
-    Returns:
-        Usable namespace capacity in bytes.
-
-    Raises:
-        RuntimeError: If uGDS cannot query the device or returns zero capacity.
-    """
-    del fd
-    capacity_bytes = ctypes.c_uint64()
-    _check(
-        _get_lib().uGDSGetDeviceCapacity(
-            ctypes.c_void_p(handle), ctypes.byref(capacity_bytes)
-        ),
-        "uGDSGetDeviceCapacity",
-    )
-    if capacity_bytes.value == 0:
-        raise RuntimeError("uGDSGetDeviceCapacity returned zero capacity")
-    return capacity_bytes.value
-
-
-# --- Buffer / stream registration -----------------------------------
-
-# UGDS_REGISTER_DMABUF from ugds.h requests the AMD HIP dma-buf path.
 _UGDS_REGISTER_DMABUF = 0x1
 
 
@@ -256,122 +132,181 @@ def _buf_register_flags() -> int:
     return _UGDS_REGISTER_DMABUF if torch.version.hip is not None else 0
 
 
-def register_buffer(buf: torch.Tensor) -> None:
-    if not buf.is_cuda:
-        raise ValueError("register_buffer: tensor must be on a CUDA or ROCm GPU")
-    _ensure_driver_open()
-    lib = _get_lib()
-    nbytes = buf.numel() * buf.element_size()
-    _check(
-        lib.uGDSBufRegister(
-            ctypes.c_void_p(buf.data_ptr()),
-            ctypes.c_size_t(nbytes),
-            ctypes.c_int(_buf_register_flags()),
-        ),
-        "uGDSBufRegister",
-    )
+class UgdsBackend(GDSBackend):
+    """Own the ugds driver and its registration operations."""
 
+    name = "ugds"
 
-def deregister_buffer(buf: torch.Tensor) -> None:
-    lib = _get_lib()
-    _check(
-        lib.uGDSBufDeregister(ctypes.c_void_p(buf.data_ptr())),
-        "uGDSBufDeregister",
-    )
+    def __init__(self) -> None:
+        self._driver_opened = False
+        self._lib: Optional[ctypes.CDLL] = None
 
-
-def register_stream(raw_stream: int) -> None:
-    _ensure_driver_open()
-    lib = _get_lib()
-    _check(
-        lib.uGDSStreamRegister(ctypes.c_void_p(raw_stream)),
-        "uGDSStreamRegister",
-    )
-
-
-def deregister_stream(raw_stream: int) -> None:
-    lib = _get_lib()
-    _check(
-        lib.uGDSStreamDeregister(ctypes.c_void_p(raw_stream)),
-        "uGDSStreamDeregister",
-    )
-
-
-# --- Submission + AsyncHandle ----------------------------------------
-
-
-class Submission:
-    """One in-flight uGDSReadAsync / uGDSWriteAsync.
-
-    Mirrors :class:`_cufile_async.Submission`: holds the ctypes storage for the
-    size and offset arguments, which uGDS takes by pointer and dereferences
-    later from a stream-ordered host callback.
-
-    The instance must therefore stay reachable until the stream has executed
-    the operation. Dropping the last reference earlier lets the garbage
-    collector free the ctypes storage, and the callback then reads a dangling
-    pointer. That surfaces as silently wrong IO (typically all-zero reads)
-    rather than an error, so callers must retain submissions until they have
-    synchronized the stream. :class:`~gds_context.GDSContext` does this by
-    tracking per-stream in-flight submissions.
-    """
-
-    __slots__ = ("_size", "_file_offset", "_buf_offset", "_bytes_done")
-
-    def __init__(self, size: int, file_offset: int, buf_offset: int) -> None:
-        self._size = ctypes.c_size_t(size)
-        self._file_offset = ctypes.c_int64(file_offset)
-        self._buf_offset = ctypes.c_int64(buf_offset)
-        self._bytes_done = ctypes.c_int64(0)
-
-    @property
-    def bytes_done(self) -> int:
-        return self._bytes_done.value
-
-
-class AsyncHandle:
-    """uGDS device handle wrapper, API-compatible with _cufile_async.AsyncHandle."""
-
-    __slots__ = ("_fd", "_handle", "path", "writable")
-
-    def __init__(
-        self,
-        device_path: str,
-        writable: bool = True,
-    ) -> None:
-        fd = os.open(device_path, os.O_RDWR)
+    def open_slab(self, location: str, size: int, direct_io: bool) -> "AsyncHandle":
+        """Validate a raw device and its capacity before allowing slab IO."""
+        device_stat = os.stat(location)
+        if not stat.S_ISCHR(device_stat.st_mode):
+            raise ValueError(f"uGDS path must be a character device: {location}")
+        major = os.major(device_stat.st_rdev)
+        minor = os.minor(device_stat.st_rdev)
+        subsystem = os.path.realpath(f"/sys/dev/char/{major}:{minor}/subsystem")
+        if os.path.basename(subsystem) != "ugds_drv":
+            raise ValueError(f"uGDS path is not managed by ugds_drv: {location}")
+        if direct_io:
+            logger.warning("use_direct_io is ignored by uGDS")
+        slab = self.open_handle(os.open(location, os.O_RDWR), location)
         try:
-            handle = register_handle(fd)
+            capacity = slab.capacity()
+            if size > capacity:
+                raise ValueError(
+                    f"GDS L1 slab size ({size} bytes) exceeds backing device "
+                    f"capacity ({capacity} bytes): {location}"
+                )
+        except Exception:
+            try:
+                slab.close()
+            except Exception as cleanup_error:
+                logger.warning("uGDS handle cleanup failed: %s", cleanup_error)
+            raise
+        return slab
+
+    def validate_environment(self) -> None:
+        """Preserve this implementation's existing PyTorch-build requirement."""
+        if torch.version.hip is None and torch.version.cuda is None:
+            raise ValueError("ugds requires a ROCm or CUDA PyTorch build")
+
+    def open_handle(self, fd: int, path: str) -> "AsyncHandle":
+        """Take ownership of fd and register it; close fd on registration failure."""
+        try:
+            handle = self.register_handle(fd)
         except Exception:
             os.close(fd)
             raise
-        self._fd = fd
-        self._handle = handle
-        self.path = device_path
-        self.writable = writable
+        return AsyncHandle(self, fd, handle, path)
 
-    @classmethod
-    def from_fd(
-        cls,
-        fd: int,
-        handle: int,
-        path: str,
-        writable: bool = False,
-    ) -> "AsyncHandle":
-        """Wrap an already-opened fd and registered uGDS handle.
+    def close_driver(self) -> None:
+        if not self._driver_opened:
+            return
+        lib = self.library()
+        try:
+            _check(lib.uGDSDriverClose(), "uGDSDriverClose")
+        finally:
+            self._driver_opened = False
 
-        Matches _cufile_async.AsyncHandle.from_fd.
+    def register_handle(self, fd: int) -> int:
+        """Register an open uGDS device fd and return the raw uGDSHandle_t.
+
+        Mirrors _cufile_async.register_handle(fd): the caller owns the fd
+        (typically an O_RDWR open of /dev/ugds_drvX) and closes it on
+        registration failure. open_handle() also takes ownership of the fd.
         """
-        obj = cls.__new__(cls)
-        obj._fd = fd
-        obj._handle = handle
-        obj.path = path
-        obj.writable = writable
-        return obj
+        self._ensure_driver_open()
+        lib = self.library()
+        handle = ctypes.c_void_p()
+        descr = _uGDSDescr_t()
+        descr.type = _UGDS_HANDLE_TYPE_OPAQUE_FD
+        descr.handle.fd = fd
+        _check(
+            lib.uGDSHandleRegister(ctypes.byref(handle), ctypes.byref(descr)),
+            "uGDSHandleRegister",
+        )
+        if handle.value is None:
+            raise RuntimeError("uGDSHandleRegister returned a null handle")
+        return handle.value
 
-    @property
-    def fd(self) -> int:
-        return self._fd
+    def deregister_handle(self, handle: int) -> None:
+        """Reverse of register_handle (uGDSHandleDeregister)."""
+        lib = self.library()
+        lib.uGDSHandleDeregister(ctypes.c_void_p(handle))
+
+    def get_device_capacity(self, fd: int, handle: int) -> int:
+        """Return the NVMe namespace capacity associated with a uGDS handle.
+
+        Args:
+            fd: Open uGDS character-device descriptor. It is accepted for API
+                consistency with the file-based GDS backends and is not inspected.
+            handle: Registered ``uGDSHandle_t`` whose namespace capacity to query.
+
+        Returns:
+            Usable namespace capacity in bytes.
+
+        Raises:
+            RuntimeError: If uGDS cannot query the device or returns zero capacity.
+        """
+        del fd
+        capacity_bytes = ctypes.c_uint64()
+        _check(
+            self.library().uGDSGetDeviceCapacity(
+                ctypes.c_void_p(handle), ctypes.byref(capacity_bytes)
+            ),
+            "uGDSGetDeviceCapacity",
+        )
+        if capacity_bytes.value == 0:
+            raise RuntimeError("uGDSGetDeviceCapacity returned zero capacity")
+        return capacity_bytes.value
+
+    def register_buffer(self, buf: torch.Tensor) -> None:
+        if not buf.is_cuda:
+            raise ValueError("register_buffer: tensor must be on a CUDA or ROCm GPU")
+        self._ensure_driver_open()
+        lib = self.library()
+        nbytes = buf.numel() * buf.element_size()
+        _check(
+            lib.uGDSBufRegister(
+                ctypes.c_void_p(buf.data_ptr()),
+                ctypes.c_size_t(nbytes),
+                ctypes.c_int(_buf_register_flags()),
+            ),
+            "uGDSBufRegister",
+        )
+
+    def deregister_buffer(self, buf: torch.Tensor) -> None:
+        lib = self.library()
+        _check(
+            lib.uGDSBufDeregister(ctypes.c_void_p(buf.data_ptr())),
+            "uGDSBufDeregister",
+        )
+
+    def register_stream(self, raw_stream: int) -> None:
+        self._ensure_driver_open()
+        lib = self.library()
+        _check(
+            lib.uGDSStreamRegister(ctypes.c_void_p(raw_stream)),
+            "uGDSStreamRegister",
+        )
+
+    def deregister_stream(self, raw_stream: int) -> None:
+        lib = self.library()
+        _check(
+            lib.uGDSStreamDeregister(ctypes.c_void_p(raw_stream)),
+            "uGDSStreamDeregister",
+        )
+
+    def library(self) -> ctypes.CDLL:
+        if self._lib is not None:
+            return self._lib
+        search = ctypes.util.find_library("ugds")
+        path = search or "libugds.so"
+        lib = ctypes.CDLL(path)
+        _declare_signatures(lib)
+        self._lib = lib
+        return lib
+
+    def _ensure_driver_open(self) -> None:
+        if self._driver_opened:
+            return
+        lib = self.library()
+        _check(lib.uGDSDriverOpen(), "uGDSDriverOpen")
+        self._driver_opened = True
+
+
+class AsyncHandle(GDSHandle):
+    """An owning ugds slab handle with stream-ordered IO."""
+
+    _backend: UgdsBackend
+
+    def capacity(self) -> int:
+        """Return this device's finite namespace capacity in bytes."""
+        return self._backend.get_device_capacity(self.fd, self._handle)
 
     def read_async(
         self,
@@ -381,16 +316,16 @@ class AsyncHandle:
         buf_offset: int,
         raw_stream: int,
     ) -> Submission:
-        lib = _get_lib()
+        lib = self._backend.library()
         sub = Submission(size=size, file_offset=file_offset, buf_offset=buf_offset)
         _check(
             lib.uGDSReadAsync(
                 ctypes.c_void_p(self._handle),
                 ctypes.c_void_p(buf_base),
-                ctypes.byref(sub._size),
-                ctypes.byref(sub._file_offset),
-                ctypes.byref(sub._buf_offset),
-                ctypes.byref(sub._bytes_done),
+                ctypes.byref(sub.size),
+                ctypes.byref(sub.file_offset),
+                ctypes.byref(sub.buf_offset),
+                ctypes.byref(sub.result),
                 ctypes.c_void_p(raw_stream),
             ),
             "uGDSReadAsync",
@@ -405,35 +340,18 @@ class AsyncHandle:
         buf_offset: int,
         raw_stream: int,
     ) -> Submission:
-        lib = _get_lib()
+        lib = self._backend.library()
         sub = Submission(size=size, file_offset=file_offset, buf_offset=buf_offset)
         _check(
             lib.uGDSWriteAsync(
                 ctypes.c_void_p(self._handle),
                 ctypes.c_void_p(buf_base),
-                ctypes.byref(sub._size),
-                ctypes.byref(sub._file_offset),
-                ctypes.byref(sub._buf_offset),
-                ctypes.byref(sub._bytes_done),
+                ctypes.byref(sub.size),
+                ctypes.byref(sub.file_offset),
+                ctypes.byref(sub.buf_offset),
+                ctypes.byref(sub.result),
                 ctypes.c_void_p(raw_stream),
             ),
             "uGDSWriteAsync",
         )
         return sub
-
-    def close(self) -> None:
-        if self._fd < 0:
-            return
-        try:
-            deregister_handle(self._handle)
-        finally:
-            try:
-                os.close(self._fd)
-            finally:
-                self._fd = -1
-
-    def __enter__(self) -> "AsyncHandle":
-        return self
-
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        self.close()

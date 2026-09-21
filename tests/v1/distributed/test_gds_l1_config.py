@@ -4,6 +4,9 @@
 # Standard
 import argparse
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.distributed.config import (
     add_storage_manager_args,
@@ -12,7 +15,8 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.multiprocess.config import add_mp_server_args
 
 
-def test_cli_parses_ugds_raw_device() -> None:
+@pytest.mark.parametrize("backend", ["ugds", "custom_backend"])
+def test_cli_passes_backend_name_to_config(backend: str) -> None:
     parser = argparse.ArgumentParser()
     add_mp_server_args(parser)
     add_storage_manager_args(parser)
@@ -25,7 +29,7 @@ def test_cli_parses_ugds_raw_device() -> None:
                 "--eviction-policy",
                 "LRU",
                 "--gds-l1-backend",
-                "ugds",
+                backend,
                 "--gds-l1-path",
                 "/dev/ugds_drv0",
             ]
@@ -34,6 +38,6 @@ def test_cli_parses_ugds_raw_device() -> None:
 
     gds_config = config.l1_manager_config.gds_l1_config
     assert gds_config is not None
-    assert gds_config.backend == "ugds"
+    assert gds_config.backend == backend
     assert gds_config.file_location == "/dev/ugds_drv0"
     assert gds_config.size_in_bytes == 8 << 30

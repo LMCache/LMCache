@@ -67,6 +67,12 @@ pytest -xvs tests/v1/test_cache_engine.py::test_function_name
 
 Test dependencies: `uv pip install -r requirements/test.txt`
 
+The async GDS wrapper tests and the pure tests in
+`tests/v1/gpu_connector/test_gds_context.py` run without CUDA or storage
+libraries. Keep hardware skips on individual DMA roundtrip tests, not on the
+whole module. On macOS, mock Linux-only `os.posix_fallocate` and `os.O_DIRECT`
+with `raising=False`; do not assume Linux device-number encoding in sysfs mocks.
+
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 
 ### Testing Practices
