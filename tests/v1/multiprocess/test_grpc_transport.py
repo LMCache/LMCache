@@ -301,7 +301,10 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
     registry = get_method_codec_registry()
     codecs = tuple(registry.by_full_name.values())
 
-    assert set(handlers) == {codec.request_type for codec in codecs}
+    # KV event polling is currently ZMQ-only.
+    assert set(handlers) - {RequestType.POLL_KV_EVENTS} == {
+        codec.request_type for codec in codecs
+    }
     for codec in codecs:
         codec.validate_handler(handlers[codec.request_type])
 

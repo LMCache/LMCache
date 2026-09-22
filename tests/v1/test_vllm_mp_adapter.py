@@ -1378,11 +1378,13 @@ class _FakePollServer:
     most one poll, in a deterministic order."""
 
     def __init__(self, req_client: MagicMock) -> None:
-        self.answers: collections.deque[KVEventPollResult] = collections.deque()
+        self.answers: collections.deque[KVEventPollResult | Exception] = (
+            collections.deque()
+        )
         self.calls: list[tuple[str, int, int]] = []
         req_client.poll_kv_events.side_effect = self._poll
 
-    def answer(self, *results: KVEventPollResult) -> None:
+    def answer(self, *results: KVEventPollResult | Exception) -> None:
         self.answers.extend(results)
 
     def _poll(self, model_name: str, cursor: int, max_events: int) -> object:
@@ -1394,7 +1396,10 @@ class _FakePollServer:
                 return bool(server.answers)
 
             def result(self, timeout: float | None = None) -> KVEventPollResult:
-                return server.answers.popleft()
+                answer = server.answers.popleft()
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
 
         return _Future()
 
@@ -1652,6 +1657,18 @@ def test_lost_events_on_first_contact_do_not_resync(fake_adapter) -> None:
     assert server.calls[-1] == ("test-model", 40, 1024)
 
 
+def test_event_polling_starts_worker_liveness_heartbeat(fake_adapter) -> None:
+    """Polling workers keep their registration alive before any store/retrieve."""
+    adapter, _ = _polling_adapter(fake_adapter)
+    _step(adapter)
+    _step(adapter)
+    assert len(FakeHeartbeatThread.instances) == 1
+    assert FakeHeartbeatThread.instances[0].calls == [
+        "register_recover_callback",
+        "start",
+    ]
+
+
 @pytest.mark.parametrize("failure", ["disabled_on_server", "no_client_method"])
 def test_polling_stops_when_the_server_cannot_serve_it(
     fake_adapter, failure: str
@@ -1672,6 +1689,43 @@ def test_polling_stops_when_the_server_cannot_serve_it(
     _complete_own_store(adapter, "req-1", 1)
     assert len(_step(adapter)) == 1
     assert len(server.calls) == (1 if failure == "disabled_on_server" else 0)
+
+
+@pytest.mark.parametrize(
+    "failure", ["disabled_on_server", "poll_error", "submit_error", "timeout"]
+)
+def test_polling_failure_withdraws_announced_placements(
+    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock], failure: str
+) -> None:
+    """The router must not retain placements after the event channel fails."""
+    adapter, server = _polling_adapter(
+        fake_adapter, extra_config={"lmcache.mp.mq_timeout": 0.0}
+    )
+    server.answer(
+        _poll_result(
+            [_record(1, KV_EVENT_KIND_STORED, [b"chunk"], token_ids=[1])],
+            next_cursor=1,
+        )
+    )
+    _step(adapter)
+    assert isinstance(_step(adapter)[0], CacheStoreEvent)
+
+    if failure == "disabled_on_server":
+        server.answer(_poll_result(enabled=False))
+    elif failure == "poll_error":
+        server.answer(RuntimeError("poll failed"))
+    elif failure == "submit_error":
+        server.answer(_poll_result(next_cursor=1))
+        _, req_client, _ = fake_adapter
+        req_client.poll_kv_events.side_effect = RuntimeError("submit failed")
+
+    events = _step(adapter)
+    assert len(events) == 1 and isinstance(events[0], CacheRemoveEvent)
+    assert events[0].block_hashes == [b"chunk"]
+    assert events[0].medium == "CPU"
+    assert _step(adapter) == []
+    _complete_own_store(adapter, "fallback", 3)
+    assert isinstance(_step(adapter)[0], CacheStoreEvent)
 
 
 def test_pending_poll_times_out_only_while_healthy(fake_adapter) -> None:

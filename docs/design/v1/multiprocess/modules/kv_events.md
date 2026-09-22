@@ -1,11 +1,11 @@
-# KV event channel (`lmcache/v1/multiprocess/modules/kv_events.py`)
+# KV event channel
 
-Module: `lmcache/v1/multiprocess/modules/kv_events.py`
-Wire contract: `lmcache/v1/multiprocess/protocols/kv_events.py`,
+Module: `lmcache/v1/multiprocess/modules/management.py` (`ManagementModule`)
+Wire contract: `lmcache/v1/multiprocess/protocols/observability.py`,
 `lmcache/v1/multiprocess/custom_types.py` (`KVEventRecord`, `KVEventPollResult`)
 Consumer: `LMCacheMPWorkerAdapter` and `LMCacheMPConnector` in
 `lmcache/integration/vllm/` (vLLM `BlockStored` / `BlockRemoved`)
-User docs: `docs/source/production/dynamo_coordination.rst`
+User docs: `docs/source/mp/configuration.rst`
 
 ## Problem
 
@@ -42,15 +42,17 @@ new transport.
   single drain thread, so its own state (the token-binding cache) needs no
   lock.
 - One **record per chunk** for stores (`kind="stored"`, one hash, the chunk's
-  tokens, its predecessor's hash, the chunk size) and one **record per
+  tokens and its predecessor's hash) and one **record per
   model** for removals (`kind="removed"`, every distinct hash in the event).
   KV ranks and object groups collapse into one record because a router
   tracks chunks, not shards. Media are vLLM's: `CPU` for L1, `STORAGE` for L2.
+  The worker uses the chunk size it already fetched from the server.
 - **Token bindings.** A router keys its radix index by the block's tokens and
   parent hash, so a stored record must carry them. The store path publishes
-  `MP_TOKENS` (chunk hashes, tokens, offsets, and now `parent_hashes`) ahead
-  of the write-finished events; the subscriber caches them (LRU, 65536
-  entries). A store whose binding is unknown (binding evicted, or an L2
+  `MP_TOKENS` (chunk hashes, tokens, offsets, and `parent_hashes`) ahead
+  of the write-finished events; the subscriber retains up to 65536 bindings,
+  trimming the oldest half when that limit is exceeded. A store whose
+  binding is unknown (binding evicted, or an L2
   prefetch of a chunk stored long ago) is **counted and skipped**
   (`unbound_stores` in `report_status`), never reported without tokens.
   The first chunk of a mid-sequence store gets its parent from the session's
@@ -66,7 +68,7 @@ new transport.
   eviction with no later bus traffic still surfaces); records before the
   last marker in range are withheld, because their world may be
   incomplete.
-- `KVEventModule` owns the log and the subscriber, serves
+- `ManagementModule` owns the log and the subscriber, serves
   `POLL_KV_EVENTS` (SYNC: it only copies records out of memory), and stamps
   every answer with an **incarnation** (`time.time_ns()` at module
   construction). It is disabled, answering `enabled=False`, when the log
@@ -105,6 +107,10 @@ new transport.
   `AllBlocksCleared` is never used, as it would also wipe the router's
   GPU-tier view. `lost` on first contact is ignored, since nothing was
   announced from that log yet.
+- **Polling failure.** If the channel is disabled or a poll fails, withdraw
+  its announced placements before falling back to own-store reporting.
+  The `polling_disabled` resync counter makes this loss of eviction coverage
+  visible to operators.
 - **Version skew.** A worker polls only a server advertising `kv_events`
   through `GET_EXPERIMENTAL`, which the adapter already queries at
   construction. This is not an optimization: a server that predates
@@ -118,22 +124,28 @@ new transport.
 
 - `get_kv_connector_kv_cache_events()` converts `CacheStoreEvent` to
   `BlockStored` and `CacheRemoveEvent` to `BlockRemoved`, keeping the medium.
-- `LMCacheMPKVEvents.aggregate()` merges the ranks' batches as an
-  **order-preserving, deduplicated union** (`kv_event_merge.py`) rather than
-  vLLM's `KVEventAggregator` intersection. That aggregator counts only the
+- `LMCacheMPKVEvents.aggregate()` merges the ranks' batches while preserving
+  each worker's transitions. vLLM's `KVEventAggregator` counts only the
   ranks that reported in a step and keeps what all of them reported, so
   store-completion skew drops events, and with several MP servers per engine
   the disjoint pollers would intersect to nothing. A repeated `BlockStored`
   is idempotent for a router, and removals never arrive twice because one
   rank per server polls.
+  Deduplication applies across workers only: a stored/removed/stored sequence
+  within one batch must preserve the final store.
 - The scheduler keeps one aggregated batch per step, and `take_events()`
   returns them in order.
+- **Delivery timing.** Polling and publishing run during vLLM engine steps.
+  An idle worker defers host-cache eviction delivery until stepping resumes,
+  so router placements can remain stale meanwhile. This MP path requires no
+  vLLM engine changes. Polling workers start their existing heartbeat to
+  retain their registration.
 
 ## Guarantees and limits
 
-- Exactly the chunks a worker can serve from LMCache are announced, once,
-  in the order they became (un)available, within one poll interval plus the
-  bus drain lag.
+- Stores with known token bindings and removals of previously announced
+  placements are published in log order. Visibility is delayed by the poll
+  interval, bus drain lag, and the engine's next model-runner step.
 - Every loss of fidelity is explicit: `lost` and incarnation changes
   resync (metric `vllm:lmcache_mp_kv_event_resyncs_total{reason}`),
   unknown bindings are counted, and a disabled channel is logged once.

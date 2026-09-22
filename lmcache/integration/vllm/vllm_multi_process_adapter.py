@@ -94,9 +94,11 @@ _KV_EVENT_POLL_PAGE = 1024
 # Reasons a resync withdraws every announced placement (metric label values).
 _KV_EVENT_RESYNC_SERVER_RESTART = "server_restart"
 _KV_EVENT_RESYNC_EVENTS_LOST = "events_lost"
+_KV_EVENT_RESYNC_POLLING_DISABLED = "polling_disabled"
 _KV_EVENT_RESYNC_REASONS = (
     _KV_EVENT_RESYNC_SERVER_RESTART,
     _KV_EVENT_RESYNC_EVENTS_LOST,
+    _KV_EVENT_RESYNC_POLLING_DISABLED,
 )
 
 
@@ -1626,7 +1628,7 @@ class LMCacheMPWorkerAdapter:
             ) from None
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat thread on first store/retrieve.
+        """Lazily start the heartbeat on first store, retrieve, or event poll.
 
         The heartbeat starts healthy (the event was set at construction). A
         live worker pings every interval, refreshing its server-side
@@ -2274,6 +2276,7 @@ class LMCacheMPWorkerAdapter:
         """
         if not self._kv_events_enabled:
             return []
+        self._ensure_heartbeat_started()
         self._poll_server_kv_events()
         if not self._kv_events:
             return []
@@ -2491,7 +2494,7 @@ class LMCacheMPWorkerAdapter:
         self._kv_event_polling = False
         self._kv_event_server_source = False
         self._kv_event_poll_future = None
-        self._announced_kv_hashes.clear()
+        self._resync_kv_events(_KV_EVENT_RESYNC_POLLING_DISABLED)
 
     def _resolve_kv_event_source(
         self, enable_kv_events: bool, parallel_strategy: ParallelStrategy

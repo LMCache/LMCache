@@ -44,7 +44,6 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_coordinator_config,
     parse_args_to_mp_server_config,
 )
-from lmcache.v1.multiprocess.custom_types import KV_EVENT_CAPABILITY
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import EngineModule, InstanceLivenessTarget
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
@@ -52,7 +51,6 @@ from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.experimental import EXPERIMENTAL_TRANSFER
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
-from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -272,27 +270,17 @@ def _build_modules(
         liveness_targets.append(module)
         experimental_transfer.append(enabled_module)
 
-    # Records the storage layer's key events for engine workers that
-    # republish them as KV events (KV-aware routing). Built before the
-    # management module so the channel can be advertised: an engine polls
-    # only a server that advertises it, because a server that predates the
-    # request aborts its request loop on the unknown request type.
-    kv_events = KVEventModule(ctx, log_size=mp_config.kv_event_log_size)
-
     management = ManagementModule(
         ctx,
         liveness_targets=liveness_targets,
         worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=mp_config.worker_registration_grace_seconds,
         experimental_transfer=experimental_transfer,
-        # Advertised on ZMQ only: the gRPC client builds its methods from
-        # the generated service descriptors, which do not carry
-        # POLL_KV_EVENTS yet.
-        capabilities=(
-            [KV_EVENT_CAPABILITY]
-            if kv_events.enabled and mp_config.transport == "zmq"
-            else []
-        ),
+        kv_event_log_size=mp_config.kv_event_log_size,
+        # The KV event channel is advertised on ZMQ only: the gRPC client
+        # builds its methods from the generated service descriptors, which
+        # do not carry POLL_KV_EVENTS yet.
+        advertise_kv_events=mp_config.transport == "zmq",
     )
 
     # ManagementModule precedes the transfer/blend modules so close() stops
@@ -303,7 +291,6 @@ def _build_modules(
         lookup_module,
         p2p_controller,
         management,
-        kv_events,
         *transfer_modules,
         *experimental_modules,
         *blend_modules,

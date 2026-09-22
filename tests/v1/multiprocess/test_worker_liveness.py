@@ -288,7 +288,7 @@ def test_management_report_status_summarizes_liveness() -> None:
     finally:
         mgmt.close()
 
-    assert ManagementModule(MagicMock()).report_status() == {}
+    assert "worker_liveness" not in ManagementModule(MagicMock()).report_status()
 
 
 def test_blend_drop_instance_state_drops_rope_state() -> None:

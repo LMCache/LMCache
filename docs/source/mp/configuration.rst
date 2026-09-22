@@ -769,7 +769,9 @@ All connector-level options are passed through
        events so a KV-aware router learns host-cache evictions. One rank per
        server polls. ``0`` disables polling, and the worker then reports only
        its own completed stores, so evictions never reach the router. The
-       server must record events; see ``--kv-event-log-size``.
+       server must record events; see ``--kv-event-log-size``. Polling advances
+       only when vLLM takes an engine step; idle workers defer eviction
+       delivery until stepping resumes.
    * - ``lmcache.mp.eager_prefetch``
      - ``false``
      - Submit the LMCache lookup when a request enters vLLM's waiting queue,

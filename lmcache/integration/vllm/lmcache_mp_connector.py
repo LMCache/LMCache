@@ -53,7 +53,6 @@ from lmcache.integration.vllm.kv_cache_groups import (
     get_tokens_per_block,
     is_scratch_spec,
 )
-from lmcache.integration.vllm.kv_event_merge import merge_worker_kv_events
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
@@ -135,8 +134,8 @@ class LMCacheMPKVEvents(KVConnectorKVEvents):
     """KV event container used by LMCache multiprocess workers.
 
     Each ``add_events`` call holds one worker's batch for the current step.
-    ``aggregate`` merges the batches as an order-preserving, deduplicated
-    union rather than vLLM's ``KVEventAggregator`` intersection: the workers
+    ``aggregate`` preserves each batch's transitions and deduplicates across
+    workers rather than using vLLM's ``KVEventAggregator`` intersection: workers
     finish store futures and drain the server's event log independently, so
     the same event usually reaches the scheduler from different workers in
     different steps, and an intersection would drop it for good.
@@ -155,8 +154,12 @@ class LMCacheMPKVEvents(KVConnectorKVEvents):
         self._batches.append(list(events))
 
     def aggregate(self) -> "LMCacheMPKVEvents":
-        """Merge every batch into one deduplicated batch, first-seen order."""
-        merged = merge_worker_kv_events(self._batches)
+        """Preserve batch transitions while deduplicating across workers."""
+        merged: list[KVCacheEvent] = []
+        seen: set[KVCacheEvent] = set()
+        for events in self._batches:
+            merged.extend(event for event in events if event not in seen)
+            seen.update(events)
         self._batches = [merged] if merged else []
         self._num_workers = 1
         return self

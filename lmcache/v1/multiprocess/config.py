@@ -462,11 +462,11 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--kv-event-log-size",
         type=int,
-        default=32768,
+        default=MPServerConfig.kv_event_log_size,
         help="Number of cache-event records (host-cache store completions "
         "and evictions, L2 stores and deletes) retained for engine workers "
         "that republish them as KV events for KV-aware routing. 0 disables "
-        "the KV event channel. Default is 32768.",
+        "the KV event channel. Default is %(default)s.",
     )
     return parser
 

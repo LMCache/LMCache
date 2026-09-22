@@ -23,14 +23,12 @@ from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_STORED,
     KV_EVENT_MEDIUM_CPU,
     KV_EVENT_MEDIUM_STORAGE,
-    KVEventPollResult,
 )
-from lmcache.v1.multiprocess.modules.kv_events import (
+from lmcache.v1.multiprocess.modules.management import (
     KVEventLog,
-    KVEventModule,
     KVEventSubscriber,
+    ManagementModule,
 )
-from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import iter_request_handlers
 
@@ -207,13 +205,22 @@ def test_subscriber_records_l1_stores_with_their_token_bindings() -> None:
 
 
 def test_subscriber_skips_and_counts_stores_without_a_binding() -> None:
+    """An early rank's store can precede rank 0's shared token binding."""
     log, subscriber = _subscriber()
     _emit(
         subscriber,
         EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
-        **_l1_keys(_key(5)),
+        **_l1_keys(_key(5, kv_rank=1)),
     )
     assert log.read_after(0, MODEL, max_events=10) == ([], 0, False)
+    assert subscriber.unbound_stores == 1
+
+    _bind(subscriber, 5)
+    _emit(subscriber, EventType.L1_WRITE_FINISHED, **_l1_keys(_key(5)))
+    records, _, _ = log.read_after(0, MODEL, max_events=10)
+    assert [(r.block_hashes, r.token_ids) for r in records] == [
+        ([_hash(5)], _tokens(5))
+    ]
     assert subscriber.unbound_stores == 1
 
 
@@ -290,50 +297,55 @@ def test_subscriber_flags_events_the_bus_dropped() -> None:
     assert log.lost_markers == 1
 
 
-# -- KVEventModule ------------------------------------------------------------
+# -- ManagementModule -------------------------------------------------------
 
 
-def _context(bus: EventBus) -> MagicMock:
+def _module(
+    bus: EventBus, log_size: int, advertise_kv_events: bool = True
+) -> ManagementModule:
     ctx = MagicMock(name="ctx")
     ctx.event_bus = bus
     ctx.chunk_size = CHUNK_SIZE
-    return ctx
+    return ManagementModule(
+        ctx,
+        experimental_transfer=("transfer_query",),
+        kv_event_log_size=log_size,
+        advertise_kv_events=advertise_kv_events,
+    )
 
 
-def test_module_exposes_a_sync_poll_handler() -> None:
-    handlers = iter_request_handlers(KVEventModule)
-    assert [(h.options.request_type, h.options.handler_type) for h in handlers] == [
-        (RequestType.POLL_KV_EVENTS, HandlerType.SYNC)
-    ]
+def test_the_poll_handler_is_served_synchronously() -> None:
+    handlers = iter_request_handlers(ManagementModule)
+    poll = [h for h in handlers if h.options.request_type == RequestType.POLL_KV_EVENTS]
+    assert [h.options.handler_type for h in poll] == [HandlerType.SYNC]
 
 
-def test_module_is_disabled_without_a_log_or_an_enabled_bus() -> None:
-    off = KVEventModule(_context(_bus(enabled=False)), log_size=8)
-    zero = KVEventModule(_context(_bus()), log_size=0)
+def test_the_channel_is_disabled_without_a_log_or_an_enabled_bus() -> None:
+    off = _module(_bus(enabled=False), log_size=8)
+    zero = _module(_bus(), log_size=0)
     for module in (off, zero):
-        assert not module.enabled
         result = module.poll_kv_events(MODEL, 0, 8)
-        assert isinstance(result, KVEventPollResult)
         assert (result.enabled, result.events) == (False, [])
         assert module.report_status()["kv_events"]["enabled"] is False
-    with pytest.raises(ValueError, match="log_size"):
-        KVEventModule(_context(_bus()), log_size=-1)
+        assert KV_EVENT_CAPABILITY not in module.get_experimental()
+    with pytest.raises(ValueError, match="kv_event_log_size"):
+        _module(_bus(), log_size=-1)
 
 
-def test_module_validates_poll_arguments() -> None:
-    module = KVEventModule(_context(_bus()), log_size=8)
+def test_the_poll_arguments_are_validated() -> None:
+    module = _module(_bus(), log_size=8)
     with pytest.raises(ValueError, match="cursor"):
         module.poll_kv_events(MODEL, -1, 8)
     with pytest.raises(ValueError, match="max_events"):
         module.poll_kv_events(MODEL, 0, 0)
 
 
-def test_module_serves_bus_events_end_to_end() -> None:
+def test_bus_events_are_served_end_to_end() -> None:
     bus = _bus()
     bus.start()
     try:
-        module = KVEventModule(_context(bus), log_size=16)
-        assert module.enabled
+        module = _module(bus, log_size=16)
+        incarnation = module.report_status()["kv_events"]["incarnation"]
         bus.publish(
             Event(
                 EventType.MP_TOKENS,
@@ -355,7 +367,7 @@ def test_module_serves_bus_events_end_to_end() -> None:
                 break
             time.sleep(0.01)
         assert result.enabled and not result.lost
-        assert result.incarnation == module.incarnation
+        assert result.incarnation == incarnation
         assert [(r.kind, r.block_hashes) for r in result.events] == [
             (KV_EVENT_KIND_STORED, [_hash(1)]),
             (KV_EVENT_KIND_REMOVED, [_hash(1)]),
@@ -366,7 +378,7 @@ def test_module_serves_bus_events_end_to_end() -> None:
         assert (again.events, again.next_cursor, again.incarnation) == (
             [],
             2,
-            module.incarnation,
+            incarnation,
         )
         status = module.report_status()["kv_events"]
         assert status["enabled"] and status["log_depth"] == 2
@@ -375,9 +387,9 @@ def test_module_serves_bus_events_end_to_end() -> None:
         bus.stop()
 
 
-def test_module_reports_bus_drops_as_lost_on_the_next_poll() -> None:
+def test_bus_drops_are_reported_as_lost_on_the_next_poll() -> None:
     bus = _bus(max_queue_size=1)  # not started: the second publish is dropped
-    module = KVEventModule(_context(bus), log_size=16)
+    module = _module(bus, log_size=16)
     bus.publish(Event(EventType.L1_KEYS_EVICTED, metadata=_l1_keys(_key(1))))
     bus.publish(Event(EventType.L1_KEYS_EVICTED, metadata=_l1_keys(_key(1))))
 
@@ -388,9 +400,9 @@ def test_module_reports_bus_drops_as_lost_on_the_next_poll() -> None:
 
 def test_the_kv_event_capability_is_advertised_to_engines() -> None:
     """An engine polls only a server that advertises the channel, so the
-    management module must carry the flag alongside the transfer types."""
-    advertising = ManagementModule(_context(_bus()), capabilities=[KV_EVENT_CAPABILITY])
-    silent = ManagementModule(_context(_bus()))
+    flag must reach ``GET_EXPERIMENTAL`` alongside the transfer types."""
+    advertising = _module(_bus(), log_size=8)
+    silent = _module(_bus(), log_size=8, advertise_kv_events=False)
 
-    assert KV_EVENT_CAPABILITY in advertising.get_experimental()
-    assert KV_EVENT_CAPABILITY not in silent.get_experimental()
+    assert advertising.get_experimental() == ["transfer_query", KV_EVENT_CAPABILITY]
+    assert silent.get_experimental() == ["transfer_query"]
