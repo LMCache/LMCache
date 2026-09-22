@@ -4,9 +4,8 @@
 # Standard
 from abc import ABC, abstractmethod
 from types import TracebackType
-from typing import Any, ClassVar
+from typing import ClassVar
 import ctypes
-import os
 
 # Third Party
 import torch
@@ -40,6 +39,8 @@ class Submission:
 class GDSBackend(ABC):
     """Backend owned by one GDSContext.
 
+    The context opens a slab and manages GPU buffer/stream lifetimes. How the
+    backend opens or registers its storage is internal to the implementation.
     Construction and selection must not load native drivers. Platform requirements
     belong to each implementation. Backends with process-wide native state define
     a class-level SharedDriver in _driver. Complete DMA and release this context's
@@ -61,19 +62,7 @@ class GDSBackend(ABC):
 
     @abstractmethod
     def open_slab(self, location: str, size: int, direct_io: bool) -> "GDSHandle":
-        """Prepare and register size bytes at location; release resources on failure."""
-
-    @abstractmethod
-    def open_handle(self, fd: int, path: str) -> "GDSHandle":
-        """Take ownership of fd; return a registered handle or close fd on failure."""
-
-    @abstractmethod
-    def register_handle(self, fd: int) -> Any:
-        """Return a native registration for fd, leaving fd ownership with the caller."""
-
-    @abstractmethod
-    def deregister_handle(self, handle: Any) -> None:
-        """Release a native registration without closing its descriptor."""
+        """Prepare size bytes at location for IO; release resources on failure."""
 
     @abstractmethod
     def register_buffer(self, buf: torch.Tensor) -> None:
@@ -114,7 +103,7 @@ class GDSBackend(ABC):
 
 
 class GDSHandle(ABC):
-    """Own a slab descriptor and its backend registration.
+    """Own a slab's IO resources, with path identifying its location.
 
     IO sizes and offsets are in bytes: buf_offset is relative to the registered
     buf_base, and file_offset is relative to the slab. Operations are ordered on
@@ -122,16 +111,8 @@ class GDSHandle(ABC):
     Submission errors raise immediately; deferred errors appear in bytes_done.
     """
 
-    def __init__(self, backend: GDSBackend, fd: int, handle: Any, path: str) -> None:
-        self._backend = backend
-        self._fd = fd
-        self._handle = handle
+    def __init__(self, path: str) -> None:
         self.path = path
-
-    @property
-    def fd(self) -> int:
-        """Return the owned descriptor, or -1 after close()."""
-        return self._fd
 
     @abstractmethod
     def read_async(
@@ -155,20 +136,12 @@ class GDSHandle(ABC):
     ) -> Submission:
         """Enqueue a GPU-to-slab write and return its in-flight Submission."""
 
+    @abstractmethod
     def close(self) -> None:
-        """Deregister and close fd once, even if deregistration fails.
+        """Release this slab's resources; repeated calls do nothing.
 
         The caller must complete IO first. This does not close the backend's driver.
         """
-        if self._fd < 0:
-            return
-        try:
-            self._backend.deregister_handle(self._handle)
-        finally:
-            try:
-                os.close(self._fd)
-            finally:
-                self._fd = -1
 
     def __enter__(self) -> "GDSHandle":
         return self

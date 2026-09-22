@@ -117,31 +117,22 @@ def _skip_unless_gds_registrable(directory: Path) -> None:
         directory: The directory in which the roundtrip test would place the
             GDS slab file.
     """
-    probe_path = directory / ".gds_registration_probe"
     try:
-        fd = os.open(probe_path, os.O_CREAT | os.O_RDWR, 0o644)
-        try:
-            os.posix_fallocate(fd, 0, 4096)
-        finally:
-            os.close(fd)
-        fd = os.open(probe_path, os.O_RDWR | os.O_DIRECT)
-        try:
+        with tempfile.TemporaryDirectory(
+            dir=directory, prefix=".gds_registration_probe_"
+        ) as probe_dir:
             backend = create_backend("auto")
             try:
-                handle = backend.register_handle(fd)
-                backend.deregister_handle(handle)
+                with backend.open_slab(probe_dir, 4096, direct_io=True):
+                    pass
             finally:
                 backend.close_driver()
-        finally:
-            os.close(fd)
     except (OSError, RuntimeError) as exc:
         # OSError: open/fallocate; RuntimeError: cufile/hipfile registration.
         pytest.skip(
             f"GDS driver cannot register files under {directory} ({exc}); "
             "point LMCACHE_GDS_TEST_DIR at a GDS-capable filesystem"
         )
-    finally:
-        probe_path.unlink(missing_ok=True)
 
 
 @pytest.fixture

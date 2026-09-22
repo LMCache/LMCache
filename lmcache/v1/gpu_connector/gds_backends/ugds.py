@@ -14,7 +14,8 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
-from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend, GDSHandle, Submission
+from lmcache.v1.gpu_connector.gds_backends._file import FDGDSBackend, FDGDSHandle
+from lmcache.v1.gpu_connector.gds_backends.base import Submission
 
 logger = init_logger(__name__)
 
@@ -129,7 +130,7 @@ def _buf_register_flags() -> int:
     return _UGDS_REGISTER_DMABUF if torch.version.hip is not None else 0
 
 
-class Backend(GDSBackend):
+class Backend(FDGDSBackend):
     """Own the ugds driver and its registration operations."""
 
     name = "ugds"
@@ -269,7 +270,7 @@ class Backend(GDSBackend):
         _check(self.library().uGDSDriverClose(), "uGDSDriverClose")
 
 
-class AsyncHandle(GDSHandle):
+class AsyncHandle(FDGDSHandle):
     """An owning ugds slab handle with stream-ordered IO."""
 
     _backend: Backend

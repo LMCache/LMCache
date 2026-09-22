@@ -11,8 +11,8 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
-from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
-from lmcache.v1.gpu_connector.gds_backends.base import GDSHandle, Submission
+from lmcache.v1.gpu_connector.gds_backends._file import FDGDSHandle, FileGDSBackend
+from lmcache.v1.gpu_connector.gds_backends.base import Submission
 
 if TYPE_CHECKING:
     # Third Party
@@ -164,7 +164,7 @@ class Backend(FileGDSBackend):
         cuFileDriverClose()
 
 
-class AsyncHandle(GDSHandle):
+class AsyncHandle(FDGDSHandle):
     """An owning cufile slab handle with stream-ordered IO."""
 
     _backend: Backend

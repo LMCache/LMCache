@@ -12,8 +12,8 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
-from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
-from lmcache.v1.gpu_connector.gds_backends.base import GDSHandle, Submission
+from lmcache.v1.gpu_connector.gds_backends._file import FDGDSHandle, FileGDSBackend
+from lmcache.v1.gpu_connector.gds_backends.base import Submission
 
 _LIBHIPFILE_SONAME = "libhipfile.so"
 
@@ -226,7 +226,7 @@ class Backend(FileGDSBackend):
         return raw.decode() if raw is not None else "unknown"
 
 
-class AsyncHandle(GDSHandle):
+class AsyncHandle(FDGDSHandle):
     """An owning hipfile slab handle with stream-ordered IO."""
 
     _backend: Backend
