@@ -2,7 +2,7 @@
 """uGDS tests without native libraries or raw devices."""
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
 import ctypes
@@ -59,11 +59,14 @@ def backend() -> ua.Backend:
 
 
 @pytest.fixture(autouse=True)
-def _fake_lib(backend: ua.Backend, monkeypatch: pytest.MonkeyPatch) -> _FakeLib:
+def _fake_lib(
+    backend: ua.Backend, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[_FakeLib]:
     """Replace the backend's native library with a fresh fake."""
     lib = _FakeLib()
     monkeypatch.setattr(backend, "library", lambda: lib)
-    return lib
+    yield lib
+    backend.close_driver()
 
 
 def _fake_gpu_tensor(ptr: int = 0x1000, nbytes: int = 4096) -> SimpleNamespace:
@@ -77,6 +80,30 @@ def _fake_gpu_tensor(ptr: int = 0x1000, nbytes: int = 4096) -> SimpleNamespace:
 
 
 class TestDriverLifecycle:
+    def test_overlapping_backends_share_driver(
+        self, backend: ua.Backend, _fake_lib: _FakeLib, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        other = ua.Backend()
+        monkeypatch.setattr(other, "library", lambda: _fake_lib)
+        try:
+            backend.register_stream(7)
+            other.register_stream(9)
+            handle = other.open_handle(-1, "/dev/ugds_drv0")
+            assert _fake_lib.calls["uGDSDriverOpen"] == [()]
+            backend.deregister_stream(7)
+            backend.close_driver()
+            assert "uGDSDriverClose" not in _fake_lib.calls
+            other.register_buffer(_fake_gpu_tensor())
+            handle.read_async(0x1000, 4096, 0, 0, 9)
+            assert len(_fake_lib.calls["uGDSReadAsync"]) == 1
+            other.deregister_buffer(_fake_gpu_tensor())
+            other.deregister_handle(0xDEADBEEF)
+            other.deregister_stream(9)
+        finally:
+            backend.close_driver()
+            other.close_driver()
+        assert _fake_lib.calls["uGDSDriverClose"] == [()]
+
     def test_native_open_error_propagates(
         self, backend: ua.Backend, _fake_lib: _FakeLib
     ) -> None:

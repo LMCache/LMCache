@@ -10,6 +10,7 @@ import os
 import torch
 
 # First Party
+from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
 from lmcache.v1.gpu_connector.gds_backends.base import GDSHandle, Submission
 
@@ -69,6 +70,7 @@ class Backend(FileGDSBackend):
     """Own the cufile driver and its registration operations."""
 
     name = "cufile"
+    _driver = SharedDriver()
 
     @classmethod
     def is_default(cls) -> bool:
@@ -103,6 +105,7 @@ class Backend(FileGDSBackend):
         """Use the raw API to preserve cuFile status codes in raised errors."""
         if not buf.is_cuda:
             raise ValueError("register_buffer: tensor must be on CUDA")
+        self._ensure_driver_open()
         # Third Party
         from cufile.bindings import libcufile
 
@@ -151,8 +154,8 @@ class Backend(FileGDSBackend):
         # Third Party
         from cufile.bindings import cuFileDriverOpen
 
-        cuFileDriverOpen()
         _declare_signatures()
+        cuFileDriverOpen()
 
     def _close_driver(self) -> None:
         # Third Party

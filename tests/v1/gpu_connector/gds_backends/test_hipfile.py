@@ -2,6 +2,7 @@
 """hipFile tests with a fake native library."""
 
 # Standard
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -33,6 +34,8 @@ class _FakeLib:
             self.calls[name] = args
             if name == "hipFileGetOpErrorString":
                 return b"hipFileFakeError"
+            if name == "hipFileHandleRegister":
+                args[0]._obj.value = 0xFEED
             return _ok()
 
         return _record
@@ -44,11 +47,12 @@ def backend() -> ha.Backend:
 
 
 @pytest.fixture(autouse=True)
-def _fake_lib(backend: ha.Backend, monkeypatch) -> _FakeLib:
+def _fake_lib(backend: ha.Backend, monkeypatch) -> Iterator[_FakeLib]:
     """Replace the backend's native library with a fresh fake."""
     lib = _FakeLib()
     monkeypatch.setattr(backend, "library", lambda: lib)
-    return lib
+    yield lib
+    backend.close_driver()
 
 
 def _fake_gpu_tensor(ptr: int = 0x1000, nbytes: int = 4096):
@@ -62,6 +66,33 @@ def _fake_gpu_tensor(ptr: int = 0x1000, nbytes: int = 4096):
 
 
 class TestDriverLifecycle:
+    def test_overlapping_backends_share_driver(
+        self, backend: ha.Backend, _fake_lib: _FakeLib, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        other = ha.Backend()
+        monkeypatch.setattr(other, "library", lambda: _fake_lib)
+        opened, closed = Mock(return_value=_ok()), Mock(return_value=_ok())
+        monkeypatch.setattr(_fake_lib, "hipFileDriverOpen", opened)
+        monkeypatch.setattr(_fake_lib, "hipFileDriverClose", closed)
+        try:
+            backend.register_stream(7)
+            other.register_stream(9)
+            handle = other.open_handle(-1, "/slab")
+            opened.assert_called_once()
+            backend.deregister_stream(7)
+            backend.close_driver()
+            closed.assert_not_called()
+            other.register_buffer(_fake_gpu_tensor())
+            handle.read_async(0x1000, 4096, 0, 0, 9)
+            assert "hipFileReadAsync" in _fake_lib.calls
+            other.deregister_buffer(_fake_gpu_tensor())
+            other.deregister_handle(0xFEED)
+            other.deregister_stream(9)
+        finally:
+            backend.close_driver()
+            other.close_driver()
+        closed.assert_called_once()
+
     def test_concurrent_open_and_close_call_driver_once(
         self,
         backend: ha.Backend,

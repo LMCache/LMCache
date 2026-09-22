@@ -2,6 +2,7 @@
 """Phoenix tests with a fake phxFile shim."""
 
 # Standard
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -64,12 +65,15 @@ def backend() -> pa.Backend:
 
 
 @pytest.fixture(autouse=True)
-def _fake_lib(monkeypatch: pytest.MonkeyPatch) -> _FakeLib:
+def _fake_lib(
+    backend: pa.Backend, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[_FakeLib]:
     """Replace the lazy-loaded CDLL with the fake frozen-ABI library."""
     lib = _FakeLib()
     monkeypatch.setattr(pa.ctypes, "CDLL", lambda path: lib)
     monkeypatch.setattr(pa.ctypes.util, "find_library", lambda name: None)
-    return lib
+    yield lib
+    backend.close_driver()
 
 
 def _gpu_tensor(
@@ -221,6 +225,28 @@ class TestAsyncHandleIO:
 
 
 class TestCloseDriver:
+    def test_overlapping_backends_keep_shim_alive(
+        self, backend: pa.Backend, _fake_lib: _FakeLib
+    ) -> None:
+        other = pa.Backend()
+        try:
+            backend.register_stream(7)
+            other.register_stream(9)
+            handle = pa.AsyncHandle(other, -1, other.register_handle(8), "/slab")
+            backend.deregister_stream(7)
+            backend.close_driver()
+            assert "phxFileDriverClose" not in _fake_lib.calls
+            other.register_buffer(_gpu_tensor())
+            assert handle.read_async(0x100000, 4096, 0, 0, 9).bytes_done == 4096
+            other.deregister_buffer(_gpu_tensor())
+            other.deregister_handle(8)
+            other.deregister_stream(9)
+        finally:
+            backend.close_driver()
+            other.close_driver()
+        assert "phxFileDriverOpen" not in _fake_lib.calls
+        assert _fake_lib.calls["phxFileDriverClose"] == [()]
+
     def test_registration_does_not_explicitly_open_driver(
         self, backend: pa.Backend, _fake_lib: _FakeLib
     ) -> None:
@@ -230,10 +256,10 @@ class TestCloseDriver:
         assert "phxFileDriverOpen" not in _fake_lib.calls
         backend.close_driver()
         backend.close_driver()
-        assert _fake_lib.calls["phxFileDriverClose"] == [(), ()]
+        assert _fake_lib.calls["phxFileDriverClose"] == [()]
 
     def test_failure_raises(self, backend: pa.Backend, _fake_lib: _FakeLib) -> None:
         _fake_lib.driver_close_rc = -5
-        backend.library()
+        backend.register_handle(7)
         with pytest.raises(RuntimeError, match="phxFileDriverClose"):
             backend.close_driver()

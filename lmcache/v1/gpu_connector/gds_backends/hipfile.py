@@ -11,6 +11,7 @@ import threading
 import torch
 
 # First Party
+from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
 from lmcache.v1.gpu_connector.gds_backends.base import GDSHandle, Submission
 
@@ -116,6 +117,7 @@ class Backend(FileGDSBackend):
     """Own the hipfile driver and its registration operations."""
 
     name = "hipfile"
+    _driver = SharedDriver()
 
     def __init__(self) -> None:
         super().__init__()
@@ -137,10 +139,6 @@ class Backend(FileGDSBackend):
             os.close(fd)
             raise
         return AsyncHandle(self, fd, handle, path)
-
-    def close_driver(self) -> None:
-        with self._init_lock:
-            super().close_driver()
 
     def register_handle(self, fd: int) -> int:
         self._ensure_driver_open()
@@ -215,12 +213,6 @@ class Backend(FileGDSBackend):
                 f"[{self._op_error_string(err.err)}], "
                 f"hip_drv_err={err.hip_drv_err})"
             )
-
-    def _ensure_driver_open(self) -> None:
-        # Load before taking the non-reentrant initialization lock.
-        self.library()
-        with self._init_lock:
-            super()._ensure_driver_open()
 
     def _open_driver(self) -> None:
         self.check_error(self.library().hipFileDriverOpen(), "hipFileDriverOpen")

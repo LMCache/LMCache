@@ -11,6 +11,9 @@ import os
 # Third Party
 import torch
 
+# First Party
+from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
+
 
 class Submission:
     """Native IO arguments retained until the issuing stream completes.
@@ -35,14 +38,14 @@ class GDSBackend(ABC):
     """Backend owned by one GDSContext.
 
     Construction and selection must not load native drivers. Platform requirements
-    belong to each implementation. Complete DMA before releasing registrations,
-    handles, and driver state; native errors propagate to the caller.
+    belong to each implementation. Backends with process-wide native state define
+    a class-level SharedDriver in _driver. Complete DMA and release this context's
+    registrations and handles before releasing driver ownership. Only the last
+    owner closes the native session; native errors propagate to the caller.
     """
 
     name: ClassVar[str]
-
-    def __init__(self) -> None:
-        self._driver_opened = False
+    _driver: ClassVar[SharedDriver | None] = None
 
     @classmethod
     def is_default(cls) -> bool:
@@ -89,28 +92,14 @@ class GDSBackend(ABC):
         """Release registration after IO completes, leaving the stream alive."""
 
     def close_driver(self) -> None:
-        """Close an opened driver once, resetting state even if closing fails.
-
-        Implicit-initialization backends may override this. Calls before opening do
-        nothing; state is local to this instance.
-        """
-        if not self._driver_opened:
-            return
-        try:
-            self._close_driver()
-        finally:
-            self._driver_opened = False
+        """Release this owner's session use; unused/repeated releases do nothing."""
+        if self._driver is not None:
+            self._driver.release(self, self._close_driver)
 
     def _ensure_driver_open(self) -> None:
-        """Open once per instance; failed opens remain retryable.
-
-        Subclasses supply _open_driver/_close_driver and any required synchronization.
-        Backends without explicit initialization can ignore these helpers.
-        """
-        if self._driver_opened:
-            return
-        self._open_driver()
-        self._driver_opened = True
+        """Acquire session ownership before registration, opening on first use."""
+        if self._driver is not None:
+            self._driver.acquire(self, self._open_driver)
 
     def _open_driver(self) -> None:
         """Perform native initialization; the default requires none."""

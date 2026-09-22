@@ -12,6 +12,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 from lmcache.v1.gpu_connector.gds_backends._file import FileGDSBackend
 from lmcache.v1.gpu_connector.gds_backends.base import GDSHandle, Submission
 
@@ -105,6 +106,7 @@ class Backend(FileGDSBackend):
     """Own the phx driver and its registration operations."""
 
     name = "phx"
+    _driver = SharedDriver()
 
     def __init__(self) -> None:
         super().__init__()
@@ -127,6 +129,7 @@ class Backend(FileGDSBackend):
 
         Load the shim here so a missing library fails at slab setup, not DMA.
         """
+        self._ensure_driver_open()
         lib = self.library()
         fh = ctypes.c_void_p()
         _check(
@@ -150,6 +153,7 @@ class Backend(FileGDSBackend):
         nbytes = buf.numel() * buf.element_size()
         if nbytes == 0:
             raise ValueError("register_buffer: tensor is empty")
+        self._ensure_driver_open()
         _check(
             self.library().phxFileBufRegister(
                 ctypes.c_void_p(buf.data_ptr()),
@@ -172,6 +176,7 @@ class Backend(FileGDSBackend):
 
     def register_stream(self, raw_stream: int) -> None:
         """Call the shim's no-op registration; each phx IO carries its stream."""
+        self._ensure_driver_open()
         _check(
             self.library().phxFileStreamRegister(ctypes.c_void_p(raw_stream)),
             "phxFileStreamRegister",
@@ -183,12 +188,6 @@ class Backend(FileGDSBackend):
             "phxFileStreamDeregister",
         )
 
-    def close_driver(self) -> None:
-        """Clean up the loaded shim without an explicit driver-open transition."""
-        # Closing the shim sweeps its registration table and all opened devices.
-        if self._lib is not None:
-            _check(self._lib.phxFileDriverClose(), "phxFileDriverClose")
-
     def library(self) -> ctypes.CDLL:
         """Load ``libphxfile.so`` on first use and declare the frozen ABI."""
         if self._lib is not None:
@@ -199,6 +198,13 @@ class Backend(FileGDSBackend):
         _declare_signatures(lib, path)
         self._lib = lib
         return lib
+
+    def _open_driver(self) -> None:
+        # Phoenix initializes devices implicitly during registration.
+        self.library()
+
+    def _close_driver(self) -> None:
+        _check(self.library().phxFileDriverClose(), "phxFileDriverClose")
 
 
 class AsyncHandle(GDSHandle):

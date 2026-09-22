@@ -2,7 +2,7 @@
 """Process-global GPUDirect Storage data path for the GDS L1 tier.
 
 The context owns a GDSBackend and calls its object interface. Each backend
-prepares its own slab and owns its native driver and registration operations.
+prepares its own slab and shares its native driver session with peer instances.
 
 One :class:`GDSContext` per worker process owns the slab, its GDS handle,
 the registered GPU staging buffers, and the stream-ordered GDS submissions.

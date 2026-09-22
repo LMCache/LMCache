@@ -13,6 +13,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend, GDSHandle, Submission
 
 logger = init_logger(__name__)
@@ -132,6 +133,7 @@ class Backend(GDSBackend):
     """Own the ugds driver and its registration operations."""
 
     name = "ugds"
+    _driver = SharedDriver()
 
     def __init__(self) -> None:
         super().__init__()
