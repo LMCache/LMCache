@@ -13,7 +13,9 @@ Disable the environment switch to stop injecting and honoring remote parents.
 The existing provider's sampler still decides whether a span is recorded.
 
 CPU submission events retain the parent before asynchronous GPU callbacks.
-This boundary does not cover gRPC, keyless control RPCs, or L2 task queues.
+L2 prefetch queues keep per-request snapshots. Shared store batches use a
+scheduling span linked to contributing writers. This boundary does not cover
+gRPC, keyless control RPCs, or native storage backends' own queues.
 """
 
 # Future
@@ -117,3 +119,64 @@ def run_with_trace_context(
         return handler(*args, **kwargs)
     finally:
         context.detach(token)
+
+
+def run_with_trace_links(
+    carriers: list[dict[str, str]],
+    handler: Callable[P, T],
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> T:
+    """Schedule a shared store batch under a root span linked to its writers.
+
+    A batch is never assigned to whichever writer happened to finish last.
+    Only valid, distinct W3C parents become links. No keys or error payloads
+    are exported. The span measures scheduling, not the asynchronous I/O.
+
+    Args:
+        carriers: Writer contexts collected for the shared batch.
+        handler: Synchronous batch submission handler.
+        args: Positional arguments forwarded to the handler.
+        kwargs: Keyword arguments forwarded to the handler.
+
+    Returns:
+        The handler's original result.
+
+    Raises:
+        BaseException: Any exception raised by the handler, unchanged.
+    """
+    if os.environ.get("LMCACHE_MP_TRACE_CONTEXT") != "1":
+        return run_with_trace_context({}, handler, *args, **kwargs)
+    try:
+        # Third Party
+        from opentelemetry import trace
+        from opentelemetry.context import Context
+    except ImportError:
+        return handler(*args, **kwargs)
+    parents = {}
+    for carrier in carriers:
+        parent = trace.get_current_span(
+            extract_trace_context(carrier)
+        ).get_span_context()
+        if parent.is_valid:
+            parents[(parent.trace_id, parent.span_id)] = parent
+            if len(parents) >= 128:
+                break
+    # A linked batch must not turn an entirely unsampled workload into a
+    # new sampled root merely because the provider's root sampler is AlwaysOn.
+    if not any(parent.trace_flags.sampled for parent in parents.values()):
+        return run_with_trace_context({}, handler, *args, **kwargs)
+    tracer = trace.get_tracer("lmcache_mp.server")
+    with tracer.start_as_current_span(
+        "mp.l2.store.schedule",
+        context=Context(),
+        links=[trace.Link(parent) for parent in parents.values()],
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
+        try:
+            return handler(*args, **kwargs)
+        except BaseException:
+            # Exception text can contain cache keys or request content.
+            span.set_status(trace.StatusCode.ERROR)
+            raise

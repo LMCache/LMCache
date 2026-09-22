@@ -54,10 +54,21 @@ characters are ignored. Headers are separate from event metadata and are not
 exported as attributes. Prompt content, token values, and baggage are not
 carried by this feature.
 
+L2 controllers retain the submitting request's parent across the prefetch
+lookup/load poll loop. A store batch can contain keys from several requests,
+so its ``mp.l2.store.schedule`` span has links to its writers instead of
+selecting one writer as its parent. This span measures batch submission,
+not the later storage I/O. It exports no keys or error payloads. If every
+contributing context is unsampled, no scheduling span is created.
+
+Writer tracking retains at most 10,000 keys, 8 contexts per key, and 128
+distinct contexts per batch. Eviction drops only tracing links; it does not
+drop store keys or change cache policy.
+
 The propagation switch is off by default. Without the OpenTelemetry API,
 request handlers use their original path. This boundary covers keyed ZMQ
 requests and CPU event submission. It does not cover gRPC, keyless control
-calls, CacheBlend root spans, L2 scheduling queues, or native storage backends.
+calls, CacheBlend root spans, or native storage backends' own queues.
 
 Per-Request Hit-Rate Attributes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

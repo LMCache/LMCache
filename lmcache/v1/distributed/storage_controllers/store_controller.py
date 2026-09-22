@@ -10,7 +10,7 @@ The controller runs a background thread with an event-driven loop that:
 """
 
 # Standard
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass
 import enum
 import select
@@ -35,6 +35,10 @@ from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
+from lmcache.v1.mp_observability.propagation import (
+    capture_trace_context,
+    run_with_trace_links,
+)
 from lmcache.v1.platform import (
     consume_fd,
     create_event_notifier,
@@ -79,6 +83,12 @@ class StoreListener(L1ManagerListener):
 
     def __init__(self) -> None:
         self._pending_keys: list[ObjectKey] = []
+        self._pending_contexts: list[dict[str, str]] = []
+        # Best-effort telemetry only: abandoned/temporary staging can outlive
+        # notifications, so bound retained writer context independently of L1.
+        self._writer_contexts: OrderedDict[ObjectKey, list[dict[str, str]]] = (
+            OrderedDict()
+        )
         self._lock = threading.Lock()
         self._event_fd = create_event_notifier()
 
@@ -106,10 +116,19 @@ class StoreListener(L1ManagerListener):
         Returns:
             list[ObjectKey]: All keys enqueued since the last pop.
         """
-        with self._lock:
-            keys = self._pending_keys
-            self._pending_keys = []
+        keys, _ = self.pop_pending_batch()
         return keys
+
+    def pop_pending_batch(self) -> tuple[list[ObjectKey], list[dict[str, str]]]:
+        """Atomically pop keys and their writers' contexts for batch links.
+
+        Returns:
+            The pending keys and at most 128 distinct writer carriers.
+        """
+        with self._lock:
+            keys, contexts = self._pending_keys, self._pending_contexts
+            self._pending_keys, self._pending_contexts = [], []
+        return keys, contexts
 
     def pending_count(self) -> int:
         """Return the number of pending keys waiting to be processed."""
@@ -130,6 +149,14 @@ class StoreListener(L1ManagerListener):
         """
         with self._lock:
             self._pending_keys.extend(keys)
+            fallback = capture_trace_context()
+            for key in keys if fallback or self._writer_contexts else ():
+                carriers = self._writer_contexts.pop(key, [])
+                for carrier in carriers or ([fallback] if fallback else []):
+                    if len(self._pending_contexts) >= 128:
+                        break
+                    if carrier not in self._pending_contexts:
+                        self._pending_contexts.append(carrier)
         self._event_fd.notify()
 
     def on_l1_keys_reserved_read(self, keys: list[ObjectKey]) -> None:
@@ -139,21 +166,37 @@ class StoreListener(L1ManagerListener):
         pass
 
     def on_l1_keys_reserved_write(self, keys: list[ObjectKey]) -> None:
-        pass
+        carrier = capture_trace_context()
+        if carrier:
+            with self._lock:
+                for key in keys:
+                    # Concurrent staging writers can share a key. Keep links
+                    # to all contributors rather than selecting the last one.
+                    carriers = self._writer_contexts.setdefault(key, [])
+                    if carrier not in carriers and len(carriers) < 8:
+                        carriers.append(carrier)
+                    self._writer_contexts.move_to_end(key)
+                    if len(self._writer_contexts) > 10_000:
+                        self._writer_contexts.popitem(last=False)
 
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]) -> None:
-        pass
+        with self._lock:
+            for key in keys:
+                self._writer_contexts.pop(key, None)
 
     def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]) -> None:
         # No op here because we don't want to trigger store when the
         # objects are prefetched to L1.
-        pass
+        self.on_l1_keys_deleted_by_manager(keys)
 
     def on_l1_keys_accessed(self, keys: list[ObjectKey]) -> None:
         pass
 
     def close(self) -> None:
         """Close the notifier."""
+        with self._lock:
+            self._writer_contexts.clear()
+            self._pending_contexts.clear()
         self._event_fd.close()
 
 
@@ -466,9 +509,9 @@ class StoreController(StorageControllerInterface):
 
                 try:
                     if fd == listener_efd:
-                        keys = self._listener.pop_pending_keys()
+                        keys, carriers = self._listener.pop_pending_batch()
                         if keys:
-                            self._process_new_keys(keys)
+                            run_with_trace_links(carriers, self._process_new_keys, keys)
                     else:
                         adapter_idx = self._efd_to_adapter_index.get(fd)
                         if adapter_idx is not None:

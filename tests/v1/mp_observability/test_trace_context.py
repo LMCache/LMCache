@@ -299,6 +299,7 @@ spec.loader.exec_module(module)
 os.environ["LMCACHE_MP_TRACE_CONTEXT"] = "1"
 assert module.capture_trace_context() == {}
 assert module.run_with_trace_context({}, lambda value: value + 1, 4) == 5
+assert module.run_with_trace_links([], lambda value: value + 1, 4) == 5
 try:
     module.run_with_trace_context({}, lambda: 1 / 0)
 except ZeroDivisionError:

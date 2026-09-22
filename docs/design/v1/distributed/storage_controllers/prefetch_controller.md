@@ -203,3 +203,15 @@ with a real `L1Manager` and `MockL2Adapter`:
 
 `tests/v1/distributed/test_prefetch_policy.py` tests the policies black-box
 against their docstrings.
+
+## Optional tracing context
+
+With `LMCACHE_MP_TRACE_CONTEXT=1`, the submission queue captures each caller's
+W3C parent separately from `PrefetchTaskSpec`. The pending deque and in-flight
+request retain that snapshot across lookup and load notifications. The poll
+thread attaches the relevant context only while starting or advancing that
+request, then restores its previous context even if the handler fails.
+
+The grid, multi-L1 planning, `skip_l2` path, and cache identity remain unchanged.
+Missing or invalid headers use an isolated context. Disabling the switch keeps
+the original handler context. No provider or exporter is configured here.
