@@ -14,9 +14,10 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import (
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
+    PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.config import (
     L1ManagerConfig,
@@ -62,6 +63,7 @@ def manager_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[tuple[L1Manager, MagicMock]]:
     backend = MagicMock()
+    backend.get_memory_usage.return_value = (128, 4096)
     monkeypatch.setattr(
         l1_manager_module,
         "SharedDevDaxL1Backend",
@@ -71,13 +73,16 @@ def manager_backend(
         yield manager, backend
 
 
+@pytest.mark.parametrize("tag", ["", "writer"])
 def test_shared_manager_write_read_and_abort(
     manager_backend: tuple[L1Manager, MagicMock],
+    tag: str,
 ) -> None:
     manager, backend = manager_backend
     layout = _layout()
     key = _key(1)
     write_obj = MagicMock()
+    write_obj.get_size.return_value = 32
     read_obj = MagicMock()
     backend.reserve_write.return_value = [write_obj]
     backend.reserve_read.return_value = [read_obj]
@@ -86,22 +91,24 @@ def test_shared_manager_write_read_and_abort(
 
     def commit(_keys: list[ObjectKey]) -> None:
         listener.on_l1_keys_write_finished.assert_not_called()
-        assert entry.write_lock.is_locked()
 
     backend.finish_write.side_effect = commit
     assert manager.uses_shared_l1
-    assert manager.reserve_write([key], [False], layout)[key] == (
+    assert manager.reserve_write([key], [False], layout, tag=tag)[key] == (
         L1Error.SUCCESS,
         write_obj,
     )
-    entry = manager.get_object_state(key)
-    assert entry is not None
+    assert manager.get_object_state(key) is None
+    assert manager.get_staging_memory_usage() == 32
+    assert manager.delete([key], force=True) == {key: L1Error.KEY_IS_LOCKED}
     with pytest.raises(RuntimeError, match="write-and-delete"):
-        manager.finish_write_and_delete([key])
-    assert manager.get_object_state(key) is entry and entry.write_lock.is_locked()
+        manager.finish_write_and_delete([key], tag=tag)
+    assert manager.get_object_state(key) is None
+    assert manager.report_status()["write_locked_count"] == 1
     backend.finish_write.assert_not_called()
     backend.abort_write.assert_not_called()
-    assert manager.finish_write([key])[key] == L1Error.SUCCESS
+    assert manager.finish_write([key], tag=tag)[key] == L1Error.SUCCESS
+    assert manager.get_staging_memory_usage() == 0
     listener.on_l1_keys_write_finished.assert_called_once_with([key])
     assert manager.reserve_read([key])[key] == (L1Error.SUCCESS, read_obj)
     # Duplicate finishes retain existing batched-read semantics and never evict.
@@ -113,11 +120,12 @@ def test_shared_manager_write_read_and_abort(
     backend.finish_write.assert_called_once_with([key])
 
     failed_key = _key(2)
-    backend.reserve_write.return_value = [MagicMock()]
-    manager.reserve_write([failed_key], [False], layout)
-    assert manager.abort_write([failed_key])[failed_key] == L1Error.SUCCESS
+    backend.reserve_write.return_value = [write_obj]
+    manager.reserve_write([failed_key], [False], layout, tag=tag)
+    assert manager.abort_write([failed_key], tag=tag)[failed_key] == L1Error.SUCCESS
     backend.abort_write.assert_called_once_with([failed_key])
     assert manager.get_object_state(failed_key) is None
+    assert manager.get_staging_memory_usage() == 0
 
 
 def test_shared_manager_preserves_partial_batch_results(
@@ -131,6 +139,33 @@ def test_shared_manager_preserves_partial_batch_results(
     assert result[keys[0]] == (L1Error.SUCCESS, memory_obj)
     assert result[keys[1]] == (L1Error.KEY_NOT_WRITABLE, None)
     backend.reserve_write.assert_called_once()
+
+
+@pytest.mark.parametrize("operation", ["finish_write", "abort_write"])
+def test_shared_write_tag_preserves_reservation_owner(
+    manager_backend: tuple[L1Manager, MagicMock],
+    operation: str,
+) -> None:
+    manager, backend = manager_backend
+    key = _key(1)
+    obj = MagicMock()
+    obj.get_size.return_value = 32
+    backend.reserve_write.return_value = [obj]
+    assert manager.reserve_write([key], [False], _layout(), tag="owner")[key][0] == (
+        L1Error.SUCCESS
+    )
+    backend.reserve_write.return_value = []
+    assert manager.reserve_write([key], [False], _layout(), tag="other")[key][0] == (
+        L1Error.KEY_NOT_WRITABLE
+    )
+    assert getattr(manager, operation)([key], tag="other") == {
+        key: L1Error.KEY_NOT_EXIST
+    }
+    assert manager.get_object_state(key) is None
+    assert manager.report_status()["write_locked_count"] == 1
+    assert manager.get_staging_memory_usage() == 32
+    assert getattr(manager, operation)([key], tag="owner") == {key: L1Error.SUCCESS}
+    assert manager.get_staging_memory_usage() == 0
 
 
 def test_shared_manager_rejects_multi_reader_count(
@@ -157,11 +192,9 @@ def test_shared_read_batch_rolls_back_after_local_failure(
     assert manager.finish_write([keys[1]])[keys[1]] == L1Error.SUCCESS
     entry = manager.get_object_state(keys[1])
     assert entry is not None
-    monkeypatch.setattr(
-        entry,
-        "available_for_read",
-        MagicMock(side_effect=RuntimeError("injected failure")),
-    )
+    read_lock = MagicMock()
+    read_lock.lock.side_effect = RuntimeError("injected failure")
+    monkeypatch.setattr(entry, "read_lock", read_lock)
     with pytest.raises(RuntimeError, match="injected failure"):
         manager.reserve_read(keys)
     rolled_back = manager.get_object_state(keys[0])
@@ -239,12 +272,12 @@ def test_shared_finish_failure_keeps_entire_batch_locked(
         backend.finish_write.assert_not_called()
     listener.on_l1_keys_write_finished.assert_not_called()
     for key in keys:
-        entry = manager.get_object_state(key)
-        assert entry is not None and entry.write_lock.is_locked()
+        assert manager.get_object_state(key) is None
+    assert manager.report_status()["write_locked_count"] == len(keys)
 
 
 @pytest.mark.parametrize("object_group_id", [0, 1])
-def test_shared_reader_rejects_missing_or_mismatched_layout(
+def test_shared_reader_rejects_mismatched_layout(
     object_group_id: int,
 ) -> None:
     manager = StorageManager.__new__(StorageManager)
@@ -259,7 +292,9 @@ def test_shared_reader_rejects_missing_or_mismatched_layout(
     }
 
     with pytest.raises(RuntimeError, match="layout does not match"):
-        manager.submit_prefetch_task(PrefetchRequestSpec([key], {0: _layout()}))
+        manager.submit_prefetch_task(
+            PrefetchTaskSpec([GroupedObjectKeys([key], object_group_id, _layout())])
+        )
 
     l1_manager.finish_read.assert_called_once_with([key], read_locks=1)
 

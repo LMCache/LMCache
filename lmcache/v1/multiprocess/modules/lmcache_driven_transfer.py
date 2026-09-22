@@ -38,8 +38,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
     transfer_kv_per_object_group,
 )
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
-from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -404,7 +403,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # before StorageManager unpins the shared mapping.
             self._device_host_func_dispatcher.stop()
 
-    @request_handler(RequestType.REGISTER_KV_CACHE)
+    @request_handler()
     def register_kv_cache(
         self,
         instance_id: int,
@@ -504,7 +503,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             cache_context.num_layers,
         )
 
-    @request_handler(RequestType.UNREGISTER_KV_CACHE)
+    @request_handler()
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister the KV cache tensors for a given GPU instance ID.
 
@@ -529,7 +528,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
 
     @request_handler(
-        RequestType.STORE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
@@ -708,7 +706,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         object_group_id=obj_group_id,
                     )
                     reserved_dict = self._ctx.storage_manager.reserve_write(
-                        keys_to_reserve, layout_desc, "new"
+                        keys_to_reserve, layout_desc
                     )
                     all_dict.update(reserved_dict)
                     if reserved_dict:
@@ -821,7 +819,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         )
 
     @request_handler(
-        RequestType.RETRIEVE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )

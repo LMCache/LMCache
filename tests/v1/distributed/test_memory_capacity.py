@@ -348,6 +348,8 @@ class TestReportStatusSharesTheSource:
             get_configured_capacity_bytes(_config_yielding(configured)).values()
         )
         manager._objects = {}
+        manager._staging = {}
+        manager._staging_bytes = 0
         manager._write_ttl_seconds = 600
         manager._read_ttl_seconds = 600
         # report_status is lock-guarded; the pinned-memory __init__ is skipped.
