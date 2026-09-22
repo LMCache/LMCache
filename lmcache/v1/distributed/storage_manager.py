@@ -6,7 +6,7 @@ Distributed multi-tier storage manager for MP mode
 # Standard
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Iterator, Literal, Optional
+from typing import Iterator, Optional
 import threading
 import time
 
@@ -70,6 +70,10 @@ from lmcache.v1.mp_observability.trace.decorator import (
 from lmcache.v1.platform import HAS_EVENTFD
 
 logger = init_logger(__name__)
+
+# L1 write tag for every object reserved through this manager. Sharing one
+# tag makes concurrent stores of the same key exclude each other.
+_L1_WRITE_TAG = "storage_manager"
 
 
 class StorageManager:
@@ -183,7 +187,6 @@ class StorageManager:
         self,
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
-        mode: Literal["new", "update", "all"],
     ) -> dict[ObjectKey, MemoryObj]:
         """
         Reserve the object for writing into the storage manager.
@@ -192,11 +195,6 @@ class StorageManager:
             keys (list[ObjectKey]): List of object keys to reserve for writing.
             layout_desc (MemoryLayoutDesc): Description of the memory layout
                 for the objects to be reserved.
-            mode (Literal["new", "update", "all"]): Reservation mode.
-            - "new": Reserve only new objects that do not exist.
-            - "update": Reserve only existing objects for update.
-            - "all": Reserve all writable objects regardless of existence.
-
         Returns:
             dict[ObjectKey, MemoryObj]: A dictionary mapping object keys to their
                 reserved memory objects. Note that not all requested keys could be
@@ -206,7 +204,7 @@ class StorageManager:
             keys=keys,
             is_temporary=[False] * len(keys),
             layout_desc=layout_desc,
-            mode=mode,
+            tag=_L1_WRITE_TAG,
         )
 
         result = {k: m for k, (e, m) in reserve_result.items() if m is not None}
@@ -243,10 +241,14 @@ class StorageManager:
         """
         Finish writing the objects into the storage manager.
 
+        Admits the objects reserved by :meth:`reserve_write`: each becomes
+        visible to readers unless the key is already resident, in which case
+        the reserved copy is dropped.
+
         Args:
             keys (list[ObjectKey]): List of object keys that have been written.
         """
-        finish_result = self._l1_manager.finish_write(keys)
+        finish_result = self._l1_manager.finish_write(keys, tag=_L1_WRITE_TAG)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
         self._event_bus.publish(

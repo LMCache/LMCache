@@ -181,6 +181,7 @@ fi
 env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_VLLM}" \
     "${VLLM_DEVICE_ENV[@]}" \
 lmcache server \
+    --transport "$LMCACHE_REQUEST_TRANSPORT" \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \
@@ -215,6 +216,7 @@ echo "Port: $vllm_port"
 # cache availability for batched store throughput without changing this script.
 KV_TRANSFER_CONFIG="$(
     LMCACHE_PORT="${LMCACHE_PORT}" \
+    LMCACHE_REQUEST_SCHEME="${LMCACHE_REQUEST_SCHEME}" \
     LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
     LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD="${LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD:-2}" \
     LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT="${LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT:-1}" \
@@ -223,6 +225,7 @@ import json
 import os
 
 extra_config = {
+    "lmcache.mp.host": os.environ["LMCACHE_REQUEST_SCHEME"] + "://localhost",
     "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
     "lmcache.mp.mq_timeout": 10,
 }

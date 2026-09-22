@@ -215,7 +215,7 @@ class TestStorageManagerBasic:
         object_key = make_object_key(chunk_hash=12345)
 
         # Reserve space for the object
-        ret = storage_manager.reserve_write([object_key], basic_layout, mode="new")
+        ret = storage_manager.reserve_write([object_key], basic_layout)
         assert object_key in ret
         assert ret[object_key] is not None
 
@@ -232,7 +232,7 @@ class TestStorageManagerBasic:
 
         keys = [make_object_key(i) for i in range(5)]
 
-        ret = storage_manager.reserve_write(keys, basic_layout, mode="new")
+        ret = storage_manager.reserve_write(keys, basic_layout)
 
         # All keys should be allocated
         assert len(ret) == len(keys)
@@ -248,7 +248,7 @@ class TestStorageManagerBasic:
 
         keys = [make_object_key(i) for i in range(20)]
 
-        ret = storage_manager.reserve_write(keys, large_layout, mode="new")
+        ret = storage_manager.reserve_write(keys, large_layout)
 
         # At least some of the keys could be allocated
         assert len(ret) < len(keys)
@@ -266,7 +266,7 @@ class TestStorageManagerBasic:
         object_keys = [make_object_key(i) for i in range(5)]
 
         # Write keys into storage manager
-        ret = storage_manager.reserve_write(object_keys, basic_layout, mode="new")
+        ret = storage_manager.reserve_write(object_keys, basic_layout)
         for key in object_keys:
             assert key in ret
             assert ret[key] is not None
@@ -294,7 +294,7 @@ class TestStorageManagerBasic:
 
         # Write only some keys into storage manager
         keys_to_write = [object_keys[0], object_keys[1], object_keys[3], object_keys[4]]
-        ret = storage_manager.reserve_write(keys_to_write, basic_layout, mode="new")
+        ret = storage_manager.reserve_write(keys_to_write, basic_layout)
         for key in keys_to_write:
             assert key in ret
             assert ret[key] is not None
@@ -309,13 +309,8 @@ class TestStorageManagerBasic:
         assert hit_count is not None
         assert hit_count == 2  # Only 2 keys were written
 
-        # The last 2 keys should be "writable"
-        ret = storage_manager.reserve_write(
-            object_keys[3:], basic_layout, mode="update"
-        )
-        for key in object_keys[3:]:
-            assert key in ret
-            assert ret[key] is not None
+        # The last 2 keys should be unlocked (deletable)
+        assert storage_manager.delete_l1_keys(object_keys[3:]) == (2, 0)
 
         storage_manager.close()
 
@@ -326,7 +321,7 @@ class TestStorageManagerBasic:
         object_keys = [make_object_key(i) for i in range(3)]
 
         # Write keys into storage manager
-        ret = storage_manager.reserve_write(object_keys, basic_layout, mode="new")
+        ret = storage_manager.reserve_write(object_keys, basic_layout)
         for key in object_keys:
             assert key in ret
             assert ret[key] is not None
@@ -349,11 +344,8 @@ class TestStorageManagerBasic:
         # Finish reading
         storage_manager.finish_read_prefetched(object_keys)
 
-        # Now the objects should be writable again
-        ret = storage_manager.reserve_write(object_keys, basic_layout, mode="update")
-        for key in object_keys:
-            assert key in ret
-            assert ret[key] is not None
+        # Now the objects should be unlocked again
+        assert storage_manager.delete_l1_keys(object_keys) == (len(object_keys), 0)
 
         storage_manager.close()
 
@@ -366,7 +358,7 @@ class TestStorageManagerBasic:
         object_keys = [make_object_key(i) for i in range(5)]
 
         # Write all objects into storage manager
-        ret = storage_manager.reserve_write(object_keys, basic_layout, mode="new")
+        ret = storage_manager.reserve_write(object_keys, basic_layout)
         for key in object_keys:
             assert key in ret
             assert ret[key] is not None
@@ -384,13 +376,8 @@ class TestStorageManagerBasic:
         with storage_manager.read_prefetched_results(object_keys) as retrieved_objects:
             assert retrieved_objects is None
 
-        # Remaining 4 objects should still be writable (i.e., no dangling read locks)
-        ret = storage_manager.reserve_write(
-            object_keys[1:], basic_layout, mode="update"
-        )
-        for key in object_keys[1:]:
-            assert key in ret
-            assert ret[key] is not None
+        # Remaining 4 objects should be unlocked (i.e., no dangling read locks)
+        assert storage_manager.delete_l1_keys(object_keys[1:]) == (4, 0)
         storage_manager.close()
 
 
@@ -415,7 +402,7 @@ class TestStorageManagerMultiReader:
         keys = [make_object_key(i) for i in range(3)]
 
         # Write keys
-        ret = sm.reserve_write(keys, basic_layout, mode="new")
+        ret = sm.reserve_write(keys, basic_layout)
         assert len(ret) == len(keys)
         sm.finish_write(list(ret.keys()))
 
@@ -430,8 +417,7 @@ class TestStorageManagerMultiReader:
         sm.finish_read_prefetched(keys, read_locks=num_kv_readers)
 
         # All locks released -> objects writable again
-        ret = sm.reserve_write(keys, basic_layout, mode="update")
-        assert len(ret) == len(keys)
+        assert sm.delete_l1_keys(keys) == (len(keys), 0)
 
         sm.close()
 
@@ -442,7 +428,7 @@ class TestStorageManagerMultiReader:
         sm = StorageManager(basic_storage_manager_config)
         keys = [make_object_key(i) for i in range(2)]
 
-        ret = sm.reserve_write(keys, basic_layout, mode="new")
+        ret = sm.reserve_write(keys, basic_layout)
         sm.finish_write(list(ret.keys()))
 
         num_kv_readers = 4
@@ -455,16 +441,14 @@ class TestStorageManagerMultiReader:
         # Release 2 of 4 read locks
         sm.finish_read_prefetched(keys, read_locks=2)
 
-        # Objects should NOT be writable (2 locks remain)
-        ret = sm.reserve_write(keys, basic_layout, mode="update")
-        assert len(ret) == 0
+        # Objects should still be locked (2 locks remain)
+        assert sm.delete_l1_keys(keys) == (0, len(keys))
 
         # Release the remaining 2 read locks
         sm.finish_read_prefetched(keys, read_locks=2)
 
         # Now writable
-        ret = sm.reserve_write(keys, basic_layout, mode="update")
-        assert len(ret) == len(keys)
+        assert sm.delete_l1_keys(keys) == (len(keys), 0)
 
         sm.close()
 
@@ -481,7 +465,7 @@ class TestStorageManagerMultiReader:
         all_keys = [make_object_key(i) for i in range(5)]
         existing = [all_keys[i] for i in [0, 1, 3, 4]]
 
-        ret = sm.reserve_write(existing, basic_layout, mode="new")
+        ret = sm.reserve_write(existing, basic_layout)
         sm.finish_write(list(ret.keys()))
 
         num_kv_readers = 2
@@ -498,13 +482,8 @@ class TestStorageManagerMultiReader:
         # Finish the prefix hits
         sm.finish_read_prefetched(all_keys[:2], read_locks=num_kv_readers)
 
-        # Keys {3,4} should be writable (skipped locks released)
-        ret = sm.reserve_write(
-            [all_keys[3], all_keys[4]],
-            basic_layout,
-            mode="update",
-        )
-        assert len(ret) == 2
+        # Keys {3,4} should be unlocked (skipped locks released)
+        assert sm.delete_l1_keys([all_keys[3], all_keys[4]]) == (2, 0)
 
         sm.close()
 
@@ -515,7 +494,7 @@ class TestStorageManagerMultiReader:
         sm = StorageManager(basic_storage_manager_config)
         keys = [make_object_key(i) for i in range(3)]
 
-        ret = sm.reserve_write(keys, basic_layout, mode="new")
+        ret = sm.reserve_write(keys, basic_layout)
         sm.finish_write(list(ret.keys()))
 
         handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: basic_layout}))
@@ -525,8 +504,7 @@ class TestStorageManagerMultiReader:
         # Single finish is enough
         sm.finish_read_prefetched(keys)
 
-        ret = sm.reserve_write(keys, basic_layout, mode="update")
-        assert len(ret) == len(keys)
+        assert sm.delete_l1_keys(keys) == (len(keys), 0)
 
         sm.close()
 
@@ -562,17 +540,22 @@ class TestStorageManagerL2Prefetch:
         layout: MemoryLayoutDesc,
     ) -> None:
         """Write keys to L1 via StorageManager and wait for L2 store."""
-        ret = sm.reserve_write(keys, layout, mode="new")
+        ret = sm.reserve_write(keys, layout)
         assert len(ret) == len(keys)
         sm.finish_write(list(ret.keys()))
 
-        # Wait for StoreController to propagate all keys to L2
+        # Wait for StoreController to propagate all keys to L2 and release
+        # the read locks it held while copying from L1.
         adapter = sm._l2_adapters[0]
         ok = wait_for_condition(
-            lambda: all(adapter.debug_has_key(k) for k in keys),  # type: ignore
+            lambda: all(
+                adapter.debug_has_key(k)  # type: ignore[attr-defined]
+                and sm._l1_manager.is_key_evictable(k)
+                for k in keys
+            ),
             timeout=10.0,
         )
-        assert ok, "Keys should be stored in L2 by StoreController"
+        assert ok, "Keys should be stored in L2 and unlocked by StoreController"
 
     def test_prefetch_from_l2(self, l2_storage_manager_config, basic_layout):
         """Write to L1 → store to L2 → clear L1 → prefetch from L2."""
@@ -689,7 +672,6 @@ class TestStorageManagerL2Prefetch:
 
         # All keys reach L2; delete key 1 from L1 so it is L2-only.
         self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
-        time.sleep(0.05)
         deleted, skipped = sm.delete_l1_keys([all_keys[1]])
         assert (deleted, skipped) == (1, 0)
 
@@ -941,7 +923,7 @@ class TestFailureEventProduction:
         sm = StorageManager(small_storage_manager_config)
         try:
             keys = [make_object_key(i) for i in range(20)]
-            sm.reserve_write(keys, large_layout, mode="new")
+            sm.reserve_write(keys, large_layout)
 
             # Allow drain thread to deliver the event.
             assert wait_for_condition(
@@ -976,7 +958,7 @@ class TestFailureEventProduction:
             keys = [make_object_key(i) for i in range(3)]
 
             # Write + finish_write so the keys are readable.
-            ret = sm.reserve_write(keys, basic_layout, mode="new")
+            ret = sm.reserve_write(keys, basic_layout)
             assert len(ret) == len(keys)
             sm.finish_write(list(ret.keys()))
 
@@ -1029,7 +1011,7 @@ class TestStorageManagerSparsePrefetch:
         all_keys = [make_object_key(i) for i in range(5)]
         # Write {0,1,3,4}; key 2 is the gap.
         existing = [all_keys[i] for i in (0, 1, 3, 4)]
-        ret = sm.reserve_write(existing, basic_layout, mode="new")
+        ret = sm.reserve_write(existing, basic_layout)
         sm.finish_write(list(ret.keys()))
 
         handle = sm.submit_prefetch_task(
@@ -1041,13 +1023,11 @@ class TestStorageManagerSparsePrefetch:
         assert found == {0, 1, 3, 4}
 
         # Every found key is read-locked (none write-reservable).
-        locked = sm.reserve_write(existing, basic_layout, mode="update")
-        assert len(locked) == 0
+        assert sm.delete_l1_keys(existing) == (0, len(existing))
 
         # Releasing the full found set frees them.
         sm.finish_read_prefetched(existing)
-        freed = sm.reserve_write(existing, basic_layout, mode="update")
-        assert len(freed) == len(existing)
+        assert sm.delete_l1_keys(existing) == (len(existing), 0)
 
         sm.close()
 
@@ -1060,7 +1040,7 @@ class TestStorageManagerSparsePrefetch:
         all_keys = [make_object_key(i) for i in range(5)]
         # L2 has {0,1,3,4}; gap at 2.
         existing = [all_keys[i] for i in (0, 1, 3, 4)]
-        wret = sm.reserve_write(existing, basic_layout, mode="new")
+        wret = sm.reserve_write(existing, basic_layout)
         sm.finish_write(list(wret.keys()))
         adapter = sm._l2_adapters[0]
         assert wait_for_condition(
@@ -1095,7 +1075,7 @@ class TestStorageManagerDelete:
 
         resident = make_object_key(1)
         missing = make_object_key(2)
-        storage_manager.reserve_write([resident], basic_layout, mode="new")
+        storage_manager.reserve_write([resident], basic_layout)
         storage_manager.finish_write([resident])
 
         assert storage_manager.delete_l1_keys([resident, missing]) == (1, 0)
@@ -1111,14 +1091,19 @@ class TestStorageManagerDelete:
 
         # Reserve write without finishing -> the key is write-locked.
         key = make_object_key(1)
-        storage_manager.reserve_write([key], basic_layout, mode="new")
+        storage_manager.reserve_write([key], basic_layout)
 
-        # Non-force delete refuses the locked key; it survives.
+        # Non-force delete refuses the locked key; its reservation survives.
         assert storage_manager.delete_l1_keys([key]) == (0, 1)
-        assert storage_manager._l1_manager.get_object_state(key) is not None
+        assert (
+            storage_manager.report_status()["l1_manager"]["staging_object_count"] == 1
+        )
 
         # Force delete removes it regardless of the lock.
         assert storage_manager.delete_l1_keys([key], force=True) == (1, 0)
-        assert storage_manager._l1_manager.get_object_state(key) is None
+        assert (
+            storage_manager.report_status()["l1_manager"]["staging_object_count"] == 0
+        )
+        assert storage_manager.delete_l1_keys([key]) == (0, 0)
 
         storage_manager.close()

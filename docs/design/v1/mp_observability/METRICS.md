@@ -202,7 +202,7 @@ ratio is the fraction of tokens requested by a lookup that were served from
 either L1 or L2.  L0 (GPU prefix cache) is intentionally excluded — it is
 vLLM-owned and not observable from LMCache.
 
-Both counters carry `model_name` and `cache_salt` OTel attributes (captured
+All of these counters carry `model_name` and `cache_salt` OTel attributes (captured
 at lookup time from `IPCCacheServerKey`), enabling per-model and per-tenant
 slicing of the hit rate.  `cache_salt` can be high-cardinality; drop it at
 scrape time with `metric_relabel_configs` if storage cost matters.
@@ -211,6 +211,10 @@ scrape time with `metric_relabel_configs` if storage cost matters.
 |---|---|---|---|---|
 | `lmcache_mp.lookup_requested` | `lmcache_mp_lookup_requested_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+requested_tokens` |
 | `lmcache_mp.lookup_hit` | `lmcache_mp_lookup_hit_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+hit_tokens` |
+| `lmcache_mp.lookup_hit_l1` | `lmcache_mp_lookup_hit_l1_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l1_hit_tokens` (0 if absent) |
+| `lmcache_mp.lookup_hit_l2` | `lmcache_mp_lookup_hit_l2_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l2_hit_tokens` (0 if absent); `l1 + l2 == lookup_hit` per event |
+| `lmcache_mp.lookups` | `lmcache_mp_lookups_requests_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+1` per completed lookup |
+| `lmcache_mp.lookup_early_exit` | `lmcache_mp_lookup_early_exit_requests_total` | Counter (attrs: `model_name`, `cache_salt`, `reason` ∈ {`no_gpu_context`, `empty_chunk_hashes`, `no_group_layout_descs`}) | `MP_LOOKUP_PREFETCH_END` | `+1` when `early_exit_reason != ""` |
 
 **What it answers:** What fraction of tokens requested by a lookup were served from cache (L1 or L2)?
 
@@ -224,9 +228,22 @@ sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
 / sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
 ```
 
-> **Note:** Both counters are driven by the *same* event, so they always
+**Per-tier split and early exits:**
+
+```promql
+# Share of hit tokens that L1 could serve on its own:
+rate(lmcache_mp_lookup_hit_l1_tokens_total[5m])
+/ rate(lmcache_mp_lookup_hit_tokens_total[5m])
+
+# Fraction of lookups that early-exited, by reason:
+sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)
+/ sum(rate(lmcache_mp_lookups_requests_total[5m]))
+```
+
+> **Note:** All lookup counters are driven by the *same* event, so they always
 > advance together per completed lookup.  Early-exit lookups (no GPU
-> context matches, empty `chunk_hashes`) contribute `0` to both, and
+> context matches, empty `chunk_hashes`) contribute `0` tokens to all four
+> token counters and `+1` to `lookups` and `lookup_early_exit{reason}`, and
 > abandoned lookups (client never polls `query_prefetch_status`)
 > contribute to neither.  See
 > [L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the full rationale.
@@ -554,6 +571,7 @@ the same backend type — same shape as the existing
 | OTel metric name | Prometheus name | Type | Source of truth | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l1_memory_usage_bytes` | `lmcache_mp_l1_memory_usage_bytes` | ObservableGauge | `L1Manager.get_memory_usage()` | Bytes currently held in L1 at scrape time |
+| `lmcache_mp.l1_staging_bytes` | `lmcache_mp_l1_staging_bytes` | ObservableGauge | `L1Manager.get_staging_memory_usage()` | Bytes held by L1 staging objects (write-reserved, not yet admitted: in-flight stores and L2 prefetch loads) at scrape time; a subset of `l1_memory_usage_bytes` |
 | `lmcache_mp.l2_usage_bytes` | `lmcache_mp_l2_usage_bytes` | ObservableGauge (attr: `l2_name`) | `StorageManager.get_l2_usages()` (calls `L2AdapterInterface.get_usage().total_bytes_used`) | Per-adapter bytes currently held in L2 at scrape time; one observation per configured adapter.  Adapters whose `get_usage()` raises are skipped silently. |
 | `lmcache_mp.num_inflight_l2_stores` | `lmcache_mp_num_inflight_l2_stores` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `StoreController.get_inflight_count_by_adapter()` | Snapshot of in-flight L2 store tasks grouped by adapter |
 | `lmcache_mp.num_inflight_l2_loads` | `lmcache_mp_num_inflight_l2_loads` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `PrefetchController.get_inflight_load_state_by_adapter()` | Per-adapter count from the same snapshot |
@@ -562,6 +580,12 @@ the same backend type — same shape as the existing
 **What `l1_memory_usage_bytes` answers:** How full is the L1 cache? Helps
 size L1 against working set and detect leaks (steadily climbing without
 plateauing).
+
+**What `l1_staging_bytes` answers:** How much of L1 is committed to writes
+that have not landed yet? A high or climbing value means many concurrent
+stores / prefetch loads (input for in-flight prefetch planning); a value
+that never returns to zero means abandoned reservations waiting for their
+write TTL to expire. See `../../distributed/l1_manager.md`.
 
 **What `l2_usage_bytes` answers:** How full is each L2 backend? Lets
 operators query how much each L2 tier currently holds, decide whether

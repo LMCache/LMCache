@@ -20,6 +20,9 @@ from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers import build_controllers
 from lmcache.v1.mp_coordinator.controllers.base import ControllerRuntime
+from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
+    FleetEvictionController,
+)
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.views import build_views
 
@@ -276,6 +279,124 @@ def test_a_package_that_does_not_import_is_reported():
     )
 
     with pytest.raises(ModuleNotFoundError, match="no_such_package_here"):
+        build_controllers(config, build_views(config))
+
+
+# =============================================================================
+# Disabling a built-in controller
+# =============================================================================
+
+
+def _disabling(*names: str) -> MPCoordinatorConfig:
+    """A config that leaves ``names`` unbuilt."""
+    return MPCoordinatorConfig(
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+        extra_config={"disabled_controllers": list(names)},
+    )
+
+
+def test_a_disabled_controller_is_not_built():
+    """The other half of ``controller_packages``: something out of tree can
+    take a built-in controller's job only if the built-in one gets out of
+    the way. The package is always scanned, so this is the only way."""
+    config = _disabling("FleetEvictionController")
+
+    controllers = build_controllers(config, build_views(config))
+
+    assert FleetEvictionController not in [type(c) for c in controllers.all()]
+
+
+def test_disabling_one_controller_leaves_the_others():
+    config = _disabling("FleetEvictionController")
+
+    names = {
+        type(c).__name__ for c in build_controllers(config, build_views(config)).all()
+    }
+
+    assert "PrefetchManager" in names
+
+
+def test_a_disabled_controller_holds_no_durable_state():
+    """The reason this exists: two controllers claiming the same artifact
+    sections write over each other, and the survivor is decided by class
+    name ordering."""
+    config = _disabling("FleetEvictionController")
+
+    sections = [
+        component.name
+        for components in (
+            build_controllers(config, build_views(config)).durable_components().values()
+        )
+        for component in components
+    ]
+
+    assert "pins" not in sections
+
+
+def test_the_endpoints_of_a_disabled_controller_are_not_mounted():
+    """They belong to the controller, so they go with it -- leaving the
+    paths free for whatever took its place, rather than shadowing them."""
+    with TestClient(create_app(_disabling("FleetEvictionController"))) as client:
+        assert client.get("/quota").status_code == 404
+        assert not [
+            path
+            for path in client.app.openapi()["paths"]
+            if "quota" in path or "pins" in path
+        ]
+
+
+def test_those_endpoints_are_mounted_when_it_is_built():
+    """The other half: disabling is what removes them, not their absence."""
+    with TestClient(create_app(_config())) as client:
+        mounted = {
+            path
+            for path in client.app.openapi()["paths"]
+            if "quota" in path or "pins" in path
+        }
+
+        assert mounted == {
+            "/quota",
+            "/quota/config",
+            "/quota/{cache_salt}",
+            "/cache/pins",
+        }
+
+
+def test_deleting_still_works_without_an_eviction_controller():
+    """Deleting is a cache operation that merely consults pins, so a
+    coordinator holding none should still delete rather than 404."""
+    with TestClient(create_app(_disabling("FleetEvictionController"))) as client:
+        response = client.post(
+            "/cache/delete",
+            json={
+                "instance_id": "nobody",
+                "model_name": "m",
+                "world_size": 1,
+                "token_ids": [1, 2, 3, 4],
+            },
+        )
+
+        # 404 for the *instance*, not for the missing controller.
+        assert response.status_code == 404
+        assert "no MP server registered" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("value", ["FleetEvictionController", 42, ["ok", 7]])
+def test_a_malformed_disable_list_is_refused(value):
+    config = MPCoordinatorConfig(extra_config={"disabled_controllers": value})
+
+    with pytest.raises(ValueError, match="disabled_controllers"):
+        build_controllers(config, build_views(config))
+
+
+def test_disabling_something_that_does_not_exist_is_refused():
+    """An operator believing they disabled a controller they did not is
+    worse than a boot failure that says so -- a typo would otherwise leave
+    the built-in one running against whatever replaced it."""
+    config = _disabling("FleetEvctionController")  # codespell:ignore
+
+    with pytest.raises(ValueError, match="not discovered"):
         build_controllers(config, build_views(config))
 
 

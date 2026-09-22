@@ -673,3 +673,30 @@ def test_num_kv_readers_never_under_reserves_any_shard(
         assert declared >= max(readers_per_shard.values()), (
             f"server {server} shard readers {readers_per_shard} exceed {declared}"
         )
+
+
+@dataclass
+class CircularBufferSpec(AttentionSpec):
+    """Scratch ring double: vLLM marks it non-prefix-cacheable."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
+@requires_vllm
+def test_scratch_group_spans_zero_and_skips_alignment():
+    (
+        get_group_tokens_per_block,
+        _,
+        get_vllm_scheduler_block_size,
+        _,
+    ) = _import_connector_geometry_helpers()
+    config = _geometry_config(dcp_size=1)
+    kv_config = _hybrid_kv_cache_config(1600, 1600)
+    kv_config.kv_cache_groups.append(
+        SimpleNamespace(kv_cache_spec=CircularBufferSpec(block_size=8))
+    )
+
+    assert get_group_tokens_per_block(config, kv_config) == [1600, 1600, 0]
+    assert get_vllm_scheduler_block_size(config, kv_config) == 1600

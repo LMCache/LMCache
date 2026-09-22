@@ -7,9 +7,9 @@ Overview
    request_transport
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
-vLLM instances connect to over ZMQ.  One LMCache server per node can serve
-multiple vLLM pods, providing process isolation, shared caching, and
-independent resource scaling.
+vLLM instances reach through a configurable ZMQ or gRPC request transport.
+One LMCache server per node can serve multiple vLLM pods, providing process
+isolation, shared caching, and independent resource scaling.
 
 .. contents::
    :local:
@@ -51,9 +51,10 @@ LMCache ships two server entry points:
    * - Entry Point
      - Description
    * - ``lmcache server``
-     - **Recommended.** ZMQ + FastAPI HTTP frontend — see :doc:`http_api`.
+     - **Recommended.** Configurable request transport (ZMQ by default, or
+       gRPC) + FastAPI HTTP frontend — see :doc:`http_api`.
    * - ``python3 -m lmcache.v1.multiprocess.server``
-     - (Legacy) ZMQ-only server with no HTTP endpoints; same
+     - (Legacy) Request server with no HTTP endpoints; same
        ``--engine-type`` / ``--supported-transfer-mode`` flags as
        ``lmcache server``. Prefer ``lmcache server``.
 
@@ -67,13 +68,19 @@ High-Level Architecture
 
     vLLM Instance(s)
          |
-         | ZMQ (tcp)
+         | RequestClient (URL scheme selects ZMQ or gRPC)
          v
-    MessageQueueServer (mq.py)
-         |
-         | dispatch by RequestType
-         v
-    MPCacheServer (server.py)
+    RequestServer factory (transport/server_factory.py)
+         |                                      |
+         | ZMQ                                  | gRPC
+         v                                      v
+    MessageQueueServer                  GrpcMultiprocessServer
+    (transport/zmq_impl/mq.py)          (transport/grpc_impl/server.py)
+         |                                      |
+         +------------------+-------------------+
+                            | dispatch by RequestType
+                            v
+    EngineModule handlers owned by MPCacheServer (server.py)
          |
          |--- TokenHasher / SessionManager
          |
@@ -102,16 +109,17 @@ it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
 instances assembled by ``_build_modules()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
-**``server.py``** -- The default ZMQ-only server.  Creates an
+**``server.py``** -- The transport-neutral server compositor. Creates an
 ``MPCacheServer``, assembles the engine modules
 (``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
 and/or ``EngineDrivenTransferModule`` depending on
 ``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
 ``engine_driven`` loads just one,
 ``auto`` loads both — plus the blend module when
-``--engine-type blend`` is set). Starts a ``MessageQueueServer``,
-registers handlers for every ``RequestType`` exposed by the loaded
-modules, and blocks in a keep-alive loop.
+``--engine-type blend`` is set). It calls ``create_request_server()`` to build
+the ZMQ or gRPC request server selected by ``--transport``, registers handlers
+for every ``RequestType`` exposed by the loaded modules, and blocks in a
+keep-alive loop.
 
 **``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
 blend pipeline that enables non-prefix KV cache reuse (e.g. across
@@ -130,14 +138,17 @@ inside a FastAPI application.  Endpoints are contributed by modules under
 ``http_apis/`` and auto-registered via ``HTTPAPIRegistry``: ``GET /`` (basic
 liveness), ``GET /healthcheck`` for Kubernetes probes, ``POST /cache/clear``
 for clearing all KV cache data in L1 (CPU) memory, and ``GET /status``
-for inspecting detailed internal state.  The ZMQ server runs as part of the
-same process, and any configured runtime plugins are spawned by
+for inspecting detailed internal state. The selected request server runs as
+part of the same process, and any configured runtime plugins are spawned by
 ``MPRuntimePluginLauncher`` during FastAPI startup.
 
-ZMQ Protocol
-------------
+Request Protocol and Dispatch
+-----------------------------
 
-Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
+ZMQ encodes requests as msgspec multipart messages over DEALER/ROUTER sockets;
+gRPC encodes the same semantic operations with protobuf. Both transports map
+requests to the shared ``RequestType`` and annotated engine-module handlers.
+See :doc:`request_transport` for endpoint selection and wire-format details.
 
 **RequestType enum** (defined in ``protocols/base.py``):
 
@@ -223,7 +234,8 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - Remove session state for a finished request.
    * - ``CLEAR``
      - BLOCKING
-     - Clear all cached data.
+     - Clear cached data. The optional ``force`` flag defaults to ``False``;
+       when set, active locks may be ignored.
    * - ``GET_CHUNK_SIZE``
      - SYNC
      - Return the server's chunk size.
@@ -277,8 +289,10 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
 
 **Handler types:**
 
-- **SYNC** -- Runs directly in the ZMQ main loop (fast, non-blocking).
-- **BLOCKING** -- Dispatched to a thread pool (may involve GPU copies or I/O).
+- **SYNC** -- Serialized by the request transport (the ZMQ main loop or the
+  gRPC sync-handler lock) for fast, non-blocking work.
+- **BLOCKING** -- Dispatched to a normal or client-affinity thread pool (may
+  involve GPU copies or I/O).
 
 Config System
 -------------
@@ -538,12 +552,14 @@ Adding a new request type
    (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
    or ``p2p``) and add the request name to that module's ``REQUEST_NAMES``.
 3. Implement the handler method on the appropriate ``EngineModule``
-   (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendModule``) and
-   add its ``HandlerSpec`` to ``get_zmq_handler_specs()`` in the ZMQ transport
-   adapter.
-4. ``create_request_server()`` selects the transport. Its ZMQ implementation
-   registers every ``HandlerSpec`` returned for the loaded modules — no manual
-   registration step is needed.
+   (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendModule``)
+   and decorate it with ``@request_handler``.
+4. Add the named method to the shared ``RequestClient`` contract and the ZMQ
+   client facade. Add the corresponding protobuf method for gRPC; register a
+   custom codec only when the structural codec cannot represent its types.
+5. ``create_request_server()`` selects the transport. Both implementations
+   discover the annotated handlers from the loaded modules, so business code
+   does not register handlers with either concrete server.
 
 Key Source Files
 ----------------
@@ -555,7 +571,7 @@ Key Source Files
    * - File
      - Purpose
    * - ``lmcache/v1/multiprocess/server.py``
-     - MPCacheServer + ZMQ server entry point
+     - MPCacheServer composition and transport-neutral request-server entry point
    * - ``lmcache/v1/multiprocess/config.py``
      - MPServerConfig, HTTPFrontendConfig
    * - ``lmcache/v1/multiprocess/engine_context.py``
@@ -567,6 +583,12 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/transport/zmq_impl/server.py``
      - ZMQ ``HandlerSpec`` and ``ThreadPoolType`` definitions, per-module
        handler adapters, and message queue server construction
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/protos/``
+     - Protobuf wire contracts for the gRPC request transport
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/``
+     - Build-time protobuf generator and generated Python package
+   * - ``lmcache/v1/multiprocess/transport/grpc_impl/server.py``
+     - gRPC service binding, handler scheduling, and request-server construction
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``

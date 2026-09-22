@@ -181,6 +181,22 @@ PREFETCH_LOOP_POLL_TIMEOUT_MS = 500
 PrefetchRequestId = int
 
 
+def _get_prefetch_write_tag(request_id: PrefetchRequestId) -> str:
+    """Return the L1 write tag of one prefetch request.
+
+    Args:
+        request_id: The prefetch request id.
+
+    Returns:
+        The tag for the request's L1 write reservations.
+
+    Note:
+        Tags are per request, so concurrent requests loading the same key
+        do not contend for its L1 reservation.
+    """
+    return f"prefetch:{request_id}"
+
+
 class PrefetchPhase(enum.Enum):
     LOOKUP = enum.auto()
     PLAN_AND_LOAD = enum.auto()
@@ -1078,7 +1094,7 @@ class PrefetchController(StorageControllerInterface):
                 keys=group_keys,
                 is_temporary=[not retention_map[k] for k in group_keys],
                 layout_desc=gld,
-                mode="new",
+                tag=_get_prefetch_write_tag(request.request_id),
             )
             write_results.update(gr)
 
@@ -1116,8 +1132,8 @@ class PrefetchController(StorageControllerInterface):
                 )
             )
         if contended_keys:
-            # The key was write-locked by a concurrent request after the L1
-            # lock pass; the caller falls back to the L1-only hit.
+            # The key became resident in L1 after the lock pass; the caller
+            # falls back to the L1-only hit.
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L2_PREFETCH_FAILED,
@@ -1339,21 +1355,21 @@ class PrefetchController(StorageControllerInterface):
         # |       -        |     -      |       -        |load→locked |     -      |
         # SW keys in L1:
         # |     unlock     |   unlock   |     unlock     |   locked   |   unlock   |
+        write_tag = _get_prefetch_write_tag(request.request_id)
         if loaded_keys:
             if request.mode is PrefetchMode.WARM:
-                # Warm: make ready, lock nothing.
-                l1_mgr.finish_write(loaded_keys)
+                # Warm: admit (make ready), lock nothing.
+                l1_mgr.finish_write(loaded_keys, tag=write_tag)
             else:
                 # write-locked -> read-locked; num_kv_readers so each TP
                 # worker gets its own read lock.
                 l1_mgr.finish_write_and_reserve_read(
-                    loaded_keys, read_locks=request.num_kv_readers
+                    loaded_keys, read_locks=request.num_kv_readers, tag=write_tag
                 )
 
         # Clean up failed keys
         if failed_keys:
-            l1_mgr.finish_write(failed_keys)
-            l1_mgr.delete(failed_keys)
+            l1_mgr.finish_write_and_delete(failed_keys, tag=write_tag)
 
         self._event_bus.publish(
             Event(
@@ -1478,8 +1494,10 @@ class PrefetchController(StorageControllerInterface):
         for request in self._in_flight_requests.values():
             if request.phase == PrefetchPhase.PLAN_AND_LOAD:
                 if request.write_reserved_keys:
-                    l1_mgr.finish_write(request.write_reserved_keys)
-                    l1_mgr.delete(request.write_reserved_keys)
+                    l1_mgr.finish_write_and_delete(
+                        request.write_reserved_keys,
+                        tag=_get_prefetch_write_tag(request.request_id),
+                    )
             self._release_l2_locks(request, keep={})
             if request.l1_readlocks.popcount() > 0:
                 l1_mgr.finish_read(
