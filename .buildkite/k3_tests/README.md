@@ -31,7 +31,7 @@ Each directory has a `BK_WEB_SETUP.md` with the exact settings — env vars, Git
 
    steps:
      - label: ":pipeline: Upload pipeline"
-       command: buildkite-agent pipeline upload .buildkite/k3_tests/<test-name>/pipeline.yml
+       command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/<test-name>/pipeline.yml
    ```
    The `agents.queue` must match the queue you created above. This routes the upload step to agent-stack-k8s, which checks out the repo, runs the path filter, and (if the build isn't skipped) uploads the real `pipeline.yml`. Each subsequent step also targets the same queue.
 3. `HF_TOKEN` is needed for gated model access (e.g., Llama, Qwen). Set it in the `env` block as shown above, or under **Pipeline Settings → Environment Variables** in the UI — both work
@@ -90,6 +90,19 @@ Not all tests should run on every push. The general pattern:
 | Heavy (multi-GPU, >30 min) | PR label or main branch only | `build.pull_request.labels includes "full" \|\| build.branch == 'dev'` |
 
 Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so adding a label to an existing PR kicks off the build.
+
+Enabling auto-merge adds `full` automatically only when a PR changes a file
+outside `tests/`. A tests-only PR still runs its unit-test checks, but does not
+automatically trigger the pipelines gated on `full`. If later commits add
+changes outside `tests/` while auto-merge remains enabled, the labeler adds
+`full` then. Maintainers can still add `full` manually.
+
+Build creation and test execution are separate: a pipeline configured for every
+PR can still create its initial upload job. The path filter skips integration
+and multiprocess test steps for changes confined to `tests/`, even if `full` is
+present. Keep the wrapper command above in the Buildkite Steps editor; a direct
+`buildkite-agent pipeline upload` bypasses this filter. Use `force-ci` alongside
+any label needed to trigger the pipeline when deliberately running those steps.
 
 ## Adding a New Test
 
