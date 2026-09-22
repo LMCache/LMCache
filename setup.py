@@ -77,7 +77,10 @@ if __name__ == "__main__":
     cmdclass["build_py"] = _BuildPyWithGrpcStubs
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
-    extras_require: dict[str, list[str]] = {}
+    # Platform-neutral extras; the build profile adds its own below.
+    extras_require: dict[str, list[str]] = {
+        "kafka": _read_requirements(ROOT_DIR / "requirements" / "kafka.txt"),
+    }
     if (
         not BuildProfile.is_gpu_ext_disabled()
         and req_file is not None

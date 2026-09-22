@@ -23,7 +23,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.mp_coordinator.cache_events import (
     CacheEventSubscriber,
-    HttpCacheEventSink,
+    create_cache_event_sink,
 )
 from lmcache.v1.mp_coordinator.registrar import keep_registered
 from lmcache.v1.mp_observability.config import (
@@ -150,7 +150,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ):
         get_event_bus().register_subscriber(
             CacheEventSubscriber(
-                sink=HttpCacheEventSink(coordinator_config.url),
+                sink=create_cache_event_sink(coordinator_config),
                 instance_id=mp_config.instance_id,
                 # Server start time: fences out placements this instance
                 # reported before a restart (its pools restarted empty).
