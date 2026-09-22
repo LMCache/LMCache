@@ -116,6 +116,15 @@ class GDSL1MemoryManager:
         """
         return L1BackendType.GDS
 
+    def get_allocation_size(self, layout_desc: MemoryLayoutDesc) -> int:
+        """Return the aligned slab bytes needed by one layout object.
+
+        Args:
+            layout_desc: Shapes and dtypes of the object to allocate.
+        """
+        raw_size = get_size_bytes(layout_desc.shapes, layout_desc.dtypes)
+        return self._address_manager.compute_aligned_size(raw_size)
+
     def get_memory_usage(self) -> tuple[int, int]:
         """Return ``(used_bytes, total_bytes)`` of the slab."""
         free_size = self._address_manager.get_free_size()

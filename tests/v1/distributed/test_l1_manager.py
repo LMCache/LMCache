@@ -76,7 +76,7 @@ except ImportError:
         "Skipping because L1 manager cannot be imported", allow_module_level=True
     )
 
-if not torch_dev.is_available():
+if torch_device_type != "cpu" and not torch_dev.is_available():
     pytest.skip(
         f"Requires available {torch_device_type} runtime",
         allow_module_level=True,

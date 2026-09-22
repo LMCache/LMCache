@@ -25,7 +25,11 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
-from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import (
     PrefetchMode,
@@ -39,6 +43,9 @@ from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
+)
+from lmcache.v1.distributed.storage_controllers.eviction_controller import (
+    L1EvictionController,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
@@ -54,7 +61,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
-if not torch_dev.is_available():
+if torch_device_type != "cpu" and not torch_dev.is_available():
     pytest.skip(
         f"Requires available {torch_device_type} runtime",
         allow_module_level=True,
@@ -2032,3 +2039,146 @@ class TestSlidingWindowClaims:
             assert read_results[key][0] == L1Error.SUCCESS
 
         l1_manager.finish_read(keys[:4])
+
+
+@pytest.mark.parametrize("recovery", ["disabled", "enabled", "locked", "load_failure"])
+def test_prefetch_demand_eviction_below_watermark(recovery: str) -> None:
+    """An 11-chunk L2 hit needs one victim in a 28-chunk L1 with 18 residents."""
+    layout = make_layout()
+    chunk_bytes = 100 * 2 * 512 * 2
+    manager = L1Manager(
+        L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=28 * chunk_bytes, use_lazy=False
+            )
+        )
+    )
+    eviction = L1EvictionController(manager, EvictionConfig("LRU"))
+    inner = make_adapter()
+    adapter = (
+        FaultInjectL2Adapter(inner, rate=0.0, seed=0, gap_indices=(0,))
+        if recovery == "load_failure"
+        else inner
+    )
+    controller = PrefetchController(
+        l1_manager=manager,
+        l2_adapters=[adapter],
+        adapter_descriptors=[make_descriptor(0)],
+        policy=DefaultPrefetchPolicy(),
+        eviction_candidate_selector=(
+            None if recovery == "disabled" else eviction.get_eviction_candidates
+        ),
+    )
+    controller.start()
+    keys = [make_object_key(i) for i in range(11)]
+    residents = [make_object_key(100 + i) for i in range(18)]
+    try:
+        # Seed L2 with known data, then remove all corresponding L1 copies.
+        result = manager.reserve_write(keys, [False] * len(keys), layout)
+        objects = []
+        for index, key in enumerate(keys):
+            error, obj = result[key]
+            assert error == L1Error.SUCCESS and obj is not None
+            tensor = obj.tensor
+            assert tensor is not None
+            tensor.fill_(index + 1)
+            objects.append(obj)
+        inner.submit_store_task(keys, objects)
+        assert wait_for_condition(lambda: all(inner.debug_has_key(k) for k in keys))
+        manager.finish_write_and_delete(keys)
+
+        occupied = manager.reserve_write(residents, [False] * len(residents), layout)
+        assert all(error == L1Error.SUCCESS for error, _ in occupied.values())
+        manager.finish_write(residents)
+        if recovery == "locked":
+            manager.reserve_read(residents)
+        used, total = manager.get_memory_usage()
+        assert used / total < 0.8
+
+        request = controller.submit_prefetch_request(
+            PrefetchRequestSpec(keys, {0: layout})
+        )
+        assert wait_for_prefetch_result(controller, request) == (
+            11 if recovery == "enabled" else 0
+        )
+        if recovery == "enabled":
+            for index, key in enumerate(keys):
+                error, obj = manager.unsafe_read([key])[key]
+                assert error == L1Error.SUCCESS and obj is not None
+                assert obj.tensor is not None
+                assert torch.all(obj.tensor == index + 1)
+            manager.finish_read(keys)
+        if recovery == "locked":
+            manager.finish_read(residents)
+        # Both success and an adapter failure clean up temporary write buffers.
+        assert manager.get_staging_memory_usage() == 0
+        remaining = 17 if recovery in ("enabled", "load_failure") else 18
+        assert manager.get_memory_usage()[0] == remaining * chunk_bytes
+        assert all(inner.debug_has_key(k) for k in keys)
+        assert manager.memcheck()
+    finally:
+        controller.stop()
+        adapter.close()
+        manager.close()
+
+
+@pytest.mark.parametrize("capacity_pages", [5, 6])
+def test_demand_eviction_preserves_earlier_group_reservations(
+    capacity_pages: int,
+) -> None:
+    """Group 1 cannot evict group 0's buffers, even if the whole load cannot fit."""
+    page = 4096
+    layouts = {
+        gid: MemoryLayoutDesc(
+            [torch.Size([1, 1, page * (gid + 1) // 2])], [torch.bfloat16]
+        )
+        for gid in range(2)
+    }
+    manager = L1Manager(
+        L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=capacity_pages * page, use_lazy=False
+            )
+        )
+    )
+    eviction = L1EvictionController(manager, EvictionConfig("LRU"))
+    adapter = make_adapter()
+    controller = PrefetchController(
+        l1_manager=manager,
+        l2_adapters=[adapter],
+        adapter_descriptors=[make_descriptor(0)],
+        policy=DefaultPrefetchPolicy(),
+        eviction_candidate_selector=eviction.get_eviction_candidates,
+    )
+    keys = [
+        ObjectKey(ObjectKey.IntHash2Bytes(chunk), "test_model", 0, object_group_id=gid)
+        for chunk in range(2)
+        for gid in range(2)
+    ]
+    residents = [make_object_key(100 + i) for i in range(capacity_pages - 2)]
+    controller.start()
+    try:
+        for gid in range(2):
+            store_keys_in_l2(adapter, keys[gid::2], layouts[gid])
+        result = manager.reserve_write(residents, [False] * len(residents), layouts[0])
+        assert all(error == L1Error.SUCCESS for error, _ in result.values())
+        manager.finish_write(residents)
+        request = controller.submit_prefetch_request(
+            PrefetchRequestSpec(keys, layouts, attn_desc=AttnWindowDesc([-1, -1]))
+        )
+        retained = wait_for_prefetch_result_bitmap(controller, request)
+        assert retained is not None
+        assert retained.popcount() == (4 if capacity_pages == 6 else 0)
+        if capacity_pages == 6:
+            assert manager.get_memory_usage()[0] == 6 * page
+            manager.finish_read(keys)
+            assert manager.get_memory_usage()[0] == 0
+        else:
+            assert manager.get_memory_usage()[0] == len(residents) * page
+            assert all(manager.get_object_state(k) is not None for k in residents)
+        assert manager.get_staging_memory_usage() == 0
+        assert manager.memcheck()
+    finally:
+        controller.stop()
+        adapter.close()
+        manager.close()

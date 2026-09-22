@@ -117,6 +117,39 @@ class L1EvictionController(EvictionController):
             "eviction_ratio": self._eviction_config.eviction_ratio,
         }
 
+    def get_eviction_candidates(
+        self, requested_keys: list[ObjectKey]
+    ) -> list[ObjectKey]:
+        """Select ordered candidates for a failed L1 write reservation.
+
+        Args:
+            requested_keys: Keys whose reservation needs space. Isolated
+                policies may select victims only from these keys' salts.
+
+        Returns:
+            Policy-ordered discard candidates, without deleting them. The
+            L1 manager rechecks eligibility and evicts only enough bytes to
+            cover the allocation deficit. No-op policies return no candidates.
+
+        This callback can run under the L1 manager lock: the eligibility
+        predicate is lock-free, preserving the L1-to-policy lock order.
+        """
+        salts: list[str | None] = (
+            list(dict.fromkeys(key.cache_salt for key in requested_keys))
+            if self._eviction_policy.support_isolation
+            else [None]
+        )
+        candidates: list[ObjectKey] = []
+        for salt in salts:
+            for action in self._eviction_policy.get_eviction_actions(
+                1.0,
+                key_eligible_filter=self._l1_manager.is_key_evictable,
+                cache_salt=salt,
+            ):
+                if action.destination == EvictionDestination.DISCARD:
+                    candidates.extend(action.keys)
+        return candidates
+
     def _publish_skipped(self, usage: float, watermark: float) -> None:
         """Publish a below-watermark loop tick (no eviction this cycle)."""
         self._event_bus.publish(

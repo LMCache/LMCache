@@ -4,6 +4,7 @@ Managing objects and memory for L1 cache
 """
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass
 import threading
 
@@ -63,6 +64,7 @@ def l1_mgr_synchronized(func):
 
 
 L1OperationResult = tuple[L1Error, MemoryObj | None]
+EvictionCandidateSelector = Callable[[list[ObjectKey]], list[ObjectKey]]
 
 # Upper bound for the count parameter in reserve_read / finish_read
 # to prevent a single call from holding the global lock for too long.
@@ -423,6 +425,7 @@ class L1Manager:
         is_temporary: list[bool],
         layout_desc: MemoryLayoutDesc,
         tag: str = "",
+        eviction_candidate_selector: EvictionCandidateSelector | None = None,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve a staging object for each of the given keys.
 
@@ -434,6 +437,13 @@ class L1Manager:
                 allocated.
             tag: The writer's identity; the same tag must be passed to the
                 ``finish_write`` variant that completes the write.
+            eviction_candidate_selector: Optional demand-eviction policy. On
+                allocation failure, receives the requested keys and returns
+                candidates in eviction order. It runs under the L1 lock and
+                must not call synchronized L1 methods. Only unlocked resident
+                objects without staging writers can be reclaimed. Selection,
+                eviction and one allocation retry share the same critical
+                section. The default preserves the no-eviction behavior.
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -494,6 +504,17 @@ class L1Manager:
         err, allocated_objs = self._memory_manager.allocate(
             layout_desc, len(need_to_allocate)
         )
+
+        if err == L1Error.OUT_OF_MEMORY and eviction_candidate_selector is not None:
+            if allocated_objs:
+                self._memory_manager.free(allocated_objs)
+                allocated_objs = []
+            if self._evict_for_allocation(
+                layout_desc, len(need_to_allocate), keys, eviction_candidate_selector
+            ):
+                err, allocated_objs = self._memory_manager.allocate(
+                    layout_desc, len(need_to_allocate)
+                )
 
         if err != L1Error.SUCCESS:
             for key, _ in need_to_allocate:
@@ -1157,6 +1178,57 @@ class L1Manager:
             return
         for listener in self._registered_listeners:
             listener.on_l1_keys_deleted_by_manager(keys)
+
+    def _evict_for_allocation(
+        self,
+        layout_desc: MemoryLayoutDesc,
+        count: int,
+        requested_keys: list[ObjectKey],
+        selector: EvictionCandidateSelector,
+    ) -> bool:
+        """Reclaim enough resident bytes for one retry, with the L1 lock held.
+
+        Preflight the entire deficit before deleting anything. Requests larger
+        than the pool, insufficient evictable bytes, and allocation failures
+        with no byte deficit (e.g. fragmentation) leave residents untouched.
+        Free-byte accounting cannot guarantee contiguous space; a failed retry
+        returns OOM without another eviction pass.
+        """
+        required = self._memory_manager.get_allocation_size(layout_desc) * count
+        used, total = self._memory_manager.get_memory_usage()
+        deficit = required - (total - used)
+        if required > total or deficit <= 0:
+            return False
+
+        protected = set(requested_keys)
+        victims: dict[ObjectKey, MemoryObj] = {}
+        reclaimed = 0
+        for key in selector(requested_keys):
+            if key in protected or key in victims or key in self._staging:
+                continue
+            entry = self._objects.get(key)
+            if entry is None or entry.read_lock.is_locked():
+                continue
+            victims[key] = entry.memory_obj
+            reclaimed += entry.memory_obj.get_physical_size()
+            if reclaimed >= deficit:
+                break
+
+        if reclaimed < deficit:
+            return False
+
+        for key in victims:
+            del self._objects[key]
+        self._free_and_report_deleted(list(victims), list(victims.values()))
+        logger.debug(
+            "L1 demand eviction reclaimed %d bytes from %d objects "
+            "for a %d-byte allocation (deficit %d bytes)",
+            reclaimed,
+            len(victims),
+            required,
+            deficit,
+        )
+        return True
 
     def _free_and_report_deleted(
         self,
