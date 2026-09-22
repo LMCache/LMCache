@@ -7,10 +7,7 @@ build the client without an engine and feed it replies directly.
 """
 
 # First Party
-from lmcache.v1.lookup_client.lmcache_lookup_client import (
-    HS_LAYER_IDXS_CONFIG,
-    LMCacheLookupClient,
-)
+from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupClient
 from lmcache.v1.lookup_client.lmcache_lookup_client_bypass import (
     LMCacheBypassLookupClient,
 )
@@ -33,7 +30,7 @@ class _FakeTokenDatabase:
         yield (256, 512, 2222)
 
 
-_ASKED = {HS_LAYER_IDXS_CONFIG: [0]}
+_ASKED = {"lmcache.hidden_state_layer_idxs": [0]}
 
 
 def _client(responses):
@@ -77,11 +74,13 @@ def test_the_layer_request_rides_in_request_configs():
     """No frame-format change, so an older server just ignores the key."""
     client = _client([(512).to_bytes(4, "big")])
 
-    client.lookup([1, 2, 3], "req", request_configs={HS_LAYER_IDXS_CONFIG: [0, -1]})
+    client.lookup(
+        [1, 2, 3], "req", request_configs={"lmcache.hidden_state_layer_idxs": [0, -1]}
+    )
 
     sent = client.transport.sent[0]
     assert len(sent) == 4
-    assert HS_LAYER_IDXS_CONFIG in sent[-1]
+    assert "lmcache.hidden_state_layer_idxs" in sent[-1]
 
 
 def test_clearing_status_drops_the_coverage_too():
@@ -125,7 +124,8 @@ def test_bypass_client_reports_coverage():
     engine = _FakeEngine(kv=512, coverage=256)
     client = _bypass_client(engine)
 
-    assert client.lookup([1, 2, 3], "req", {HS_LAYER_IDXS_CONFIG: [0, 24]}) == 512
+    asked = {"lmcache.hidden_state_layer_idxs": [0, 24]}
+    assert client.lookup([1, 2, 3], "req", asked) == 512
     assert client.lookup_hidden_state_coverage("req") == 256
     assert engine.hs_calls[0]["layer_idxs"] == [0, 24]
 

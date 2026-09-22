@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Optional, Union
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.v1.lookup_client.lmcache_lookup_client import HS_LAYER_IDXS_CONFIG
 
 if TYPE_CHECKING:
     # Third Party
@@ -94,7 +93,7 @@ class LMCacheBypassLookupClient(LookupClientInterface):
                     request_configs=request_configs,
                 )
 
-            layer_idxs = (request_configs or {}).get(HS_LAYER_IDXS_CONFIG)
+            layer_idxs = (request_configs or {}).get("lmcache.hidden_state_layer_idxs")
             if layer_idxs:
                 self.hs_status[lookup_id] = self.lmcache_engine.lookup_hidden_states(
                     tokens=tokens,

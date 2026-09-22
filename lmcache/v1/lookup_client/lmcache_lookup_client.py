@@ -23,11 +23,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# request_configs key carrying the layer indices whose hidden-state coverage
-# the caller wants reported alongside the KV hit length.
-HS_LAYER_IDXS_CONFIG = "lmcache.hidden_state_layer_idxs"
-
-
 class LMCacheLookupClient(LookupClientInterface):
     """
     Lookup client that communicates with a lookup server
@@ -152,7 +147,7 @@ class LMCacheLookupClient(LookupClientInterface):
             return 0
 
         results = [int.from_bytes(resp[:4], "big") for resp in responses]
-        if request_configs and HS_LAYER_IDXS_CONFIG in request_configs:
+        if request_configs and "lmcache.hidden_state_layer_idxs" in request_configs:
             # A rank on an older build answers 4 bytes; treat the whole reply as
             # unknown rather than reading the missing field as zero.
             hs = [int.from_bytes(r[4:8], "big") for r in responses if len(r) >= 8]
@@ -282,7 +277,9 @@ class LMCacheLookupServer:
                     # hidden-state coverage still gets the 4-byte reply it
                     # expects, and one that asks an older server gets 4 bytes
                     # back and treats the coverage as unknown.
-                    layer_idxs = (request_configs or {}).get(HS_LAYER_IDXS_CONFIG)
+                    layer_idxs = (request_configs or {}).get(
+                        "lmcache.hidden_state_layer_idxs"
+                    )
                     if layer_idxs:
                         hs_result = self.lmcache_engine.lookup_hidden_states(
                             tokens=tokens,
