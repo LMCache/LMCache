@@ -66,7 +66,7 @@ High-Level Architecture
 
 .. code-block:: text
 
-    vLLM Instance(s)
+    Engine Worker(s)
          |
          | RequestClient (URL scheme selects ZMQ or gRPC)
          v
@@ -76,9 +76,9 @@ High-Level Architecture
          v                                      v
     MessageQueueServer                  GrpcMultiprocessServer
     (transport/zmq_impl/mq.py)          (transport/grpc_impl/server.py)
-         |                                      |
-         +------------------+-------------------+
-                            | dispatch by RequestType
+          |                                      |
+          +------------------+-------------------+
+                            | dispatch by operation name
                             v
     EngineModule handlers owned by MPCacheServer (server.py)
          |
@@ -117,9 +117,9 @@ and/or ``EngineDrivenTransferModule`` depending on
 ``engine_driven`` loads just one,
 ``auto`` loads both — plus the blend module when
 ``--engine-type blend`` is set). It calls ``create_request_server()`` to build
-the ZMQ or gRPC request server selected by ``--transport``, registers handlers
-for every ``RequestType`` exposed by the loaded modules, and blocks in a
-keep-alive loop.
+the ZMQ or gRPC request server selected by ``--transport``, discovers the
+annotated operations exposed by the loaded modules, and blocks in a keep-alive
+loop.
 
 **``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
 blend pipeline that enables non-prefix KV cache reuse (e.g. across
@@ -142,15 +142,17 @@ for inspecting detailed internal state. The selected request server runs as
 part of the same process, and any configured runtime plugins are spawned by
 ``MPRuntimePluginLauncher`` during FastAPI startup.
 
-Request Protocol and Dispatch
------------------------------
+Request Operations
+------------------
+
+Workers call the same typed operations through either ZMQ (DEALER/ROUTER) or
+gRPC. The handler scheduling contract is transport-neutral.
 
 ZMQ encodes requests as msgspec multipart messages over DEALER/ROUTER sockets;
-gRPC encodes the same semantic operations with protobuf. Both transports map
-requests to the shared ``RequestType`` and annotated engine-module handlers.
-See :doc:`request_transport` for endpoint selection and wire-format details.
+gRPC encodes the same operations with protobuf. Both dispatch by operation
+name; see :doc:`request_transport` for endpoint selection and wire details.
 
-**RequestType enum** (defined in ``protocols/base.py``):
+**RPC operations** (declared by typed methods on ``RequestClient``):
 
 .. list-table::
    :header-rows: 1
@@ -544,22 +546,15 @@ Adding an observability subscriber
    concern (metrics / logging / tracing), gated on the corresponding
    CLI flag if needed.
 
-Adding a new request type
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Adding a new RPC
+~~~~~~~~~~~~~~~~
 
-1. Add a new member to ``RequestType`` in ``protocols/base.py``.
-2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
-   (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
-   or ``p2p``) and add the request name to that module's ``REQUEST_NAMES``.
-3. Implement the handler method on the appropriate ``EngineModule``
-   (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendModule``)
-   and decorate it with ``@request_handler``.
-4. Add the named method to the shared ``RequestClient`` contract and the ZMQ
-   client facade. Add the corresponding protobuf method for gRPC; register a
-   custom codec only when the structural codec cannot represent its types.
-5. ``create_request_server()`` selects the transport. Both implementations
-   discover the annotated handlers from the loaded modules, so business code
-   does not register handlers with either concrete server.
+1. Add a typed ``@rpc_method`` to ``RequestClient``.
+2. Add the gRPC protobuf request, response, and service method.
+3. Add a same-named ``@request_handler`` on the appropriate ``EngineModule``.
+
+Existing ZMQ operations retain their frozen numeric wire IDs. New operations
+use their string name and do not extend the legacy compatibility table.
 
 Key Source Files
 ----------------
@@ -578,6 +573,10 @@ Key Source Files
      - MPCacheServerContext (shared state passed to every EngineModule)
    * - ``lmcache/v1/multiprocess/engine_module.py``
      - Transport-neutral ``EngineModule`` protocol
+   * - ``lmcache/v1/multiprocess/rpc.py``
+     - RPC discovery and typed operation specifications
+   * - ``lmcache/v1/multiprocess/transport/base.py``
+     - Typed ``RequestClient`` and ``RequestServer`` contracts
    * - ``lmcache/v1/multiprocess/transport/server_factory.py``
      - Transport-neutral request-server construction boundary
    * - ``lmcache/v1/multiprocess/transport/zmq_impl/server.py``
@@ -606,8 +605,6 @@ Key Source Files
    * - ``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``
      - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
        full server config serialized into environment variables
-   * - ``lmcache/v1/multiprocess/protocols/base.py``
-     - RequestType, HandlerType, ProtocolDefinition
    * - ``lmcache/v1/distributed/storage_manager.py``
      - StorageManager (top-level manager)
    * - ``lmcache/v1/distributed/config.py``
