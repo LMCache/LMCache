@@ -1,17 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Tests for the QUERY_PREFETCH_LOOKUP_HITS protocol: enum registration,
-protocol definition, message-queue round-trip, and server handler.
+protocol definition, request-transport round-trip, and server handler.
 """
 
 # Standard
 from unittest.mock import MagicMock
 import time
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
-    ObjectKey,
+    GroupedObjectKeys,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
@@ -24,10 +27,15 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
-from tests.v1.multiprocess.test_mq import (
-    MessageQueueTestHelper,
+from tests.v1.multiprocess.transport_test_utils import (
+    REQUEST_TRANSPORTS,
+    RequestTransport,
+    request_server_url,
+    start_lookup_request_server,
 )
 
 # ============================================================================
@@ -61,50 +69,43 @@ def test_query_prefetch_lookup_hits_handler_type():
 
 
 # ============================================================================
-# Message-queue round-trip test
+# Request-transport round-trip tests
 # ============================================================================
 
 
-def _query_lookup_hits_handler(request_id: str) -> int | None:
-    """Dummy handler for QUERY_PREFETCH_LOOKUP_HITS requests."""
-    assert isinstance(request_id, str)
-    return 42
+class _QueryLookupHitsHandler:
+    """Return a configured lookup-hit result and record the request ID."""
+
+    def __init__(self, result: int | None) -> None:
+        self.result = result
+        self.request_id: str | None = None
+
+    @request_handler(RequestType.QUERY_PREFETCH_LOOKUP_HITS, HandlerType.BLOCKING)
+    def query_prefetch_lookup_hits(self, request_id: str) -> int | None:
+        """Record the request ID and return the configured result."""
+        self.request_id = request_id
+        return self.result
 
 
-def test_mq_query_prefetch_lookup_hits():
-    """Test MessageQueue with QUERY_PREFETCH_LOOKUP_HITS request type."""
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5575")
-    helper.register_handler(
-        RequestType.QUERY_PREFETCH_LOOKUP_HITS, _query_lookup_hits_handler
-    )
-
-    helper.run_test(
-        request_type=RequestType.QUERY_PREFETCH_LOOKUP_HITS,
-        payloads=["req-1"],
-        expected_response=42,
-        num_requests=1,
-    )
-
-
-def _query_lookup_hits_none_handler(request_id: str) -> int | None:
-    """Dummy handler that returns None (lookup still in progress)."""
-    assert isinstance(request_id, str)
-    return None
-
-
-def test_mq_query_prefetch_lookup_hits_none_response():
-    """Test MessageQueue returns None when lookup is still in progress."""
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5576")
-    helper.register_handler(
-        RequestType.QUERY_PREFETCH_LOOKUP_HITS, _query_lookup_hits_none_handler
-    )
-
-    helper.run_test(
-        request_type=RequestType.QUERY_PREFETCH_LOOKUP_HITS,
-        payloads=["req-1"],
-        expected_response=None,
-        num_requests=1,
-    )
+@pytest.mark.parametrize("request_transport", REQUEST_TRANSPORTS)
+@pytest.mark.parametrize("expected", [42, None])
+def test_query_prefetch_lookup_hits_request_transport(
+    request_transport: RequestTransport,
+    expected: int | None,
+) -> None:
+    """Lookup-hit results round-trip over every request transport."""
+    handler = _QueryLookupHitsHandler(expected)
+    port = 15575 if request_transport == "zmq" else 15576
+    server_url = request_server_url(request_transport, port)
+    server = start_lookup_request_server(request_transport, server_url, handler)
+    client = RequestClientFactory.create(server_url)
+    try:
+        result = client.query_prefetch_lookup_hits("req-1").result(timeout=5)
+        assert result == expected
+        assert handler.request_id == "req-1"
+    finally:
+        client.close()
+        server.close()
 
 
 # ============================================================================
@@ -135,7 +136,7 @@ def _make_module_with_job(
     request_id = "req-1"
     job = _PrefetchJob(
         handle=handle,
-        world_size=world_size,
+        row_windows=(-1,) * world_size,
         request_id=request_id,
         requested_tokens=0,
         num_object_groups=num_object_groups,
@@ -231,7 +232,7 @@ def test_server_handler_registered():
 
 
 # ============================================================================
-# Chunk-major key layout
+# Grouped key layout
 # ============================================================================
 
 
@@ -249,14 +250,14 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
     )
 
 
-def _captured_lookup_object_keys(
+def _captured_lookup_key_groups(
     world_size: int, num_groups: int, chunk_hashes: list[bytes]
-) -> list[ObjectKey]:
-    """Drive the public ``lookup()`` and return the object keys it submits.
+) -> list[GroupedObjectKeys]:
+    """Drive the public ``lookup()`` and return the key rows it submits.
 
-    The engine context is mocked so ``lookup()`` runs end-to-end; the
-    chunk-major key list it builds is recovered from the ``submit_prefetch_task``
-    call rather than by reaching into a private helper.
+    The engine context is mocked so ``lookup()`` runs end-to-end; the rows
+    are recovered from the ``submit_prefetch_task`` call rather than by
+    reaching into a private helper.
     """
     ctx = MagicMock()
     ctx.chunk_size = 16
@@ -276,37 +277,68 @@ def _captured_lookup_object_keys(
     module.lookup(_lookup_key(world_size=world_size), tp_size=1)
 
     ctx.storage_manager.submit_prefetch_task.assert_called_once()
-    return ctx.storage_manager.submit_prefetch_task.call_args.args[0].keys
+    spec = ctx.storage_manager.submit_prefetch_task.call_args.args[0]
+    assert spec.fetching_policy == "prefix"
+    return spec.key_groups
 
 
-def test_lookup_lays_keys_out_chunk_then_group_then_rank():
-    """lookup() submits keys laid out chunk -> object group -> kv_rank, so each
-    chunk's keys are contiguous (the property that makes a leading-ones prefix
-    equal to the full-attention model-wide hit)."""
-    keys = _captured_lookup_object_keys(
+def test_lookup_submits_one_row_per_group_and_rank_group_major():
+    """lookup() submits one chunk-ordered key row per (object group, kv_rank),
+    group-major / rank-minor, each row carrying its own group id."""
+    rows = _captured_lookup_key_groups(
         world_size=2, num_groups=2, chunk_hashes=[b"c0", b"c1"]
     )
 
-    # 2 chunks * 2 groups * 2 ranks.
-    assert len(keys) == 8
-    # Each chunk's 4 keys are contiguous.
-    assert [k.chunk_hash for k in keys[:4]] == [b"c0"] * 4
-    assert [k.chunk_hash for k in keys[4:]] == [b"c1"] * 4
-    # Within a chunk, group 0 (both ranks) precedes group 1 (both ranks).
-    assert [k.object_group_id for k in keys[:4]] == [0, 0, 1, 1]
-    assert [k.object_group_id for k in keys[4:]] == [0, 0, 1, 1]
-    # The two ranks within one (chunk, group) cell are distinct.
-    assert keys[0].kv_rank != keys[1].kv_rank
+    # 2 groups * 2 ranks rows, each of 2 chunks.
+    assert len(rows) == 4
+    assert [row.object_group_id for row in rows] == [0, 0, 1, 1]
+    for row in rows:
+        assert [k.chunk_hash for k in row.keys] == [b"c0", b"c1"]
+        assert {k.object_group_id for k in row.keys} == {row.object_group_id}
+        assert len({k.kv_rank for k in row.keys}) == 1
+    # The two rank rows of one group address distinct kv_ranks.
+    assert rows[0].keys[0].kv_rank != rows[1].keys[0].kv_rank
+    # Every group's rows use the same rank order.
+    assert [r.keys[0].kv_rank for r in rows[:2]] == [
+        r.keys[0].kv_rank for r in rows[2:]
+    ]
 
 
-def test_lookup_single_group_matches_single_group_layout():
-    """With one object group the submitted layout is byte-identical to the
-    single-group layout (the object-group-separation-disabled / non-hybrid
-    case)."""
+def test_lookup_single_group_matches_single_group_expansion():
+    """With one object group the submitted keys are exactly the single-group
+    expansion, one row per kv_rank (the object-group-separation-disabled /
+    non-hybrid case)."""
     chunk_hashes = [b"c0", b"c1"]
-    keys = _captured_lookup_object_keys(
+    rows = _captured_lookup_key_groups(
         world_size=2, num_groups=1, chunk_hashes=chunk_hashes
     )
 
     expected = ipc_key_to_object_keys(_lookup_key(world_size=2), chunk_hashes, [0])[0]
-    assert keys == expected
+    assert len(rows) == 2
+    submitted = [k for row in rows for k in row.keys]
+    assert sorted(submitted, key=repr) == sorted(expected, key=repr)
+
+
+def test_lookup_hashing_stops_at_key_end() -> None:
+    """LOOKUP must not hash chunks beyond the IPC key's requested range."""
+    ctx = MagicMock()
+    ctx.chunk_size = 16
+    ctx.event_bus.has_subscribers.return_value = False
+    ctx.layout_desc_registry.find.return_value = MagicMock()
+    ctx.token_hasher.compute_chunk_hashes.return_value = []
+    key = IPCCacheServerKey(
+        model_name="m",
+        world_size=1,
+        num_kv_readers=1,
+        worker_id=None,
+        token_ids=tuple(range(32)),
+        start=0,
+        end=16,
+        request_id="r",
+    )
+
+    LookupModule(ctx).lookup(key, tp_size=1)
+
+    ctx.token_hasher.compute_chunk_hashes.assert_called_once_with(
+        list(range(32)), end=16
+    )
