@@ -42,7 +42,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
     L2ReconfigureError,
 )
-from lmcache.v1.distributed.storage_controllers.utils import AdapterDescriptor
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
@@ -451,7 +451,7 @@ class _SerdeLikeWrapper:
 class _FakeAdapterDescriptor:
     def __init__(self, type_name: str, shared: bool = False) -> None:
         self.type_name = type_name
-        # The real AdapterDescriptor always carries its config; capacity
+        # The real L2AdapterDescriptor always carries its config; capacity
         # reporting reads ``shared`` off it.
         self.config = SimpleNamespace(shared=shared)
 
@@ -483,7 +483,7 @@ def _wire_capacity_publishing(sm: StorageManager) -> None:
     )
     if not hasattr(sm, "_adapter_descriptors"):
         sm._adapter_descriptors = {
-            adapter_id: cast(AdapterDescriptor, _FakeAdapterDescriptor("fake"))
+            adapter_id: cast(L2AdapterDescriptor, _FakeAdapterDescriptor("fake"))
             for adapter_id in sm._l2_adapters
         }
 

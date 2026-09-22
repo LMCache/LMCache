@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.storage_controllers.utils import AdapterDescriptor
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 
 
 class StorePolicy(ABC):
@@ -29,7 +29,7 @@ class StorePolicy(ABC):
     def select_store_targets(
         self,
         keys: list[ObjectKey],
-        adapters: list[AdapterDescriptor],
+        adapters: list[L2AdapterDescriptor],
     ) -> dict[int, list[ObjectKey]]:
         """
         Decide which keys to store to which L2 adapters.
@@ -119,7 +119,7 @@ class DefaultStorePolicy(StorePolicy):
     def select_store_targets(
         self,
         keys: list[ObjectKey],
-        adapters: list[AdapterDescriptor],
+        adapters: list[L2AdapterDescriptor],
     ) -> dict[int, list[ObjectKey]]:
         """
         Store all keys to all adapters.

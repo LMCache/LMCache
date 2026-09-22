@@ -38,7 +38,7 @@ from lmcache.v1.distributed.storage_controllers.store_controller import (
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     DefaultStorePolicy,
 )
-from lmcache.v1.distributed.storage_controllers.utils import AdapterDescriptor
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 
 # Importing this sets the process-wide MeterProvider with an
@@ -76,9 +76,9 @@ def make_adapter(bandwidth_gb: float = 10.0) -> MockL2Adapter:
     return MockL2Adapter(config)
 
 
-def make_descriptor(index: int) -> AdapterDescriptor:
+def make_descriptor(index: int) -> L2AdapterDescriptor:
     config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
-    return AdapterDescriptor(index=index, config=config)
+    return L2AdapterDescriptor(index=index, config=config)
 
 
 def wait_for_condition(predicate, timeout: float = 5.0) -> bool:

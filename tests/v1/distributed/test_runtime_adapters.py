@@ -35,7 +35,7 @@ from lmcache.v1.distributed.storage_controllers.store_controller import StoreCon
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     DefaultStorePolicy,
 )
-from lmcache.v1.distributed.storage_controllers.utils import AdapterDescriptor
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.distributed.storage_manager import StorageManager
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
@@ -82,8 +82,8 @@ def make_adapter() -> MockL2Adapter:
     return MockL2Adapter(make_mock_config())
 
 
-def make_descriptor(index: int) -> AdapterDescriptor:
-    return AdapterDescriptor(index=index, config=make_mock_config())
+def make_descriptor(index: int) -> L2AdapterDescriptor:
+    return L2AdapterDescriptor(index=index, config=make_mock_config())
 
 
 def adapter_by_id(sm: StorageManager, adapter_id: int) -> MockL2Adapter:

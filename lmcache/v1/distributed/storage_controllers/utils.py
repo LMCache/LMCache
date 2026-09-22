@@ -37,7 +37,7 @@ def _copy_rows(bitmaps: list[Bitmap]) -> list[Bitmap]:
 
 
 @dataclass(frozen=True)
-class AdapterDescriptor:
+class L2AdapterDescriptor:
     """
     Lightweight descriptor for an L2 adapter, giving the store policy
     enough information to distinguish adapters without exposing runtime

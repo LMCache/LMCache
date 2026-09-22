@@ -578,7 +578,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     StorePolicy,
     register_store_policy,
 )
-from lmcache.v1.distributed.storage_controllers.utils import AdapterDescriptor
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.distributed.api import ObjectKey
 
 
