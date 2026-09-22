@@ -23,16 +23,40 @@ x-vllm-bench-retry: &vllm-bench-retry
     - exit_status: "*"
       limit: 3
 
+# Engines that run the shared workloads. Adapter capability declarations and
+# workload blacklists skip unsupported matrix combinations before dependency
+# installation, so adding a shared-workload engine requires only one entry.
+x-common-inference-engines: &common-inference-engines
+  - "vllm"
+
 # Most scenarios exercise transport-independent behavior, so keep their PR
 # coverage on the default ZMQ transport.
-x-request-transport-matrix: &request-transport-matrix
+x-common-matrix: &common-matrix
   setup:
+    inference_engine: *common-inference-engines
     request_transport:
       - "zmq"
 
 # Retain gRPC only for the representative GPU E2E and restart-recovery smokes.
-x-request-transport-smoke-matrix: &request-transport-smoke-matrix
+x-common-smoke-matrix: &common-smoke-matrix
   setup:
+    inference_engine: *common-inference-engines
+    request_transport:
+      - "zmq"
+      - "grpc"
+
+# vLLM-only workloads stay isolated from the common engine list.
+x-vllm-matrix: &vllm-matrix
+  setup:
+    inference_engine:
+      - "vllm"
+    request_transport:
+      - "zmq"
+
+x-vllm-smoke-matrix: &vllm-smoke-matrix
+  setup:
+    inference_engine:
+      - "vllm"
     request_transport:
       - "zmq"
       - "grpc"
@@ -62,7 +86,7 @@ steps:
   # On the SM120 agent fleet (RTX PRO 6000 Blackwell) this step first builds a
   # DeepGEMM carrying SM120 kernels, because the vLLM wheel's bundled one has
   # none -- an upstream regression (vllm#50000 repointed the DeepGEMM pin onto
-  # a base that never had SM120). run-dsv4-flash-tp.sh documents the full
+  # a base that never had SM120). workloads/vllm/dsv4-flash-tp.sh documents the full
   # chain and no-ops the build on SM90/SM100. The build measures ~1-2 min in
   # CI, well inside the timeout below.
   - group: ":compression: Multiprocess (4-GPU)"
@@ -78,10 +102,12 @@ steps:
       # fp8 TP-shard load (plus the weight download on a cold hf-cache node)
       # needs the long timeout. The SM120 DeepGEMM build adds ~1-2 min,
       # measured in CI, so it does not move this budget.
-      - label: ":compression: dsv4_flash_tp / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / dsv4_flash_tp / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh dsv4_flash_tp
-        matrix: *request-transport-matrix
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 90
         retry: *flaky-retry
         agents: { queue: "k8s" }
@@ -106,10 +132,12 @@ steps:
   - group: ":compression: Multiprocess (2-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
-      - label: ":compression: vllm_bench / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / vllm_bench / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
-        matrix: *request-transport-smoke-matrix
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        matrix: *vllm-smoke-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         retry: *vllm-bench-retry
         agents: { queue: "k8s" }
@@ -129,37 +157,47 @@ steps:
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
         artifact_paths: ["*.log"]
 
-      - label: ":compression: long_doc_qa / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / long_doc_qa / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
-        matrix: *request-transport-matrix
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        matrix: *common-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: long_doc_qa_l2 / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / long_doc_qa_l2 / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa_l2
-        matrix: *request-transport-matrix
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        matrix: *common-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: deadlock / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / deadlock / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh deadlock
-        matrix: *request-transport-matrix
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        matrix: *common-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: mp_autostart_tp2"
+      - label: ":compression: {{matrix.inference_engine}} / mp_autostart_tp2 / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh mp_autostart_tp2
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
@@ -168,10 +206,12 @@ steps:
       # Two LMCache MP instances + two vLLM instances + one coordinator on a
       # single 2-GPU pod (localhost). Verifies engine B serves a long prompt's
       # KV from engine A over P2P.
-      - label: ":compression: p2p / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / p2p / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh p2p
-        matrix: *request-transport-matrix
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
@@ -185,10 +225,12 @@ steps:
       # utils.py::mla_only) hands non-zero ranks rank 0's mamba shard and
       # diverges the output. Two 48B loads (cold + post-restart) need the long
       # timeout.
-      - label: ":compression: kimi_linear_tp / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / kimi_linear_tp / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh kimi_linear_tp
-        matrix: *request-transport-matrix
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 60
         retry: *flaky-retry
         agents: { queue: "k8s" }
@@ -200,7 +242,7 @@ steps:
     steps:
       # Correctness coverage for both transfer modes. engine_driven requires
       # SHM transport, so both matrix jobs use the existing dshm pod spec.
-      - label: ":compression: lm_eval_{{matrix.mode}} / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / lm_eval_{{matrix.mode}} / {{matrix.request_transport}}"
         command: |
           case "{{matrix.mode}}" in
             lmcache_driven) ;;
@@ -213,12 +255,15 @@ steps:
           .buildkite/k3_tests/multiprocess/run.sh lm_eval
         matrix:
           setup:
+            inference_engine: *common-inference-engines
             mode:
               - "lmcache_driven"
               - "engine_driven"
             request_transport:
               - "zmq"
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         retry: *flaky-retry
         agents: { queue: "k8s" }
@@ -243,7 +288,7 @@ steps:
       # lm_eval load. Both steps reuse the same run.sh lm_eval_preemption
       # command; env vars select the transfer mode. Checks: no crash, score
       # drift < 0.01, preemption actually occurred, score >= SCORE_MIN.
-      - label: ":compression: lm_eval_preemption / {{matrix.mode}} / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / lm_eval_preemption / {{matrix.mode}} / {{matrix.request_transport}}"
         command: |
           case "{{matrix.mode}}" in
             lmcache_driven) ;;
@@ -255,6 +300,7 @@ steps:
           .buildkite/k3_tests/multiprocess/run.sh lm_eval_preemption
         matrix:
           setup:
+            inference_engine: *common-inference-engines
             mode:
               - "lmcache_driven"
               - "engine_driven"
@@ -262,6 +308,7 @@ steps:
               - "zmq"
         timeout_in_minutes: 30
         env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
           GPU_MEMORY_UTILIZATION: "0.4"
           NUM_CONCURRENT: "256"
@@ -273,28 +320,34 @@ steps:
 
       # Temporarily disabled: hma_lm_eval_gemma4.
 
-      - label: ":compression: fault_tolerance / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / fault_tolerance / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
-        matrix: *request-transport-matrix
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: restart_recovery / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / restart_recovery / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
-        matrix: *request-transport-smoke-matrix
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        matrix: *common-smoke-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: cache_stats / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / cache_stats / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh cache_stats
-        matrix: *request-transport-matrix
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
@@ -303,28 +356,34 @@ steps:
       # Real GPU MP integration: vLLM is launched with FIFO lazy offload
       # (threshold=2, select_count=1). Three requests verify that the first
       # two remain pending and the third drains the first request.
-      - label: ":compression: lazy_offload / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / lazy_offload / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh lazy_offload
-        matrix: *request-transport-matrix
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: http_api / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / http_api / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh http_api
-        matrix: *request-transport-matrix
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        matrix: *common-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: gds_smoke_test / {{matrix.request_transport}}"
-        command: .buildkite/k3_tests/multiprocess/run.sh gds_smoke_test
-        matrix: *request-transport-matrix
-        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+      - label: ":compression: {{matrix.inference_engine}} / gds_smoke / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh gds_smoke
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:
@@ -401,14 +460,16 @@ steps:
   # across both request transports. The pin is published only after both
   # matrix jobs pass, preventing one successful transport from pinning a
   # nightly that failed the other transport.
-  - label: ":test_tube: Verify vLLM nightly / {{matrix.request_transport}}"
+  - label: ":test_tube: Verify {{matrix.inference_engine}} nightly / {{matrix.request_transport}}"
     if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
     command: |
       .buildkite/k3_tests/multiprocess/run.sh vllm_bench
       python3 -c 'import vllm; print(vllm.__version__)' \
         > "verified_vllm_{{matrix.request_transport}}.txt"
-    matrix: *request-transport-smoke-matrix
-    env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+    matrix: *vllm-smoke-matrix
+    env:
+      INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+      LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
     timeout_in_minutes: 30
     retry: *vllm-bench-retry
     agents: { queue: "k8s" }

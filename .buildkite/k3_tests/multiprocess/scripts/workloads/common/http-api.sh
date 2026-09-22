@@ -3,27 +3,21 @@
 #
 # Part 1 — HTTP API endpoints:
 #   Systematically exercises every HTTP endpoint on the LMCache
-#   multiprocess HTTP server (port 8080) with a live engine + vLLM.
+#   multiprocess HTTP server (port 8080) with a live inference engine.
 #
 # Part 2 — CLI commands:
 #   Tests `lmcache describe` and `lmcache kvcache clear`
 #   against the running server.
 #
-# Requires: LMCache MP server + vLLM launched by launch-processes.sh.
+# Requires: LMCache MP server + inference engine launched by launch-processes.sh.
 set -e
 set -o pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
-
-source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
+COMMON_WORKLOAD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${COMMON_WORKLOAD_DIR}/../helpers.sh"
 
 # Configuration (inherited from run-single-test.sh)
-VLLM_PORT="${VLLM_PORT:-8000}"
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
-MODEL="${MODEL:-Qwen/Qwen3-14B}"
-BUILD_ID="${BUILD_ID:-local_$$}"
-RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 
 HTTP_DIR="$RESULTS_DIR/http_api"
 mkdir -p "$HTTP_DIR"
@@ -32,7 +26,7 @@ BASE_URL="http://localhost:${LMCACHE_HTTP_PORT}"
 
 echo "=== HTTP API & CLI Test ==="
 echo "Model: $MODEL"
-echo "vLLM port: $VLLM_PORT"
+echo "${ENGINE_NAME} port: $ENGINE_PORT"
 echo "LMCache HTTP: $BASE_URL"
 echo "Results dir: $HTTP_DIR"
 echo ""
@@ -148,14 +142,14 @@ echo "========================================================"
 echo "=== Part 1: HTTP API Endpoint Tests ==="
 echo "========================================================"
 
-# ── Step 0: Warm up cache via vLLM ─────────────────────────
+# ── Step 0: Warm up cache via the inference engine ─────────
 echo ""
 echo "============================================"
 echo "=== Step 0: Warm up cache ==="
 echo "============================================"
 
 warmup_code=$(curl -s -o "$HTTP_DIR/warmup.json" -w "%{http_code}" \
-    -X POST "http://localhost:${VLLM_PORT}/v1/chat/completions" \
+    -X POST "http://localhost:${ENGINE_PORT}/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d "{
         \"model\": \"${MODEL}\",
