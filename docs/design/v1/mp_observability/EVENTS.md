@@ -14,11 +14,18 @@ these events see [METRICS.md](METRICS.md).
 |---|---|---|
 | `L1_READ_RESERVED` | `keys` | `list[ObjectKey]` |
 | `L1_READ_FINISHED` | `keys` | `list[ObjectKey]` |
-| `L1_WRITE_RESERVED` | `keys` | `list[ObjectKey]` |
+| `L1_WRITE_RESERVED` | `keys`, `tag` | `list[ObjectKey]`, `str` |
 | `L1_WRITE_FINISHED` | `keys` | `list[ObjectKey]` |
 | `L1_WRITE_FINISHED_AND_READ_RESERVED` | `keys` | `list[ObjectKey]` |
 | `L1_KEYS_EVICTED` | `keys` | `list[ObjectKey]` |
 | `L1_EVICTION_LOOP_TICK` | `usage`, `watermark`, `triggered` | `float`, `float`, `bool` |
+
+`L1_WRITE_RESERVED.tag` names the writer that staged the keys (e.g.
+`prefetch:<request_id>`, `storage_manager`); see
+`../../distributed/l1_manager.md`. A staging object that is discarded or
+reclaimed without becoming resident publishes **no** event (it is logged at
+debug level): `L1_KEYS_EVICTED` is reserved for admitted objects, which is
+what the coordinator cache-event reporter and the L1 byte metrics assume.
 
 `L1_EVICTION_LOOP_TICK` fires once per `L1EvictionController.eviction_loop`
 iteration (default ~1Hz).  `triggered` is `True` when `usage >= watermark`

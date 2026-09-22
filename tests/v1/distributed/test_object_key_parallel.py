@@ -176,9 +176,7 @@ class TestStorageManagerTPLookup:
                 )
                 for i in range(num_chunks)
             ]
-            reserved_dict = storage_manager.reserve_write(
-                storage_keys, test_layout, "new"
-            )
+            reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Create interleaved lookup keys for scheduler-style lookup
@@ -208,7 +206,7 @@ class TestStorageManagerTPLookup:
             create_object_key(chunk_hash=i, worker_id=0, world_size=world_size)
             for i in range(num_chunks)
         ]
-        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout, "new")
+        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
         storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Create interleaved lookup keys for scheduler-style lookup
@@ -242,7 +240,7 @@ class TestStorageManagerTPLookup:
             create_object_key(chunk_hash=i, worker_id=1, world_size=world_size)
             for i in range(num_chunks)
         ]
-        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout, "new")
+        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
         storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Create interleaved lookup keys for scheduler-style lookup
@@ -276,9 +274,7 @@ class TestStorageManagerTPLookup:
                 )
                 for i in range(num_stored_chunks)
             ]
-            reserved_dict = storage_manager.reserve_write(
-                storage_keys, test_layout, "new"
-            )
+            reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Request 5 chunks with scheduler-style interleaved lookup
@@ -311,9 +307,7 @@ class TestStorageManagerTPLookup:
             create_object_key(chunk_hash=i, worker_id=0, world_size=world_size)
             for i in range(5)
         ]
-        reserved_dict = storage_manager.reserve_write(
-            storage_keys_w0, test_layout, "new"
-        )
+        reserved_dict = storage_manager.reserve_write(storage_keys_w0, test_layout)
         storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Worker 1 has only 2 chunks
@@ -321,9 +315,7 @@ class TestStorageManagerTPLookup:
             create_object_key(chunk_hash=i, worker_id=1, world_size=world_size)
             for i in range(2)
         ]
-        reserved_dict = storage_manager.reserve_write(
-            storage_keys_w1, test_layout, "new"
-        )
+        reserved_dict = storage_manager.reserve_write(storage_keys_w1, test_layout)
         storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Request 5 chunks with scheduler-style interleaved lookup
@@ -363,9 +355,7 @@ class TestStorageManagerTPLookup:
                 )
                 for i in range(num_chunks)
             ]
-            reserved_dict = storage_manager.reserve_write(
-                storage_keys, test_layout, "new"
-            )
+            reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Scheduler-style interleaved lookup
@@ -397,9 +387,7 @@ class TestStorageManagerTPLookup:
                 )
                 for i in range(num_chunks)
             ]
-            reserved_dict = storage_manager.reserve_write(
-                storage_keys, test_layout, "new"
-            )
+            reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Scheduler-style interleaved lookup
@@ -443,12 +431,12 @@ class TestStorageManagerTPStoreRetrieve:
         key_w1 = create_object_key(chunk_hash=100, worker_id=1, world_size=world_size)
 
         # Store worker 0's data
-        reserved_dict0 = storage_manager.reserve_write([key_w0], test_layout, "new")
+        reserved_dict0 = storage_manager.reserve_write([key_w0], test_layout)
         assert len(reserved_dict0) == 1
         storage_manager.finish_write(list(reserved_dict0.keys()))
 
         # Store worker 1's data
-        reserved_dict1 = storage_manager.reserve_write([key_w1], test_layout, "new")
+        reserved_dict1 = storage_manager.reserve_write([key_w1], test_layout)
         assert len(reserved_dict1) == 1
         storage_manager.finish_write(list(reserved_dict1.keys()))
 
@@ -480,7 +468,7 @@ class TestStorageManagerTPStoreRetrieve:
                 )
                 for i in range(3)
             ]
-            reserved_dict = storage_manager.reserve_write(keys, test_layout, "new")
+            reserved_dict = storage_manager.reserve_write(keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
             all_keys.extend(keys)
 
@@ -532,7 +520,7 @@ class TestTPEdgeCases:
             create_object_key(chunk_hash=i, worker_id=0, world_size=world_size)
             for i in range(num_chunks)
         ]
-        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout, "new")
+        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
         storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Lookup should find all chunks
@@ -564,9 +552,7 @@ class TestTPEdgeCases:
                 for i in range(num_chunks)
             ]
             all_keys.extend(storage_keys)
-            reserved_dict = storage_manager.reserve_write(
-                storage_keys, test_layout, "new"
-            )
+            reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Create interleaved lookup keys (simulating scheduler lookup)
@@ -616,7 +602,7 @@ class TestTPEdgeCases:
         assert len(set(storage_keys)) == world_size
 
         # Store all keys
-        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout, "new")
+        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
         assert len(reserved_dict) == world_size
         storage_manager.finish_write(list(reserved_dict.keys()))
 
@@ -670,9 +656,7 @@ class TestTPIntegration:
                 )
                 for i in range(stored_chunks)
             ]
-            reserved_dict = storage_manager.reserve_write(
-                storage_keys, test_layout, "new"
-            )
+            reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Step 3: Scheduler lookup with interleaved keys
@@ -728,7 +712,7 @@ class TestTPIntegration:
                 )
                 for i in range(num_chunks)
             ]
-            reserved = storage_manager.reserve_write(storage_keys, test_layout, "new")
+            reserved = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved.keys()))
             results[worker_id] = len(reserved)
 

@@ -468,7 +468,7 @@ class QStoreModule(InstanceLivenessTarget):
                         object_group_id=obj_group_id,
                     )
                     reserved_dict = self._ctx.storage_manager.reserve_write(
-                        obj_keys, layout_desc, "new"
+                        obj_keys, layout_desc
                     )
                     all_dict.update(reserved_dict)
                     if reserved_dict:

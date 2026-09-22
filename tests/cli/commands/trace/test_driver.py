@@ -151,7 +151,7 @@ class TestRecordReplayRoundtrip:
         keys = [_make_key(i) for i in range(3)]
 
         def script(sm: StorageManager) -> None:
-            reserved = sm.reserve_write(keys, layout, mode="new")
+            reserved = sm.reserve_write(keys, layout)
             assert len(reserved) == 3
             sm.finish_write(keys)
 
@@ -172,7 +172,7 @@ class TestRecordReplayRoundtrip:
         keys = [_make_key(i) for i in range(3)]
 
         def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout, mode="new")
+            sm.reserve_write(keys, layout)
             sm.finish_write(keys)
             handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
             assert handle is not None
@@ -208,7 +208,7 @@ class TestRecordReplayRoundtrip:
         keys = [_make_key(0)]
 
         def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout, mode="new")
+            sm.reserve_write(keys, layout)
             sm.finish_write(keys)
 
         _record_sequence(trace_path, sm_config, script)
@@ -234,7 +234,7 @@ class TestMismatchHandling:
         keys = [_make_key(0)]
 
         def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout, mode="new")
+            sm.reserve_write(keys, layout)
 
         _record_sequence(trace_path, sm_config, script)
 
@@ -252,7 +252,7 @@ class TestMismatchHandling:
         keys = [_make_key(0)]
 
         def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout, mode="new")
+            sm.reserve_write(keys, layout)
 
         _record_sequence(trace_path, sm_config, script)
 
@@ -307,7 +307,7 @@ class TestPacing:
         keys = [_make_key(0)]
 
         def script(sm: StorageManager) -> None:
-            sm.reserve_write(keys, layout, mode="new")
+            sm.reserve_write(keys, layout)
             time.sleep(0.05)  # force a gap
             sm.finish_write(keys)
 

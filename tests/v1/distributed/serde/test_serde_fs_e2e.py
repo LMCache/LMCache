@@ -148,7 +148,7 @@ class TestFp8SerdeFsRoundTrip:
         originals = [torch.randn(kv_shape, dtype=kv_dtype) for _ in keys]
 
         # ---- Step 1: write to L1 ----
-        reserved = sm.reserve_write(keys, layout, mode="new")
+        reserved = sm.reserve_write(keys, layout)
         assert len(reserved) == len(keys)
         for k, orig in zip(keys, originals, strict=True):
             mem_obj = reserved[k]
