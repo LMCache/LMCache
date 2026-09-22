@@ -15,6 +15,7 @@ This directory contains runnable examples organized by use case. The table below
 | Example | What it does | Hardware |
 |---------|-------------|----------|
 | [`kv_cache_calculator/`](kv_cache_calculator/) | Web UI for calculating KV cache size (GB) given model architecture, dtype, and token count. Start here to size GPU memory and cache tiers before running anything. | None (browser) |
+| [`cpu_hello_world/`](cpu_hello_world/) | **No GPU? Start here.** A tiered, hardware-free hello-world: verify LMCache stores/retrieves KV on CPU (no model), then watch a real ~0.5B open-weight (Apache-2.0) model get a cache hit and lower TTFT — all on CPU. Also the on-ramp for weak/consumer GPUs. | None → CPU |
 
 ---
 
