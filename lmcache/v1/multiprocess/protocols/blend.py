@@ -47,6 +47,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
                 bool,
                 list[int],
                 list[list[int]],
+                list[int],
             ],
             response_class=None,
             handler_type=HandlerType.SYNC,

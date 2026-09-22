@@ -218,6 +218,7 @@ class ZmqMultiprocessClient(RequestClient):
         is_neox_style: bool,
         group_to_cache: list[int],
         group_rot: list[list[int]],
+        group_head_size: list[int],
     ) -> MessagingFuture[Any]:
         """Register blend RoPE state."""
         return self._call(
@@ -228,6 +229,7 @@ class ZmqMultiprocessClient(RequestClient):
             is_neox_style,
             group_to_cache,
             group_rot,
+            group_head_size,
         )
 
     def cb_unregister_rope(self, instance_id: int) -> MessagingFuture[Any]:

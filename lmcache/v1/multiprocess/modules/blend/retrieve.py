@@ -235,7 +235,7 @@ class RetrieveMixin:
                 engine_kv_format=gpu_context.get_engine_kv_format(group_idx),
                 page_buffer_size=group.shape_desc.nb * group_bs,
                 block_size=group_bs,
-                head_size=rope_state.head_size,
+                head_size=rope_state.head_size_for_group(group.engine_group_idx),
                 # Physical per-block stride; padded pools are wider than bs*hs.
                 block_stride_elems=getattr(group.shape_desc, "block_stride_elems", 0)
                 or 0,
@@ -269,7 +269,7 @@ class RetrieveMixin:
                     group,
                     int(buf0.shape[0]),
                     hidden_dim,
-                    rope_state.head_size,
+                    rope_state.head_size_for_group(group.engine_group_idx),
                     group_idx,
                     rot,
                 )

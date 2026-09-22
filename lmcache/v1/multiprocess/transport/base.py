@@ -129,6 +129,7 @@ class RequestClient(Protocol):
         is_neox_style: bool,
         group_to_cache: list[int],
         group_rot: list[list[int]],
+        group_head_size: list[int],
     ) -> MessagingFuture[Any]: ...
 
     def cb_unregister_rope(self, instance_id: int) -> MessagingFuture[Any]: ...

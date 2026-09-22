@@ -36,6 +36,27 @@ class _CBRopeState:
     # skips re-RoPE for the group, empty list = legacy inferred geometry.
     # Required for MLA: inference would rotate the latent's content dims.
     group_rot: "list[tuple[int, int] | None]" = field(default_factory=list)
+    # Per-group scatter head size; empty = ``head_size`` covers every group.
+    # Models that size heads per layer type (Gemma-4: 256 sliding, 512 full)
+    # have no single answer. Distinct from ``group_rot``, which is the
+    # rotation window: MLA rotates a narrow slice of a wide latent row.
+    group_head_size: list[int] = field(default_factory=list)
+
+    def head_size_for_group(self, engine_group_idx: int) -> int:
+        """The scatter head size for one engine group.
+
+        Args:
+            engine_group_idx: The kernel group's engine group index.
+
+        Returns:
+            The group's head size, or the model-wide ``head_size`` when no
+            per-group map was registered.
+        """
+        if not self.group_head_size:
+            return self.head_size
+        if 0 <= engine_group_idx < len(self.group_head_size):
+            return self.group_head_size[engine_group_idx]
+        return self.head_size
 
     def rot_for_group(
         self, engine_group_idx: int, dtype: "torch.dtype | None" = None
