@@ -31,8 +31,7 @@ from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
-from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
@@ -201,7 +200,7 @@ class P2PController:
     # RPC Handlers
     # -----------------------------------------------------------------
 
-    @request_handler(RequestType.P2P_LOOKUP_AND_LOCK, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def p2p_lookup_and_lock(
         self,
         keys: list[ObjectKey],
@@ -251,7 +250,7 @@ class P2PController:
         )
         return task_id
 
-    @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def p2p_query_lookup_results(
         self,
         task_id: int,
@@ -294,7 +293,7 @@ class P2PController:
             self._jobs.pop(task_id, None)
         return addresses
 
-    @request_handler(RequestType.P2P_UNLOCK_OBJECTS, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def p2p_unlock_objects(
         self,
         keys: list[ObjectKey],
