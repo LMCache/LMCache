@@ -708,7 +708,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             # Align-mode Mamba keeps one speculative block per draft token at
             # the tail of a request's block list.
-            spec_config = vllm_config.speculative_config
+            spec_config = getattr(vllm_config, "speculative_config", None)
             self._mamba_relocation_window = (
                 spec_config.num_speculative_tokens or 0
                 if mamba_cache_mode == "align" and spec_config is not None

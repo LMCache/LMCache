@@ -142,12 +142,35 @@ class LMCacheMPRequestTracker:
     ) -> None:
         """Append the block ids vLLM reported for this request in one step.
 
-        In align mode with speculative decoding, vLLM may move a speculative
-        Mamba block from one of the last ``relocation_window`` slots to the
-        tail, writing the null block into the old slot without reporting it
-        (``MambaManager.allocate_new_blocks``). vLLM never lists a block at
-        two slots of a request, so an id reported again from that window is
-        such a move; its old slot is set to the null block here as well.
+        ``new_block_ids`` holds the ids at the positions vLLM added to its
+        own block list this step. Normally these are newly allocated blocks
+        and are appended here as-is.
+
+        Align-mode Mamba with speculative decoding is the exception. When a
+        step skips a block boundary, vLLM sets that slot to the null block
+        and moves the speculative block that sat there to the end of its list
+        (``MambaManager.allocate_new_blocks``). The moved block then shows up
+        in ``new_block_ids`` again, but the nulled slot is not reported. At
+        most ``relocation_window`` blocks move per step, one per skipped
+        boundary, so only that many tail slots need checking.
+
+        Example: one Mamba group, block size 100, ``relocation_window=4``,
+        a 337-token prompt prefilled with MTP. After step 1 (tokens
+        [0, 100)) the tracked ids are ``[10, 11, 12, 13, 14]``: slot 0 is
+        the state block, slots 1-4 the speculative blocks.
+
+        Step 2 (tokens [100, 200)) advances one block. vLLM reports
+        ``[15]``, a new block. Nothing in the last 4 slots is reported
+        again, so it is appended: ``[10, 11, 12, 13, 14, 15]``.
+
+        Step 3 (tokens [200, 337)) advances two blocks, because MTP runs the
+        last full block and the tail in one step. The boundary at token 300
+        is skipped, so vLLM nulls slot 2, moves its speculative block 12 to
+        the tail and allocates 16. Positions 6 and 7 are new, so it reports
+        ``[12, 16]``. 12 is in the last 4 slots, so slot 2 becomes 0 and 12
+        is appended; 16 is appended: ``[10, 11, 0, 13, 14, 15, 12, 16]``.
+
+        With ``relocation_window=0`` every call is a plain append.
 
         Args:
             new_block_ids: Block ids appended this step, one list per engine
