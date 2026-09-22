@@ -107,6 +107,17 @@ def test_negative_null_marker_preserves_checkpoint_zero() -> None:
     assert masks == [[True, False, True, False]]
 
 
+def test_nondefault_null_marker_rejects_mixed_object_presence() -> None:
+    with pytest.raises(ValueError, match="object group 0 chunk 0 mixes"):
+        all_null_chunk_masks(
+            [[-1], [7]],
+            [_og([0, 1])],
+            [1, 1],
+            1,
+            -1,
+        )
+
+
 def _staging_context(
     num_kernel_groups: int,
     object_groups: list[ObjectGroupInfo],
@@ -248,6 +259,40 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
         [-1, -1, 0, 1],
         [-1, -1, 2, 3],
     ]
+
+
+def test_store_fails_closed_before_staging_mixed_state_presence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, context, _reads, transfers = _make_checkpoint_module(monkeypatch)
+    _handle, ok = module.store(
+        SimpleNamespace(request_id="req", worker_id=1),
+        1,
+        [[0, 1, 2, 3], [-1, -1, 0, 1], [4, 5, 2, 3]],
+        b"producer",
+    )
+
+    assert not ok
+    module.context.storage_manager.reserve_write.assert_not_called()
+    context.stage_block_ids.assert_not_called()
+    assert transfers == []
+
+
+def test_retrieve_fails_closed_before_staging_mixed_state_presence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, context, _reads, transfers = _make_checkpoint_module(monkeypatch)
+    _handle, ok = module.retrieve(
+        SimpleNamespace(request_id="req", cache_salt="salt"),
+        1,
+        [[0, 1, 2, 3], [-1, -1, 0, 1], [4, 5, 2, 3]],
+        b"producer",
+    )
+
+    assert not ok
+    module.context.storage_manager.read_prefetched_results.assert_not_called()
+    context.stage_block_ids.assert_not_called()
+    assert transfers == []
 
 
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):

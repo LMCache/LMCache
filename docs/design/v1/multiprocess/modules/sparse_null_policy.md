@@ -55,6 +55,13 @@ by the transfer helper. Block IDs are therefore staged with the existing
 slice-only behavior; a null ID may be present in the staged tensor, but it is
 outside every launched kernel's block-ID range and is never dereferenced.
 
+For a non-default sentinel, all block IDs represented by one object and chunk
+must agree on presence. If an object mixes the null marker with live block IDs,
+the server fails that store before staging or reserving memory. This protects
+the transfer kernel from an invalid index while preserving the legacy vLLM
+zero-null behavior. Supporting independently sparse kernel groups inside one
+object requires a separate object-group contract or per-kernel transfer masks.
+
 ## Testing
 
 - `tests/v1/multiprocess/test_config.py` covers the default and CLI override.
