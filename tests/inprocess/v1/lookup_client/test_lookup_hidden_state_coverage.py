@@ -33,6 +33,9 @@ class _FakeTokenDatabase:
         yield (256, 512, 2222)
 
 
+_ASKED = {HS_LAYER_IDXS_CONFIG: [0]}
+
+
 def _client(responses):
     client = object.__new__(LMCacheLookupClient)
     client.transport = _FakeTransport(responses)
@@ -47,14 +50,14 @@ def test_four_byte_reply_leaves_coverage_unknown():
     """An older server answers KV only; the caller must fall back, not read zero."""
     client = _client([(512).to_bytes(4, "big")])
 
-    assert client.lookup([1, 2, 3], "req") == 512
+    assert client.lookup([1, 2, 3], "req", _ASKED) == 512
     assert client.lookup_hidden_state_coverage("req") is None
 
 
 def test_eight_byte_reply_carries_coverage():
     client = _client([(512).to_bytes(4, "big") + (256).to_bytes(4, "big")])
 
-    assert client.lookup([1, 2, 3], "req") == 512
+    assert client.lookup([1, 2, 3], "req", _ASKED) == 512
     assert client.lookup_hidden_state_coverage("req") == 256
 
 
@@ -66,7 +69,7 @@ def test_coverage_takes_the_minimum_across_ranks():
         ]
     )
 
-    assert client.lookup([1, 2, 3], "req") == 512
+    assert client.lookup([1, 2, 3], "req", _ASKED) == 512
     assert client.lookup_hidden_state_coverage("req") == 256
 
 
@@ -83,7 +86,7 @@ def test_the_layer_request_rides_in_request_configs():
 
 def test_clearing_status_drops_the_coverage_too():
     client = _client([(512).to_bytes(4, "big") + (256).to_bytes(4, "big")])
-    client.lookup([1, 2, 3], "req")
+    client.lookup([1, 2, 3], "req", _ASKED)
 
     client.clear_lookup_status("req")
 

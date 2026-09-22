@@ -152,11 +152,12 @@ class LMCacheLookupClient(LookupClientInterface):
             return 0
 
         results = [int.from_bytes(resp[:4], "big") for resp in responses]
-        hs_results = [
-            int.from_bytes(resp[4:8], "big") for resp in responses if len(resp) >= 8
-        ]
-        if len(hs_results) == len(responses):
-            self.hs_status[lookup_id] = min(hs_results)
+        if request_configs and HS_LAYER_IDXS_CONFIG in request_configs:
+            # A rank on an older build answers 4 bytes; treat the whole reply as
+            # unknown rather than reading the missing field as zero.
+            hs = [int.from_bytes(r[4:8], "big") for r in responses if len(r) >= 8]
+            if len(hs) == len(responses):
+                self.hs_status[lookup_id] = min(hs)
 
         assert len(results) == self.transport.world_size
         if len(set(results)) > 1:
