@@ -42,8 +42,12 @@ def resolve_prefetched_obj_keys(
     A worker-specific key resolves only that worker's shard (or one MLA reader
     share), which is required for per-instance RETRIEVE failure cleanup.
     """
-    chunk_hashes = ctx.token_hasher.compute_chunk_hashes(
-        list(key.token_ids), start=key.start, end=key.end
+    chunk_hashes = (
+        key.precomputed_range(ctx.chunk_size)
+        if key.chunk_hashes
+        else ctx.token_hasher.compute_chunk_hashes(
+            list(key.token_ids), start=key.start, end=key.end
+        )
     )
     if not chunk_hashes:
         return []
@@ -206,8 +210,12 @@ class LookupModule:
 
         num_kv_readers = key.require_num_kv_readers()
 
-        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
-            list(key.token_ids), end=key.end
+        chunk_hashes = (
+            key.precomputed_range(self._ctx.chunk_size, prefix=True)
+            if key.chunk_hashes
+            else self._ctx.token_hasher.compute_chunk_hashes(
+                list(key.token_ids), end=key.end
+            )
         )
         if not chunk_hashes:
             self._register_prefetch_job(
@@ -263,7 +271,7 @@ class LookupModule:
             model_name, world_size
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
+        session.set_key(key)
         session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(

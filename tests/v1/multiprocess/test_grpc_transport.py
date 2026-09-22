@@ -72,6 +72,23 @@ class _Calls:
     clear_force: bool | None = None
 
 
+def test_supplied_page_hashes_survive_grpc_lookup(grpc_client) -> None:
+    client, calls = grpc_client
+    key = IPCCacheServerKey(
+        model_name="sglang-pages",
+        world_size=1,
+        worker_id=None,
+        token_ids=(),
+        start=0,
+        end=2,
+        request_id="page-lookup",
+        num_kv_readers=1,
+        chunk_hashes=(b"a" * 32, b"b" * 32),
+    )
+    client.lookup(key, 1).result(5)
+    assert calls.lookup == (key, 1)
+
+
 class _TestDeviceIPCWrapper(DeviceIPCWrapper):
     """Pickle-safe test wrapper for the shared custom codec."""
 

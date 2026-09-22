@@ -18,6 +18,9 @@ message IpcCacheServerKey {
   string cache_salt = 8;
   optional bytes encoded_request_configs = 9;
   int64 num_kv_readers = 10;
+  // Optional engine-provided SHA-256 content identities. Mutually exclusive
+  // with token_ids; start/end remain in server logical-token units.
+  repeated bytes chunk_hashes = 11;
 }
 
 // Store / Retrieve and CacheBlend retrieve share this reply shape.

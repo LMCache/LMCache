@@ -37,6 +37,7 @@ class Session:
     request_id: str
     hasher: TokenHasher
     token_ids: list[int] = field(default_factory=list)
+    supplied_hashes: tuple[bytes, ...] = ()
     chunk_hashes: list = field(default_factory=list)
     last_prefix_hash: Any = None
     num_chunks_processed: int = 0
@@ -60,6 +61,22 @@ class Session:
         """
         with self._lock:
             self.token_ids = full_token_ids
+
+    def set_key(self, key: IPCCacheServerKey) -> None:
+        """Set a token sequence or validated engine-supplied chunk identities.
+
+        A session cannot switch between identity modes. This prevents stale
+        computed hashes from being reused for a different representation.
+        """
+        if key.chunk_hashes:
+            key.precomputed_range(self.hasher.chunk_size)
+        with self._lock:
+            if (self.token_ids and key.chunk_hashes) or (
+                self.supplied_hashes and not key.chunk_hashes
+            ):
+                raise ValueError("Cannot change a session's cache identity mode")
+            self.token_ids = list(key.token_ids)
+            self.supplied_hashes = key.chunk_hashes
 
     @overload
     def get_hashes(self, start: int, end: int) -> list: ...
@@ -98,6 +115,12 @@ class Session:
         start_chunk = start // chunk_size
 
         with self._lock:
+            if self.supplied_hashes:
+                limit = len(self.supplied_hashes) * chunk_size
+                end = limit if end is None else end
+                if start < 0 or end < start or end > limit or end % chunk_size:
+                    raise ValueError("Invalid precomputed session range")
+                return list(self.supplied_hashes[start_chunk : end // chunk_size])
             if end is not None and end > len(self.token_ids):
                 raise ValueError(
                     f"get_hashes end ({end}) exceeds the session's "
@@ -183,6 +206,7 @@ class Session:
                 key.model_name == lookup_key.model_name
                 and key.world_size == lookup_key.world_size
                 and key.token_ids == lookup_key.token_ids
+                and key.chunk_hashes == lookup_key.chunk_hashes
                 and key.cache_salt == lookup_key.cache_salt
                 and key.start >= lookup_key.start
                 and key.end <= lookup_key.end
@@ -228,6 +252,7 @@ class Session:
                 key.model_name == lookup_key.model_name
                 and key.world_size == lookup_key.world_size
                 and key.token_ids == lookup_key.token_ids
+                and key.chunk_hashes == lookup_key.chunk_hashes
                 and key.cache_salt == lookup_key.cache_salt
                 and key.start >= lookup_key.start
                 and key.end <= lookup_key.end

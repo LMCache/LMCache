@@ -69,12 +69,24 @@ class IPCCacheServerKey:
     # lookups reject it.
     num_kv_readers: int = field(default=0, compare=False)
 
+    # Optional engine-provided content identities, one per complete chunk.
+    # Empty preserves the token-based protocol. Ranges still use logical
+    # token units; the server validates them against its chunk size.
+    chunk_hashes: tuple[bytes, ...] = ()
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
     _SALT_MAX_LEN = 128
 
     def __post_init__(self) -> None:
+        if self.chunk_hashes:
+            if self.token_ids:
+                raise ValueError("token_ids and chunk_hashes are mutually exclusive")
+            if self.start < 0 or self.end < self.start:
+                raise ValueError("Invalid precomputed-key range")
+            if any(not isinstance(h, bytes) or len(h) != 32 for h in self.chunk_hashes):
+                raise ValueError("Precomputed chunk hashes must contain 32 bytes each")
         bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
         if bad:
             raise ValueError(
@@ -132,6 +144,32 @@ class IPCCacheServerKey:
             )
         return self.num_kv_readers
 
+    def precomputed_range(
+        self, chunk_size: int, *, prefix: bool = False
+    ) -> list[bytes]:
+        """Resolve supplied hashes after checking the server's chunk geometry.
+
+        Args:
+            chunk_size: Server logical tokens per stored chunk.
+            prefix: Include the prefix before ``start``, as LOOKUP requires.
+
+        Returns:
+            Hashes covering the requested range (or its complete prefix).
+
+        Raises:
+            ValueError: The key is token-based, unaligned, or out of bounds.
+        """
+        if (
+            not self.chunk_hashes
+            or chunk_size <= 0
+            or self.start % chunk_size
+            or self.end % chunk_size
+            or self.end > len(self.chunk_hashes) * chunk_size
+        ):
+            raise ValueError("Precomputed keys require an aligned, bounded chunk range")
+        start = 0 if prefix else self.start // chunk_size
+        return list(self.chunk_hashes[start : self.end // chunk_size])
+
     def no_worker_id_version(self) -> "IPCCacheServerKey":
         """Create a copy with worker_id=None for lookup requests."""
         return IPCCacheServerKey(
@@ -145,6 +183,7 @@ class IPCCacheServerKey:
             request_id=self.request_id,
             cache_salt=self.cache_salt,
             request_configs=self.request_configs,
+            chunk_hashes=self.chunk_hashes,
         )
 
 

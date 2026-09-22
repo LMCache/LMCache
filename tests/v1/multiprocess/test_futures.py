@@ -846,3 +846,31 @@ def test_device_future_reuses_prevalidated_backend(
     raw.set_result((b"event", 7))
 
     assert future.result() == 7
+
+
+def test_device_future_stream_wait_does_not_acknowledge_dma(monkeypatch):
+    """An imported IPC event can order compute while source slots stay pinned."""
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    calls = []
+
+    class Backend:
+        def import_event(self, handle, device):
+            return "event"
+
+        def wait_event(self, event, stream):
+            calls.append((event, stream))
+
+        def query_event(self, event):
+            return False
+
+        def synchronize_event(self, event, device):
+            raise AssertionError("stream ordering must not synchronize the CPU")
+
+    raw = MessagingFuture[tuple[bytes, bool]]()
+    future = DeviceMessagingFuture(raw, device="device", event_backend=Backend())
+    raw.set_result((b"ipc-event", True))
+    assert future.wait_on_stream("forward", timeout=0)
+    assert calls == [("event", "forward")]
+    assert not future.query(), "the response alone must not release the tree's lock"

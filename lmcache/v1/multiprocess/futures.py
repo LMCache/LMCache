@@ -194,6 +194,29 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         self.event_ = event
         self._raw_response_processed = True
 
+    def wait_on_stream(self, stream: Any, timeout: Optional[float] = None) -> T:
+        """Order a consumer stream after remote DMA without a CPU device wait.
+
+        Args:
+            stream: Stream that will read the retrieved data.
+            timeout: Maximum wait for the server's event handle, in seconds.
+
+        Returns:
+            The server result; a successful response does not mean DMA has
+            completed. ``query``/``result`` still govern buffer lifetime.
+
+        Raises:
+            LMCacheTimeoutError: The server did not respond before the deadline.
+        """
+        if not self._raw_response_processed:
+            if not self.raw_future_.wait(timeout):
+                raise LMCacheTimeoutError("Remote transfer response timed out")
+            self._on_raw_future_complete()
+        if self.event_ is not None:
+            self._event_backend.wait_event(self.event_, stream)
+        assert self.result_ is not None
+        return self.result_
+
     def wait(self, timeout: Optional[float] = None) -> bool:
         """
         Wait for the future to be done, ordered through the device event.
