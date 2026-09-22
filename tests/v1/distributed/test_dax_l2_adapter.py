@@ -837,7 +837,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
         adapter = sm._l2_adapters[0]
         assert isinstance(adapter, DaxL2Adapter)
 
-        reserved = sm.reserve_write([key], layout, mode="new")
+        reserved = sm.reserve_write([key], layout)
         assert key in reserved
         assert reserved[key].tensor is not None
         reserved[key].tensor.fill_(11)
@@ -942,7 +942,7 @@ def test_storage_manager_dax_adapter_uses_global_l2_eviction(tmp_path):
         key2 = create_object_key(72)
 
         def _write_key(key: ObjectKey, fill_value: int, usage_fraction: float) -> None:
-            reserved = sm.reserve_write([key], layout, mode="new")
+            reserved = sm.reserve_write([key], layout)
             assert key in reserved
             assert reserved[key].tensor is not None
             reserved[key].tensor.fill_(fill_value)

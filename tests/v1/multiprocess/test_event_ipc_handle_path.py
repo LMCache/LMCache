@@ -80,7 +80,6 @@ class _FakeStorageManager:
         self,
         keys: list[object],
         layout: object,
-        mode: str,
     ) -> dict[object, object]:
         return {}
 
