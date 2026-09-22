@@ -36,9 +36,9 @@ from lmcache.v1.distributed.storage_controllers.store_controller import (
     StoreController,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     DefaultStorePolicy,
 )
+from lmcache.v1.distributed.storage_controllers.utils import AdapterDescriptor
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 
 # Importing this sets the process-wide MeterProvider with an

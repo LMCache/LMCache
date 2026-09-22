@@ -42,7 +42,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
     L2ReconfigureError,
 )
-from lmcache.v1.distributed.storage_controllers.store_policy import AdapterDescriptor
+from lmcache.v1.distributed.storage_controllers.utils import AdapterDescriptor
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (

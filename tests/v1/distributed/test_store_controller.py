@@ -37,11 +37,11 @@ from lmcache.v1.distributed.storage_controllers.store_controller import (
     StoreListener,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     BufferOnlyStorePolicy,
     DefaultStorePolicy,
     StorePolicy,
 )
+from lmcache.v1.distributed.storage_controllers.utils import AdapterDescriptor
 from lmcache.v1.memory_management import MemoryObj
 from tests.v1.distributed.utils import should_use_lazy_alloc
 

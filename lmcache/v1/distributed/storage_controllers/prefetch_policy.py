@@ -13,9 +13,7 @@ from abc import ABC, abstractmethod
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
-)
+from lmcache.v1.distributed.storage_controllers.utils import AdapterDescriptor
 
 
 class PrefetchPolicy(ABC):

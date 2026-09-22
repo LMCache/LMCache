@@ -29,9 +29,9 @@ from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
     RemoveAdapterOp,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     StorePolicy,
 )
+from lmcache.v1.distributed.storage_controllers.utils import AdapterDescriptor
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge

@@ -9,41 +9,10 @@ The store policy makes two decisions after data is written to L1:
 
 # Standard
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.l2_adapters.config import (
-    L2AdapterConfigBase,
-    get_type_name_for_config,
-)
-
-
-@dataclass(frozen=True)
-class AdapterDescriptor:
-    """
-    Lightweight descriptor for an L2 adapter, giving the store policy
-    enough information to distinguish adapters without exposing runtime
-    objects.
-    """
-
-    index: int
-    """Position in the L2 adapters list."""
-
-    config: L2AdapterConfigBase
-    """The adapter's configuration object."""
-
-    @property
-    def type_name(self) -> str:
-        """
-        Registered adapter type name (e.g., "mock", "disk", "redis").
-
-        Derived from the config's registered type via reverse lookup.
-
-        Returns:
-            str: The registered type name.
-        """
-        return get_type_name_for_config(self.config)
+from lmcache.v1.distributed.storage_controllers.utils import AdapterDescriptor
 
 
 class StorePolicy(ABC):

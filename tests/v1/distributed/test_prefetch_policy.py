@@ -14,9 +14,7 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
     RetainPrefetchPolicy,
 )
-from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
-)
+from lmcache.v1.distributed.storage_controllers.utils import AdapterDescriptor
 
 # =============================================================================
 # Helpers
