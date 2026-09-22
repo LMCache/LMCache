@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
-# Run lm_eval workload test against vLLM server.
+# Run lm_eval accuracy checks against an OpenAI-compatible engine.
 # Sends the same requests twice to test LMCache caching behavior.
-# Adapted from the old Docker-based run-lm-eval.sh -- no venv setup needed
-# (setup-env.sh + extras already installed by run.sh).
+# Engine setup and test dependencies are installed by the harness entrypoint.
 set -e
 set -o pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
-
-source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
+COMMON_WORKLOAD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${COMMON_WORKLOAD_DIR}/../helpers.sh"
 
 # Configuration
-VLLM_PORT="${VLLM_PORT:-8000}"
+ENGINE_PORT="${ENGINE_PORT:-8000}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 NUM_CONCURRENT="${NUM_CONCURRENT:-${LM_EVAL_NUM_CONCURRENT_DEFAULT:-50}}"
 LIMIT="${LIMIT:-300}"
@@ -21,7 +18,9 @@ RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 LM_EVAL_VERIFY_MODE="${LM_EVAL_VERIFY_MODE:-${LM_EVAL_VERIFY_MODE_DEFAULT:-samples}}"
 SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
 SCORE_MIN="${SCORE_MIN:-${LM_EVAL_SCORE_MIN_DEFAULT:-0.80}}"
-VLLM_LOG="${VLLM_LOG:-/tmp/build_${BUILD_ID}_vllm.log}"
+ENGINE_LOG_FILE="${ENGINE_LOG_FILE:-/tmp/build_${BUILD_ID}_engine.log}"
+LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
+VERIFY_LMCACHE_RETRIEVAL="${VERIFY_LMCACHE_RETRIEVAL:-false}"
 
 case "$LM_EVAL_VERIFY_MODE" in
     samples) LM_EVAL_DIR="$RESULTS_DIR/lm_eval" ;;
@@ -37,7 +36,7 @@ SECOND_RUN_DIR="$LM_EVAL_DIR/second_run"
 
 echo "=== LM-Eval Workload Test ($LM_EVAL_VERIFY_MODE) ==="
 echo "Model: $MODEL"
-echo "vLLM Port: $VLLM_PORT"
+echo "Engine Port: $ENGINE_PORT"
 echo "Concurrent requests: $NUM_CONCURRENT"
 echo "Limit: $LIMIT"
 echo "Results dir: $LM_EVAL_DIR"
@@ -52,7 +51,7 @@ run_lm_eval() {
 
     echo "=== Running lm_eval ($run_name) ==="
     lm_eval --model local-completions --tasks gsm8k \
-        --model_args "model=${MODEL},base_url=http://127.0.0.1:${VLLM_PORT}/v1/completions,num_concurrent=${NUM_CONCURRENT},max_retries=3,tokenized_requests=False" \
+        --model_args "model=${MODEL},base_url=http://127.0.0.1:${ENGINE_PORT}/v1/completions,num_concurrent=${NUM_CONCURRENT},max_retries=3,tokenized_requests=False" \
         --limit "$LIMIT" \
         --seed 0 \
         -s --output_path "$output_dir" \
@@ -107,18 +106,48 @@ verify_samples_match() {
 }
 
 count_preemptions() {
-    [ -f "$VLLM_LOG" ] || { echo 0; return; }
-    local count
-    count=$(grep -c "<preempted>" "$VLLM_LOG" 2>/dev/null || true)
-    echo "${count:-0}"
+    engine_count_preemptions "$ENGINE_LOG_FILE"
+}
+
+read_l1_retrievals() {
+    curl --noproxy '*' -fsS --max-time 10 \
+        "http://127.0.0.1:${LMCACHE_HTTP_PORT}/metrics" \
+        | awk '
+            /^lmcache_mp_l1_read_chunks_total[ {]/ { total += $NF }
+            END { printf "%d", total + 0 }
+        '
+}
+
+prepare_lmcache_retrieval_run() {
+    if ! declare -F engine_clear_local_cache > /dev/null; then
+        echo "${ENGINE_NAME} cannot clear its local prefix cache" >&2
+        return 1
+    fi
+
+    # Let asynchronous stores drain before removing the engine-local entries.
+    # The next run must then retrieve from LMCache rather than hit only the
+    # inference engine's prefix/radix cache.
+    sleep "${LMCACHE_STORE_SETTLE_SECONDS:-2}"
+    engine_clear_local_cache "$ENGINE_PORT"
+    read_l1_retrievals
 }
 
 verify_preemption() {
     # Check score drift/floor and that each lm_eval run observed preemptions.
-    python3 - "$1" "$2" "$SCORE_TOLERANCE" "$SCORE_MIN" "$3" "$4" "$5" <<'PYEOF'
+    python3 - "$1" "$2" "$SCORE_TOLERANCE" "$SCORE_MIN" "$3" "$4" "$5" \
+        "$ENGINE_NAME" <<'PYEOF'
 import glob, json, os, sys
 
-first_dir, second_dir, tolerance, score_min, before, after_first, after_second = sys.argv[1:8]
+(
+    first_dir,
+    second_dir,
+    tolerance,
+    score_min,
+    before,
+    after_first,
+    after_second,
+    engine_name,
+) = sys.argv[1:9]
 tolerance, score_min = float(tolerance), float(score_min)
 before, after_first, after_second = int(before), int(after_first), int(after_second)
 def score(results_dir):
@@ -138,7 +167,10 @@ first, second = score(first_dir), score(second_dir)
 drift = abs(first - second)
 print(f"First run gsm8k exact_match: {first:.4f}")
 print(f"Second run gsm8k exact_match: {second:.4f}")
-print(f"vLLM preemptions logged: before={before}, after_first={after_first}, after_second={after_second}")
+print(
+    f"{engine_name} preemptions logged: before={before}, "
+    f"after_first={after_first}, after_second={after_second}"
+)
 failures = []
 if drift > tolerance:
     failures.append(f"score drift {drift:.4f} > tolerance {tolerance}")
@@ -203,12 +235,28 @@ echo "============================================"
 run_lm_eval "first_run" "$FIRST_RUN_DIR"
 [ "$LM_EVAL_VERIFY_MODE" = "preemption" ] && preemptions_after_first=$(count_preemptions)
 
+if [[ "$VERIFY_LMCACHE_RETRIEVAL" == "1" \
+        || "$VERIFY_LMCACHE_RETRIEVAL" == "true" ]]; then
+    retrievals_before_second=$(prepare_lmcache_retrieval_run)
+    echo "L1 retrievals before second run: $retrievals_before_second"
+fi
+
 # Second run -- should use cached results
 echo "============================================"
 echo "=== Second lm_eval run (cache hit) ==="
 echo "============================================"
 run_lm_eval "second_run" "$SECOND_RUN_DIR"
 [ "$LM_EVAL_VERIFY_MODE" = "preemption" ] && preemptions_after_second=$(count_preemptions)
+
+if [[ "$VERIFY_LMCACHE_RETRIEVAL" == "1" \
+        || "$VERIFY_LMCACHE_RETRIEVAL" == "true" ]]; then
+    retrievals_after_second=$(read_l1_retrievals)
+    echo "L1 retrievals after second run: $retrievals_after_second"
+    if ((retrievals_after_second <= retrievals_before_second)); then
+        echo "LMCache served no L1 chunks during the second lm_eval run" >&2
+        exit 1
+    fi
+fi
 
 # Verify consistency
 echo "============================================"

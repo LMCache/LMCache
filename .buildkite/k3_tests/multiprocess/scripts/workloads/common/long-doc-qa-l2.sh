@@ -4,31 +4,24 @@
 # This script:
 #   1. Kills the existing LMCache MP server
 #   2. Relaunches it with L2 config (skip_l1 + mock L2 at 2 GB/s)
-#   3. Waits for vLLM to reconnect
-#   4. Runs long_doc_qa against baseline (vLLM only) and L2-enabled vLLM
+#   3. Restarts the selected inference engine against the L2 server
+#   4. Runs long_doc_qa against the baseline and L2-enabled engine
 #   5. Verifies L2 query is faster than baseline and warmup overhead is bounded
 #
 # Expects the following env vars from run-mp-test.sh:
-#   VLLM_PORT, VLLM_BASELINE_PORT, MODEL, BUILD_ID, RESULTS_DIR, LMCACHE_DIR,
-#   LMCACHE_PORT, CPU_BUFFER_SIZE, MAX_WORKERS, GPU_FOR_VLLM (optional)
+#   ENGINE_PORT, ENGINE_BASELINE_PORT, MODEL, BUILD_ID, RESULTS_DIR, LMCACHE_DIR,
+#   LMCACHE_PORT, CPU_BUFFER_SIZE, MAX_WORKERS, GPU_FOR_ENGINE (optional)
 set -e
 set -o pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
-
-source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
+COMMON_WORKLOAD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${COMMON_WORKLOAD_DIR}/../helpers.sh"
 
 # Configuration
-VLLM_PORT="${VLLM_PORT:-8000}"
-VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
-MODEL="${MODEL:-Qwen/Qwen3-14B}"
-BUILD_ID="${BUILD_ID:-local_$$}"
-RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
-LMCACHE_DIR="${LMCACHE_DIR:-$REPO_ROOT}"
 LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
+ENGINE_L2_LOG_FILE="/tmp/build_${BUILD_ID}_${INFERENCE_ENGINE}_l2.log"
 
 DOCUMENT_LENGTH="${DOCUMENT_LENGTH:-10000}"
 NUM_DOCUMENTS="${NUM_DOCUMENTS:-30}"
@@ -69,11 +62,11 @@ echo ""
 mkdir -p "$L2_RESULTS_DIR"
 
 # ---------------------------------------------------------------------------
-# Step 1: Kill existing LMCache + vLLM, relaunch both with L2 config
+# Step 1: Kill existing LMCache + engine, relaunch both with L2 config
 # ---------------------------------------------------------------------------
 
-echo "--- Stopping existing LMCache MP server and vLLM ---"
-# PID file layout: line1=LMCache, line2=vLLM w/ LMCache, line3=vLLM baseline.
+echo "--- Stopping existing LMCache MP server and ${ENGINE_NAME} ---"
+# PID file layout: line1=LMCache, line2=engine w/ LMCache, line3=baseline.
 # These processes were launched by an earlier script (launch-processes.sh)
 # and are not children of this shell, so ``wait $pid`` is a no-op here.
 # We instead poll until each PID actually exits, then poll until the
@@ -81,8 +74,8 @@ echo "--- Stopping existing LMCache MP server and vLLM ---"
 # fail to bind /metrics and the metrics check would fail spuriously.
 if [ -f "$PID_FILE" ]; then
     LMCACHE_PID=$(sed -n '1p' "$PID_FILE")
-    VLLM_PID=$(sed -n '2p' "$PID_FILE")
-    for pid in $LMCACHE_PID $VLLM_PID; do
+    OLD_ENGINE_PID=$(sed -n '2p' "$PID_FILE")
+    for pid in $LMCACHE_PID $OLD_ENGINE_PID; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             echo "Killing PID $pid"
             kill "$pid" 2>/dev/null || true
@@ -112,10 +105,11 @@ echo "--- Launching LMCache MP server with L2 config ---"
 L2_ADAPTER_JSON="{\"type\":\"mock\",\"max_size_gb\":${L2_MAX_SIZE_GB},\"mock_bandwidth_gb\":${L2_BANDWIDTH_GB}}"
 
 # Determine GPU to use
-GPU_DEVICE="${GPU_FOR_VLLM:-0}"
+GPU_DEVICE="${GPU_FOR_ENGINE:-0}"
 
-CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
-lmcache server \
+server_environment=("${DEVICE_AFFINITY_VAR}=${GPU_DEVICE}")
+engine_add_lmcache_server_environment server_environment
+env "${server_environment[@]}" lmcache server \
     --transport "$LMCACHE_REQUEST_TRANSPORT" \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy noop \
@@ -134,50 +128,29 @@ echo "LMCache L2 server started (PID=$NEW_LMCACHE_PID)"
 echo "Waiting for LMCache L2 to initialize..."
 sleep 10
 
-echo "--- Launching vLLM with LMCache ---"
-# Compute GPU memory utilization for large GPUs
-GPU_MEMORY_UTIL_ARG=""
-GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_DEVICE}" | tr -d ' ')
-GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
-if [ "$GPU_MEMORY_GB" -gt 90 ]; then
-    GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
-fi
-
-# Unset VLLM_PORT in child env so vLLM's torch.distributed picks a free port
-env -u VLLM_PORT \
-    CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
-    VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-    VLLM_SERVER_DEV_MODE=1 \
-    VLLM_BATCH_INVARIANT=1 \
-    PYTHONHASHSEED=0 \
-vllm serve "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
-    --attention-backend FLASH_ATTN \
-    --port "$VLLM_PORT" \
-    --no-async-scheduling \
-    $GPU_MEMORY_UTIL_ARG \
-    > "/tmp/build_${BUILD_ID}_vllm_l2.log" 2>&1 &
-
-NEW_VLLM_PID=$!
-echo "vLLM started (PID=$NEW_VLLM_PID)"
+echo "--- Launching ${ENGINE_NAME} with LMCache ---"
+engine_prepare_launch "$GPU_DEVICE"
+engine_launch lmcache "$ENGINE_PORT" "$GPU_DEVICE" "$ENGINE_L2_LOG_FILE"
+NEW_ENGINE_PID="$ENGINE_PID"
+echo "${ENGINE_NAME} started (PID=$NEW_ENGINE_PID)"
 
 # Update PID file (replace lines 1 and 2, keep baseline on line 3)
 if [ -f "$PID_FILE" ]; then
     sed -i "1s/.*/$NEW_LMCACHE_PID/" "$PID_FILE"
-    sed -i "2s/.*/$NEW_VLLM_PID/" "$PID_FILE"
+    sed -i "2s/.*/$NEW_ENGINE_PID/" "$PID_FILE"
 else
     echo "$NEW_LMCACHE_PID" > "$PID_FILE"
-    echo "$NEW_VLLM_PID" >> "$PID_FILE"
+    echo "$NEW_ENGINE_PID" >> "$PID_FILE"
 fi
 
-# Wait for vLLM to be ready (needs time to load model)
-echo "--- Waiting for vLLM to be ready ---"
-if ! wait_for_server "$VLLM_PORT" 300; then
-    echo "vLLM failed to start after restart"
+# Wait for the engine to be ready (needs time to load model)
+echo "--- Waiting for ${ENGINE_NAME} to be ready ---"
+if ! wait_for_server "$ENGINE_PORT" 300; then
+    echo "${ENGINE_NAME} failed to start after restart"
     echo "LMCache L2 log (last 50 lines):"
     tail -50 "/tmp/build_${BUILD_ID}_lmcache_l2.log" || true
-    echo "vLLM log (last 50 lines):"
-    tail -50 "/tmp/build_${BUILD_ID}_vllm_l2.log" || true
+    echo "${ENGINE_NAME} log (last 50 lines):"
+    tail -50 "$ENGINE_L2_LOG_FILE" || true
     exit 1
 fi
 
@@ -240,18 +213,18 @@ if [ -f "$STEP5_BASELINE" ]; then
     echo ""
 else
     echo "============================================"
-    echo "=== Phase 1: Baseline vLLM (no LMCache) ==="
+    echo "=== Phase 1: ${ENGINE_NAME} baseline (no LMCache) ==="
     echo "============================================"
-    run_long_doc_qa "$VLLM_BASELINE_PORT" "$L2_RESULTS_DIR/baseline_result.json" "baseline"
+    run_long_doc_qa "$ENGINE_BASELINE_PORT" "$L2_RESULTS_DIR/baseline_result.json" "baseline"
 fi
 
 # Phase 2+3: L2 warmup + query (repeat_count=2, tile mode)
 #   Round 1 (warmup): prompts -> L1 write buffer -> L2 store -> L1 delete
 #   Round 2 (query):  prompts -> L1 miss -> L2 prefetch -> L1 load -> serve
 echo "============================================"
-echo "=== Phase 2+3: vLLM + LMCache L2 ==="
+echo "=== Phase 2+3: ${ENGINE_NAME} + LMCache L2 ==="
 echo "============================================"
-run_long_doc_qa "$VLLM_PORT" "$L2_RESULTS_DIR/l2_result.json" "l2"
+run_long_doc_qa "$ENGINE_PORT" "$L2_RESULTS_DIR/l2_result.json" "l2"
 
 # ---------------------------------------------------------------------------
 # Step 3: Verify thresholds
