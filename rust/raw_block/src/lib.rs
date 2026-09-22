@@ -15,7 +15,9 @@
 //!   submission/completion loop. All alignment checks are performed before
 //!   enqueuing; violations result in an immediate Python `ValueError`.
 
-use pyo3::exceptions::{PyMemoryError, PyOSError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{
+    PyDeprecationWarning, PyMemoryError, PyOSError, PyRuntimeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use std::collections::HashMap;
@@ -2465,6 +2467,8 @@ impl RawBlockDevice {
     }
 
     /// Synchronous read using io_uring.
+    ///
+    /// Deprecated: use ``batched_read()`` followed by ``wait_iouring()`` instead.
     #[pyo3(signature = (offset, data, payload_len, total_len = None))]
     fn read_uring(
         &self,
@@ -2474,6 +2478,14 @@ impl RawBlockDevice {
         payload_len: usize,
         total_len: Option<usize>,
     ) -> PyResult<()> {
+        PyErr::warn(
+            py,
+            &py.get_type::<PyDeprecationWarning>(),
+            c"RawBlockDevice.read_uring() is deprecated; \
+              use batched_read() followed by wait_iouring() instead.",
+            1,
+        )?;
+
         if !self.use_iouring {
             return Err(PyRuntimeError::new_err("io_uring not enabled"));
         }

@@ -3,6 +3,8 @@
 First off, thank you for taking the time to contribute! 🎉👍  
 Check out the [online docs](https://docs.lmcache.ai/developer_guide/contributing.html) for a set of guidelines for contributing.
 
+New to LMCache? Start at the [2026 onboarding umbrella issue](https://github.com/LMCache/LMCache/issues/3372) — it walks you through your first PR step by step.
+
 A summary of LMCache's current direction can be found at: [[Onboarding] Welcoming contributors with good first issues!](https://github.com/LMCache/LMCache/issues/627)
 
 =======
@@ -71,6 +73,30 @@ Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator 
 - Ensure existing tests still pass before submitting changes.
 
 ## Linting & Code Quality
+
+### Pre-commit Setup
+
+Install the pre-commit hooks before making changes:
+
+```bash
+pre-commit install
+```
+
+To run all checks locally before pushing:
+
+```bash
+pre-commit run --all-files
+```
+
+### DCO Sign-Off
+
+All commits must include a **Developer Certificate of Origin (DCO) sign-off**. Use `git commit -s` to sign off automatically:
+
+```bash
+git commit -s -m "your commit message"
+```
+
+PRs without DCO sign-off cannot be merged. The sign-off certifies that you have the right to submit the code under the project's license.
 
 ```bash
 # Run all checks (mirrors CI exactly)

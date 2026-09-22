@@ -19,7 +19,7 @@ MP integration / SDK / benchmark
          RequestClient     -- named request methods
           /       \
          v         v
-   ZMQ facade   gRPC client (planned)
+   ZMQ facade   gRPC client
          |
          v
  MessageQueueClient
@@ -30,7 +30,9 @@ MP integration / SDK / benchmark
 `RequestClient` defines named methods such as `lookup()`, `store()`, and
 `retrieve()`. The ZMQ facade translates each method back to the existing
 `RequestType`, payload order, and response type, so this refactor does not
-change the ZMQ wire protocol.
+change the ZMQ wire protocol. Its low-level sockets, polling loop, multipart
+frames, msgspec codecs, and worker-pool dispatch live in `zmq_impl/mq.py` so
+the shared multiprocess package does not expose ZMQ runtime internals.
 
 `RequestClientFactory` normalizes an endpoint and selects an implementation by
 scheme:
@@ -38,35 +40,48 @@ scheme:
 | Scheme | Implementation |
 |---|---|
 | no scheme, `tcp`, `ipc`, `inproc` | ZMQ |
-| `grpc`, `grpc+unix` | gRPC (not implemented yet) |
+| `grpc`, `grpc+unix` | gRPC |
 
 A bare `host:port` endpoint is normalized to `tcp://host:port`. Invalid or
-unknown schemes fail before a client is created. The gRPC schemes are reserved
-so gRPC support can land without changing business callers; selecting one
-currently raises `NotImplementedError`.
+unknown schemes fail before a client is created. The server selects the matching
+implementation through `--transport zmq` or `--transport grpc`.
 
 This abstraction covers MP request RPCs only. It does not select the mechanism
 used to move KV data between an engine worker and the server.
 
-## Protobuf contracts
+The server follows the same boundary. `server.py` builds transport-neutral
+engine modules and passes them to `create_request_server()`, which returns the
+`RequestServer` protocol implemented by either `MessageQueueServer` or
+`GrpcMultiprocessServer`. Shared runtime code starts and closes only that
+protocol; concrete server classes are accessed only inside their transport
+packages and implementation-level tests.
 
-The planned gRPC transport keeps its wire contracts under
-`grpc_impl/protos/`. These `.proto` files are the source of truth for request
-and response messages; they do not enable the gRPC runtime by themselves.
+### gRPC codecs
 
-Python protobuf modules are generated into `grpc_impl/_proto_gen/` during a
-package build. Most generated files remain ignored, while the type stubs used
-by handwritten adapters are tracked so static analysis also works from a
-source checkout. Regenerate the bindings after changing a schema with:
+gRPC keeps protobuf as its wire format. During initialization, each generated
+gRPC method is mapped to a transport-neutral `RequestType`. Its method codec
+combines the protobuf descriptor, which defines the wire schema, with the
+payload and response types exposed by `ProtocolDefinition`, which define the
+corresponding Python contract. Both the client and server use the resulting
+read-only registry.
 
-```bash
-pip install -r requirements/proto.txt
-python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
-```
+Most dataclasses and containers use the structural codec. Types that need a
+non-structural representation register an explicit message codec in
+`grpc_impl/codecs/`, organized by protobuf message domain; types shared across
+domains register in the common codec module. Missing protocol definitions and
+duplicate registrations fail while the method codec registry is initialized.
 
-The generator cleans stale outputs, compiles every schema, rewrites generated
-imports to use the package-qualified path, and verifies that all generated
-Python modules import successfully.
+Server-side binding and scheduling are separate from serialization. Business
+module methods use the transport-neutral `@request_handler` annotation to
+declare their `RequestType`, `HandlerType`, and client-affinity requirement.
+Both ZMQ and gRPC discover this metadata. When gRPC registers the modules, it
+also validates each handler's parameter and return annotations against the
+Python contract used to compile that method's codec.
+
+Adding an RPC therefore requires a protobuf method, a matching `RequestType`
+and `ProtocolDefinition`, and an annotated business-module handler. A custom
+message codec is needed only when the structural codec cannot represent the
+Python type directly.
 
 ## Extending the transport
 

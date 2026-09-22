@@ -217,6 +217,7 @@ def _create_fs_native_l2_adapter(
         native_client,
         max_capacity_gb=config.max_capacity_gb,
         type_name="FSNativeL2Adapter",
+        pad_buffers_to_alignment=config.use_odirect,
         extra_status={
             "base_path": config.base_path,
             "use_odirect": config.use_odirect,
@@ -224,6 +225,7 @@ def _create_fs_native_l2_adapter(
             "read_ahead_size": config.read_ahead_size,
             "read_io_depth": config.read_io_depth,
             "read_max_bytes_in_flight": effective_read_budget,
+            "pad_buffers_to_alignment": config.use_odirect,
         },
     )
 
