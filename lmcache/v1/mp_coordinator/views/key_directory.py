@@ -664,10 +664,6 @@ class KeyDirectory(View):
         l1_keys.clear()
         return removed
 
-<<<<<<< HEAD
-    def _create_token_binding(self, key: ObjectKey, entry: CacheEventEntry) -> None:
-        """Record ``entry``'s token content on ``key``'s chunk binding.
-=======
     def _adjust_placement_stats(
         self,
         placement: Placement,
@@ -681,9 +677,8 @@ class KeyDirectory(View):
         tier_stats.count += count_delta
         tier_stats.size_bytes += size_bytes_delta
 
-    def _create_token_binding(self, chunk_hash: bytes, entry: CacheEventEntry) -> None:
-        """Record ``entry``'s token content on ``chunk_hash``'s binding.
->>>>>>> a516293d ([MP][Coordinator] Add Key Directory placement metrics)
+    def _create_token_binding(self, key: ObjectKey, entry: CacheEventEntry) -> None:
+        """Record ``entry``'s token content on ``key``'s chunk binding.
 
         Token ids outside ``uint32`` leave the binding as it was, so one
         bad entry is a lookup miss rather than a failed batch. An entry
