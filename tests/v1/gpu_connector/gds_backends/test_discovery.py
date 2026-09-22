@@ -104,9 +104,7 @@ def test_discovery_does_not_execute_modules(
     required_args = ["--l1-size-gb", "1", "--eviction-policy", "LRU"]
     args = parser.parse_args([*required_args, "--gds-l1-backend", "unavailable"])
     assert args.gds_l1_backend == "unavailable"
-    with pytest.raises(
-        argparse.ArgumentError, match="choose from 'auto', 'unavailable'"
-    ):
+    with pytest.raises(argparse.ArgumentError, match="choose from .*auto.*unavailable"):
         parser.parse_args([*required_args, "--gds-l1-backend", "missing"])
     with pytest.raises(ValueError, match="Choose from: auto, unavailable"):
         create_backend("missing")
