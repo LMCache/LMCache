@@ -15,7 +15,7 @@ one.
 
 The extension is built as ``lmcache.cuda_ops`` -- the same module name the
 CUDA profile uses -- because MACA reports ``device_type == "cuda"`` to
-torch/vLLM and :class:`~lmcache.v1.platform.cuda.device_ops.CudaDeviceOps`
+torch/vLLM and :class:`~lmcache.v1.platform.devices.cuda.device_ops.CudaDeviceOps`
 looks up native ops by importing exactly that name; a differently-named
 extension would silently never be picked up, leaving MACA on the pure
 Python fallback.
@@ -77,6 +77,7 @@ class MacaProfile(BuildProfile):
             "csrc/cuda/pybind.cpp",
             "csrc/cuda/mem_kernels.cu",
             "csrc/cuda/mp_mem_kernels.cu",
+            "csrc/cuda/phase_timing_recorder.cu",
             "csrc/cuda/blend_kernels.cu",
             "csrc/cuda/cal_cdf.cu",
             "csrc/cuda/ac_enc.cu",
