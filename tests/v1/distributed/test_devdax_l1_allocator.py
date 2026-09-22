@@ -7,6 +7,7 @@ manager wiring while keeping CI portable.
 """
 
 # Standard
+from pathlib import Path
 from typing import Any, cast
 import argparse
 import gc
@@ -659,6 +660,49 @@ def test_add_device_serves_overflow_after_primary_full(tmp_path):
     del second
     gc.collect()
     manager.close()
+
+
+@pytest.mark.parametrize("batch_size", [2, 3])
+def test_batched_allocate_across_fragmented_arenas(
+    tmp_path: Path, batch_size: int
+) -> None:
+    """Use fragmented capacity across arenas and roll back oversized batches."""
+    page_size = 4096
+    primary = _make_mmap_file(tmp_path, size=6 * page_size, name="primary.bin")
+    extra = _make_mmap_file(tmp_path, size=2 * page_size, name="extra.bin")
+    allocator = DevDaxMemoryAllocator(
+        size=6 * page_size, device_path=primary, align_bytes=page_size
+    )
+    owned: list[memory_management.MemoryObj] = []
+    try:
+        initial = allocator.batched_allocate(torch.Size([page_size]), torch.uint8, 6)
+        assert initial is not None
+        owned.extend(initial)
+        # Leave free blocks of 8, 4, and 4 KiB: only one 8 KiB object fits.
+        allocator.batched_free([initial[i] for i in (0, 1, 3, 5)])
+        allocator.add_device(extra, 2 * page_size)
+        baseline_usage = allocator.get_memory_usage()
+
+        shape = torch.Size([2 * page_size])
+        batch = allocator.batched_allocate(shape, torch.uint8, batch_size)
+        if batch is not None:
+            owned.extend(batch)
+        if batch_size == 3:
+            assert batch is None
+            assert allocator.get_memory_usage() == baseline_usage
+            # The failed batch must leave both arenas available for a retry.
+            batch = allocator.batched_allocate(shape, torch.uint8, 2)
+            if batch is not None:
+                owned.extend(batch)
+
+        assert batch is not None
+        assert len(batch) == 2
+        allocator.batched_free(batch)
+        assert allocator.get_memory_usage() == baseline_usage
+        assert allocator.memcheck()
+    finally:
+        allocator.batched_free([obj for obj in owned if obj.is_valid()])
+        allocator.close()
 
 
 def test_remove_device_reaps_empty_arena_immediately(tmp_path):
