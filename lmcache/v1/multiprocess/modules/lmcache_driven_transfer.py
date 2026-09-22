@@ -644,9 +644,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context,
-                gpu_block_ids,
-                skipped_chunks=skipped_chunks if null_block_id != 0 else None,
+                cache_context, gpu_block_ids
             )
 
             producer_event = event_backend.import_event(
@@ -912,6 +910,15 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 event_backend.record_event(event, cache_context.stream)
                 return event_backend.export_event(event, cache_context.device), False
 
+            # Cut and stage all block_ids to GPU once before the transfer
+            block_ids_per_group_gpu = downsample_and_stage_block_ids(
+                cache_context, gpu_block_ids
+            )
+            producer_event = event_backend.import_event(
+                event_ipc_handle, cache_context.device
+            )
+            event_backend.wait_event(producer_event, cache_context.stream)
+
             # Per object group, the prefetch only locked the in-window suffix
             # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
             # attention, where the value is < 0). Read and transfer only those.
@@ -927,25 +934,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 0 if window < 0 else max(0, num_chunks - window)
                 for window in attn_desc.num_chunks_in_sw
             ]
-            skipped_chunks = [
-                [g in skipped_groups or i < skip for i in range(num_chunks)]
-                for g, skip in enumerate(group_skips)
-            ]
-            uses_nondefault_null_block = self._ctx.null_block_id != 0
-            block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context,
-                gpu_block_ids,
-                skipped_chunks=(skipped_chunks if uses_nondefault_null_block else None),
-                skip_first_n_tokens=(
-                    skip_first_n_tokens if uses_nondefault_null_block else 0
-                ),
-            )
-
-            producer_event = event_backend.import_event(
-                event_ipc_handle, cache_context.device
-            )
-            event_backend.wait_event(producer_event, cache_context.stream)
-
             expected_retained = sum(
                 num_chunks - skip
                 for g, skip in enumerate(group_skips)

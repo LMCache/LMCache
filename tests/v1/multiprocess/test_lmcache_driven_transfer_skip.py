@@ -126,40 +126,6 @@ def _staging_context(
     return context
 
 
-def test_absent_checkpoint_objects_stage_safe_placeholders() -> None:
-    context = _staging_context(3, [_og([0]), _og([1, 2])])
-    block_ids = [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]]
-    masks = all_null_chunk_masks(
-        block_ids,
-        context.kv_layer_groups_manager.object_groups,
-        [2] * 3,
-        2,
-        -1,
-    )
-    staged = downsample_and_stage_block_ids(context, block_ids, skipped_chunks=masks)
-    assert staged == [[0, 1, 2, 3], [0, 0, 0, 1], [0, 0, 2, 3]]
-
-
-def test_legacy_sliding_window_zero_placeholders_remain_valid() -> None:
-    context = _staging_context(1, [_og([0])])
-    assert downsample_and_stage_block_ids(context, [[0, 3]]) == [[0, 3]]
-
-
-def test_invalid_blocks_outside_copy_window_are_not_staged() -> None:
-    context = _staging_context(1, [_og([0])], window_tokens=1)
-    assert downsample_and_stage_block_ids(context, [[-1, 0, -1, 3]]) == [[0, 3]]
-
-
-def test_retrieve_skipped_prefix_accepts_absent_checkpoints() -> None:
-    context = _staging_context(1, [_og([0])])
-    assert downsample_and_stage_block_ids(
-        context,
-        [[-1, -1, -1, 0]],
-        skipped_chunks=[[True, False]],
-        skip_first_n_tokens=3,
-    ) == [[0, 0, 0, 0]]
-
-
 # ------------------------------------------------------------------ #
 #  retrieve (read-side window)                                         #
 # ------------------------------------------------------------------ #
@@ -226,7 +192,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         transfer_calls.append((object_group_id, list(memory_objs)))
 
     monkeypatch.setattr(mod, "transfer_kv_per_object_group", fake_transfer)
-    monkeypatch.setattr(mod, "downsample_and_stage_block_ids", lambda cc, b, **kw: b)
+    monkeypatch.setattr(mod, "downsample_and_stage_block_ids", lambda cc, b: b)
     monkeypatch.setattr(mod, "submit_callback_to_stream", lambda *a, **k: None)
     monkeypatch.setattr(mod, "torch_dev", MagicMock())
     monkeypatch.setattr(mod, "Event", MagicMock())
@@ -279,8 +245,8 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
     assert [obj is None for obj in transfers[1][1]] == [True, False]
     assert context.stage_block_ids.call_args.args[0] == [
         [0, 1, 2, 3],
-        [0, 0, 0, 1],
-        [0, 0, 2, 3],
+        [-1, -1, 0, 1],
+        [-1, -1, 2, 3],
     ]
 
 

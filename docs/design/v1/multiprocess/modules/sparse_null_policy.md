@@ -47,20 +47,19 @@ sentinel. A chunk is skipped for an object group only when all block IDs in all
 of that object's kernel groups equal the sentinel. Skipped objects are neither
 reserved nor committed.
 
-Negative IDs cannot be passed to GPU gather/scatter kernels. On store and
-retrieve, when the configured sentinel is nonzero, block-ID slots belonging to
-skipped objects or skipped token prefixes are replaced with safe zero
-placeholders before staging. Those slots are never transferred, so block zero
-is not read or written accidentally.
-
-The default `--null-block-id 0` path keeps the historical slice-only staging
-behavior.
+LMCache already skips these copies in the transfer layer. On store, skipped
+objects become `None` entries and the D2H loop does not launch a kernel for
+them. On retrieve, the existing sliding-window/object-prefix logic starts from
+the first object that is actually present, and `skip_first_n_tokens` is applied
+by the transfer helper. Block IDs are therefore staged with the existing
+slice-only behavior; a null ID may be present in the staged tensor, but it is
+outside every launched kernel's block-ID range and is never dereferenced.
 
 ## Testing
 
 - `tests/v1/multiprocess/test_config.py` covers the default and CLI override.
 - `tests/v1/multiprocess/test_lmcache_driven_transfer_skip.py` covers global
-  null masks and safe staging.
+  null masks and reuse of the existing sparse-copy skip path.
 - `tests/v1/multiprocess/test_native_state_lookup.py` covers sparse PAGE/STATE
   lookup with explicit object-group separation.
 - `tests/v1/multiprocess/test_native_state_alias_gpu.py` covers a real
