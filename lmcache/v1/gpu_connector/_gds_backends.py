@@ -43,7 +43,10 @@ def create_backend(name: str) -> GDSBackend:
             raise ValueError("no default GDS backend for this environment")
     else:
         if name not in names:
-            raise ValueError(f"unsupported GDS L1 backend: {name}")
+            choices = ", ".join(("auto", *names))
+            raise ValueError(
+                f"unsupported GDS L1 backend: {name!r}. Choose from: {choices}"
+            )
         backend_class = _load_backend_class(name)
     backend = backend_class()
     backend.validate_environment()

@@ -22,6 +22,9 @@ class Submission:
     bytes_done holds the transferred byte count or a negative IO error.
     """
 
+    # Keep per-IO objects compact while allowing weakref lifetime checks.
+    __slots__ = ("size", "file_offset", "buf_offset", "result", "__weakref__")
+
     def __init__(self, size: int, file_offset: int, buf_offset: int) -> None:
         self.size = ctypes.c_size_t(size)
         self.file_offset = ctypes.c_int64(file_offset)
