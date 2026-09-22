@@ -171,6 +171,39 @@ def test_real_handlers_and_concurrent_worker_isolation() -> None:
 
 @pytest.mark.usefixtures("enabled")
 @pytest.mark.parametrize("sampled", [True, False])
+def test_gpu_callback_events_use_cpu_submission_parent(
+    monkeypatch: pytest.MonkeyPatch, sampled: bool
+) -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(
+        tracing_module, "_tracer", provider.get_tracer("lmcache_mp.server")
+    )
+    subscriber = MPServerTracingSubscriber()
+    callbacks = subscriber.get_subscriptions()
+    with trace.use_span(parent_span(42, sampled)):
+        submitted = Event(EventType.MP_STORE_SUBMITTED, session_id="gpu", timestamp=1)
+    callbacks[submitted.event_type](submitted)
+    for kind in (
+        EventType.MP_REQUEST_END,
+        EventType.MP_STORE_START,
+        EventType.MP_STORE_END,
+    ):
+        # Native stream events carry no Python thread-local context.
+        callbacks[kind](Event(kind, session_id="gpu", timestamp=2, trace_context={}))
+    spans = exporter.get_finished_spans()
+    if sampled:
+        assert {span.context.trace_id for span in spans} == {42}
+        assert {span.name for span in spans} == {"request", "mp.store"}
+    else:
+        assert not spans
+    subscriber.shutdown()
+    provider.shutdown()
+
+
+@pytest.mark.usefixtures("enabled")
+@pytest.mark.parametrize("sampled", [True, False])
 def test_real_zmq_worker_event_bus_parentage(
     monkeypatch: pytest.MonkeyPatch, sampled: bool
 ) -> None:

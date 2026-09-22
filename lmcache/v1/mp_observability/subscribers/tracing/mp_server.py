@@ -166,6 +166,9 @@ class MPServerTracingSubscriber(EventSubscriber):
             return
         sid = event.session_id
         self._pending_store_count[sid] = self._pending_store_count.get(sid, 0) + 1
+        # Capture the CPU-side parent before native GPU event recording,
+        # whose callbacks do not retain Python thread context.
+        self._get_or_create_request_span(sid, event.timestamp, event.trace_context)
 
     def _on_retrieve_submitted(self, event: Event) -> None:
         """Increment the in-flight retrieve counter for the session.
@@ -180,6 +183,7 @@ class MPServerTracingSubscriber(EventSubscriber):
             return
         sid = event.session_id
         self._pending_retrieve_count[sid] = self._pending_retrieve_count.get(sid, 0) + 1
+        self._get_or_create_request_span(sid, event.timestamp, event.trace_context)
 
     def _on_session_end(self, event: Event) -> None:
         """Close the root span, or defer if GPU stores/retrieves are still in flight.
