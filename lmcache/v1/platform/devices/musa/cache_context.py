@@ -16,6 +16,7 @@ from lmcache import torch_dev
 from lmcache.lmcache_native import EngineKVFormat
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.gpu_connector.gds_context import get_gds_context
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
@@ -148,6 +149,11 @@ class _TempMUSABuffer:
     def max_batch_size(self) -> int:
         """Return the number of chunks that fit in the staging buffer."""
         return self._max_batch_size
+
+    @property
+    def buffer(self) -> torch.Tensor:
+        """Return the flat staging tensor (for GDS muFile registration)."""
+        return self._temp_buffer
 
     def get_temp_kernel_group_buffer(
         self,
@@ -357,8 +363,15 @@ class MUSACacheContext(BaseCacheContext):
             device=self.device_,
             max_batch_size=4,
         )
+        self._gds_buffer_registered = False
         self.stream_ = torch_dev.Stream(device=self.device_)
         self.host_callback_stream_ = _MUSAHostCallbackStream(self.stream_)
+
+        # Register the staging buffer with the GDS muFile context on the
+        # context's MUSA stream (mirrors the CUDA cache context).
+        with torch_dev.stream(self.stream_):
+            get_gds_context().register_gpu_buffer(self._temp_buffer.buffer)
+        self._gds_buffer_registered = True
 
         logger.debug(
             "MUSACacheContext: %d layers, %d blocks, dtype=%s",
@@ -370,30 +383,50 @@ class MUSACacheContext(BaseCacheContext):
     def close(self) -> None:
         """Synchronize transfers and release receiver-side IPC owners.
 
+        Also deregisters the GDS staging buffer on the context's MUSA stream
+        before releasing IPC wrappers.
+
         Returns:
             None.
 
         Raises:
             RuntimeError: If the MUSA stream cannot be synchronized.
         """
-        wrappers = self._ipc_wrappers
-        if not wrappers:
-            return
-
         stream = getattr(self, "stream_", None)
-        synchronize = getattr(stream, "synchronize", None)
-        if callable(synchronize):
-            synchronize()
+        temp_buffer = getattr(self, "_temp_buffer", None)
+        wrappers = getattr(self, "_ipc_wrappers", ())
+        if not wrappers and not getattr(self, "_gds_buffer_registered", False):
+            return
+        try:
+            synchronize = getattr(stream, "synchronize", None)
+            if callable(synchronize):
+                synchronize()
 
-        kv_tensors = getattr(self, "kv_caches_", None)
-        if isinstance(kv_tensors, list):
-            kv_tensors.clear()
+            # Deregister only after a complete registration succeeded. A
+            # failed constructor may have created the staging buffer without
+            # owning a registration for it.
+            if (
+                getattr(self, "_gds_buffer_registered", False)
+                and temp_buffer is not None
+                and stream is not None
+            ):
+                with torch_dev.stream(stream):
+                    get_gds_context().deregister_gpu_buffer(temp_buffer.buffer)
+                self._gds_buffer_registered = False
 
-        for wrapper in wrappers:
-            close = getattr(wrapper, "close", None)
-            if callable(close):
-                close()
-        self._ipc_wrappers = ()
+            kv_tensors = getattr(self, "kv_caches_", None)
+            if isinstance(kv_tensors, list):
+                kv_tensors.clear()
+        finally:
+            # IPC owners are independent of GDS registration and must be
+            # released even when synchronization or deregistration fails.
+            try:
+                for wrapper in wrappers:
+                    close = getattr(wrapper, "close", None)
+                    if callable(close):
+                        close()
+            finally:
+                self._ipc_wrappers = ()
 
     @property
     def stream(self) -> Any:

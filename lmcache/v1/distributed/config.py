@@ -185,12 +185,13 @@ class GdsL1Config:
     use_direct_io: bool = True
     """Use ``O_DIRECT`` for cuFile/hipFile. Ignored by uGDS."""
 
-    backend: Literal["auto", "cufile", "hipfile", "ugds", "phx"] = "auto"
+    backend: Literal["auto", "cufile", "hipfile", "mufile", "ugds", "phx"] = "auto"
     """GPU storage backend. ``auto`` selects cuFile on CUDA and hipFile on
-    ROCm; ``ugds`` can be used on either platform with a matching
-    ``libugds.so`` and treats ``file_location`` as a character-device path;
-    ``phx`` uses the Phoenix phxfs DMA path with a filesystem slab and a
-    matching ``libphoenix.so``."""
+    ROCm; ``mufile`` uses the SmartIO muFile GDS path on MUSA with a matching
+    ``libmufile.so`` and a filesystem slab; ``ugds`` can be used on either
+    platform with a matching ``libugds.so`` and treats ``file_location`` as a
+    character-device path; ``phx`` uses the Phoenix phxfs DMA path with a
+    filesystem slab and a matching ``libphoenix.so``."""
 
     align_bytes: int = 4096
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
@@ -487,12 +488,13 @@ def add_storage_manager_args(
     )
     gds_group.add_argument(
         "--gds-l1-backend",
-        choices=("auto", "cufile", "hipfile", "ugds", "phx"),
+        choices=("auto", "cufile", "hipfile", "mufile", "ugds", "phx"),
         default="auto",
         help="GDS implementation. auto selects cuFile on CUDA or hipFile on ROCm; "
-        "ugds can be used on either platform with a matching libugds.so and "
-        "treats --gds-l1-path as /dev/ugds_drvX; phx uses the Phoenix phxfs "
-        "DMA path with a matching libphoenix.so.",
+        "mufile uses the SmartIO muFile GDS path on MUSA; ugds can be used on "
+        "either platform with a matching libugds.so and treats --gds-l1-path as "
+        "/dev/ugds_drvX; phx uses the Phoenix phxfs DMA path with a matching "
+        "libphoenix.so.",
     )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(

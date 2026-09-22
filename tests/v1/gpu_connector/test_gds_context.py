@@ -305,6 +305,40 @@ class TestRegisterGpuBuffer:
 
         assert sizes == [16 << 20, 16 << 20, 8 << 20]
 
+    def test_rolls_back_regions_when_registration_fails(self, monkeypatch):
+        ctx = GDSContext()
+        ctx.initialized = True
+        registered_sizes: list[int] = []
+        deregistered_sizes: list[int] = []
+        stream_registrations: list[int] = []
+        stream_deregistrations: list[int] = []
+
+        def register_buffer(region):
+            registered_sizes.append(region.numel() * region.element_size())
+            if len(registered_sizes) == 2:
+                raise RuntimeError("registration failed")
+
+        monkeypatch.setattr(ca, "register_buffer", register_buffer)
+        monkeypatch.setattr(
+            ca,
+            "deregister_buffer",
+            lambda region: deregistered_sizes.append(
+                region.numel() * region.element_size()
+            ),
+        )
+        monkeypatch.setattr(ca, "register_stream", stream_registrations.append)
+        monkeypatch.setattr(ca, "deregister_stream", stream_deregistrations.append)
+        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(7))
+
+        with pytest.raises(RuntimeError, match="registration failed"):
+            ctx.register_gpu_buffer(torch.empty(40 << 20, dtype=torch.uint8))
+
+        assert registered_sizes == [16 << 20, 16 << 20]
+        assert deregistered_sizes == [16 << 20]
+        assert stream_registrations == [7]
+        assert stream_deregistrations == [7]
+        assert ctx._base_ptrs == []
+
 
 class TestUgdsInitialization:
     @pytest.mark.parametrize(
