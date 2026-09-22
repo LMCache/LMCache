@@ -49,7 +49,7 @@ if not (torch_dev.is_available() and torch_device_type == "cuda"):
     pytest.skip("requires a CUDA or ROCm runtime", allow_module_level=True)
 
 # First Party
-from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper  # noqa: E402
+from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper  # noqa: E402
 
 
 def _serve(port: int) -> None:
