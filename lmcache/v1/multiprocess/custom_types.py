@@ -69,6 +69,12 @@ class IPCCacheServerKey:
     # lookups reject it.
     num_kv_readers: int = field(default=0, compare=False)
 
+    # Optional W3C headers. Old msgspec map decoders ignore this field; new
+    # decoders accept legacy keys without it. Never part of cache identity.
+    trace_context: dict[str, str] | None = field(
+        default=None, compare=False, repr=False
+    )
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
