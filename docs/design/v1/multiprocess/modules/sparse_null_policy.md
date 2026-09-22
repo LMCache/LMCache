@@ -55,12 +55,12 @@ by the transfer helper. Block IDs are therefore staged with the existing
 slice-only behavior; a null ID may be present in the staged tensor, but it is
 outside every launched kernel's block-ID range and is never dereferenced.
 
-For a non-default sentinel, all block IDs represented by one object and chunk
-must agree on presence. If an object mixes the null marker with live block IDs,
-the server fails that store before staging or reserving memory. This protects
-the transfer kernel from an invalid index while preserving the legacy vLLM
-zero-null behavior. Supporting independently sparse kernel groups inside one
-object requires a separate object-group contract or per-kernel transfer masks.
+Connectors that use an unallocated sentinel such as `-1` must put only kernel
+groups with a shared presence domain in the same object group. ATOM satisfies
+this contract because its native STATE image is indivisible: every STATE
+ordinal is absent in the same prefix chunks and present at the same checkpoint
+endpoint. Independently sparse kernel groups require a separate object-group
+contract or per-kernel transfer masks and are outside this integration.
 
 ## Testing
 

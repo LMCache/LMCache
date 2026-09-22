@@ -109,38 +109,21 @@ def all_null_chunk_masks(
 
     Returns:
         ``mask[g][i]`` is True iff chunk ``i`` is all-null for object group ``g``.
-
-    Raises:
-        ValueError: If a non-default null marker appears in only part of an
-            object-group chunk. The transfer path cannot skip individual
-            kernel groups within one object, so such a chunk is unsafe to copy.
     """
     masks: list[list[bool]] = []
-    for object_group_id, group in enumerate(object_groups):
+    for group in object_groups:
         chunk_null: list[bool] = []
         for i in range(num_chunks):
-            saw_null = False
-            saw_real = False
+            is_null = True
             for kg in group.kernel_group_indices:
                 bpc = blocks_per_chunk[kg]
-                for block in block_ids[kg][i * bpc : (i + 1) * bpc]:
-                    if block == null_block_id:
-                        saw_null = True
-                    else:
-                        saw_real = True
-
-            # The legacy zero sentinel is a real, allocated vLLM null block,
-            # so existing hybrid layouts may safely include it beside live
-            # blocks. A non-default sentinel such as ATOM's -1 is not a valid
-            # GPU index: every block represented by one stored object must
-            # therefore agree on presence before any IDs are staged.
-            if null_block_id != 0 and saw_null and saw_real:
-                raise ValueError(
-                    "object group "
-                    f"{object_group_id} chunk {i} mixes null block ID "
-                    f"{null_block_id} with live block IDs"
-                )
-            chunk_null.append(not saw_real)
+                if any(
+                    block != null_block_id
+                    for block in block_ids[kg][i * bpc : (i + 1) * bpc]
+                ):
+                    is_null = False
+                    break
+            chunk_null.append(is_null)
         masks.append(chunk_null)
     return masks
 
@@ -652,23 +635,13 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # be committed. Computed on the raw block ids before downsampling
             # mutates them.
             null_block_id = self._ctx.null_block_id
-            try:
-                skipped_chunks = all_null_chunk_masks(
-                    gpu_block_ids,
-                    cache_context.kv_layer_groups_manager.object_groups,
-                    blocks_per_chunk,
-                    num_chunks,
-                    null_block_id,
-                )
-            except ValueError as exc:
-                logger.error(
-                    "STORE block presence mismatch for request_id=%s: %s; "
-                    "skipping the store.",
-                    key.request_id,
-                    exc,
-                )
-                event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+            skipped_chunks = all_null_chunk_masks(
+                gpu_block_ids,
+                cache_context.kv_layer_groups_manager.object_groups,
+                blocks_per_chunk,
+                num_chunks,
+                null_block_id,
+            )
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
@@ -934,35 +907,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     num_chunks,
                     blocks_per_chunk,
                 )
-                event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
-
-            # A non-default sentinel is not a valid GPU block index. Reject a
-            # request whose kernel groups disagree on whether an object is
-            # present before staging any IDs or launching an H2D copy.
-            try:
-                all_null_chunk_masks(
-                    gpu_block_ids,
-                    cache_context.kv_layer_groups_manager.object_groups,
-                    blocks_per_chunk,
-                    num_chunks,
-                    self._ctx.null_block_id,
-                )
-            except ValueError as exc:
-                logger.error(
-                    "RETRIEVE block presence mismatch for request_id=%s: %s; "
-                    "skipping the retrieve.",
-                    key.request_id,
-                    exc,
-                )
-                try:
-                    self._release_failed_retrieve_locks(key, instance_id)
-                except Exception:
-                    logger.exception(
-                        "Failed to release RETRIEVE locks after a block "
-                        "presence mismatch for request_id=%s",
-                        key.request_id,
-                    )
                 event_backend.record_event(event, cache_context.stream)
                 return event_backend.export_event(event, cache_context.device), False
 
