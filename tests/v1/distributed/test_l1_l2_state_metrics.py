@@ -18,9 +18,9 @@ from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
 )
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.internal_api import PrefetchRequestSpec
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,

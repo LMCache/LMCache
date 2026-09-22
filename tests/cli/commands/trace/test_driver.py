@@ -31,7 +31,6 @@ from lmcache.cli.commands.trace._driver import StorageReplayDriver
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
 )
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -43,6 +42,9 @@ from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.trace.decorator import set_tracing_enabled
 from lmcache.v1.mp_observability.trace.recorder import StorageTraceRecorder
+
+# Test helpers
+from tests.v1.distributed.utils import single_row_spec
 import lmcache.v1.mp_observability.event_bus as _bus_module
 
 # ---------------------------------------------------------------------------
@@ -174,7 +176,7 @@ class TestRecordReplayRoundtrip:
         def script(sm: StorageManager) -> None:
             sm.reserve_write(keys, layout)
             sm.finish_write(keys)
-            handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
+            handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
             assert handle is not None
             with sm.read_prefetched_results(keys) as objs:
                 assert objs is not None

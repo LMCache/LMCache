@@ -17,14 +17,15 @@ if TYPE_CHECKING:
     )
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
-    PrefetchRequestSpec,
-    TrimPolicy,
+    PrefetchTaskSpec,
+    ipc_key_to_grouped_object_keys,
 )
-from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
+from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.mp_coordinator.api import BlendNamespace
 from lmcache.v1.mp_coordinator.blend_client import PENDING
@@ -37,9 +38,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.modules.blend.matcher import _unique_token_coverage
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups,
-    _cb_chunk_major_object_keys,
     _classify_cb_read_groups,
-    _narrow_attn_desc,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
@@ -47,10 +46,10 @@ from lmcache.v1.multiprocess.request_handler import request_handler
 logger = init_logger(__name__)
 
 
-#: ``_submit_prefix_leg`` result: ``(handle, world_size, prefix_gids, windows,
+#: ``_submit_prefix_leg`` result: ``(handle, prefix_gids, row_windows,
 #: n_chunks, no_gpu_context)``.
 _PrefixLegSubmit = tuple[
-    PrefetchHandle | None, int, tuple[int, ...], tuple[int, ...], int, bool
+    PrefetchHandle | None, tuple[int, ...], tuple[int, ...], int, bool
 ]
 
 
@@ -67,9 +66,8 @@ class _CBUnifiedJob:
     # Prefix leg (blend-module-owned submit/poll). ``prefix_handle`` is None when
     # there is no GPU context / no full chunk (poll reports 0 coverage).
     prefix_handle: PrefetchHandle | None = None
-    prefix_world_size: int = 1
     prefix_lock_gids: tuple = ()  # the gids the prefix keys cover (lock model)
-    prefix_windows: tuple = ()  # per-gid cross-chunk windows (fold input)
+    prefix_windows: tuple = ()  # per-row cross-chunk windows (fold input)
     prefix_num_chunks: int = 0  # chunks in the submitted prefix key list
     prefix_chunks: int | None = None  # stashed when the prefix poll completes
     retained_chunks: list[int] | None = None  # SEGMENTED_PREFIX: full gapped set
@@ -77,8 +75,8 @@ class _CBUnifiedJob:
     handle: PrefetchHandle | None = None  # sparse handle, None if no sparse leg
     non_prefix: list[CBMatchResult] | None = None
     per_hash_obj_keys: dict | None = None
-    expanded_uidx: list[int] | None = None
-    found_uidx: set[int] | None = None  # stashed when the sparse poll completes
+    hash_to_col: dict[bytes, int] | None = None  # sparse: chunk hash -> row column
+    found_rows: list[Bitmap] | None = None  # stashed when the sparse poll completes
     l2_keys: int = 0  # sparse keys needing an L2 load (0 => no L2 read, span skipped)
     coord_submitted: bool = False  # coordinator match query was issued
     coord_deadline: float = 0.0  # time.monotonic() wall-clock cutoff for the leg
@@ -170,57 +168,52 @@ class LookupMixin:
             "tuple[_BlendReadGroups, dict[int, MemoryLayoutDesc], AttnWindowDesc]"
         ),
         matches: list[CBMatchResult],
-    ) -> "tuple[PrefetchHandle, dict[bytes, list], list[int]]":
+    ) -> "tuple[PrefetchHandle, dict[bytes, list], dict[bytes, int]]":
         """Coalesce all matches into one sparse L2->L1 prefetch (non-blocking).
 
         The caller polls ``query_prefetch_status(handle)`` then calls
-        :meth:`_sparse_classify` with the found set.
+        :meth:`_sparse_classify` with the found rows.
 
         Returns:
-            The prefetch handle, per-hash object keys (chunk-major), and each
-            expanded position's deduped-key index (maps the per-key found set
-            back to every chunk).
+            The prefetch handle, per-hash object keys (one per blend read
+            group x rank, group-major / rank-minor), and each hash's column
+            in the submitted key rows (maps the per-row found bitmaps back
+            to every chunk).
         """
         read, layouts, attn_desc = resolved
-        per_hash_obj_keys: dict[bytes, list] = {}
-        all_hashes = [r.hash for r in matches]
-        all_obj_keys = _cb_chunk_major_object_keys(key, all_hashes, read.blend_gids)
-        per_chunk = len(all_obj_keys) // len(all_hashes) if all_hashes else 0
-        for i, h in enumerate(all_hashes):
-            per_hash_obj_keys[h] = all_obj_keys[i * per_chunk : (i + 1) * per_chunk]
+        # Dedup hashes before submit: sparse keeps one read lock per loaded
+        # key, so a duplicate would leak.
+        uniq_hashes: list[bytes] = []
+        hash_to_col: dict[bytes, int] = {}
+        for r in matches:
+            if r.hash not in hash_to_col:
+                hash_to_col[r.hash] = len(uniq_hashes)
+                uniq_hashes.append(r.hash)
 
-        # Dedup keys before submit: sparse keeps one read lock per loaded key,
-        # so a duplicate would leak.
-        uniq_keys: list = []
-        key_to_uidx: dict = {}
-        expanded_uidx: list[int] = []
-        for k in all_obj_keys:
-            uidx = key_to_uidx.get(k)
-            if uidx is None:
-                uidx = len(uniq_keys)
-                key_to_uidx[k] = uidx
-                uniq_keys.append(k)
-            expanded_uidx.append(uidx)
+        key_groups = ipc_key_to_grouped_object_keys(
+            key, uniq_hashes, list(read.blend_gids), layouts, attn_desc
+        )
+        per_hash_obj_keys: dict[bytes, list] = {
+            h: [row.keys[col] for row in key_groups] for h, col in hash_to_col.items()
+        }
 
         handle: PrefetchHandle = self._ctx.storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(
-                keys=uniq_keys,
-                group_layout_descs=layouts,
+            PrefetchTaskSpec(
+                key_groups=key_groups,
                 num_kv_readers=key.require_num_kv_readers(),
-                policy=TrimPolicy.SPARSE,
-                attn_desc=_narrow_attn_desc(attn_desc, read.blend_gids),
+                fetching_policy="full",
             ),
             external_request_id=key.request_id,
         )
-        return handle, per_hash_obj_keys, expanded_uidx
+        return handle, per_hash_obj_keys, hash_to_col
 
     def _sparse_classify(
         self,
         key: IPCCacheServerKey,
         matches: list[CBMatchResult],
-        found_uidx: set[int],
+        found_rows: list[Bitmap],
         per_hash_obj_keys: dict[bytes, list],
-        expanded_uidx: list[int],
+        hash_to_col: dict[bytes, int],
     ) -> list[CBMatchResult]:
         """Classify each prefetched chunk as found or stale, and finalize state.
 
@@ -232,12 +225,11 @@ class LookupMixin:
         Returns:
             The found subset, in cur_st order.
         """
-        per_chunk = len(expanded_uidx) // len(matches) if matches else 0
         found_cb_match_result: list[CBMatchResult] = []
         stale_hashes: list[bytes] = []
-        for j, r in enumerate(matches):
-            base = j * per_chunk
-            if all(expanded_uidx[base + t] in found_uidx for t in range(per_chunk)):
+        for r in matches:
+            col = hash_to_col.get(r.hash)
+            if col is not None and all(row.test(col) for row in found_rows):
                 found_cb_match_result.append(r)
             else:
                 stale_hashes.append(r.hash)
@@ -305,7 +297,6 @@ class LookupMixin:
         self,
         key: IPCCacheServerKey,
         tp_size: int,
-        policy: TrimPolicy,
     ) -> _PrefixLegSubmit:
         """Submit the CB prefix prefetch (non-blocking).
 
@@ -315,11 +306,11 @@ class LookupMixin:
         Args:
             key: Request key (token IDs, request_id, model, world_size).
             tp_size: Tensor-parallel size for MLA multi-reader locking.
-            policy: ``PREFIX`` or ``SEGMENTED_PREFIX``.
 
         Returns:
-            ``(handle, world_size, prefix_gids, windows, n_chunks,
-            no_gpu_context)``. ``handle`` is None when there is no GPU context
+            ``(handle, prefix_gids, row_windows, n_chunks, no_gpu_context)``.
+            ``row_windows`` holds the sliding window of each submitted key
+            row, in row order. ``handle`` is None when there is no GPU context
             or no full chunk (the poll then reports 0 coverage);
             ``no_gpu_context`` is True only for the former.
         """
@@ -336,13 +327,13 @@ class LookupMixin:
                 model_name,
                 world_size,
             )
-            return None, world_size, (), (), 0, True
+            return None, (), (), 0, True
         read, layouts, attn_desc = resolved
         layout_desc = layouts[read.attn_gid]
 
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         if not chunk_hashes:
-            return None, world_size, (), (), 0, False
+            return None, (), (), 0, False
 
         # Build the metadata dict only when a subscriber is listening.
         if self._event_bus.has_subscribers(EventType.MP_LOOKUP):
@@ -363,28 +354,27 @@ class LookupMixin:
             )
 
         num_kv_readers = key.require_num_kv_readers()
-        # PREFIX leg reads attention + recurrent, never aux. Chunk-major so
-        # the fold stays prefix-aligned with _poll_prefix_leg's divisor.
-        obj_keys = _cb_chunk_major_object_keys(key, chunk_hashes, read.prefix_gids)
-        prefix_desc = _narrow_attn_desc(attn_desc, read.prefix_gids)
+        # PREFIX leg reads attention + recurrent, never aux: one key row per
+        # (read group, kv rank), each with its own attention window.
+        spec = PrefetchTaskSpec(
+            key_groups=ipc_key_to_grouped_object_keys(
+                key, chunk_hashes, list(read.prefix_gids), layouts, attn_desc
+            ),
+            num_kv_readers=num_kv_readers,
+            fetching_policy="prefix",
+        )
+        row_windows = tuple(row.sliding_window_size for row in spec.key_groups)
         session = self._ctx.session_manager.get_or_create(rid)
         session.set_tokens(list(key.token_ids))
         session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
         handle = self._ctx.storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(
-                keys=obj_keys,
-                group_layout_descs=layouts,
-                num_kv_readers=num_kv_readers,
-                policy=policy,
-                attn_desc=prefix_desc,
-            ),
+            spec,
             external_request_id=rid,
         )
         return (
             handle,
-            world_size,
             read.prefix_gids,
-            tuple(prefix_desc.num_chunks_in_sw),
+            row_windows,
             len(chunk_hashes),
             False,
         )
@@ -401,27 +391,21 @@ class LookupMixin:
             under SEGMENTED_PREFIX, else None.
         """
         if job.prefix_handle is not None:
-            bm = self._ctx.storage_manager.query_prefetch_status(job.prefix_handle)
-            if bm is None:
+            rows = self._ctx.storage_manager.query_prefetch_status(job.prefix_handle)
+            if rows is None:
                 return None  # still loading
             # Window-aware fold: a windowed group's out-of-window keys are
             # trimmed from the load (bits legitimately unset), so a plain
             # count_leading_ones would read those bits as a miss.
-            leading, _ = fold_unfold_ranked(
-                bm,
-                job.prefix_num_chunks,
-                job.prefix_world_size,
-                list(job.prefix_windows),
-            )
+            leading, _ = fold_unfold_grouped(rows, list(job.prefix_windows))
             # Retain a chunk only if EVERY key loaded (AND across the rank
             # shards of every read group); a chunk missing any is a gap.
             if segmented:
-                per_chunk = job.prefix_world_size * len(job.prefix_lock_gids)
-                shard_counts: dict[int, int] = {}
-                for ki in bm.get_indices_list():
-                    c = ki // per_chunk
-                    shard_counts[c] = shard_counts.get(c, 0) + 1
-                retained = sorted(c for c, n in shard_counts.items() if n == per_chunk)
+                retained = [
+                    c
+                    for c in range(job.prefix_num_chunks)
+                    if all(row.test(c) for row in rows)
+                ]
             else:
                 retained = None
         else:
@@ -474,24 +458,20 @@ class LookupMixin:
                     metadata={"num_tokens": len(key.token_ids)},
                 )
             )
-            # SEGMENTED_PREFIX is forced OFF for recurrent registrations:
+            # Segmented prefix is forced OFF for recurrent registrations:
             # pure-load post-gap rows would hole the recurrence scan, so a
             # gap must truncate the prefix.
             resolved_pre = self._resolve_cb_read_layouts(key.model_name, key.world_size)
             use_segmented = self._segmented_prefix and not (
                 resolved_pre is not None and resolved_pre[0].recurrent_gids
             )
-            prefix_policy = (
-                TrimPolicy.SEGMENTED_PREFIX if use_segmented else TrimPolicy.PREFIX
-            )
             (
                 prefix_handle,
-                prefix_ws,
                 prefix_gids,
                 prefix_windows,
                 prefix_n_chunks,
                 prefix_no_ctx,
-            ) = self._submit_prefix_leg(key, tp_size, prefix_policy)
+            ) = self._submit_prefix_leg(key, tp_size)
             # With a coordinator the fleet directory is the only match source;
             # skip the local matcher.
             matches: list[CBMatchResult]
@@ -516,7 +496,6 @@ class LookupMixin:
                 matches=matches,
                 num_tokens=len(key.token_ids),
                 prefix_handle=prefix_handle,
-                prefix_world_size=prefix_ws,
                 prefix_lock_gids=prefix_gids,
                 prefix_windows=prefix_windows,
                 prefix_num_chunks=prefix_n_chunks,
@@ -583,7 +562,7 @@ class LookupMixin:
                     (
                         job.handle,
                         job.per_hash_obj_keys,
-                        job.expanded_uidx,
+                        job.hash_to_col,
                     ) = self._sparse_prefetch_submit(key, resolved, job.non_prefix)
                     # Trace the span only when the prefetch actually reads L2.
                     job.l2_keys = len(job.handle.l2_orig_indices)
@@ -611,18 +590,18 @@ class LookupMixin:
             job.sparse_started = True
 
         # --- Sparse leg: poll (consume-once) until the scattered chunks land. ---
-        if job.handle is not None and job.found_uidx is None:
-            bm = self._ctx.storage_manager.query_prefetch_status(job.handle)
-            if bm is None:
+        if job.handle is not None and job.found_rows is None:
+            rows = self._ctx.storage_manager.query_prefetch_status(job.handle)
+            if rows is None:
                 return None  # sparse still loading -> defer
-            job.found_uidx = set(bm.get_indices_list())
+            job.found_rows = rows
             if job.l2_keys > 0:
                 self._event_bus.publish(
                     Event(
                         event_type=EventType.CB_SPARSE_PREFETCH_END,
                         session_id=rid,
                         metadata={
-                            "found_keys": len(job.found_uidx),
+                            "found_keys": sum(row.popcount() for row in rows),
                             "l2_keys": job.l2_keys,
                         },
                     )
@@ -633,9 +612,9 @@ class LookupMixin:
             fetched = self._sparse_classify(
                 key,
                 job.non_prefix or [],
-                job.found_uidx or set(),
+                job.found_rows or [],
                 job.per_hash_obj_keys or {},
-                job.expanded_uidx or [],
+                job.hash_to_col or {},
             )
             # Overlap dedup over the retrievable candidates; dropped
             # candidates' keys are released by the retrieve's orphan sweep.

@@ -7,6 +7,7 @@ from enum import Enum
 from functools import partial
 from typing import Literal
 import threading
+import time
 
 # Third Party
 import httpx
@@ -15,12 +16,11 @@ import httpx
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
-    PrefetchRequestSpec,
-    TrimPolicy,
+    PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel import (
@@ -47,6 +47,62 @@ _INVALID_ADDRESS = TransferChannelAddress(offset=-1, size=0)
 
 # Consecutive missed polls a peer may be absent before its adapter is removed.
 _MAX_MISSES = 3
+
+
+def _group_keys_by_object_group(
+    keys: list[ObjectKey],
+    group_layout_descs: dict[int, MemoryLayoutDesc],
+) -> list[GroupedObjectKeys]:
+    """Bucket a flat key list into one key row per object group.
+
+    Each object group becomes a single row holding its keys in request
+    order (kv ranks mixed), paired with that group's layout.
+
+    Args:
+        keys: The keys received over RPC, in request order.
+        group_layout_descs: Memory layout per object group id.
+
+    Returns:
+        One :class:`GroupedObjectKeys` per object group, in first-seen order.
+        Empty when ``keys`` is empty, when the object groups received
+        different numbers of keys, or when a key's object group has no entry
+        in ``group_layout_descs``.
+
+    Note:
+        Now we only do ``"full"`` fetching.
+    """
+    by_group: dict[int, list[ObjectKey]] = {}
+    for key in keys:
+        by_group.setdefault(key.object_group_id, []).append(key)
+    group_sizes = {gid: len(group_keys) for gid, group_keys in by_group.items()}
+    if len(set(group_sizes.values())) > 1:
+        logger.error(
+            "P2P lookup: object groups received different numbers of keys "
+            "(%s); treating all %d keys as misses",
+            group_sizes,
+            len(keys),
+        )
+        return []
+    rows: list[GroupedObjectKeys] = []
+    for object_group_id, group_keys in by_group.items():
+        layout_desc = group_layout_descs.get(object_group_id)
+        if layout_desc is None:
+            logger.error(
+                "P2P lookup: no layout for object group %d (have %s); "
+                "treating all %d keys as misses",
+                object_group_id,
+                sorted(group_layout_descs),
+                len(keys),
+            )
+            return []
+        rows.append(
+            GroupedObjectKeys(
+                keys=group_keys,
+                object_group_id=object_group_id,
+                layout_desc=layout_desc,
+            )
+        )
+    return rows
 
 
 class _P2PState(Enum):
@@ -85,6 +141,10 @@ class _P2PLookupJob:
 
     keys: list[ObjectKey]
     """ The object keys submitted for this lookup, in request order """
+
+    key_groups: list[GroupedObjectKeys]
+    """ The same keys as submitted to the storage manager, one row per
+    object group; the status result is one bitmap per row """
 
 
 class P2PController:
@@ -224,24 +284,30 @@ class P2PController:
             task_id = self._next_task_id
             self._next_task_id += 1
 
-        # NOTE: skip_l2=True -- only objects already resident in L1 are locked.
-        handle = self._ctx.storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(
-                keys=keys,
-                group_layout_descs=group_layout_descs,
-                # SPARSE + skip_l2 never folds windows; the attn_desc only
-                # has to cover the same object groups as group_layout_descs.
-                attn_desc=AttnWindowDesc(
-                    num_chunks_in_sw=[-1] * len(group_layout_descs)
-                ),
-                policy=TrimPolicy.SPARSE,
-            ),
-            external_request_id=f"p2p-{task_id}",
-            skip_l2=True,
-        )
+        key_groups = _group_keys_by_object_group(keys, group_layout_descs)
+        if key_groups:
+            # NOTE: skip_l2=True -- only objects already resident in L1 are
+            # locked; "full" keeps every resident key, gaps allowed.
+            handle = self._ctx.storage_manager.submit_prefetch_task(
+                PrefetchTaskSpec(key_groups=key_groups, fetching_policy="full"),
+                external_request_id=f"p2p-{task_id}",
+                skip_l2=True,
+            )
+        else:
+            # Nothing to look up: an already-complete empty handle.
+            handle = PrefetchHandle(
+                prefetch_request_id=-1,
+                external_request_id=f"p2p-{task_id}",
+                l1_found_indices=(),
+                l1_hit_chunks=0,
+                total_requested_keys=0,
+                submit_time=time.monotonic(),
+            )
 
         with self._job_lock:
-            self._jobs[task_id] = _P2PLookupJob(handle=handle, keys=keys)
+            self._jobs[task_id] = _P2PLookupJob(
+                handle=handle, keys=keys, key_groups=key_groups
+            )
 
         logger.debug(
             "P2P lookup submitted: task_id=%d, %d keys, %d L1 hits",
@@ -283,12 +349,12 @@ class P2PController:
             )
             return None
 
-        found = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if found is None:
+        found_rows = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        if found_rows is None:
             # Still in progress (only possible once L2 prefetch is enabled).
             return None
 
-        addresses = self._build_addresses(job, found)
+        addresses = self._build_addresses(job, found_rows)
 
         with self._job_lock:
             self._jobs.pop(task_id, None)
@@ -315,33 +381,44 @@ class P2PController:
     def _build_addresses(
         self,
         job: _P2PLookupJob,
-        found: Bitmap,
+        found_rows: list[Bitmap],
     ) -> list[TransferChannelAddress]:
         """Build the per-key transfer addresses for a completed lookup.
 
-        Keys at set indices of ``found`` are the locked L1 hits; their
-        addresses are read via ``unsafe_read``. Every other key gets an
-        invalid address.
+        ``found_rows`` is parallel to ``job.key_groups``; the keys at its set
+        bits are the locked L1 hits, whose addresses are read via
+        ``unsafe_read``. Every other key gets an invalid address. Addresses
+        are returned in ``job.keys`` (request) order.
         """
         addresses = [_INVALID_ADDRESS] * len(job.keys)
-        found_indices = found.get_indices_list()
-        if not found_indices:
+        if not job.key_groups:
+            return addresses
+        found_keys = [
+            key
+            for row, found in zip(job.key_groups, found_rows, strict=True)
+            for key in found.gather(row.keys)
+        ]
+        if not found_keys:
             return addresses
 
-        found_keys = [job.keys[i] for i in found_indices]
         good_keys, good_objs = self._ctx.storage_manager.unsafe_read(found_keys)
         obj_by_key = dict(zip(good_keys, good_objs, strict=True))
 
-        for i, key in zip(found_indices, found_keys, strict=True):
+        positions: dict[ObjectKey, list[int]] = {}
+        for i, key in enumerate(job.keys):
+            positions.setdefault(key, []).append(i)
+        for key in found_keys:
             obj = obj_by_key.get(key)
             if obj is None:
                 # Locked but unreadable (e.g. evicted under a race); leave it
                 # marked invalid so the peer skips it.
                 continue
-            addresses[i] = TransferChannelAddress(
+            address = TransferChannelAddress(
                 offset=obj.shm_offset,
                 size=obj.shm_byte_length,
             )
+            for i in positions.get(key, ()):
+                addresses[i] = address
         return addresses
 
     # -----------------------------------------------------------------
