@@ -23,7 +23,9 @@ from lmcache.v1.distributed.l2_adapters import s3_l2_adapter as s3mod
 from lmcache.v1.distributed.l2_adapters.s3_l2_adapter import (
     S3L2Adapter,
     S3L2AdapterConfig,
+    _build_delete_objects_body,
     _object_key_to_string,
+    _parse_delete_objects_errors,
 )
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -100,6 +102,21 @@ def _path_to_key(path: str) -> str:
     from urllib.parse import unquote
 
     return unquote(path.lstrip("/"))
+
+
+def _parse_delete_request_keys(xml: bytes) -> list[str]:
+    """Extract ``<Object><Key>`` strings from a DeleteObjects request body."""
+    # Standard
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(xml)
+    return [
+        key.text
+        for obj in root
+        if obj.tag.rsplit("}", 1)[-1] == "Object"
+        for key in obj
+        if key.tag.rsplit("}", 1)[-1] == "Key" and key.text
+    ]
 
 
 def _build_list_objects_v2_response(
@@ -199,6 +216,40 @@ class _FakeS3Request:
                     on_headers(200, [("content-type", "application/xml")])
                 if on_body is not None:
                     on_body(xml, 0)
+                if on_done is not None:
+                    on_done(error=None, status_code=200)
+                self.finished_future.set_result(None)
+            except Exception as e:
+                if not self.finished_future.done():
+                    self.finished_future.set_exception(e)
+            return
+
+        # DeleteObjects (multi-delete) is a POST to the bucket root with a
+        # ``?delete`` subresource and an XML body listing keys. Intercept before
+        # the per-key branch so it isn't treated as an object named "".
+        if (
+            method == "POST"
+            and operation_name == "DeleteObjects"
+            and path == "/?delete"
+        ):
+            request.body_stream.seek(0)
+            xml = bytes(request.body_stream.read())
+            keys = _parse_delete_request_keys(xml)
+            try:
+                with _BACKEND._lock:
+                    _BACKEND._delete_count += len(keys)
+                for k in keys:
+                    _BACKEND.delete(k)
+                if on_headers is not None:
+                    on_headers(200, [("content-type", "application/xml")])
+                # Quiet mode: empty DeleteResult body means every key succeeded.
+                if on_body is not None:
+                    on_body(
+                        b'<?xml version="1.0"?><DeleteResult '
+                        b'xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+                        b"</DeleteResult>",
+                        0,
+                    )
                 if on_done is not None:
                     on_done(error=None, status_code=200)
                 self.finished_future.set_result(None)
@@ -542,6 +593,15 @@ class TestEviction:
         assert _BACKEND.contains(_object_key_to_string(key))
         adapter.delete([key])
         assert not _BACKEND.contains(_object_key_to_string(key))
+
+    def test_delete_batches_over_1000_keys(self, adapter):
+        # >1000 keys → multiple DeleteObjects requests; all must be removed.
+        keys = [create_object_key(i) for i in range(1500)]
+        for k in keys:
+            self._store(adapter, k, create_memory_obj())
+        adapter.delete(keys)
+        for k in keys:
+            assert not _BACKEND.contains(_object_key_to_string(k))
 
     def test_lock_blocks_delete(self, adapter):
         key = create_object_key(1)
@@ -902,3 +962,99 @@ class TestS3L2AdapterListKeys:
             page.entries[0].key
             == create_object_key(0, model_name="m").to_encoded_object_key()
         )
+
+
+# =============================================================================
+# DeleteObjects (multi-delete) helper unit tests
+# =============================================================================
+
+
+def test_build_delete_objects_body_quiet_and_escaped():
+    body = _build_delete_objects_body(["m@0@aa", "weird&<key>"])
+    assert b"<Quiet>true</Quiet>" in body
+    # ElementTree XML-escapes special chars in keys.
+    assert b"weird&amp;&lt;key&gt;" in body
+    assert _parse_delete_request_keys(body) == ["m@0@aa", "weird&<key>"]
+
+
+def test_parse_delete_objects_errors_empty_is_all_ok():
+    assert _parse_delete_objects_errors(b"") == set()
+    assert _parse_delete_objects_errors(b"   ") == set()
+
+
+def test_parse_delete_objects_errors_reports_failed_keys():
+    # Quiet-mode response with a namespace and one failed key.
+    resp = (
+        b'<?xml version="1.0"?><DeleteResult '
+        b'xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+        b"<Error><Key>m@1@bb</Key><Code>AccessDenied</Code></Error>"
+        b"</DeleteResult>"
+    )
+    assert _parse_delete_objects_errors(resp) == {"m@1@bb"}
+
+
+def test_parse_delete_objects_errors_malformed_raises():
+    # Third Party
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        _parse_delete_objects_errors(b"<not-xml")
+
+
+# =============================================================================
+# A1 best-effort writes + A4 coalescing
+# =============================================================================
+
+
+def _store_and_drain(adapter, keys, objs):
+    adapter.submit_store_task(keys, objs)
+    wait_for_event_fd(adapter.get_store_event_fd())
+    adapter.pop_completed_store_tasks()
+
+
+def test_store_rejected_at_reject_watermark():
+    # cap 1 MB, reject at 0.8: one 1 MB object fills it; the next store is dropped
+    # (best-effort cache-miss) rather than written, bounding the overshoot.
+    config = S3L2AdapterConfig(
+        s3_endpoint="s3://test-bucket",
+        s3_region="us-east-1",
+        s3_prefer_http2=False,
+        s3_num_io_threads=1,
+        max_capacity_gb=0.001,  # 1 MiB
+        store_reject_watermark=0.8,
+    )
+    a = S3L2Adapter(config)
+    try:
+        k1 = create_object_key(1)
+        k2 = create_object_key(2)
+        # ~1 MB → usage ~0.93
+        _store_and_drain(a, [k1], [create_memory_obj(size=250_000)])
+        assert _BACKEND.contains(_object_key_to_string(k1))
+        # usage now >= 0.8 → k2 dropped, not written.
+        _store_and_drain(a, [k2], [create_memory_obj(size=250_000)])
+        assert not _BACKEND.contains(_object_key_to_string(k2))
+        assert a.report_status()["store_rejected_chunks"] >= 1
+    finally:
+        a.close()
+
+
+def test_store_coalesces_duplicate_keys():
+    # Same content-addressed key twice in one batch: the second is coalesced
+    # (single-flight), so the object is written once, not twice.
+    config = S3L2AdapterConfig(
+        s3_endpoint="s3://test-bucket",
+        s3_region="us-east-1",
+        s3_prefer_http2=False,
+        s3_num_io_threads=1,
+        max_capacity_gb=0.001,
+    )
+    a = S3L2Adapter(config)
+    try:
+        k = create_object_key(7)
+        _store_and_drain(a, [k, k], [create_memory_obj(), create_memory_obj()])
+        assert _BACKEND.contains(_object_key_to_string(k))
+        assert a.report_status()["store_coalesced_chunks"] >= 1
+        # In-flight set is released after completion.
+        assert a.report_status()["store_in_flight_chunks"] == 0
+    finally:
+        a.close()
