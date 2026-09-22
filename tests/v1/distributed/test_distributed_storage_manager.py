@@ -1015,7 +1015,7 @@ class TestStorageManagerGroupedRows:
         }
         resident = [k for keys in rows_keys.values() for k in keys]
         resident.remove(rows_keys[(1, 1)][2])
-        ret = sm.reserve_write(resident, basic_layout, mode="new")
+        ret = sm.reserve_write(resident, basic_layout)
         assert len(ret) == len(resident)
         sm.finish_write(list(ret.keys()))
 
@@ -1041,16 +1041,17 @@ class TestStorageManagerGroupedRows:
         assert [row.get_indices_list() for row in found] == [[0, 1]] * 4
 
         # Chunk 2 of the complete rows was L1-resident but lies past the
-        # model-wide hit: its read lock was released, so it is writable.
+        # model-wide hit: its read lock was released, so it is deletable.
         extra = [rows_keys[(0, 0)][2], rows_keys[(0, 1)][2], rows_keys[(1, 0)][2]]
-        assert len(sm.reserve_write(extra, basic_layout, mode="update")) == len(extra)
+        assert sm.delete_l1_keys(extra) == (len(extra), 0)
         # The retained keys are read-locked.
         retained = [
             rows_keys[(g, r)][c] for g in (0, 1) for r in (0, 1) for c in (0, 1)
         ]
-        assert len(sm.reserve_write(retained, basic_layout, mode="update")) == 0
+        assert sm.delete_l1_keys(retained) == (0, len(retained))
 
         sm.finish_read_prefetched(retained)
+        assert sm.delete_l1_keys(retained) == (len(retained), 0)
         sm.close()
 
     def test_full_policy_two_groups_keep_gaps_per_group(
@@ -1062,7 +1063,7 @@ class TestStorageManagerGroupedRows:
         g1_keys = [make_object_key(10 + c) for c in range(3)]
         # Resident: group 0 chunk 1; group 1 chunks 0 and 2.
         resident = [g0_keys[1], g1_keys[0], g1_keys[2]]
-        ret = sm.reserve_write(resident, basic_layout, mode="new")
+        ret = sm.reserve_write(resident, basic_layout)
         sm.finish_write(list(ret.keys()))
 
         handle = sm.submit_prefetch_task(
