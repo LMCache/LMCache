@@ -161,13 +161,8 @@ class EventIPCBackend(Protocol):
         ...
 
 
-# An exported IPC handle is only meaningful while the event it was taken from is
-# still alive: the importing process resolves the handle against the exporter's
-# event, and a destroyed event leaves it dangling. ``export_event`` therefore
-# keeps a strong reference to everything it hands out. The ring is bounded so a
-# long-lived backend cannot grow without limit; it must be large enough to cover
-# the window between export and the peer's import, which is microseconds to
-# milliseconds on the ``lmcache_driven`` transfer path.
+# Persist the reference to the IPC events for a while so that the inference engine
+# won't access the dangling references to the events.
 _EXPORTED_EVENT_RING_SIZE = 8192
 
 
@@ -229,9 +224,6 @@ class DefaultEventIPCBackend(EventIPCBackend):
 
     def export_event(self, event: object, device: object) -> bytes:
         """Serialize ``event`` into a process-portable IPC handle.
-
-        The event is retained (see ``_EXPORTED_EVENT_RING_SIZE``) because the
-        returned handle is only valid while the exporting event is alive.
 
         Args:
             event: The interprocess-capable event to export.
