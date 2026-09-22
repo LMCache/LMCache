@@ -417,6 +417,38 @@ class TransferContext(ABC):
             RuntimeError: If register() was not called first.
         """
 
+    def submit_store_with_chunk_events(
+        self,
+        request_id: str,
+        key: Any,
+        kv_caches: dict[str, torch.Tensor],
+        block_ids: list[list[int]],
+        event: IPCEvent | None,
+        blocks_in_chunk: int,
+    ) -> MessagingFuture:
+        """Submit a store that may report completed token ranges early.
+
+        The base implementation falls back to :meth:`submit_store`, whose
+        future has no ``take_completed_ranges``. Callers must therefore treat
+        early ranges as an optimization and still handle terminal completion as
+        the only guaranteed signal.
+
+        Args:
+            request_id: Identifier of the originating request.
+            key: Cache key for the stored range.
+            kv_caches: Registered KV cache tensors by layer name.
+            block_ids: Engine block IDs, indexed by engine group order.
+            event: Producer event ordering the store after the engine's writes.
+            blocks_in_chunk: Engine blocks covered by one LMCache chunk.
+
+        Returns:
+            A future for the store. It exposes ``take_completed_ranges`` only
+            when the transport supports per-chunk events.
+        """
+        return self.submit_store(
+            request_id, key, kv_caches, block_ids, event, blocks_in_chunk
+        )
+
     @abstractmethod
     def submit_retrieve(
         self,
@@ -619,6 +651,32 @@ class LMCacheDrivenTransferContext(TransferContext):
         return self._req_client.store(
             key, self._instance_id, block_ids, event_ipc_handle
         ).to_device_future(
+            device=self._device,
+            event_backend=self._event_backend,
+        )
+
+    def submit_store_with_chunk_events(
+        self,
+        _request_id: str,
+        key: Any,
+        kv_caches: dict[str, torch.Tensor],
+        block_ids: list[list[int]],
+        event: IPCEvent | None,
+        _blocks_in_chunk: int,
+    ) -> MessagingFuture:
+        """Submit a handle-based store with per-chunk D2H completion events."""
+        del kv_caches
+        if self._device is None or self._event_backend is None:
+            raise RuntimeError(
+                "LMCache-driven transfer context is not registered. "
+                "Call register() before submit_store_with_chunk_events()."
+            )
+        if event is None:
+            raise RuntimeError("LMCache-driven transfer requires an IPC event.")
+        event_ipc_handle = self._event_backend.export_event(event, self._device)
+        return self._req_client.store_with_chunk_events(
+            key, self._instance_id, block_ids, event_ipc_handle
+        ).to_chunk_event_device_future(
             device=self._device,
             event_backend=self._event_backend,
         )

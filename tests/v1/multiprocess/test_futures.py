@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import cast
 import gc
 import multiprocessing as mp
 import threading
@@ -12,6 +13,7 @@ import pytest
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.futures import CUDAMessagingFuture, MessagingFuture
+from lmcache.v1.platform.base.event_ipc import EventIPCBackend
 
 
 def _event_ipc_supported_for_active_device() -> bool:
@@ -253,6 +255,49 @@ def test_messaging_future_retains_reference_for_its_lifetime() -> None:
     del future
     gc.collect()
     assert resource_ref() is None
+
+
+def test_chunk_event_future_drains_ranges_before_terminal_event() -> None:
+    class EventBackend:
+        def __init__(self) -> None:
+            self.ready = {b"chunk-0": True, b"chunk-1": False, b"final": False}
+
+        def import_event(self, handle, _device):
+            return handle
+
+        def query_event(self, event):
+            return self.ready[event]
+
+        def synchronize_event(self, event, _device):
+            self.ready[event] = True
+
+    backend = EventBackend()
+    raw: MessagingFuture[tuple[bytes, list[tuple[bytes, int, int]], bool]] = (
+        MessagingFuture()
+    )
+    future = raw.to_chunk_event_device_future(
+        device=0, event_backend=cast(EventIPCBackend, backend)
+    )
+    assert future.take_completed_ranges() == ()
+
+    raw.set_result(
+        (
+            b"final",
+            [(b"chunk-0", 0, 8), (b"chunk-1", 8, 16)],
+            True,
+        )
+    )
+    assert future.take_completed_ranges() == ((0, 8),)
+    assert future.take_completed_ranges() == ()
+    assert not future.query()
+
+    backend.ready[b"chunk-1"] = True
+    assert future.take_completed_ranges() == ((8, 16),)
+    assert not future.query()
+
+    backend.ready[b"final"] = True
+    assert future.query()
+    assert future.result(timeout=0) is True
 
 
 # ==============================================================================

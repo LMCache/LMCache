@@ -48,6 +48,7 @@ REQUEST_NAMES = [
     "COMMIT_STORE",
     "PREPARE_RETRIEVE",
     "COMMIT_RETRIEVE",
+    "STORE_WITH_CHUNK_EVENTS",
 ]
 
 # Type alias for cache keys
@@ -142,6 +143,13 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "STORE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes],
             response_class=tuple[bytes, bool],
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Store with one stream-ordered source-safety event per token chunk.
+        # Returns (final_event, [(chunk_event, start, end)], success).
+        "STORE_WITH_CHUNK_EVENTS": ProtocolDefinition(
+            payload_classes=[KeyType, int, list[list[int]], bytes],
+            response_class=tuple[bytes, list[tuple[bytes, int, int]], bool],
             handler_type=HandlerType.BLOCKING,
         ),
         # Retrieve KV cache blocks
