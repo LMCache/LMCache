@@ -199,7 +199,7 @@ def test_reads_return_identical_bytes(
 
     # An odd number of blocks, so an object is never a round power of two.
     size = block_size * 7
-    keys = [f"test_model@00000000@{i:016x}" for i in range(6)]
+    keys = [f"test_model@00000000@0@{i:016x}" for i in range(6)]
     sources, dests, keep_alive = _aligned_pairs(len(keys), size, block_size)
 
     writer = LMCacheFSClient(str(tmp_path), 2, "", True, 0)
@@ -234,8 +234,8 @@ def test_pooled_read_tolerates_one_missing_object(tmp_path: Path) -> None:
         pytest.skip("filesystem block size is unavailable")
 
     size = block_size * 4
-    present = "test_model@00000000@aaaaaaaaaaaaaaaa"
-    absent = "test_model@00000000@bbbbbbbbbbbbbbbb"
+    present = "test_model@00000000@0@aaaaaaaaaaaaaaaa"
+    absent = "test_model@00000000@0@bbbbbbbbbbbbbbbb"
     _source_raw, source = _aligned_memoryview(size, block_size)
     _first_raw, first = _aligned_memoryview(size, block_size)
     _second_raw, second = _aligned_memoryview(size, block_size)
