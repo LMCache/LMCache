@@ -38,6 +38,11 @@ from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
+
+class _NixlStorageCapacityError(RuntimeError):
+    """Raised when a store batch cannot reserve enough storage slots."""
+
+
 # Main class
 
 
@@ -726,7 +731,8 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         slot indices and a single batched DMA write is issued. On success the
         key-to-storage mapping is recorded in ``_memory_objects``. On preparation
         or transfer failure, all allocated storage slots are freed and the
-        task is marked as failed.
+        task is marked as failed. Capacity exhaustion logs a warning; unexpected
+        failures include a traceback.
 
         Args:
             keys: Keys identifying each object to store.
@@ -739,7 +745,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         try:
             # Get memory page indices and storage slot indices
             mem_indices_flat = []
-            storage_indices_flat = []
+            storage_indices_flat: list[int] = []
             stored_keys = []
             storage_objs = []
             for key, obj in zip(keys, objects, strict=False):
@@ -756,7 +762,10 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 )
 
                 if not storage_indices:
-                    raise RuntimeError("Insufficient NIXL storage capacity")
+                    success = False
+                    raise _NixlStorageCapacityError(
+                        "Insufficient NIXL storage capacity"
+                    )
 
                 mem_indices_flat.extend(mem_indices)
                 storage_indices_flat.extend(storage_indices)
@@ -798,11 +807,14 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 self._notify_keys_stored(stored_keys, stored_sizes)
             bytes_transferred = sum(obj.size for obj in storage_objs)
 
+        except _NixlStorageCapacityError as exc:
+            logger.warning("NIXL store task %d failed: %s", task_id, exc)
         except Exception:
             logger.exception("NIXL store task %d failed", task_id)
             success = False
-            bytes_transferred = 0
 
+        if not success:
+            bytes_transferred = 0
             # Free storage indices after preparation or transfer failures.
             self.nixl_agent.pool.batched_free(storage_indices_flat)
 

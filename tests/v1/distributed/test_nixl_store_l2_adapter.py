@@ -7,8 +7,10 @@ Tests only use public methods and do not access private fields.
 """
 
 # Standard
+from collections.abc import Iterator
 from unittest.mock import call, patch
 import errno
+import logging
 import os
 import select
 import shutil
@@ -67,6 +69,7 @@ class _RecordingListener(L2AdapterListener):
 # First Party
 from lmcache.v1.memory_management import (  # noqa: E402
     MemoryFormat,
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
@@ -81,6 +84,7 @@ _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 PAGE_SIZE = 4096  # 4 KB per page
 NUM_BUFFER_PAGES = 20  # pages in the registered memory buffer
 POOL_SIZE = 20  # number of storage descriptors to pre-allocate
+_LOGGER_NAME = "lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter"
 
 # =============================================================================
 # Test Helpers
@@ -149,6 +153,25 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
 # =============================================================================
 # Test Fixtures
 # =============================================================================
+
+
+@pytest.fixture
+def store_logs(caplog: pytest.LogCaptureFixture) -> Iterator[pytest.LogCaptureFixture]:
+    """Capture adapter logs despite its disabled logger propagation.
+
+    Args:
+        caplog: Pytest fixture that collects emitted log records.
+
+    Yields:
+        The capture fixture with adapter warnings and errors included.
+    """
+    logger = logging.getLogger(_LOGGER_NAME)
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+            yield caplog
+    finally:
+        logger.removeHandler(caplog.handler)
 
 
 @pytest.fixture
@@ -335,15 +358,19 @@ class TestStoreInterface:
         assert task_id in completed
         assert completed[task_id].is_successful()
 
-    def test_store_fails_atomically_when_batch_exceeds_pool(self, adapter):
-        """Pool exhaustion should roll back every allocation in the batch."""
+    def test_store_fails_atomically_when_batch_exceeds_pool(
+        self,
+        adapter: tuple[NixlStoreL2Adapter, torch.Tensor],
+        store_logs: pytest.LogCaptureFixture,
+    ) -> None:
+        """Pool exhaustion should roll back the batch and warn without a traceback."""
         adpt, buf = adapter
         listener = _RecordingListener()
         adpt.register_listener(listener)
         initial_status = adpt.report_status()
 
         keys = [create_object_key(i) for i in range(POOL_SIZE + 1)]
-        objs = [
+        objs: list[MemoryObj] = [
             create_memory_obj(buf, page_index=i % NUM_BUFFER_PAGES)
             for i in range(POOL_SIZE + 1)
         ]
@@ -361,16 +388,28 @@ class TestStoreInterface:
         assert adpt.get_usage().total_bytes_used == 0
         assert listener.stored == []
 
+        records = [
+            record for record in store_logs.records if record.name == _LOGGER_NAME
+        ]
+        assert len(records) == 1
+        assert records[0].levelno == logging.WARNING
+        assert "Insufficient NIXL storage capacity" in records[0].getMessage()
+        assert records[0].exc_info is None
+
         lookup_fd = adpt.get_lookup_and_lock_event_fd()
-        lookup_task_id = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        lookup_task_id = adpt.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
         assert bitmap is not None
         for index in range(len(keys)):
             assert bitmap.test(index) is False
 
-    def test_store_fails_when_pool_is_full(self, adapter):
-        """Pool exhaustion should preserve existing data and accounting."""
+    def test_store_fails_when_pool_is_full(
+        self,
+        adapter: tuple[NixlStoreL2Adapter, torch.Tensor],
+        store_logs: pytest.LogCaptureFixture,
+    ) -> None:
+        """A full pool should warn without a traceback and preserve existing data."""
         adpt, buf = adapter
         existing_key = create_object_key(1)
         existing_obj = create_memory_obj(buf, page_index=0, num_pages=POOL_SIZE)
@@ -397,9 +436,17 @@ class TestStoreInterface:
         )
         assert adpt.get_usage() == usage_before
 
+        records = [
+            record for record in store_logs.records if record.name == _LOGGER_NAME
+        ]
+        assert len(records) == 1
+        assert records[0].levelno == logging.WARNING
+        assert "Insufficient NIXL storage capacity" in records[0].getMessage()
+        assert records[0].exc_info is None
+
         lookup_fd = adpt.get_lookup_and_lock_event_fd()
         lookup_task_id = adpt.submit_lookup_and_lock_task(
-            [existing_key, new_key], _EMPTY_LAYOUT
+            [existing_key, new_key], {0: _EMPTY_LAYOUT}
         )
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
@@ -407,6 +454,45 @@ class TestStoreInterface:
         assert bitmap.test(0) is True
         assert bitmap.test(1) is False
         adpt.submit_unlock([existing_key])
+
+    def test_store_preparation_failure_logs_traceback_and_releases_slots(
+        self,
+        adapter: tuple[NixlStoreL2Adapter, torch.Tensor],
+        store_logs: pytest.LogCaptureFixture,
+    ) -> None:
+        """Unexpected preparation errors should roll back and retain the traceback."""
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+        initial_status = adpt.report_status()
+        keys = [create_object_key(i) for i in range(2)]
+        objs: list[MemoryObj] = [create_memory_obj(buf, page_index=i) for i in range(2)]
+        store_fd = adpt.get_store_event_fd()
+
+        with patch.object(
+            adpt.nixl_agent,
+            "get_mem_to_storage_handle",
+            side_effect=RuntimeError("NIXL transfer preparation failed"),
+        ):
+            task_id = adpt.submit_store_task(keys, objs)
+            assert wait_for_event_fd(store_fd, timeout=5.0)
+
+        result = adpt.pop_completed_store_tasks()[task_id]
+        assert not result.is_successful()
+        assert result.bytes_transferred() == 0
+        assert (
+            adpt.report_status()["pool_free_slots"] == initial_status["pool_free_slots"]
+        )
+        assert adpt.get_usage().total_bytes_used == 0
+        assert listener.stored == []
+
+        records = [
+            record for record in store_logs.records if record.name == _LOGGER_NAME
+        ]
+        assert len(records) == 1
+        assert records[0].levelno == logging.ERROR
+        assert records[0].exc_info is not None
+        assert records[0].exc_info[0] is RuntimeError
 
     def test_store_existing_keys_succeeds_without_allocating(self, adapter):
         """A no-op store should succeed without consuming pool slots."""
