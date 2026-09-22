@@ -9,6 +9,7 @@ without a CUDA build.
 # Standard
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+import logging
 
 # Third Party
 import pytest
@@ -59,14 +60,35 @@ def test_eligible_layout_is_supported(native):
     assert _supported(_cache_context([_FMT_ELIGIBLE])) is True
 
 
-def test_every_kernel_group_must_be_eligible(native, caplog):
+class _RecordingHandler(logging.Handler):
+    """Collects formatted messages emitted on the module logger."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+def test_every_kernel_group_must_be_eligible(native):
     """One ineligible group disqualifies the whole object group, logged once."""
     cc = _cache_context([_FMT_ELIGIBLE, _FMT_HND])
-    with caplog.at_level("INFO"):
+    # lmcache's init_logger sets propagate=False and levels the handlers at
+    # LMCACHE_LOG_LEVEL, so caplog sees nothing when that is above INFO. Attach
+    # our own handler and force the level for the duration of the test.
+    handler = _RecordingHandler()
+    original_level = mod.logger.level
+    mod.logger.setLevel(logging.INFO)
+    mod.logger.addHandler(handler)
+    try:
         assert _supported(cc) is False
         # Repeated decisions do not repeat the message.
         assert _supported(cc) is False
-    assert sum("not eligible" in r.message for r in caplog.records) == 1
+    finally:
+        mod.logger.removeHandler(handler)
+        mod.logger.setLevel(original_level)
+    assert sum("not eligible" in m for m in handler.messages) == 1
 
 
 def test_missing_host_block_ids_is_unsupported(native):
