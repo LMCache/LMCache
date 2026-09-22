@@ -73,6 +73,9 @@ caller-provided load buffers during prefetch.
 - ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
   through ``RawBlockCore``. Slot reclamation is driven by the shared/global
   L2 eviction controller or explicit ``delete()`` calls.
+- POSIX restart recovery validates slot headers with an internal pool of 8
+  reader threads. Regular ``io_uring`` batches header reads up to
+  ``iouring_queue_depth``, while ``io_uring_cmd`` keeps serial validation.
 - ``slot_bytes``, ``header_bytes``, and ``meta_total_bytes`` must be multiples
   of ``block_align``.
 - If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should be

@@ -28,7 +28,10 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.config import (
+    KafkaCacheEventSourceConfig,
+    MPCoordinatorConfig,
+)
 from lmcache.v1.mp_coordinator.controllers import build_controllers
 from lmcache.v1.mp_coordinator.controllers.base import ControllerRuntime
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
@@ -38,7 +41,11 @@ from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
     CacheEventConsumer,
 )
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
+from lmcache.v1.mp_coordinator.ingest.event_source import CacheEventSource
 from lmcache.v1.mp_coordinator.ingest.http_event_source import HttpCacheEventSource
+from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
+    KafkaCacheEventSource,
+)
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
     save_checkpoint,
@@ -111,7 +118,15 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # to read across the consumers consistently.
     quiesce = QuiesceLock()
     event_gate = EventGate(event_broadcaster, quiesce)
-    event_source = HttpCacheEventSource(event_gate)
+    # Exactly one source feeds the gate, chosen by the config: the HTTP push
+    # source behind ``POST /events`` or the Kafka pull source, never both, so
+    # every emitter's stream has one ordered path in (which is what the
+    # gate's per-emitter seq cursor assumes).
+    event_source: CacheEventSource
+    if isinstance(config.event_source_config, KafkaCacheEventSourceConfig):
+        event_source = KafkaCacheEventSource(event_gate, config.event_source_config)
+    else:
+        event_source = HttpCacheEventSource(event_gate)
 
     # The gate is named because it is durable but is neither a view nor
     # a controller; everything else advertises its own state.
