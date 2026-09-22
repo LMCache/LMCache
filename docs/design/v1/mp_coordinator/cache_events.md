@@ -42,17 +42,18 @@ storage layer ──► EventBus ──► CacheEventSubscriber ──► CacheE
   envelope with exactly one batch, keeping the HTTP and Kafka wire
   vocabulary identical.
 
-The Kafka sink is producer-side only in this milestone. Until
-coordinator-side Kafka consumption lands, retained records are not
-consumed by the coordinator; direct HTTP remains the default end-to-end
+A coordinator started with `--event-transport kafka` consumes the topic
+through `KafkaCacheEventSource` (see [ingest.md](ingest.md)) instead of
+serving `POST /events`; direct HTTP remains the default end-to-end
 transport.
 
 On the coordinator side, transport adapters converge at
-`EventGate.ingest_batches`. The current
-`HttpCacheEventSource` is explicitly non-durable and advertises no replay
-capability. Gate cursors (`instance_id` / `incarnation` / `seq`) remain
-separate from a future durable transport's seek position (for example
-Kafka partition offsets).
+`EventGate.ingest_batches`. `HttpCacheEventSource` is non-durable and
+advertises no replay capability; `KafkaCacheEventSource` (selected by
+`--event-transport kafka` in place of the HTTP source, see
+[ingest.md](ingest.md)) polls the topic and advertises `seekable`. Gate cursors (`instance_id` / `incarnation` /
+`seq`) remain separate from Kafka's partition offsets, which the consumer
+group commits.
 
 ## Batching and sequencing (inside the subscriber)
 
