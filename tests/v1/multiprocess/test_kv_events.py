@@ -29,8 +29,7 @@ from lmcache.v1.multiprocess.modules.management import (
     KVEventSubscriber,
     ManagementModule,
 )
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
-from lmcache.v1.multiprocess.request_handler import iter_request_handlers
+from lmcache.v1.multiprocess.request_handler import HandlerType, iter_request_handlers
 
 CHUNK_SIZE = 4
 MODEL = "model-a"
@@ -316,7 +315,7 @@ def _module(
 
 def test_the_poll_handler_is_served_synchronously() -> None:
     handlers = iter_request_handlers(ManagementModule)
-    poll = [h for h in handlers if h.options.request_type == RequestType.POLL_KV_EVENTS]
+    poll = [h for h in handlers if h.operation == "poll_kv_events"]
     assert [h.options.handler_type for h in poll] == [HandlerType.SYNC]
 
 

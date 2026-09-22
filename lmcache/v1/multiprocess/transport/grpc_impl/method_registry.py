@@ -9,11 +9,7 @@ from types import MappingProxyType
 from typing import Any, Callable
 
 # First Party
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-    get_payload_classes,
-    get_response_class,
-)
+from lmcache.v1.multiprocess.rpc import RpcOperation, get_rpc_spec, get_rpc_specs
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
@@ -41,7 +37,7 @@ class GrpcMethodCodec:
     """Compiled protobuf converters for one generated gRPC method."""
 
     full_name: str
-    request_type: RequestType
+    operation: RpcOperation
     request_message_class: type[Any]
     response_message_class: type[Any]
     payload_types: tuple[Any, ...]
@@ -98,34 +94,31 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
         Read-only codec lookup table keyed by full protobuf method name.
 
     Raises:
-        RuntimeError: If a generated method has no matching request type, or
-            a protobuf method or request type is duplicated.
+        RuntimeError: If a generated method has no matching RPC contract, or
+            a protobuf method or operation is duplicated.
         TypeError: If a protobuf message cannot represent its annotated types.
     """
     by_full_name: dict[str, GrpcMethodCodec] = {}
-    request_types: set[RequestType] = set()
+    operations: set[RpcOperation] = set()
     for _binding, method in iter_methods():
-        request_name = client_method_name(method.name).upper()
+        operation = client_method_name(method.name)
         try:
-            request_type = RequestType[request_name]
+            rpc_spec = get_rpc_spec(operation)
         except KeyError as exc:
             raise RuntimeError(
                 f"Generated gRPC method {method.full_name} has no matching "
-                f"RequestType.{request_name}"
+                f"RequestClient method {operation!r}"
             ) from exc
-        if request_type in request_types:
-            raise RuntimeError(
-                f"Duplicate generated gRPC request type: {request_type.name}"
-            )
+        if operation in operations:
+            raise RuntimeError(f"Duplicate generated gRPC operation: {operation}")
 
         request_message_class = message_class(method.input_type)
         response_message_class = message_class(method.output_type)
-        payload_types = tuple(get_payload_classes(request_type))
+        payload_types = rpc_spec.payload_types
         request_encoder, request_decoder = compile_request_codec_for_types(
             request_message_class, payload_types
         )
-        response_class = get_response_class(request_type)
-        response_type = type(None) if response_class is None else response_class
+        response_type = rpc_spec.response_type
         response_encoder = compile_response_encoder_for_type(
             response_message_class, response_type
         )
@@ -134,7 +127,7 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
         )
         codec = GrpcMethodCodec(
             full_name=method.full_name,
-            request_type=request_type,
+            operation=operation,
             request_message_class=request_message_class,
             response_message_class=response_message_class,
             payload_types=payload_types,
@@ -147,7 +140,15 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
         if method.full_name in by_full_name:
             raise RuntimeError(f"Duplicate generated gRPC method: {method.full_name}")
         by_full_name[method.full_name] = codec
-        request_types.add(request_type)
+        operations.add(operation)
+
+    # KV event polling is currently ZMQ-only.
+    missing_methods = set(get_rpc_specs()) - operations - {"poll_kv_events"}
+    if missing_methods:
+        raise RuntimeError(
+            "RequestClient RPCs have no generated gRPC method: "
+            f"{sorted(missing_methods)}"
+        )
 
     return GrpcMethodCodecRegistry(
         by_full_name=MappingProxyType(by_full_name),

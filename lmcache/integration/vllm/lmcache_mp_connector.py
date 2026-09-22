@@ -65,6 +65,9 @@ from lmcache.integration.vllm.lmcache_mp_metrics import (
     LMCacheMPConnectorStats,
     LMCacheMPPromMetrics,
 )
+from lmcache.integration.vllm.mp_server_launcher import (
+    is_mp_server_autostart_enabled,
+)
 from lmcache.integration.vllm.utils import (
     mla_only,
     vllm_layout_hints,
@@ -553,6 +556,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig | None" = None,
     ) -> None:
+        """Initialize a worker or scheduler connector from vLLM configuration.
+
+        Args:
+            vllm_config: Engine configuration, including connector extra config.
+            role: Scheduler or worker role.
+            kv_cache_config: Resolved cache groups, if supplied by vLLM.
+
+        Raises:
+            ValueError: If cache geometry or auto-start configuration is invalid,
+                including auto-start with multiple server endpoints.
+            ConnectionError: If the configured MP server cannot be reached.
+        """
         # Older supported vLLM releases allow connectors to omit this value,
         # while current vLLM's type declaration requires it.
         super().__init__(vllm_config, role, kv_cache_config)  # type: ignore[arg-type]
@@ -566,6 +581,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         group_tokens_per_block = get_group_tokens_per_block(
             vllm_config, kv_cache_config
         )
+        mamba_cache_mode = getattr(vllm_config.cache_config, "mamba_cache_mode", "none")
+        self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
         scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
         )
@@ -613,6 +630,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # The server count is derived from lmcache.mp.server_urls.
         n_servers = len(server_urls)
+        if (
+            is_mp_server_autostart_enabled(
+                vllm_config.kv_transfer_config.kv_connector_extra_config
+            )
+            and n_servers > 1
+        ):
+            raise ValueError(
+                "LMCache MP auto-start only supports a single server; "
+                "start multiple servers separately and disable lmcache.mp.autostart."
+            )
 
         validate_dcp_support(vllm_config, n_servers, kv_cache_config)
 
@@ -1113,6 +1140,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler-side methods
     # ==============================
 
+    def reset_cache(self) -> bool | None:
+        """Request a best-effort LMCache MP cache clear from the scheduler.
+
+        Active request trackers are preserved. Backing servers retain objects
+        protected by in-flight read or write locks.
+
+        Returns:
+            True when every MP server answers the clear, False on timeout or
+            RPC failure, and None for worker-role connectors.
+        """
+        if self.role != KVConnectorRole.SCHEDULER:
+            return None
+
+        return self.scheduler_adapter.reset_cache()
+
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind GPU block pool so that we can touch blocks during stores.
         Called by Scheduler after kv_cache_manager is ready."""
@@ -1200,6 +1242,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
+            reserve_last_token=self._reserve_last_token_for_lookup,
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -1264,6 +1307,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
+            reserve_last_token=self._reserve_last_token_for_lookup,
         )
 
     def update_state_after_alloc(

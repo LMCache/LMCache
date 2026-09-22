@@ -1,7 +1,7 @@
 # KV event channel
 
 Module: `lmcache/v1/multiprocess/modules/management.py` (`ManagementModule`)
-Wire contract: `lmcache/v1/multiprocess/protocols/observability.py`,
+Wire contract: `lmcache/v1/multiprocess/transport/base.py` (`RequestClient`),
 `lmcache/v1/multiprocess/custom_types.py` (`KVEventRecord`, `KVEventPollResult`)
 Consumer: `LMCacheMPWorkerAdapter` and `LMCacheMPConnector` in
 `lmcache/integration/vllm/` (vLLM `BlockStored` / `BlockRemoved`)
@@ -69,7 +69,7 @@ new transport.
   last marker in range are withheld, because their world may be
   incomplete.
 - `ManagementModule` owns the log and the subscriber, serves
-  `POLL_KV_EVENTS` (SYNC: it only copies records out of memory), and stamps
+  `poll_kv_events` (SYNC: it only copies records out of memory), and stamps
   every answer with an **incarnation** (`time.time_ns()` at module
   construction). It is disabled, answering `enabled=False`, when the log
   size is 0 or the observability bus is off (`--disable-observability`),
@@ -119,6 +119,8 @@ new transport.
   to it. The capability is advertised on the ZMQ transport only, because the
   gRPC client builds its methods from the generated service descriptors,
   which do not carry this request yet.
+  The typed `RequestClient.poll_kv_events` method now supplies the RPC
+  contract; ZMQ retains wire ID 34 for earlier builds of this event channel.
 
 ### Connector side (`LMCacheMPConnector`)
 

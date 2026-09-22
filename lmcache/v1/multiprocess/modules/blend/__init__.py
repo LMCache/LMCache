@@ -27,9 +27,6 @@ from lmcache.v1.multiprocess.modules.blend.read_set import (
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _classify_cb_read_groups as _classify_cb_read_groups,
 )
-from lmcache.v1.multiprocess.modules.blend.read_set import (
-    _narrow_attn_desc as _narrow_attn_desc,
-)
 from lmcache.v1.multiprocess.modules.blend.retrieve import (
     _HAS_NATIVE_RETRIEVE_PLAN as _HAS_NATIVE_RETRIEVE_PLAN,
 )
