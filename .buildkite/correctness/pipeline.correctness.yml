@@ -6,6 +6,9 @@ steps:
       - |
         set -euo pipefail
 
+        source .buildkite/k3_tests/common_scripts/ci-mode.sh
+        if should_skip_ci_mode inprocess; then exit 0; fi
+
         echo "[INFO] HOME: $HOME"
         echo "[INFO] PWD: $PWD"
 

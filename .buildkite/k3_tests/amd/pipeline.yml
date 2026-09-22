@@ -16,7 +16,10 @@ steps:
 
   - label: "vLLM + LMCache E2E (AMD, {{matrix.mode}}, {{matrix.request_transport}})"
     timeout_in_minutes: 90
-    command: bash .buildkite/scripts/amd-vllm-bench.sh {{matrix.mode}}
+    command: |
+      source .buildkite/k3_tests/common_scripts/ci-mode.sh
+      if should_skip_ci_mode mp; then exit 0; fi
+      bash .buildkite/scripts/amd-vllm-bench.sh {{matrix.mode}}
     matrix:
       setup:
         mode:
