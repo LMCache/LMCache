@@ -63,17 +63,13 @@ def _group_keys_by_object_group(
         group_layout_descs: Memory layout per object group id.
 
     Returns:
-        One :class:`GroupedObjectKeys` per object group, in first-seen order;
-        empty when ``keys`` is empty or the object groups received different
-        numbers of keys (logged as an error).
-
-    Raises:
-        ValueError: If a key's object group has no entry in
-            ``group_layout_descs``.
+        One :class:`GroupedObjectKeys` per object group, in first-seen order.
+        Empty when ``keys`` is empty, when the object groups received
+        different numbers of keys, or when a key's object group has no entry
+        in ``group_layout_descs``.
 
     Note:
-        The groups carry no chunk layout, so they are only valid for
-        ``"full"`` fetching.
+        Now we only do ``"full"`` fetching.
     """
     by_group: dict[int, list[ObjectKey]] = {}
     for key in keys:
@@ -91,10 +87,14 @@ def _group_keys_by_object_group(
     for object_group_id, group_keys in by_group.items():
         layout_desc = group_layout_descs.get(object_group_id)
         if layout_desc is None:
-            raise ValueError(
-                f"P2P lookup: no layout for object group {object_group_id} "
-                f"(have {sorted(group_layout_descs)})"
+            logger.error(
+                "P2P lookup: no layout for object group %d (have %s); "
+                "treating all %d keys as misses",
+                object_group_id,
+                sorted(group_layout_descs),
+                len(keys),
             )
+            return []
         rows.append(
             GroupedObjectKeys(
                 keys=group_keys,

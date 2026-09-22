@@ -63,7 +63,7 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 | `multiprocess/modules/lookup.py` (engine lookup) | every registered object group x every kv rank, via `ipc_key_to_grouped_object_keys` | `"prefix"`, `LOCK` |
 | blend prefix leg (`modules/blend/lookup.py`) | the leg's read groups (attention + recurrent) x ranks | `"prefix"`, `LOCK` |
 | blend sparse leg | the blend read groups (attention + aux) x ranks over the de-duplicated matched chunk hashes | `"full"`, `LOCK` |
-| P2P receiver (`modules/p2p_controller.py`) | **one row per object group** holding the peer's keys in request order, ranks mixed. The peer only asks "are these resident"; it carries no chunk layout. If the groups receive different numbers of keys the lookup logs an error and reports every key as a miss. | `"full"`, `LOCK`, `skip_l2=True` |
+| P2P receiver (`modules/p2p_controller.py`) | **one row per object group** holding the peer's keys in request order, ranks mixed. The peer only asks "are these resident"; it carries no chunk layout. If the groups receive different numbers of keys, or a group has no layout, the lookup logs an error and reports every key as a miss. | `"full"`, `LOCK`, `skip_l2=True` |
 | warm prefetch (`warm_prefetch.py`, `cache_control/key_resolver.py`) | object group 0 x ranks | `"full"`, `NO_LOCK` |
 
 ### Prerequisite: grouped fold / unfold

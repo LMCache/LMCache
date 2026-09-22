@@ -26,10 +26,10 @@ logger = init_logger(__name__)
 FetchingPolicy = Literal["prefix", "full"]
 """Which found objects a prefetch loads and reports.
 
-``"prefix"`` -- only the longest token prefix every object group can serve
-under its attention window.
+``"prefix"`` -- only fetch the prefix hit and discard all non-prefix hits.
 
-``"full"`` -- every found object, gaps included, with no prefix trimming.
+``"full"`` -- fetch all of the hit chunks, no matter whether they are in the
+prefix or not.
 """
 
 FULL_ATTENTION_WINDOW_CHUNKS = -1

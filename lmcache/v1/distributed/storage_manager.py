@@ -483,10 +483,6 @@ class StorageManager:
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
-        Read-locks (under ``LOCK``) the requested objects already resident in
-        L1 and loads the rest from L2 in the background. The result is
-        reported per ``spec.key_groups`` row by :meth:`query_prefetch_status`.
-
         Args:
             spec: The request (see :class:`PrefetchTaskSpec`).
             external_request_id: Caller id for end-to-end log tracing.

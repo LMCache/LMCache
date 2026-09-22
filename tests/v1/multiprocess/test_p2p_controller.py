@@ -241,14 +241,16 @@ def test_lookup_and_lock_uneven_object_groups_report_misses():
     assert controller.p2p_query_lookup_results(task_id) == [_INVALID] * 3
 
 
-def test_lookup_and_lock_rejects_key_without_layout():
-    """A key whose object group has no layout is refused loudly."""
+def test_lookup_and_lock_key_without_layout_reports_miss():
+    """A key whose object group has no layout never reaches the storage
+    manager and resolves to a miss."""
     controller, ctx = _make_controller()
-    with pytest.raises(ValueError):
-        controller.p2p_lookup_and_lock(
-            [_make_key(0, object_group_id=3)], {0: _make_layout_desc()}
-        )
+    ctx.storage_manager.query_prefetch_status.return_value = [Bitmap(0)]
+    task_id = controller.p2p_lookup_and_lock(
+        [_make_key(0, object_group_id=3)], {0: _make_layout_desc()}
+    )
     ctx.storage_manager.submit_prefetch_task.assert_not_called()
+    assert controller.p2p_query_lookup_results(task_id) == [_INVALID]
 
 
 def test_lookup_and_lock_empty_keys_completes_immediately():
