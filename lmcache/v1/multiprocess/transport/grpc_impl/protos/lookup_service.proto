@@ -49,6 +49,8 @@ message FreeLookupLocksResponse {}
 
 message EndSessionRequest {
   string request_id = 1;
+  // Absent when the engine observed nothing; decodes to NO_SESSION_END_INFO.
+  SessionEndInfo end_info = 2;
 }
 
 message EndSessionResponse {}

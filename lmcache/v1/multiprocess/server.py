@@ -35,6 +35,7 @@ from lmcache.v1.mp_observability.gc_monitor import (
     shutdown_gc_monitor,
 )
 from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
+from lmcache.v1.multiprocess.commit_policy import CommitAnchor, CommitPolicyConfig
 from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
     CoordinatorConfig,
@@ -43,6 +44,7 @@ from lmcache.v1.multiprocess.config import (
     add_mp_server_args,
     parse_args_to_coordinator_config,
     parse_args_to_mp_server_config,
+    validate_server_config,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import EngineModule, InstanceLivenessTarget
@@ -318,10 +320,20 @@ def run_cache_server(
     Returns:
         If return_engine is True: tuple of (request server, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
+
+    Raises:
+        ValueError: If ``mp_config`` and ``storage_manager_config`` select an
+            incompatible combination of options (see
+            :func:`validate_server_config`).
     """
     # Before any event IPC backend is resolved (KV-cache registration), so
     # the setting is observed by every resolver in this process.
     set_isolated_ipc(mp_config.isolated_ipc)
+
+    # Reject option combinations that only one of the two configs can see
+    # (e.g. defer_windowed without separate object groups) before anything is
+    # started.
+    validate_server_config(mp_config, storage_manager_config)
 
     # mp_config.instance_id is this server's single source of identity (set via
     # --instance-id, else a random UUID v4). Project it onto the OTel
@@ -375,6 +387,11 @@ def run_cache_server(
         hash_algorithm=mp_config.hash_algorithm,
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
+        commit_config=CommitPolicyConfig(
+            policy=mp_config.window_commit_policy,
+            anchor=CommitAnchor(mp_config.window_commit_anchor),
+            turn_boundary_token_ids=frozenset(mp_config.turn_boundary_token_ids),
+        ),
     )
 
     modules = _build_modules(ctx, mp_config, coordinator_config)

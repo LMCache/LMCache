@@ -5,6 +5,10 @@
 from typing import Any, Protocol
 
 # First Party
+from lmcache.v1.multiprocess.custom_types import (
+    NO_SESSION_END_INFO,
+    SessionEndInfo,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
 
 
@@ -86,7 +90,11 @@ class RequestClient(Protocol):
 
     def free_lookup_locks(self, key: Any, tp_size: int) -> MessagingFuture[Any]: ...
 
-    def end_session(self, request_id: str) -> MessagingFuture[Any]: ...
+    def end_session(
+        self,
+        request_id: str,
+        end_info: SessionEndInfo = NO_SESSION_END_INFO,
+    ) -> MessagingFuture[Any]: ...
 
     def register_kv_cache_engine_driven_context(
         self, payload: Any

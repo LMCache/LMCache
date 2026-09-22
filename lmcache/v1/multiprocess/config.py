@@ -13,6 +13,7 @@ import uuid
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.config import StorageManagerConfig
 
 logger = init_logger(__name__)
 
@@ -58,6 +59,26 @@ class MPServerConfig:
     """When True, split kernel groups into one object group per
     sliding-window size at KV-cache registration (hybrid models). When False
     (default), all kernel groups share a single full-attention object group."""
+
+    window_commit_policy: str = "turn_end"
+    """Which commit policy decides whether a finished request's final window
+    is copied to L2 right away. Only matters for a model with windowed object
+    groups; a model whose groups all need the whole prefix has nothing to
+    commit. See ``lmcache/v1/multiprocess/commit_policy.py``."""
+
+    window_commit_anchor: str = "generation_end"
+    """Where a committed window ends: "generation_end" (the last chunk the
+    request stored) or "prompt_end" (the end of the looked-up prompt). Which
+    one is right follows from whether the serving frontend re-sends the
+    generated answer verbatim in the next turn, so it is a property of the
+    chat template and the client, not of one request."""
+
+    turn_boundary_token_ids: list[int] = field(default_factory=list)
+    """Token ids that mark a chat turn boundary, for the "turn_end" commit
+    policy. Empty (default) accepts any token a request stopped on. Qwen ends
+    an assistant turn on ``<|im_end|>`` = 151645. On a model that ends tool
+    calls and answers on different tokens (gpt-oss: ``<|call|>`` = 200012,
+    ``<|return|>`` = 200002) the set also chooses which of the two commit."""
 
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
@@ -336,6 +357,38 @@ def add_mp_server_args(
         "--transport grpc. Default is 32.",
     )
     mp_group.add_argument(
+        "--window-commit-policy",
+        type=str,
+        default="turn_end",
+        help="Commit policy deciding whether a finished request's final "
+        "window is copied to L2 immediately. 'turn_end' (default) commits "
+        "when the model stopped on a chat turn boundary. Plugins may "
+        "register more. Has no effect on a model without windowed object "
+        "groups.",
+    )
+    mp_group.add_argument(
+        "--window-commit-anchor",
+        type=str,
+        default="generation_end",
+        choices=["generation_end", "prompt_end"],
+        help="Where a committed window ends. 'generation_end' (default) uses "
+        "the last chunk the request stored; 'prompt_end' uses the end of the "
+        "looked-up prompt, which is right when the next turn re-renders the "
+        "assistant message differently from what was generated (a reasoning "
+        "model whose client drops reasoning_content).",
+    )
+    mp_group.add_argument(
+        "--turn-boundary-token-ids",
+        type=int,
+        nargs="*",
+        default=None,
+        help="Token ids that mark a chat turn boundary, for --window-commit-policy "
+        "turn_end. Omit to accept any stop token. Qwen ends an assistant "
+        "turn on <|im_end|> = 151645. On a model with distinct tool-call and "
+        "answer stop tokens (gpt-oss: <|call|> = 200012, <|return|> = 200002) "
+        "listing only one of them commits only that kind of boundary.",
+    )
+    mp_group.add_argument(
         "--hash-algorithm",
         type=str,
         default="blake3",
@@ -456,6 +509,43 @@ def add_mp_server_args(
     return parser
 
 
+def validate_server_config(
+    mp_config: MPServerConfig,
+    storage_manager_config: StorageManagerConfig,
+) -> None:
+    """Check cross-config constraints before the cache server starts.
+
+    Some options are only meaningful in combination, and the two halves live in
+    different configs: the store policy is a storage-manager option while the
+    object-group split is an MP server option. This is the one place where both
+    are visible, so the incompatible combinations are rejected here rather than
+    failing obscurely at the first store.
+
+    Args:
+        mp_config: The parsed MP server configuration.
+        storage_manager_config: The parsed storage manager configuration.
+
+    Raises:
+        ValueError: If ``--l2-store-policy defer_windowed`` is selected without
+            ``--separate-object-groups``.
+    """
+    if storage_manager_config.store_policy != "defer_windowed":
+        return
+
+    if not mp_config.separate_object_groups:
+        raise ValueError(
+            "--l2-store-policy defer_windowed requires "
+            "--separate-object-groups: without it every layer shares one "
+            "whole-prefix object group, so no chunk is ever classified as "
+            "windowed and the policy degenerates to 'default'. Add "
+            "--separate-object-groups, or select --l2-store-policy default."
+        )
+
+    # Windowed chunks this policy keeps out of L2 are simply discarded when
+    # L1 evicts them; the commit path (--window-commit-policy) is what gives
+    # a finished turn's window an L2 copy before that can happen.
+
+
 def parse_args_to_mp_server_config(
     args: argparse.Namespace,
 ) -> MPServerConfig:
@@ -488,6 +578,9 @@ def parse_args_to_mp_server_config(
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
+        window_commit_policy=args.window_commit_policy,
+        window_commit_anchor=args.window_commit_anchor,
+        turn_boundary_token_ids=list(args.turn_boundary_token_ids or []),
         enable_segmented_prefix=args.enable_segmented_prefix,
         enable_dedup_content=args.enable_dedup_content,
         supported_transfer_mode=args.supported_transfer_mode,

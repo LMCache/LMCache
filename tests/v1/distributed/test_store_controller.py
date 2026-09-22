@@ -756,3 +756,105 @@ class TestBufferOnlyMode:
 
         ctrl.stop()
         adapter.close()
+
+
+# =============================================================================
+# Copy Tests
+# =============================================================================
+
+
+class _StoreNothingDeleteEverythingPolicy(StorePolicy):
+    """Write-through stores nothing; would delete every stored key from L1.
+
+    Makes both bypasses of the copy path observable: a key that reaches L2
+    can only have come from the copy, and a key that stays in L1 proves the
+    policy's deletions were not applied to it.
+    """
+
+    def select_store_targets(self, keys, adapters):
+        return {}
+
+    def select_l1_deletions(self, keys):
+        return list(keys)
+
+
+class TestStoreControllerCopy:
+    """Tests for ``StoreController.submit_copy``."""
+
+    def test_copy_stores_to_l2_and_keeps_l1(self, l1_manager):
+        """A copy reaches every adapter without the policy and keeps L1."""
+        adapters = [make_adapter(), make_adapter()]
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=adapters,
+            adapter_descriptors=[make_descriptor(0), make_descriptor(1)],
+            policy=_StoreNothingDeleteEverythingPolicy(),
+        )
+        ctrl.start()
+
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        written = write_keys_to_l1(l1_manager, keys, layout)
+        assert written == keys
+
+        ctrl.submit_copy(written)
+
+        ok = wait_for_condition(
+            lambda: all(a.debug_has_key(k) for a in adapters for k in keys),
+            timeout=5.0,
+        )
+        assert ok, "a copy should store every key to every adapter"
+        ok = wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 0,
+            timeout=5.0,
+        )
+        assert ok
+        for key in keys:
+            assert l1_manager.get_object_state(key) is not None, (
+                "a copy must not delete the key from L1"
+            )
+        # Read locks are released: the keys are updatable again.
+        results = l1_manager.reserve_write(
+            keys=keys,
+            is_temporary=[False] * len(keys),
+            layout_desc=layout,
+            mode="update",
+        )
+        assert all(m is not None for _, m in results.values())
+
+        ctrl.stop()
+        for adapter in adapters:
+            adapter.close()
+
+    def test_copy_without_adapters_keeps_keys(self, l1_manager):
+        """With no L2 adapter a copy is dropped and leaves L1 untouched."""
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[],
+            adapter_descriptors=[],
+            policy=DefaultStorePolicy(),
+        )
+        ctrl.start()
+
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        write_keys_to_l1(l1_manager, keys, layout)
+
+        ctrl.submit_copy(keys)
+
+        ok = wait_for_condition(
+            lambda: (
+                l1_manager.reserve_write(
+                    keys=keys,
+                    is_temporary=[False],
+                    layout_desc=layout,
+                    mode="update",
+                )[keys[0]][1]
+                is not None
+            ),
+            timeout=5.0,
+        )
+        assert ok, "a dropped copy must not leave a read lock behind"
+        assert l1_manager.get_object_state(keys[0]) is not None
+
+        ctrl.stop()

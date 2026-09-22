@@ -563,7 +563,11 @@ def add_storage_manager_args(
         default="default",
         help="L2 store policy. Determines which adapters receive each key "
         "and whether keys are deleted from L1 after L2 store. "
-        "Default is 'default' (store all keys to all adapters, keep L1).",
+        "Default is 'default' (store all keys to all adapters, keep L1). "
+        "'skip_l1' stores to all adapters and drops the L1 copy. "
+        "'defer_windowed' stores whole-prefix object groups like 'default' "
+        "and keeps windowed object groups (sliding-window attention, "
+        "recurrent) out of L2; it requires --separate-object-groups.",
     )
     policy_group.add_argument(
         "--l2-prefetch-policy",
