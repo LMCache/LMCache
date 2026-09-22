@@ -213,11 +213,9 @@ def _make_checkpoint_module(
     module.context.chunk_size = 2
     module.context.null_block_id = -1
     module.context.session_manager.get.return_value = None
-    module.context.storage_manager.reserve_write.side_effect = (
-        lambda keys, layout, mode: {
-            key: MagicMock(get_size=MagicMock(return_value=10)) for key in keys
-        }
-    )
+    module.context.storage_manager.reserve_write.side_effect = lambda keys, layout: {
+        key: MagicMock(get_size=MagicMock(return_value=10)) for key in keys
+    }
     monkeypatch.setattr(
         mod, "downsample_and_stage_block_ids", downsample_and_stage_block_ids
     )
