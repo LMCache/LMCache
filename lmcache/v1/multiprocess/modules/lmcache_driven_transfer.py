@@ -721,6 +721,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         skip_first_n_tokens=0,
                         direction=lmcache_native.TransferDirection.D2H,
                         transfer_key=transfer_key,
+                        block_ids_host=gpu_block_ids,
                     )
 
                 store_succeeded = True
@@ -967,6 +968,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             skip_first_n_tokens=skip_first_n_tokens,
                             direction=lmcache_native.TransferDirection.H2D,
                             transfer_key=transfer_key,
+                            block_ids_host=gpu_block_ids,
                         )
                         # Extend only after the copy is enqueued: on exception,
                         # read_prefetched_results releases this group's locks
