@@ -160,14 +160,14 @@ def test_reserving_last_token_preserves_full_request_identity(
 
     adapter.maybe_submit_lookup_request(
         "r",
-        token_ids,
+        pack_token_ids(token_ids),
         reserve_last_token=True,
     )
 
     assert len(client.lookups) == 1
     key = client.lookups[0]
     assert key.end == 64
-    assert key.token_ids == tuple(token_ids)
+    assert key.token_bytes == pack_token_ids(token_ids)
 
 
 def resolved(adapter: LMCacheMPSchedulerAdapter) -> int:

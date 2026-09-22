@@ -320,13 +320,13 @@ def test_lookup_hashing_stops_at_key_end() -> None:
     ctx.chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock()
-    ctx.token_hasher.compute_chunk_hashes.return_value = []
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
     key = IPCCacheServerKey(
         model_name="m",
         world_size=1,
         num_kv_readers=1,
         worker_id=None,
-        token_ids=tuple(range(32)),
+        token_bytes=pack_token_ids(range(32)),
         start=0,
         end=16,
         request_id="r",
@@ -334,6 +334,6 @@ def test_lookup_hashing_stops_at_key_end() -> None:
 
     LookupModule(ctx).lookup(key, tp_size=1)
 
-    ctx.token_hasher.compute_chunk_hashes.assert_called_once_with(
-        list(range(32)), end=16
+    ctx.token_hasher.compute_packed_chunk_hashes.assert_called_once_with(
+        pack_token_ids(range(32)), end=16
     )

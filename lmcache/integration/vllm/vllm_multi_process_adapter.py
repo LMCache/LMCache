@@ -41,7 +41,11 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.token_codec import num_packed_tokens
+from lmcache.v1.multiprocess.token_codec import (
+    TOKEN_STRIDE,
+    num_packed_tokens,
+    unpack_token_ids,
+)
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
@@ -2332,10 +2336,9 @@ class LMCacheMPWorkerAdapter:
         if self._kv_event_hasher is None:
             return []
 
-        token_ids = list(key.token_ids)
         chunk_size = self.lmcache_tokens_per_chunk
-        hashes = self._kv_event_hasher.compute_chunk_hashes(
-            token_ids,
+        hashes = self._kv_event_hasher.compute_packed_chunk_hashes(
+            key.token_bytes,
             end=key.end,
         )
         start_chunk = key.start // chunk_size
@@ -2355,7 +2358,9 @@ class LMCacheMPWorkerAdapter:
                 CacheStoreEvent(
                     block_hashes=[block_hash],
                     parent_block_hash=parent_hash,
-                    token_ids=token_ids[start:end],
+                    token_ids=unpack_token_ids(
+                        key.token_bytes[start * TOKEN_STRIDE : end * TOKEN_STRIDE]
+                    ),
                     block_size=chunk_size,
                     lora_id=None,
                     medium="CPU",

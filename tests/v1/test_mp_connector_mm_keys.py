@@ -232,7 +232,7 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
     assert (matched_tokens, load_async) == (64, True)
     scheduler_adapter.maybe_submit_lookup_request.assert_called_once_with(
         request.request_id,
-        token_ids=list(range(128)),
+        packed_token_ids=pack_token_ids(range(128)),
         cache_salt="",
         request_configs=None,
         reserve_last_token=True,

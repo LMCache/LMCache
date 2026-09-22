@@ -672,7 +672,7 @@ def test_store_kv_events_are_reported_after_successful_store(
     chunk_size = adapter.lmcache_tokens_per_chunk
     token_ids = list(range(chunk_size * 2))
     op = LoadStoreOp(
-        token_ids=token_ids,
+        token_bytes=pack_token_ids(token_ids),
         block_ids=[[1]],
         start=chunk_size,
         end=chunk_size * 2,
@@ -683,8 +683,8 @@ def test_store_kv_events_are_reported_after_successful_store(
 
     adapter.get_finished({"req-1"})
     events = adapter.get_kv_events()
-    expected_hashes = TokenHasher(chunk_size=chunk_size).compute_chunk_hashes(
-        token_ids,
+    expected_hashes = TokenHasher(chunk_size=chunk_size).compute_packed_chunk_hashes(
+        pack_token_ids(token_ids),
         end=chunk_size * 2,
     )
 
@@ -713,7 +713,7 @@ def test_store_kv_events_are_discarded_after_failed_store(
 
     chunk_size = adapter.lmcache_tokens_per_chunk
     op = LoadStoreOp(
-        token_ids=list(range(chunk_size)),
+        token_bytes=pack_token_ids(range(chunk_size)),
         block_ids=[[0]],
         start=0,
         end=chunk_size,
@@ -741,7 +741,7 @@ def test_lazy_store_kv_events_preserve_completion_and_failure_reporting(
     future.result.return_value = store_result
     chunk_size = adapter.lmcache_tokens_per_chunk
     op = LoadStoreOp(
-        token_ids=list(range(chunk_size)),
+        token_bytes=pack_token_ids(range(chunk_size)),
         block_ids=[[0]],
         start=0,
         end=chunk_size,
@@ -779,7 +779,7 @@ def test_kv_event_buffer_metrics(
     future.result.return_value = True
     chunk_size = adapter.lmcache_tokens_per_chunk
     op = LoadStoreOp(
-        token_ids=list(range(chunk_size * 2)),
+        token_bytes=pack_token_ids(range(chunk_size * 2)),
         block_ids=[[0, 1]],
         start=0,
         end=chunk_size * 2,
