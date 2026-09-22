@@ -62,7 +62,15 @@ headers use an isolated context when propagation is enabled.
 
 The propagation switch is off by default. This boundary covers keyed ZMQ
 requests, gRPC metadata, and CPU event submission, including CacheBlend request
-root spans. It does not cover L2 scheduling queues or native storage backends.
+root spans. L2 prefetch keeps each caller's context across lookup and load
+scheduling. A shared L2 store batch uses ``mp.l2.store.schedule`` with links to
+its contributing writers; it does not select one writer as the batch parent.
+Native storage backends remain a separate boundary.
+
+The store span measures synchronous scheduling only, not completion of backend
+I/O. Writer snapshots are bounded to 10,000 keys and eight contexts per key.
+Each scheduling span carries at most 128 distinct links. Evicted or truncated
+contexts lose only trace attribution; cache keys and writes are retained.
 
 Per-Request Hit-Rate Attributes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

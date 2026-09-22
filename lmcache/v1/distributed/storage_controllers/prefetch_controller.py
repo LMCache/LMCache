@@ -59,6 +59,10 @@ from lmcache.v1.distributed.storage_controllers.utils import (
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
+from lmcache.v1.mp_observability.propagation import (
+    capture_trace_context,
+    run_with_trace_context,
+)
 from lmcache.v1.platform import (
     consume_fd,
     create_event_notifier,
@@ -368,6 +372,11 @@ class InFlightPrefetchRequest:
     # first load result is admitted.
     l2_loaded_cells: Bitmap2D = field(default_factory=lambda: Bitmap2D([]))
 
+    # Snapshot the submitter before lookup/load advance on the poll thread.
+    trace_context: dict[str, str] = field(
+        default_factory=capture_trace_context, repr=False, compare=False
+    )
+
     # private fields
     _flattened_keys: list[ObjectKey] = field(init=False, repr=False)
 
@@ -484,11 +493,15 @@ class PrefetchController(StorageControllerInterface):
 
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
-        self._pending_queue: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = deque()
+        self._pending_queue: deque[
+            tuple[PrefetchRequestId, PrefetchTaskSpec, dict[str, str]]
+        ] = deque()
 
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
-        self._submission_queue: list[tuple[PrefetchRequestId, PrefetchTaskSpec]] = []
+        self._submission_queue: list[
+            tuple[PrefetchRequestId, PrefetchTaskSpec, dict[str, str]]
+        ] = []
         self._next_request_id: PrefetchRequestId = 0
         self._submission_efd = create_event_notifier()
 
@@ -595,7 +608,7 @@ class PrefetchController(StorageControllerInterface):
             return request_id
 
         with self._submission_lock:
-            self._submission_queue.append((request_id, spec))
+            self._submission_queue.append((request_id, spec, capture_trace_context()))
             self._submission_efd.notify()
         return request_id
 
@@ -867,7 +880,12 @@ class PrefetchController(StorageControllerInterface):
             if any(signaled_adapters.values()):
                 for request in list(self._in_flight_requests.values()):
                     try:
-                        self._advance_request(request, signaled_adapters)
+                        run_with_trace_context(
+                            request.trace_context,
+                            self._advance_request,
+                            request,
+                            signaled_adapters,
+                        )
                     except Exception:
                         logger.exception(
                             "Unexpected error advancing in-flight prefetch request "
@@ -999,8 +1017,8 @@ class PrefetchController(StorageControllerInterface):
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, spec = self._pending_queue.popleft()
-            self._start_lookup_phase(request_id, spec)
+            request_id, spec, carrier = self._pending_queue.popleft()
+            run_with_trace_context(carrier, self._start_lookup_phase, request_id, spec)
 
     # =========================================================================
     # Lookup phase
