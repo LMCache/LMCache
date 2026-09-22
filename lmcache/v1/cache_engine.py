@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable
+from contextlib import closing
+from itertools import groupby, islice
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -30,7 +32,11 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
-from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
+from lmcache.observability import (
+    LMCacheStatsLogger,
+    LMCStatsMonitor,
+    RetrieveRequestStats,
+)
 from lmcache.usage_telemetry import InitializeUsageContext
 from lmcache.utils import (
     CacheEngineKey,
@@ -38,6 +44,11 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate,
     compress_slot_mapping,
     convert_tokens_to_list,
+)
+from lmcache.v1.broadcast_transfer import (
+    BroadcastTransfer,
+    RetrievalBuffer,
+    RetrievalChunk,
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
@@ -53,8 +64,6 @@ from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
-    MemoryObjMetadata,
-    TensorMemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.pin_monitor import PinMonitor
@@ -105,7 +114,8 @@ class LMCacheEngine:
         gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
-    ):
+        all_ranks_agree_fn: Optional[Callable[[bool], bool]] = None,
+    ) -> None:
         logger.info("Creating LMCacheEngine with config: %s", config)
         self.config = config
         self.metadata = metadata
@@ -113,26 +123,34 @@ class LMCacheEngine:
         self.gpu_connector = gpu_connector
         self.broadcast_fn = broadcast_fn
         self.broadcast_object_fn = broadcast_object_fn
+        self.all_ranks_agree_fn = all_ranks_agree_fn
         # save_only_first_rank only works when use mla
         self.save_only_first_rank = (
             self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
             and metadata.use_mla
         )
 
-        if self.save_only_first_rank and self.gpu_connector is not None:
+        self.retrieval_buffer: Optional[RetrievalBuffer] = None
+        self._failed_retrieval: Optional[Generator[RetrievalChunk, None, None]] = None
+        if (
+            self.save_only_first_rank
+            and not config.use_layerwise
+            and self.gpu_connector is not None
+        ):
             self.broadcast_stream = (
                 self.gpu_connector.load_stream
                 if hasattr(self.gpu_connector, "load_stream")
                 else torch_dev.Stream()
             )
-
-        # Holds GPU-resident copies of the broadcast send buffers on the
-        # leader rank so the subsequent batched_to_gpu can read from HBM
-        # rather than re-reading the same L1 bytes over PCIe. Always empty
-        # on non-leader ranks and outside the broadcast critical section.
-        # Typed as List[MemoryObj] (the supertype) so the list can be
-        # passed directly to batched_to_gpu without an invariance cast.
-        self._leader_gpu_substitute_objs: List[MemoryObj] = []
+            try:
+                self.retrieval_buffer = RetrievalBuffer.get(
+                    torch.device(torch_device_type, metadata.local_worker_id),
+                    config.retrieve_buffer_size,
+                )
+            except (RuntimeError, MemoryError):
+                # Peers learn about this at retrieval admission, before any
+                # tensor collective. Do not let one rank leave them waiting.
+                logger.exception("Could not reserve the KV retrieval buffer")
 
         self.enable_controller = config.enable_controller
 
@@ -781,7 +799,7 @@ class LMCacheEngine:
         self,
         tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """Retrieve the KV caches from the cache engine. And put the retrieved
         KV cache to the serving engine via the GPU connector.
@@ -805,7 +823,7 @@ class LMCacheEngine:
             multiple of the chunk size.
         """
         # Health check: block operation if LMCache is unhealthy
-        if not self.is_healthy():
+        if not self.is_healthy() and not self.save_only_first_rank:
             logger.warning("LMCache is unhealthy, skipping retrieve operation")
             return torch.zeros(len(tokens), dtype=torch.bool)
 
@@ -835,106 +853,33 @@ class LMCacheEngine:
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
-        reordered_chunks: List[ProcessedChunk] = []
-        if not self._is_passive():
+        if self.save_only_first_rank:
+            ret_mask, tot_kv_size = self._retrieve_broadcast(
+                tokens, mask, retrieve_stats, **kwargs
+            )
+        else:
             with retrieve_stats.profile_process_tokens():
                 if self.async_loading:
-                    reordered_chunks, tot_kv_size = self._async_process_tokens_internal(  # noqa: E501
-                        tokens,
-                        mask,
-                        ret_mask,
-                        **kwargs,
+                    reordered_chunks, tot_kv_size = self._async_process_tokens_internal(
+                        tokens, mask, ret_mask, **kwargs
                     )
                 else:
                     reordered_chunks, tot_kv_size = self._process_tokens_internal(
-                        tokens,
-                        mask,
-                        ret_mask,
-                        **kwargs,
+                        tokens, mask, ret_mask, **kwargs
                     )
-
-        if self.save_only_first_rank:
-            with retrieve_stats.profile_broadcast():
-                with torch_dev.stream(self.broadcast_stream):
-                    self._broadcast_or_receive_memory_objs(
-                        reordered_chunks,
-                        ret_mask,
-                    )
-
-                # if self.gpu_connector has load_stream, self.broadcast_stream is equals
-                # to self.gpu_connector.load_stream, the broadcast and to_gpu operation
-                # will execute sequentially within the stream.
-                # if self.gpu_connector does not have load_stream, self.broadcast_stream
-                # is created by torch_dev.Stream(), we need to synchronize broadcast
-                # operation, and then process to_cpu operation.
-                if not hasattr(self.gpu_connector, "load_stream"):
-                    self.broadcast_stream.synchronize()
-
-        # NOTE(Jiayi): memory_obj doesn't have to be a pinned
-        # cpu tensor for the sake of performance.
-        # For example, disk->gpu is faster than disk->cpu->gpu.
-        # RDMA is another example.
-        if len(reordered_chunks) > 0:
-            with retrieve_stats.profile_to_gpu():
-                _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
-                # When save_only_first_rank is enabled, the leader rank's
-                # memory_objs from L1 are CPU-resident. The broadcast above
-                # already created GPU-resident copies on the leader to use as
-                # the NCCL send buffer. Substitute those here so this kernel
-                # reads from HBM rather than re-reading the same L1 bytes
-                # over PCIe via zero-copy mapped pinned memory. Without this
-                # swap, batched_to_gpu on the leader takes ~9 ms (PCIe-bound)
-                # while passive ranks take ~0.5 ms (HBM-bound) — a structural
-                # asymmetry on the critical path of every retrieve.
-                if self.save_only_first_rank and self.metadata.is_first_rank():
-                    if len(self._leader_gpu_substitute_objs) == len(memory_objs):
-                        memory_objs_for_togpu = self._leader_gpu_substitute_objs
-                    else:
-                        # Substitute list should always match memory_objs after
-                        # _broadcast_or_receive_memory_objs has run on the
-                        # leader.  A mismatch indicates a bug or stale state;
-                        # fall back to the CPU L1 source so retrieval is still
-                        # correct, but warn so the issue is visible.
-                        logger.warning(
-                            "Leader rank: GPU substitute count (%d) does not "
-                            "match memory_objs count (%d); falling back to "
-                            "CPU L1 source for batched_to_gpu (PCIe-bound, "
-                            "~9 ms slower).",
-                            len(self._leader_gpu_substitute_objs),
-                            len(memory_objs),
-                        )
-                        memory_objs_for_togpu = list(memory_objs)
-                else:
-                    memory_objs_for_togpu = list(memory_objs)
+            if reordered_chunks:
                 try:
-                    self.gpu_connector.batched_to_gpu(
-                        memory_objs_for_togpu, list(starts), list(ends), **kwargs
-                    )
+                    with retrieve_stats.profile_to_gpu():
+                        _, memory_objs, starts, ends = zip(
+                            *reordered_chunks, strict=True
+                        )
+                        self.gpu_connector.batched_to_gpu(
+                            list(memory_objs), list(starts), list(ends), **kwargs
+                        )
                 finally:
-                    # Release GPU substitute references so the temporary
-                    # buffers can be freed; original memory_objs in
-                    # reordered_chunks are still tracked for the cleanup
-                    # loop below. Done in `finally` so a raise from
-                    # batched_to_gpu (e.g. CUDA OOM) does not leave the
-                    # references dangling on this long-lived engine.
-                    if self.save_only_first_rank and self.metadata.is_first_rank():
-                        self._leader_gpu_substitute_objs = []
-
-        # TODO(Jiayi): Remove the following for loop with batched operations
-        # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
-        for key, memory_obj, _, _ in reordered_chunks:
-            if self.remove_after_retrieve and not self._is_passive():
-                assert self.storage_manager is not None
-                self.storage_manager.remove(key, self.retrieve_locations)
-                # Sync PDBackend.remove() does NOT call ref_count_down() internally
-                # (unlike async PD and other backends), so we must call it manually.
-                # See pd_backend.py line 605 TODO comment.
-                if self._is_sync_pd_backend():
-                    memory_obj.ref_count_down()
-            else:
-                if memory_obj.is_pinned:
-                    memory_obj.unpin()
-                memory_obj.ref_count_down()
+                    self.gpu_connector.synchronize_load()
+                    for key, memory_obj, _, _ in reordered_chunks:
+                        self._release_retrieval_chunk(key, memory_obj)
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(
@@ -1615,6 +1560,19 @@ class LMCacheEngine:
         """Close the cache engine and free all the resources"""
         logger.info("Closing LMCacheEngine...")
 
+        if self._failed_retrieval is not None:
+            try:
+                self.broadcast_stream.synchronize()
+                assert self.gpu_connector is not None
+                self.gpu_connector.synchronize_load()
+            except Exception:
+                logger.exception(
+                    "Cannot release failed retrieval until device recovery"
+                )
+                return
+            self._failed_retrieval.close()
+            self._failed_retrieval = None
+
         if self.hidden_state_store is not None:
             try:
                 logger.info("Closing hidden_state_store...")
@@ -1638,6 +1596,7 @@ class LMCacheEngine:
         except Exception as e:
             logger.error("Error closing storage_manager: %s", e)
 
+        self.retrieval_buffer = None
         logger.info("LMCacheEngine closed.")
 
     def _async_process_tokens_internal(
@@ -1813,106 +1772,186 @@ class LMCacheEngine:
             reordered_chunks = kept_chunks
         return reordered_chunks, tot_kv_size
 
-    def _broadcast_or_receive_memory_objs(
+    def _retrieve_broadcast(
         self,
-        reordered_chunks,
-        ret_mask,
-    ):
-        """
-        Handles broadcasting or receiving memory objects in a distributed environment.
+        tokens: Union[torch.Tensor, list[int]],
+        mask: Optional[torch.Tensor],
+        stats: RetrieveRequestStats,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, int]:
+        assert self.gpu_connector is not None
+        connector = self.gpu_connector
+        total_size = 0
 
-        This function implements the communication logic where:
-        - The first rank (coordinator) broadcasts memory objects and metadata to others
-        - Other ranks receive and reconstruct the memory objects
+        def synchronize() -> None:
+            if getattr(connector, "load_stream", None) is not self.broadcast_stream:
+                self.broadcast_stream.synchronize()
+            connector.synchronize_load()
 
-        Parameters:
-        reordered_chunks: List of tuples containing [key, memory object, start, end]
-        ret_mask: Boolean mask indicating which positions have been processed
+        def write(
+            memory_objs: list[MemoryObj], starts: list[int], ends: list[int]
+        ) -> None:
+            with stats.profile_to_gpu():
+                connector.batched_to_gpu(memory_objs, starts, ends, **kwargs)
 
-        Side Effects:
-        - On first rank:
-          * Broadcasts chunk count and each chunk's combined metadata
-          * Broadcasts tensor data
-        - On other ranks:
-          * Receives chunk data and populates reordered_chunks
-          * Updates ret_mask to mark received positions as True
-        """
-        if self.metadata.is_first_rank():
-            # Broadcast total chunk count
-            chunk_count = len(reordered_chunks)
-            self.broadcast_object_fn(chunk_count, self.metadata.first_rank)
+        def broadcast(tensor: torch.Tensor, rank: int) -> None:
+            with stats.profile_broadcast():
+                self.broadcast_fn(tensor, rank)
+                self.broadcast_stream.synchronize()
 
-            # Reset the GPU-resident copy list. We populate it during this
-            # broadcast loop so the caller's subsequent batched_to_gpu can
-            # read from HBM instead of re-reading the same CPU L1 buffer
-            # over PCIe. (Declared in __init__; reassigning to a fresh list
-            # rather than .clear() to drop any references the caller's
-            # finally block missed if a previous retrieve raised.)
-            self._leader_gpu_substitute_objs = []
+        def chunks() -> Generator[RetrievalChunk, None, None]:
+            nonlocal total_size
+            with closing(self._iter_retrieval_chunks(tokens, mask, **kwargs)) as source:
+                while True:
+                    with stats.profile_process_tokens():
+                        chunk = next(source, None)
+                    if chunk is None:
+                        break
+                    memory_obj, start, end = chunk
+                    total_size += memory_obj.get_size()
+                    yield memory_obj, start, end
 
-            # Broadcast each chunk's data
-            for key, memory_obj, start, end in reordered_chunks:
-                # Combine (start, end) and metadata into single broadcast
-                metadata_dict = memory_obj.metadata.to_dict()
-                combined_metadata = (start, end, metadata_dict)
-                self.broadcast_object_fn(combined_metadata, self.metadata.first_rank)
-
-                # Broadcast tensor data
-                raw_tensor = memory_obj.raw_tensor
-                assert raw_tensor is not None
-                tensor_to_broadcast = raw_tensor.to(
-                    f"{torch_device_type}:{self.metadata.worker_id}"
+        # Single-rank integrations need not supply collective callbacks.
+        broadcast_object = self.broadcast_object_fn
+        if self.metadata.world_size == 1:
+            broadcast_object = lambda obj, src: obj
+        transfer = BroadcastTransfer(
+            self.retrieval_buffer if self.is_healthy() else None,
+            is_source=self.metadata.is_first_rank(),
+            source_rank=self.metadata.first_rank,
+            broadcast=broadcast,
+            broadcast_object=broadcast_object,
+            agree=self._all_ranks_agree,
+            synchronize=synchronize,
+        )
+        source = chunks()
+        try:
+            with torch_dev.stream(self.broadcast_stream):
+                result = transfer.retrieve(
+                    source, len(tokens), write, request_id=kwargs.get("req_id")
                 )
-                self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
-
-                # Keep this GPU-resident copy alive so the subsequent
-                # batched_to_gpu can read from HBM rather than re-reading
-                # the L1 buffer over PCIe.
-                gpu_mo = TensorMemoryObj(
-                    raw_data=tensor_to_broadcast,
-                    metadata=memory_obj.metadata,
-                    parent_allocator=None,
-                )
-                self._leader_gpu_substitute_objs.append(gpu_mo)
+        except BaseException:
+            # A failed device fence cannot establish that sources are reusable.
+            # Keep their ownership until close() can fence a recovered device.
+            self._failed_retrieval = source
+            self.mark_init_failed("Fatal KV retrieval transfer failure")
+            raise
         else:
-            # Receive total chunk count
-            chunk_count = self.broadcast_object_fn(None, self.metadata.first_rank)
-            if chunk_count is None:
-                logger.warning(
-                    "rank=%d received None chunk_count", self.metadata.worker_id
-                )
-                return
+            source.close()
+        return result, total_size if result.any() else 0
 
-            # Fill reordered_chunks with received data
-            for _ in range(chunk_count):
-                # Receive combined metadata (start, end, metadata_dict)
-                combined_metadata = self.broadcast_object_fn(
-                    None, self.metadata.first_rank
+    def _iter_retrieval_chunks(
+        self,
+        tokens: Union[torch.Tensor, list[int]],
+        mask: Optional[torch.Tensor],
+        **kwargs: Any,
+    ) -> Generator[RetrievalChunk, None, None]:
+        # The iterator owns source references. The transfer fences every read
+        # before advancing it, and closes it on both success and failure.
+        if self.async_loading:
+            pending, _ = self._async_process_tokens_internal(
+                tokens, mask, torch.zeros(len(tokens), dtype=torch.bool), **kwargs
+            )
+            # This iterator now owns all returned references; lookup_unpin must
+            # not later release the same prefetch result a second time.
+            self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
+            yield from self._consume_retrieval_batch(pending)
+            return
+
+        assert self.storage_manager is not None
+        chunk_infos = []
+        for start, end, chunk_key in self.token_database.process_tokens(
+            tokens=tokens, mask=mask, request_configs=kwargs.get("request_configs")
+        ):
+            assert isinstance(chunk_key, CacheEngineKey)
+            chunk_infos.append((chunk_key, start, end))
+        pins = self.lookup_pins.get(self._get_req_id(kwargs))
+        if pins and len(pins) == 1:
+            block_mapping = {next(iter(pins)): chunk_infos}
+        else:
+            block_mapping = self.storage_manager.get_block_mapping(chunk_infos)
+        plan = sorted(
+            (
+                (start, end, key, location)
+                for location, blocks in block_mapping.items()
+                for key, start, end in blocks
+            ),
+            key=lambda item: item[0],
+        )
+        chunk_bytes = sum(
+            shape.numel() * dtype.itemsize
+            for shape, dtype in zip(
+                self.metadata.get_shapes(self.config.chunk_size),
+                self.metadata.get_dtypes(),
+                strict=True,
+            )
+        )
+        batch_size = max(1, self.config.retrieve_buffer_size // chunk_bytes)
+        for location, blocks in groupby(plan, key=lambda item: item[3]):
+            # Preserve concurrent backend I/O without materializing the whole
+            # hit. A source chunk larger than the window is sliced by transfer.
+            while batch := list(islice(blocks, batch_size)):
+                memory_objs = self.storage_manager.batched_get(
+                    [key for _, _, key, _ in batch], location
                 )
-                if combined_metadata is None:
-                    logger.warning(
-                        "rank=%d received None combined_metadata",
-                        self.metadata.worker_id,
+                if len(memory_objs) != len(batch) or any(
+                    obj is None for obj in memory_objs
+                ):
+                    for (_, _, key, _), obj in zip(batch, memory_objs, strict=False):
+                        if obj is not None:
+                            self._release_retrieval_chunk(key, obj)
+                    raise OSError("A KV chunk disappeared before retrieval")
+                pending = [
+                    (key, obj, start, end)
+                    for (start, end, key, _), obj in zip(
+                        batch, memory_objs, strict=True
                     )
-                    break
-                start, end, metadata_dict = combined_metadata
-                ret_mask[start:end] = True
+                    if obj is not None
+                ]
+                yield from self._consume_retrieval_batch(pending)
 
-                # Create tensor and receive data
-                metadata = MemoryObjMetadata.from_dict(metadata_dict)
-                local_rank = self.metadata.worker_id % torch_dev.device_count()
-                raw_tensor = torch.empty(
-                    torch.Size([metadata.get_size()]),
-                    dtype=torch.uint8,
-                    device=f"{torch_device_type}:{local_rank}",
-                )
-                self.broadcast_fn(raw_tensor, self.metadata.first_rank)
+    def _consume_retrieval_batch(
+        self, batch: list[ProcessedChunk]
+    ) -> Generator[RetrievalChunk, None, None]:
+        chunks = deque(batch)
+        try:
+            while chunks:
+                key, memory_obj, start, end = chunks.popleft()
+                try:
+                    yield memory_obj, start, end
+                finally:
+                    self._release_retrieval_chunk(key, memory_obj)
+        finally:
+            for key, memory_obj, _, _ in chunks:
+                self._release_retrieval_chunk(key, memory_obj)
 
-                # Create temporary memory object (key not needed for other ranks)
-                memory_obj = TensorMemoryObj(
-                    raw_data=raw_tensor, metadata=metadata, parent_allocator=None
-                )
-                reordered_chunks.append((None, memory_obj, start, end))
+    def _release_retrieval_chunk(
+        self, key: CacheEngineKey, memory_obj: MemoryObj
+    ) -> None:
+        if self.remove_after_retrieve:
+            assert self.storage_manager is not None
+            self.storage_manager.remove(key, self.retrieve_locations)
+            if self._is_sync_pd_backend():
+                memory_obj.ref_count_down()
+        else:
+            if memory_obj.is_pinned:
+                memory_obj.unpin()
+            memory_obj.ref_count_down()
+
+    def _all_ranks_agree(self, ready: bool) -> bool:
+        if self.all_ranks_agree_fn is not None:
+            return self.all_ranks_agree_fn(ready)
+        if self.metadata.world_size == 1:
+            return ready
+        # Compatibility for integrations providing only object broadcasts.
+        # Evaluate every vote even after a failure to preserve collective order.
+        votes = [
+            self.broadcast_object_fn(
+                ready if rank == self.metadata.worker_id else None, rank
+            )
+            for rank in range(self.metadata.world_size)
+        ]
+        return all(vote is True for vote in votes)
 
     def _is_passive(self):
         """
@@ -2098,13 +2137,29 @@ class LMCacheEngineBuilder:
         gpu_connector: Optional[GPUConnectorInterface],
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
+        all_ranks_agree_fn: Optional[Callable[[bool], bool]] = None,
     ) -> LMCacheEngine:
         """
         Builds a new LMCacheEngine instance if it doesn't already exist for the
         given ID.
 
-        raises: ValueError if the instance already exists with a different
-            configuration.
+        Args:
+            instance_id: Engine identity within this process.
+            config: Cache and storage configuration.
+            metadata: Model layout and worker identity.
+            gpu_connector: Destination KV writer, or None for a scheduler.
+            broadcast_fn: Tensor broadcast callback accepting a source rank.
+            broadcast_object_fn: Host metadata broadcast returning the source object.
+            all_ranks_agree_fn: Optional host collective returning True only when
+                all retrieval ranks vote True. Without it, object broadcasts
+                gather votes over the metadata's world-size rank space.
+
+        Returns:
+            The existing compatible engine or a newly initialized engine.
+
+        Raises:
+            ValueError: If an existing engine has a different configuration or
+                metadata, or a shared retrieval reservation has a different size.
         """
         logger.info("Creating LMCacheEngine instance %s", instance_id)
         if instance_id not in cls._instances:
@@ -2124,6 +2179,7 @@ class LMCacheEngineBuilder:
                 gpu_connector,
                 broadcast_fn,
                 broadcast_object_fn,
+                all_ranks_agree_fn,
             )
 
             cls._instances[instance_id] = engine

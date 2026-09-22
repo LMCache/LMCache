@@ -88,6 +88,16 @@ _EC_FILE_PREFIX = "ec_"
 _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     # Basic configurations
     "chunk_size": {"type": int, "default": 256, "env_converter": int},
+    "retrieve_buffer_size": {
+        "type": int,
+        "default": 64 * 1024 * 1024,
+        "env_converter": int,
+        "description": (
+            "Device staging budget in bytes for non-layerwise first-rank KV "
+            "retrieval. Reserved at engine initialization and shared by engines "
+            "on the same local device in this process. Must be positive."
+        ),
+    },
     "local_cpu": {
         "type": bool,
         "default": True,
@@ -688,8 +698,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
 
 
 # Specialized methods that are unique to LMCacheEngineConfig
-def _validate_config(self):
+def _validate_config(self: Any) -> None:
     """Validate configuration"""
+
+    if self.retrieve_buffer_size <= 0:
+        raise ValueError("retrieve_buffer_size must be positive")
 
     # needed for the old async serializer implementation
     # # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
@@ -843,7 +856,7 @@ def _validate_config(self):
         # downstream readers see a single source of truth.
         if "nixl_use_hugepages" in self.extra_config:
             nixl_huge = bool(self.extra_config["nixl_use_hugepages"])
-            user_set = getattr(self, "_user_set_keys", set())
+            user_set: set[str] = getattr(self, "_user_set_keys", set())
             if self.nixl_buffer_device == "cpu":
                 if (
                     "local_cpu_use_hugepages" in user_set
