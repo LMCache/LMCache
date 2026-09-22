@@ -20,7 +20,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
-from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory, PlacementStats
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
 def _key(hash_byte: int) -> ObjectKey:
@@ -537,20 +537,18 @@ def test_stats_counts_keys_and_placements():
 # -- Placement stats ---------------------------------------------------------
 
 
-def test_empty_placement_stats_are_zero_and_immutable() -> None:
-    stats = KeyDirectory().placement_stats()
+def test_empty_directory_stats_have_zero_placement_aggregates() -> None:
+    stats = KeyDirectory().stats()
 
-    assert stats == PlacementStats(
-        l1_count=0,
-        l1_size_bytes=0,
-        l2_count=0,
-        l2_size_bytes=0,
-    )
+    assert stats.l1_count == 0
+    assert stats.l1_size_bytes == 0
+    assert stats.l2_count == 0
+    assert stats.l2_size_bytes == 0
     with pytest.raises(FrozenInstanceError):
         stats.l1_count = 1  # type: ignore[misc]
 
 
-def test_placement_stats_count_every_current_placement() -> None:
+def test_placement_aggregates_count_every_current_placement() -> None:
     directory = KeyDirectory()
     directory.consume(_batch(instance_id="node-a", keys=[_key(1)], size_bytes=100))
     directory.consume(_batch(instance_id="node-b", keys=[_key(1)], size_bytes=200))
@@ -574,22 +572,22 @@ def test_placement_stats_count_every_current_placement() -> None:
         )
     )
 
-    assert directory.placement_stats() == PlacementStats(
-        l1_count=3,
-        l1_size_bytes=600,
-        l2_count=1,
-        l2_size_bytes=400,
-    )
+    stats = directory.stats()
+    assert stats.l1_count == 3
+    assert stats.l1_size_bytes == 600
+    assert stats.l2_count == 1
+    assert stats.l2_size_bytes == 400
 
 
-def test_placement_stats_follow_upsert_and_delete() -> None:
+def test_placement_aggregates_follow_upsert_and_delete() -> None:
     directory = KeyDirectory()
     directory.consume(_batch(seq=1, keys=[_key(1)], size_bytes=100))
     directory.consume(_batch(seq=2, keys=[_key(1)], size_bytes=100))
     directory.consume(_batch(seq=3, keys=[_key(1)], size_bytes=250))
 
-    assert directory.placement_stats().l1_count == 1
-    assert directory.placement_stats().l1_size_bytes == 250
+    stats = directory.stats()
+    assert stats.l1_count == 1
+    assert stats.l1_size_bytes == 250
 
     directory.consume(
         _batch(
@@ -600,7 +598,7 @@ def test_placement_stats_follow_upsert_and_delete() -> None:
         )
     )
     directory.consume(_batch(seq=5, event_type=CacheEventType.DELETE, keys=[_key(9)]))
-    assert directory.placement_stats().l1_size_bytes == 250
+    assert directory.stats().l1_size_bytes == 250
 
     directory.consume(
         _batch(
@@ -610,10 +608,14 @@ def test_placement_stats_follow_upsert_and_delete() -> None:
             size_bytes=999,
         )
     )
-    assert directory.placement_stats() == PlacementStats(0, 0, 0, 0)
+    stats = directory.stats()
+    assert stats.l1_count == 0
+    assert stats.l1_size_bytes == 0
+    assert stats.l2_count == 0
+    assert stats.l2_size_bytes == 0
 
 
-def test_placement_stats_follow_instance_fencing() -> None:
+def test_placement_aggregates_follow_instance_fencing() -> None:
     directory = KeyDirectory()
     directory.consume(
         _batch(instance_id="node-a", seq=1, keys=[_key(1)], size_bytes=100)
@@ -634,12 +636,11 @@ def test_placement_stats_follow_instance_fencing() -> None:
 
     directory.fence_instance("node-a")
 
-    assert directory.placement_stats() == PlacementStats(
-        l1_count=1,
-        l1_size_bytes=200,
-        l2_count=1,
-        l2_size_bytes=300,
-    )
+    stats = directory.stats()
+    assert stats.l1_count == 1
+    assert stats.l1_size_bytes == 200
+    assert stats.l2_count == 1
+    assert stats.l2_size_bytes == 300
 
 
 def test_shared_l1_stats_follow_reporter_replacement_and_fencing() -> None:
@@ -664,16 +665,28 @@ def test_shared_l1_stats_follow_reporter_replacement_and_fencing() -> None:
             shared=True,
         )
     )
-    assert directory.placement_stats() == PlacementStats(1, 160, 0, 0)
+    stats = directory.stats()
+    assert stats.l1_count == 1
+    assert stats.l1_size_bytes == 160
+    assert stats.l2_count == 0
+    assert stats.l2_size_bytes == 0
 
     directory.fence_instance("node-a")
-    assert directory.placement_stats() == PlacementStats(1, 160, 0, 0)
+    stats = directory.stats()
+    assert stats.l1_count == 1
+    assert stats.l1_size_bytes == 160
+    assert stats.l2_count == 0
+    assert stats.l2_size_bytes == 0
 
     directory.fence_instance("node-b")
-    assert directory.placement_stats() == PlacementStats(0, 0, 0, 0)
+    stats = directory.stats()
+    assert stats.l1_count == 0
+    assert stats.l1_size_bytes == 0
+    assert stats.l2_count == 0
+    assert stats.l2_size_bytes == 0
 
 
-def test_placement_stats_are_rebuilt_from_a_capture() -> None:
+def test_placement_aggregates_are_rebuilt_from_a_capture() -> None:
     live = KeyDirectory()
     live.consume(_batch(seq=1, keys=[_key(1), _key(2)], size_bytes=100))
     live.consume(
@@ -689,20 +702,29 @@ def test_placement_stats_are_rebuilt_from_a_capture() -> None:
     restarted = KeyDirectory()
     restarted.restore(live.capture())
 
-    assert restarted.placement_stats() == live.placement_stats()
+    restarted_stats = restarted.stats()
+    live_stats = live.stats()
+    assert restarted_stats.l1_count == live_stats.l1_count
+    assert restarted_stats.l1_size_bytes == live_stats.l1_size_bytes
+    assert restarted_stats.l2_count == live_stats.l2_count
+    assert restarted_stats.l2_size_bytes == live_stats.l2_size_bytes
 
 
-def test_failed_restore_keeps_existing_placement_stats() -> None:
+def test_failed_restore_keeps_existing_placement_aggregates() -> None:
     source = KeyDirectory()
     source.consume(_batch(keys=[_key(1)], size_bytes=100))
     target = KeyDirectory()
     target.consume(_batch(keys=[_key(2)], size_bytes=300))
-    before = target.placement_stats()
+    before = target.stats()
 
     with pytest.raises(ValueError, match="requires an empty directory"):
         target.restore(source.capture())
 
-    assert target.placement_stats() == before
+    after = target.stats()
+    assert after.l1_count == before.l1_count
+    assert after.l1_size_bytes == before.l1_size_bytes
+    assert after.l2_count == before.l2_count
+    assert after.l2_size_bytes == before.l2_size_bytes
 
 
 # -- Shared locations ----------------------------------------------------------

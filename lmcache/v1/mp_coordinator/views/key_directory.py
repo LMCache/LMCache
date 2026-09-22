@@ -95,29 +95,28 @@ class DirectoryStats:
         l1_keys_by_instance: Keys each instance reported L1 placements
             for; its stream cursor lives on the ingest gate.
         blend: How much of the directory is fragment-matchable.
-    """
-
-    num_keys: int
-    num_placements: int
-    l1_keys_by_instance: dict[str, int]
-    blend: BlendIndexStats
-
-
-@dataclass(frozen=True)
-class PlacementStats:
-    """A point-in-time summary of placements by cache tier.
-
-    Attributes:
         l1_count: Placements currently recorded in L1.
         l1_size_bytes: Reported logical bytes across the L1 placements.
         l2_count: Placements currently recorded in L2.
         l2_size_bytes: Reported logical bytes across the L2 placements.
     """
 
+    num_keys: int
+    num_placements: int
+    l1_keys_by_instance: dict[str, int]
+    blend: BlendIndexStats
     l1_count: int
     l1_size_bytes: int
     l2_count: int
     l2_size_bytes: int
+
+
+@dataclass
+class _TierPlacementStats:
+    """Incrementally maintained placement totals for one cache tier."""
+
+    count: int = 0
+    size_bytes: int = 0
 
 
 @dataclass
@@ -156,10 +155,10 @@ class KeyDirectory(View):
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._directory: dict[ObjectKey, _KeyRecord] = {}
-        self._l1_placement_count = 0
-        self._l1_placement_size_bytes = 0
-        self._l2_placement_count = 0
-        self._l2_placement_size_bytes = 0
+        self._placement_stats = {
+            Tier.L1: _TierPlacementStats(),
+            Tier.L2: _TierPlacementStats(),
+        }
         # instance_id → keys it reported L1 placements for. The reverse
         # index that makes fencing proportional to the instance's own
         # keys instead of a full directory scan.
@@ -529,6 +528,8 @@ class KeyDirectory(View):
         """Return a point-in-time summary of directory contents."""
         blend = self._blend_index.stats()
         with self._lock:
+            l1_stats = self._placement_stats[Tier.L1]
+            l2_stats = self._placement_stats[Tier.L2]
             num_placements = sum(
                 len(record.placements) for record in self._directory.values()
             )
@@ -540,21 +541,10 @@ class KeyDirectory(View):
                     for instance_id, keys in self._l1_keys_by_instance.items()
                 },
                 blend=blend,
-            )
-
-    def placement_stats(self) -> PlacementStats:
-        """Return current placement counts and logical bytes by tier.
-
-        Returns:
-            An immutable snapshot derived from the placements currently
-            recorded in this directory. Taking the snapshot is O(1).
-        """
-        with self._lock:
-            return PlacementStats(
-                l1_count=self._l1_placement_count,
-                l1_size_bytes=self._l1_placement_size_bytes,
-                l2_count=self._l2_placement_count,
-                l2_size_bytes=self._l2_placement_size_bytes,
+                l1_count=l1_stats.count,
+                l1_size_bytes=l1_stats.size_bytes,
+                l2_count=l2_stats.count,
+                l2_size_bytes=l2_stats.size_bytes,
             )
 
     # -- Internals (call with self._lock held) --------------------------------
@@ -685,14 +675,11 @@ class KeyDirectory(View):
         size_bytes_delta: int,
     ) -> None:
         """Adjust one tier's aggregate under the directory lock."""
-        if placement.tier == Tier.L1:
-            self._l1_placement_count += count_delta
-            self._l1_placement_size_bytes += size_bytes_delta
-        elif placement.tier == Tier.L2:
-            self._l2_placement_count += count_delta
-            self._l2_placement_size_bytes += size_bytes_delta
-        else:
+        tier_stats = self._placement_stats.get(placement.tier)
+        if tier_stats is None:
             raise ValueError(f"placement tier must be l1 or l2, got {placement.tier}")
+        tier_stats.count += count_delta
+        tier_stats.size_bytes += size_bytes_delta
 
     def _create_token_binding(self, chunk_hash: bytes, entry: CacheEventEntry) -> None:
         """Record ``entry``'s token content on ``chunk_hash``'s binding.

@@ -2,13 +2,14 @@
 """Tests for MP coordinator metrics initialization."""
 
 # Standard
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # First Party
 from lmcache.v1.mp_coordinator import observability
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.observability import init_coordinator_metrics
-from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory, PlacementStats
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
 def test_disabled_metrics_are_not_initialized() -> None:
@@ -57,9 +58,19 @@ def test_otlp_metrics_reuse_shared_initializer() -> None:
 
 def test_key_directory_gauges_register_once_and_follow_latest_target() -> None:
     first = MagicMock(spec=KeyDirectory)
-    first.placement_stats.return_value = PlacementStats(0, 0, 0, 0)
+    first.stats.return_value = SimpleNamespace(
+        l1_count=0,
+        l1_size_bytes=0,
+        l2_count=0,
+        l2_size_bytes=0,
+    )
     second = MagicMock(spec=KeyDirectory)
-    second.placement_stats.return_value = PlacementStats(2, 300, 1, 400)
+    second.stats.return_value = SimpleNamespace(
+        l1_count=2,
+        l1_size_bytes=300,
+        l2_count=1,
+        l2_size_bytes=400,
+    )
 
     # Isolate the process-global OTel instrument lifecycle from other app tests.
     with (

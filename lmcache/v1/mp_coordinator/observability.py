@@ -92,7 +92,7 @@ def _placement_count_observations() -> list[tuple[int | float, dict[str, object]
     target = _key_directory_metrics_current_target()
     if target is None:
         return [(0, {"tier": "l1"}), (0, {"tier": "l2"})]
-    stats = target.placement_stats()
+    stats = target.stats()
     return [
         (stats.l1_count, {"tier": "l1"}),
         (stats.l2_count, {"tier": "l2"}),
@@ -104,7 +104,7 @@ def _placement_size_observations() -> list[tuple[int | float, dict[str, object]]
     target = _key_directory_metrics_current_target()
     if target is None:
         return [(0, {"tier": "l1"}), (0, {"tier": "l2"})]
-    stats = target.placement_stats()
+    stats = target.stats()
     return [
         (stats.l1_size_bytes, {"tier": "l1"}),
         (stats.l2_size_bytes, {"tier": "l2"}),

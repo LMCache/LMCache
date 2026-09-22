@@ -189,10 +189,10 @@ belongs to the gate ([ingest.md](ingest.md)).
 
 Placement counts and reported logical bytes are maintained per tier alongside
 these mutations. They are derived state rather than checkpoint payload:
-`restore()` rebuilds them from the restored placements. `placement_stats()`
-copies the four scalar totals under the directory lock, keeping an
-OpenTelemetry collection O(1) instead of scanning a fleet-wide directory while
-holding that lock.
+`restore()` rebuilds them from the restored placements. `stats()` includes the
+four scalar tier totals from these incrementally maintained counters, so
+placement aggregation does not scan the fleet-wide directory while holding its
+lock.
 
 The Python-phase directory is keyed by `ObjectKey` directly (hashable
 frozen dataclass). The RFC's 16-byte
@@ -223,9 +223,10 @@ cheap indicator of whether the chunk's tokens are known. Full token ids
 are deliberately not inlined (a page repeats each chunk across its
 ranks/groups; fetch content via `/directory/lookup` for exactly the keys
 that need it).
-- `GET /directory/stats` — key/placement counts, per-instance L1 key
-counts (the fencing index), and the blend-index counts; per-key L2
-detail lives on the keys listing endpoint. Directory contents only —
+- `GET /directory/stats` — key/placement counts, per-tier placement counts and
+reported logical bytes, per-instance L1 key counts (the fencing index), and the
+blend-index counts; per-key L2 detail lives on the keys listing endpoint.
+Directory contents only —
 per-emitter stream state lives on the ingest gate and has no endpoint
 yet (see [ingest.md](ingest.md)).
 
