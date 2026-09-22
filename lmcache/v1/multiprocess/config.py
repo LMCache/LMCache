@@ -121,7 +121,7 @@ class MPServerConfig:
     (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
 
     kv_event_log_size: int = 32768
-    """CPU store/eviction records retained for KV-event polling; 0 disables it."""
+    """CPU store/eviction records retained for KV-event subscribers; 0 disables it."""
 
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
@@ -505,7 +505,7 @@ def add_mp_server_args(
         "--kv-event-log-size",
         type=int,
         default=MPServerConfig.kv_event_log_size,
-        help="CPU store/eviction records retained for KV-event polling. "
+        help="CPU store/eviction records retained for KV-event subscribers. "
         "0 disables the channel. Default is %(default)s.",
     )
     return parser

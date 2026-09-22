@@ -315,8 +315,8 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, dec_hook=dec_hook, type=type)
 
 
-# Poll only advertising servers: older request loops reject unknown wire IDs.
-KV_EVENT_CAPABILITY = "kv_events"
+# Subscribe only to advertising servers; older versions expose a polling API.
+KV_EVENT_CAPABILITY = "kv_event_stream"
 KV_EVENT_KIND_STORED = "stored"
 KV_EVENT_KIND_REMOVED = "removed"
 KV_EVENT_MEDIUM_CPU = "CPU"
@@ -336,9 +336,9 @@ class KVEventRecord:
 
 
 @dataclass
-class KVEventPollResult:
-    """One ordered page. Incarnation changes or lost=True require withdrawal
-    of earlier announcements; enabled=False ends polling. Resume at next_cursor.
+class KVEventBatch:
+    """One ordered batch. Incarnation changes or lost=True require withdrawal
+    of earlier announcements; enabled=False ends the stream. Resume at next_cursor.
     """
 
     enabled: bool

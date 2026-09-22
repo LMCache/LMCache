@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from types import MappingProxyType
-from typing import Any, Callable
+from typing import Any, Callable, get_type_hints
 
 # First Party
 from lmcache.v1.multiprocess.rpc import RpcOperation, get_rpc_spec, get_rpc_specs
@@ -46,6 +46,7 @@ class GrpcMethodCodec:
     request_decoder: RequestDecoder
     response_encoder: ResponseEncoder
     response_decoder: ResponseDecoder
+    streaming: bool
 
     def validate_handler(self, handler: Callable[..., Any]) -> None:
         """Validate that a service handler implements the gRPC contract.
@@ -60,9 +61,13 @@ class GrpcMethodCodec:
         _decoder, handler_payload_types = compile_request_decoder(
             self.request_message_class, handler
         )
-        _encoder, handler_response_type = compile_response_encoder(
-            self.response_message_class, handler
-        )
+        spec = get_rpc_spec(self.operation)
+        if self.streaming:
+            handler_response_type = get_type_hints(handler)["return"]
+        else:
+            _encoder, handler_response_type = compile_response_encoder(
+                self.response_message_class, handler
+            )
         if handler_payload_types != self.payload_types:
             raise TypeError(
                 f"{self.full_name} handler payload annotations "
@@ -70,7 +75,7 @@ class GrpcMethodCodec:
                 f"{self.payload_types!r}"
             )
         if _normalize_none_type(handler_response_type) != _normalize_none_type(
-            self.response_type
+            spec.handler_response_type
         ):
             raise TypeError(
                 f"{self.full_name} handler return annotation "
@@ -111,6 +116,8 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
             ) from exc
         if operation in operations:
             raise RuntimeError(f"Duplicate generated gRPC operation: {operation}")
+        if method.client_streaming or method.server_streaming != rpc_spec.streaming:
+            raise TypeError(f"Streaming contract mismatch for {method.full_name}")
 
         request_message_class = message_class(method.input_type)
         response_message_class = message_class(method.output_type)
@@ -136,14 +143,14 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
             request_decoder=request_decoder,
             response_encoder=response_encoder,
             response_decoder=response_decoder,
+            streaming=rpc_spec.streaming,
         )
         if method.full_name in by_full_name:
             raise RuntimeError(f"Duplicate generated gRPC method: {method.full_name}")
         by_full_name[method.full_name] = codec
         operations.add(operation)
 
-    # KV event polling is currently ZMQ-only.
-    missing_methods = set(get_rpc_specs()) - operations - {"poll_kv_events"}
+    missing_methods = set(get_rpc_specs()) - operations
     if missing_methods:
         raise RuntimeError(
             "RequestClient RPCs have no generated gRPC method: "

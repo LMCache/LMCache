@@ -5,10 +5,11 @@ recovery: multiprocess ``workloads/common/restart-recovery.sh``."""
 
 # Standard
 from dataclasses import replace
-from typing import Callable, ClassVar, cast
+from typing import Any, Callable, ClassVar, cast
 from unittest.mock import MagicMock
 import gc
 import os
+import queue
 import threading
 import time
 import weakref
@@ -27,13 +28,13 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
-from lmcache.utils import CacheEvent, CacheRemoveEvent, CacheStoreEvent
+from lmcache.utils import CacheRemoveEvent, CacheStoreEvent
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_CAPABILITY,
-    KVEventPollResult,
+    KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.ipc_policy import (
@@ -87,27 +88,56 @@ def _event_adapter(
     fake_adapter: tuple,
     parallel_strategy: ParallelStrategy | None = None,
     extra_config: dict | None = None,
-) -> tuple[LMCacheMPWorkerAdapter, MagicMock, list[MessagingFuture[KVEventPollResult]]]:
-    """Use real messaging futures while the transport remains stubbed."""
+) -> tuple[LMCacheMPWorkerAdapter, MagicMock, list[Callable]]:
+    """Use cancellable streams at the stubbed network boundary."""
     _, client, _ = fake_adapter
+    senders = []
+    ready = threading.Event()
+
+    def subscribe(*args: object, **kwargs: object) -> MessagingStream[KVEventBatch]:
+        inbox: queue.Queue = queue.Queue()
+        processed: threading.Event | None = None
+
+        def read(closed: threading.Event) -> KVEventBatch:
+            nonlocal processed
+            if processed is not None:
+                processed.set()
+            value, processed = inbox.get()
+            if closed.is_set():
+                raise StopIteration
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        def cancel() -> None:
+            if processed is not None:
+                processed.set()
+            inbox.put((None, threading.Event()))
+
+        def send(value: KVEventBatch | Exception) -> None:
+            done = threading.Event()
+            inbox.put((value, done))
+            assert done.wait(5), "receiver did not process the pushed batch"
+
+        senders.append(send)
+        ready.set()
+        return MessagingStream(read, cancel)
+
+    client.subscribe_kv_events.side_effect = subscribe
     adapter = _make_worker_adapter(
         enable_kv_events=True,
         parallel_strategy=parallel_strategy,
-        extra_config={
-            "lmcache.mp.kv_event_poll_interval": 1e-6,
-            **(extra_config or {}),
-        },
+        extra_config=extra_config,
     )
-    pending: list[MessagingFuture[KVEventPollResult]] = []
-
-    def poll(*args: object, **kwargs: object) -> MessagingFuture[KVEventPollResult]:
-        future: MessagingFuture[KVEventPollResult] = MessagingFuture()
-        pending.append(future)
-        return future
-
-    client.poll_kv_events.side_effect = poll
     assert adapter.get_kv_events() == []
-    return adapter, client, pending
+    strategy = parallel_strategy or _parallel_strategy()
+    if (
+        KV_EVENT_CAPABILITY in adapter.experimental
+        and (extra_config or {}).get("lmcache.mp.kv_event_stream", True)
+        and strategy.is_kv_event_subscriber
+    ):
+        assert ready.wait(5)
+    return adapter, client, senders
 
 
 def _event_record(kind: str = "stored", chunk: bytes = b"chunk") -> KVEventRecord:
@@ -130,11 +160,6 @@ def _complete_event_store(adapter: LMCacheMPWorkerAdapter) -> None:
     op = replace(_op([[0]]), token_ids=list(range(size)), end=size)
     adapter.submit_store_request("own-store", op, None)
     adapter.get_finished({"own-store"})
-
-
-def _event_step(adapter: LMCacheMPWorkerAdapter) -> list[CacheEvent]:
-    time.sleep(0.001)
-    return adapter.get_kv_events()
 
 
 class FakeCudaEvent:
@@ -202,8 +227,8 @@ class FakeHeartbeatThread:
 
 
 # Own completed-store events are the fallback path: they are published only
-# while the server's cache-event log is not polled.
-_OWN_STORE_EVENTS: dict[str, object] = {"lmcache.mp.kv_event_poll_interval": 0}
+# while the server event subscription is disabled.
+_OWN_STORE_EVENTS: dict[str, object] = {"lmcache.mp.kv_event_stream": False}
 
 
 def _make_worker_adapter(
@@ -1772,87 +1797,109 @@ def test_recovery_reports_the_ring_re_registration_result(fake_adapter, ring_ok)
     assert adapter._reregister_kv_caches_callback() is ring_ok
 
 
-def test_polled_cpu_events_preserve_transitions_and_suppress_own_stores(
+def test_pushed_cpu_events_preserve_transitions_without_worker_polls(
     fake_adapter: tuple,
 ) -> None:
-    adapter, client, pending = _event_adapter(fake_adapter)
-    _complete_event_store(adapter)
-    assert _event_step(adapter) == []
-    stored = replace(_event_record(), parent_block_hash=b"parent")
-    response = KVEventPollResult(
-        True,
-        7,
-        4,
-        False,
-        [
-            _event_record("removed", b"unknown"),
-            stored,
-            stored,
-            replace(stored, medium="STORAGE"),
-        ],
-    )
-    pending[-1].set_result(response)
-    events = _event_step(adapter)
-    assert len(events) == 1 and isinstance(events[0], CacheStoreEvent)
-    assert (events[0].parent_block_hash, events[0].token_ids, events[0].medium) == (
-        b"parent",
-        [1, 2],
-        "CPU",
-    )
-    assert client.poll_kv_events.call_args.args == ("test-model", 4, 1024)
-    pending[-1].set_result(replace(response, events=[_event_record("removed"), stored]))
-    assert [type(e) for e in _event_step(adapter)] == [
-        CacheRemoveEvent,
-        CacheStoreEvent,
-    ]
-    pending[-1].set_result(replace(response, events=[_event_record("removed")] * 2))
-    assert len(_event_step(adapter)) == 1
-    assert len(FakeHeartbeatThread.instances) == 1
+    adapter, client, senders = _event_adapter(fake_adapter)
+    try:
+        _complete_event_store(adapter)
+        assert adapter.get_kv_events() == []
+        stored = replace(_event_record(), parent_block_hash=b"parent")
+        batch = KVEventBatch(
+            True,
+            7,
+            4,
+            False,
+            [
+                _event_record("removed", b"unknown"),
+                stored,
+                stored,
+                replace(stored, medium="STORAGE"),
+            ],
+        )
+        senders[-1](batch)
+        assert any(
+            sample.name == "vllm:lmcache_mp_kv_events_buffered"
+            and sample.labels == {"model_name": "test-model", "worker_id": "0"}
+            and sample.value == 1
+            for metric in adapter_mod._KV_EVENTS_BUFFERED.collect()
+            for sample in metric.samples
+        )
+        events = adapter.get_kv_events()
+        assert len(events) == 1 and isinstance(events[0], CacheStoreEvent)
+        assert (events[0].parent_block_hash, events[0].token_ids, events[0].medium) == (
+            b"parent",
+            [1, 2],
+            "CPU",
+        )
+        senders[-1](replace(batch, events=[_event_record("removed"), stored]))
+        assert [type(e) for e in adapter.get_kv_events()] == [
+            CacheRemoveEvent,
+            CacheStoreEvent,
+        ]
+        senders[-1](replace(batch, events=[_event_record("removed")] * 2))
+        assert len(adapter.get_kv_events()) == 1
+        # Repeated engine drains never issue a new request.
+        for _ in range(10):
+            assert adapter.get_kv_events() == []
+        client.subscribe_kv_events.assert_called_once_with(
+            adapter.instance_id, "test-model", 0, 1024
+        )
+    finally:
+        adapter.shutdown()
 
 
 @pytest.mark.parametrize(
-    "reset", ["restart", "lost", "disabled", "result_error", "submit_error", "timeout"]
+    "reset", ["restart", "lost", "disabled", "error", "disconnect"]
 )
-def test_poll_failure_or_loss_withdraws_announced_cpu_placements(
+def test_stream_failure_or_loss_withdraws_announced_cpu_placements(
     fake_adapter: tuple,
     reset: str,
 ) -> None:
-    adapter, client, pending = _event_adapter(
-        fake_adapter,
-        extra_config={"lmcache.mp.mq_timeout": 0.0},
-    )
-    response = KVEventPollResult(True, 7, 1, False, [_event_record()])
-    pending[-1].set_result(response)
-    assert isinstance(_event_step(adapter)[0], CacheStoreEvent)
-    if reset in ("restart", "lost"):
-        pending[-1].set_result(
-            replace(
-                response,
-                incarnation=8 if reset == "restart" else 7,
-                lost=reset == "lost",
-                next_cursor=41,
-                events=[_event_record(chunk=b"new")],
+    adapter, client, senders = _event_adapter(fake_adapter)
+    try:
+        batch = KVEventBatch(True, 7, 1, False, [_event_record()])
+        reconnected = threading.Event()
+        subscribe = client.subscribe_kv_events.side_effect
+
+        def reconnect(*args: Any, **kwargs: Any) -> MessagingStream[KVEventBatch]:
+            stream = subscribe(*args, **kwargs)
+            reconnected.set()
+            return stream
+
+        client.subscribe_kv_events.side_effect = reconnect
+        senders[-1](batch)
+        assert isinstance(adapter.get_kv_events()[0], CacheStoreEvent)
+        if reset in ("restart", "lost"):
+            senders[-1](
+                replace(
+                    batch,
+                    incarnation=8 if reset == "restart" else 7,
+                    lost=reset == "lost",
+                    next_cursor=41,
+                    events=[_event_record(chunk=b"new")],
+                )
             )
-        )
-    elif reset == "result_error":
-        pending[-1].set_exception(RuntimeError("poll failed"))
-    elif reset != "timeout":
-        pending[-1].set_result(
-            replace(response, enabled=reset != "disabled", events=[])
-        )
-        if reset == "submit_error":
-            client.poll_kv_events.side_effect = RuntimeError("submit failed")
-    events = _event_step(adapter)
-    assert isinstance(events[0], CacheRemoveEvent)
-    assert events[0].block_hashes == [b"chunk"] and events[0].medium == "CPU"
-    if reset in ("restart", "lost"):
-        assert isinstance(events[1], CacheStoreEvent)
-        assert events[1].block_hashes == [b"new"]
-        assert client.poll_kv_events.call_args.args[1] == 41
-    else:
-        assert _event_step(adapter) == []
-        _complete_event_store(adapter)
-        assert isinstance(_event_step(adapter)[0], CacheStoreEvent)
+        elif reset == "disabled":
+            senders[-1](replace(batch, enabled=False, events=[]))
+        else:
+            error = ConnectionError if reset == "disconnect" else RuntimeError
+            senders[-1](error("stream failed"))
+        events = adapter.get_kv_events()
+        assert isinstance(events[0], CacheRemoveEvent)
+        assert events[0].block_hashes == [b"chunk"] and events[0].medium == "CPU"
+        if reset in ("restart", "lost"):
+            assert isinstance(events[1], CacheStoreEvent)
+            assert events[1].block_hashes == [b"new"]
+        elif reset != "disconnect":
+            _complete_event_store(adapter)
+            assert isinstance(adapter.get_kv_events()[0], CacheStoreEvent)
+        else:
+            assert reconnected.wait(5)
+            senders[-1](batch)
+            assert isinstance(adapter.get_kv_events()[0], CacheStoreEvent)
+    finally:
+        adapter.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -1875,67 +1922,37 @@ def test_one_publisher_per_server(
     strategy = replace(
         _parallel_strategy(tp_size=4, vllm_worker_id=rank), n_servers=servers
     )
-    adapter, _, pending = _event_adapter(fake_adapter, strategy)
-    assert bool(pending) == publishes
-    if pending:
-        pending[-1].set_result(KVEventPollResult(True, 7, 1, False, [_event_record()]))
-    assert bool(_event_step(adapter)) == publishes
-    _complete_event_store(adapter)
-    assert _event_step(adapter) == []
+    adapter, _, senders = _event_adapter(fake_adapter, strategy)
+    try:
+        assert bool(senders) == publishes
+        if senders:
+            senders[-1](KVEventBatch(True, 7, 1, False, [_event_record()]))
+        assert bool(adapter.get_kv_events()) == publishes
+        _complete_event_store(adapter)
+        assert adapter.get_kv_events() == []
+    finally:
+        adapter.shutdown()
 
 
-@pytest.mark.parametrize("advertised, interval", [(False, 1e-6), (True, 0)])
+@pytest.mark.parametrize("advertised, enabled", [(False, True), (True, False)])
 def test_old_or_disabled_channels_keep_completed_store_reporting(
     fake_adapter: tuple,
     monkeypatch: pytest.MonkeyPatch,
     advertised: bool,
-    interval: float,
+    enabled: bool,
 ) -> None:
     monkeypatch.setattr(
         adapter_mod,
         "get_experimental",
         lambda *a, **kw: {KV_EVENT_CAPABILITY} if advertised else set(),
     )
-    adapter, _, pending = _event_adapter(
+    adapter, _, senders = _event_adapter(
         fake_adapter,
-        extra_config={"lmcache.mp.kv_event_poll_interval": interval},
+        extra_config={"lmcache.mp.kv_event_stream": enabled},
     )
-    _complete_event_store(adapter)
-    assert isinstance(_event_step(adapter)[0], CacheStoreEvent)
-    assert not pending
-
-
-def test_pending_event_poll_resumes_after_unhealthy_timeout(
-    fake_adapter: tuple,
-) -> None:
-    adapter, _, pending = _event_adapter(
-        fake_adapter,
-        extra_config={"lmcache.mp.mq_timeout": 0.0},
-    )
-    heartbeat = FakeHeartbeatThread.instances[-1]
-    heartbeat.health_event.clear()
-    _event_step(adapter)
-    _event_step(adapter)
-    assert len(pending) == 1
-    heartbeat.health_event.set()
-    _event_step(adapter)
-    assert len(pending) == 2
-
-
-def test_full_event_pages_poll_immediately_then_resume_interval(
-    fake_adapter: tuple,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(adapter_mod, "_KV_EVENT_POLL_PAGE", 1)
-    adapter, _, pending = _event_adapter(
-        fake_adapter,
-        extra_config={"lmcache.mp.kv_event_poll_interval": 100.0},
-    )
-    response = KVEventPollResult(True, 7, 1, False, [_event_record("removed")])
-    pending[-1].set_result(response)
-    _event_step(adapter)
-    assert len(pending) == 2
-    pending[-1].set_result(replace(response, events=[]))
-    _event_step(adapter)
-    _event_step(adapter)
-    assert len(pending) == 2
+    try:
+        _complete_event_store(adapter)
+        assert isinstance(adapter.get_kv_events()[0], CacheStoreEvent)
+        assert not senders
+    finally:
+        adapter.shutdown()

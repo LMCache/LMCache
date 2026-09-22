@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Management operations and CPU KV-event polling for the MP server."""
+"""Management operations and CPU KV-event subscriptions for the MP server."""
 
 # Standard
 from collections import OrderedDict, deque
@@ -20,11 +20,12 @@ from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_STORED,
     KV_EVENT_MEDIUM_CPU,
     BlockAllocationRecord,
-    KVEventPollResult,
+    KVEventBatch,
     KVEventRecord,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -59,11 +60,8 @@ class ManagementModule:
             registered but never pinged.
         experimental_transfer: Types of experimental intermediate tensor
             transfer built in the server.
-        kv_event_log_size: Cache-event records retained for engine workers
-            to poll; 0 disables the KV event channel.
-        advertise_kv_events: Whether the channel may be advertised through
-            ``GET_EXPERIMENTAL``. False on a transport whose client cannot
-            issue ``POLL_KV_EVENTS`` yet.
+        kv_event_log_size: Cache-event records retained for subscribers and
+            reconnects; 0 disables the KV event channel.
 
     Raises:
         ValueError: If ``kv_event_log_size`` is negative.
@@ -77,7 +75,6 @@ class ManagementModule:
         worker_registration_grace_seconds: float = 0.0,
         experimental_transfer: Sequence[str] = (),
         kv_event_log_size: int = MPServerConfig.kv_event_log_size,
-        advertise_kv_events: bool = True,
     ) -> None:
         if kv_event_log_size < 0:
             raise ValueError(
@@ -89,14 +86,15 @@ class ManagementModule:
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
         self._experimental_transfer = tuple(experimental_transfer)
-        self._advertise_kv_events = advertise_kv_events
         self._build_kv_event_log(kv_event_log_size)
 
         # Periodic reaper, started only when reaping is enabled and there is
         # something to scan. Scans every reap_timeout/4, so an instance is
         # reaped between timeout and timeout + interval after its last signal.
         self._reaper: PeriodicThread | None = None
-        if self._reap_timeout > 0 and self._liveness_targets:
+        if self._reap_timeout > 0 and (
+            self._liveness_targets or self._kv_events_enabled
+        ):
             reaper = create_periodic_thread(
                 name="lmcache-mp-worker-reaper",
                 interval=self._reap_timeout / 4,
@@ -131,9 +129,12 @@ class ManagementModule:
         return status
 
     def close(self) -> None:
-        """Stop the reaper, if one is running."""
+        """Stop the reaper and wake all outstanding event subscriptions."""
         if self._reaper is not None:
             self._reaper.stop()
+        with self._kv_event_lock:
+            for stream, _ in list(self._kv_event_streams.values()):
+                stream.close()
 
     @request_handler(HandlerType.BLOCKING)
     def ping(self, instance_id: int | None) -> bool:
@@ -150,6 +151,10 @@ class ManagementModule:
         if instance_id is not None:
             for target in self._liveness_targets:
                 target.touch_instance(instance_id)
+            with self._kv_event_lock:
+                if instance_id in self._kv_event_streams:
+                    stream, _ = self._kv_event_streams[instance_id]
+                    self._kv_event_streams[instance_id] = (stream, time.monotonic())
         return True
 
     def _reap_cycle(self) -> ThreadRunSummary:
@@ -169,6 +174,11 @@ class ManagementModule:
         for instance_id in reaped:
             for target in self._liveness_targets:
                 target.drop_instance_state(instance_id)
+        with self._kv_event_lock:
+            now = time.monotonic()
+            for instance_id, (stream, seen) in list(self._kv_event_streams.items()):
+                if instance_id in reaped or now - seen > self._reap_timeout:
+                    stream.close()
         return ThreadRunSummary(success=True, message=f"reaped={len(reaped)}")
 
     @request_handler()
@@ -191,7 +201,7 @@ class ManagementModule:
             the server records cache events.
         """
         capabilities = list(self._experimental_transfer)
-        if self._kv_events_enabled and self._advertise_kv_events:
+        if self._kv_events_enabled:
             capabilities.append(KV_EVENT_CAPABILITY)
         return capabilities
 
@@ -242,12 +252,55 @@ class ManagementModule:
         )
 
     @request_handler()
-    def poll_kv_events(
+    def subscribe_kv_events(
+        self, instance_id: int, model_name: str, cursor: int, max_events: int
+    ) -> MessagingStream[KVEventBatch]:
+        """Subscribe to CPU changes, replaying records after cursor.
+
+        Sends an initial status batch, then waits for matching events or loss.
+        Each worker instance owns at most one subscription. Closing it or
+        reaping the worker wakes its reader. Raises ValueError for invalid
+        cursor/page size. Slow subscribers share the bounded replay log.
+        """
+        if cursor < 0 or not 0 < max_events <= 1024:
+            raise ValueError("cursor must be >= 0 and max_events must be in [1, 1024]")
+        first = True
+
+        def read(closed: threading.Event) -> KVEventBatch:
+            nonlocal cursor, first
+            with self._kv_event_lock:
+                while not closed.is_set():
+                    batch = self.read_kv_events(model_name, cursor, max_events)
+                    cursor = batch.next_cursor
+                    if not first and not batch.enabled:
+                        raise StopIteration
+                    if first or batch.events or batch.lost or not batch.enabled:
+                        first = False
+                        return batch
+                    self._kv_event_lock.wait()
+            raise StopIteration
+
+        def cancel() -> None:
+            with self._kv_event_lock:
+                current = self._kv_event_streams.get(instance_id)
+                if current is not None and current[0] is stream:
+                    del self._kv_event_streams[instance_id]
+                self._kv_event_lock.notify_all()
+
+        stream = MessagingStream(read, cancel)
+        with self._kv_event_lock:
+            previous = self._kv_event_streams.get(instance_id)
+            if previous is not None:
+                previous[0].close()
+            self._kv_event_streams[instance_id] = (stream, time.monotonic())
+        return stream
+
+    def read_kv_events(
         self, model_name: str, cursor: int, max_events: int
-    ) -> KVEventPollResult:
+    ) -> KVEventBatch:
         """Read up to max_events records for model_name after cursor.
 
-        Returns a restart/loss marker and the next cursor in KVEventPollResult.
+        Returns a restart/loss marker and the next cursor in KVEventBatch.
         Raises ValueError for a negative cursor or nonpositive page size.
         Disabled channels return enabled=False and no events.
         """
@@ -257,7 +310,6 @@ class ManagementModule:
             records: list[KVEventRecord] = []
             next_cursor, lost = 0, False
             if self._kv_events_enabled:
-                self._note_kv_event_losses()
                 last = self._kv_event_next_seq - 1
                 first = self._kv_event_log[0].seq if self._kv_event_log else last + 1
                 lost = cursor + 1 < first or cursor > last
@@ -273,7 +325,7 @@ class ManagementModule:
                         records.append(record)
                         if len(records) == max_events:
                             break
-            return KVEventPollResult(
+            return KVEventBatch(
                 enabled=self._kv_events_enabled,
                 incarnation=self._kv_event_incarnation,
                 next_cursor=next_cursor,
@@ -287,7 +339,10 @@ class ManagementModule:
         """Subscribe to completed CPU stores and evictions when enabled."""
         self._kv_events_enabled = log_size > 0 and bool(self._ctx.event_bus.enabled)
         self._kv_event_log: deque[KVEventRecord] = deque(maxlen=log_size)
-        self._kv_event_lock = threading.Lock()
+        self._kv_event_lock = threading.Condition()
+        self._kv_event_streams: dict[
+            int, tuple[MessagingStream[KVEventBatch], float]
+        ] = {}
         self._kv_event_incarnation = time.time_ns()
         self._kv_event_next_seq = 1
         self._kv_event_dropped = self._kv_event_lost_markers = 0
@@ -297,6 +352,7 @@ class ManagementModule:
         ] = OrderedDict()
         if not self._kv_events_enabled:
             return
+        self._ctx.event_bus.subscribe_drops(self._record_kv_event_loss)
         for event_type in (
             EventType.MP_TOKENS,
             EventType.L1_WRITE_FINISHED,
@@ -307,7 +363,7 @@ class ManagementModule:
         register_gauge(
             "lmcache.kv_events",
             "lmcache_mp.kv_events.log_depth",
-            "Cache-event records retained for engine workers to poll.",
+            "Cache-event records retained for subscribers and reconnects.",
             lambda: len(self._kv_event_log),
         )
 
@@ -332,19 +388,20 @@ class ManagementModule:
             )
         )
         self._kv_event_next_seq += 1
+        self._kv_event_lock.notify_all()
 
-    def _note_kv_event_losses(self) -> None:
-        """Mark bus loss under the event lock, including loss without later traffic."""
-        dropped = self._ctx.event_bus.dropped_events_count()
-        if dropped > self._kv_event_dropped:
-            self._kv_event_dropped = dropped
-            self._kv_event_lost_markers += 1
-            self._append_kv_event(_KIND_LOST, "", [])
+    def _record_kv_event_loss(self) -> None:
+        """Wake subscribers even when the final eviction was dropped."""
+        with self._kv_event_lock:
+            dropped = self._ctx.event_bus.dropped_events_count()
+            if dropped > self._kv_event_dropped:
+                self._kv_event_dropped = dropped
+                self._kv_event_lost_markers += 1
+                self._append_kv_event(_KIND_LOST, "", [])
 
     def _record_kv_event(self, event: Event) -> None:
         """Translate bus events to ordered records; token bindings precede writes."""
         with self._kv_event_lock:
-            self._note_kv_event_losses()
             if event.event_type == EventType.MP_TOKENS:
                 for chunk_hash, tokens, parent in zip(
                     event.metadata["chunk_hashes"],
@@ -393,4 +450,5 @@ class ManagementModule:
                 "next_seq": self._kv_event_next_seq,
                 "lost_markers": self._kv_event_lost_markers,
                 "unbound_stores": self._kv_event_unbound_stores,
+                "subscribers": len(self._kv_event_streams),
             }

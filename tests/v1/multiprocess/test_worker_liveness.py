@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for server management: liveness and CPU KV event polling.
+"""Unit tests for server management: liveness and CPU KV event subscriptions.
 
 Cover the public liveness interfaces of the transfer modules, the
 management reaper wiring, the blend reap listener, and config validation.
@@ -8,13 +8,15 @@ are stubbed.
 """
 
 # Standard
-from typing import Any, cast
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Literal, cast
 from unittest.mock import MagicMock
 import threading
 import time
 
 # Third Party
 import pytest
+import zmq
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -32,20 +34,20 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
 
 def _event_module(
     size: int = 3,
     bus: EventBus | None = None,
-    advertise: bool = True,
 ) -> tuple[ManagementModule, EventBus]:
     bus = bus or EventBus(EventBusConfig())
     ctx = MagicMock(event_bus=bus)
     return ManagementModule(
         ctx,
         kv_event_log_size=size,
-        advertise_kv_events=advertise,
         experimental_transfer=("transfer_query",),
     ), bus
 
@@ -397,7 +399,7 @@ def test_cpu_events_preserve_tokens_parents_and_deduplicate_ranks() -> None:
         EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
         keys=[*keys, _event_key(1, rank=1)],
     )
-    result = module.poll_kv_events("model", 0, 8)
+    result = module.read_kv_events("model", 0, 8)
     assert [
         (r.kind, r.block_hashes, r.token_ids, r.parent_block_hash)
         for r in result.events
@@ -406,27 +408,27 @@ def test_cpu_events_preserve_tokens_parents_and_deduplicate_ranks() -> None:
         ("stored", [keys[1].chunk_hash], [1], keys[0].chunk_hash),
     ]
     _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[keys[0], _event_key(1, rank=1)])
-    removed = module.poll_kv_events("model", result.next_cursor, 8)
+    removed = module.read_kv_events("model", result.next_cursor, 8)
     assert [(r.kind, r.medium, r.block_hashes) for r in removed.events] == [
         ("removed", "CPU", [keys[0].chunk_hash]),
     ]
     assert removed.incarnation == result.incarnation and not removed.lost
-    assert module.poll_kv_events("model", removed.next_cursor, 8).events == []
+    assert module.read_kv_events("model", removed.next_cursor, 8).events == []
 
 
-def test_event_polling_pages_filters_models_and_reports_overflow() -> None:
+def test_event_log_pages_filters_models_and_reports_overflow() -> None:
     module, bus = _event_module(size=3)
     for index, model in enumerate(("model", "other", "model")):
         _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[_event_key(index, model)])
-    first = module.poll_kv_events("model", 0, 1)
+    first = module.read_kv_events("model", 0, 1)
     assert [r.seq for r in first.events] == [1] and first.next_cursor == 1
-    second = module.poll_kv_events("model", first.next_cursor, 1)
+    second = module.read_kv_events("model", first.next_cursor, 1)
     assert [r.seq for r in second.events] == [3] and second.next_cursor == 3
     assert not second.lost
     _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[_event_key(3)])
-    assert module.poll_kv_events("model", 0, 8).lost
-    assert not module.poll_kv_events("model", 1, 8).lost
-    stale = module.poll_kv_events("model", 99, 8)
+    assert module.read_kv_events("model", 0, 8).lost
+    assert not module.read_kv_events("model", 1, 8).lost
+    stale = module.read_kv_events("model", 99, 8)
     assert stale.lost and stale.next_cursor == 4 and stale.events == []
 
 
@@ -436,53 +438,49 @@ def test_bus_loss_is_visible_without_later_bus_traffic() -> None:
     event = Event(EventType.L1_KEYS_EVICTED, metadata={"keys": [_event_key(2)]})
     bus.publish(event)
     bus.publish(event)
-    result = module.poll_kv_events("model", 0, 8)
-    assert result.lost and result.events == [] and result.next_cursor == 2
-    assert not module.poll_kv_events("model", result.next_cursor, 8).lost
+    bus.stop()
+    result = module.read_kv_events("model", 0, 8)
+    assert result.lost and result.events == [] and result.next_cursor == 3
+    assert not module.read_kv_events("model", result.next_cursor, 8).lost
     assert module.report_status()["kv_events"]["lost_markers"] == 1
     bus.stop()
 
 
 @pytest.mark.parametrize(
-    "bus_enabled, size, advertise",
+    "bus_enabled, size",
     [
-        (False, 3, True),
-        (True, 0, True),
-        (True, 3, False),
-        (True, 3, True),
+        (False, 3),
+        (True, 0),
+        (True, 3),
     ],
 )
 def test_event_channel_capability_and_disabled_state(
     bus_enabled: bool,
     size: int,
-    advertise: bool,
 ) -> None:
     module, _ = _event_module(
         size,
         EventBus(EventBusConfig(enabled=bus_enabled)),
-        advertise,
     )
     enabled = bus_enabled and size > 0
-    result = module.poll_kv_events("model", 0, 8)
+    result = module.read_kv_events("model", 0, 8)
     assert result.enabled == enabled and result.events == []
     assert module.get_experimental() == (
-        ["transfer_query", KV_EVENT_CAPABILITY]
-        if enabled and advertise
-        else ["transfer_query"]
+        ["transfer_query", KV_EVENT_CAPABILITY] if enabled else ["transfer_query"]
     )
     assert (
-        _event_module()[0].poll_kv_events("model", 0, 8).incarnation
+        _event_module()[0].read_kv_events("model", 0, 8).incarnation
         != result.incarnation
     )
 
 
-def test_event_polling_validates_arguments() -> None:
+def test_event_log_validates_arguments() -> None:
     with pytest.raises(ValueError, match="kv_event_log_size"):
         _event_module(size=-1)
     module, _ = _event_module()
     for cursor, size in ((-1, 1), (0, 0)):
         with pytest.raises(ValueError, match="cursor|max_events"):
-            module.poll_kv_events("model", cursor, size)
+            module.read_kv_events("model", cursor, size)
 
 
 def test_unknown_and_expired_token_bindings_skip_stores(monkeypatch) -> None:
@@ -495,6 +493,90 @@ def test_unknown_and_expired_token_bindings_skip_stores(monkeypatch) -> None:
     _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[keys[0]])
     _bind_kv(bus, keys)
     _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[keys[0], keys[-1]])
-    result = module.poll_kv_events("model", 0, 8)
+    result = module.read_kv_events("model", 0, 8)
     assert [r.block_hashes for r in result.events] == [[keys[-1].chunk_hash]]
     assert module.report_status()["kv_events"]["unbound_stores"] == 2
+
+
+@pytest.mark.parametrize("transport", ["zmq", "grpc"])
+def test_event_subscription_pushes_without_polling_and_keeps_requests_live(
+    transport: Literal["zmq", "grpc"],
+) -> None:
+    """Real sockets: one subscription pushes store/remove and wakes on shutdown."""
+    module, bus = _event_module()
+    config = MPServerConfig(
+        transport=transport,
+        host="127.0.0.1",
+        port=0,
+        max_cpu_workers=1,
+        grpc_server_workers=1,
+    )
+    server: Any = create_request_server([module], config)
+    if transport == "grpc":
+        url = f"grpc://127.0.0.1:{server.bound_port}"
+    else:
+        url = server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
+    server.start()
+    client = RequestClientFactory.create(url, context=zmq.Context.instance())
+    streams = []
+    pool = ThreadPoolExecutor(max_workers=3)
+    try:
+        # More idle streams than unary workers must not starve ping/lookup.
+        for instance_id in range(3):
+            stream = client.subscribe_kv_events(instance_id, "model", 0, 8)
+            streams.append(stream)
+            assert pool.submit(next, stream).result(timeout=5).events == []
+        waiting_readers = [pool.submit(next, stream) for stream in streams]
+        assert client.ping(0).result(timeout=5)
+        assert all(not future.done() for future in waiting_readers)
+
+        key = _event_key(1)
+        _bind_kv(bus, [key])
+        _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[key])
+        for future in waiting_readers:
+            batch = future.result(timeout=5)
+            assert [(r.kind, r.medium, r.token_ids) for r in batch.events] == [
+                ("stored", "CPU", [0])
+            ]
+        waiting = pool.submit(next, streams[0])
+        _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[key])
+        assert waiting.result(timeout=5).events[0].kind == "removed"
+        waiting = pool.submit(next, streams[0])
+        old_incarnation = batch.incarnation
+        server.close()
+        with pytest.raises((StopIteration, ConnectionError)):
+            waiting.result(timeout=5)
+        module.close()
+        # Reuse the same client/channel after a server restart.
+        module, bus = _event_module()
+        config.port = int(url.rsplit(":", 1)[1])
+        server = create_request_server([module], config)
+        server.start()
+        resumed = client.subscribe_kv_events(0, "model", 2, 8)
+        streams.append(resumed)
+        batch = pool.submit(next, resumed).result(timeout=5)
+        assert batch.incarnation != old_incarnation and batch.lost
+        waiting = pool.submit(next, resumed)
+        resumed.close()
+        with pytest.raises((StopIteration, ConnectionError)):
+            waiting.result(timeout=5)
+    finally:
+        for stream in streams:
+            stream.close()
+        client.close()
+        server.close()
+        module.close()
+        pool.shutdown(wait=True)
+
+
+def test_subscription_wakes_for_final_dropped_event_and_close() -> None:
+    module, bus = _event_module(bus=EventBus(EventBusConfig(max_queue_size=0)))
+    stream = module.subscribe_kv_events(1, "model", 0, 8)
+    assert next(stream).events == []
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(next, stream)
+        try:
+            _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[_event_key(1)])
+            assert pending.result(timeout=5).lost
+        finally:
+            stream.close()

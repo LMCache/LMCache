@@ -40,10 +40,10 @@ from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_KIND_STORED,
     BlockAllocationRecord,
     IPCCacheServerKey,
-    KVEventPollResult,
+    KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
@@ -73,7 +73,7 @@ _KV_EVENTS_BUFFERED = Gauge(
 )
 _KV_EVENTS_GENERATED = Counter(
     "vllm:lmcache_mp_kv_events_generated_total",
-    "KV events (own completed stores, and store/removal records polled from "
+    "KV events (own completed stores, and store/removal records streamed from "
     "the MP server) added to the worker buffer.",
     ["model_name", "worker_id"],
 )
@@ -82,9 +82,9 @@ _KV_EVENTS_DRAINED = Counter(
     "KV events drained from the worker buffer by vLLM.",
     ["model_name", "worker_id"],
 )
-_KV_EVENT_POLLS = Counter(
-    "vllm:lmcache_mp_kv_event_polls_total",
-    "Completed polls of the MP server's cache-event log.",
+_KV_EVENT_BATCHES = Counter(
+    "vllm:lmcache_mp_kv_event_batches_total",
+    "Batches received from the MP server's cache-event stream.",
     ["model_name", "worker_id"],
 )
 _KV_EVENT_RESYNCS = Counter(
@@ -93,16 +93,16 @@ _KV_EVENT_RESYNCS = Counter(
     "server's cache-event log could not be followed exactly.",
     ["model_name", "worker_id", "reason"],
 )
-# Records fetched per poll; a full page is followed by an immediate poll.
-_KV_EVENT_POLL_PAGE = 1024
+# Maximum records in each pushed batch.
+_KV_EVENT_BATCH_SIZE = 1024
 # Reasons a resync withdraws every announced placement (metric label values).
 _KV_EVENT_RESYNC_SERVER_RESTART = "server_restart"
 _KV_EVENT_RESYNC_EVENTS_LOST = "events_lost"
-_KV_EVENT_RESYNC_POLLING_DISABLED = "polling_disabled"
+_KV_EVENT_RESYNC_STREAM_CLOSED = "stream_closed"
 _KV_EVENT_RESYNC_REASONS = (
     _KV_EVENT_RESYNC_SERVER_RESTART,
     _KV_EVENT_RESYNC_EVENTS_LOST,
-    _KV_EVENT_RESYNC_POLLING_DISABLED,
+    _KV_EVENT_RESYNC_STREAM_CLOSED,
 )
 
 
@@ -156,8 +156,8 @@ class ExtraConfigDefault(enum.Enum):
     # Must match the MP server's --hash-algorithm setting because KV events
     # expose the same chunk hashes used by server-side object keys.
     hash_algorithm = "blake3"
-    # CPU event polling interval; 0 keeps only the worker's completed stores.
-    kv_event_poll_interval = 0.1
+    # Subscribe to CPU events; False keeps only the worker's completed stores.
+    kv_event_stream = True
 
 
 # Backward-compatible aliases for callers that still pass these as
@@ -448,7 +448,7 @@ class ParallelStrategy:
         return max(1, self.vllm_world_size // self.n_servers)
 
     @property
-    def is_kv_event_poller(self) -> bool:
+    def is_kv_event_subscriber(self) -> bool:
         """Whether this is the first rank attached to its MP server."""
         return self.vllm_worker_id % self.ranks_per_server == 0
 
@@ -1375,7 +1375,7 @@ class LMCacheMPWorkerAdapter:
         )
         self._mp_server_launcher = None
         hash_algorithm = ExtraConfigDefault.hash_algorithm.default
-        kv_event_poll_interval = ExtraConfigDefault.kv_event_poll_interval.default
+        kv_event_stream = ExtraConfigDefault.kv_event_stream.default
         if extra_config is not None:
             # ``kv_worker_id`` may be shared by multiple TP ranks under MLA.
             # Only connectors that pass the actual vLLM worker rank can elect a
@@ -1398,7 +1398,7 @@ class LMCacheMPWorkerAdapter:
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
             hash_algorithm = cfg[ExtraConfigDefault.hash_algorithm.name]
-            kv_event_poll_interval = cfg[ExtraConfigDefault.kv_event_poll_interval.name]
+            kv_event_stream = cfg[ExtraConfigDefault.kv_event_stream.name]
             # Only treat ``mp_transfer_mode`` as an explicit override when
             # the user actually set it in extra_config; otherwise leave it
             # as ``None`` so ``create_transfer_context`` can still consult
@@ -1486,14 +1486,15 @@ class LMCacheMPWorkerAdapter:
         )
         self._pending_store_kv_events: dict[str, list[CacheStoreEvent]] = {}
         self._kv_events: list[CacheEvent] = []
-        self._kv_event_poll_interval = kv_event_poll_interval
+        self._kv_event_stream_enabled = kv_event_stream
+        self._kv_event_lock = threading.RLock()
         self._kv_event_server_source = False
-        self._kv_event_polling = False
+        self._kv_event_subscriber = False
         self._kv_event_cursor = 0
         self._kv_event_incarnation: int | None = None
-        self._kv_event_poll_future: MessagingFuture[KVEventPollResult] | None = None
-        self._kv_event_poll_started = 0.0
-        self._kv_event_last_poll = -math.inf
+        self._kv_event_stream: MessagingStream[KVEventBatch] | None = None
+        self._kv_event_receiver: threading.Thread | None = None
+        self._kv_event_stop = threading.Event()
         # CPU chunks this worker has announced and not withdrawn.
         self._announced_kv_hashes: set[bytes] = set()
         if enable_kv_events:
@@ -1502,7 +1503,7 @@ class LMCacheMPWorkerAdapter:
             self._kv_events_generated = _KV_EVENTS_GENERATED.labels(*labels)
             self._kv_events_drained = _KV_EVENTS_DRAINED.labels(*labels)
             self._kv_events_buffered.set(0)
-            self._kv_event_polls = _KV_EVENT_POLLS.labels(*labels)
+            self._kv_event_batches = _KV_EVENT_BATCHES.labels(*labels)
             self._kv_event_resyncs = {
                 reason: _KV_EVENT_RESYNCS.labels(*labels, reason)
                 for reason in _KV_EVENT_RESYNC_REASONS
@@ -2322,22 +2323,26 @@ class LMCacheMPWorkerAdapter:
         return completed_store_requests
 
     def get_kv_events(self) -> list[CacheEvent]:
-        """Drain CPU events in order, advancing one asynchronous server poll.
+        """Drain buffered CPU events in order, starting the subscription if needed.
 
-        Server records replace own-store reports while polling is active.
-        Returns an empty list when events are disabled or nothing is buffered.
+        Server events arrive independently of vLLM model steps. vLLM still
+        controls when this buffer is drained and published to the router.
         """
         if not self._kv_events_enabled:
             return []
         self._ensure_heartbeat_started()
-        self._poll_server_kv_events()
-        if not self._kv_events:
-            return []
-        events = self._kv_events
-        self._kv_events = []
-        self._kv_events_drained.inc(len(events))
-        self._kv_events_buffered.set(0)
-        return events
+        with self._kv_event_lock:
+            if self._kv_event_subscriber and self._kv_event_receiver is None:
+                self._kv_event_receiver = threading.Thread(
+                    target=self._receive_kv_events,
+                    daemon=True,
+                    name="lmcache-kv-events",
+                )
+                self._kv_event_receiver.start()
+            events, self._kv_events = self._kv_events, []
+            self._kv_events_drained.inc(len(events))
+            self._kv_events_buffered.set(0)
+            return events
 
     def get_failed_store_requests(self) -> set[str] | None:
         """Return the requests whose store failed since the last call.
@@ -2441,6 +2446,13 @@ class LMCacheMPWorkerAdapter:
         on the closing request client, and a straggler in-flight cycle cannot
         re-register or flip the health event after unregistration.
         """
+        self._kv_event_stop.set()
+        with self._kv_event_lock:
+            if self._kv_event_stream is not None:
+                self._kv_event_stream.close()
+        if self._kv_event_receiver is not None:
+            self._kv_event_receiver.join()
+
         with self._heartbeat_lock:
             if self._heartbeat is not None:
                 self._heartbeat.stop()
@@ -2477,88 +2489,87 @@ class LMCacheMPWorkerAdapter:
         """Append events to the buffer vLLM drains and update its metrics."""
         if not events:
             return
-        self._kv_events.extend(events)
-        self._kv_events_generated.inc(len(events))
-        self._kv_events_buffered.set(len(self._kv_events))
+        with self._kv_event_lock:
+            self._kv_events.extend(events)
+            self._kv_events_generated.inc(len(events))
+            self._kv_events_buffered.set(len(self._kv_events))
 
-    def _poll_server_kv_events(self) -> None:
-        """Consume a completed poll, then submit the next without blocking vLLM."""
-        if not self._kv_event_polling:
-            return
-        now = time.monotonic()
-        future = self._kv_event_poll_future
-        if future is not None:
-            if not future.query():
-                if now - self._kv_event_poll_started > self._mq_timeout:
-                    self._kv_event_poll_future = None
-                    if self.is_healthy:
-                        self._disable_kv_event_polling(
-                            "the LMCache server advertised the KV event "
-                            "channel but did not answer POLL_KV_EVENTS "
-                            f"within {self._mq_timeout}s"
-                        )
-                return
-            self._kv_event_poll_future = None
+    def _receive_kv_events(self) -> None:
+        """Receive pushes; reconnect after disconnect without periodic fetches."""
+        while not self._kv_event_stop.is_set():
+            stream = None
             try:
-                result = future.result()
+                stream = self.req_client.subscribe_kv_events(
+                    self.instance_id,
+                    self.model_name,
+                    self._kv_event_cursor,
+                    _KV_EVENT_BATCH_SIZE,
+                )
+                with self._kv_event_lock:
+                    if self._kv_event_stop.is_set():
+                        return
+                    self._kv_event_stream = stream
+                for batch in stream:
+                    with self._kv_event_lock:
+                        if self._kv_event_stop.is_set():
+                            return
+                        self._apply_kv_event_batch(batch)
+                        if not self._kv_event_server_source:
+                            return
+                raise ConnectionError("KV event subscription ended")
+            except ConnectionError as exc:
+                if not self._kv_event_stop.is_set():
+                    with self._kv_event_lock:
+                        logger.warning("Reconnecting KV event subscription: %s", exc)
+                        self._resync_kv_events(_KV_EVENT_RESYNC_STREAM_CLOSED)
+                        self._kv_event_cursor = 0
             except Exception as exc:
-                self._disable_kv_event_polling(f"POLL_KV_EVENTS failed: {exc!r}")
+                if not self._kv_event_stop.is_set():
+                    with self._kv_event_lock:
+                        self._disable_kv_event_stream(str(exc))
                 return
-            self._apply_kv_event_poll_result(result)
-            if not self._kv_event_polling:
-                return
-        if not self.is_healthy:
-            return
-        if now - self._kv_event_last_poll < self._kv_event_poll_interval:
-            return
-        try:
-            self._kv_event_poll_future = self.req_client.poll_kv_events(
-                self.model_name, self._kv_event_cursor, _KV_EVENT_POLL_PAGE
-            )
-        except Exception as exc:
-            # Never let the transport fail the model-runner step.
-            self._disable_kv_event_polling(f"issuing POLL_KV_EVENTS failed: {exc!r}")
-            return
-        self._kv_event_poll_started = now
-        self._kv_event_last_poll = now
+            finally:
+                if stream is not None:
+                    stream.close()
+                with self._kv_event_lock:
+                    self._kv_event_stream = None
 
-    def _disable_kv_event_polling(self, reason: str) -> None:
+    def _disable_kv_event_stream(self, reason: str) -> None:
         """Withdraw placements and resume completed-store reporting after failure."""
         logger.warning(
-            "Disabling server-side KV event polling (%s): this worker falls "
+            "Disabling server KV event subscription (%s): this worker falls "
             "back to reporting its own completed stores, so the router no "
             "longer learns LMCache host-cache evictions from it",
             reason,
         )
-        self._kv_event_polling = False
+        self._kv_event_subscriber = False
         self._kv_event_server_source = False
-        self._kv_event_poll_future = None
-        self._resync_kv_events(_KV_EVENT_RESYNC_POLLING_DISABLED)
+        self._resync_kv_events(_KV_EVENT_RESYNC_STREAM_CLOSED)
 
     def _resolve_kv_event_source(
         self, enable_kv_events: bool, parallel_strategy: ParallelStrategy
     ) -> None:
-        """Use server records only when enabled and advertised; elect one poller."""
-        if not enable_kv_events or self._kv_event_poll_interval <= 0:
+        """Use server records when advertised; elect one subscriber per server."""
+        if not enable_kv_events or not self._kv_event_stream_enabled:
             return
         if KV_EVENT_CAPABILITY not in self.experimental:
             logger.warning(
                 "The LMCache server does not advertise the '%s' capability, "
                 "so this worker reports only its own completed stores and the "
                 "router will not learn LMCache host-cache evictions from it. "
-                "Upgrade the server, or set lmcache.mp.kv_event_poll_interval "
-                "to 0 to silence this warning.",
+                "Upgrade the server, or set lmcache.mp.kv_event_stream "
+                "to false to silence this warning.",
                 KV_EVENT_CAPABILITY,
             )
             return
         self._kv_event_server_source = True
-        self._kv_event_polling = parallel_strategy.is_kv_event_poller
+        self._kv_event_subscriber = parallel_strategy.is_kv_event_subscriber
 
-    def _apply_kv_event_poll_result(self, result: KVEventPollResult) -> None:
-        """Buffer the events of one completed poll."""
-        self._kv_event_polls.inc()
+    def _apply_kv_event_batch(self, result: KVEventBatch) -> None:
+        """Buffer one pushed batch; the caller holds the event lock."""
+        self._kv_event_batches.inc()
         if not result.enabled:
-            self._disable_kv_event_polling(
+            self._disable_kv_event_stream(
                 "the LMCache server records no cache events; see the server's "
                 "--kv-event-log-size and --disable-observability"
             )
@@ -2575,9 +2586,6 @@ class LMCacheMPWorkerAdapter:
         self._kv_event_cursor = result.next_cursor
         for record in result.events:
             self._apply_kv_event_record(record)
-        if len(result.events) >= _KV_EVENT_POLL_PAGE:
-            # A full page means a backlog: poll again without waiting.
-            self._kv_event_last_poll = -math.inf
 
     def _apply_kv_event_record(self, record: KVEventRecord) -> None:
         """Publish CPU changes once, removing only previously announced hashes."""
@@ -2614,7 +2622,7 @@ class LMCacheMPWorkerAdapter:
             logger.warning("Ignoring KV event record of unknown kind %r", record.kind)
 
     def _resync_kv_events(self, reason: str) -> None:
-        """Withdraw announced CPU placements after loss, restart, or poll failure."""
+        """Withdraw announced CPU placements after loss, restart, or stream failure."""
         self._kv_event_resyncs[reason].inc()
         logger.warning("Resynchronizing CPU KV events after %s", reason)
         if self._announced_kv_hashes:

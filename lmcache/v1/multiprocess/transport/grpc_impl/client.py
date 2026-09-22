@@ -8,13 +8,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.parse import urlparse
+import threading
 import uuid
 
 # Third Party
 import grpc
 
 # First Party
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
@@ -68,11 +69,11 @@ class _ClientRpc:
     codec: GrpcMethodCodec
 
 
-ClientRpcCallable = Callable[..., MessagingFuture[Any]]
+ClientRpcCallable = Callable[..., MessagingFuture[Any] | MessagingStream[Any]]
 
 
 class GrpcMultiprocessClient(RequestClient):
-    """Expose every generated unary RPC as a snake-case client method."""
+    """Expose generated unary and server-streaming RPCs as client methods."""
 
     def __init__(self, server_url: str) -> None:
         self._channel = grpc.insecure_channel(
@@ -105,7 +106,9 @@ class GrpcMultiprocessClient(RequestClient):
                 f"{self.__class__.__name__!r} has no attribute {name!r}"
             )
 
-        def invoke(*args: Any, **kwargs: Any) -> MessagingFuture[Any]:
+        def invoke(
+            *args: Any, **kwargs: Any
+        ) -> MessagingFuture[Any] | MessagingStream[Any]:
             return self._call(rpc, args, kwargs)
 
         return invoke
@@ -137,8 +140,25 @@ class GrpcMultiprocessClient(RequestClient):
         rpc: _ClientRpc,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
-    ) -> MessagingFuture[Any]:
+    ) -> MessagingFuture[Any] | MessagingStream[Any]:
         request = rpc.codec.request_encoder(args, kwargs)
+        if rpc.codec.streaming:
+            call = rpc.stub_method(
+                request, metadata=self._metadata, wait_for_ready=True
+            )
+
+            def read(closed: threading.Event) -> Any:
+                try:
+                    return rpc.codec.response_decoder(next(call))
+                except grpc.RpcError as exc:
+                    if exc.code() in (
+                        grpc.StatusCode.UNAVAILABLE,
+                        grpc.StatusCode.CANCELLED,
+                    ):
+                        raise ConnectionError("gRPC event stream disconnected") from exc
+                    raise
+
+            return MessagingStream(read, call.cancel)
         future: MessagingFuture[Any] = MessagingFuture()
         call = rpc.stub_method.future(
             request,
@@ -163,7 +183,7 @@ def _make_client_rpc_method(name: str) -> ClientRpcCallable:
         self: GrpcMultiprocessClient,
         *args: Any,
         **kwargs: Any,
-    ) -> MessagingFuture[Any]:
+    ) -> MessagingFuture[Any] | MessagingStream[Any]:
         return self._call(self._rpc_methods[name], args, kwargs)
 
     rpc_method.__name__ = name

@@ -15,13 +15,13 @@ from lmcache.v1.multiprocess.custom_types import (
     CBUnifiedLookupResult,
     DeviceIPCWrapper,
     IPCCacheServerKey,
-    KVEventPollResult,
+    KVEventBatch,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.rpc import rpc_method
 
@@ -226,9 +226,9 @@ class RequestClient(Protocol):
     def get_experimental(self) -> MessagingFuture[list[str]]: ...
 
     @rpc_method
-    def poll_kv_events(
-        self, model_name: str, cursor: int, max_events: int
-    ) -> MessagingFuture[KVEventPollResult]: ...
+    def subscribe_kv_events(
+        self, instance_id: int, model_name: str, cursor: int, max_events: int
+    ) -> MessagingStream[KVEventBatch]: ...
 
     def cb_register_rope_v3(
         self,

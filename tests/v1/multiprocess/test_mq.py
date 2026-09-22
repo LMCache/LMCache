@@ -20,7 +20,7 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
@@ -124,11 +124,14 @@ def _run_client_test(
     successful = True
 
     try:
-        futures = []
+        futures: list[MessagingFuture[Any]] = []
         # Submit requests
         for _ in range(num_requests):
-            future = client.submit_request(operation, payloads)  # type: ignore
-            futures.append(future)
+            submitted: MessagingFuture[Any] | MessagingStream[Any] = (
+                client.submit_request(operation, payloads)
+            )
+            assert isinstance(submitted, MessagingFuture)
+            futures.append(submitted)
 
         # Validate responses
         for i, future in enumerate(futures):
@@ -660,8 +663,10 @@ def test_shared_loop_dispatch():
 
         # All futures should resolve with the correct response
         for future in futures_a:
+            assert isinstance(future, MessagingFuture)
             assert future.result(timeout=5) == "NOOP_OK"
         for future in futures_b:
+            assert isinstance(future, MessagingFuture)
             assert future.result(timeout=5) == "NOOP_OK"
 
         client_a.close()
@@ -681,8 +686,14 @@ def test_invalid_outbound_request_does_not_block_later_requests() -> None:
 
     client = MessageQueueClient(server_url, context)
     try:
-        invalid: MessagingFuture[int] = client.submit_request("get_chunk_size", [123])
-        healthy: MessagingFuture[str] = client.submit_request("noop", [])
+        invalid: MessagingFuture[int] | MessagingStream[int] = client.submit_request(
+            "get_chunk_size", [123]
+        )
+        healthy: MessagingFuture[str] | MessagingStream[str] = client.submit_request(
+            "noop", []
+        )
+        assert isinstance(invalid, MessagingFuture)
+        assert isinstance(healthy, MessagingFuture)
 
         with pytest.raises(ValueError, match="Payload count mismatch"):
             invalid.result(timeout=5)
@@ -732,13 +743,19 @@ def test_client_survives_undecodable_response() -> None:
         # The poisoned request cannot be resolved: without a decodable
         # operation there is no way to match it to its future, so it times
         # out. That much is expected -- what matters is what happens after.
-        poisoned: MessagingFuture[int] = client.submit_request("get_chunk_size", [])
+        poisoned: MessagingFuture[int] | MessagingStream[int] = client.submit_request(
+            "get_chunk_size", []
+        )
+        assert isinstance(poisoned, MessagingFuture)
         with pytest.raises(TimeoutError):
             poisoned.result(timeout=1)
 
         # A later, well-formed request must still be served. If the bad
         # response tore down the shared polling loop, this times out too.
-        healthy: MessagingFuture[int] = client.submit_request("get_chunk_size", [])
+        healthy: MessagingFuture[int] | MessagingStream[int] = client.submit_request(
+            "get_chunk_size", []
+        )
+        assert isinstance(healthy, MessagingFuture)
         assert healthy.result(timeout=5) == chunk_size
 
         client.close()

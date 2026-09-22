@@ -139,8 +139,8 @@ def test_named_rpc_method_delegates_to_zmq_request_envelope() -> None:
     assert future.result(timeout=0) == "lookup"
     assert transport.calls == [("lookup", ["key", 4])]
 
-    client.poll_kv_events("model", cursor=7, max_events=16)
-    assert transport.calls[-1] == ("poll_kv_events", ["model", 7, 16])
+    client.subscribe_kv_events(9, "model", cursor=7, max_events=16)
+    assert transport.calls[-1] == ("subscribe_kv_events", [9, "model", 7, 16])
 
 
 def test_zmq_clear_defaults_to_non_force_and_accepts_force() -> None:

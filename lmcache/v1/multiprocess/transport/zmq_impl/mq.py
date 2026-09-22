@@ -12,6 +12,7 @@ import queue
 import threading
 
 # Third Party
+from zmq.utils.monitor import recv_monitor_message
 import msgspec
 import zmq
 
@@ -26,6 +27,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import (
     MessagingFuture,
+    MessagingStream,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
@@ -150,6 +152,7 @@ class ClientPollingLoop:
         self._poller = zmq.Poller()
         self._poller.register(self._notifier.fileno(), zmq.POLLIN)
         self._socket_to_client: dict[zmq.Socket, "MessageQueueClient"] = {}
+        self._monitor_to_client: dict[zmq.Socket, "MessageQueueClient"] = {}
         self._thread = threading.Thread(
             target=self._main_loop, daemon=True, name="mq-client-shared-loop"
         )
@@ -224,10 +227,16 @@ class ClientPollingLoop:
                 if op.kind is _OpKind.REGISTER:
                     self._poller.register(op.client.socket, zmq.POLLIN)
                     self._socket_to_client[op.client.socket] = op.client
+                    self._poller.register(op.client.monitor, zmq.POLLIN)
+                    self._monitor_to_client[op.client.monitor] = op.client
                     logger.debug("Registered client socket %s", op.client.socket)
                 elif op.kind is _OpKind.UNREGISTER:
+                    op.client.cancel_streams()
+                    op.client.process_outbound_task()
                     self._poller.unregister(op.client.socket)
                     self._socket_to_client.pop(op.client.socket, None)
+                    self._poller.unregister(op.client.monitor)
+                    self._monitor_to_client.pop(op.client.monitor, None)
                     logger.debug("Unregistered client socket %s", op.client.socket)
                 op.done.set()
         except queue.Empty:
@@ -254,6 +263,14 @@ class ClientPollingLoop:
                 if sock is notifier_fd:
                     continue
                 if event & zmq.POLLIN:
+                    if sock in self._monitor_to_client:
+                        client = self._monitor_to_client[sock]
+                        if (
+                            recv_monitor_message(sock)["event"]
+                            == zmq.EVENT_DISCONNECTED
+                        ):
+                            client.cancel_streams()
+                        continue
                     owner = self._socket_to_client.get(sock)
                     if owner is not None:
                         try:
@@ -277,14 +294,16 @@ class MessageQueueClient:
     @dataclass
     class WrappedRequest:
         request_uid: RequestUID
-        future: MessagingFuture[Any]
+        future: MessagingFuture[Any] | MessagingStream[Any]
         rpc_spec: RpcSpec
         request_payloads: list[Any]
+        responses: queue.Queue | None = None
 
     def __init__(self, server_url: str, context: zmq.Context):
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.DEALER)
+        self.monitor = self.socket.get_monitor_socket(events=zmq.EVENT_DISCONNECTED)
         self.socket.connect(server_url)
 
         # Input queue
@@ -293,6 +312,9 @@ class MessageQueueClient:
         # Pending job's futures
         self._request_counter = itertools.count()
         self.pending_futures: dict[int, tuple[MessagingFuture[Any], RpcSpec]] = {}
+        self.pending_streams: dict[
+            int, tuple[MessagingStream[Any], RpcSpec, queue.Queue]
+        ] = {}
 
         # Register with the shared polling loop
         self._polling_loop = ClientPollingLoop.get_instance()
@@ -301,6 +323,13 @@ class MessageQueueClient:
     def process_outbound_task(self):
         try:
             while wrapped_request := self.input_queue.get_nowait():
+                if isinstance(wrapped_request, list):
+                    self.socket.send_multipart(wrapped_request)
+                    if wrapped_request[-1] == b"cancel":
+                        self.pending_streams.pop(
+                            decode_request_uid(wrapped_request[0]), None
+                        )
+                    continue
                 request_uid = wrapped_request.request_uid
                 try:
                     b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
@@ -332,16 +361,27 @@ class MessageQueueClient:
                             strict=False,
                         )
                     ]
-                    self.pending_futures[request_uid] = (
-                        wrapped_request.future,
-                        rpc_spec,
-                    )
+                    if isinstance(wrapped_request.future, MessagingStream):
+                        self.pending_streams[request_uid] = (
+                            wrapped_request.future,
+                            rpc_spec,
+                            wrapped_request.responses,
+                        )
+                    else:
+                        self.pending_futures[request_uid] = (
+                            wrapped_request.future,
+                            rpc_spec,
+                        )
                     self.socket.send_multipart(
                         [b_request_uid, b_operation] + b_payloads
                     )
                 except Exception as exc:
                     self.pending_futures.pop(request_uid, None)
-                    wrapped_request.future.set_exception(exc)
+                    if isinstance(wrapped_request.future, MessagingStream):
+                        self.pending_streams.pop(request_uid, None)
+                        wrapped_request.responses.put_nowait(exc)
+                    else:
+                        wrapped_request.future.set_exception(exc)
         except queue.Empty:
             pass
 
@@ -362,6 +402,20 @@ class MessageQueueClient:
             return
         b_request_uid, b_operation, *b_response = msg
         request_uid = msgspec_decode(b_request_uid, cls=RequestUID)
+
+        if request_uid in self.pending_streams:
+            stream, rpc_spec, responses = self.pending_streams[request_uid]
+            try:
+                if (
+                    decode_operation(b_operation) != rpc_spec.operation
+                    or not b_response
+                ):
+                    raise ConnectionError("Event subscription ended")
+                response = msgspec_decode(b_response[0], cls=rpc_spec.response_type)
+                responses.put_nowait(response)
+            except Exception:
+                stream.close()
+            return
 
         if request_uid in self.pending_futures:
             future, rpc_spec = self.pending_futures.pop(request_uid)
@@ -384,7 +438,7 @@ class MessageQueueClient:
         self,
         operation: RpcOperation,
         request_payloads: list[Any],
-    ) -> MessagingFuture[T]:
+    ) -> MessagingFuture[T] | MessagingStream[T]:
         """Submit a request to the server.
 
         Args:
@@ -395,22 +449,57 @@ class MessageQueueClient:
             MessagingFuture[T]: A future that will hold the response.
         """
         rpc_spec = get_rpc_spec(operation)
-        future: MessagingFuture[T] = MessagingFuture()
         request_uid = next(self._request_counter)
+        responses: queue.Queue | None = None
+        future: MessagingFuture[T] | MessagingStream[T]
+        if rpc_spec.streaming:
+            responses = queue.Queue(maxsize=1)
+
+            def control(action: bytes) -> None:
+                self.input_queue.put([encode_request_uid(request_uid), b"", action])
+                self._polling_loop.notify()
+
+            def read(closed: threading.Event) -> T:
+                response = responses.get()
+                if closed.is_set():
+                    raise StopIteration
+                if isinstance(response, BaseException):
+                    raise response
+                control(b"ack")
+                return response
+
+            def cancel() -> None:
+                try:
+                    responses.put_nowait(None)
+                except queue.Full:
+                    pass
+                control(b"cancel")
+
+            future = MessagingStream(read, cancel)
+        else:
+            future = MessagingFuture()
         self.input_queue.put(
             MessageQueueClient.WrappedRequest(
                 request_uid=request_uid,
                 future=future,
                 rpc_spec=rpc_spec,
                 request_payloads=request_payloads,
+                responses=responses,
             )
         )
         self._polling_loop.notify()
         return future
 
+    def cancel_streams(self) -> None:
+        """Wake subscription readers on disconnect; called by the socket loop."""
+        for stream, _, _ in list(self.pending_streams.values()):
+            stream.close()
+        self.pending_streams.clear()
+
     def close(self) -> None:
         self._polling_loop.unregister(self)
         ClientPollingLoop.release_instance()
+        self.monitor.close(linger=0)
         self.socket.close()
 
 
@@ -517,6 +606,7 @@ class MessageQueueServer(RequestServer):
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
+        self.socket.setsockopt(zmq.ROUTER_MANDATORY, 1)
         self.socket.bind(bind_url)
         # Use a cross-platform Notifier instead of zmq PUSH/PULL sockets
         # because blocking handler callbacks run on ThreadPoolExecutor
@@ -541,6 +631,10 @@ class MessageQueueServer(RequestServer):
 
         # Thread pools assigned via add_normal_thread_pool / add_affinity_thread_pool
         self.extra_pools: list[ThreadPoolExecutor | AffinityThreadPool] = []
+        self.streams: dict[
+            tuple[bytes, bytes],
+            tuple[MessagingStream, threading.Event, threading.Thread],
+        ] = {}
 
     def _call_sync_handler(
         self,
@@ -557,12 +651,49 @@ class MessageQueueServer(RequestServer):
             prefix_frames (list[bytes]): The prefix frames to send back.
         """
         response = handler_entry(payloads)
+        if isinstance(response, MessagingStream):
+            self._start_stream(
+                response, handler_entry.get_response_class(), prefix_frames
+            )
+            return
         response_cls = handler_entry.get_response_class()
         b_response = msgspec_encode(response, cls=response_cls)
         if response is not None:
             self.socket.send_multipart(prefix_frames + [b_response])
         else:
             self.socket.send_multipart(prefix_frames)
+
+    def _start_stream(
+        self, stream: MessagingStream, response_cls: Any, prefix: list[bytes]
+    ) -> None:
+        """Forward one batch per credit; idle readers wait on event notification."""
+        credit = threading.Event()
+        credit.set()
+        stream.add_close_callback(credit.set)
+
+        def forward() -> None:
+            try:
+                while not self.is_finished.is_set():
+                    credit.wait()
+                    credit.clear()
+                    response = next(stream)
+                    self.output_queue.put(
+                        prefix + [msgspec_encode(response, response_cls)]
+                    )
+                    self._output_efd.notify()
+            except StopIteration:
+                pass
+            except Exception:
+                logger.exception("Error in ZMQ event stream")
+            finally:
+                stream.close()
+                if not self.is_finished.is_set():
+                    self.output_queue.put(prefix)
+                    self._output_efd.notify()
+
+        thread = threading.Thread(target=forward, daemon=True, name="zmq-event-stream")
+        self.streams[(prefix[0], prefix[1])] = (stream, credit, thread)
+        thread.start()
 
     def _call_blocking_handler(
         self,
@@ -636,6 +767,14 @@ class MessageQueueServer(RequestServer):
                 )
 
                 identity, b_request_uid, b_operation, *payloads = msg
+                if b_operation == b"":
+                    state = self.streams.get((identity, b_request_uid))
+                    if state is not None:
+                        if payloads == [b"ack"]:
+                            state[1].set()
+                        elif payloads == [b"cancel"]:
+                            state[0].close()
+                    continue
                 try:
                     operation = decode_operation(b_operation)
                 except (TypeError, ValueError):
@@ -663,7 +802,16 @@ class MessageQueueServer(RequestServer):
                 # Process the output tasks
                 try:
                     while frames_to_send := self.output_queue.get_nowait():
-                        self.socket.send_multipart(frames_to_send)
+                        key = (frames_to_send[0], frames_to_send[1])
+                        try:
+                            self.socket.send_multipart(frames_to_send)
+                        except zmq.ZMQError:
+                            if key in self.streams:
+                                self.streams[key][0].close()
+                            else:
+                                logger.warning("Response destination disconnected")
+                        if len(frames_to_send) == 3:
+                            self.streams.pop(key, None)
                 except queue.Empty:
                     pass
 
@@ -724,7 +872,7 @@ class MessageQueueServer(RequestServer):
                 return False
 
         return_ann = hints.get("return", sig.return_annotation)
-        expected_return_cls = rpc_spec.response_type
+        expected_return_cls = rpc_spec.handler_response_type
         if not same_type(return_ann, expected_return_cls):
             logger.error(
                 "Handler for %s expects return type %s, but got %s",
@@ -897,6 +1045,11 @@ class MessageQueueServer(RequestServer):
         self.is_finished.set()
         if self.worker_thread.is_alive():
             self.worker_thread.join()
+        for stream, _, _ in list(self.streams.values()):
+            stream.close()
+        for _, _, thread in list(self.streams.values()):
+            thread.join()
+        self.streams.clear()
         self.socket.close()
         for pool in self.extra_pools:
             pool.shutdown(wait=False)

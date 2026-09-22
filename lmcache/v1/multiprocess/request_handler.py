@@ -93,7 +93,9 @@ def _validate_handler(operation: RpcOperation, handler: Callable[..., Any]) -> N
             f"{payload_types!r} do not match RPC {operation!r} types "
             f"{spec.payload_types!r}"
         )
-    if _normalize_none_type(response_type) != _normalize_none_type(spec.response_type):
+    if _normalize_none_type(response_type) != _normalize_none_type(
+        spec.handler_response_type
+    ):
         raise TypeError(
             f"Handler {handler.__qualname__} return annotation "
             f"{response_type!r} does not match RPC {operation!r} type "

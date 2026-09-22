@@ -280,7 +280,6 @@ def _build_modules(
         # The KV event channel is advertised on ZMQ only: the gRPC client
         # builds its methods from the generated service descriptors, which
         # do not carry POLL_KV_EVENTS yet.
-        advertise_kv_events=mp_config.transport == "zmq",
     )
 
     # ManagementModule precedes the transfer/blend modules so close() stops

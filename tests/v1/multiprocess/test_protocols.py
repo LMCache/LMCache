@@ -6,7 +6,7 @@ import msgspec
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import KVEventPollResult
+from lmcache.v1.multiprocess.custom_types import KVEventBatch
 from lmcache.v1.multiprocess.rpc import get_rpc_spec, get_rpc_specs
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
@@ -52,7 +52,6 @@ FROZEN_LEGACY_OPERATION_IDS = {
     "p2p_unlock_objects": 31,
     "get_experimental": 32,
     "cb_protocol_handshake": 33,
-    "poll_kv_events": 34,
 }
 
 
@@ -87,8 +86,7 @@ def test_request_contract_matches_generated_grpc_methods() -> None:
     descriptor_operations = {
         client_method_name(method.name) for _binding, method in iter_methods()
     }
-    # KV event polling is currently ZMQ-only.
-    assert set(get_rpc_specs()) - {"poll_kv_events"} == descriptor_operations
+    assert set(get_rpc_specs()) == descriptor_operations
 
 
 def test_rpc_types_come_from_request_client_annotations() -> None:
@@ -107,6 +105,7 @@ def test_rpc_types_come_from_request_client_annotations() -> None:
     assert clear.bind_payloads((), {"force": True}) == (True,)
     assert clear.response_type is type(None)
 
-    poll = get_rpc_spec("poll_kv_events")
-    assert poll.payload_types == (str, int, int)
-    assert poll.response_type is KVEventPollResult
+    stream = get_rpc_spec("subscribe_kv_events")
+    assert stream.payload_types == (int, str, int, int)
+    assert stream.response_type is KVEventBatch
+    assert stream.streaming

@@ -52,6 +52,7 @@ class _GrpcRequestHandler:
     requires_client_affinity: bool
     request_decoder: RequestDecoder
     response_encoder: ResponseEncoder
+    streaming: bool
 
 
 class _GeneratedServicer:
@@ -71,11 +72,52 @@ class _GeneratedServicer:
         self._affinity_submit_lock = affinity_submit_lock
         self._sync_handler_lock = sync_handler_lock
 
-    def __getattr__(self, method_name: str) -> Callable[[Any, Any], Any]:
+    def __getattr__(self, method_name: str) -> Callable[..., Any]:
         full_name = f"{self._binding.descriptor.full_name}.{method_name}"
         handler = self._handlers.get(full_name)
         if handler is None:
             raise AttributeError(method_name)
+
+        if handler.streaming:
+
+            def subscribe(
+                request: Any, context: grpc.ServicerContext, send: Callable
+            ) -> None:
+                if handler.handler is None:
+                    context.abort(grpc.StatusCode.UNIMPLEMENTED, handler.operation)
+                    return
+                try:
+                    stream = handler.handler(*handler.request_decoder(request))
+                except ValueError as exc:
+                    context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+                    return
+                if not context.add_callback(stream.close):
+                    stream.close()
+                    return
+
+                def forward() -> None:
+                    try:
+                        for response in stream:
+                            send(handler.response_encoder(response))
+                    except Exception as exc:
+                        if context.is_active():
+                            logger.exception(
+                                "Error in streaming handler %s", handler.operation
+                            )
+                            context.set_code(grpc.StatusCode.INTERNAL)
+                            context.set_details(str(exc))
+                    finally:
+                        stream.close()
+                        send(None)
+
+                # The same nonblocking hook used by grpc.health.v1.Health.Watch:
+                # an idle stream must not occupy the unary request executor.
+                threading.Thread(
+                    target=forward, daemon=True, name="grpc-event-stream"
+                ).start()
+
+            subscribe.experimental_non_blocking = True  # type: ignore[attr-defined]
+            return subscribe
 
         def invoke(request: Any, context: grpc.ServicerContext) -> Any:
             return self._dispatch(handler, request, context)
@@ -218,6 +260,7 @@ class GrpcMultiprocessServer(RequestServer):
                 ),
                 request_decoder=method_codec.request_decoder,
                 response_encoder=method_codec.response_encoder,
+                streaming=method_codec.streaming,
             )
             self._handlers[full_name] = registered
             service_handlers[full_name] = registered

@@ -6,12 +6,12 @@ from inspect import Parameter
 from typing import Any, Callable
 
 # First Party
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.rpc import RpcSpec, get_rpc_specs
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueClient
 
-ClientRpcCallable = Callable[..., MessagingFuture[Any]]
+ClientRpcCallable = Callable[..., MessagingFuture[Any] | MessagingStream[Any]]
 
 
 class ZmqMultiprocessClient(RequestClient):
@@ -50,7 +50,7 @@ class ZmqMultiprocessClient(RequestClient):
         rpc_spec: RpcSpec,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
-    ) -> MessagingFuture[Any]:
+    ) -> MessagingFuture[Any] | MessagingStream[Any]:
         payloads = rpc_spec.bind_payloads(args, kwargs)
         return self._message_queue_client.submit_request(
             rpc_spec.operation,
@@ -63,7 +63,7 @@ def _make_client_rpc_method(rpc_spec: RpcSpec) -> ClientRpcCallable:
         self: ZmqMultiprocessClient,
         *args: Any,
         **kwargs: Any,
-    ) -> MessagingFuture[Any]:
+    ) -> MessagingFuture[Any] | MessagingStream[Any]:
         return self._call(rpc_spec, args, kwargs)
 
     invoke.__name__ = rpc_spec.operation

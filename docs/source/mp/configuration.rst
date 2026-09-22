@@ -157,10 +157,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
        that exact name for its segment.
    * - ``--kv-event-log-size``
      - ``32768``
-     - CPU store-completion and eviction records retained for workers to
-       poll and republish
-       as KV events. ``0`` disables the channel, and the server then stops
-       advertising it so no worker polls. Requires the observability event
+     - CPU store-completion and eviction records retained for subscriptions
+       and reconnects. Workers receive pushes over ZMQ or gRPC and republish
+       them as KV events. ``0`` disables the channel and its capability
+       advertisement. Requires the observability event
        bus, which ``--disable-observability`` turns off.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
@@ -772,16 +772,15 @@ All connector-level options are passed through
        callback, for example when long prefill steps delay observation of an
        already-ready reply. LOOKUP acknowledgement polling
        remains asynchronous. Available with the current ``LMCacheMPConnector``.
-   * - ``lmcache.mp.kv_event_poll_interval``
-     - ``0.1``
-     - Seconds between polls of the MP server's cache-event log, which the
-       connector republishes as vLLM ``BlockStored`` and ``BlockRemoved``
-       events so a KV-aware router learns host-cache evictions. One rank per
-       server polls. ``0`` disables polling, and the worker then reports only
-       its own completed stores, so evictions never reach the router. The
-       server must record events; see ``--kv-event-log-size``. Polling advances
-       only when vLLM takes an engine step; idle workers defer eviction
-       delivery until stepping resumes.
+   * - ``lmcache.mp.kv_event_stream``
+     - ``true``
+     - Subscribe to CPU store/removal events over ZMQ or gRPC, with one
+       subscriber per MP server. Events arrive without periodic fetches and
+       are buffered for vLLM's ``BlockStored``/``BlockRemoved`` publisher.
+       ``false`` reports only the worker's own completed stores, omitting
+       evictions. The server must record events; see ``--kv-event-log-size``.
+       Reception continues while idle, but vLLM still drains and publishes
+       the buffer during engine steps.
    * - ``lmcache.mp.eager_prefetch``
      - ``false``
      - Submit the LMCache lookup when a request enters vLLM's waiting queue,
