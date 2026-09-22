@@ -59,6 +59,8 @@ def _serve(port: int) -> None:
             host="127.0.0.1",
             port=port,
             chunk_size=CHUNK,
+            null_block_id=-1,
+            separate_object_groups=True,
         ),
         storage_manager_config=StorageManagerConfig(
             l1_manager_config=L1ManagerConfig(
@@ -185,14 +187,13 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
     expected_pages = aliases[0][:16].cpu().clone()
     expected_state = [alias[:2].cpu().clone() for alias in aliases[1:]]
     groups = [
-        EngineGroupInfo(0, (0,), tokens_per_block=4, null_block_id=None),
+        EngineGroupInfo(0, (0,), tokens_per_block=4),
         EngineGroupInfo(
             1,
             (1,),
             tokens_per_block=CHUNK,
             sw_size_tokens=CHUNK,
             recurrent_state=True,
-            null_block_id=-1,
         ),
         EngineGroupInfo(
             2,
@@ -200,7 +201,6 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
             tokens_per_block=CHUNK,
             sw_size_tokens=CHUNK,
             recurrent_state=True,
-            null_block_id=-1,
         ),
     ]
     instance_id = os.getpid()
@@ -293,14 +293,13 @@ def test_state_ordinals_alias_the_page_allocation(native_client: RequestClient) 
     expected_pages = pool[:8].cpu().clone()
     expected_state = [pool[12].cpu().clone(), pool[15, :, :32].cpu().clone()]
     groups = [
-        EngineGroupInfo(0, (0,), tokens_per_block=4, null_block_id=None),
+        EngineGroupInfo(0, (0,), tokens_per_block=4),
         EngineGroupInfo(
             1,
             (1,),
             tokens_per_block=CHUNK,
             sw_size_tokens=CHUNK,
             recurrent_state=True,
-            null_block_id=-1,
         ),
         EngineGroupInfo(
             2,
@@ -308,7 +307,6 @@ def test_state_ordinals_alias_the_page_allocation(native_client: RequestClient) 
             tokens_per_block=CHUNK,
             sw_size_tokens=CHUNK,
             recurrent_state=True,
-            null_block_id=-1,
         ),
     ]
     instance_id = os.getpid()

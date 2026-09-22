@@ -86,12 +86,12 @@ def all_null_chunk_masks(
     object_groups: Sequence[ObjectGroupInfo],
     blocks_per_chunk: Sequence[int],
     num_chunks: int,
-    null_block_ids: Sequence[int | None] | None = None,
+    null_block_id: int = 0,
 ) -> list[list[bool]]:
     """Mark, per object group, the chunks whose engine block ids are all null.
 
     A chunk is null for an object group when every block ID of every kernel
-    group equals that group's null marker. Align-mode Mamba/linear
+    group equals the server's null marker. Align-mode Mamba/linear
     layers produce such chunks: only the block holding the last recurrent state
     is real, so every earlier chunk is null. These chunks must not be stored --
     the null block carries no valid KV, and object keys are content hashes, so
@@ -104,9 +104,8 @@ def all_null_chunk_masks(
         blocks_per_chunk: Blocks in one chunk per kernel group, indexed by
             kernel-group index.
         num_chunks: Number of chunks in the request.
-        null_block_ids: Null marker per kernel group. ``None`` entries mean
-            that group has no null block; omitting the sequence preserves the
-            historical null marker zero for every group.
+        null_block_id: Server-wide block ID denoting absent data. Defaults to
+            the historical vLLM null block zero.
 
     Returns:
         ``mask[g][i]`` is True iff chunk ``i`` is all-null for object group ``g``.
@@ -118,9 +117,9 @@ def all_null_chunk_masks(
             is_null = True
             for kg in group.kernel_group_indices:
                 bpc = blocks_per_chunk[kg]
-                null_id = null_block_ids[kg] if null_block_ids is not None else 0
-                if null_id is None or any(
-                    block != null_id for block in block_ids[kg][i * bpc : (i + 1) * bpc]
+                if any(
+                    block != null_block_id
+                    for block in block_ids[kg][i * bpc : (i + 1) * bpc]
                 ):
                     is_null = False
                     break
@@ -635,23 +634,19 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # Mamba chunks holding no real state) carry no valid KV and must not
             # be committed. Computed on the raw block ids before downsampling
             # mutates them.
-            null_block_ids = [
-                group.null_block_id
-                for group in cache_context.kv_layer_groups_manager.kernel_groups
-            ]
-            has_sparse_groups = any(null_id != 0 for null_id in null_block_ids)
+            null_block_id = self._ctx.null_block_id
             skipped_chunks = all_null_chunk_masks(
                 gpu_block_ids,
                 cache_context.kv_layer_groups_manager.object_groups,
                 blocks_per_chunk,
                 num_chunks,
-                null_block_ids,
+                null_block_id,
             )
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context,
                 gpu_block_ids,
-                skipped_chunks=skipped_chunks if has_sparse_groups else None,
+                skipped_chunks=skipped_chunks if null_block_id != 0 else None,
             )
 
             producer_event = event_backend.import_event(
@@ -936,15 +931,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 [g in skipped_groups or i < skip for i in range(num_chunks)]
                 for g, skip in enumerate(group_skips)
             ]
-            has_sparse_groups = any(
-                group.null_block_id != 0
-                for group in cache_context.kv_layer_groups_manager.kernel_groups
-            )
+            uses_nondefault_null_block = self._ctx.null_block_id != 0
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context,
                 gpu_block_ids,
-                skipped_chunks=skipped_chunks if has_sparse_groups else None,
-                skip_first_n_tokens=skip_first_n_tokens if has_sparse_groups else 0,
+                skipped_chunks=(skipped_chunks if uses_nondefault_null_block else None),
+                skip_first_n_tokens=(
+                    skip_first_n_tokens if uses_nondefault_null_block else 0
+                ),
             )
 
             producer_event = event_backend.import_event(

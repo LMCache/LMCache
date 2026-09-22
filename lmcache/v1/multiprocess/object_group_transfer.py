@@ -79,31 +79,6 @@ def batched_iteration_with_skip(
         batch_start_idx += len(batch)
 
 
-def kept_blocks_per_chunk(cache_context: BaseCacheContext, kernel_group_id: int) -> int:
-    """Return the blocks one chunk keeps for a kernel group after downsampling.
-
-    Sliding-window groups keep only the in-window suffix of each chunk, so the
-    staged buffer is shorter than the raw block ID list. Every caller that
-    indexes into the staged buffer must derive its stride from this function.
-
-    Args:
-        cache_context: The cache context holding the KV cache geometry.
-        kernel_group_id: Index of the kernel group.
-
-    Returns:
-        Number of blocks that one chunk contributes to the staged buffer.
-    """
-    subchunk_sw_size_tokens = (
-        cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(
-            kernel_group_id
-        )
-    )
-    tokens_per_chunk = min(
-        cache_context.lmcache_tokens_per_chunk, subchunk_sw_size_tokens
-    )
-    return cache_context.calculate_num_blocks(tokens_per_chunk, kernel_group_id)
-
-
 def downsample_and_stage_block_ids(
     cache_context: BaseCacheContext,
     block_ids: list[list[int]],
@@ -165,7 +140,17 @@ def downsample_and_stage_block_ids(
         }
 
     for kernel_group_id in range(num_kernel_groups):
-        keep_blocks_per_chunk = kept_blocks_per_chunk(cache_context, kernel_group_id)
+        subchunk_sw_size_tokens = (
+            cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(
+                kernel_group_id
+            )
+        )
+        tokens_per_chunk = min(
+            cache_context.lmcache_tokens_per_chunk, subchunk_sw_size_tokens
+        )
+        keep_blocks_per_chunk = cache_context.calculate_num_blocks(
+            tokens_per_chunk, kernel_group_id
+        )
         total_blocks_per_chunk = cache_context.calculate_num_blocks(
             cache_context.lmcache_tokens_per_chunk, kernel_group_id
         )

@@ -44,10 +44,4 @@ message EngineGroupInfo {
   int64 sw_size_tokens = 4;
   int64 extra_object_group_tag = 5;
   bool recurrent_state = 6;
-  // Omitted = historical null block 0; explicit null_block_id = sentinel;
-  // no_null_block = true means zero is a real block and no sentinel exists.
-  oneof null_block_policy {
-    int64 null_block_id = 7;
-    bool no_null_block = 8;
-  }
 }

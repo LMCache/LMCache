@@ -97,33 +97,18 @@ def test_object_group_null_only_when_all_its_kernel_groups_null():
     assert masks == [[True, False]]
 
 
-def test_zero_is_real_without_a_null_block() -> None:
-    masks = all_null_chunk_masks([[0, 0]], [_og([0])], [1], 2, [None])
+def test_zero_is_real_with_negative_null_block() -> None:
+    masks = all_null_chunk_masks([[0, 0]], [_og([0])], [1], 2, -1)
     assert masks == [[False, False]]
 
 
 def test_negative_null_marker_preserves_checkpoint_zero() -> None:
-    masks = all_null_chunk_masks([[-1, 0, -1, 1]], [_og([0])], [1], 4, [-1])
+    masks = all_null_chunk_masks([[-1, 0, -1, 1]], [_og([0])], [1], 4, -1)
     assert masks == [[True, False, True, False]]
 
 
-def test_null_markers_are_per_kernel_group() -> None:
-    masks = all_null_chunk_masks(
-        [[0, 0, 0], [-1, -1, 0], [-1, 2, 3], [0, 0, 4]],
-        [_og([0]), _og([1, 2]), _og([3])],
-        [1, 1, 1, 1],
-        3,
-        [None, -1, -1, 0],
-    )
-    assert masks == [
-        [False, False, False],
-        [True, False, False],
-        [True, True, False],
-    ]
-
-
 def _staging_context(
-    null_ids: list[int | None],
+    num_kernel_groups: int,
     object_groups: list[ObjectGroupInfo],
     *,
     window_tokens: int = 2,
@@ -133,8 +118,7 @@ def _staging_context(
     context.lmcache_tokens_per_chunk = 2
     context.calculate_num_blocks.side_effect = lambda tokens, group: tokens
     context.kv_layer_groups_manager = SimpleNamespace(
-        num_kernel_groups=len(null_ids),
-        kernel_groups=[SimpleNamespace(null_block_id=null_id) for null_id in null_ids],
+        num_kernel_groups=num_kernel_groups,
         object_groups=object_groups,
         get_subchunk_sw_size_tokens=lambda group: window_tokens,
     )
@@ -143,31 +127,31 @@ def _staging_context(
 
 
 def test_absent_checkpoint_objects_stage_safe_placeholders() -> None:
-    context = _staging_context([None, -1, -1], [_og([0]), _og([1, 2])])
+    context = _staging_context(3, [_og([0]), _og([1, 2])])
     block_ids = [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]]
     masks = all_null_chunk_masks(
         block_ids,
         context.kv_layer_groups_manager.object_groups,
         [2] * 3,
         2,
-        [None, -1, -1],
+        -1,
     )
     staged = downsample_and_stage_block_ids(context, block_ids, skipped_chunks=masks)
     assert staged == [[0, 1, 2, 3], [0, 0, 0, 1], [0, 0, 2, 3]]
 
 
 def test_legacy_sliding_window_zero_placeholders_remain_valid() -> None:
-    context = _staging_context([0], [_og([0])])
+    context = _staging_context(1, [_og([0])])
     assert downsample_and_stage_block_ids(context, [[0, 3]]) == [[0, 3]]
 
 
 def test_invalid_blocks_outside_copy_window_are_not_staged() -> None:
-    context = _staging_context([None], [_og([0])], window_tokens=1)
+    context = _staging_context(1, [_og([0])], window_tokens=1)
     assert downsample_and_stage_block_ids(context, [[-1, 0, -1, 3]]) == [[0, 3]]
 
 
 def test_retrieve_skipped_prefix_accepts_absent_checkpoints() -> None:
-    context = _staging_context([-1], [_og([0])])
+    context = _staging_context(1, [_og([0])])
     assert downsample_and_stage_block_ids(
         context,
         [[-1, -1, -1, 0]],
@@ -192,11 +176,6 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     kvlgm = SimpleNamespace(
         num_object_groups=num_object_groups,
         num_kernel_groups=num_object_groups,
-        # Dense by default: every group uses the reserved null block zero,
-        # matching what vLLM/SGLang register.
-        kernel_groups=[
-            SimpleNamespace(null_block_id=0) for _ in range(num_object_groups)
-        ],
         get_attn_desc=lambda: SimpleNamespace(
             num_chunks_in_sw=num_chunks_in_sw, group_kinds=tuple(group_kinds)
         ),
@@ -218,6 +197,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     ]
     ctx = MagicMock()
     ctx.chunk_size = 256
+    ctx.null_block_id = 0
     ctx.resolve_obj_keys.return_value = obj_keys
 
     read_calls: list[list[str]] = []
@@ -258,13 +238,14 @@ def _make_checkpoint_module(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[LMCacheDrivenTransferModule, MagicMock, list, list]:
     module, reads, transfers = _make_module(monkeypatch, 2, [-1, 1])
-    context = _staging_context([None, -1, -1], [_og([0]), _og([1, 2])])
+    context = _staging_context(3, [_og([0]), _og([1, 2])])
     context.kv_layer_groups_manager.num_object_groups = 2
     context.kv_layer_groups_manager.get_attn_desc = lambda: SimpleNamespace(
         num_chunks_in_sw=[-1, 1], group_kinds=("attention", "recurrent")
     )
     module.get_and_touch_context_entry(1).cache_context = context
     module.context.chunk_size = 2
+    module.context.null_block_id = -1
     module.context.session_manager.get.return_value = None
     module.context.storage_manager.reserve_write.side_effect = (
         lambda keys, layout, mode: {

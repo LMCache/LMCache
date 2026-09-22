@@ -79,6 +79,11 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--chunk-size``
      - ``256``
      - Chunk size for KV cache operations (in tokens).
+   * - ``--null-block-id``
+     - ``0``
+     - Engine block ID that denotes absent KV data. Keep the default for
+       vLLM-compatible layouts. Engines where block ``0`` is valid, such as
+       ATOM native PAGE/STATE transfer, can use ``-1``.
    * - ``--max-workers``
      - ``1``
      - Base number of worker threads. Sets the default for both the GPU

@@ -113,14 +113,13 @@ def _groups() -> KVLayerGroupsManager:
         aliases,
         [EngineKVFormat.NL_X_NB_BS_HS] * 3,
         [
-            EngineGroupInfo(0, (0,), tokens_per_block=4, null_block_id=None),
+            EngineGroupInfo(0, (0,), tokens_per_block=4),
             EngineGroupInfo(
                 1,
                 (1,),
                 tokens_per_block=CHUNK,
                 sw_size_tokens=CHUNK,
                 recurrent_state=True,
-                null_block_id=-1,
             ),
             EngineGroupInfo(
                 2,
@@ -128,10 +127,10 @@ def _groups() -> KVLayerGroupsManager:
                 tokens_per_block=CHUNK,
                 sw_size_tokens=CHUNK,
                 recurrent_state=True,
-                null_block_id=-1,
             ),
         ],
         lmcache_tokens_per_chunk=CHUNK,
+        separate_object_groups=True,
     )
     assert manager.get_attn_desc().num_chunks_in_sw == [-1, 1]
     assert manager.get_attn_desc().group_kinds == ("attention", "recurrent")
@@ -186,7 +185,7 @@ def _lookup(
                 manager.object_groups,
                 [4, 1, 1],
                 endpoint,
-                [None, -1, -1],
+                -1,
             )
             for group_id, mask in enumerate(masks):
                 present.update(
