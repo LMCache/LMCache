@@ -121,10 +121,7 @@ class MPServerConfig:
     (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
 
     kv_event_log_size: int = 32768
-    """Number of cache-event records (host-cache store completions and
-    evictions, L2 stores and deletes) retained for engine workers that poll
-    ``POLL_KV_EVENTS`` to republish them as framework KV events. 0 disables
-    the KV event channel."""
+    """CPU store/eviction records retained for KV-event polling; 0 disables it."""
 
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
@@ -508,10 +505,8 @@ def add_mp_server_args(
         "--kv-event-log-size",
         type=int,
         default=MPServerConfig.kv_event_log_size,
-        help="Number of cache-event records (host-cache store completions "
-        "and evictions, L2 stores and deletes) retained for engine workers "
-        "that republish them as KV events for KV-aware routing. 0 disables "
-        "the KV event channel. Default is %(default)s.",
+        help="CPU store/eviction records retained for KV-event polling. "
+        "0 disables the channel. Default is %(default)s.",
     )
     return parser
 

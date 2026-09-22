@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for server-side worker liveness tracking and reaping.
+"""Unit tests for server management: liveness and CPU KV event polling.
 
 Cover the public liveness interfaces of the transfer modules, the
 management reaper wiring, the blend reap listener, and config validation.
@@ -8,7 +8,7 @@ are stubbed.
 """
 
 # Standard
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock
 import threading
 import time
@@ -17,7 +17,11 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.custom_types import KV_EVENT_CAPABILITY
 from lmcache.v1.multiprocess.modules import engine_driven_transfer as non_gpu_mod
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as gpu_mod
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
@@ -29,6 +33,42 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
+
+
+def _event_module(
+    size: int = 3,
+    bus: EventBus | None = None,
+    advertise: bool = True,
+) -> tuple[ManagementModule, EventBus]:
+    bus = bus or EventBus(EventBusConfig())
+    ctx = MagicMock(event_bus=bus)
+    return ManagementModule(
+        ctx,
+        kv_event_log_size=size,
+        advertise_kv_events=advertise,
+        experimental_transfer=("transfer_query",),
+    ), bus
+
+
+def _publish_kv(bus: EventBus, event_type: EventType, **metadata: Any) -> None:
+    bus.publish(Event(event_type, metadata=metadata))
+    bus.stop()  # Public shutdown flushes queued callbacks synchronously.
+
+
+def _event_key(index: int, model: str = "model", rank: int = 0) -> ObjectKey:
+    return ObjectKey(bytes([index]) * 32, model, rank)
+
+
+def _bind_kv(bus: EventBus, keys: list[ObjectKey]) -> None:
+    hashes = [key.chunk_hash for key in keys]
+    _publish_kv(
+        bus,
+        EventType.MP_TOKENS,
+        chunk_hashes=hashes,
+        token_chunks=[[i] for i in range(len(keys))],
+        token_offsets=list(range(len(keys))),
+        parent_hashes=[None] + hashes[:-1],
+    )
 
 
 def _bare_gpu_module() -> LMCacheDrivenTransferModule:
@@ -346,3 +386,115 @@ def test_config_accepts_disabled_and_defaults() -> None:
     default = MPServerConfig()
     assert default.worker_reap_timeout_seconds == 120.0
     assert default.worker_registration_grace_seconds == 3600.0
+
+
+def test_cpu_events_preserve_tokens_parents_and_deduplicate_ranks() -> None:
+    module, bus = _event_module()
+    keys = [_event_key(1), _event_key(2)]
+    _bind_kv(bus, keys)
+    _publish_kv(
+        bus,
+        EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
+        keys=[*keys, _event_key(1, rank=1)],
+    )
+    result = module.poll_kv_events("model", 0, 8)
+    assert [
+        (r.kind, r.block_hashes, r.token_ids, r.parent_block_hash)
+        for r in result.events
+    ] == [
+        ("stored", [keys[0].chunk_hash], [0], None),
+        ("stored", [keys[1].chunk_hash], [1], keys[0].chunk_hash),
+    ]
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[keys[0], _event_key(1, rank=1)])
+    removed = module.poll_kv_events("model", result.next_cursor, 8)
+    assert [(r.kind, r.medium, r.block_hashes) for r in removed.events] == [
+        ("removed", "CPU", [keys[0].chunk_hash]),
+    ]
+    assert removed.incarnation == result.incarnation and not removed.lost
+    assert module.poll_kv_events("model", removed.next_cursor, 8).events == []
+
+
+def test_event_polling_pages_filters_models_and_reports_overflow() -> None:
+    module, bus = _event_module(size=3)
+    for index, model in enumerate(("model", "other", "model")):
+        _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[_event_key(index, model)])
+    first = module.poll_kv_events("model", 0, 1)
+    assert [r.seq for r in first.events] == [1] and first.next_cursor == 1
+    second = module.poll_kv_events("model", first.next_cursor, 1)
+    assert [r.seq for r in second.events] == [3] and second.next_cursor == 3
+    assert not second.lost
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[_event_key(3)])
+    assert module.poll_kv_events("model", 0, 8).lost
+    assert not module.poll_kv_events("model", 1, 8).lost
+    stale = module.poll_kv_events("model", 99, 8)
+    assert stale.lost and stale.next_cursor == 4 and stale.events == []
+
+
+def test_bus_loss_is_visible_without_later_bus_traffic() -> None:
+    module, bus = _event_module(bus=EventBus(EventBusConfig(max_queue_size=1)))
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[_event_key(1)])
+    event = Event(EventType.L1_KEYS_EVICTED, metadata={"keys": [_event_key(2)]})
+    bus.publish(event)
+    bus.publish(event)
+    result = module.poll_kv_events("model", 0, 8)
+    assert result.lost and result.events == [] and result.next_cursor == 2
+    assert not module.poll_kv_events("model", result.next_cursor, 8).lost
+    assert module.report_status()["kv_events"]["lost_markers"] == 1
+    bus.stop()
+
+
+@pytest.mark.parametrize(
+    "bus_enabled, size, advertise",
+    [
+        (False, 3, True),
+        (True, 0, True),
+        (True, 3, False),
+        (True, 3, True),
+    ],
+)
+def test_event_channel_capability_and_disabled_state(
+    bus_enabled: bool,
+    size: int,
+    advertise: bool,
+) -> None:
+    module, _ = _event_module(
+        size,
+        EventBus(EventBusConfig(enabled=bus_enabled)),
+        advertise,
+    )
+    enabled = bus_enabled and size > 0
+    result = module.poll_kv_events("model", 0, 8)
+    assert result.enabled == enabled and result.events == []
+    assert module.get_experimental() == (
+        ["transfer_query", KV_EVENT_CAPABILITY]
+        if enabled and advertise
+        else ["transfer_query"]
+    )
+    assert (
+        _event_module()[0].poll_kv_events("model", 0, 8).incarnation
+        != result.incarnation
+    )
+
+
+def test_event_polling_validates_arguments() -> None:
+    with pytest.raises(ValueError, match="kv_event_log_size"):
+        _event_module(size=-1)
+    module, _ = _event_module()
+    for cursor, size in ((-1, 1), (0, 0)):
+        with pytest.raises(ValueError, match="cursor|max_events"):
+            module.poll_kv_events("model", cursor, size)
+
+
+def test_unknown_and_expired_token_bindings_skip_stores(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.modules.management._TOKEN_BINDING_CACHE_SIZE",
+        4,
+    )
+    module, bus = _event_module()
+    keys = [_event_key(i) for i in range(5)]
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[keys[0]])
+    _bind_kv(bus, keys)
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[keys[0], keys[-1]])
+    result = module.poll_kv_events("model", 0, 8)
+    assert [r.block_hashes for r in result.events] == [[keys[-1].chunk_hash]]
+    assert module.report_status()["kv_events"]["unbound_stores"] == 2

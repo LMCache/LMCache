@@ -315,38 +315,16 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, dec_hook=dec_hook, type=type)
 
 
-# KV event channel (``POLL_KV_EVENTS``) wire vocabulary. The media are vLLM's
-# ``BlockStored.medium`` values: the L1 host cache is ``CPU``, L2 is
-# ``STORAGE``.
-# Advertised through ``GET_EXPERIMENTAL`` when the server records cache
-# events. An engine polls ``POLL_KV_EVENTS`` only against a server that
-# advertises it: a server that predates the request aborts its request loop
-# on the unknown request type, taking the cache down for every engine.
+# Poll only advertising servers: older request loops reject unknown wire IDs.
 KV_EVENT_CAPABILITY = "kv_events"
-
 KV_EVENT_KIND_STORED = "stored"
 KV_EVENT_KIND_REMOVED = "removed"
 KV_EVENT_MEDIUM_CPU = "CPU"
-KV_EVENT_MEDIUM_STORAGE = "STORAGE"
 
 
 @dataclass
 class KVEventRecord:
-    """One cache event from the server's log, as returned by ``POLL_KV_EVENTS``.
-
-    Attributes:
-        seq: Position in the log; strictly increasing, starting at 1.
-        kind: ``KV_EVENT_KIND_STORED`` or ``KV_EVENT_KIND_REMOVED``.
-        medium: Cache medium the chunks entered or left:
-            ``KV_EVENT_MEDIUM_CPU`` (L1 host cache) or
-            ``KV_EVENT_MEDIUM_STORAGE`` (L2).
-        model_name: Model the chunks belong to.
-        block_hashes: LMCache chunk hashes, deduplicated across KV ranks and
-            object groups. A stored record carries exactly one.
-        parent_block_hash: The preceding chunk's hash for a stored record;
-            ``None`` for a sequence's first chunk or for removals.
-        token_ids: The stored chunk's tokens; empty for removals.
-    """
+    """Sequenced CPU cache change; stores carry one chunk's tokens and parent."""
 
     seq: int
     kind: str
@@ -359,22 +337,8 @@ class KVEventRecord:
 
 @dataclass
 class KVEventPollResult:
-    """Response of ``POLL_KV_EVENTS``.
-
-    Attributes:
-        enabled: Whether the server records cache events. When ``False`` the
-            other fields are placeholders and the client should stop polling.
-        incarnation: Identity of the server's event log. It changes when the
-            server (and therefore its caches) restarts; the client must then
-            forget every placement it learned under the previous value.
-        next_cursor: The ``cursor`` to send on the next poll.
-        lost: Whether records the client has not consumed were discarded
-            (it fell behind the log's capacity, or the server's event bus
-            dropped events). Returned records are complete from that point
-            on, but the client's earlier view may be stale and must be
-            resynchronized.
-        events: Records after ``cursor`` for the requested model, oldest
-            first, at most ``max_events`` of them.
+    """One ordered page. Incarnation changes or lost=True require withdrawal
+    of earlier announcements; enabled=False ends polling. Resume at next_cursor.
     """
 
     enabled: bool

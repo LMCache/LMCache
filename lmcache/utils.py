@@ -644,11 +644,7 @@ class CacheStoreEvent:
 
 @dataclass
 class CacheRemoveEvent:
-    """A KV cache removal, the counterpart of :class:`CacheStoreEvent`.
-
-    Reported when chunks previously announced as stored leave a cache medium
-    (host-cache eviction, L2 delete) so a KV-aware router can forget them.
-    """
+    """Removal of previously announced CPU chunks, paired with CacheStoreEvent."""
 
     block_hashes: list[int | bytes]
     medium: str | None

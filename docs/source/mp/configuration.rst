@@ -157,8 +157,8 @@ Source: ``lmcache/v1/multiprocess/config.py``
        that exact name for its segment.
    * - ``--kv-event-log-size``
      - ``32768``
-     - Cache-event records (host-cache store completions and evictions, L2
-       stores and deletes) retained for engine workers to poll and republish
+     - CPU store-completion and eviction records retained for workers to
+       poll and republish
        as KV events. ``0`` disables the channel, and the server then stops
        advertising it so no worker polls. Requires the observability event
        bus, which ``--disable-observability`` turns off.

@@ -4,9 +4,9 @@ stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
 recovery: multiprocess ``workloads/common/restart-recovery.sh``."""
 
 # Standard
+from dataclasses import replace
 from typing import Callable, ClassVar, cast
 from unittest.mock import MagicMock
-import collections
 import gc
 import os
 import threading
@@ -30,13 +30,10 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 from lmcache.utils import CacheEvent, CacheRemoveEvent, CacheStoreEvent
 from lmcache.v1.multiprocess.custom_types import (
     KV_EVENT_CAPABILITY,
-    KV_EVENT_KIND_REMOVED,
-    KV_EVENT_KIND_STORED,
-    KV_EVENT_MEDIUM_CPU,
-    KV_EVENT_MEDIUM_STORAGE,
     KVEventPollResult,
     KVEventRecord,
 )
+from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.ipc_policy import (
@@ -84,6 +81,60 @@ def _parallel_strategy(
         pp_size=1,
         n_servers=1,
     )
+
+
+def _event_adapter(
+    fake_adapter: tuple,
+    parallel_strategy: ParallelStrategy | None = None,
+    extra_config: dict | None = None,
+) -> tuple[LMCacheMPWorkerAdapter, MagicMock, list[MessagingFuture[KVEventPollResult]]]:
+    """Use real messaging futures while the transport remains stubbed."""
+    _, client, _ = fake_adapter
+    adapter = _make_worker_adapter(
+        enable_kv_events=True,
+        parallel_strategy=parallel_strategy,
+        extra_config={
+            "lmcache.mp.kv_event_poll_interval": 1e-6,
+            **(extra_config or {}),
+        },
+    )
+    pending: list[MessagingFuture[KVEventPollResult]] = []
+
+    def poll(*args: object, **kwargs: object) -> MessagingFuture[KVEventPollResult]:
+        future: MessagingFuture[KVEventPollResult] = MessagingFuture()
+        pending.append(future)
+        return future
+
+    client.poll_kv_events.side_effect = poll
+    assert adapter.get_kv_events() == []
+    return adapter, client, pending
+
+
+def _event_record(kind: str = "stored", chunk: bytes = b"chunk") -> KVEventRecord:
+    return KVEventRecord(
+        seq=1,
+        kind=kind,
+        medium="CPU",
+        model_name="test-model",
+        block_hashes=[chunk],
+        parent_block_hash=None,
+        token_ids=[1, 2] if kind == "stored" else [],
+    )
+
+
+def _complete_event_store(adapter: LMCacheMPWorkerAdapter) -> None:
+    adapter.transfer_ctx = MagicMock()
+    adapter.transfer_ctx.submit_store.return_value.query.return_value = True
+    adapter.transfer_ctx.submit_store.return_value.result.return_value = True
+    size = adapter.lmcache_tokens_per_chunk
+    op = replace(_op([[0]]), token_ids=list(range(size)), end=size)
+    adapter.submit_store_request("own-store", op, None)
+    adapter.get_finished({"own-store"})
+
+
+def _event_step(adapter: LMCacheMPWorkerAdapter) -> list[CacheEvent]:
+    time.sleep(0.001)
+    return adapter.get_kv_events()
 
 
 class FakeCudaEvent:
@@ -1721,497 +1772,170 @@ def test_recovery_reports_the_ring_re_registration_result(fake_adapter, ring_ok)
     assert adapter._reregister_kv_caches_callback() is ring_ok
 
 
-# -- Server-side KV event polling ---------------------------------------------
-
-
-class _FakePollServer:
-    """Answers ``poll_kv_events``. A poll completes once an answer is queued,
-    so each ``get_kv_events`` call consumes at most one answer and issues at
-    most one poll, in a deterministic order."""
-
-    def __init__(self, req_client: MagicMock) -> None:
-        self.answers: collections.deque[KVEventPollResult | Exception] = (
-            collections.deque()
-        )
-        self.calls: list[tuple[str, int, int]] = []
-        req_client.poll_kv_events.side_effect = self._poll
-
-    def answer(self, *results: KVEventPollResult | Exception) -> None:
-        self.answers.extend(results)
-
-    def _poll(self, model_name: str, cursor: int, max_events: int) -> object:
-        self.calls.append((model_name, cursor, max_events))
-        server = self
-
-        class _Future:
-            def query(self) -> bool:
-                return bool(server.answers)
-
-            def result(self, timeout: float | None = None) -> KVEventPollResult:
-                answer = server.answers.popleft()
-                if isinstance(answer, Exception):
-                    raise answer
-                return answer
-
-        return _Future()
-
-
-def _poll_result(
-    events: list[KVEventRecord] | None = None,
-    *,
-    incarnation: int = 7,
-    next_cursor: int = 0,
-    lost: bool = False,
-    enabled: bool = True,
-) -> KVEventPollResult:
-    return KVEventPollResult(
-        enabled=enabled,
-        incarnation=incarnation,
-        next_cursor=next_cursor,
-        lost=lost,
-        events=list(events or []),
-    )
-
-
-def _record(
-    seq: int,
-    kind: str,
-    hashes: list[bytes],
-    *,
-    medium: str = KV_EVENT_MEDIUM_CPU,
-    token_ids: list[int] | None = None,
-    parent: bytes | None = None,
-) -> KVEventRecord:
-    return KVEventRecord(
-        seq=seq,
-        kind=kind,
-        medium=medium,
-        model_name="test-model",
-        block_hashes=list(hashes),
-        parent_block_hash=parent,
-        token_ids=list(token_ids or []),
-    )
-
-
-def _polling_adapter(
-    fake_adapter,
-    parallel_strategy: ParallelStrategy | None = None,
-    extra_config: dict[str, object] | None = None,
-) -> tuple[LMCacheMPWorkerAdapter, _FakePollServer]:
-    """A KV-event-enabled adapter whose poll interval never throttles."""
-    _adapter, req_client, _future = fake_adapter
-    config: dict[str, object] = {"lmcache.mp.kv_event_poll_interval": 1e-6}
-    config.update(extra_config or {})
-    adapter = _make_worker_adapter(
-        extra_config=config,
-        enable_kv_events=True,
-        parallel_strategy=parallel_strategy,
-    )
-    adapter.transfer_ctx = MagicMock()
-    return adapter, _FakePollServer(req_client)
-
-
-def _complete_own_store(
-    adapter: LMCacheMPWorkerAdapter, request_id: str, chunk_index: int
-) -> bytes:
-    """Store one chunk and report it finished; return its chunk hash."""
-    # First Party
-    from lmcache.v1.multiprocess.token_hasher import TokenHasher
-
-    chunk_size = adapter.lmcache_tokens_per_chunk
-    token_ids = [chunk_index * 1000 + i for i in range(chunk_size)]
-    transfer_ctx = MagicMock()
-    future = MagicMock()
-    future.query.return_value = True
-    future.result.return_value = True
-    transfer_ctx.submit_store.return_value = future
-    adapter.transfer_ctx = transfer_ctx
-    adapter.submit_store_request(
-        request_id,
-        LoadStoreOp(token_ids=token_ids, block_ids=[[0]], start=0, end=chunk_size),
-        event=None,
-    )
-    adapter.get_finished({request_id})
-    return TokenHasher(chunk_size=chunk_size).compute_chunk_hashes(token_ids)[0]
-
-
-def _resync_count(reason: str) -> float:
-    labels = {"model_name": "test-model", "worker_id": "0", "reason": reason}
-    return sum(
-        sample.value
-        for family in adapter_mod._KV_EVENT_RESYNCS.collect()
-        for sample in family.samples
-        if sample.name == "vllm:lmcache_mp_kv_event_resyncs_total"
-        and sample.labels == labels
-    )
-
-
-def _step(adapter: LMCacheMPWorkerAdapter) -> list[CacheEvent]:
-    """One model-runner step: let the poll interval elapse, then drain."""
-    time.sleep(0.001)
-    return adapter.get_kv_events()
-
-
-def test_polling_reports_evictions_of_announced_chunks_only(fake_adapter) -> None:
-    """A server removal becomes a CacheRemoveEvent for chunks announced from
-    the server's records; chunks never announced are not withdrawn."""
-    adapter, server = _polling_adapter(fake_adapter)
-    server.answer(
-        _poll_result(
-            [_record(1, KV_EVENT_KIND_STORED, [b"h1"], token_ids=[1])], next_cursor=1
-        )
-    )
-    assert _step(adapter) == []  # issues the first poll
-    assert [type(e).__name__ for e in _step(adapter)] == ["CacheStoreEvent"]
-    assert server.calls[0] == ("test-model", 0, 1024)
-
-    server.answer(
-        _poll_result(
-            [_record(2, KV_EVENT_KIND_REMOVED, [b"never-announced", b"h1"])],
-            next_cursor=2,
-        )
-    )
-    events = _step(adapter)
-    assert len(events) == 1
-    assert isinstance(events[0], CacheRemoveEvent)
-    assert (events[0].block_hashes, events[0].medium) == ([b"h1"], "CPU")
-    # The next poll continues from the returned cursor.
-    assert server.calls[-1] == ("test-model", 2, 1024)
-
-    # A second removal of the same chunk is not reported again.
-    server.answer(
-        _poll_result([_record(3, KV_EVENT_KIND_REMOVED, [b"h1"])], next_cursor=3)
-    )
-    assert _step(adapter) == []
-
-
-def test_polling_reports_server_stores_once_and_lets_them_be_evicted(
-    fake_adapter,
+def test_polled_cpu_events_preserve_transitions_and_suppress_own_stores(
+    fake_adapter: tuple,
 ) -> None:
-    adapter, server = _polling_adapter(fake_adapter)
-    stored = _record(
-        1,
-        KV_EVENT_KIND_STORED,
-        [b"server-chunk"],
-        token_ids=[1, 2, 3, 4],
-        parent=b"parent",
+    adapter, client, pending = _event_adapter(fake_adapter)
+    _complete_event_store(adapter)
+    assert _event_step(adapter) == []
+    stored = replace(_event_record(), parent_block_hash=b"parent")
+    response = KVEventPollResult(
+        True,
+        7,
+        4,
+        False,
+        [
+            _event_record("removed", b"unknown"),
+            stored,
+            stored,
+            replace(stored, medium="STORAGE"),
+        ],
     )
-    server.answer(_poll_result([stored, stored], next_cursor=2))
-    assert _step(adapter) == []  # issues the first poll
-
-    events = _step(adapter)
-    assert len(events) == 1
-    assert isinstance(events[0], CacheStoreEvent)
-    assert events[0].block_hashes == [b"server-chunk"]
-    assert events[0].parent_block_hash == b"parent"
-    assert events[0].token_ids == [1, 2, 3, 4]
-    assert (events[0].block_size, events[0].medium) == (
-        adapter.lmcache_tokens_per_chunk,
+    pending[-1].set_result(response)
+    events = _event_step(adapter)
+    assert len(events) == 1 and isinstance(events[0], CacheStoreEvent)
+    assert (events[0].parent_block_hash, events[0].token_ids, events[0].medium) == (
+        b"parent",
+        [1, 2],
         "CPU",
     )
-
-    server.answer(
-        _poll_result(
-            [_record(3, KV_EVENT_KIND_REMOVED, [b"server-chunk"])], next_cursor=3
-        )
-    )
-    assert [type(e).__name__ for e in _step(adapter)] == ["CacheRemoveEvent"]
-
-
-def test_own_store_completions_are_not_announced_while_polling(fake_adapter) -> None:
-    """With the server's log polled, only its write-finished records announce
-    stores: a store result does not say which chunks were written."""
-    adapter, server = _polling_adapter(fake_adapter)
-    own = _complete_own_store(adapter, "req-1", 1)
-    assert _step(adapter) == []  # the own completion announces nothing
-
-    server.answer(
-        _poll_result(
-            [_record(1, KV_EVENT_KIND_STORED, [own], token_ids=[1])], next_cursor=1
-        )
-    )
-    events = _step(adapter)
-    assert [(type(e).__name__, e.block_hashes) for e in events] == [
-        ("CacheStoreEvent", [own])
+    assert client.poll_kv_events.call_args.args == ("test-model", 4, 1024)
+    pending[-1].set_result(replace(response, events=[_event_record("removed"), stored]))
+    assert [type(e) for e in _event_step(adapter)] == [
+        CacheRemoveEvent,
+        CacheStoreEvent,
     ]
-
-
-def test_server_restart_withdraws_every_announced_chunk(fake_adapter) -> None:
-    adapter, server = _polling_adapter(fake_adapter)
-    server.answer(
-        _poll_result(
-            [
-                _record(1, KV_EVENT_KIND_STORED, [b"cpu-chunk"], token_ids=[1]),
-                _record(
-                    2,
-                    KV_EVENT_KIND_STORED,
-                    [b"l2-chunk"],
-                    medium=KV_EVENT_MEDIUM_STORAGE,
-                    token_ids=[1],
-                ),
-            ],
-            incarnation=7,
-            next_cursor=2,
-        )
-    )
-    _step(adapter)
-    assert [e.medium for e in _step(adapter)] == ["CPU", "STORAGE"]
-    before = _resync_count("server_restart")
-
-    server.answer(_poll_result(incarnation=8, next_cursor=0))
-    events = _step(adapter)
-    assert all(isinstance(e, CacheRemoveEvent) for e in events)
-    assert {(e.medium, tuple(e.block_hashes)) for e in events} == {
-        ("CPU", (b"cpu-chunk",)),
-        ("STORAGE", (b"l2-chunk",)),
-    }
-    assert _resync_count("server_restart") == before + 1
-
-    # Nothing is announced any more, so nothing is withdrawn twice.
-    server.answer(_poll_result(incarnation=9, next_cursor=0))
-    assert _step(adapter) == []
-
-
-def test_lost_events_withdraw_announced_chunks(fake_adapter) -> None:
-    adapter, server = _polling_adapter(fake_adapter)
-    server.answer(
-        _poll_result(
-            [_record(1, KV_EVENT_KIND_STORED, [b"h1"], token_ids=[1])], next_cursor=1
-        )
-    )
-    _step(adapter)
-    assert len(_step(adapter)) == 1
-    before = _resync_count("events_lost")
-
-    server.answer(
-        _poll_result(
-            [_record(41, KV_EVENT_KIND_STORED, [b"after-loss"], token_ids=[1])],
-            lost=True,
-            next_cursor=41,
-        )
-    )
-    events = _step(adapter)
-    assert [(type(e).__name__, e.block_hashes) for e in events] == [
-        ("CacheRemoveEvent", [b"h1"]),
-        ("CacheStoreEvent", [b"after-loss"]),
-    ]
-    assert _resync_count("events_lost") == before + 1
-    assert server.calls[-1] == ("test-model", 41, 1024)
-
-
-def test_lost_events_on_first_contact_do_not_resync(fake_adapter) -> None:
-    adapter, server = _polling_adapter(fake_adapter)
-    before = _resync_count("events_lost")
-    server.answer(_poll_result(lost=True, next_cursor=40))
-    _step(adapter)
-    assert _step(adapter) == []
-    assert _resync_count("events_lost") == before
-    assert server.calls[-1] == ("test-model", 40, 1024)
-
-
-def test_event_polling_starts_worker_liveness_heartbeat(fake_adapter) -> None:
-    """Polling workers keep their registration alive before any store/retrieve."""
-    adapter, _ = _polling_adapter(fake_adapter)
-    _step(adapter)
-    _step(adapter)
+    pending[-1].set_result(replace(response, events=[_event_record("removed")] * 2))
+    assert len(_event_step(adapter)) == 1
     assert len(FakeHeartbeatThread.instances) == 1
-    assert FakeHeartbeatThread.instances[0].calls == [
-        "register_recover_callback",
-        "start",
-    ]
-
-
-@pytest.mark.parametrize("failure", ["disabled_on_server", "no_client_method"])
-def test_polling_stops_when_the_server_cannot_serve_it(
-    fake_adapter, failure: str
-) -> None:
-    """Polling stops for good and the rank resumes announcing its own stores."""
-    adapter, server = _polling_adapter(fake_adapter)
-    _adapter, req_client, _future = fake_adapter
-    if failure == "disabled_on_server":
-        server.answer(_poll_result(enabled=False))
-        _step(adapter)
-        _step(adapter)
-        assert len(server.calls) == 1
-    else:
-        req_client.poll_kv_events = None
-        _step(adapter)
-
-    # Own store events keep flowing, and no further poll is issued.
-    _complete_own_store(adapter, "req-1", 1)
-    assert len(_step(adapter)) == 1
-    assert len(server.calls) == (1 if failure == "disabled_on_server" else 0)
 
 
 @pytest.mark.parametrize(
-    "failure", ["disabled_on_server", "poll_error", "submit_error", "timeout"]
+    "reset", ["restart", "lost", "disabled", "result_error", "submit_error", "timeout"]
 )
-def test_polling_failure_withdraws_announced_placements(
-    fake_adapter: tuple[LMCacheMPWorkerAdapter, MagicMock, MagicMock], failure: str
+def test_poll_failure_or_loss_withdraws_announced_cpu_placements(
+    fake_adapter: tuple,
+    reset: str,
 ) -> None:
-    """The router must not retain placements after the event channel fails."""
-    adapter, server = _polling_adapter(
-        fake_adapter, extra_config={"lmcache.mp.mq_timeout": 0.0}
+    adapter, client, pending = _event_adapter(
+        fake_adapter,
+        extra_config={"lmcache.mp.mq_timeout": 0.0},
     )
-    server.answer(
-        _poll_result(
-            [_record(1, KV_EVENT_KIND_STORED, [b"chunk"], token_ids=[1])],
-            next_cursor=1,
+    response = KVEventPollResult(True, 7, 1, False, [_event_record()])
+    pending[-1].set_result(response)
+    assert isinstance(_event_step(adapter)[0], CacheStoreEvent)
+    if reset in ("restart", "lost"):
+        pending[-1].set_result(
+            replace(
+                response,
+                incarnation=8 if reset == "restart" else 7,
+                lost=reset == "lost",
+                next_cursor=41,
+                events=[_event_record(chunk=b"new")],
+            )
         )
+    elif reset == "result_error":
+        pending[-1].set_exception(RuntimeError("poll failed"))
+    elif reset != "timeout":
+        pending[-1].set_result(
+            replace(response, enabled=reset != "disabled", events=[])
+        )
+        if reset == "submit_error":
+            client.poll_kv_events.side_effect = RuntimeError("submit failed")
+    events = _event_step(adapter)
+    assert isinstance(events[0], CacheRemoveEvent)
+    assert events[0].block_hashes == [b"chunk"] and events[0].medium == "CPU"
+    if reset in ("restart", "lost"):
+        assert isinstance(events[1], CacheStoreEvent)
+        assert events[1].block_hashes == [b"new"]
+        assert client.poll_kv_events.call_args.args[1] == 41
+    else:
+        assert _event_step(adapter) == []
+        _complete_event_store(adapter)
+        assert isinstance(_event_step(adapter)[0], CacheStoreEvent)
+
+
+@pytest.mark.parametrize(
+    "rank, servers, publishes",
+    [
+        (0, 1, True),
+        (1, 1, False),
+        (0, 2, True),
+        (1, 2, False),
+        (2, 2, True),
+        (3, 2, False),
+    ],
+)
+def test_one_publisher_per_server(
+    fake_adapter: tuple,
+    rank: int,
+    servers: int,
+    publishes: bool,
+) -> None:
+    strategy = replace(
+        _parallel_strategy(tp_size=4, vllm_worker_id=rank), n_servers=servers
     )
-    _step(adapter)
-    assert isinstance(_step(adapter)[0], CacheStoreEvent)
-
-    if failure == "disabled_on_server":
-        server.answer(_poll_result(enabled=False))
-    elif failure == "poll_error":
-        server.answer(RuntimeError("poll failed"))
-    elif failure == "submit_error":
-        server.answer(_poll_result(next_cursor=1))
-        _, req_client, _ = fake_adapter
-        req_client.poll_kv_events.side_effect = RuntimeError("submit failed")
-
-    events = _step(adapter)
-    assert len(events) == 1 and isinstance(events[0], CacheRemoveEvent)
-    assert events[0].block_hashes == [b"chunk"]
-    assert events[0].medium == "CPU"
-    assert _step(adapter) == []
-    _complete_own_store(adapter, "fallback", 3)
-    assert isinstance(_step(adapter)[0], CacheStoreEvent)
+    adapter, _, pending = _event_adapter(fake_adapter, strategy)
+    assert bool(pending) == publishes
+    if pending:
+        pending[-1].set_result(KVEventPollResult(True, 7, 1, False, [_event_record()]))
+    assert bool(_event_step(adapter)) == publishes
+    _complete_event_store(adapter)
+    assert _event_step(adapter) == []
 
 
-def test_pending_poll_times_out_only_while_healthy(fake_adapter) -> None:
-    adapter, server = _polling_adapter(
-        fake_adapter, extra_config={"lmcache.mp.mq_timeout": 0.0}
+@pytest.mark.parametrize("advertised, interval", [(False, 1e-6), (True, 0)])
+def test_old_or_disabled_channels_keep_completed_store_reporting(
+    fake_adapter: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+    advertised: bool,
+    interval: float,
+) -> None:
+    monkeypatch.setattr(
+        adapter_mod,
+        "get_experimental",
+        lambda *a, **kw: {KV_EVENT_CAPABILITY} if advertised else set(),
     )
-    _complete_own_store(adapter, "req-1", 1)  # starts the (fake) heartbeat
+    adapter, _, pending = _event_adapter(
+        fake_adapter,
+        extra_config={"lmcache.mp.kv_event_poll_interval": interval},
+    )
+    _complete_event_store(adapter)
+    assert isinstance(_event_step(adapter)[0], CacheStoreEvent)
+    assert not pending
+
+
+def test_pending_event_poll_resumes_after_unhealthy_timeout(
+    fake_adapter: tuple,
+) -> None:
+    adapter, _, pending = _event_adapter(
+        fake_adapter,
+        extra_config={"lmcache.mp.mq_timeout": 0.0},
+    )
     heartbeat = FakeHeartbeatThread.instances[-1]
-    _step(adapter)
-    assert len(server.calls) == 1  # unanswered
-
-    # Unhealthy: the stale poll is dropped, but polling resumes on recovery.
     heartbeat.health_event.clear()
-    _step(adapter)
-    _step(adapter)
-    assert len(server.calls) == 1
+    _event_step(adapter)
+    _event_step(adapter)
+    assert len(pending) == 1
     heartbeat.health_event.set()
-    _step(adapter)
-    assert len(server.calls) == 2
-
-    # Healthy and unanswered: the server predates the request; stop for good.
-    _step(adapter)
-    _step(adapter)
-    assert len(server.calls) == 2
+    _event_step(adapter)
+    assert len(pending) == 2
 
 
-def test_a_full_page_is_followed_by_an_immediate_poll(
-    fake_adapter, monkeypatch
+def test_full_event_pages_poll_immediately_then_resume_interval(
+    fake_adapter: tuple,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(adapter_mod, "_KV_EVENT_POLL_PAGE", 1)
-    adapter, server = _polling_adapter(
+    adapter, _, pending = _event_adapter(
         fake_adapter,
         extra_config={"lmcache.mp.kv_event_poll_interval": 100.0},
     )
-    server.answer(
-        _poll_result([_record(1, KV_EVENT_KIND_REMOVED, [b"x"])], next_cursor=1)
-    )
-    _step(adapter)
-    _step(adapter)  # consumes the full page and polls again at once
-    assert server.calls == [("test-model", 0, 1), ("test-model", 1, 1)]
-
-    server.answer(_poll_result(next_cursor=1))
-    _step(adapter)
-    _step(adapter)  # an empty page: the 100 s interval applies again
-    assert len(server.calls) == 2
-
-
-def test_no_polling_without_kv_events_or_with_a_zero_interval(fake_adapter) -> None:
-    _adapter, req_client, _future = fake_adapter
-    cases: list[tuple[bool, dict[str, object]]] = [
-        (False, {"lmcache.mp.kv_event_poll_interval": 1e-6}),
-        (True, {"lmcache.mp.kv_event_poll_interval": 0}),
-    ]
-    for enable_kv_events, extra_config in cases:
-        adapter = _make_worker_adapter(
-            extra_config=extra_config, enable_kv_events=enable_kv_events
-        )
-        assert adapter.get_kv_events() == []
-    req_client.poll_kv_events.assert_not_called()
-
-
-# -- Single publisher and server capability ------------------------------------
-
-
-def _strategy(worker_id: int, world_size: int, n_servers: int = 1) -> ParallelStrategy:
-    return ParallelStrategy(
-        mla_only=False,
-        vllm_world_size=world_size,
-        vllm_worker_id=worker_id,
-        tp_size=world_size // n_servers,
-        pp_size=1,
-        n_servers=n_servers,
-    )
-
-
-@pytest.mark.parametrize(
-    ("worker_id", "world_size", "n_servers", "is_poller"),
-    [
-        (0, 1, 1, True),
-        (0, 2, 1, True),
-        (1, 2, 1, False),
-        (3, 4, 1, False),
-        # Two servers, two ranks each: the first rank of each block polls
-        # its own server's log.
-        (0, 4, 2, True),
-        (1, 4, 2, False),
-        (2, 4, 2, True),
-        (3, 4, 2, False),
-    ],
-)
-def test_one_rank_per_server_is_the_poller(
-    worker_id: int, world_size: int, n_servers: int, is_poller: bool
-) -> None:
-    """Every rank reads the same records, so only one may republish them."""
-    assert _strategy(worker_id, world_size, n_servers).is_kv_event_poller is is_poller
-
-
-@pytest.mark.parametrize(("worker_id", "is_poller"), [(0, True), (1, False)])
-def test_only_one_rank_per_engine_publishes(
-    fake_adapter, worker_id: int, is_poller: bool
-) -> None:
-    """Every rank of an engine reads the same records, so only one may
-    republish them: a repeated BlockRemoved is an error for the router. The
-    silent ranks must not fall back to their own store events either, or the
-    engine would have two publishers."""
-    adapter, server = _polling_adapter(fake_adapter, _strategy(worker_id, 2))
-    server.answer(
-        _poll_result(
-            [_record(1, KV_EVENT_KIND_STORED, [b"h1"], token_ids=[1])], next_cursor=1
-        )
-    )
-    _step(adapter)
-    events = _step(adapter)
-
-    assert bool(server.calls) is is_poller
-    assert [type(e).__name__ for e in events] == (
-        ["CacheStoreEvent"] if is_poller else []
-    )
-
-    # While the server's log is the source, no rank announces its own stores.
-    _complete_own_store(adapter, "req-own", 9)
-    assert _step(adapter) == []
-
-
-def test_an_unadvertised_server_is_never_polled(fake_adapter, monkeypatch) -> None:
-    """A server that predates POLL_KV_EVENTS aborts its request loop on the
-    unknown request type, so the worker keeps to its own completed stores."""
-    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
-    adapter, server = _polling_adapter(fake_adapter)
-
-    own = _complete_own_store(adapter, "req-1", 1)
-    events = _step(adapter)
-
-    assert server.calls == []
-    assert [(type(e).__name__, e.block_hashes) for e in events] == [
-        ("CacheStoreEvent", [own])
-    ]
+    response = KVEventPollResult(True, 7, 1, False, [_event_record("removed")])
+    pending[-1].set_result(response)
+    _event_step(adapter)
+    assert len(pending) == 2
+    pending[-1].set_result(replace(response, events=[]))
+    _event_step(adapter)
+    _event_step(adapter)
+    assert len(pending) == 2

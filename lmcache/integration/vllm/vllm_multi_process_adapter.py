@@ -67,7 +67,7 @@ logger = init_logger(__name__)
 # Export through vLLM's multiprocess Prometheus registry, independently of drains.
 _KV_EVENTS_BUFFERED = Gauge(
     "vllm:lmcache_mp_kv_events_buffered",
-    "Completed MP store events waiting for vLLM to drain them.",
+    "MP KV events waiting for vLLM to drain them.",
     ["model_name", "worker_id"],
     multiprocess_mode="livesum",
 )
@@ -156,10 +156,7 @@ class ExtraConfigDefault(enum.Enum):
     # Must match the MP server's --hash-algorithm setting because KV events
     # expose the same chunk hashes used by server-side object keys.
     hash_algorithm = "blake3"
-    # Seconds between polls of the MP server's cache-event log (host-cache
-    # store completions and evictions, L2 stores and deletes) when vLLM KV
-    # events are enabled. 0 disables polling: the worker then reports only
-    # its own completed stores, and evictions never reach the router.
+    # CPU event polling interval; 0 keeps only the worker's completed stores.
     kv_event_poll_interval = 0.1
 
 
@@ -447,22 +444,12 @@ class ParallelStrategy:
 
     @property
     def ranks_per_server(self) -> int:
-        """Number of workers attached to one LMCache server.
-
-        Workers are assigned to servers in contiguous rank blocks, matching
-        the connector's node routing.
-        """
+        """Workers assigned to one MP server in a contiguous rank block."""
         return max(1, self.vllm_world_size // self.n_servers)
 
     @property
     def is_kv_event_poller(self) -> bool:
-        """Whether this rank reads its server's cache-event log for the engine.
-
-        One rank per server: every rank attached to a server would otherwise
-        republish the same records, and while a duplicate ``BlockStored`` is
-        idempotent for a KV-aware router, a duplicate ``BlockRemoved`` is an
-        error.
-        """
+        """Whether this is the first rank attached to its MP server."""
         return self.vllm_worker_id % self.ranks_per_server == 0
 
     @property
@@ -1499,11 +1486,7 @@ class LMCacheMPWorkerAdapter:
         )
         self._pending_store_kv_events: dict[str, list[CacheStoreEvent]] = {}
         self._kv_events: list[CacheEvent] = []
-        # Non-blocking polling of the server's cache-event log; see
-        # _poll_server_kv_events.
         self._kv_event_poll_interval = kv_event_poll_interval
-        # Both resolved against the server's advertised capabilities once the
-        # request client is up; see _resolve_kv_event_source.
         self._kv_event_server_source = False
         self._kv_event_polling = False
         self._kv_event_cursor = 0
@@ -1511,12 +1494,8 @@ class LMCacheMPWorkerAdapter:
         self._kv_event_poll_future: MessagingFuture[KVEventPollResult] | None = None
         self._kv_event_poll_started = 0.0
         self._kv_event_last_poll = -math.inf
-        # medium -> chunk hashes announced as stored (from the server's
-        # records) and not yet withdrawn. Removals are reported only for
-        # these (a router knows nothing else about this worker), and a resync
-        # withdraws all of them. Mirrors the server's live key set for this
-        # model, so the server's cache capacity bounds its size.
-        self._announced_kv_hashes: dict[str, set[int | bytes]] = {}
+        # CPU chunks this worker has announced and not withdrawn.
+        self._announced_kv_hashes: set[bytes] = set()
         if enable_kv_events:
             labels = (model_name, parallel_strategy.vllm_worker_id)
             self._kv_events_buffered = _KV_EVENTS_BUFFERED.labels(*labels)
@@ -2343,20 +2322,10 @@ class LMCacheMPWorkerAdapter:
         return completed_store_requests
 
     def get_kv_events(self) -> list[CacheEvent]:
-        """Return the KV events collected since the last call.
+        """Drain CPU events in order, advancing one asynchronous server poll.
 
-        With server-side polling enabled (``lmcache.mp.kv_event_poll_interval``
-        > 0, the default) each call advances a non-blocking poll of the MP
-        server's cache-event log and buffers the host-cache store, eviction,
-        and L2 records it returns, translated for this worker (see
-        ``_apply_kv_event_record``); the server's write-finished records are
-        then the only source of store announcements, because a store result
-        does not say which chunks were actually written. With polling off,
-        own stores are announced as their futures succeed.
-
-        Returns:
-            Cache-store and cache-remove events, oldest first. Empty when KV
-            events are disabled or nothing new happened.
+        Server records replace own-store reports while polling is active.
+        Returns an empty list when events are disabled or nothing is buffered.
         """
         if not self._kv_events_enabled:
             return []
@@ -2513,14 +2482,7 @@ class LMCacheMPWorkerAdapter:
         self._kv_events_buffered.set(len(self._kv_events))
 
     def _poll_server_kv_events(self) -> None:
-        """Advance the non-blocking poll of the server's cache-event log.
-
-        Consumes a completed poll, then issues the next one once the poll
-        interval has elapsed (at once after a full page); never blocks the
-        caller, so a poll's records are buffered by a later call. Polling
-        stops for good when the server reports that it records no events, or
-        stops answering while healthy.
-        """
+        """Consume a completed poll, then submit the next without blocking vLLM."""
         if not self._kv_event_polling:
             return
         now = time.monotonic()
@@ -2561,14 +2523,7 @@ class LMCacheMPWorkerAdapter:
         self._kv_event_last_poll = now
 
     def _disable_kv_event_polling(self, reason: str) -> None:
-        """Stop polling for good and fall back to own completed-store events.
-
-        Only the polling rank reaches this; the other ranks of the engine
-        stay silent, so the engine keeps a single publisher.
-
-        Args:
-            reason: Why polling stopped, for the operator-facing warning.
-        """
+        """Withdraw placements and resume completed-store reporting after failure."""
         logger.warning(
             "Disabling server-side KV event polling (%s): this worker falls "
             "back to reporting its own completed stores, so the router no "
@@ -2583,22 +2538,7 @@ class LMCacheMPWorkerAdapter:
     def _resolve_kv_event_source(
         self, enable_kv_events: bool, parallel_strategy: ParallelStrategy
     ) -> None:
-        """Decide whether this rank takes KV events from the server's log.
-
-        The log is used only when the server advertises the channel: a server
-        that predates ``POLL_KV_EVENTS`` aborts its request loop on the
-        unknown request type, which would take the cache server down for
-        every engine attached to it.
-
-        Every rank attached to an advertising server stops announcing its own
-        stores, but only one of them polls
-        (:attr:`ParallelStrategy.is_kv_event_poller`), so each record reaches
-        the router exactly once.
-
-        Args:
-            enable_kv_events: Whether vLLM's KV event publisher is enabled.
-            parallel_strategy: This worker's parallel placement.
-        """
+        """Use server records only when enabled and advertised; elect one poller."""
         if not enable_kv_events or self._kv_event_poll_interval <= 0:
             return
         if KV_EVENT_CAPABILITY not in self.experimental:
@@ -2640,15 +2580,10 @@ class LMCacheMPWorkerAdapter:
             self._kv_event_last_poll = -math.inf
 
     def _apply_kv_event_record(self, record: KVEventRecord) -> None:
-        """Translate one server record into a buffered KV event.
-
-        A removal is reported only for chunks this worker announced (a router
-        knows nothing else about it), and a store only for chunks it has not
-        announced yet, so the router's view of this worker sees neither
-        duplicates nor removals of blocks it never held. Own store events
-        and server records for the same chunk thus collapse into one.
-        """
-        announced = self._announced_kv_hashes.setdefault(record.medium, set())
+        """Publish CPU changes once, removing only previously announced hashes."""
+        if record.medium != "CPU":
+            return
+        announced = self._announced_kv_hashes
         if record.kind == KV_EVENT_KIND_REMOVED:
             hashes = [h for h in record.block_hashes if h in announced]
             if not hashes:
@@ -2679,27 +2614,18 @@ class LMCacheMPWorkerAdapter:
             logger.warning("Ignoring KV event record of unknown kind %r", record.kind)
 
     def _resync_kv_events(self, reason: str) -> None:
-        """Withdraw every announced placement of this worker.
-
-        Used when the server's cache-event log cannot be followed exactly
-        (server restart, discarded events): the router is told to forget
-        this worker's LMCache placements rather than trust a possibly stale
-        view. They return as chunks are stored again.
-        """
+        """Withdraw announced CPU placements after loss, restart, or poll failure."""
         self._kv_event_resyncs[reason].inc()
-        removals = [
-            CacheRemoveEvent(block_hashes=sorted(hashes), medium=medium)
-            for medium, hashes in self._announced_kv_hashes.items()
-            if hashes
-        ]
-        self._announced_kv_hashes.clear()
-        logger.warning(
-            "Resynchronizing KV events after %s: withdrawing %d announced "
-            "chunk(s) from the router's view of this worker",
-            reason,
-            sum(len(removal.block_hashes) for removal in removals),
-        )
-        self._buffer_kv_events(list(removals))
+        logger.warning("Resynchronizing CPU KV events after %s", reason)
+        if self._announced_kv_hashes:
+            self._buffer_kv_events(
+                [
+                    CacheRemoveEvent(
+                        block_hashes=sorted(self._announced_kv_hashes), medium="CPU"
+                    )
+                ]
+            )
+            self._announced_kv_hashes.clear()
 
     def _update_and_get_finished_store(
         self,

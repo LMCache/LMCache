@@ -77,12 +77,18 @@ def test_kv_event_aggregation_preserves_worker_transitions(
         for index in range(3)
     ]
     events.append(BlockRemoved([0], "CPU"))
-    aggregate = LMCacheMPKVEvents()
-    for batch in batches:
-        worker = LMCacheMPKVEvents()
+    aggregate = LMCacheMPKVEvents(num_workers=1)
+    for index, batch in enumerate(batches):
+        worker = LMCacheMPKVEvents(num_workers=1)
         worker.add_events([events[index] for index in batch])
         aggregate.merge(worker)
+        if index:
+            aggregate.increment_workers(worker.get_number_of_workers())
+    assert aggregate.get_number_of_workers() == max(1, len(batches))
     assert aggregate.aggregate().get_all_events() == [events[i] for i in expected]
+    assert aggregate.get_number_of_workers() == 1
+    aggregate.clear_events()
+    assert aggregate.get_all_events() == []
 
 
 def _config(transfer_config: KVTransferConfig) -> VllmConfig:

@@ -56,6 +56,8 @@ The ZMQ adapter installs client methods from the same RPC specifications. IDs
 1–33 remain frozen for compatibility with deployed clients and servers. New
 operations use their stable string name on the wire and must not be added to
 the legacy ID table. The server accepts both encodings.
+The pre-discovery KV event channel also emitted ID 34; it is retained for
+`poll_kv_events` compatibility.
 
 The server follows the same boundary. `server.py` builds transport-neutral
 engine modules and passes them to `create_request_server()`, which returns the
@@ -83,3 +85,31 @@ subdirectory and adds its scheme mapping to the factory. Application code must
 continue to depend only on `RequestClientFactory` and named request methods;
 transport-specific serialization and connection management stay behind that
 boundary.
+
+## KV event polling
+
+The CPU/L1 channel reuses the event bus and the existing vLLM publisher:
+
+```text
+MP_TOKENS + L1 write/eviction -> ManagementModule's bounded log
+    -> poll_kv_events(model, cursor, limit) -> MP worker -> vLLM -> router
+```
+
+One rank per server polls. Completed server writes are the store source;
+a successful store request can skip chunks it could not reserve. Stores
+require known tokens and parent hashes. Unknown bindings are counted and
+skipped, and the binding cache is bounded.
+
+Poll replies carry an incarnation, cursor, loss flag and ordered records.
+Restart, lost records or polling failure withdraw announced CPU placements.
+Failure falls back to own completed stores. The buffer gauge and generated,
+drained, polling and resync counters expose delivery progress.
+
+The connector retains `KVEventAggregator` and an ordered batch buffer for
+store/remove/store transitions. Polling advances only during engine steps;
+idle routing entries can remain stale until stepping resumes.
+
+ZMQ alone advertises `kv_events`; gRPC has no polling RPC. Enable the event
+bus and vLLM KV events, and match hash algorithms and chunk sizes. See
+`docs/source/mp/configuration.rst` for the log-size and poll-interval controls.
+L2 events, access events and salted hash interoperability are outside scope.

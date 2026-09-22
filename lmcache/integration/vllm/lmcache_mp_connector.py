@@ -14,6 +14,7 @@ from vllm.distributed.kv_events import (
     BlockStored,
     KVCacheEvent,
     KVConnectorKVEvents,
+    KVEventAggregator,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -134,55 +135,47 @@ def _convert_kv_event_hash(block_hash: bytes | int | None) -> bytes | int | None
 
 
 class LMCacheMPKVEvents(KVConnectorKVEvents):
-    """KV event container used by LMCache multiprocess workers.
+    """KV event container used by LMCache multiprocess workers."""
 
-    Each ``add_events`` call holds one worker's batch for the current step.
-    ``aggregate`` preserves each batch's transitions and deduplicates across
-    workers rather than using vLLM's ``KVEventAggregator`` intersection: workers
-    finish store futures and drain the server's event log independently, so
-    the same event usually reaches the scheduler from different workers in
-    different steps, and an intersection would drop it for good.
-
-    Args:
-        num_workers: Workers that contributed so far; vLLM's output
-            aggregator increments it as it merges tensor-parallel workers.
-    """
-
-    def __init__(self, num_workers: int = 1) -> None:
+    def __init__(self, num_workers: int) -> None:
+        self._aggregator = KVEventAggregator(num_workers)
         self._batches: list[list[KVCacheEvent]] = []
-        self._num_workers = num_workers
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
-        """Add one worker's batch of events."""
+        """Add events from one worker."""
+        self._aggregator.add_events(events)
         self._batches.append(list(events))
 
     def aggregate(self) -> "LMCacheMPKVEvents":
-        """Preserve batch transitions while deduplicating across workers."""
+        """Keep all pollers' events, preserving transitions within each batch."""
+        remaining = set(self._aggregator.get_all_events())
         merged: list[KVCacheEvent] = []
-        seen: set[KVCacheEvent] = set()
         for events in self._batches:
-            merged.extend(event for event in events if event not in seen)
-            seen.update(events)
+            merged.extend(event for event in events if event in remaining)
+            remaining.difference_update(events)
         self._batches = [merged] if merged else []
-        self._num_workers = 1
+        self._aggregator.clear_events()
+        self._aggregator.add_events(merged)
+        self._aggregator.reset_workers()
         return self
 
     def increment_workers(self, count: int = 1) -> None:
-        """Track additional contributing workers."""
-        self._num_workers += count
+        """Track an additional worker contribution."""
+        self._aggregator.increment_workers(count)
 
     def get_all_events(self) -> list[KVCacheEvent]:
-        """Return every buffered event, batch by batch."""
+        """Return all buffered events in worker order."""
         return [event for batch in self._batches for event in batch]
 
     def get_number_of_workers(self) -> int:
         """Return the number of contributing workers."""
-        return self._num_workers
+        return self._aggregator.get_number_of_workers()
 
     def clear_events(self) -> None:
         """Clear buffered events and reset the worker count."""
-        self._batches = []
-        self._num_workers = 1
+        self._aggregator.clear_events()
+        self._aggregator.reset_workers()
+        self._batches.clear()
 
 
 # Helper functions
@@ -1079,8 +1072,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         Returns:
             A vLLM KV event container with ``BlockStored`` events for LMCache
             stores (own completed stores and stores learned from the MP
-            server) and ``BlockRemoved`` events for host-cache evictions and
-            L2 deletes, or None when disabled or when nothing happened.
+            server) and ``BlockRemoved`` events for CPU evictions, or None
+            when disabled or when nothing happened.
         """
         if not self._enable_kv_events:
             return None
