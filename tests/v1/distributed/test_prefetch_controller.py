@@ -1494,19 +1494,19 @@ class TestPrefetchMode:
         ctrl.stop()
         adapter.close()
 
-    def test_warm_aborts_when_any_key_contended(self, l1_manager):
-        """Reservation is all-or-nothing: a contended key (write-locked by a
-        concurrent request) abandons the whole L2 load; nothing is loaded
-        and no lock leaks."""
+    def test_warm_loads_despite_concurrent_staged_writer(self, l1_manager):
+        """A key another writer is still writing (staging object under its
+        own tag) does not contend: the WARM load proceeds for every key, and
+        the other writer's late copy is discarded at its admission."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         store_keys_in_l2(adapter, keys, layout)
 
-        existing = l1_manager.reserve_write(
-            [keys[0]], is_temporary=[False], layout_desc=layout, mode="new"
+        staged = l1_manager.reserve_write(
+            [keys[0]], is_temporary=[False], layout_desc=layout
         )
-        assert existing[keys[0]][0] == L1Error.SUCCESS
+        assert staged[keys[0]][0] == L1Error.SUCCESS
 
         ctrl = PrefetchController(
             l1_manager=l1_manager,
@@ -1526,13 +1526,63 @@ class TestPrefetchMode:
         )
         result = wait_for_prefetch_result_bitmap(ctrl, req_id)
         assert result is not None
+        assert result.get_indices_list() == [0, 1, 2]
+
+        # Every key is resident and unlocked; the writer's own copy is still
+        # staged and gets discarded when it finishes.
+        for key in keys:
+            assert l1_manager.is_key_evictable(key)
+        assert l1_manager.finish_write([keys[0]])[keys[0]] == L1Error.SUCCESS
+        state = l1_manager.get_object_state(keys[0])
+        assert state is not None
+        assert state.memory_obj is not staged[keys[0]][1]
+        assert l1_manager.get_staging_memory_usage() == 0
+
+        l1_manager.delete(keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_warm_aborts_when_key_becomes_resident_after_lock_pass(self, l1_manager):
+        """Reservation is all-or-nothing: a key admitted by a concurrent
+        writer between the lock pass and the reservation abandons the whole
+        L2 load; nothing is loaded and no lock leaks."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        staged = l1_manager.reserve_write(
+            [keys[0]], is_temporary=[False], layout_desc=layout
+        )
+        assert staged[keys[0]][0] == L1Error.SUCCESS
+        racing_l1 = AdmissionRacingL1Manager(l1_manager, staged_key=keys[0])
+
+        ctrl = PrefetchController(
+            l1_manager=racing_l1,  # type: ignore[arg-type]
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(
+                keys,
+                {0: layout},
+                policy=TrimPolicy.SPARSE,
+                mode=PrefetchMode.WARM,
+            )
+        )
+        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+        assert result is not None
+        assert racing_l1.admitted, "the racing writer never interleaved"
         assert result.get_indices_list() == []
 
         # Nothing was loaded; the abandoned buffers were returned.
-        l1_manager.finish_write([keys[0]])
         read_results = l1_manager.reserve_read(keys[1:])
         for key in keys[1:]:
             assert read_results[key][0] == L1Error.KEY_NOT_EXIST
+        assert l1_manager.get_staging_memory_usage() == 0
 
         l1_manager.delete(keys)
         ctrl.stop()
@@ -1617,6 +1667,97 @@ class EvictionRacingL1Manager:
         return wrapped
 
 
+class AdmissionRacingL1Manager:
+    """L1Manager wrapper emulating a concurrent writer that admits a key
+    right after the controller's L1 lock pass.
+
+    ``staged_key`` must already be staged (``reserve_write`` without
+    ``finish_write``) by the test. After the first delegated
+    ``reserve_read`` returns, the wrapper admits it via ``finish_write`` on
+    the inner manager, so the controller's subsequent
+    ``reserve_write`` finds the key resident.
+    """
+
+    def __init__(self, inner: L1Manager, staged_key: ObjectKey) -> None:
+        self._inner = inner
+        self._staged_key = staged_key
+        self.admitted = False
+
+    def __getattr__(self, name: str):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def wrapped(*args, **kwargs):
+            result = attr(*args, **kwargs)
+            if name == "reserve_read" and not self.admitted:
+                self.admitted = True
+                self._inner.finish_write([self._staged_key])
+            return result
+
+        return wrapped
+
+
+class TestConcurrentPrefetchSameKeys:
+    """Two in-flight requests loading the same L2 keys must both hit.
+
+    Each request stages its load buffers under its own write tag, so the
+    second reservation no longer fails with KEY_NOT_WRITABLE; the admission
+    keeps whichever load lands first and read-locks it for both requests.
+    """
+
+    def test_two_requests_same_keys_both_hit(self, l1_manager):
+        # Slow adapter so both loads are in flight at the same time.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=0.01)
+        )
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(4)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_a = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
+        req_b = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
+        hit_a = wait_for_lookup_result(ctrl, req_a)
+        hit_b = wait_for_lookup_result(ctrl, req_b)
+        result_a = wait_for_prefetch_result_bitmap(ctrl, req_a)
+        result_b = wait_for_prefetch_result_bitmap(ctrl, req_b)
+
+        ctrl.stop()
+        adapter.close()
+
+        assert hit_a == 4
+        assert hit_b == 4
+        assert result_a is not None and result_a.count_leading_ones() == 4
+        assert result_b is not None and result_b.count_leading_ones() == 4
+
+        # One resident copy per key, read-locked once per request; the
+        # losing copies were discarded.
+        assert l1_manager.get_staging_memory_usage() == 0
+        used, _ = l1_manager.get_memory_usage()
+        one_copy = l1_manager.get_object_state(keys[0]).memory_obj.get_size()
+        assert used == one_copy * len(keys)
+        read_results = l1_manager.unsafe_read(keys)
+        for key in keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+
+        # Request A releases: still readable for request B.
+        l1_manager.finish_read(keys)
+        for key in keys:
+            assert l1_manager.unsafe_read([key])[key][0] == L1Error.SUCCESS
+        # Request B releases: the temporary objects are gone.
+        l1_manager.finish_read(keys)
+        for key in keys:
+            assert l1_manager.get_object_state(key) is None
+
+
 class TestConcurrentEvictionRace:
     """A key present in both L1 and L2 must survive a racing evictor.
 
@@ -1627,7 +1768,7 @@ class TestConcurrentEvictionRace:
     failing that, from the still-locked L2 copy.
 
     The controller currently discovers the L1-existing key with
-    ``reserve_write(mode="new")`` (KEY_NOT_WRITABLE) and read-locks it
+    ``reserve_write`` (KEY_NOT_WRITABLE) and read-locks it
     with a separate ``reserve_read`` call.  An eviction between those two
     calls deletes the key; the failed ``reserve_read`` then leaves a gap
     that truncates the whole prefix behind it.
@@ -1642,7 +1783,7 @@ class TestConcurrentEvictionRace:
 
         # keys[1] already exists in L1, unlocked (a prior request stored it).
         existing = l1_manager.reserve_write(
-            [keys[1]], is_temporary=[False], layout_desc=layout, mode="new"
+            [keys[1]], is_temporary=[False], layout_desc=layout
         )
         assert existing[keys[1]][0] == L1Error.SUCCESS
         l1_manager.finish_write([keys[1]])
@@ -1692,7 +1833,7 @@ class TestConcurrentEvictionRace:
 
         # L1 already holds the tail (chunks 2-4), unlocked.
         existing = l1_manager.reserve_write(
-            keys[2:], is_temporary=[False] * 3, layout_desc=layout, mode="new"
+            keys[2:], is_temporary=[False] * 3, layout_desc=layout
         )
         for key in keys[2:]:
             assert existing[key][0] == L1Error.SUCCESS
@@ -1730,7 +1871,7 @@ class TestConcurrentEvictionRace:
         store_keys_in_l2(adapter, keys, layout)
 
         existing = l1_manager.reserve_write(
-            [keys[1]], is_temporary=[False], layout_desc=layout, mode="new"
+            [keys[1]], is_temporary=[False], layout_desc=layout
         )
         assert existing[keys[1]][0] == L1Error.SUCCESS
         l1_manager.finish_write([keys[1]])
@@ -1778,7 +1919,7 @@ class TestSlidingWindowClaims:
 
         # All keys resident in L1, unlocked; L2 has nothing.
         existing = l1_manager.reserve_write(
-            keys, is_temporary=[False] * 8, layout_desc=layout, mode="new"
+            keys, is_temporary=[False] * 8, layout_desc=layout
         )
         for key in keys:
             assert existing[key][0] == L1Error.SUCCESS
@@ -1834,9 +1975,9 @@ class TestSlidingWindowClaims:
 
         Layout (chunk-major, groups [full=-1, sw=2], 6 chunks): L1 holds
         chunks 0-1 (L1 hit = 2), L2 holds the rest (final hit would be 6).
-        One plan key is write-locked by a concurrent writer, so the
-        all-or-nothing reservation abandons the load; the result must be
-        the intact L1 hit, not a collapsed one.
+        One plan key becomes resident (a concurrent writer admits it) right
+        after the lock pass, so the all-or-nothing reservation abandons the
+        load; the result must be the intact L1 hit, not a collapsed one.
         """
         adapter = make_adapter()
         layout = make_layout()
@@ -1845,7 +1986,7 @@ class TestSlidingWindowClaims:
 
         # L1: chunks 0-1, both groups (indices 0-3), unlocked.
         existing = l1_manager.reserve_write(
-            keys[:4], is_temporary=[False] * 4, layout_desc=layout, mode="new"
+            keys[:4], is_temporary=[False] * 4, layout_desc=layout
         )
         for key in keys[:4]:
             assert existing[key][0] == L1Error.SUCCESS
@@ -1856,14 +1997,16 @@ class TestSlidingWindowClaims:
         l2_indices = [4, 6, 8, 10, 9, 11]
         store_keys_in_l2(adapter, [keys[i] for i in l2_indices], layout)
 
-        # A concurrent writer holds one plan key -> reservation aborts.
+        # A concurrent writer stages one plan key and admits it right after
+        # the lock pass -> the key is resident, the reservation aborts.
         contended = l1_manager.reserve_write(
-            [keys[4]], is_temporary=[False], layout_desc=layout, mode="new"
+            [keys[4]], is_temporary=[False], layout_desc=layout
         )
-        assert contended[keys[4]][0] == L1Error.SUCCESS  # stays write-locked
+        assert contended[keys[4]][0] == L1Error.SUCCESS
+        racing_l1 = AdmissionRacingL1Manager(l1_manager, staged_key=keys[4])
 
         ctrl = PrefetchController(
-            l1_manager=l1_manager,
+            l1_manager=racing_l1,  # type: ignore[arg-type]
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
@@ -1880,6 +2023,7 @@ class TestSlidingWindowClaims:
         adapter.close()
 
         # Fallback: the intact L1 hit with its window still locked.
+        assert racing_l1.admitted, "the racing writer never interleaved"
         assert hit == 2
         assert result is not None
         assert result.get_indices_list() == [0, 1, 2, 3]
@@ -1888,4 +2032,3 @@ class TestSlidingWindowClaims:
             assert read_results[key][0] == L1Error.SUCCESS
 
         l1_manager.finish_read(keys[:4])
-        l1_manager.finish_write([keys[4]])
