@@ -89,6 +89,15 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[tuple[bytes, bool]]: ...
 
     @rpc_method
+    def store_with_chunk_events(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, list[tuple[bytes, int, int]], bool]]: ...
+
+    @rpc_method
     def retrieve(
         self,
         key: IPCCacheServerKey,

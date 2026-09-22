@@ -76,6 +76,14 @@ def test_new_zmq_operations_use_names_without_registry_changes() -> None:
     assert decode_operation(encoded) == operation
 
 
+def test_chunk_event_store_uses_its_contract_name_on_zmq() -> None:
+    operation = "store_with_chunk_events"
+    spec = get_rpc_spec(operation)
+
+    assert spec.response_type == tuple[bytes, list[tuple[bytes, int, int]], bool]
+    assert msgspec.msgpack.decode(encode_operation(operation)) == operation
+
+
 def test_unknown_legacy_zmq_operation_is_rejected() -> None:
     with pytest.raises(ValueError, match="Unknown legacy ZMQ operation id"):
         decode_operation(msgspec.msgpack.encode(999))

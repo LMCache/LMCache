@@ -293,3 +293,28 @@ def test_lookup_single_group_matches_single_group_layout():
 
     expected = ipc_key_to_object_keys(_lookup_key(world_size=2), chunk_hashes, [0])[0]
     assert keys == expected
+
+
+def test_lookup_hashing_stops_at_key_end() -> None:
+    """LOOKUP must not hash chunks beyond the IPC key's requested range."""
+    ctx = MagicMock()
+    ctx.chunk_size = 16
+    ctx.event_bus.has_subscribers.return_value = False
+    ctx.layout_desc_registry.find.return_value = MagicMock()
+    ctx.token_hasher.compute_chunk_hashes.return_value = []
+    key = IPCCacheServerKey(
+        model_name="m",
+        world_size=1,
+        num_kv_readers=1,
+        worker_id=None,
+        token_ids=tuple(range(32)),
+        start=0,
+        end=16,
+        request_id="r",
+    )
+
+    LookupModule(ctx).lookup(key, tp_size=1)
+
+    ctx.token_hasher.compute_chunk_hashes.assert_called_once_with(
+        list(range(32)), end=16
+    )

@@ -37,6 +37,18 @@ message StoreResponse {
   EventIpcHandleResult result = 1;
 }
 
+message ChunkCompletion {
+  bytes event_ipc_handle = 1;
+  int64 start = 2;
+  int64 end = 3;
+}
+
+message StoreWithChunkEventsResponse {
+  bytes terminal_event_ipc_handle = 1;
+  repeated ChunkCompletion chunk_events = 2;
+  bool success = 3;
+}
+
 message RetrieveRequest {
   IpcCacheServerKey key = 1;
   int64 instance_id = 2;
@@ -54,5 +66,6 @@ service LMCacheDrivenService {
   rpc UnregisterKvCache(UnregisterKvCacheRequest)
       returns (UnregisterKvCacheResponse);
   rpc Store(StoreRequest) returns (StoreResponse);
+  rpc StoreWithChunkEvents(StoreRequest) returns (StoreWithChunkEventsResponse);
   rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
 }

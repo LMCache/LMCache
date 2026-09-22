@@ -117,6 +117,26 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
+        def store_with_chunk_events(
+            self,
+            key: IPCCacheServerKey,
+            instance_id: int,
+            block_ids: list[list[int]],
+            event_ipc_handle: bytes,
+        ) -> tuple[bytes, list[tuple[bytes, int, int]], bool]:
+            assert instance_id == 7
+            assert block_ids == [[1, 2], [3]]
+            assert event_ipc_handle == b"input-event"
+            return (
+                b"output-event",
+                [(b"chunk-event", 0, 3)],
+                key.model_name == "model",
+            )
+
+        @request_handler(
+            HandlerType.BLOCKING,
+            requires_client_affinity=True,
+        )
         def prepare_store(
             self, key: IPCCacheServerKey, instance_id: int
         ) -> PrepareStoreResponse:
@@ -232,6 +252,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     assert "EngineService" not in bindings
     assert {method.name for _, method in iter_methods()} >= {
         "Store",
+        "StoreWithChunkEvents",
         "PrepareStore",
         "Lookup",
         "StoreQ",
@@ -253,6 +274,20 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
         bytes,
     )
     assert store_codec.response_type == tuple[bytes, bool]
+
+    chunk_store_codec = registry.by_full_name[
+        "lmcache.mp.LMCacheDrivenService.StoreWithChunkEvents"
+    ]
+    assert chunk_store_codec.payload_types == (
+        IPCCacheServerKey,
+        int,
+        list[list[int]],
+        bytes,
+    )
+    assert (
+        chunk_store_codec.response_type
+        == tuple[bytes, list[tuple[bytes, int, int]], bool]
+    )
 
     clear_codec = registry.by_full_name["lmcache.mp.ControllerService.Clear"]
     assert clear_codec.operation == "clear"
@@ -482,6 +517,9 @@ def test_generated_grpc_services_communicate_end_to_end(
         b"output-event",
         True,
     )
+    assert client.store_with_chunk_events(key, 7, [[1, 2], [3]], b"input-event").result(
+        5
+    ) == (b"output-event", [(b"chunk-event", 0, 3)], True)
     assert client.prepare_store(key, 7).result(5) == PrepareStoreResponse(
         context={"slots": [{"offset": 8}], "chunk_indices": [2]}
     )
