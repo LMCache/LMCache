@@ -21,6 +21,11 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
+from lmcache.v1.multiprocess.token_codec import (
+    TOKEN_STRIDE,
+    num_packed_tokens,
+    pack_token_ids,
+)
 
 if TYPE_CHECKING:
     # Third Party
@@ -79,6 +84,11 @@ class LMCacheMPRequestTracker:
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
+    # Packed prefix of `get_token_ids()`, grown in place. A request emits one
+    # op per scheduler step, so repacking the whole sequence each time would
+    # put the context length back on the scheduler's critical path.
+    packed_tokens: bytearray = field(default_factory=bytearray)
+
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
@@ -93,6 +103,7 @@ class LMCacheMPRequestTracker:
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.state = LMCacheMPRequestState.PREFETCHING
+        self.packed_tokens = bytearray()
         self.mm_adjusted_prompt_ids = []
         mm_hashes, mm_positions = extract_mm_features(request)
         if mm_hashes and mm_positions:
@@ -157,11 +168,53 @@ class LMCacheMPRequestTracker:
     def get_token_ids(self) -> list[int]:
         """Return the token ids to use for LMCache key derivation."""
         if not self.mm_adjusted_prompt_ids:
+            # The common case, and the only one that copies just once:
+            # slicing a ConstantList already materializes a list.
             return list(self.all_token_ids)
+        return self.get_token_ids_slice(0, len(self.all_token_ids))
+
+    def get_token_ids_slice(self, start: int, end: int) -> list[int]:
+        """Return ``get_token_ids()[start:end]`` without building the whole list.
+
+        Args:
+            start: Absolute start position.
+            end: Absolute end position (exclusive).
+
+        Returns:
+            The token ids in ``[start, end)``.
+        """
         num_prompt_tokens = len(self.mm_adjusted_prompt_ids)
-        return self.mm_adjusted_prompt_ids + list(
-            self.all_token_ids[num_prompt_tokens:]
+        if end <= num_prompt_tokens:
+            return self.mm_adjusted_prompt_ids[start:end]
+        if start >= num_prompt_tokens:
+            return list(self.all_token_ids[start:end])
+        return self.mm_adjusted_prompt_ids[start:] + list(
+            self.all_token_ids[num_prompt_tokens:end]
         )
+
+    def packed_token_ids(self) -> bytes:
+        """Return the whole current token sequence, packed.
+
+        Returns:
+            Every token ``get_token_ids`` would return, in packed form.
+        """
+        packed_so_far = num_packed_tokens(self.packed_tokens)
+        total = len(self.all_token_ids)
+        # A tracker outliving a streaming turn cannot assume the sequence
+        # only grows: `Scheduler._update_request_as_session` truncates it in
+        # place. The boundary token also catches an equally long next turn.
+        if packed_so_far and (
+            total < packed_so_far
+            or self.get_token_ids_slice(packed_so_far - 1, packed_so_far)[0]
+            != int.from_bytes(self.packed_tokens[-TOKEN_STRIDE:], "big")
+        ):
+            self.packed_tokens = bytearray()
+            packed_so_far = 0
+        if total > packed_so_far:
+            self.packed_tokens += pack_token_ids(
+                self.get_token_ids_slice(packed_so_far, total)
+            )
+        return bytes(self.packed_tokens)
 
     ####
     # For debugging
@@ -266,9 +319,9 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
-            token_ids = tracker.get_token_ids()
+            token_bytes = tracker.packed_token_ids()
             op = LoadStoreOp(
-                token_ids=token_ids,
+                token_bytes=token_bytes,
                 block_ids=block_ids,
                 start=start_token_idx,
                 end=end_token_idx,
@@ -335,7 +388,7 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
-            token_ids = tracker.get_token_ids()
+            token_bytes = tracker.packed_token_ids()
 
             # Compute how many tokens at the start of the retrieve range
             # overlap with APC-shared blocks. The server must skip writing
@@ -345,7 +398,7 @@ class LMCacheMPRequestMetadata:
             skip_first_n_tokens = tracker.num_vllm_hit_tokens - start_token_idx
 
             op = LoadStoreOp(
-                token_ids=token_ids,
+                token_bytes=token_bytes,
                 block_ids=block_ids,
                 start=start_token_idx,
                 end=end_token_idx,

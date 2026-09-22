@@ -158,7 +158,7 @@ def _coalesce_store_metadata(
         for group_idx, group_ids in enumerate(meta.op.block_ids):
             merged_block_ids[group_idx].extend(group_ids)
     merged_op = LoadStoreOp(
-        token_ids=last.op.token_ids,
+        token_bytes=last.op.token_bytes,
         block_ids=merged_block_ids,
         start=first.op.start,
         end=last.op.end,
@@ -203,7 +203,7 @@ class LazyOffloadManager:
         self._policy: OffloadPolicy | None = None
         self._requests = LazyOffloadRequestRegistry()
         # One token ledger per request whose operations are buffered.
-        self._token_ledgers: dict[str, list[int]] = {}
+        self._token_ledgers: dict[str, bytearray] = {}
 
     def bind_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind the scheduler's GPU block pool and build the policy.
@@ -508,28 +508,31 @@ class LazyOffloadManager:
     ) -> LMCacheMPRequestMetadata:
         """Point one operation at its request's token ledger.
 
-        The tracker builds a fresh list of the request's whole token
+        The tracker builds a fresh buffer of the request's whole token
         sequence for every operation it produces. Under lazy offload those
-        lists are retained until the operation is submitted, so a long
-        request would hold one copy per buffered operation. Each list is a
+        buffers are retained until the operation is submitted, so a long
+        request would hold one copy per buffered operation. Each buffer is a
         prefix of the next -- vLLM only appends -- so the ledger absorbs the
         new tail and every buffered operation of the request shares it.
+
+        The ledger is a ``bytearray`` so it can grow in place and the
+        already-buffered operations see the growth.
 
         Args:
             metadata: The store operation as the tracker produced it.
 
         Returns:
-            A copy whose ``op.token_ids`` is the shared ledger. The caller's
-            metadata is left untouched.
+            A copy whose ``op.token_bytes`` is the shared ledger. The
+            caller's metadata is left untouched.
         """
-        tokens = metadata.op.token_ids
+        tokens = metadata.op.token_bytes
         ledger = self._token_ledgers.get(metadata.request_id)
         if ledger is None:
-            ledger = list(tokens)
+            ledger = bytearray(tokens)
             self._token_ledgers[metadata.request_id] = ledger
         elif len(tokens) > len(ledger):
-            ledger.extend(tokens[len(ledger) :])
-        return replace(metadata, op=replace(metadata.op, token_ids=ledger))
+            ledger += tokens[len(ledger) :]
+        return replace(metadata, op=replace(metadata.op, token_bytes=ledger))
 
     def _release_session(self, request_id: str) -> None:
         """Clear policy and registry state for a settled request.

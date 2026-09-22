@@ -41,6 +41,11 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
+from lmcache.v1.multiprocess.token_codec import (
+    TOKEN_STRIDE,
+    num_packed_tokens,
+    unpack_token_ids,
+)
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
@@ -588,8 +593,9 @@ class HeartbeatThread(PeriodicThread):
 
 @dataclass
 class LoadStoreOp:
-    token_ids: list[int]
-    """Token IDs for the load/store operation"""
+    token_bytes: bytes
+    """Token IDs for the load/store operation, packed per
+    :mod:`lmcache.v1.multiprocess.token_codec`."""
 
     block_ids: list[list[int]]
     """Block IDs for the load/store operation, indexed by engine KV cache
@@ -715,9 +721,7 @@ class LMCacheMPSchedulerAdapter:
         self._lookup_status: dict[
             str, dict[str, tuple[MessagingFuture[Any], float]]
         ] = {}
-        self._lookup_params: dict[
-            str, tuple[list[int], str, dict[str, Any] | None]
-        ] = {}
+        self._lookup_params: dict[str, tuple[bytes, str, dict[str, Any] | None]] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -808,7 +812,7 @@ class LMCacheMPSchedulerAdapter:
     def maybe_submit_lookup_request(
         self,
         request_id: str,
-        token_ids: list[int],
+        packed_token_ids: bytes,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
@@ -823,7 +827,7 @@ class LMCacheMPSchedulerAdapter:
         Args:
             request_id: The ID of the lookup request. The same ID indicates it's
                 from the same request
-            token_ids: Token IDs to lookup from LMCache
+            packed_token_ids: Packed token IDs to lookup from LMCache.
             cache_salt: Per-user isolation salt. Requests with different
                 cache_salt values produce separate cache entries.
             request_configs: Optional LMCache request configs to include in
@@ -850,13 +854,15 @@ class LMCacheMPSchedulerAdapter:
             # Skip if there is already a lookup request
             return
 
-        lookup_tokens = max(0, len(token_ids) - int(reserve_last_token))
+        lookup_tokens = max(
+            0, num_packed_tokens(packed_token_ids) - int(reserve_last_token)
+        )
         aligned_end = (
             lookup_tokens // self.lmcache_tokens_per_chunk
         ) * self.lmcache_tokens_per_chunk
 
         key = self._create_key(
-            token_ids,
+            packed_token_ids,
             start=0,
             end=aligned_end,
             request_id=request_id,
@@ -876,7 +882,11 @@ class LMCacheMPSchedulerAdapter:
             futures=futures, submitted_at=time.monotonic()
         )
         self._pending_lookups.add(request_id)
-        self._lookup_params[request_id] = (token_ids, cache_salt, request_configs)
+        self._lookup_params[request_id] = (
+            packed_token_ids,
+            cache_salt,
+            request_configs,
+        )
 
     def _free_inconsistent_lookup_locks(
         self,
@@ -896,18 +906,19 @@ class LMCacheMPSchedulerAdapter:
             per_server: Per-server hit chunk counts.
             min_chunks: Minimum hit chunk count across all servers.
         """
-        token_ids_l, cs, request_configs = self._lookup_params.pop(
+        packed, cs, request_configs = self._lookup_params.pop(
             request_id, (None, None, None)
         )
-        if token_ids_l is not None:
+        if packed is not None:
             for url, hit_chunks in per_server.items():
                 if hit_chunks <= min_chunks:
                     continue
                 tail_end = min(
-                    hit_chunks * self.lmcache_tokens_per_chunk, len(token_ids_l)
+                    hit_chunks * self.lmcache_tokens_per_chunk,
+                    num_packed_tokens(packed),
                 )
                 tail_key = self._create_key(
-                    token_ids=token_ids_l,
+                    token_bytes=packed,
                     start=min_chunks * self.lmcache_tokens_per_chunk,
                     end=tail_end,
                     request_id=request_id,
@@ -1100,7 +1111,7 @@ class LMCacheMPSchedulerAdapter:
 
     def free_lookup_locks(
         self,
-        token_ids: list[int],
+        packed_token_ids: bytes,
         start: int,
         end: int,
         request_id: str,
@@ -1121,7 +1132,8 @@ class LMCacheMPSchedulerAdapter:
         It is caller's responsibility to properly align the boundaries.
 
         Args:
-            token_ids: Token IDs for the key (same as used in lookup).
+            packed_token_ids: Packed token IDs for the key (same as used
+                in lookup).
             start: Start token index.
             end: End token index.
             request_id: The request ID.
@@ -1134,7 +1146,7 @@ class LMCacheMPSchedulerAdapter:
 
         # Free [start, end) on every server.
         base_key = self._create_key(
-            token_ids,
+            packed_token_ids,
             start=start,
             end=end,
             request_id=request_id,
@@ -1207,17 +1219,17 @@ class LMCacheMPSchedulerAdapter:
     # Helper functions
     def _create_key(
         self,
-        token_ids: list[int],
+        token_bytes: bytes,
         start: int,
         end: int,
         request_id: str,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
     ) -> IPCCacheServerKey:
-        """Convert token IDs to an IPC cache engine key.
+        """Convert packed token IDs to an IPC cache engine key.
 
         Args:
-            token_ids: The token IDs.
+            token_bytes: The packed token IDs.
             start: Start token index.
             end: End token index.
             request_id: The request ID.
@@ -1235,7 +1247,7 @@ class LMCacheMPSchedulerAdapter:
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
-            token_ids=tuple(token_ids),
+            token_bytes=token_bytes,
             start=start,
             end=end,
             request_id=request_id,
@@ -1773,9 +1785,8 @@ class LMCacheMPWorkerAdapter:
                 self._failed_store_requests.add(request_id)
             return
 
-        assert op.token_ids is not None
         key = self._create_key(
-            op.token_ids,
+            op.token_bytes,
             op.start,
             op.end,
             request_id=request_id,
@@ -1835,9 +1846,8 @@ class LMCacheMPWorkerAdapter:
             self._dropped_retrieves.add(request_id)
             return
 
-        assert op.token_ids is not None
         key = self._create_key(
-            op.token_ids,
+            op.token_bytes,
             op.start,
             op.end,
             request_id=request_id,
@@ -2326,10 +2336,9 @@ class LMCacheMPWorkerAdapter:
         if self._kv_event_hasher is None:
             return []
 
-        token_ids = list(key.token_ids)
         chunk_size = self.lmcache_tokens_per_chunk
-        hashes = self._kv_event_hasher.compute_chunk_hashes(
-            token_ids,
+        hashes = self._kv_event_hasher.compute_packed_chunk_hashes(
+            key.token_bytes,
             end=key.end,
         )
         start_chunk = key.start // chunk_size
@@ -2349,7 +2358,9 @@ class LMCacheMPWorkerAdapter:
                 CacheStoreEvent(
                     block_hashes=[block_hash],
                     parent_block_hash=parent_hash,
-                    token_ids=token_ids[start:end],
+                    token_ids=unpack_token_ids(
+                        key.token_bytes[start * TOKEN_STRIDE : end * TOKEN_STRIDE]
+                    ),
                     block_size=chunk_size,
                     lora_id=None,
                     medium="CPU",
@@ -2417,17 +2428,17 @@ class LMCacheMPWorkerAdapter:
 
     def _create_key(
         self,
-        token_ids: list[int],
+        token_bytes: bytes,
         start: int,
         end: int,
         request_id: str,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
     ) -> IPCCacheServerKey:
-        """Convert token IDs to an IPC cache engine key.
+        """Convert packed token IDs to an IPC cache engine key.
 
         Args:
-            token_ids: The token IDs.
+            token_bytes: The packed token IDs.
             start: Start token index.
             end: End token index.
             request_id: The request ID.
@@ -2443,7 +2454,7 @@ class LMCacheMPWorkerAdapter:
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,
-            token_ids=tuple(token_ids),
+            token_bytes=token_bytes,
             start=start,
             end=end,
             request_id=request_id,

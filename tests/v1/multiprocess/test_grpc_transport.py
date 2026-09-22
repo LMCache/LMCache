@@ -45,6 +45,7 @@ from lmcache.v1.multiprocess.request_handler import (
     iter_request_handlers,
     request_handler,
 )
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.grpc_impl import server as grpc_server_module
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
@@ -468,7 +469,7 @@ def test_generated_grpc_services_communicate_end_to_end(
         model_name="model",
         world_size=2,
         worker_id=None,
-        token_ids=(1, 2, 3),
+        token_bytes=pack_token_ids((1, 2, 3)),
         start=0,
         end=3,
         request_id="request",

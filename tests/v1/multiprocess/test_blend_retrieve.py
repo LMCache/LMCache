@@ -17,6 +17,7 @@ from lmcache import device_ops  # noqa: F401
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 # ---------------------------------------------------------------------------
@@ -650,7 +651,7 @@ def _unretrieved_ctx(
     ctx.storage_manager = storage_manager
     ctx.event_bus.has_subscribers.return_value = False
     # Prefix leg: no full chunk hashes -> handle None -> 0 coverage.
-    ctx.token_hasher.compute_chunk_hashes.return_value = []
+    ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
     # One registered attention-only object group.
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
@@ -691,7 +692,7 @@ def _run_unretrieved_lookup(blend, request_id: str, num_kv_readers: int = 1):
         world_size=1,
         num_kv_readers=num_kv_readers,
         worker_id=None,
-        token_ids=tuple(query),
+        token_bytes=pack_token_ids(query),
         start=0,
         end=len(query),
         request_id=request_id,

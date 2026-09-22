@@ -42,8 +42,8 @@ def resolve_prefetched_obj_keys(
     A worker-specific key resolves only that worker's shard (or one MLA reader
     share), which is required for per-instance RETRIEVE failure cleanup.
     """
-    chunk_hashes = ctx.token_hasher.compute_chunk_hashes(
-        list(key.token_ids), start=key.start, end=key.end
+    chunk_hashes = ctx.token_hasher.compute_packed_chunk_hashes(
+        key.token_bytes, start=key.start, end=key.end
     )
     if not chunk_hashes:
         return []
@@ -204,8 +204,8 @@ class LookupModule:
 
         num_kv_readers = key.require_num_kv_readers()
 
-        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
-            list(key.token_ids), end=key.end
+        chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
+            key.token_bytes, end=key.end
         )
         if not chunk_hashes:
             self._register_prefetch_job(
@@ -248,7 +248,7 @@ class LookupModule:
                         "chunk_hashes": chunk_hashes,
                         "model_name": model_name,
                         "chunk_size": self._ctx.chunk_size,
-                        "seq_len": len(key.token_ids),
+                        "seq_len": key.num_tokens,
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],
                     },
@@ -261,7 +261,7 @@ class LookupModule:
             model_name, world_size
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
+        session.set_tokens(key.token_bytes)
         session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
         obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
 

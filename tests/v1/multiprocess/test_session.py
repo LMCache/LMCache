@@ -11,6 +11,7 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import Session, SessionManager
+from lmcache.v1.multiprocess.token_codec import pack_token_ids, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
@@ -35,21 +36,21 @@ def session_manager(hasher: TokenHasher) -> SessionManager:
 
 class TestSession:
     def test_set_tokens_replaces(self, session: Session) -> None:
-        session.set_tokens([1, 2, 3])
-        assert session.token_ids == [1, 2, 3]
-        session.set_tokens([4, 5, 6])
-        assert session.token_ids == [4, 5, 6]
+        session.set_tokens(pack_token_ids([1, 2, 3]))
+        assert unpack_token_ids(bytes(session.tokens)) == [1, 2, 3]
+        session.set_tokens(pack_token_ids([4, 5, 6]))
+        assert unpack_token_ids(bytes(session.tokens)) == [4, 5, 6]
 
     def test_get_hashes_basic(self, session: Session) -> None:
         """8 tokens, chunk_size=4 produces 2 hashes."""
-        session.set_tokens(list(range(8)))
+        session.set_tokens(pack_token_ids(list(range(8))))
         hashes = session.get_hashes(0, 8)
         assert len(hashes) == 2
 
     def test_get_hashes_incremental(self, session: Session) -> None:
         """Calling get_hashes incrementally should produce same results."""
         tokens = list(range(12))
-        session.set_tokens(tokens)
+        session.set_tokens(pack_token_ids(tokens))
 
         # First call: compute chunks 0-1
         h_first = session.get_hashes(0, 8)
@@ -67,7 +68,7 @@ class TestSession:
 
     def test_get_hashes_idempotent(self, session: Session) -> None:
         """Calling get_hashes twice with same range returns same result."""
-        session.set_tokens(list(range(8)))
+        session.set_tokens(pack_token_ids(list(range(8))))
         h1 = session.get_hashes(0, 8)
         h2 = session.get_hashes(0, 8)
         assert h1 == h2
@@ -78,7 +79,7 @@ class TestSession:
     ) -> None:
         """Session hashes should match standalone TokenHasher hashes."""
         tokens = list(range(8))
-        session.set_tokens(tokens)
+        session.set_tokens(pack_token_ids(tokens))
         session_hashes = session.get_hashes(0, 8)
         hasher_hashes = hasher.compute_chunk_hashes(tokens)
         assert session_hashes == hasher_hashes
@@ -87,7 +88,7 @@ class TestSession:
         """Simulates the lookup then store flow: lookup hashes all, store
         hashes a subrange. The rolling state from lookup should be reused."""
         tokens = list(range(12))
-        session.set_tokens(tokens)
+        session.set_tokens(pack_token_ids(tokens))
 
         # Lookup: hash everything
         all_hashes = session.get_hashes(0, 12)
@@ -182,7 +183,7 @@ class TestSessionThreadSafety:
         """
         session = Session(request_id="req-mt", hasher=hasher)
         tokens = list(range(20))  # 5 chunks of 4
-        session.set_tokens(tokens)
+        session.set_tokens(pack_token_ids(tokens))
 
         # Reference hashes computed single-threaded
         expected = hasher.compute_chunk_hashes(tokens)
@@ -214,7 +215,7 @@ class TestSessionThreadSafety:
         corrupt internal state."""
         session = Session(request_id="req-mt2", hasher=hasher)
         tokens = list(range(8))  # 2 chunks
-        session.set_tokens(tokens)
+        session.set_tokens(pack_token_ids(tokens))
         expected = hasher.compute_chunk_hashes(tokens)
         errors: list[str] = []
         barrier = threading.Barrier(4)
@@ -232,7 +233,7 @@ class TestSessionThreadSafety:
             try:
                 barrier.wait(timeout=5)
                 # Re-set same tokens (idempotent)
-                session.set_tokens(tokens)
+                session.set_tokens(pack_token_ids(tokens))
             except Exception as exc:
                 errors.append("Writer: %s" % exc)
 
@@ -257,13 +258,13 @@ class TestSessionGetHashesOptionalEnd:
 
     def test_get_hashes_optional_end_after_compute(self, session: Session) -> None:
         """get_hashes(0) should return all computed hashes."""
-        session.set_tokens(list(range(12)))  # 3 chunks of 4
+        session.set_tokens(pack_token_ids(list(range(12))))  # 3 chunks of 4
         all_hashes = session.get_hashes(0)
         assert len(all_hashes) == 3
 
     def test_get_hashes_optional_end_incremental(self, session: Session) -> None:
         """get_hashes(0) should accumulate hashes from incremental calls."""
-        session.set_tokens(list(range(12)))  # 3 chunks of 4
+        session.set_tokens(pack_token_ids(list(range(12))))  # 3 chunks of 4
         # First compute 2 chunks
         session.get_hashes(0, 8)
         # get_hashes(0) should now compute all 3 chunks
@@ -271,7 +272,7 @@ class TestSessionGetHashesOptionalEnd:
 
     def test_get_hashes_optional_end_matches_explicit(self, session: Session) -> None:
         """get_hashes(0) should return the same as get_hashes(0, aligned_len)."""
-        session.set_tokens(list(range(12)))
+        session.set_tokens(pack_token_ids(list(range(12))))
         expected = session.get_hashes(0, 12)
         assert session.get_hashes(0) == expected
 
@@ -280,7 +281,7 @@ class TestSessionGetHashesOptionalEnd:
     ) -> None:
         """get_hashes(0) should ignore trailing tokens that don't fill a chunk."""
         # 14 tokens with chunk_size=4 -> 3 full chunks (12 tokens), 2 leftover
-        session.set_tokens(list(range(14)))
+        session.set_tokens(pack_token_ids(list(range(14))))
         hashes = session.get_hashes(0)
         assert len(hashes) == 3
 
@@ -289,7 +290,7 @@ class TestSessionGetHashesOptionalEnd:
     ) -> None:
         """get_hashes(0) should match standalone TokenHasher results."""
         tokens = list(range(12))
-        session.set_tokens(tokens)
+        session.set_tokens(pack_token_ids(tokens))
         session_hashes = session.get_hashes(0)
         hasher_hashes = hasher.compute_chunk_hashes(tokens)
         # Convert session hashes to bytes for comparison
@@ -328,7 +329,7 @@ class TestSessionManagerRemoveReturnsSession:
         """remove() should return the session with all accumulated state."""
         mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         session = mgr.get_or_create("req-1")
-        session.set_tokens(list(range(8)))
+        session.set_tokens(pack_token_ids(list(range(8))))
         session.get_hashes(0, 8)
 
         key = IPCCacheServerKey.from_token_ids(
