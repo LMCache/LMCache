@@ -14,6 +14,15 @@ x-flaky-retry: &flaky-retry
     - exit_status: "*"
       limit: 2
 
+# Retry policy for vllm_bench, whose throughput comparison is sensitive to
+# transient node load and package/network setup noise.
+x-vllm-bench-retry: &vllm-bench-retry
+  automatic:
+    - exit_status: -1
+      limit: 3
+    - exit_status: "*"
+      limit: 3
+
 # Most scenarios exercise transport-independent behavior, so keep their PR
 # coverage on the default ZMQ transport.
 x-request-transport-matrix: &request-transport-matrix
@@ -102,6 +111,7 @@ steps:
         matrix: *request-transport-smoke-matrix
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
+        retry: *vllm-bench-retry
         agents: { queue: "k8s" }
         plugins:
           - kubernetes:
@@ -143,6 +153,13 @@ steps:
         command: .buildkite/k3_tests/multiprocess/run.sh deadlock
         matrix: *request-transport-matrix
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: mp_autostart_tp2"
+        command: .buildkite/k3_tests/multiprocess/run.sh mp_autostart_tp2
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
@@ -393,6 +410,7 @@ steps:
     matrix: *request-transport-smoke-matrix
     env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
     timeout_in_minutes: 30
+    retry: *vllm-bench-retry
     agents: { queue: "k8s" }
     plugins:
       - kubernetes:

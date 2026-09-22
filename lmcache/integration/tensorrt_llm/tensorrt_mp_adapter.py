@@ -44,7 +44,7 @@ from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
-from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
+from lmcache.v1.platform.devices.cuda.ipc_wrapper import RawCudaIPCWrapper
 
 logger = init_logger(__name__)
 

@@ -358,8 +358,11 @@ startup.
        when it is not in P2P.
    * - ``mq_port``
      - int
-     - Optional (default ``0``). ZMQ message-queue port P2P peers send
-       lookup/unlock RPCs to; ``0`` when P2P is disabled.
+     - Optional (default ``0``). Request-server port P2P peers send
+       lookup/unlock RPCs to. The field name is retained for compatibility;
+       the server's configured ZMQ or gRPC transport is used. ``0`` when P2P
+       is disabled.
+
 **Response** (``200 OK``):
 
 .. code-block:: json

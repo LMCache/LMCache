@@ -154,6 +154,15 @@ enum class EngineKVFormat : int {
   One list entry per layer; each entry is a (K, V) pair of paged tensors.
   */
   NL_X_TWO_X_NB_BS_NH_HS = 16,
+
+  /*
+  used by:
+  - vLLM-Ascend per-layer MLA / DSA plane tuples (DeepSeek-V2/V3 MLA, V3.2 DSA)
+  One list entry per layer; each entry is a tuple of NP planes -- 1 latent-only,
+  2 MLA (latent, rope) or 3 DSA (latent, rope, dsa) -- of paged tensors
+  [num_blocks, block_size, 1, width_i]: one latent KV head, width_i per plane.
+  */
+  NL_X_NP_X_NB_BS_ONE_HS = 17,
 };
 
 // __host__ __device__ under CUDA/HIP so the kernels can call these; the guard
@@ -268,6 +277,11 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
       break;
     case EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS:
       facts.is_layer_list = true;
+      facts.is_kv_second_tuple = true;
+      break;
+    case EngineKVFormat::NL_X_NP_X_NB_BS_ONE_HS:
+      facts.is_layer_list = true;
+      facts.is_mla = true;
       facts.is_kv_second_tuple = true;
       break;
     default:
