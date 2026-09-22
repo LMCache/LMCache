@@ -7,8 +7,12 @@ keeping the LMCacheManager agnostic to the serving engine.
 """
 
 # Standard
+from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Optional, Union
+
+# Third Party
+import torch
 
 if TYPE_CHECKING:
     # Third Party
@@ -34,6 +38,13 @@ from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
 
 logger = init_logger(__name__)
+
+
+def _agree_retrieval(ready: bool, group: torch.distributed.ProcessGroup) -> bool:
+    """Agree on retrieval readiness without allocating accelerator memory."""
+    flag = torch.tensor(int(ready), dtype=torch.int32, device="cpu")
+    torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MIN, group=group)
+    return bool(flag.item())
 
 
 class VllmServiceFactory(BaseServiceFactory):
@@ -214,6 +225,11 @@ class VllmServiceFactory(BaseServiceFactory):
             vllm_gpu_connector,
             tpg.broadcast,
             tpg.broadcast_object,
+            all_ranks_agree_fn=(
+                partial(_agree_retrieval, group=tpg.cpu_group)
+                if self.role != "scheduler"
+                else None
+            ),
         )
         self.lmcache_engine = engine
 

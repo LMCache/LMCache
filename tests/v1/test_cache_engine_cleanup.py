@@ -17,12 +17,18 @@ import logging
 
 # Third Party
 import pytest
+import torch
 
 # First Party
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus
+from lmcache.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.pin_monitor import PinMonitor
+from lmcache.v1.storage_backend.storage_manager import StorageManager
+from lmcache.v1.token_database import TokenDatabase
 
 # Local
 from .utils import create_test_memory_obj
@@ -74,3 +80,34 @@ def test_cleanup_memory_objs_handles_mixed_pin_state(
     assert "is negative" not in caplog.text
 
     pinned_obj.ref_count_down()
+
+
+@pytest.mark.no_shared_allocator
+def test_retrieve_cleanup_ref_count_and_unpin(pin_monitor: Any) -> None:
+    """A real engine releases both pinned and unpinned retrieval references."""
+    objects = [create_test_memory_obj(), create_test_memory_obj()]
+    objects[0].pin()
+    keys = [CacheEngineKey("test", 1, 0, index, torch.bfloat16) for index in range(2)]
+    database = MagicMock(spec=TokenDatabase)
+    database.process_tokens.return_value = [(0, 8, keys[0]), (8, 16, keys[1])]
+    storage = MagicMock(spec=StorageManager)
+    storage.get_block_mapping.return_value = {
+        "LocalCPUBackend": [(keys[0], 0, 8), (keys[1], 8, 16)]
+    }
+    storage.batched_get.return_value = objects
+    shape = (16, 2, 8, 1, 128)
+    engine = LMCacheEngine(
+        LMCacheEngineConfig.from_defaults(chunk_size=8, py_enable_gc=True),
+        LMCacheMetadata("test", 1, 1, 0, 0, torch.bfloat16, shape),
+        database,
+        MockGPUConnector(shape),
+        lambda tensor, src: None,
+        lambda obj, src: obj,
+    )
+    engine.storage_manager = storage
+    try:
+        assert engine.retrieve(list(range(16))).all()
+        assert all(obj.get_ref_count() == 0 for obj in objects)
+        assert all(obj.metadata.pin_count == 0 for obj in objects)
+    finally:
+        engine.close()
