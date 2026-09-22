@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""In-memory stand-ins for the confluent-kafka producer surface the sink uses.
+"""In-memory stand-ins for the confluent-kafka surface LMCache uses.
 
-Only ``Producer.produce`` / ``Producer.flush`` and their delivery callbacks
-are modelled. Consumer groups, retention, and rebalancing are out of scope.
-:func:`install_fake_confluent_kafka` swaps the stand-ins in for the real
-module, so the sink tests run without ``confluent-kafka`` installed.
+Modelled: ``Producer.produce`` / ``flush`` with delivery callbacks, and a
+single-reader ``Consumer`` (``subscribe`` / ``poll`` / ``store_offsets`` /
+``close``) over one logical partition per topic. Consumer groups, retention,
+and rebalancing are out of scope. :func:`install_fake_confluent_kafka` swaps
+the stand-ins in for the real module, so tests run without ``confluent-kafka``
+installed.
 """
 
 # Standard
 from collections.abc import Callable
 from dataclasses import dataclass
 import sys
+import time
 import types
 
 # Third Party
@@ -18,6 +21,7 @@ import pytest
 
 DeliveryCallback = Callable[[object | None, "FakeKafkaRecord"], None]
 ProducerFactory = Callable[[dict[str, str | int | bool]], "FakeKafkaProducer"]
+ConsumerFactory = Callable[[dict[str, str | int | bool]], "FakeKafkaConsumer"]
 
 
 class FakeKafkaException(Exception):
@@ -159,17 +163,157 @@ class FakeKafkaProducer:
         return 0
 
 
+class FakeKafkaMessage:
+    """Consumer-side view of a record with the ``confluent_kafka.Message``
+    accessors the coordinator source reads.
+
+    Args:
+        record: The record read from the broker.
+        error: Error surfaced by :meth:`error`; the record then only carries
+            the topic, as a real error message does.
+    """
+
+    def __init__(self, record: FakeKafkaRecord, error: object | None = None) -> None:
+        self._record = record
+        self._error = error
+
+    def error(self) -> object | None:
+        """Return the consumer error this message carries, if any."""
+        return self._error
+
+    def topic(self) -> str:
+        """Return the record topic."""
+        return self._record.topic
+
+    def partition(self) -> int:
+        """Return the logical partition (always ``0``)."""
+        return 0
+
+    def offset(self) -> int:
+        """Return the record offset."""
+        return self._record.offset
+
+    def key(self) -> bytes | None:
+        """Return the record key."""
+        return self._record.key
+
+    def value(self) -> bytes | None:
+        """Return the record value."""
+        return self._record.value
+
+
+class FakeKafkaConsumer:
+    """Single-reader consumer double over a :class:`FakeKafkaBroker`.
+
+    :meth:`poll` returns injected errors first, then unread records of the
+    subscribed topics in offset order, then ``None`` after a short sleep so a
+    polling thread does not spin.
+
+    Args:
+        broker: Broker whose records are read.
+        config: Consumer configuration, exposed for assertions.
+    """
+
+    def __init__(
+        self, broker: FakeKafkaBroker, config: dict[str, str | int | bool]
+    ) -> None:
+        self._broker = broker
+        self._config = dict(config)
+        self._topics: list[str] = []
+        self._positions: dict[str, int] = {}
+        self._errors: list[object] = []
+        self._stored_offsets: list[int] = []
+        self._closed = False
+
+    @property
+    def config(self) -> dict[str, str | int | bool]:
+        """Return a copy of the consumer configuration."""
+        return dict(self._config)
+
+    @property
+    def subscribed(self) -> tuple[str, ...]:
+        """Return the topics passed to :meth:`subscribe`."""
+        return tuple(self._topics)
+
+    @property
+    def stored_offsets(self) -> tuple[int, ...]:
+        """Return the offsets passed to :meth:`store_offsets`, in call order."""
+        return tuple(self._stored_offsets)
+
+    @property
+    def closed(self) -> bool:
+        """Whether :meth:`close` was called."""
+        return self._closed
+
+    def inject_error(self, error: object) -> None:
+        """Queue ``error`` to be surfaced as the next polled message.
+
+        Args:
+            error: Object returned by that message's ``error()``.
+        """
+        self._errors.append(error)
+
+    def subscribe(self, topics: list[str]) -> None:
+        """Subscribe to ``topics``, polled in list order.
+
+        Args:
+            topics: Topics to read from their first record.
+        """
+        self._topics = list(topics)
+
+    def poll(self, timeout: float | None = None) -> FakeKafkaMessage | None:
+        """Return the next error or unread record, or ``None`` when caught up.
+
+        Args:
+            timeout: Upper bound (seconds) on the sleep taken when caught up.
+
+        Returns:
+            The next message, or ``None`` when every subscribed topic is read.
+        """
+        if self._errors:
+            topic = self._topics[0] if self._topics else ""
+            placeholder = FakeKafkaRecord(topic=topic, key=None, value=None, offset=-1)
+            return FakeKafkaMessage(placeholder, error=self._errors.pop(0))
+        for topic in self._topics:
+            records = self._broker.records(topic)
+            position = self._positions.get(topic, 0)
+            if position < len(records):
+                self._positions[topic] = position + 1
+                return FakeKafkaMessage(records[position])
+        time.sleep(min(timeout or 0.0, 0.005))
+        return None
+
+    def store_offsets(self, message: FakeKafkaMessage) -> None:
+        """Record ``message``'s offset as stored for the next commit.
+
+        Args:
+            message: The message whose offset the caller has finished with.
+        """
+        self._stored_offsets.append(message.offset())
+
+    def close(self) -> None:
+        """Mark the consumer closed."""
+        self._closed = True
+
+
 def install_fake_confluent_kafka(
-    monkeypatch: pytest.MonkeyPatch, producer_factory: ProducerFactory
+    monkeypatch: pytest.MonkeyPatch,
+    producer_factory: ProducerFactory | None = None,
+    consumer_factory: ConsumerFactory | None = None,
 ) -> None:
     """Make ``import confluent_kafka`` resolve to the in-memory stand-ins.
 
     Args:
         monkeypatch: Fixture that undoes the module swap after the test.
         producer_factory: Called in place of ``confluent_kafka.Producer``.
+        consumer_factory: Called in place of ``confluent_kafka.Consumer``.
     """
     module = types.ModuleType("confluent_kafka")
-    module.__dict__.update(Producer=producer_factory, KafkaException=FakeKafkaException)
+    module.__dict__["KafkaException"] = FakeKafkaException
+    if producer_factory is not None:
+        module.__dict__["Producer"] = producer_factory
+    if consumer_factory is not None:
+        module.__dict__["Consumer"] = consumer_factory
     monkeypatch.setitem(sys.modules, "confluent_kafka", module)
 
 
