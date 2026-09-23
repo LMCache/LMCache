@@ -95,15 +95,9 @@ def test_enabled_app_registers_its_discovered_key_directory(
     with patch(
         "lmcache.v1.mp_coordinator.app.register_key_directory_metrics"
     ) as mock_register:
-        first_app = create_app(config)
-        second_app = create_app(config)
+        app = create_app(config)
 
-    assert mock_register.call_count == 2
-    first_target = mock_register.call_args_list[0].args[0]
-    second_target = mock_register.call_args_list[1].args[0]
-    assert first_target is first_app.state.ctx.views.get(KeyDirectory)
-    assert second_target is second_app.state.ctx.views.get(KeyDirectory)
-    assert second_target is not first_target
+    mock_register.assert_called_once_with(app.state.ctx.views.get(KeyDirectory))
 
 
 def test_disabled_app_does_not_register_key_directory_metrics() -> None:

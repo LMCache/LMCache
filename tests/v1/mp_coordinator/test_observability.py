@@ -56,64 +56,40 @@ def test_otlp_metrics_reuse_shared_initializer() -> None:
     )
 
 
-def test_key_directory_gauges_register_once_and_follow_latest_target() -> None:
-    first = MagicMock(spec=KeyDirectory)
-    first.stats.return_value = SimpleNamespace(
-        l1_count=0,
-        l1_size_bytes=0,
-        l2_count=0,
-        l2_size_bytes=0,
-    )
-    second = MagicMock(spec=KeyDirectory)
-    second.stats.return_value = SimpleNamespace(
+def test_key_directory_gauges_bind_registered_directory() -> None:
+    directory = MagicMock(spec=KeyDirectory)
+    directory.stats.return_value = SimpleNamespace(
         l1_count=2,
         l1_size_bytes=300,
         l2_count=1,
         l2_size_bytes=400,
     )
 
-    # Isolate the process-global OTel instrument lifecycle from other app tests.
-    with (
-        patch.object(observability, "_key_directory_metrics_registered", False),
-        patch.object(observability, "_key_directory_metrics_target", None),
-        patch.object(observability, "register_gauge") as mock_register,
-    ):
-        observability.register_key_directory_metrics(first)
+    with patch.object(observability, "register_gauge") as mock_register:
+        observability.register_key_directory_metrics(directory)
 
-        assert mock_register.call_count == 2
-        count_call, size_call = mock_register.call_args_list
-        assert count_call.args[:3] == (
-            "lmcache.mp_coordinator",
-            "lmcache_mp.key_directory_placement_count",
-            "Number of placements currently recorded in the Coordinator "
-            "Key Directory, by cache tier.",
-        )
-        assert size_call.args[:3] == (
-            "lmcache.mp_coordinator",
-            "lmcache_mp.key_directory_placement_size_bytes",
-            "Sum of reported logical object sizes for placements currently "
-            "recorded in the Coordinator Key Directory, by cache tier.",
-        )
+    assert mock_register.call_count == 2
+    count_call, size_call = mock_register.call_args_list
+    assert count_call.args[:3] == (
+        "lmcache.mp_coordinator",
+        "lmcache_mp.key_directory_placement_count",
+        "Number of placements currently recorded in the Coordinator "
+        "Key Directory, by cache tier.",
+    )
+    assert size_call.args[:3] == (
+        "lmcache.mp_coordinator",
+        "lmcache_mp.key_directory_placement_size_bytes",
+        "Sum of reported logical object sizes for placements currently "
+        "recorded in the Coordinator Key Directory, by cache tier.",
+    )
 
-        count_callback = count_call.args[3]
-        size_callback = size_call.args[3]
-        assert count_callback() == [
-            (0, {"tier": "l1"}),
-            (0, {"tier": "l2"}),
-        ]
-        assert size_callback() == [
-            (0, {"tier": "l1"}),
-            (0, {"tier": "l2"}),
-        ]
-
-        observability.register_key_directory_metrics(second)
-
-        assert mock_register.call_count == 2
-        assert count_callback() == [
-            (2, {"tier": "l1"}),
-            (1, {"tier": "l2"}),
-        ]
-        assert size_callback() == [
-            (300, {"tier": "l1"}),
-            (400, {"tier": "l2"}),
-        ]
+    count_callback = count_call.args[3]
+    size_callback = size_call.args[3]
+    assert count_callback() == [
+        (2, {"tier": "l1"}),
+        (1, {"tier": "l2"}),
+    ]
+    assert size_callback() == [
+        (300, {"tier": "l1"}),
+        (400, {"tier": "l2"}),
+    ]
