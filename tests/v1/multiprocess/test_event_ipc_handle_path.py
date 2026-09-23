@@ -80,7 +80,6 @@ class _FakeStorageManager:
         self,
         keys: list[object],
         layout: object,
-        mode: str,
     ) -> dict[object, object]:
         return {}
 
@@ -291,5 +290,5 @@ def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
 
     for module in (futures, lmcache_driven_transfer, worker_transfer):
         source = inspect.getsource(module)
-        assert "lmcache.v1.platform.musa" not in source
+        assert "lmcache.v1.platform.devices.musa" not in source
         assert 'device.type == "musa"' not in source

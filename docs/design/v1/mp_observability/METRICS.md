@@ -571,6 +571,7 @@ the same backend type — same shape as the existing
 | OTel metric name | Prometheus name | Type | Source of truth | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l1_memory_usage_bytes` | `lmcache_mp_l1_memory_usage_bytes` | ObservableGauge | `L1Manager.get_memory_usage()` | Bytes currently held in L1 at scrape time |
+| `lmcache_mp.l1_staging_bytes` | `lmcache_mp_l1_staging_bytes` | ObservableGauge | `L1Manager.get_staging_memory_usage()` | Bytes held by L1 staging objects (write-reserved, not yet admitted: in-flight stores and L2 prefetch loads) at scrape time; a subset of `l1_memory_usage_bytes` |
 | `lmcache_mp.l2_usage_bytes` | `lmcache_mp_l2_usage_bytes` | ObservableGauge (attr: `l2_name`) | `StorageManager.get_l2_usages()` (calls `L2AdapterInterface.get_usage().total_bytes_used`) | Per-adapter bytes currently held in L2 at scrape time; one observation per configured adapter.  Adapters whose `get_usage()` raises are skipped silently. |
 | `lmcache_mp.num_inflight_l2_stores` | `lmcache_mp_num_inflight_l2_stores` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `StoreController.get_inflight_count_by_adapter()` | Snapshot of in-flight L2 store tasks grouped by adapter |
 | `lmcache_mp.num_inflight_l2_loads` | `lmcache_mp_num_inflight_l2_loads` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `PrefetchController.get_inflight_load_state_by_adapter()` | Per-adapter count from the same snapshot |
@@ -579,6 +580,12 @@ the same backend type — same shape as the existing
 **What `l1_memory_usage_bytes` answers:** How full is the L1 cache? Helps
 size L1 against working set and detect leaks (steadily climbing without
 plateauing).
+
+**What `l1_staging_bytes` answers:** How much of L1 is committed to writes
+that have not landed yet? A high or climbing value means many concurrent
+stores / prefetch loads (input for in-flight prefetch planning); a value
+that never returns to zero means abandoned reservations waiting for their
+write TTL to expire. See `../../distributed/l1_manager.md`.
 
 **What `l2_usage_bytes` answers:** How full is each L2 backend? Lets
 operators query how much each L2 tier currently holds, decide whether

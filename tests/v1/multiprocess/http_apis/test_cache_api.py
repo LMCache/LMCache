@@ -453,11 +453,12 @@ class _PrefetchStorageManager:
     submit_calls: list[dict] = field(default_factory=list)
 
     def submit_prefetch_task(self, spec, **_) -> _PrefetchHandle:
-        self.submit_calls.append({"keys": list(spec.keys), "mode": spec.mode})
-        return _PrefetchHandle(len(spec.keys))
+        keys = [key for row in spec.key_groups for key in row.keys]
+        self.submit_calls.append({"keys": keys, "lock_mode": spec.lock_mode})
+        return _PrefetchHandle(len(keys))
 
-    def query_prefetch_status(self, handle) -> _PrefetchBitmap:
-        return _PrefetchBitmap(handle.total_requested_keys)
+    def query_prefetch_status(self, handle) -> list[_PrefetchBitmap]:
+        return [_PrefetchBitmap(handle.total_requested_keys)]
 
 
 @dataclass
