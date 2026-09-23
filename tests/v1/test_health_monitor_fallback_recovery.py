@@ -269,23 +269,89 @@ class TestRemoteBackendHealthCheckFallbackRecovery:
         thread = monitor.start()
         assert thread is not None
 
+        def wait_for_state(
+            condition,
+            phase_name: str,
+            timeout: float = 2.0,
+            interval: float = 0.01,
+        ):
+            """Poll until condition returns True or timeout expires.
+
+            Includes phase name and last observed system state in timeout failure.
+            """
+            start = time.time()
+            while time.time() - start < timeout:
+                if condition():
+                    return
+                time.sleep(interval)
+
+            last_bypass_call = (
+                mock_storage_manager.set_backend_bypass.call_args
+                if mock_storage_manager.set_backend_bypass.called
+                else None
+            )
+            raise TimeoutError(
+                f"Phase '{phase_name}' did not complete within {timeout}s. "
+                f"Last observed state: "
+                f"is_healthy={monitor.is_healthy()}, "
+                f"use_hot={mock_local_cpu_backend.use_hot}, "
+                f"bypassed_backends={dict(monitor._bypassed_backends)}, "
+                f"total_runs={monitor.total_runs}, "
+                f"last_bypass_call={last_bypass_call}"
+            )
+
         try:
-            time.sleep(0.2)
-            assert monitor.is_healthy() is True
-
-            # Simulate failure
-            controllable_connector.set_ping_error_code(1)
-            time.sleep(0.2)
-            assert monitor.is_healthy() is True
-            assert mock_local_cpu_backend.use_hot is True
-
-            # Simulate recovery
-            controllable_connector.set_ping_error_code(0)
-            time.sleep(0.2)
+            # Phase 1: Initial healthy state — wait for monitor to complete
+            # at least one check cycle
+            wait_for_state(
+                lambda: (
+                    monitor.total_runs >= 1
+                    and mock_local_cpu_backend.use_hot is False
+                    and "RemoteBackend" not in monitor._bypassed_backends
+                ),
+                phase_name="initial_healthy",
+            )
             assert monitor.is_healthy() is True
             assert mock_local_cpu_backend.use_hot is False
+            assert "RemoteBackend" not in monitor._bypassed_backends
+
+            # Phase 2: Simulate failure — wait for observable LOCAL_CPU fallback effects
+            controllable_connector.set_ping_error_code(1)
+            wait_for_state(
+                lambda: (
+                    mock_local_cpu_backend.use_hot is True
+                    and "RemoteBackend" in monitor._bypassed_backends
+                ),
+                phase_name="fallback",
+            )
+            assert monitor.is_healthy() is True
+            assert mock_local_cpu_backend.use_hot is True
+            mock_storage_manager.set_backend_bypass.assert_called_with(
+                "RemoteBackend", True
+            )
+            assert "RemoteBackend" in monitor._bypassed_backends
+
+            # Phase 3: Simulate recovery — wait for observable recovery effects
+            controllable_connector.set_ping_error_code(0)
+            wait_for_state(
+                lambda: (
+                    mock_local_cpu_backend.use_hot is False
+                    and "RemoteBackend" not in monitor._bypassed_backends
+                    and mock_local_cpu_backend.clear.called
+                ),
+                phase_name="recovery",
+            )
+            assert monitor.is_healthy() is True
+            assert mock_local_cpu_backend.use_hot is False
+            mock_storage_manager.set_backend_bypass.assert_called_with(
+                "RemoteBackend", False
+            )
+            assert "RemoteBackend" not in monitor._bypassed_backends
+            # Verify hot-cache was cleared during recovery (original use_hot was False)
+            mock_local_cpu_backend.clear.assert_called_once()
         finally:
             monitor.stop()
+            assert not thread.is_alive()
 
     def test_multiple_failures_do_not_duplicate_fallback(
         self,
