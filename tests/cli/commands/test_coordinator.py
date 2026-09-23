@@ -76,6 +76,14 @@ class TestCoordinatorCommandArguments:
                 "--disable-metrics",
                 "--otlp-endpoint",
                 "http://collector:4317",
+                "--event-transport",
+                "kafka",
+                "--kafka-bootstrap-servers",
+                "broker:9092",
+                "--kafka-topic",
+                "events",
+                "--kafka-group-id",
+                "coord",
             ]
         )
         assert args.host == "127.0.0.1"
@@ -90,6 +98,10 @@ class TestCoordinatorCommandArguments:
         assert args.timeout_keep_alive == 15
         assert args.disable_metrics is True
         assert args.otlp_endpoint == "http://collector:4317"
+        assert args.event_transport == "kafka"
+        assert args.kafka_bootstrap_servers == "broker:9092"
+        assert args.kafka_topic == "events"
+        assert args.kafka_group_id == "coord"
 
     def test_enable_blend_lookup_flag(self, parser):
         """The blend-lookup switch parses as True when passed."""
@@ -110,13 +122,20 @@ class TestCoordinatorCommandArguments:
         assert args.timeout_keep_alive is None
         assert args.disable_metrics is None
         assert args.otlp_endpoint is None
+        assert args.event_transport is None
+        assert args.kafka_bootstrap_servers is None
+        assert args.kafka_topic is None
+        assert args.kafka_group_id is None
 
 
 class TestCoordinatorCommandExecute:
     def test_overrides_applied(self, cmd):
         """chunk_size/hash_algorithm/blend flags override the config."""
         # First Party
-        from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+        from lmcache.v1.mp_coordinator.config import (
+            KafkaCacheEventSourceConfig,
+            MPCoordinatorConfig,
+        )
 
         args = argparse.Namespace(
             host=None,
@@ -133,10 +152,14 @@ class TestCoordinatorCommandExecute:
             checkpoint_path="/var/lib/lmcache/checkpoint",
             checkpoint_interval=30.0,
             metadata_path="/var/lib/lmcache/metadata.json",
-            extra_config='{"my_view.window": 8}',
+            extra_config='{"my_view.window": 8, "controller_packages": ["acme.c"]}',
             timeout_keep_alive=None,
             disable_metrics=True,
             otlp_endpoint="http://collector:4317",
+            event_transport="kafka",
+            kafka_bootstrap_servers="broker:9092",
+            kafka_topic="events",
+            kafka_group_id="coord",
         )
 
         captured = {}
@@ -164,9 +187,17 @@ class TestCoordinatorCommandExecute:
         assert captured["config"].checkpoint_path == "/var/lib/lmcache/checkpoint"
         assert captured["config"].checkpoint_interval == 30.0
         assert captured["config"].metadata_path == "/var/lib/lmcache/metadata.json"
-        assert captured["config"].extra_config == {"my_view.window": 8}
+        # Out-of-tree controllers ride in here rather than on a flag of
+        # their own, the way vLLM is told where to find a KV connector.
+        assert captured["config"].extra_config == {
+            "my_view.window": 8,
+            "controller_packages": ["acme.c"],
+        }
         assert captured["config"].metrics_enabled is False
         assert captured["config"].otlp_endpoint == "http://collector:4317"
+        assert captured["config"].event_source_config == KafkaCacheEventSourceConfig(
+            bootstrap_servers="broker:9092", topic="events", group_id="coord"
+        )
         # Unset flags keep the config defaults.
         assert captured["config"].host == MPCoordinatorConfig.host
         assert captured["config"].port == MPCoordinatorConfig.port
@@ -200,6 +231,10 @@ class TestCoordinatorCommandExecute:
             timeout_keep_alive=None,
             disable_metrics=None,
             otlp_endpoint=None,
+            event_transport=None,
+            kafka_bootstrap_servers=None,
+            kafka_topic=None,
+            kafka_group_id=None,
         )
 
         captured = {}

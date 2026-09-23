@@ -37,8 +37,9 @@ use NVMe passthrough via the io_uring command interface for direct device access
   incompatible value is rejected when the device opens.
 - When `use_uring_cmd=True`, `use_odirect` is ignored for NVMe namespace
   character devices.
-- SQE build failures are returned by `wait_iouring` after the worker releases
-  the request's global and per-batch in-flight accounting.
+- `wait_iouring` returns a success bitmap and a sparse
+  `(operation_index, error_message)` list after the worker releases the
+  request's global and per-batch in-flight accounting.
 
 ## MP Mode Integration
 
@@ -61,7 +62,10 @@ StoreController / PrefetchController
 ```
 
 This split lets LMCache reuse the same on-device metadata and recovery model in
-both non-MP and MP mode without duplicating the raw-block implementation.
+both non-MP and MP mode without duplicating the raw-block implementation. During
+restart recovery, the shared `RawBlockCore` validates POSIX per-slot headers with
+an internal pool of 8 reader threads. Regular `io_uring` batches header reads up
+to `iouring_queue_depth`, while `io_uring_cmd` keeps serial validation.
 
 ## Zero-Copy Data Path
 

@@ -5,6 +5,7 @@ in the multiprocess cache server.
 """
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Optional, overload
 import threading
@@ -263,6 +264,10 @@ class SessionManager:
         self._ttl = ttl
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
+        #: Callbacks invoked for every destroyed session, so owners of
+        #: per-request state (e.g. entries in ``Session.extras``) can release
+        #: it however the request ended. See :meth:`_notify_destroyed`.
+        self.destroy_listeners: list[Callable[[Session], None]] = []
         self._cleanup_interval = cleanup_interval
         self._cleanup_thread: PeriodicThread | None = None
         if cleanup_interval is not None and cleanup_interval > 0:
@@ -301,12 +306,13 @@ class SessionManager:
             The removed session, or None if no session was found.
         """
         with self._lock:
-            if request_id in self._sessions:
-                session = self._sessions[request_id]
-                del self._sessions[request_id]
-                logger.debug("Removed session for request_id=%s", request_id)
-                return session
-            return None
+            if request_id not in self._sessions:
+                return None
+            session = self._sessions[request_id]
+            del self._sessions[request_id]
+            logger.debug("Removed session for request_id=%s", request_id)
+        self._notify_destroyed(session)
+        return session
 
     def cleanup_expired(self) -> int:
         """Remove sessions that have exceeded their TTL.
@@ -315,17 +321,38 @@ class SessionManager:
             Number of sessions removed.
         """
         now = time.time()
-        expired = []
+        expired: list[Session] = []
         with self._lock:
-            for rid, session in self._sessions.items():
+            for session in self._sessions.values():
                 if now - session.created_at > self._ttl:
-                    expired.append(rid)
-            for rid in expired:
-                del self._sessions[rid]
+                    expired.append(session)
+            for session in expired:
+                del self._sessions[session.request_id]
 
+        for session in expired:
+            self._notify_destroyed(session)
         if expired:
             logger.info("Cleaned up %d expired sessions", len(expired))
         return len(expired)
+
+    def _notify_destroyed(self, session: Session) -> None:
+        """Run every destroy listener for one removed session.
+
+        Called without the manager lock held: a listener may take other locks
+        (e.g. the storage manager's). A listener that raises is logged and
+        skipped so destruction always completes.
+
+        Args:
+            session: The session that was just removed.
+        """
+        for listener in list(self.destroy_listeners):
+            try:
+                listener(session)
+            except Exception:
+                logger.exception(
+                    "Session destroy listener failed for request_id=%s",
+                    session.request_id,
+                )
 
     def active_count(self) -> int:
         """Return the number of active sessions.

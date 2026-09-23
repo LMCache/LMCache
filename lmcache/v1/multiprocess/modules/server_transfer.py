@@ -14,8 +14,8 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.protocols.engine import (
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheServerKey,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
 )
@@ -211,7 +211,7 @@ class PickleTransferStrategy(TransferStrategy):
         obj_keys = resolve_obj_keys(key)
         chunks: list[torch.Tensor] = pickle.loads(cpu_data)
         reserved_dict = self._storage_manager.reserve_write(
-            obj_keys, context.layout_desc, "new"
+            obj_keys, context.layout_desc
         )
         written_keys: list[ObjectKey] = []
         try:
@@ -219,12 +219,35 @@ class PickleTransferStrategy(TransferStrategy):
                 if obj_key not in reserved_dict:
                     continue
                 if idx >= len(chunks):
+                    logger.error(
+                        "Engine-driven pickle store is missing chunk %d "
+                        "(instance_id=%d, object_keys=%d, chunks=%d)",
+                        idx,
+                        instance_id,
+                        len(obj_keys),
+                        len(chunks),
+                    )
                     continue
                 memory_obj = reserved_dict[obj_key]
                 if memory_obj.tensor is None:
+                    logger.error(
+                        "Engine-driven pickle store reserved an object without "
+                        "a tensor (instance_id=%d, chunk_index=%d)",
+                        instance_id,
+                        idx,
+                    )
                     continue
                 chunk_cpu = chunks[idx]
                 if chunk_cpu.shape != memory_obj.tensor.shape:
+                    logger.error(
+                        "Engine-driven pickle store chunk shape mismatch "
+                        "(instance_id=%d, chunk_index=%d, chunk_shape=%s, "
+                        "object_shape=%s)",
+                        instance_id,
+                        idx,
+                        tuple(chunk_cpu.shape),
+                        tuple(memory_obj.tensor.shape),
+                    )
                     continue
                 memory_obj.tensor.copy_(chunk_cpu)
                 written_keys.append(obj_key)
@@ -232,7 +255,18 @@ class PickleTransferStrategy(TransferStrategy):
             if written_keys:
                 self._storage_manager.finish_write(written_keys)
 
-        return len(written_keys) == len(reserved_dict)
+        success = len(written_keys) == len(reserved_dict)
+        if not success:
+            logger.error(
+                "Engine-driven pickle store incomplete (instance_id=%d, "
+                "object_keys=%d, reserved=%d, chunks=%d, written=%d)",
+                instance_id,
+                len(obj_keys),
+                len(reserved_dict),
+                len(chunks),
+                len(written_keys),
+            )
+        return success
 
     def prepare_retrieve(
         self,
@@ -322,9 +356,7 @@ class ShmTransferStrategy(TransferStrategy):
             Context with ``slots`` and ``chunk_indices``.
         """
         obj_keys = resolve_obj_keys(key)
-        reserved = self._storage_manager.reserve_write(
-            obj_keys, context.layout_desc, "new"
-        )
+        reserved = self._storage_manager.reserve_write(obj_keys, context.layout_desc)
         slots: list[dict[str, Any]] = []
         chunk_indices: list[int] = []
         reserved_keys: list[ObjectKey] = []

@@ -24,6 +24,7 @@ from lmcache.v1.mp_coordinator.schemas import (
     InstanceMemoryStatus,
     ModuleMemoryStatus,
 )
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.server_config import (
     UNDECLARED_CAPACITY,
     ServerConfigRegistry,
@@ -161,7 +162,10 @@ async def fleet_usage(request: Request) -> FleetMemoryResponse:
     """
     ctx = get_context(request)
     declarations = ctx.views.get(ServerConfigRegistry).get_all()
-    registered = {instance.instance_id for instance in ctx.registry.all_instances()}
+    registered = {
+        instance.instance_id
+        for instance in ctx.views.get(InstanceRegistry).all_instances()
+    }
     by_owner = _usage_by_owner(ctx.views.get(CacheUsageManager))
     owned = {owner for owner in by_owner if owner != _SHARED_OWNER}
 
@@ -210,7 +214,7 @@ async def instance_usage(instance_id: str, request: Request) -> InstanceMemorySt
     ctx = get_context(request)
     declared = ctx.views.get(ServerConfigRegistry).get(instance_id)
     used = _usage_by_owner(ctx.views.get(CacheUsageManager)).get(instance_id, {})
-    registered = ctx.registry.contains(instance_id)
+    registered = ctx.views.get(InstanceRegistry).contains(instance_id)
     if not registered and not declared and not used:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

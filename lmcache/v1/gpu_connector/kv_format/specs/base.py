@@ -31,6 +31,7 @@ import lmcache.lmcache_native as lmcache_native
 _LABELS = {
     "ONE": "1",
     "TWO": "2",
+    "NP": "NP",
     "NBBS": "PBS",
     "NB": "NB",
     "NL": "NL",
@@ -85,7 +86,8 @@ def concrete_shape(
     -> ``32 x [2, 2048, 16, 8, 128]``.
     """
     return _render_shape(
-        fmt, lambda t: _LABELS[t] if t in ("ONE", "TWO") else str(size(_LABELS[t]))
+        fmt,
+        lambda t: _LABELS[t] if t in ("ONE", "TWO", "NP") else str(size(_LABELS[t])),
     )
 
 
@@ -117,6 +119,9 @@ class KVFormatSpec(ABC):
       connectors, none of the MP transfer path): :meth:`page_buffer_size`,
       :meth:`tokens_per_layer`, :meth:`elements_per_layer`. The MP path derives
       these from a per-group :class:`PageBufferShapeDesc` instead.
+    * Used by pointer-backed paged-buffer reconstruction:
+      :meth:`paged_layer_shape`. It is a class method because it uses declared
+      format facts and caller-provided geometry, not borrowed KV tensors.
 
     Lifetime: a spec **borrows** ``kv_caches`` -- it does not own the GPU KV
     tensors. ``get_spec`` builds a fresh instance per call and callers use it
@@ -153,6 +158,46 @@ class KVFormatSpec(ABC):
     # Each per-layer list entry is a ``(K, V)`` tuple of paged tensors, rather
     # than a single stacked per-layer tensor.
     is_kv_second_tuple: ClassVar[bool] = False
+
+    @classmethod
+    def paged_layer_shape(cls, nb: int, bs: int, nh: int, hs: int) -> tuple[int, ...]:
+        """Return one pointer-addressable paged tensor's physical shape.
+
+        This applies only to per-layer formats whose list entry is one tensor.
+        Callers that handle cross-layer tensors, top-level K/V lists, or
+        per-layer K/V tuples must reconstruct those structures themselves.
+
+        Args:
+            nb: Number of paged blocks.
+            bs: Tokens in each block.
+            nh: Number of attention heads.
+            hs: Per-head content size (the packed K/V width when applicable).
+
+        Returns:
+            The physical tensor shape for one paged layer.
+
+        Raises:
+            ValueError: If this format does not use one tensor per layer.
+        """
+        if not cls.is_layer_list or cls.is_kv_second_tuple:
+            raise ValueError(
+                f"{cls.engine_kv_format!r} does not have one paged tensor per layer"
+            )
+        if cls.is_pbs_fused:
+            return (nb * bs, 1, hs)
+        if cls.is_mla:
+            return (nb, bs, hs)
+        if cls.is_fused_packed and cls.is_hnd:
+            return (nb, nh, bs, hs)
+        if cls.is_fused_packed:
+            return (nb, bs, nh, hs)
+        if cls.is_two_major and cls.is_hnd:
+            return (2, nb, nh, bs, hs)
+        if cls.is_two_major:
+            return (2, nb, bs, nh, hs)
+        if cls.is_hnd:
+            return (nb, 2, nh, bs, hs)
+        return (nb, 2, bs, nh, hs)
 
     def __init__(self, kv_caches: DiscoverableKVCache) -> None:
         # Borrowed, not owned: see the class docstring's "Lifetime" note. The
@@ -218,9 +263,12 @@ class KVFormatSpec(ABC):
     def data_ptrs(self, layer_indices: list[int]) -> list[int]:
         """Return device pointers for ``layer_indices`` in kernel-expected order.
 
-        Per-layer formats: one pointer per layer. SGLang two-list MHA: all K
-        pointers then all V. Cross-layer: a single base pointer (the kernel
-        walks layers itself, so ``layer_indices`` is ignored).
+        Per-layer formats: one pointer per layer.
+
+        SGLang two-list MHA: all K pointers, then all V pointers.
+
+        Cross-layer with a K/V axis: a single base pointer; the kernel walks
+        layers itself, so ``layer_indices`` is ignored.
         """
 
     def concrete_shape_str(self) -> str:

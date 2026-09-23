@@ -51,20 +51,14 @@ class BlendMetricsSubscriber(EventSubscriber):
     - ``lmcache_blend.retrieve_requests``            — total CB retrieve calls
     - ``lmcache_blend.retrieve_chunks``              — chunks requested for retrieval
     - ``lmcache_blend.retrieve_failures``            — retrieves with success=False
-    - ``lmcache_blend.store_pre_computed_requests``  — total CB store_pre_computed calls
-    - ``lmcache_blend.store_pre_computed_chunks``    — chunks via store_pre_computed
-    - ``lmcache_blend.store_pre_computed_failures``  — store_pre_computed failures
-    - ``lmcache_blend.store_final_requests``         — total CB store_final calls
-    - ``lmcache_blend.store_final_chunks``           — chunks stored via store_final
-    - ``lmcache_blend.store_final_failures``         — store_final failures
     - ``lmcache_blend.fingerprints_registered``      — chunks in fingerprint table
     - ``lmcache_blend.chunks_evicted``               — evicted from fingerprint table
 
-    V3 phase metrics — the sub-legs of the unified lookup and the retrieve
+    Blend phase metrics — the sub-legs of the unified lookup and the retrieve
     scatter. Each ``*_duration`` pairs the phase's START/END events by
     ``(session, worker_id)`` -- at TP>1 each rank's retrieve/scatter is its own
     sample -- and measures the interval the same-named trace span covers (see
-    ``docs/design/v1/mp_observability/blend_v3_observability.md``):
+    ``docs/design/v1/mp_observability/blend_observability.md``):
 
     - ``lmcache_blend.lookup_duration``              — cb.lookup, incl. poll waits
     - ``lmcache_blend.fingerprint_match_duration``   — local fingerprint match
@@ -196,30 +190,6 @@ class BlendMetricsSubscriber(EventSubscriber):
             "lmcache_blend.retrieve_failures",
             description="CB retrieve operations that returned success=False",
         )
-        self._store_pre_computed_requests = meter.create_counter(
-            "lmcache_blend.store_pre_computed_requests",
-            description="Total CB store_pre_computed requests",
-        )
-        self._store_pre_computed_chunks = meter.create_counter(
-            "lmcache_blend.store_pre_computed_chunks",
-            description="Chunks stored via CB store_pre_computed",
-        )
-        self._store_pre_computed_failures = meter.create_counter(
-            "lmcache_blend.store_pre_computed_failures",
-            description="CB store_pre_computed failures",
-        )
-        self._store_final_requests = meter.create_counter(
-            "lmcache_blend.store_final_requests",
-            description="Total CB store_final requests",
-        )
-        self._store_final_chunks = meter.create_counter(
-            "lmcache_blend.store_final_chunks",
-            description="Chunks stored via CB store_final",
-        )
-        self._store_final_failures = meter.create_counter(
-            "lmcache_blend.store_final_failures",
-            description="CB store_final failures",
-        )
         self._fingerprints_registered = meter.create_counter(
             "lmcache_blend.fingerprints_registered",
             description="Chunks indexed into the fingerprint table",
@@ -285,10 +255,6 @@ class BlendMetricsSubscriber(EventSubscriber):
             EventType.CB_RETRIEVE_START: self._on_retrieve_start,
             EventType.CB_RETRIEVE_END: self._on_retrieve_end,
             EventType.CB_RETRIEVE_NOOP: self._on_retrieve_noop,
-            EventType.CB_STORE_PRE_COMPUTED_START: self._on_store_pre_start,
-            EventType.CB_STORE_PRE_COMPUTED_END: self._on_store_pre_end,
-            EventType.CB_STORE_FINAL_START: self._on_store_final_start,
-            EventType.CB_STORE_FINAL_END: self._on_store_final_end,
             EventType.CB_FINGERPRINTS_REGISTERED: self._on_fingerprints_registered,
             EventType.CB_CHUNKS_EVICTED: self._on_chunks_evicted,
             EventType.CB_FINGERPRINT_MATCH_START: self._on_phase_start,
@@ -412,22 +378,6 @@ class BlendMetricsSubscriber(EventSubscriber):
         self._scatter_prefix_chunks.add(event.metadata.get("n_prefix", 0))
         self._scatter_shifted_chunks.add(event.metadata.get("n_shifted", 0))
         self._scatter_dropped_chunks.add(event.metadata.get("dropped", 0))
-
-    def _on_store_pre_start(self, event: Event) -> None:
-        self._store_pre_computed_requests.add(1)
-
-    def _on_store_pre_end(self, event: Event) -> None:
-        self._store_pre_computed_chunks.add(event.metadata["stored_chunks"])
-        if not event.metadata.get("success", True):
-            self._store_pre_computed_failures.add(1)
-
-    def _on_store_final_start(self, event: Event) -> None:
-        self._store_final_requests.add(1)
-
-    def _on_store_final_end(self, event: Event) -> None:
-        self._store_final_chunks.add(event.metadata["stored_chunks"])
-        if not event.metadata.get("success", True):
-            self._store_final_failures.add(1)
 
     def _on_fingerprints_registered(self, event: Event) -> None:
         self._fingerprints_registered.add(event.metadata["num_chunks"])

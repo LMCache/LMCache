@@ -16,7 +16,11 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.config import (
+    DEFAULT_KAFKA_CACHE_EVENT_TOPIC,
+    DEFAULT_KAFKA_DELIVERY_TIMEOUT,
     CoordinatorConfig,
+    HttpCacheEventSinkConfig,
+    KafkaCacheEventSinkConfig,
     MPServerConfig,
     add_coordinator_args,
     add_mp_server_args,
@@ -147,6 +151,27 @@ def _parse_mp(argv: list[str]) -> MPServerConfig:
     return parse_args_to_mp_server_config(parser.parse_args(argv))
 
 
+def test_transport_defaults_to_zmq():
+    assert _parse_mp([]).transport == "zmq"
+    assert MPServerConfig().transport == "zmq"
+
+
+def test_transport_flag_is_parsed_without_starting_grpc():
+    assert _parse_mp(["--transport", "grpc"]).transport == "grpc"
+
+
+def test_grpc_server_workers_are_parsed():
+    assert _parse_mp([]).grpc_server_workers == 32
+    assert MPServerConfig().grpc_server_workers == 32
+    assert _parse_mp(["--grpc-server-workers", "7"]).grpc_server_workers == 7
+
+
+@pytest.mark.parametrize("workers", ["0", "-1"])
+def test_grpc_server_workers_must_be_positive(workers):
+    with pytest.raises(ValueError, match="grpc server workers must be >= 1"):
+        _parse_mp(["--grpc-server-workers", workers])
+
+
 def test_instance_id_defaults_to_uuid4():
     # No --instance-id flag => a random UUID v4 is minted.
     config = _parse_mp([])
@@ -178,6 +203,23 @@ def test_isolated_ipc_flag_enables():
     assert _parse_mp(["--no-isolated-ipc"]).isolated_ipc is False
 
 
+# -- Engine type --------------------------------------------------------------
+
+
+def test_engine_type_defaults_to_default():
+    assert _parse_mp([]).engine_type == "default"
+
+
+def test_engine_type_blend_selects_blend_module():
+    assert _parse_mp(["--engine-type", "blend"]).engine_type == "blend"
+
+
+def test_engine_type_blend_legacy_removed():
+    # The original blend engine was removed; only ``blend`` remains.
+    with pytest.raises(SystemExit):
+        _parse_mp(["--engine-type", "blend_legacy"])
+
+
 # -- Event reporting ----------------------------------------------------------
 
 
@@ -185,6 +227,7 @@ def test_event_reporting_defaults_are_disabled():
     config = _parse([])
     assert config.event_reporting is False
     assert config.event_flush_interval == 1.0
+    assert isinstance(config.event_sink_config, HttpCacheEventSinkConfig)
 
 
 def test_event_reporting_flags_are_parsed():
@@ -210,6 +253,78 @@ def test_event_reporting_env_fallback(monkeypatch):
 def test_event_flush_interval_rejects_nonpositive():
     with pytest.raises(ValueError):
         _parse(["--coordinator-event-flush-interval", "0"])
+
+
+def test_kafka_event_transport_flags_are_parsed():
+    config = _parse(
+        [
+            "--coordinator-event-transport",
+            "kafka",
+            "--coordinator-kafka-bootstrap-servers",
+            "broker-a:9092,broker-b:9092",
+            "--coordinator-kafka-topic",
+            "events",
+            "--coordinator-kafka-delivery-timeout",
+            "2.5",
+        ]
+    )
+
+    assert config.event_sink_config == KafkaCacheEventSinkConfig(
+        bootstrap_servers="broker-a:9092,broker-b:9092",
+        topic="events",
+        delivery_timeout=2.5,
+    )
+
+
+def test_kafka_event_transport_requires_bootstrap_servers():
+    with pytest.raises(ValueError, match="bootstrap servers must be non-empty"):
+        _parse(["--coordinator-event-transport", "kafka"])
+
+
+def test_kafka_event_transport_uses_topic_and_timeout_defaults():
+    config = _parse(
+        [
+            "--coordinator-event-transport",
+            "kafka",
+            "--coordinator-kafka-bootstrap-servers",
+            "broker:9092",
+        ]
+    )
+
+    assert config.event_sink_config == KafkaCacheEventSinkConfig(
+        bootstrap_servers="broker:9092",
+        topic=DEFAULT_KAFKA_CACHE_EVENT_TOPIC,
+        delivery_timeout=DEFAULT_KAFKA_DELIVERY_TIMEOUT,
+    )
+
+
+def test_kafka_event_transport_rejects_empty_topic():
+    with pytest.raises(ValueError, match="topic must be non-empty"):
+        _parse(
+            [
+                "--coordinator-event-transport",
+                "kafka",
+                "--coordinator-kafka-bootstrap-servers",
+                "broker:9092",
+                "--coordinator-kafka-topic",
+                "",
+            ]
+        )
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf"])
+def test_kafka_delivery_timeout_rejects_invalid_value(timeout):
+    with pytest.raises(ValueError, match="delivery timeout must be a finite"):
+        _parse(
+            [
+                "--coordinator-event-transport",
+                "kafka",
+                "--coordinator-kafka-bootstrap-servers",
+                "broker:9092",
+                "--coordinator-kafka-delivery-timeout",
+                timeout,
+            ]
+        )
 
 
 # -- Deprecated pre-v0.5.3 aliases (operator <= v0.5.2 still emits these) -----

@@ -16,7 +16,7 @@
 // request instead of once per copy/launch. Same plan-then-execute shape as
 // the object-group transfer in mp_mem_kernels.cuh, plus K-only re-RoPE and a
 // per-token scatter (CB matches are not block-aligned). Plans are built in
-// blend_v3.py (cb_retrieve_pre_computed).
+// blend.py (cb_retrieve_pre_computed).
 // ---------------------------------------------------------------------------
 
 // Per-kernel-group invariants, resolved once on the Python side; only the
@@ -33,7 +33,9 @@ struct CBGroupSpec {
   EngineKVFormat engine_kv_format;
   int page_buffer_size;
   int block_size;
-  int head_size;                  // scatter kernel head_size (element units)
+  int head_size;  // scatter kernel head_size (element units)
+  // Pool's per-block stride in scalars; 0 = tight block_size*head_size.
+  int64_t block_stride_elems;
   uintptr_t slot_mapping_base;    // device int64*, whole-request slot mapping
   int64_t slot_mapping_capacity;  // int64 elements behind slot_mapping_base
   // Re-RoPE (cos_sin_cache == 0 disables rope for this group). Rotation

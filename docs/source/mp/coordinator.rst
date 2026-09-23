@@ -104,7 +104,12 @@ keeps the default below.
    * - ``--extra-config``
      - (empty)
      - JSON object of settings the core flags do not name, read by whichever
-       view or controller looks for them.
+       view or controller looks for them. Two keys are read by the
+       coordinator itself: ``controller_packages``, a list of importable
+       paths to load out-of-tree controllers from, and
+       ``disabled_controllers``, a list of class names to leave unbuilt --
+       which is how one of those takes a built-in controller's place
+       instead of running beside it.
    * - ``--timeout-keep-alive``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing
@@ -121,6 +126,119 @@ keeps the default below.
      - OTLP gRPC endpoint for metrics push mode. When unset, Prometheus pull
        mode exposes ``/metrics`` on the coordinator HTTP port. When set, the
        local ``/metrics`` endpoint returns 404.
+   * - ``--event-transport``
+     - ``http``
+     - Transport the fleet's cache events arrive on, exactly one. ``http``
+       serves ``POST /events``; ``kafka`` consumes ``--kafka-topic`` instead
+       (one ``CacheEventsRequest`` JSON envelope per record, the same body
+       ``POST /events`` accepts) and ``POST /events`` answers 404. ``kafka``
+       needs the ``lmcache[kafka]`` extra (``pip install 'lmcache[kafka]'``).
+   * - ``--kafka-bootstrap-servers``
+     - (empty)
+     - Comma-separated Kafka bootstrap servers. Required with
+       ``--event-transport kafka``.
+   * - ``--kafka-topic``
+     - ``lmcache-cache-events``
+     - Topic to consume; must match the MP servers'
+       ``--coordinator-kafka-topic``. Ignored unless
+       ``--event-transport kafka``.
+   * - ``--kafka-group-id``
+     - ``lmcache-coordinator``
+     - Consumer group whose committed offsets a restart resumes from. A new
+       group reads the whole retained stream. Ignored unless
+       ``--event-transport kafka``.
+
+Loading your own controllers
+----------------------------
+
+A **controller** gives the coordinator behaviour of its own — fleet-wide L2
+eviction is one, warm-prefetch dispatch is another. Add yours by putting it in
+any importable package and naming that package in ``--extra-config``. The
+package imports from lmcache; nothing in lmcache imports it.
+
+.. code-block:: python
+
+    # acme_controllers/reaper.py
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    from fastapi import APIRouter
+    from lmcache.v1.mp_coordinator.controllers.base import Controller
+    from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+
+
+    class ReaperController(Controller):
+        @classmethod
+        def from_config(cls, config, views):
+            obj = cls()
+            obj.registry = views.get(InstanceRegistry)                  # a shared view
+            obj.interval = config.extra_config.get("acme.interval", 30.0)
+            obj.last_seen = 0
+            return obj
+
+        @asynccontextmanager
+        async def run(self, runtime):                    # background work
+            task = asyncio.create_task(self._sweep())    # 1. start
+            try:
+                yield                                    # 2. serve
+            finally:
+                task.cancel()                            # 3. stop
+
+        def get_routers(self):                           # your endpoints
+            router = APIRouter()
+
+            @router.get("/acme/reaper")
+            async def status():
+                return {"last_seen": self.last_seen}
+
+            return (router,)
+
+        async def _sweep(self):
+            while True:
+                await asyncio.sleep(self.interval)
+                self.last_seen = len(self.registry.all_instances())
+
+``run`` is an async context manager and must do three things, in order:
+
+1. **Start** the background work.
+2. ``yield`` **exactly once** — the coordinator serves for the duration of
+   that yield.
+3. **Stop** the work in a ``finally``, so teardown runs whether shutdown was
+   clean or an exception unwound the stack.
+
+The same JSON names the package and carries the controller's own settings:
+
+.. code-block:: bash
+
+    lmcache coordinator --extra-config '{
+      "controller_packages": ["acme_controllers"],
+      "acme.interval": 10
+    }'
+
+    curl -s http://localhost:9300/acme/reaper
+    # -> {"last_seen": 2}
+
+Every hook is optional: write only ``run``, only ``get_routers``, or add
+``consume`` to receive the cache-event stream and ``get_durable_components`` to
+have your state checkpointed. Name a package — scanned entire, so a controller
+that outgrows one file can be a directory — or a single module. A name that
+does not import raises at startup; a controller that raises while starting is
+logged and skipped. Views cannot be added this way: they are the coordinator's
+own shared state, which your controller reads.
+
+**Disabling a built-in controller.** Name its class in
+``disabled_controllers`` and it is not built, taking its endpoints with it —
+which is how a controller of your own replaces one rather than running beside
+it:
+
+.. code-block:: bash
+
+    lmcache coordinator --extra-config '{
+      "controller_packages": ["acme_controllers"],
+      "disabled_controllers": ["FleetEvictionController"]
+    }'
+
+A name matching no discovered controller raises at startup.
 
 Coordinator metrics export
 --------------------------
@@ -177,6 +295,28 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL``
      - Seconds between cache-event batch flushes (must be ``> 0``, default
        ``1``).
+   * - ``--coordinator-event-transport``
+     - (none)
+     - Event delivery transport: ``http`` (default) or ``kafka``.
+   * - ``--coordinator-kafka-bootstrap-servers``
+     - (none)
+     - Comma-separated Kafka bootstrap servers. Required for the ``kafka``
+       event transport.
+   * - ``--coordinator-kafka-topic``
+     - (none)
+     - Kafka event topic (default ``lmcache-cache-events``).
+   * - ``--coordinator-kafka-delivery-timeout``
+     - (none)
+     - Seconds to wait for Kafka broker acknowledgement (default ``10``).
+
+With the Kafka transport, start the coordinator with
+``--event-transport kafka`` and the same topic so it consumes the stream
+instead of serving ``POST /events``; without that, the broker retains the
+records but nothing reads them. Both sides need the optional
+``lmcache[kafka]`` extra (``pip install 'lmcache[kafka]'``), imported only
+when Kafka is selected. A restarted coordinator resumes from its consumer
+group's committed offsets; coordinator-driven replay of a detected gap is a
+follow-up.
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
@@ -261,8 +401,11 @@ startup.
        when it is not in P2P.
    * - ``mq_port``
      - int
-     - Optional (default ``0``). ZMQ message-queue port P2P peers send
-       lookup/unlock RPCs to; ``0`` when P2P is disabled.
+     - Optional (default ``0``). Request-server port P2P peers send
+       lookup/unlock RPCs to. The field name is retained for compatibility;
+       the server's configured ZMQ or gRPC transport is used. ``0`` when P2P
+       is disabled.
+
 **Response** (``200 OK``):
 
 .. code-block:: json
@@ -734,7 +877,8 @@ List cached keys and their placements, one page at a time.
               "shared": false
             }
           ],
-          "num_tokens": 256
+          "num_tokens": 256,
+          "access_count": 7
         }
       ]
     }
@@ -744,8 +888,9 @@ List cached keys and their placements, one page at a time.
 placements**. ``num_tokens`` reports how many token ids the directory knows for
 the key's chunk (``0`` = unknown) -- fetch the actual tokens via
 ``POST /directory/lookup``, which exists precisely so listing pages stay
-small. Pages of a changing directory may skip or repeat keys (snapshot
-semantics).
+small. ``access_count`` is the number of ``access`` events applied to the key
+since the directory first saw it. Pages of a changing directory may skip or
+repeat keys (snapshot semantics).
 
 **HTTP status codes:**
 
@@ -821,7 +966,8 @@ forms -- supply exactly one:
             {"instance_id": "server-1", "incarnation": 1770000000, "tier": "l1",
              "backend": "dram", "size_bytes": 8388608, "shared": false}
           ],
-          "token_ids": [15496, 11, 995]
+          "token_ids": [15496, 11, 995],
+          "access_count": 7
         }
       ]
     }
@@ -831,7 +977,8 @@ the number of keys requested); ``results`` has one entry per resolved key, in
 request order (tokens form: ``chunks`` x the per-rank fan-out). ``placements``
 is empty for keys the directory does not know; ``token_ids`` is empty when the
 directory has no tokens for the key's chunk (never stored with token reporting
-on, or not yet re-reported after an event gap).
+on, or not yet re-reported after an event gap). ``access_count`` is the number
+of ``access`` events applied to the key, ``0`` for unknown keys.
 
 **HTTP status codes:**
 
@@ -1105,15 +1252,67 @@ chunk pinned *N* times needs *N* unpins before it can be evicted.
         }'
     # -> {"requested": 12, "affected": 12, "status": "unpinned"}
 
-**Delete (removing cache by token sequence).** Delete a token sequence's cache
-on one named server, addressed by token ids. The coordinator resolves the tokens
-to object keys locally (like pin) and issues a single key-addressed
-``DELETE /cache/objects`` to the named server, which removes them from the
-requested tier(s). The ``tier`` field selects the tier(s): ``l1`` deletes only
-the named server's L1, ``l2`` only L2, ``all`` both. When the tier includes L2,
-the coordinator first drops any key it is protecting with an L2 pin from the
-delete set unless ``force`` is set — so a pinned key is retained in every tier
-the delete would have touched; ``force`` deletes them and drops those pins.
+``GET /cache/pins``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+List the keys currently pinned in the L2 eviction plan.
+
+**Query parameters** (all optional):
+
+.. list-table::
+   :header-rows: 1
+   :width: 100%
+   :widths: 18 16 66
+
+   * - Parameter
+     - Type
+     - Description
+   * - ``cache_salt``
+     - string
+     - Only keys with this salt. Default: all salts.
+   * - ``model_name``
+     - string
+     - Only keys for this model. Default: all models.
+   * - ``offset``
+     - int
+     - Matching keys to skip (``>= 0``). Default ``0``.
+   * - ``limit``
+     - int
+     - Maximum keys to return (``1``-``10000``). Default ``1000``.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "total": 12,
+      "pins": [
+        {
+          "key": {
+            "chunk_hash_hex": "aa12...",
+            "model_name": "Qwen/Qwen3-8B",
+            "kv_rank": 0,
+            "object_group_id": 0,
+            "cache_salt": "user-a"
+          },
+          "pin_count": 2
+        }
+      ]
+    }
+
+``total`` is the number of pinned keys matching the filters; ``pins`` is the
+requested page in first-pinned order, each with its current ``pin_count``.
+
+**HTTP status codes:**
+
+- ``200``: listed.
+- ``422``: ``offset`` or ``limit`` out of range.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s 'http://localhost:9300/cache/pins?cache_salt=user-a&limit=100'
 
 ``POST /cache/delete``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1293,7 +1492,9 @@ only). Matching is chunked at the coordinator's ``--chunk-size`` — which must
 equal the MP servers' ``--chunk-size`` — probing every
 ``--blend-probe-stride`` positions.
 
-**Request body:**
+**Request body** — the query tokens plus the caller's identity, which names
+the namespace matches are scoped to. ``model_name`` is not optional: without
+it there is no namespace to scope to.
 
 .. list-table::
    :header-rows: 1
@@ -1305,7 +1506,24 @@ equal the MP servers' ``--chunk-size`` — probing every
    * - ``tokens_b64``
      - string
      - Query tokens packed as base64 little-endian ``uint32`` (see
-       ``encode_tokens`` / ``decode_tokens`` in ``schemas.py``).
+       ``encode_tokens`` / ``decode_tokens`` in ``schemas.py``). Required.
+   * - ``model_name``
+     - string
+     - Model the caller retrieves under. Required.
+   * - ``world_size``
+     - int
+     - The caller's world size (TP x PP), selecting its rank fan-out.
+       Defaults to ``1``.
+   * - ``cache_salt``
+     - string
+     - The caller's per-tenant isolation salt. Defaults to ``""``.
+
+``model_name`` / ``world_size`` / ``cache_salt`` are the same three fields
+``/directory/lookup``'s tokens form carries, but serve a different purpose
+here: prefix lookup uses them to *build* the keys it resolves, while a
+fragment match already names a stored chunk hash and uses them to stay in
+the namespace the caller can retrieve from. The token encodings differ
+between the two endpoints for now.
 
 **Response** (``200 OK``):
 
@@ -1326,10 +1544,17 @@ position in the query (re-RoPE target). Matches are sorted ascending by
 them resolves overlaps itself. A query shorter than one chunk, or a coordinator
 without ``--enable-blend-lookup``, returns ``{"matches": []}``.
 
+Only chunks some instance stored under the request's
+``model_name`` / ``cache_salt`` / ``world_size`` are returned. A chunk hash
+names content and prefix only, so an unscoped match could name KV under
+another model or tenant, which the caller's own key expansion could never
+retrieve. Content held solely by another namespace therefore returns no
+match rather than one that misses at prefetch.
+
 **HTTP status codes:**
 
 - ``200``: lookup completed (an empty match list is not an error).
 - ``422``: ``tokens_b64`` is not valid base64 or not a whole number of
-  ``uint32`` tokens.
+  ``uint32`` tokens, or it is supplied without ``model_name``.
 
 Index counts are reported under the ``blend`` key of ``GET /directory/stats``.

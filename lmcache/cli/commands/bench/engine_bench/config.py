@@ -3,6 +3,7 @@
 
 # Standard
 from dataclasses import dataclass
+from enum import Enum
 import argparse
 import json
 import os
@@ -18,6 +19,23 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 _GB = 1024**3
+
+
+class WarmupPolicy(str, Enum):
+    """Whether the workload runs its warmup phase before the measured run.
+
+    Subclasses ``str`` so the value lands in the JSON summary
+    (``bench_summary.json``) as a plain ``"run"`` / ``"skip"`` string.
+
+    Attributes:
+        RUN: Run warmup, then discard its stats and start the benchmark.
+        SKIP: Go straight to the benchmark, leaving the engine and the KV
+            cache in whatever state the run starts in.  The first requests
+            then pay any first-request cost and see a cold cache.
+    """
+
+    RUN = "run"
+    SKIP = "skip"
 
 
 @dataclass
@@ -40,6 +58,7 @@ class EngineBenchConfig:
     export_json: bool
     quiet: bool
     ignore_eos: bool = False
+    warmup_policy: WarmupPolicy = WarmupPolicy.RUN
 
     def __post_init__(self) -> None:
         if not self.engine_url:
@@ -248,4 +267,7 @@ def parse_args_to_config(args: argparse.Namespace) -> EngineBenchConfig:
         export_json=args.json,
         quiet=args.quiet,
         ignore_eos=args.ignore_eos,
+        warmup_policy=(
+            WarmupPolicy.SKIP if getattr(args, "no_warmup", False) else WarmupPolicy.RUN
+        ),
     )
