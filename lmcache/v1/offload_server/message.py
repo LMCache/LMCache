@@ -22,7 +22,12 @@ class OffloadMsg(msgspec.Struct):
 
 
 class OffloadRetMsg(msgspec.Struct):
-    """Return message for Offloading"""
+    """Outcome of processing an offload request.
+
+    ``success`` is false if the request is invalid or the engine call raises.
+    True means the engine call returned normally, not that data was persisted.
+    The engine may skip a store or complete it asynchronously.
+    """
 
     success: bool
 
