@@ -185,7 +185,7 @@ def test_p2p_adapter_end_to_end(request_transport: RequestTransport) -> None:
 
     try:
         # --- Peer side: store known objects in L1 ---
-        reserved = peer_sm.reserve_write(keys, layout, mode="new")
+        reserved = peer_sm.reserve_write(keys, layout)
         peer_objects: dict[ObjectKey, MemoryObj] = {}
         expected_values: dict[ObjectKey, int] = {}
         for i, key in enumerate(keys):

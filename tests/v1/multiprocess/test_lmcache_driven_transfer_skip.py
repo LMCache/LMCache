@@ -11,7 +11,11 @@
 # Standard
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock
+
+# Third Party
+import pytest
 
 # First Party
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
@@ -19,6 +23,9 @@ from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
     all_null_chunk_masks,
+)
+from lmcache.v1.multiprocess.object_group_transfer import (
+    downsample_and_stage_block_ids,
 )
 
 # ------------------------------------------------------------------ #
@@ -90,6 +97,35 @@ def test_object_group_null_only_when_all_its_kernel_groups_null():
     assert masks == [[True, False]]
 
 
+def test_zero_is_real_with_negative_null_block() -> None:
+    masks = all_null_chunk_masks([[0, 0]], [_og([0])], [1], 2, -1)
+    assert masks == [[False, False]]
+
+
+def test_negative_null_marker_preserves_checkpoint_zero() -> None:
+    masks = all_null_chunk_masks([[-1, 0, -1, 1]], [_og([0])], [1], 4, -1)
+    assert masks == [[True, False, True, False]]
+
+
+def _staging_context(
+    num_kernel_groups: int,
+    object_groups: list[ObjectGroupInfo],
+    *,
+    window_tokens: int = 2,
+) -> MagicMock:
+    """Build a CPU-only context that captures staged block IDs."""
+    context = MagicMock()
+    context.lmcache_tokens_per_chunk = 2
+    context.calculate_num_blocks.side_effect = lambda tokens, group: tokens
+    context.kv_layer_groups_manager = SimpleNamespace(
+        num_kernel_groups=num_kernel_groups,
+        object_groups=object_groups,
+        get_subchunk_sw_size_tokens=lambda group: window_tokens,
+    )
+    context.stage_block_ids.side_effect = lambda ids: ids
+    return context
+
+
 # ------------------------------------------------------------------ #
 #  retrieve (read-side window)                                         #
 # ------------------------------------------------------------------ #
@@ -127,6 +163,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     ]
     ctx = MagicMock()
     ctx.chunk_size = 256
+    ctx.null_block_id = 0
     ctx.resolve_obj_keys.return_value = obj_keys
 
     read_calls: list[list[str]] = []
@@ -162,6 +199,54 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     monkeypatch.setattr(mod, "Event", MagicMock())
 
     return module, read_calls, transfer_calls
+
+
+def _make_checkpoint_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[LMCacheDrivenTransferModule, MagicMock, list, list]:
+    module, reads, transfers = _make_module(monkeypatch, 2, [-1, 1])
+    context = _staging_context(3, [_og([0]), _og([1, 2])])
+    context.kv_layer_groups_manager.num_object_groups = 2
+    context.kv_layer_groups_manager.get_attn_desc = lambda: SimpleNamespace(
+        num_chunks_in_sw=[-1, 1], group_kinds=("attention", "recurrent")
+    )
+    module.get_and_touch_context_entry(1).cache_context = context
+    module.context.chunk_size = 2
+    module.context.null_block_id = -1
+    module.context.session_manager.get.return_value = None
+    module.context.storage_manager.reserve_write.side_effect = lambda keys, layout: {
+        key: MagicMock(get_size=MagicMock(return_value=10)) for key in keys
+    }
+    monkeypatch.setattr(
+        mod, "downsample_and_stage_block_ids", downsample_and_stage_block_ids
+    )
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a, **kw: object())
+    return module, context, reads, transfers
+
+
+def test_store_reserves_real_page_zero_and_only_present_state_objects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, context, _reads, transfers = _make_checkpoint_module(monkeypatch)
+    _handle, ok = module.store(
+        SimpleNamespace(request_id="req", worker_id=1),
+        1,
+        [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
+        b"producer",
+    )
+    assert ok
+    assert [
+        call.args[0]
+        for call in cast(
+            MagicMock, module.context.storage_manager.reserve_write
+        ).call_args_list
+    ] == [["g0c0", "g0c1"], ["g1c1"]]
+    assert [obj is None for obj in transfers[1][1]] == [True, False]
+    assert context.stage_block_ids.call_args.args[0] == [
+        [0, 1, 2, 3],
+        [-1, -1, 0, 1],
+        [-1, -1, 2, 3],
+    ]
 
 
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):

@@ -36,7 +36,7 @@ class _FakeAdapterConfig:
 
 
 class _FakeDescriptor:
-    """Stands in for an ``AdapterDescriptor``."""
+    """Stands in for an ``L2AdapterDescriptor``."""
 
     def __init__(self, type_name: str, shared: bool) -> None:
         self.type_name = type_name
@@ -337,6 +337,8 @@ class TestReportStatusSharesTheSource:
             get_configured_capacity_bytes(_config_yielding(configured)).values()
         )
         manager._objects = {}
+        manager._staging = {}
+        manager._staging_bytes = 0
         manager._write_ttl_seconds = 600
         manager._read_ttl_seconds = 600
         # report_status is lock-guarded; the pinned-memory __init__ is skipped.

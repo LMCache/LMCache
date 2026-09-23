@@ -426,22 +426,28 @@ everything together.
 ### Prefetch Flow (from the serving engine's perspective)
 
 ```python
-# 1. Submit: check L1 first, then delegate remainder to L2
-handle = sm.submit_prefetch_task(keys, layout_desc)
+# 1. Submit: one key row per (object group, kv rank); L1 is checked first,
+#    the remainder is delegated to L2. See ../storage_manager.md.
+handle = sm.submit_prefetch_task(
+    PrefetchTaskSpec(
+        key_groups=[GroupedObjectKeys(keys=keys, object_group_id=0, layout_desc=layout_desc)]
+    )
+)
 
-# 2. Poll: busy-wait for completion
+# 2. Poll: busy-wait for completion (one found bitmap per key row)
 while True:
-    found_count = sm.query_prefetch_status(handle)
-    if found_count is not None:
+    rows = sm.query_prefetch_status(handle)
+    if rows is not None:
         break
+hit_chunks, retain = fold_unfold_grouped(rows, windows=[-1])
 
 # 3. Read: access the prefetched data (holds read locks)
-with sm.read_prefetched_results(keys[:found_count]) as objs:
+with sm.read_prefetched_results(retain[0].gather(keys)) as objs:
     # use objs ...
     pass
 
 # 4. Release: drop read locks
-sm.finish_read_prefetched(keys[:found_count])
+sm.finish_read_prefetched(retain[0].gather(keys))
 ```
 
 ### PrefetchHandle
@@ -449,18 +455,23 @@ sm.finish_read_prefetched(keys[:found_count])
 ```python
 @dataclass(frozen=True)
 class PrefetchHandle:
-    request_id: int          # -1 if no L2 request needed
-    l1_prefix_hit_count: int # leading keys already in L1
+    prefetch_request_id: int        # -1 if no L2 request needed
+    external_request_id: str
+    l1_found_indices: tuple[int, ...]
+    l1_hit_chunks: int
     total_requested_keys: int
-    submit_time: float       # for latency logging
+    submit_time: float              # for latency logging
+    l2_orig_indices: tuple[int, ...]
+    num_key_groups: int             # key-group count, for per-group status
 ```
 
-`submit_prefetch_task` first checks L1 for a contiguous prefix of hits:
-- If all keys hit L1: returns handle with `request_id=-1` (no L2 work).
+`submit_prefetch_task` first checks L1 for the prefix every object group can
+serve:
+- If all keys hit L1: returns handle with `prefetch_request_id=-1` (no L2 work).
 - If some keys miss: submits the **remaining** keys to PrefetchController.
 
-`query_prefetch_status` combines L1 hits with L2 results:
-`total_hits = l1_prefix_hit_count + l2_prefix_hits`.
+`query_prefetch_status` combines the L1 hits with the L2 result and reports
+them per key row.
 
 ## Assumptions and Invariants Summary
 
@@ -565,9 +576,9 @@ module discovery. **To add a new policy, create a single file in
 ```python
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     StorePolicy,
-    AdapterDescriptor,
     register_store_policy,
 )
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.distributed.api import ObjectKey
 
 

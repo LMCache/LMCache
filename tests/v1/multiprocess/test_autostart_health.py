@@ -21,10 +21,8 @@ def test_autostart_health_real_transport(start_server: bool) -> None:
         import sys
         import zmq
         from lmcache.integration.vllm.mp_server_launcher import is_mp_server_healthy
+        from lmcache.v1.multiprocess.request_handler import HandlerType
         from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueServer
-        from lmcache.v1.multiprocess.protocol import (
-            RequestType, get_handler_type, get_payload_classes,
-        )
 
         def ping(instance_id: int | None) -> bool:
             assert instance_id is None
@@ -38,10 +36,9 @@ def test_autostart_health_real_transport(start_server: bool) -> None:
             if enabled:
                 server = MessageQueueServer(endpoint, context)
                 server.add_handler(
-                    RequestType.PING, get_payload_classes(RequestType.PING),
-                    get_handler_type(RequestType.PING), ping,
+                    "ping", HandlerType.BLOCKING, ping,
                 )
-                server.add_normal_thread_pool([RequestType.PING], max_workers=1)
+                server.add_normal_thread_pool(["ping"], max_workers=1)
                 server.start()
             assert is_mp_server_healthy(endpoint, context, timeout=0.5) is enabled
         finally:
