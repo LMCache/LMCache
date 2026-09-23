@@ -103,8 +103,8 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         default="gpu",
         help=(
             "Run mode (default: gpu). In cpu mode the client allocates "
-            "POSIX-SHM-backed KV cache tensors and the server maps the "
-            "same physical pages."
+            "regular CPU KV tensors; the selected TransferContext owns "
+            "any SHM migration or staging."
         ),
     )
     parser.add_argument(

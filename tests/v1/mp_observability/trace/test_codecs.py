@@ -9,11 +9,14 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
-    TrimPolicy,
+    PrefetchLockMode,
+    PrefetchTaskSpec,
 )
+from lmcache.v1.distributed.internal_api import TrimPolicy
 from lmcache.v1.mp_observability.trace import codecs
 
 
@@ -93,6 +96,80 @@ class TestPrefetchHandle:
         )
         out = _roundtrip(h)
         assert out == h
+
+
+class TestPrefetchHandleKeyGroups:
+    def test_num_key_groups_roundtrip(self):
+        h = PrefetchHandle(
+            prefetch_request_id=1,
+            external_request_id="r",
+            l1_found_indices=(0, 3),
+            l1_hit_chunks=1,
+            total_requested_keys=4,
+            submit_time=1.5,
+            l2_orig_indices=(1, 2),
+            num_key_groups=2,
+        )
+        assert _roundtrip(h) == h
+
+    def test_record_without_num_key_groups_decodes_to_one(self):
+        """Handles recorded before key groups existed decode as one group."""
+        encoded = codecs.encode_value(
+            PrefetchHandle(
+                prefetch_request_id=-1,
+                external_request_id="r",
+                l1_found_indices=(),
+                l1_hit_chunks=0,
+                total_requested_keys=3,
+                submit_time=0.0,
+            )
+        )
+        del encoded["v"]["num_key_groups"]
+        assert codecs.decode_value(encoded).num_key_groups == 1
+
+
+def _grouped_object_keys(gid: int, window: int = -1) -> GroupedObjectKeys:
+    return GroupedObjectKeys(
+        keys=[
+            ObjectKey(
+                chunk_hash=bytes([i]), model_name="m", kv_rank=1, object_group_id=gid
+            )
+            for i in range(3)
+        ],
+        object_group_id=gid,
+        layout_desc=MemoryLayoutDesc(
+            shapes=[torch.Size([2, 3])], dtypes=[torch.float16]
+        ),
+        sliding_window_size=window,
+    )
+
+
+class TestPrefetchLockMode:
+    def test_roundtrip(self):
+        for m in PrefetchLockMode:
+            assert _roundtrip(m) is m
+
+
+class TestGroupedObjectKeys:
+    def test_roundtrip(self):
+        g = _grouped_object_keys(2, window=4)
+        out = _roundtrip(g)
+        assert out == g
+        assert out.sliding_window_size == 4
+
+
+class TestPrefetchTaskSpec:
+    def test_roundtrip(self):
+        spec = PrefetchTaskSpec(
+            key_groups=[_grouped_object_keys(0), _grouped_object_keys(1, window=2)],
+            num_kv_readers=2,
+            fetching_policy="full",
+            lock_mode=PrefetchLockMode.NO_LOCK,
+        )
+        out = _roundtrip(spec)
+        assert out == spec
+        assert out.fetching_policy == "full"
+        assert out.lock_mode is PrefetchLockMode.NO_LOCK
 
 
 class TestTrimPolicy:

@@ -2,10 +2,10 @@ HTTP API
 ========
 
 When the MP server is started via ``lmcache server`` (the recommended entry
-point), a FastAPI-based HTTP frontend is exposed alongside the ZMQ socket
-used by vLLM. This HTTP API is intended for operators, orchestrators
-(e.g. Kubernetes), and debugging tools — it is **not** on the inference
-data path.
+point), a FastAPI-based HTTP frontend is exposed alongside the selected ZMQ or
+gRPC request endpoint used by vLLM. This HTTP API is intended for operators,
+orchestrators (e.g. Kubernetes), and debugging tools — it is **not** on the
+inference data path.
 
 Where the routes come from
 --------------------------
@@ -48,8 +48,9 @@ Server Configuration
      - Default
      - Description
    * - ``--http-host``
-     - ``0.0.0.0``
-     - Host to bind the HTTP server.
+     - ``127.0.0.1``
+     - Host to bind the HTTP server. The admin API has no authentication;
+       only bind a non-loopback address on a trusted network.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
@@ -249,6 +250,7 @@ compatibility with the vLLM-embedded API server.
    * - POST
      - ``/run_script``
      - Execute an uploaded Python script in a restricted sandbox.
+       Disabled by default; requires ``--run-script-api-enabled``.
 
 Liveness and Health
 -------------------
@@ -544,13 +546,16 @@ Cache Management
 ``POST /cache/clear``
 ~~~~~~~~~~~~~~~~~~~~~~
 
-Force-clears **all** KV cache data currently held in a tier (today ``l1``).
+Clears KV cache data currently held in a tier (today ``l1``). Set
+``force=true`` to clear locked objects too.
 
 .. warning::
 
-   This endpoint is destructive and bypasses read/write locks. In-flight
-   store or prefetch operations may be corrupted. Use only when the
-   server is idle, or when recovering from a known-bad cache state.
+   By default, this endpoint clears only objects that are safe to remove.
+   With ``force=true``, it is destructive and bypasses read/write locks.
+   In-flight store or prefetch operations may be corrupted. Use forced
+   cleanup only when the server is idle, or when recovering from a
+   known-bad cache state.
 
 **Request body:** optional -- an absent (or empty) body uses the defaults below.
 
@@ -567,9 +572,8 @@ Force-clears **all** KV cache data currently held in a tier (today ``l1``).
        supported. Any other value returns ``400``.
    * - ``force``
      - bool
-     - Optional (default ``true``). Currently accepted but **not honored** --
-       the clear always force-clears (active locks are ignored) regardless of
-       this value.
+     - Optional (default ``false``). When ``true``, active locks may be
+       ignored so the server can force-clear cached objects.
 
 **Response** (``200 OK``):
 
@@ -1616,6 +1620,11 @@ piped directly to a terminal.
 ``POST /run_script``
 ~~~~~~~~~~~~~~~~~~~~
 
+.. note::
+
+   This endpoint is **disabled by default** (requests return ``404``).
+   Start the server with ``--run-script-api-enabled`` to enable it.
+
 Execute an uploaded Python script inside the server process. The script is
 uploaded as multipart form data under the field name ``script`` and is
 ``exec``'d with a restricted ``__builtins__`` (only ``print``, ``str``,
@@ -1643,6 +1652,7 @@ the script assigns one, otherwise ``Script executed successfully``.
 
 - ``200``: script executed.
 - ``400``: no ``script`` file provided.
+- ``404``: the endpoint is disabled (``--run-script-api-enabled`` not set).
 - ``500``: an exception was raised during import setup or execution
   (body: ``"Error executing script: <reason>"``).
 
