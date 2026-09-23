@@ -69,6 +69,7 @@ message CbRegisterRopeRequest {
   bool is_neox_style = 4;
   repeated int64 group_to_cache = 5;
   repeated RopeWindow group_rot = 6;
+  repeated int64 group_head_size = 7;
 }
 
 message CbRegisterRopeResponse {}

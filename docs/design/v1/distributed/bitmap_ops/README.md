@@ -25,9 +25,10 @@ Supporting / convenience:
 |---|---|
 | `fold_unfold_ranked` | Composes `fold` → `highest_set_bit` → `unfold`. |
 | `fold_unfold` | `fold_unfold_ranked` for the single-rank (`chunk x group`) layout. |
+| `fold_grouped` / `unfold_grouped` / `fold_unfold_grouped` | The same operators over the **grouped** layout: a list of presence bitmaps (one per object, each of length `num_chunks`) paired 1:1 with a list of window sizes. No ordering of the rows is assumed; the caller resolves each row's window (a kv-rank shard is simply another row with its group's window). |
 | `unfold_range` | Chunk range one group needs for a given hit length. |
 | `merge_bitmaps` | Bitwise-OR several presence bitmaps (e.g. L1 ∪ L2). |
-| `select_retained` | Non-windowed `TrimPolicy` selection (`PREFIX` = longest prefix; any other = keep every set bit). |
+| `select_retained` | Non-windowed `TrimPolicy` (`internal_api`) selection (`PREFIX` = longest prefix; any other = keep every set bit). |
 
 A chunk counts as present for a group only when **all** its `kv_rank` shards are
 present, and `unfold` sets all ranks of each retained `(group, chunk)`. With a
@@ -36,8 +37,9 @@ matching.
 
 ## Performance
 
-`fold` and `unfold` delegate to native C++ (`csrc/storage_manager/fold.cpp`,
-exported as `lmcache_native.fold` / `unfold`) and `highest_set_bit` to
+`fold` / `unfold` and their grouped variants delegate to native C++
+(`csrc/lmcache_native/fold.cpp`, exported as `lmcache_native.fold` / `unfold` /
+`fold_grouped` / `unfold_grouped`) and `highest_set_bit` to
 `Bitmap.highest_set_bit()`. They scan the packed `Bitmap` buffer directly —
 no Python per-bit loop and no `Bitmap`↔tensor conversion. `_fold_python` /
 `_unfold_python` are reference implementations used only as test oracles. See
