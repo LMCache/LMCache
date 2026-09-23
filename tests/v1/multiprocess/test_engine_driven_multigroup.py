@@ -300,7 +300,7 @@ def test_register_accepts_sliding_window_groups() -> None:
     sw_tokens = chunk_tokens // 2
 
     # First Party
-    from lmcache.v1.multiprocess.protocols.engine import (
+    from lmcache.v1.multiprocess.custom_types import (
         RegisterEngineDrivenContextResponse,
     )
 
@@ -579,7 +579,7 @@ def test_register_payload_carries_group_layouts() -> None:
     kv = {f"layer_{i}": torch.zeros(2, 6, 4, 2, 8) for i in range(3)}
 
     # First Party
-    from lmcache.v1.multiprocess.protocols.engine import (
+    from lmcache.v1.multiprocess.custom_types import (
         RegisterEngineDrivenContextResponse,
     )
 

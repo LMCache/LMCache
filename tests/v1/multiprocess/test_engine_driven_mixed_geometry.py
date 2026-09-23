@@ -17,10 +17,10 @@ import math
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocols.engine import (
+from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transfer_context.base import compute_kv_layout
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
