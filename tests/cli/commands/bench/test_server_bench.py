@@ -35,9 +35,9 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_lookup,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.transport.zmq_impl.wire import decode_operation
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
@@ -632,11 +632,11 @@ class _LookupRouter:
                 continue
             frames = self._router.recv_multipart()
             identity, uid_f, type_f, *payload = frames
-            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
-            if req_type == RequestType.LOOKUP:
+            operation = decode_operation(type_f)
+            if operation == "lookup":
                 # Void reply: no payload frame.
                 self._router.send_multipart([identity, uid_f, type_f])
-            elif req_type == RequestType.QUERY_PREFETCH_STATUS:
+            elif operation == "query_prefetch_status":
                 req_id = msgspec.msgpack.decode(payload[0], type=str)
                 self.last_query_request_id = req_id
                 if self._in_progress_left > 0:
