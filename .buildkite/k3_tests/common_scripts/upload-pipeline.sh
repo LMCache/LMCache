@@ -19,8 +19,12 @@ set -euo pipefail
 PIPELINE_FILE="${1:?Usage: upload-pipeline.sh <path/to/pipeline.yml>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# shellcheck source=path-filter.sh
+# shellcheck source=.buildkite/k3_tests/common_scripts/helpers.sh
+source "${SCRIPT_DIR}/helpers.sh"
+# shellcheck source=.buildkite/k3_tests/common_scripts/path-filter.sh
 source "${SCRIPT_DIR}/path-filter.sh"
+
+merge_pr_base_branch
 
 if should_skip_ci "${PIPELINE_FILE}"; then
     echo "+++ :fast_forward: Skipping CI — no relevant files changed for ${PIPELINE_FILE}"
@@ -36,6 +40,7 @@ fi
 
 if [[ "${PIPELINE_FILE}" == */xpu/*/pipeline.yml ]]; then
     # The XPU template interpolates this into its Kubernetes pod image.
+    # shellcheck source=.buildkite/k3_harness/resolve-pinned-vllm.sh
     source "${SCRIPT_DIR}/../../k3_harness/resolve-pinned-vllm.sh"
 fi
 

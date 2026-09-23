@@ -6,7 +6,6 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import TrimPolicy
 from lmcache.v1.distributed.bitmap_ops import (
     FULL_ATTENTION_WINDOW,
     fold,
@@ -22,9 +21,7 @@ from lmcache.v1.distributed.bitmap_ops import (
     unfold_range,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import _fold_python, _unfold_python
-
-# TODO(ApostaC): In next PR
-# from lmcache.v1.distributed.internal_api import TrimPolicy
+from lmcache.v1.distributed.internal_api import TrimPolicy
 
 
 def _make_presence(num_chunks: int, present_per_group: list[list[int]]) -> Bitmap:
