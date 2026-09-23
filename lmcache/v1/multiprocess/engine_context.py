@@ -197,6 +197,7 @@ class MPCacheServerContext:
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default
             False.
+        null_block_id: Engine block ID that denotes absent KV data.
     """
 
     def __init__(
@@ -206,8 +207,10 @@ class MPCacheServerContext:
         hash_algorithm: str = "blake3",
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
+        null_block_id: int = 0,
     ) -> None:
         self._chunk_size = chunk_size
+        self._null_block_id = null_block_id
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
 
@@ -240,6 +243,11 @@ class MPCacheServerContext:
     def chunk_size(self) -> int:
         """Chunk size for KV cache operations."""
         return self._chunk_size
+
+    @property
+    def null_block_id(self) -> int:
+        """Engine block ID that denotes absent KV data."""
+        return self._null_block_id
 
     @property
     def separate_object_groups(self) -> bool:

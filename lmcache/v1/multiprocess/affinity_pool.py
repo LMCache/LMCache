@@ -27,8 +27,8 @@ _SHUTDOWN = object()
 class AffinityThreadPool:
     """Thread pool that routes tasks to workers by affinity key.
 
-    Not thread-safe: ``submit()`` must be called from a single thread (the
-    ``MessageQueueServer`` main loop).
+    Not thread-safe: the request transport must serialize calls to ``submit()``.
+    ZMQ submits from its main loop, while gRPC protects submission with a lock.
 
     Args:
         max_workers: Number of worker threads.

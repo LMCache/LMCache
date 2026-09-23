@@ -2,6 +2,7 @@
 # Standard
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
 import os
@@ -15,16 +16,16 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.multiprocess.custom_types import (
+    PrepareRetrieveResponse,
+    PrepareStoreResponse,
+    RegisterEngineDrivenContextResponse,
+)
 from lmcache.v1.multiprocess.posix_shm import (
     shm_create_readwrite,
     shm_munmap,
     shm_open_pool_as_mmap,
     shm_unlink,
-)
-from lmcache.v1.multiprocess.protocols.engine import (
-    PrepareRetrieveResponse,
-    PrepareStoreResponse,
-    RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
@@ -306,7 +307,9 @@ def test_create_transfer_context_uses_default_context_on_cpu() -> None:
         create_transfer_context,
     )
 
-    context = create_transfer_context({"layer_0": torch.randn(2, 2)})
+    context = create_transfer_context(
+        {"layer_0": torch.randn(2, 2)}, instance_id=1, req_client=MagicMock()
+    )
     assert isinstance(context, EngineDrivenTransferContext)
 
 
@@ -367,7 +370,10 @@ def test_extra_config_default_lets_env_var_select_mp_transfer_mode(
     # EngineDrivenTransferContext.
     monkeypatch.setenv(ENV_MP_TRANSFER_MODE, "engine_driven")
     context = create_transfer_context(
-        {"layer_0": torch.randn(2, 2)}, mode=resolved_mode
+        {"layer_0": torch.randn(2, 2)},
+        instance_id=1,
+        req_client=MagicMock(),
+        mode=resolved_mode,
     )
     assert isinstance(context, EngineDrivenTransferContext)
 
@@ -384,10 +390,13 @@ def test_create_transfer_context_force_lmcache_driven_mode() -> None:
     )
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory.
-    import lmcache.v1.platform.cpu  # noqa: F401
+    import lmcache.v1.platform.devices.cpu  # noqa: F401
 
     context = create_transfer_context(
-        {"layer_0": torch.randn(2, 2)}, mode=MPTransferMode.LMCACHE_DRIVEN
+        {"layer_0": torch.randn(2, 2)},
+        instance_id=1,
+        req_client=MagicMock(),
+        mode=MPTransferMode.LMCACHE_DRIVEN,
     )
     assert isinstance(context, LMCacheDrivenTransferContext)
 
@@ -402,7 +411,10 @@ def test_create_transfer_context_force_engine_driven_mode_on_cpu() -> None:
     )
 
     context = create_transfer_context(
-        {"layer_0": torch.randn(2, 2)}, mode="engine_driven"
+        {"layer_0": torch.randn(2, 2)},
+        instance_id=1,
+        req_client=MagicMock(),
+        mode="engine_driven",
     )
     assert isinstance(context, EngineDrivenTransferContext)
 
@@ -429,7 +441,11 @@ def test_auto_non_cuda_context_does_not_require_event_ipc(
         fail_event_backend_resolution,
     )
 
-    context = worker_transfer.create_transfer_context({"layer_0": MagicMock()})
+    context = worker_transfer.create_transfer_context(
+        {"layer_0": MagicMock()},
+        instance_id=1,
+        req_client=MagicMock(),
+    )
 
     assert isinstance(context, worker_transfer.EngineDrivenTransferContext)
 
@@ -440,7 +456,12 @@ def test_create_transfer_context_invalid_mode_raises() -> None:
     from lmcache.v1.multiprocess.transfer_context import create_transfer_context
 
     with pytest.raises(ValueError, match="Invalid MP transfer mode"):
-        create_transfer_context({"layer_0": torch.randn(2, 2)}, mode="bogus")
+        create_transfer_context(
+            {"layer_0": torch.randn(2, 2)},
+            instance_id=1,
+            req_client=MagicMock(),
+            mode="bogus",
+        )
 
 
 def test_create_transfer_context_handle_mode_unsupported_device_raises(
@@ -462,7 +483,12 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
         property(lambda self: None),
     )
     with pytest.raises(ValueError, match="not supported for device type"):
-        create_transfer_context({"layer_0": torch.randn(2, 2)}, mode="lmcache_driven")
+        create_transfer_context(
+            {"layer_0": torch.randn(2, 2)},
+            instance_id=1,
+            req_client=MagicMock(),
+            mode="lmcache_driven",
+        )
 
 
 @pytest.mark.musa
@@ -498,15 +524,13 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
     future.result.return_value = RegisterEngineDrivenContextResponse()
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
-    ctx = EngineDrivenTransferContext()
+    ctx = EngineDrivenTransferContext(1, req_client)
 
     ctx.register(
-        instance_id=1,
         kv_caches=_make_hnd_kv_caches(),
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        req_client=req_client,
         mq_timeout=1.0,
     )
 
@@ -558,23 +582,20 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
         return [torch.zeros(2, 2, 8, 16)]
 
     monkeypatch.setattr(worker_transfer, "gather_paged_kv_to_cpu", _fake_gather)
-    ctx = EngineDrivenTransferContext()
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
+    ctx = EngineDrivenTransferContext(1, req_client)
     ctx.register(
-        instance_id=1,
         kv_caches=_make_kv_caches(),
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        req_client=req_client,
         mq_timeout=1.0,
     )
 
     result = ctx.submit_store(
         "req",
         _default_key(),
-        1,
         _make_kv_caches(),
         [[0, 1]],
         MagicMock(),
@@ -631,23 +652,20 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
         captured_kwargs.update(kwargs)
 
     monkeypatch.setattr(worker_transfer, "scatter_cpu_to_paged_kv", _fake_scatter)
-    ctx = EngineDrivenTransferContext()
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
+    ctx = EngineDrivenTransferContext(1, req_client)
     ctx.register(
-        instance_id=1,
         kv_caches=_make_kv_caches(),
         model_name="m",
         world_size=1,
         blocks_in_chunk=2,
-        req_client=req_client,
         mq_timeout=1.0,
     )
 
     result = ctx.submit_retrieve(
         "req",
         _default_key(),
-        1,
         _make_kv_caches(),
         [[0, 1]],
         MagicMock(),
@@ -674,10 +692,12 @@ def test_create_transfer_context_env_var_overrides_default(
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory,
     # which is required by the lmcache-driven (handle) path.
-    import lmcache.v1.platform.cpu  # noqa: F401
+    import lmcache.v1.platform.devices.cpu  # noqa: F401
 
     monkeypatch.setenv(ENV_MP_TRANSFER_MODE, "lmcache_driven")
-    context = create_transfer_context({"layer_0": torch.randn(2, 2)})
+    context = create_transfer_context(
+        {"layer_0": torch.randn(2, 2)}, instance_id=1, req_client=MagicMock()
+    )
     assert isinstance(context, LMCacheDrivenTransferContext)
 
 
@@ -863,20 +883,73 @@ def test_engine_driven_register_sends_num_physical_slots(
     req_client = MagicMock()
     req_client.register_kv_cache_engine_driven_context.return_value = future
 
-    EngineDrivenTransferContext().register(
-        instance_id=1,
+    context = EngineDrivenTransferContext(1, req_client)
+    context.register(
         kv_caches=_make_fused_nhd_kv_caches(),
         model_name="m",
         world_size=1,
         blocks_in_chunk=8,
-        req_client=req_client,
         mq_timeout=1.0,
         layout_hints={"kv_layout": "NHD"},
     )
 
+    unregister_future = context.unregister()
+
     payload = req_client.register_kv_cache_engine_driven_context.call_args.args[0]
     assert isinstance(payload, RegisterEngineDrivenContextPayload)
     assert payload.num_physical_slots == 128
+    assert (
+        unregister_future
+        is req_client.unregister_kv_cache_engine_driven_context.return_value
+    )
+    req_client.unregister_kv_cache_engine_driven_context.assert_called_once_with(1)
+
+
+def test_engine_driven_context_unregister_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unregister is a no-op before REGISTER but rolls back a timed-out one."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import (
+        EngineDrivenTransferContext,
+        worker_transfer,
+    )
+
+    req_client = MagicMock()
+    context = EngineDrivenTransferContext(7, req_client)
+    assert context.unregister() is None
+    req_client.unregister_kv_cache_engine_driven_context.assert_not_called()
+
+    monkeypatch.setattr(
+        worker_transfer,
+        "compute_kv_layout",
+        lambda *_args, **_kwargs: (
+            16,
+            2,
+            576,
+            "float32",
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
+            1,
+        ),
+    )
+    register_future = MagicMock()
+    register_future.result.side_effect = TimeoutError()
+    req_client.register_kv_cache_engine_driven_context.return_value = register_future
+
+    with pytest.raises(TimeoutError):
+        context.register(
+            _make_fused_nhd_kv_caches(),
+            "m",
+            1,
+            8,
+            1.0,
+        )
+
+    assert (
+        context.unregister()
+        is req_client.unregister_kv_cache_engine_driven_context.return_value
+    )
+    req_client.unregister_kv_cache_engine_driven_context.assert_called_once_with(7)
 
 
 @pytest.mark.parametrize(
@@ -1116,6 +1189,12 @@ def stub_lmcache_native() -> Any:
     module.PeriodicEventNotifier = type(  # type: ignore[attr-defined]
         "PeriodicEventNotifier", (), {}
     )
+
+    class TransferDirection(IntEnum):
+        H2D = 0
+        D2H = 1
+
+    module.TransferDirection = TransferDirection  # type: ignore[attr-defined]
     with patch.dict(
         sys.modules,
         {
@@ -1367,7 +1446,7 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
 ) -> None:
     """Ensure SHM prepare_store releases reserved keys that have no writable tensor."""
     # First Party
-    from lmcache.v1.multiprocess.protocols.engine import PrepareStoreResponse
+    from lmcache.v1.multiprocess.custom_types import PrepareStoreResponse
 
     mock_storage = MagicMock()
     memory_obj = MagicMock()
