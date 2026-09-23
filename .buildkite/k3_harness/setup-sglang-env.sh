@@ -8,6 +8,7 @@ trap 'echo "ERROR: setup-sglang-env.sh failed at line $LINENO (exit code $?)" >&
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 check_gpu_health 80
+merge_pr_base_branch
 
 echo "--- :wrench: System tools (rustup, protoc, libnuma1)"
 # rustup: sglang-grpc needs Rust 1.85+ (apt's rustc is too old).
