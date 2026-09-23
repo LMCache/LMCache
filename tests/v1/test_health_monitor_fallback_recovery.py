@@ -6,7 +6,7 @@ Tests the health check lifecycle: healthy -> failure -> LOCAL_CPU fallback -> re
 """
 
 # Standard
-from typing import List, Optional
+from typing import Callable, List, Optional
 from unittest.mock import MagicMock
 import asyncio
 import threading
@@ -29,6 +29,34 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
+
+
+def _wait_for_condition(
+    description: str,
+    condition: Callable[[], bool],
+    timeout: float = 10.0,
+    poll_interval: float = 0.01,
+) -> None:
+    """Poll until a background-monitor effect is observable, or fail.
+
+    Args:
+        description: Phase description included in the timeout failure.
+        condition: Observable effect to wait for (e.g. fallback applied).
+        timeout: Maximum seconds to wait before failing.
+        poll_interval: Seconds between polls.
+
+    Raises:
+        AssertionError: If the deadline expires before the condition holds.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if condition():
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"Timed out after {timeout}s waiting for: {description}"
+            )
+        time.sleep(poll_interval)
 
 
 class ControllablePingConnector(RemoteConnector):
@@ -270,18 +298,27 @@ class TestRemoteBackendHealthCheckFallbackRecovery:
         assert thread is not None
 
         try:
-            time.sleep(0.2)
+            _wait_for_condition(
+                "initial healthy state",
+                lambda: monitor.is_healthy() is True,
+            )
             assert monitor.is_healthy() is True
 
             # Simulate failure
             controllable_connector.set_ping_error_code(1)
-            time.sleep(0.2)
+            _wait_for_condition(
+                "LOCAL_CPU fallback applied (use_hot True)",
+                lambda: mock_local_cpu_backend.use_hot is True,
+            )
             assert monitor.is_healthy() is True
             assert mock_local_cpu_backend.use_hot is True
 
             # Simulate recovery
             controllable_connector.set_ping_error_code(0)
-            time.sleep(0.2)
+            _wait_for_condition(
+                "recovery applied (use_hot False)",
+                lambda: mock_local_cpu_backend.use_hot is False,
+            )
             assert monitor.is_healthy() is True
             assert mock_local_cpu_backend.use_hot is False
         finally:
