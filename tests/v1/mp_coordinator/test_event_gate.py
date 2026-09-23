@@ -85,6 +85,56 @@ def test_gate_with_no_consumers_admits():
     assert _gate().ingest(_batch()) == IngestResult.ADMITTED
 
 
+def test_ingest_batches_forwards_in_source_order():
+    consumer = _RecordingConsumer()
+    gate = _gate(consumer)
+    first = _batch(incarnation=1, seq=1)
+    second = _batch(incarnation=1, seq=2)
+
+    summary = gate.ingest_batches([first, second])
+
+    assert summary.applied == 2
+    assert summary.duplicates == 0
+    assert summary.stale == 0
+    assert consumer.batches == [first, second]
+
+
+def test_ingest_batches_aggregates_outcomes():
+    consumer = _RecordingConsumer()
+    gate = _gate(consumer)
+    current = _batch(incarnation=2, seq=1)
+    fresh = _batch(incarnation=2, seq=2)
+
+    summary = gate.ingest_batches(
+        [
+            current,
+            _batch(incarnation=2, seq=1),
+            _batch(incarnation=1, seq=9),
+            fresh,
+        ]
+    )
+
+    assert summary.applied == 2
+    assert summary.duplicates == 1
+    assert summary.stale == 1
+    assert consumer.batches == [current, fresh]
+
+
+def test_ingest_batches_preserves_incarnation_fencing():
+    consumer = _RecordingConsumer()
+    gate = _gate(consumer)
+
+    summary = gate.ingest_batches(
+        [
+            _batch(incarnation=1, seq=1),
+            _batch(incarnation=2, seq=1),
+        ]
+    )
+
+    assert summary.applied == 2
+    assert consumer.fenced == ["node-a"]
+
+
 # -- Seq handling ------------------------------------------------------------
 
 

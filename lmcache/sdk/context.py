@@ -27,13 +27,12 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_heads,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -74,7 +73,8 @@ class LMCacheSDKContext:
         Initialize the SDK context and register the SDK transfer strategy.
 
         Args:
-            url: ZMQ endpoint URL for the LMCache message queue.
+            url: Multiprocess request endpoint. The URL scheme selects the
+                transport.
             http_url: HTTP endpoint URL for fetching information.
             model_name: Model name used by the running LMCache server instance.
             kind: The type of cache.
@@ -85,8 +85,9 @@ class LMCacheSDKContext:
         """
         self._kind = kind
         self._zmq_context = zmq.Context()
-        self._req_client: RequestClient = ZmqMultiprocessClient(
-            MessageQueueClient(url, self._zmq_context)
+        self._req_client: RequestClient = RequestClientFactory.create(
+            url,
+            context=self._zmq_context,
         )
         self._mq_timeout = timeout
         self._model_name = kind.server_model_name(model_name)
@@ -222,7 +223,11 @@ class LMCacheSDKContext:
                 for i in range(num_layers)
             }
 
-        transfer_ctx = create_transfer_context(self._kv_caches)
+        transfer_ctx = create_transfer_context(
+            self._kv_caches,
+            instance_id=self.instance_id,
+            req_client=self._req_client,
+        )
         self.blocks_in_chunk = self._chunk_size // block_size
         layout_hints = LayoutHints(
             kv_layout="HND",
@@ -232,12 +237,10 @@ class LMCacheSDKContext:
         )
 
         transfer_ctx.register(
-            self.instance_id,
             self._kv_caches,
             self._model_name,
             self._world_size,
             self.blocks_in_chunk,
-            self._req_client,
             self._mq_timeout,
             layout_hints=layout_hints,
         )
@@ -267,7 +270,7 @@ class LMCacheSDKContext:
         return self._transfer_ctx
 
     def close(self) -> None:
-        """Close the request client and ZMQ context."""
+        """Close the request client and release its transport resources."""
         self._req_client.close()
 
     def maybe_submit_lookup_request(

@@ -23,13 +23,47 @@ github_https_remote_url() {
     esac
 }
 
+pr_base_merge_mode() {
+    local raw_mode="${LMCACHE_PR_BASE_MERGE:-auto}"
+    local normalized_mode
+    normalized_mode="$(printf '%s' "${raw_mode}" | tr '[:upper:]' '[:lower:]')"
+    case "${normalized_mode}" in
+        ""|auto|pr)
+            printf 'auto\n'
+            ;;
+        1|true|yes|on|always|force)
+            printf 'always\n'
+            ;;
+        0|false|no|off|never|skip)
+            printf 'never\n'
+            ;;
+        *)
+            echo "ERROR: invalid LMCACHE_PR_BASE_MERGE=${raw_mode}" >&2
+            echo "Expected one of: auto, always, never" >&2
+            return 1
+            ;;
+    esac
+}
+
 # Merge the PR base branch into the current checkout for Buildkite PR builds.
 # Buildkite's checkout step may leave the pod on the raw PR head commit rather
 # than a synthetic merge commit, so tests can miss conflicts/regressions that
 # only appear once the latest base branch is merged in.
 merge_pr_base_branch() {
+    local merge_mode
+    merge_mode="$(pr_base_merge_mode)"
+    case "${merge_mode}" in
+        never)
+            echo "--- :git: PR-base pre-merge disabled (LMCACHE_PR_BASE_MERGE=${LMCACHE_PR_BASE_MERGE:-auto})"
+            return 0
+            ;;
+        always)
+            echo "--- :git: PR-base pre-merge forced (LMCACHE_PR_BASE_MERGE=${LMCACHE_PR_BASE_MERGE})"
+            ;;
+    esac
+
     local pr_number="${BUILDKITE_PULL_REQUEST:-false}"
-    if [[ -z "${pr_number}" || "${pr_number}" == "false" ]]; then
+    if [[ "${merge_mode}" == "auto" && ( -z "${pr_number}" || "${pr_number}" == "false" ) ]]; then
         echo "--- :git: Not a PR build; skipping base-branch pre-merge"
         return 0
     fi
@@ -147,7 +181,8 @@ find_free_port() {
     return 1
 }
 
-# Wait for a vLLM server to become ready by polling /v1/models.
+# Wait for an inference server to become ready. When an engine adapter is
+# loaded, use its readiness URLs; otherwise fall back to /v1/models.
 # Usage: wait_for_server <port> [timeout_secs] [log_file]
 # If log_file is provided, its tail is dumped to stderr on timeout so the
 # real failure (e.g. an ImportError during startup) is visible inline in the
@@ -156,15 +191,29 @@ wait_for_server() {
     local port="$1"
     local timeout="${2:-180}"
     local log_file="${3:-}"
-    echo "Waiting for vLLM on port $port (timeout=${timeout}s)..."
+    local server_name="${ENGINE_NAME:-inference server}"
+    local -a ready_urls=("http://localhost:${port}/v1/models")
+
+    if declare -F engine_ready_urls >/dev/null; then
+        mapfile -t ready_urls < <(engine_ready_urls "$port")
+    fi
+    if [[ ${#ready_urls[@]} -eq 0 ]]; then
+        echo "No readiness URLs configured for ${server_name}" >&2
+        return 1
+    fi
+
+    echo "Waiting for ${server_name} on port $port (timeout=${timeout}s)..."
     for ((i = 0; i < timeout; i++)); do
-        if curl -sf "http://localhost:${port}/v1/models" >/dev/null 2>&1; then
-            echo "vLLM ready on port $port (${i}s)"
-            return 0
-        fi
+        local ready_url
+        for ready_url in "${ready_urls[@]}"; do
+            if curl --noproxy '*' -sf "$ready_url" >/dev/null 2>&1; then
+                echo "${server_name} ready on port $port (${i}s)"
+                return 0
+            fi
+        done
         sleep 1
     done
-    echo "vLLM failed to start on port $port within ${timeout}s" >&2
+    echo "${server_name} failed to start on port $port within ${timeout}s" >&2
     if [[ -n "$log_file" && -f "$log_file" ]]; then
         echo "--- :page_facing_up: Last 200 lines of ${log_file}" >&2
         tail -n 200 "$log_file" >&2
