@@ -272,12 +272,13 @@ Length-prefixed frames keep the reader simple and let truncated tails
 |-------|------|---------|
 | `magic` | `bytes` (`LMCT`) | Sanity check; reader rejects non-matching files |
 | `format_version` | `int` (1) | Bumped on incompatible **framing** layout changes (length prefix, struct shape). Reader rejects unknown versions |
-| `level` | `str` (`storage`) | Trace level discriminator. Future `mq` / `gpu` levels will share this format and use this field for replay-driver dispatch |
+| `level` | `str` (`storage` or `events`) | Trace level discriminator; replay drivers dispatch on it. Future `mq` / `gpu` levels will share this format |
 | `trace_schema_version` | `int` (1) | Bumped on incompatible changes to the captured API surface (e.g. a traced method's args change, a codec wire form changes). Owned by the trace subsystem, not tied to `lmcache.__version__`; reader rejects mismatches |
 | `t_mono_start` | `float` | `time.monotonic()` at recorder construction; record `t_mono` is relative to this |
 | `t_wall_start` | `float` | `time.time()` at construction, for absolute correlation with external logs |
 | `sm_config_json` | `str` | JSON dump of `StorageManagerConfig` at record time, or empty string if attach was skipped |
 | `sm_config_digest` | `str` | SHA-256 of `sm_config_json`. Replay drivers use this to detect mismatched configurations |
+| `level_meta` | `dict` (default `{}`) | Level-specific metadata. Empty for `storage`. `events` records `instance_id`, `cache_event_schema_version`, `lmcache_version`. Defaulted, so older files decode |
 
 ### `Record`
 
@@ -327,7 +328,7 @@ arg group:
 
 | Flag | Description |
 |------|-------------|
-| `--trace-level {storage}` | **Primary enable flag.** Currently only `storage` is supported. |
+| `--trace-level {storage,events}` | **Primary enable flag.** `storage` records StorageManager calls; `events` records the cache-event stream (see §12). |
 | `--trace-output FILE` | Output path. Optional; if omitted while `--trace-level` is set, a timestamped file under `$TMPDIR` is minted (`lmcache-trace-<pid>-<UTC>.lct`) and its path is logged at INFO. |
 
 Both flags flow through `ObservabilityConfig` and are consumed by
@@ -337,7 +338,8 @@ When `--trace-level` is unset, the helper returns `None` and no
 recorder is registered — true zero overhead.
 
 `lmcache trace info|replay|record` reads the format defined here;
-see §9 for details.
+see §9 for details. `replay` accepts `storage` traces only and refuses an
+`events` file with a message saying so.
 
 ---
 
@@ -543,3 +545,60 @@ file format:
   `replay` end-to-end: CSV/JSON export and `-q` terminal-summary
   suppression against a recorded `reserve_write` + `finish_write`
   fixture.
+
+---
+
+## 12. The `events` level
+
+`lmcache server --trace-level events` records the cache-event stream the
+server emits for the MP coordinator: the `CacheEventBatch` list a
+`CacheEventSubscriber` would `POST /events`, captured at the moment it is
+built. It does not need a coordinator. A fleet that runs without one, such
+as a benchmark, can record what it would have reported, and the file can
+later be replayed into a coordinator or into a test double of one.
+
+### Where it hooks in
+
+```
+storage layer ──► EventBus ──► CacheEventSubscriber ──► TraceCacheEventSink ──► EventsTraceRecorder ──► file
+                                                    └──► HttpCacheEventSink (when a coordinator is configured)
+```
+
+`EventsTraceRecorder` is a `TraceRecorder` with no bus subscriptions: the
+subscriber already does the mapping and batching, and the sink hands each
+flushed batch to `write_record`. Registering the recorder on the bus still
+closes the file at bus shutdown. The `@enable_tracing` gate is left off
+(`captures_calls = False`), so no `TRACE_CALL` events are built for a level
+that would not read them. When the server also reports to a coordinator, a
+`MultiCacheEventSink` delivers each flush to both; a failure of one does
+not stop the other.
+
+### Records
+
+Same `Record` shape as every level; `qualname` discriminates.
+
+| `qualname` | When | `args` |
+|---|---|---|
+| `events.lifecycle` | subscriber start; sink close | `phase` (`start` / `stop`); at `start` also `instance_id`, `incarnation`, `ip`, `http_port`, `mq_port` |
+| `events.batch` | each batch the subscriber flushes | the batch in **wire form**: one element of `CacheEventsRequest.batches`, byte-for-byte what `POST /events` carries |
+
+Wire form is the point. A replayer posts `args` to a coordinator with no
+conversion, and a recorded file has exactly the compatibility with a newer
+coordinator that a live server would have. `CACHE_EVENT_SCHEMA_VERSION` in
+`level_meta` names the shape; bump it in `mp_coordinator/api.py` when a
+batch field is added, removed or changes meaning.
+
+Heartbeats are not recorded: they carry nothing, and a replayer heartbeats
+on its own schedule. One file is written per server process; a fleet
+capture is a set of files, one per instance, which `lmcache trace info`
+summarizes one at a time.
+
+### Size and privacy
+
+`token_ids` on store entries are the bulk of a file and are the prompt.
+They are recorded as emitted. Anything that leaves the environment it was
+captured in should have `model_name` and `cache_salt` pseudonymized and
+`token_ids` dropped unless blend matching is being tested; `chunk_hash` is
+a hash of the tokens and reveals nothing. That tooling lives outside this
+repository.
+

@@ -111,8 +111,10 @@ Commonly used flags include:
        (default ``30``).
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation for P2P reads (default ``nixl``).
-   * - ``--trace-level {storage}``
-     - Enable storage-level trace recording (see :doc:`trace`).
+   * - ``--trace-level {storage,events}``
+     - Enable trace recording: ``storage`` records StorageManager calls for
+       replay, ``events`` records the cache-event stream emitted for the
+       coordinator, with or without one configured (see :doc:`trace`).
    * - ``--trace-output PATH``
      - Destination for recorded ``.lct`` trace files.
 
