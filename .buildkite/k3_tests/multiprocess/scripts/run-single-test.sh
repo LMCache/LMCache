@@ -3,7 +3,7 @@
 # Usage: run-single-test.sh <test_name>
 #   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
-#              | restart_recovery | lazy_offload | gds_smoke_test
+#              | restart_recovery | lazy_offload | gds_smoke
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -18,14 +18,54 @@ source .buildkite/k3_tests/common_scripts/helpers.sh
 
 # ── Configuration ────────────────────────────────────────────
 export LMCACHE_PORT="${LMCACHE_PORT:-6555}"
-export VLLM_PORT="${VLLM_PORT:-8000}"
-export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
-export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
-export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
+export INFERENCE_ENGINE="${INFERENCE_ENGINE:-vllm}"
+ENGINE_ADAPTER="${SCRIPT_DIR}/engines/${INFERENCE_ENGINE}.sh"
+if [[ ! -f "$ENGINE_ADAPTER" ]]; then
+    echo "Unsupported inference engine '${INFERENCE_ENGINE}': $ENGINE_ADAPTER not found" >&2
+    exit 1
+fi
+source "$ENGINE_ADAPTER"
+source "${SCRIPT_DIR}/workload-discovery.sh"
 
-# gds_smoke_test enables the GDS L1 NVMe-slab tier
+# Keep direct run-single-test.sh callers consistent with run.sh. The latter
+# performs this check before dependency installation; this second check keeps
+# the lower-level entry point safe for AMD and local callers.
+if resolve_engine_workload "$TEST_NAME" "$SCRIPT_DIR" "$INFERENCE_ENGINE"; then
+    :
+else
+    status=$?
+    if [[ "$status" -eq "$WORKLOAD_UNSUPPORTED_STATUS" ]]; then
+        exit 0
+    fi
+    exit "$status"
+fi
+exec_script="$RESOLVED_WORKLOAD_SCRIPT"
+
+if [[ "$TEST_NAME" == "lm_eval_preemption" ]]; then
+    export LM_EVAL_VERIFY_MODE=preemption
+fi
+# Keep this aligned with wait-for-servers.sh. Large-model startup can exceed
+# five minutes on cold or contended CI nodes before the service is unhealthy.
+export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-600}"
+export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
+export DEFAULT_MODEL="${DEFAULT_MODEL:-${ENGINE_DEFAULT_MODEL:-Qwen/Qwen3-14B}}"
+export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
+engine_configure_defaults
+
+case "${LMCACHE_REQUEST_TRANSPORT}" in
+    zmq) export LMCACHE_REQUEST_SCHEME="tcp" ;;
+    grpc) export LMCACHE_REQUEST_SCHEME="grpc" ;;
+    *)
+        echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'"
+        echo "Valid values: zmq, grpc"
+        exit 1
+        ;;
+esac
+
+# gds_smoke enables the GDS L1 NVMe-slab tier
 GDS_SCRATCH="${GDS_SCRATCH:-/scratch}"
-if [ "$TEST_NAME" = "gds_smoke_test" ]; then
+if [ "$TEST_NAME" = "gds_smoke" ]; then
     export GDS_L1_PATH="${GDS_SCRATCH}/lmcache-gds-${BUILD_ID}-${TEST_NAME}"
     echo "GDS L1 tier enabled (slab dir: $GDS_L1_PATH)"
 fi
@@ -60,17 +100,27 @@ elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ]; then
     export SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
     export LIMIT="${LIMIT:-300}"
 elif [ "$TEST_NAME" = "kimi_linear_tp" ]; then
-    # Self-contained test: run-kimi-linear-tp.sh owns the server lifecycle and
+    # Self-contained test: kimi-linear-tp.sh owns the server lifecycle and
     # all launch flags (TP=2, trust-remote-code, align, chunk/batch sizes). Only
     # the model name is declared here so the banner and the script's ${MODEL:-}
     # fallback both resolve to Kimi-Linear rather than the generic default below.
     export MODEL="${MODEL:-moonshotai/Kimi-Linear-48B-A3B-Instruct}"
 elif [ "$TEST_NAME" = "dsv4_flash_tp" ]; then
-    # Self-contained test: run-dsv4-flash-tp.sh owns the server lifecycle and
+    # Self-contained test: dsv4-flash-tp.sh owns the server lifecycle and
     # all launch flags (TP=4, fp8_ds_mla, deepseek_v4 tokenizer). Only the
     # model name is declared here so the banner and the script's ${MODEL:-}
     # fallback both resolve to DeepSeek-V4-Flash.
     export MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+elif [ "$TEST_NAME" = "deadlock" ]; then
+    # The workload is engine-neutral, while each adapter owns the launch flags
+    # needed to reproduce the high-concurrency TP=2 scenario.
+    export MODEL="deepseek-ai/DeepSeek-V2-Lite-Chat"
+    export ENGINE_LAUNCH_PROFILE=deadlock
+    export ENGINE_USE_ALL_DEVICES=true
+    export LMCACHE_HOST=localhost
+    export CHUNK_SIZE=256
+    export CPU_BUFFER_SIZE=50
+    export MAX_WORKERS=2
 elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # The shared GPU launcher includes these values in the real vLLM
     # kv-transfer configuration only for this integration test.
@@ -78,14 +128,18 @@ elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # vLLM's default paged-block size is 16 tokens. Matching it keeps this
     # test's expected LMCache chunk counts exact and small.
     export CHUNK_SIZE="${CHUNK_SIZE:-16}"
-    export MODEL="${MODEL:-Qwen/Qwen3-14B}"
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
 else
-    export MODEL="${MODEL:-Qwen/Qwen3-14B}"
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
 fi
 export CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 export MAX_WORKERS="${MAX_WORKERS:-4}"
 export LMCACHE_DIR="$REPO_ROOT"
 export RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
+
+if declare -F engine_configure_workload > /dev/null; then
+    engine_configure_workload "$TEST_NAME"
+fi
 
 mkdir -p "$RESULTS_DIR"
 
@@ -98,19 +152,25 @@ echo "============================================"
 echo "Build ID: $BUILD_ID"
 echo "Model: $MODEL"
 echo "LMCache port: $LMCACHE_PORT"
-echo "vLLM port: $VLLM_PORT"
-echo "vLLM baseline port: $VLLM_BASELINE_PORT"
+echo "Request transport: $LMCACHE_REQUEST_TRANSPORT"
+echo "Inference engine: $ENGINE_NAME"
+echo "Engine port: $ENGINE_PORT"
+echo "Engine baseline port: $ENGINE_BASELINE_PORT"
 echo "Results dir: $RESULTS_DIR"
 echo ""
 
-# Tests that handle their own server lifecycle (different GPU/model config)
-SELF_CONTAINED_TESTS=" deadlock p2p kimi_linear_tp dsv4_flash_tp "
+# Tests that still handle their own server lifecycle.
+SELF_CONTAINED_TESTS=" mp_autostart_tp2 p2p kimi_linear_tp dsv4_flash_tp "
 
-# Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
+# Tests that compare against a baseline engine (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
 # else runs on GPU 0 alone, so launch-processes.sh skips the baseline.
+# Respect an explicit environment override from a device-specific wrapper
+# before applying the default baseline heuristic below.
 BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 "
-if [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then
+if [ -n "${LAUNCH_BASELINE:-}" ]; then
+    export LAUNCH_BASELINE
+elif [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then
     export LAUNCH_BASELINE=true
 else
     export LAUNCH_BASELINE=false
@@ -127,12 +187,12 @@ if [[ "$SELF_CONTAINED_TESTS" != *" $TEST_NAME "* ]]; then
     fi
     echo ""
 
-    # ── Step 2: Wait for vLLM to be ready ───────────────────────
+    # ── Step 2: Wait for the inference engine to be ready ───────
     echo "============================================"
-    echo "=== Waiting for vLLM to be ready ==="
+    echo "=== Waiting for ${ENGINE_NAME} to be ready ==="
     echo "============================================"
     if ! "${SCRIPT_DIR}/wait-for-servers.sh"; then
-        echo "vLLM failed to become ready"
+        echo "${ENGINE_NAME} failed to become ready"
         exit 1
     fi
     echo ""
@@ -142,66 +202,6 @@ fi
 echo "============================================"
 echo "=== Running test: ${TEST_NAME} ==="
 echo "============================================"
-
-case "$TEST_NAME" in
-    lm_eval)
-        exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
-        ;;
-    lm_eval_preemption)
-        export LM_EVAL_VERIFY_MODE=preemption
-        exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
-        ;;
-    hma_lm_eval_gemma4)
-        exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
-        ;;
-    hma_lm_eval_qwen3_5)
-        exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
-        ;;
-    vllm_bench)
-        exec_script="${SCRIPT_DIR}/run-vllm-bench.sh"
-        ;;
-    long_doc_qa)
-        exec_script="${SCRIPT_DIR}/run-long-doc-qa.sh"
-        ;;
-    long_doc_qa_l2)
-        exec_script="${SCRIPT_DIR}/run-long-doc-qa-l2.sh"
-        ;;
-    fault_tolerance)
-        exec_script="${SCRIPT_DIR}/run-fault-tolerance.sh"
-        ;;
-    deadlock)
-        exec_script="${SCRIPT_DIR}/run-deadlock.sh"
-        ;;
-    restart_recovery)
-        exec_script="${SCRIPT_DIR}/run-restart-recovery.sh"
-        ;;
-    cache_stats)
-        exec_script="${SCRIPT_DIR}/run-cache-stats.sh"
-        ;;
-    lazy_offload)
-        exec_script="${SCRIPT_DIR}/run-lazy-offload.sh"
-        ;;
-    p2p)
-        exec_script="${SCRIPT_DIR}/run-p2p.sh"
-        ;;
-    kimi_linear_tp)
-        exec_script="${SCRIPT_DIR}/run-kimi-linear-tp.sh"
-        ;;
-    dsv4_flash_tp)
-        exec_script="${SCRIPT_DIR}/run-dsv4-flash-tp.sh"
-        ;;
-    http_api)
-        exec_script="${SCRIPT_DIR}/run-http-api.sh"
-        ;;
-    gds_smoke_test)
-        exec_script="${SCRIPT_DIR}/run-gds-smoke.sh"
-        ;;
-    *)
-        echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, lazy_offload, http_api, gds_smoke_test, p2p, kimi_linear_tp, dsv4_flash_tp"
-        exit 1
-        ;;
-esac
 
 if ! "$exec_script"; then
     echo "${TEST_NAME} test failed"

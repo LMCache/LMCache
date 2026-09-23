@@ -4,6 +4,15 @@
 
 BUILD_ID="${BUILD_ID:-local_$$}"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+INFERENCE_ENGINE="${INFERENCE_ENGINE:-vllm}"
+ENGINE_ADAPTER="${SCRIPT_DIR}/engines/${INFERENCE_ENGINE}.sh"
+
+if [[ -f "$ENGINE_ADAPTER" ]]; then
+    source "$ENGINE_ADAPTER"
+    engine_configure_defaults
+fi
 
 echo "=== Cleaning up background processes ==="
 
@@ -22,11 +31,16 @@ else
     echo "No PID file found at $PID_FILE"
 fi
 
-# Also kill any stray vllm/lmcache processes from this build
+# Also release serving ports in case a child process outlived its parent.
 # (safety net in case PIDs weren't recorded)
-for port in "${VLLM_PORT:-8000}" "${VLLM_BASELINE_PORT:-9000}" "${LMCACHE_PORT:-6555}"; do
+for port in "${ENGINE_PORT:-${VLLM_PORT:-8000}}" \
+    "${ENGINE_BASELINE_PORT:-${VLLM_BASELINE_PORT:-9000}}" \
+    "${LMCACHE_PORT:-6555}"; do
     fuser -k "${port}/tcp" 2>/dev/null || true
 done
+if declare -F engine_cleanup_processes >/dev/null; then
+    engine_cleanup_processes
+fi
 
 # Remove the GDS slab scratch dir (only set for gds_* tests). It lives on the
 # /scratch hostPath (host-local NVMe), so it persists past the pod and the
@@ -39,9 +53,10 @@ fi
 echo "=== Cleanup complete ==="
 
 # Copy server logs to the workspace so Buildkite can collect them as artifacts
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 cp /tmp/build_${BUILD_ID}_*.log "${REPO_ROOT}/" 2>/dev/null || true
+if [[ -d "${RESULTS_DIR:-}" ]]; then
+    cp -a "$RESULTS_DIR" "${REPO_ROOT}/ci_results_${BUILD_ID}"
+fi
 
 # Wait for GPU memory to be fully released
 echo "Waiting 5 seconds for GPU memory to be released..."
