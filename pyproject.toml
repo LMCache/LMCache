@@ -176,7 +176,6 @@ ignore = [
 "lmcache/v1/storage_backend/pd_backend.py" = ["G004"]
 "lmcache/v1/storage_backend/pd_backend_async.py" = ["G004"]
 "lmcache/v1/transfer_channel/nixl_channel.py" = ["G004"]
-"tests/disagg/test_nixl_cache_engine.py" = ["G004"]
 "tests/disagg/test_nixl_channel.py" = ["G004"]
 "tests/v1/shm_allocator/test_shm_allocator.py" = ["G004"]
 "tests/v1/storage_backend/test_p2p_backend_with_controller.py" = ["G004"]
