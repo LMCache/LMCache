@@ -305,6 +305,24 @@ def test_management_reaper_isolates_drop_failure() -> None:
     assert summary.message == "reaped=1, failures=1"
 
 
+def test_management_clear_defaults_to_non_force() -> None:
+    ctx = MagicMock()
+    mgmt = ManagementModule(ctx)
+
+    mgmt.clear()
+
+    ctx.storage_manager.clear.assert_called_once_with(force=False)
+
+
+def test_management_clear_accepts_force() -> None:
+    ctx = MagicMock()
+    mgmt = ManagementModule(ctx)
+
+    mgmt.clear(force=True)
+
+    ctx.storage_manager.clear.assert_called_once_with(force=True)
+
+
 def test_management_reaper_reaps_and_drops() -> None:
     """The reaper scans targets and calls drop_instance_state for reaped ids."""
     target = _FakeTarget()

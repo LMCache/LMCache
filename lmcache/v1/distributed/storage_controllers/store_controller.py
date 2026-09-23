@@ -653,7 +653,16 @@ class StoreController(StorageControllerInterface):
                 continue
 
             adapter = self._l2_adapters[adapter_index]
-            task_id = adapter.submit_store_task(successful_keys, successful_objs)
+            try:
+                task_id = adapter.submit_store_task(successful_keys, successful_objs)
+            except Exception:
+                logger.exception(
+                    "Failed to submit store task to adapter %d for %d keys.",
+                    adapter_index,
+                    len(successful_keys),
+                )
+                l1_mgr.finish_read(successful_keys)
+                continue
 
             self._in_flight_tasks[(adapter_index, task_id)] = InFlightStoreTask(
                 adapter_index=adapter_index,

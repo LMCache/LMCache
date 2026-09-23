@@ -76,9 +76,6 @@ class _FakeRawBlockDevice:
         length = len(data) if payload_len is None else payload_len
         self._data[offset : offset + length] = bytes(memoryview(data)[:length])
 
-    def read_uring(self, offset, out, payload_len, total_len=None):
-        self.pread_into(offset, out, payload_len, total_len)
-
     def write_uring(
         self,
         offset: int,
