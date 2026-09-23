@@ -181,6 +181,14 @@ class Bitmap:
         """
         ...
 
+    def size(self) -> int:
+        """Number of bits in the bitmap."""
+        ...
+
+    def __len__(self) -> int:
+        """Number of bits in the bitmap (same as :meth:`size`)."""
+        ...
+
     def popcount(self) -> int:
         """Return the number of bits set to 1."""
         ...
@@ -284,6 +292,49 @@ def unfold(
     Returns:
         Retain mask of length ``len(group_windows) * num_chunks * num_ranks``
         (all ranks of each retained ``(group, chunk)`` set).
+    """
+    ...
+
+def fold_grouped(
+    rows: Sequence[Bitmap],
+    windows: Sequence[int],
+) -> Bitmap:
+    """Fold per-row presence bitmaps into servable prefix lengths.
+
+    Args:
+        rows: Presence bitmaps, all of the same length (the number of
+            chunks); bit ``j`` of ``rows[i]`` set iff chunk ``j`` is present.
+        windows: Per-row cross-chunk window size in chunks, parallel to
+            ``rows``; ``<= 0`` means full attention.
+
+    Returns:
+        A bitmap of size ``num_chunks``; bit ``j`` set iff every row can serve
+        a length-``j + 1`` prefix under its own window.
+
+    Raises:
+        ValueError: If ``rows`` and ``windows`` differ in length or the rows
+            differ in length.
+    """
+    ...
+
+def unfold_grouped(
+    hit_length: int,
+    num_chunks: int,
+    windows: Sequence[int],
+) -> list[Bitmap]:
+    """Expand a model-wide hit length into per-row retain bitmaps.
+
+    Args:
+        hit_length: Model-wide prefix hit length in chunks (clamped to
+            ``num_chunks``).
+        num_chunks: Number of LMCache chunks in the request.
+        windows: Per-row cross-chunk window size in chunks; ``<= 0`` means
+            full attention.
+
+    Returns:
+        ``len(windows)`` bitmaps of size ``num_chunks``, parallel to
+        ``windows``; bit ``j`` of row ``i`` set iff that row retains chunk
+        ``j``.
     """
     ...
 
