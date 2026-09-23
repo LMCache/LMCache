@@ -453,11 +453,12 @@ class _PrefetchStorageManager:
     submit_calls: list[dict] = field(default_factory=list)
 
     def submit_prefetch_task(self, spec, **_) -> _PrefetchHandle:
-        self.submit_calls.append({"keys": list(spec.keys), "mode": spec.mode})
-        return _PrefetchHandle(len(spec.keys))
+        keys = [key for row in spec.key_groups for key in row.keys]
+        self.submit_calls.append({"keys": keys, "lock_mode": spec.lock_mode})
+        return _PrefetchHandle(len(keys))
 
-    def query_prefetch_status(self, handle) -> _PrefetchBitmap:
-        return _PrefetchBitmap(handle.total_requested_keys)
+    def query_prefetch_status(self, handle) -> list[_PrefetchBitmap]:
+        return [_PrefetchBitmap(handle.total_requested_keys)]
 
 
 @dataclass
@@ -588,9 +589,11 @@ class TestPrefetchEndpoint:
 class _ClearEngine:
     clear_calls: int = 0
     cache_contexts: Optional[dict] = None
+    force_values: list[bool] = field(default_factory=list)
 
-    def clear(self) -> None:
+    def clear(self, force: bool = False) -> None:
         self.clear_calls += 1
+        self.force_values.append(force)
 
 
 def _make_clear_app(engine: Optional[_ClearEngine]) -> FastAPI:
@@ -610,6 +613,15 @@ class TestClearEndpoint:
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"status": "ok", "cleared": {"tier": "l1"}}
         assert engine.clear_calls == 1
+        assert engine.force_values == [False]
+
+    def test_clear_l1_force(self):
+        engine = _ClearEngine()
+        client = TestClient(_make_clear_app(engine))
+        resp = client.post("/cache/clear", json={"tier": "l1", "force": True})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "cleared": {"tier": "l1"}}
+        assert engine.force_values == [True]
 
     def test_clear_no_body_defaults_to_l1(self):
         """The body is optional; an absent body defaults to tier l1."""
@@ -619,6 +631,7 @@ class TestClearEndpoint:
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"status": "ok", "cleared": {"tier": "l1"}}
         assert engine.clear_calls == 1
+        assert engine.force_values == [False]
 
     def test_clear_unsupported_tier(self):
         client = TestClient(_make_clear_app(_ClearEngine()))
