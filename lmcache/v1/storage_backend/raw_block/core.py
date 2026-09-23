@@ -5,6 +5,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Optional
 import ctypes
@@ -43,6 +44,7 @@ _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
+_MAX_PUT_MANY_IO_URING_BATCH_KEYS = 64
 _MAX_FDP_PLACEMENT_ID = 0xFFFF
 
 # FDP placement ID semantics are shared by design across raw-block write paths.
@@ -54,6 +56,11 @@ _MAX_FDP_PLACEMENT_ID = 0xFFFF
 # Metadata checkpoint placement is optional. ``None`` keeps the historical
 # default NVMe write behavior; a positive identifier emits an FDP directive.
 PlacementId = int | None
+
+# Slot-header validation issues many small pread calls during POSIX restart
+# recovery. Use a conservative reader count to expose device parallelism without
+# relying on high thread counts; io_uring recovery should use batched reads.
+DEFAULT_RECOVERY_READ_THREADS = 8
 
 
 def round_up(x: int, align: int) -> int:
@@ -284,6 +291,7 @@ class RawBlockCore:
                 "meta_checkpoint_placement_id requires "
                 "io_engine='io_uring' and use_uring_cmd=true"
             )
+        self._recovery_read_threads = DEFAULT_RECOVERY_READ_THREADS
         if self.use_uring_cmd and self.use_odirect:
             logger.warning(
                 "RawBlockCore: use_odirect is ignored for NVMe namespace "
@@ -722,6 +730,12 @@ class RawBlockCore:
     ) -> RawBlockPutManyResult:
         """Persist a batch of memory objects into raw-block slots.
 
+        With ``io_engine='io_uring'`` and more than one key, writes are
+        submitted in batches and failure is no longer independent per key: a
+        device write failure rolls back every key submitted in the same batch.
+        Batches are bounded, so a request larger than one batch can leave
+        earlier batches committed while a later one rolls back.
+
         Args:
             keys: Ordered raw-block key specs corresponding to ``objs``.
             objs: Memory objects whose byte buffers should be written.
@@ -730,10 +744,10 @@ class RawBlockCore:
                 0 is rejected because default writes already use that mapping.
 
         Returns:
-            Per-key success results and newly stored encoded keys. If no free
-            raw-block slot is available, that key is reported as failed; slot
-            reclamation is owned by the adapter/controller calling
-            ``delete_many``.
+            Per-key success results and newly stored encoded keys. A key is
+            reported as failed when no free raw-block slot is available or when
+            its payload does not fit a slot. Slot reclamation is owned by the
+            adapter/controller calling ``delete_many``.
 
         Raises:
             ValueError: If either sequence is empty, sequence lengths do not
@@ -748,6 +762,9 @@ class RawBlockCore:
             len(keys),
             field_name="placement_ids",
         )
+
+        if self.io_engine == "io_uring" and len(keys) > 1:
+            return self._put_many_batch_io(keys, objs, per_key_placement_ids)
 
         results = [False] * len(keys)
         stored_keys: list[str] = []
@@ -1223,6 +1240,15 @@ class RawBlockCore:
         except Exception:
             return None
 
+    def _payload_fits_slot(self, payload_len: int) -> bool:
+        """Return whether a logical payload can fit in one raw-block slot."""
+        payload_capacity = self.slot_bytes - self.header_bytes
+        if payload_len > payload_capacity:
+            return False
+        if self._requires_transfer_alignment:
+            return round_up(payload_len, self.block_align) <= payload_capacity
+        return True
+
     def _prepare_write_payload(self, memory_obj: MemoryObj) -> tuple[Any, int, int]:
         """Prepare the payload buffer and lengths for a raw-block write.
 
@@ -1521,6 +1547,10 @@ class RawBlockCore:
             int(payload_len) == int(total_len)
             for payload_len, total_len in zip(payload_lens, total_lens, strict=True)
         )
+        # batched_write carries a single length per entry, so it cannot express
+        # O_DIRECT padding where payload_len < total_len. Fall back to
+        # write_uring, which takes both lengths and lets Rust build the aligned
+        # padded transfer.
         if can_batch:
             batch_id = raw_dev.batched_write(
                 [int(offset) for offset in offsets],
@@ -1596,35 +1626,17 @@ class RawBlockCore:
                 total_lens,
             )
 
-        can_batch = all(
-            int(payload_len) == int(total_len)
-            for payload_len, total_len in zip(payload_lens, total_lens, strict=True)
+        batch_id = raw_dev.batched_read(
+            [int(offset) for offset in offsets],
+            list(buffers),
+            [int(total_len) for total_len in total_lens],
         )
-        # batched_read requires aligned buffers when O_DIRECT is enabled
-        # Check alignment before using batched_read
-        if can_batch and all(self._is_buffer_aligned(buf) for buf in buffers):
-            batch_id = raw_dev.batched_read(
-                [int(offset) for offset in offsets],
-                list(buffers),
-                [int(total_len) for total_len in total_lens],
-            )
-            return self._wait_iouring_results(
-                raw_dev,
-                batch_id,
-                len(offsets),
-                "io_uring read",
-            )
-
-        results = []
-        for offset, buf, payload_len, total_len in zip(
-            offsets, buffers, payload_lens, total_lens, strict=True
-        ):
-            try:
-                raw_dev.read_uring(int(offset), buf, int(payload_len), int(total_len))
-                results.append(True)
-            except Exception:
-                results.append(False)
-        return results
+        return self._wait_iouring_results(
+            raw_dev,
+            batch_id,
+            len(offsets),
+            "io_uring read",
+        )
 
     def _wait_iouring_results(
         self,
@@ -1716,6 +1728,253 @@ class RawBlockCore:
         except Exception as e:
             logger.error("RawBlockCore write failed for %s: %s", key.encoded, e)
             return False
+
+    def _put_many_batch_io(
+        self,
+        keys: Sequence[RawBlockKeySpec],
+        objs: Sequence[MemoryObj],
+        placement_ids: Sequence[PlacementId],
+    ) -> RawBlockPutManyResult:
+        """Persist objects using bounded io_uring batch submissions.
+
+        Large ``put_many`` calls are split into chunks so one caller cannot
+        monopolize the RawBlockCore lock while planning slots, and so the
+        transient memory a single batch holds stays bounded.
+
+        Each key contributes at least two write entries (header + payload).
+        The io_uring_cmd path splits those further by
+        ``max_data_transfer_size``, so one chunk can expand to many more
+        entries there. Alignment and padding are handled by the existing write
+        paths, which may allocate bounce buffers retained until I/O completes.
+
+        Args:
+            keys: Ordered raw-block key specs corresponding to ``objs``.
+            objs: Memory objects whose byte buffers should be written.
+            placement_ids: Normalized per-key FDP placement identifiers, one
+                entry per key. ``None`` entries omit the directive.
+
+        Returns:
+            Per-key success results aligned with ``keys`` and the list of
+            encoded keys that were newly committed to the index.
+
+        Raises:
+            ValueError: If ``keys``, ``objs``, and ``placement_ids`` do not all
+                have the same length.
+        """
+        if len(keys) <= _MAX_PUT_MANY_IO_URING_BATCH_KEYS:
+            return self._put_many_batch_io_chunk(keys, objs, placement_ids)
+
+        results = [False] * len(keys)
+        stored_keys: list[str] = []
+        first_occurrences: dict[str, int] = {}
+        unique_plan: list[tuple[int, RawBlockKeySpec, MemoryObj, PlacementId]] = []
+        duplicate_indices: list[tuple[int, int]] = []
+
+        # Deduplicate before chunking so duplicates that cross chunk boundaries
+        # still inherit the first occurrence result without being rewritten.
+        for i, (key, obj, placement_id) in enumerate(
+            zip(keys, objs, placement_ids, strict=True)
+        ):
+            first_index = first_occurrences.get(key.encoded)
+            if first_index is not None:
+                duplicate_indices.append((i, first_index))
+                continue
+            first_occurrences[key.encoded] = i
+            unique_plan.append((i, key, obj, placement_id))
+
+        chunk_size = _MAX_PUT_MANY_IO_URING_BATCH_KEYS
+        for start in range(0, len(unique_plan), chunk_size):
+            chunk = unique_plan[start : start + chunk_size]
+            chunk_result = self._put_many_batch_io_chunk(
+                [key for _, key, _, _ in chunk],
+                [obj for _, _, obj, _ in chunk],
+                [placement_id for _, _, _, placement_id in chunk],
+            )
+            for local_i, (global_i, _key, _obj, _placement_id) in enumerate(chunk):
+                results[global_i] = chunk_result.results[local_i]
+            stored_keys.extend(chunk_result.stored_keys)
+
+        for duplicate_i, first_i in duplicate_indices:
+            results[duplicate_i] = results[first_i]
+
+        return RawBlockPutManyResult(results=results, stored_keys=stored_keys)
+
+    def _put_many_batch_io_chunk(
+        self,
+        keys: Sequence[RawBlockKeySpec],
+        objs: Sequence[MemoryObj],
+        placement_ids: Sequence[PlacementId],
+    ) -> RawBlockPutManyResult:
+        """Persist one bounded chunk through a single ``_write_buffers`` call.
+
+        Eligible new keys are submitted through one ``_write_buffers`` call so
+        the io_uring path can batch those writes when their lengths allow it.
+
+        Failures before submission are reported per key: already indexed keys
+        report success without rewriting, duplicates of keys already reserved
+        in this chunk share that key's final result, and keys with no free
+        slot, payloads that cannot fit one slot, or buffer preparation errors
+        fail individually.
+        Once a combined device write is submitted, any write failure rolls back
+        every submitted new key and commits none of them.
+
+        Args:
+            keys: Ordered raw-block key specs corresponding to ``objs``. Must be
+                the same length as ``objs``.
+            objs: Memory objects whose byte buffers should be written. Must be
+                the same length as ``keys``.
+            placement_ids: Normalized per-key FDP placement identifiers. Must be
+                the same length as ``keys``. Each key's header and payload write
+                inherit that key's identifier; ``None`` omits the directive.
+
+        Returns:
+            Per-key success results aligned with ``keys`` and the list of
+            encoded keys that were newly committed to the index.
+
+        Raises:
+            ValueError: If ``keys``, ``objs``, and ``placement_ids`` do not all
+                have the same length.
+        """
+        results = [False] * len(keys)
+        stored_keys: list[str] = []
+        write_plan: list[tuple[int, RawBlockKeySpec, MemoryObj, int, PlacementId]] = []
+        planned_keys: set[str] = set()
+        batch_duplicates: list[tuple[int, str]] = []
+
+        # Reserve slots for eligible first-occurrence keys under the lock.
+        with self._lock:
+            for i, (key, obj, placement_id) in enumerate(
+                zip(keys, objs, placement_ids, strict=True)
+            ):
+                if self._closed:
+                    break
+                encoded_key = key.encoded
+                if encoded_key in self._index:
+                    results[i] = True
+                    continue
+                if encoded_key in planned_keys:
+                    batch_duplicates.append((i, encoded_key))
+                    continue
+                if encoded_key in self._inflight:
+                    continue
+                payload_len = len(obj.byte_array)
+                if not self._payload_fits_slot(payload_len):
+                    logger.warning(
+                        "RawBlockCore: payload for key %s does not fit slot",
+                        encoded_key,
+                    )
+                    continue
+                try:
+                    offset = self._allocate_slot_locked(placement_id)
+                except RuntimeError:
+                    logger.warning(
+                        "RawBlockCore: no free slot available for key %s",
+                        key.encoded,
+                    )
+                    continue
+                meta = DiskCacheMetadata(
+                    path=f"{self.device_path}@{offset}",
+                    size=payload_len,
+                    shape=obj.metadata.shape,
+                    dtype=obj.metadata.dtype,
+                    cached_positions=obj.metadata.cached_positions,
+                    fmt=obj.metadata.fmt,
+                    pin_count=0,
+                )
+                self._inflight[encoded_key] = _Inflight(offset=offset, meta=meta)
+                planned_keys.add(encoded_key)
+                write_plan.append((i, key, obj, offset, placement_id))
+
+        if not write_plan:
+            return RawBlockPutManyResult(results=results, stored_keys=stored_keys)
+
+        # Build header/payload write entries outside the lock. Preparation
+        # failures happen before device submission and are isolated per key.
+        offsets: list[int] = []
+        buffers: list[Any] = []
+        payload_lens: list[int] = []
+        total_lens: list[int] = []
+        write_placement_ids: list[PlacementId] = []
+        prepared_plan: list[tuple[int, RawBlockKeySpec, MemoryObj, int]] = []
+        write_succeeded = True
+        for i, key, obj, offset, placement_id in write_plan:
+            try:
+                header = self._encode_header(key.slot_identity, len(obj.byte_array))
+                hdr_total = (
+                    round_up(len(header), self.block_align)
+                    if self._requires_transfer_alignment
+                    else len(header)
+                )
+                buf, payload_len, total_len = self._prepare_write_payload(obj)
+            except Exception as e:
+                logger.error(
+                    "RawBlockCore batch buffer preparation failed for %s: %s",
+                    key.encoded,
+                    e,
+                )
+                with self._lock:
+                    inflight = self._inflight.pop(key.encoded, None)
+                    if inflight is not None:
+                        self._append_free_slot_locked(
+                            self._offset_to_slot(int(inflight.offset))
+                        )
+                        self._meta_dirty_total += 1
+                continue
+
+            # Queue the key only once every fallible step has succeeded, so a
+            # failed key never leaves a header behind for a slot that the
+            # rollback above just returned to the free list.
+            offsets.extend((offset, offset + self.header_bytes))
+            buffers.extend((header, buf))
+            payload_lens.extend((hdr_total, payload_len))
+            total_lens.extend((hdr_total, total_len))
+            write_placement_ids.extend((placement_id, placement_id))
+            prepared_plan.append((i, key, obj, offset))
+
+        if prepared_plan:
+            with self._lock:
+                self._inflight_io_count += len(prepared_plan)
+            try:
+                self._write_buffers(
+                    offsets,
+                    buffers,
+                    payload_lens,
+                    total_lens,
+                    write_placement_ids,
+                )
+            except Exception as e:
+                write_succeeded = False
+                logger.error("RawBlockCore batched write failed: %s", e)
+            finally:
+                with self._lock:
+                    self._inflight_io_count -= len(prepared_plan)
+                    self._last_io_ts = time.monotonic()
+
+        # Commit successful writes, or roll back submitted keys if the device
+        # write failed.
+        with self._lock:
+            for i, key, _obj, _offset in prepared_plan:
+                inflight = self._inflight.pop(key.encoded, None)
+                if inflight is None:
+                    continue
+                if not write_succeeded or inflight.canceled:
+                    self._append_free_slot_locked(
+                        self._offset_to_slot(int(inflight.offset))
+                    )
+                    self._meta_dirty_total += 1
+                    continue
+                self._index[key.encoded] = _Entry(
+                    offset=inflight.offset,
+                    size=inflight.meta.size,
+                    meta=inflight.meta,
+                )
+                self._meta_dirty_total += 1
+                results[i] = True
+                stored_keys.append(key.encoded)
+            for i, encoded_key in batch_duplicates:
+                results[i] = encoded_key in self._index
+
+        return RawBlockPutManyResult(results=results, stored_keys=stored_keys)
 
     def _encode_header(self, slot_identity: int, payload_len: int) -> bytes:
         """Encode a fixed-size raw-block slot header."""
@@ -2240,29 +2499,19 @@ class RawBlockCore:
 
     def _validate_loaded_entries(self) -> None:
         """Drop recovered entries whose slot headers do not match metadata."""
-        to_drop: list[str] = []
         with self._lock:
             items = list(self._index.items())
 
-        for encoded_key, entry in items:
-            slot_hdr = self._read_slot_header(int(entry.offset))
-            if slot_hdr is None:
-                to_drop.append(encoded_key)
-                continue
-            try:
-                expected_identity = slot_identity_from_encoded_key(
-                    encoded_key,
-                    self.key_namespace,
-                )
-            except Exception:
-                to_drop.append(encoded_key)
-                continue
-            slot_identity, payload_len = slot_hdr
-            if int(slot_identity) != int(expected_identity):
-                to_drop.append(encoded_key)
-                continue
-            if int(payload_len) != int(entry.size):
-                to_drop.append(encoded_key)
+        if not items:
+            return
+
+        offsets = [int(entry.offset) for _, entry in items]
+        headers = self._read_slot_headers(offsets)
+        to_drop = [
+            encoded_key
+            for (encoded_key, entry), slot_hdr in zip(items, headers, strict=True)
+            if self._is_stale_header(encoded_key, entry, slot_hdr)
+        ]
 
         if not to_drop:
             return
@@ -2282,6 +2531,159 @@ class RawBlockCore:
             "slot-header validation",
             len(to_drop),
         )
+
+    def _read_slot_headers(
+        self,
+        offsets: list[int],
+    ) -> list[Optional[tuple[int, int]]]:
+        """Dispatch slot-header reads to the appropriate engine path."""
+        n = len(offsets)
+        if self.io_engine == "posix" and self._recovery_read_threads > 1 and n > 1:
+            return self._read_slot_headers_posix_parallel(offsets)
+        if self.io_engine == "io_uring" and not self.use_uring_cmd and n > 1:
+            return self._read_slot_headers_batched(offsets)
+        return [self._read_slot_header(off) for off in offsets]
+
+    def _read_slot_headers_posix_parallel(
+        self,
+        offsets: list[int],
+    ) -> list[Optional[tuple[int, int]]]:
+        """Return slot headers using a bounded POSIX reader thread pool."""
+        n = len(offsets)
+        max_workers = min(self._recovery_read_threads, n)
+        ranges = self._build_recovery_item_ranges(n, max_workers)
+        work_items = [(offsets, start, end) for start, end in ranges]
+
+        with ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="rawblk-recover",
+        ) as pool:
+            return [
+                header
+                for range_headers in pool.map(self._read_slot_header_range, work_items)
+                for header in range_headers
+            ]
+
+    def _read_slot_header_range(
+        self,
+        work_item: tuple[list[int], int, int],
+    ) -> list[Optional[tuple[int, int]]]:
+        """Read one recovery range, preserving offset order and failed reads."""
+        offsets, start, end = work_item
+        return [self._read_slot_header(offsets[i]) for i in range(start, end)]
+
+    def _read_slot_headers_batched(
+        self,
+        offsets: list[int],
+    ) -> list[Optional[tuple[int, int]]]:
+        """Return slot headers using the batched io_uring read path.
+
+        Splits the reads into ``iouring_queue_depth``-sized batches so a large
+        checkpoint does not allocate one buffer for every entry at once, then
+        reads each batch and concatenates results in input order. Failed
+        completions are retried individually before returning their headers.
+
+        Args:
+            offsets: Device byte offsets for each slot header to read.
+
+        Returns:
+            Decoded (slot_identity, payload_len) per slot, or None on error,
+            in the same order as ``offsets``.
+        """
+        n = len(offsets)
+        batch_size = max(1, self.iouring_queue_depth)
+        headers: list[Optional[tuple[int, int]]] = []
+        for start in range(0, n, batch_size):
+            headers.extend(
+                self._read_slot_header_batch(offsets[start : start + batch_size])
+            )
+        return headers
+
+    def _read_slot_header_batch(
+        self,
+        offsets: list[int],
+    ) -> list[Optional[tuple[int, int]]]:
+        """Read one bounded batch of slot headers via a single batched_read.
+
+        Allocates a single contiguous pointer-aligned buffer for the batch,
+        issues one ``batched_read`` + ``wait_iouring``, and decodes each header
+        independently. Used for the regular io_uring (block) path; NVMe
+        passthrough (``use_uring_cmd``) recovery uses the serial path until its
+        passthrough read is validated separately.
+
+        Args:
+            offsets: Device byte offsets for this batch (non-empty).
+
+        Returns:
+            Decoded (slot_identity, payload_len) per slot, or None on error.
+            Decode successful completions directly and reread only failed
+            slots. Submission errors or a completion-count mismatch require
+            rereading every slot because individual results are unavailable.
+        """
+        n = len(offsets)
+        align = self.block_align
+        hdr = self.header_bytes
+        raw_buf = bytearray(n * hdr + align - 1)
+        addr = ctypes.addressof(ctypes.c_byte.from_buffer(raw_buf))
+        pad = (-addr) % align
+        views = [
+            memoryview(raw_buf)[pad + i * hdr : pad + (i + 1) * hdr] for i in range(n)
+        ]
+
+        with self._lock:
+            self._inflight_io_count += 1
+        try:
+            raw_dev = self._rawdev()
+            batch_id = raw_dev.batched_read(offsets, views, [hdr] * n)
+            results = self._wait_iouring_results(
+                raw_dev, batch_id, n, "recovery header read"
+            )
+        except Exception:
+            results = [False] * n
+        finally:
+            with self._lock:
+                self._inflight_io_count -= 1
+                self._last_io_ts = time.monotonic()
+
+        return [
+            self._decode_slot_header(bytes(view))
+            if success
+            else self._read_slot_header(offset)
+            for offset, view, success in zip(offsets, views, results, strict=True)
+        ]
+
+    def _is_stale_header(
+        self,
+        encoded_key: str,
+        entry: _Entry,
+        slot_hdr: Optional[tuple[int, int]],
+    ) -> bool:
+        """Return True when the recovered slot header does not match metadata."""
+        if slot_hdr is None:
+            return True
+        try:
+            expected_identity = slot_identity_from_encoded_key(
+                encoded_key,
+                self.key_namespace,
+            )
+        except Exception:
+            return True
+        slot_identity, payload_len = slot_hdr
+        return int(slot_identity) != int(expected_identity) or int(payload_len) != int(
+            entry.size
+        )
+
+    def _build_recovery_item_ranges(
+        self,
+        item_count: int,
+        num_ranges: int,
+    ) -> list[tuple[int, int]]:
+        """Build bounded work ranges for recovered checkpoint entries."""
+        range_size = max(1, (item_count + num_ranges - 1) // num_ranges)
+        return [
+            (start, min(start + range_size, item_count))
+            for start in range(0, item_count, range_size)
+        ]
 
     def _load_checkpoint_from_device(self) -> None:
         """Load the newest valid checkpoint from the raw device if present."""

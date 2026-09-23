@@ -1,104 +1,79 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for explicit MP transfer-mode mismatch registration failures."""
+"""Transfer-mode mismatch registration returns a useful RPC error."""
 
-# Standard
 from unittest.mock import MagicMock
 
-# Third Party
 import pytest
 import zmq
 
-# First Party
-from lmcache.v1.multiprocess.custom_types import (
-    RegisterEngineDrivenContextPayload,
-)
+from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
 from lmcache.v1.multiprocess.modules.transfer_mode_guard import (
-    TransferModeGuardModule,
+    create_transfer_mode_guard,
 )
-from lmcache.v1.multiprocess.mq import (
+from lmcache.v1.multiprocess.request_handler import iter_request_handlers
+from lmcache.v1.multiprocess.rpc import get_rpc_spec
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     MessageQueueServer,
     RemoteHandlerError,
 )
-from lmcache.v1.multiprocess.protocol import get_payload_classes
-from lmcache.v1.multiprocess.protocols.base import RequestType
-from lmcache.v1.multiprocess.server import add_handler_helper
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.transport.zmq_impl.server import add_handler_helper
 
 
 @pytest.mark.parametrize(
     ("supported", "rejected"),
     [
-        (
-            "engine_driven",
-            {
-                RequestType.REGISTER_KV_CACHE,
-                RequestType.REGISTER_Q_CACHE,
-            },
-        ),
-        (
-            "lmcache_driven",
-            {RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT},
-        ),
+        ("engine_driven", {"register_kv_cache", "register_q_cache"}),
+        ("lmcache_driven", {"register_kv_cache_engine_driven_context"}),
         ("auto", set()),
     ],
 )
-def test_guard_registers_only_unsupported_modes(
-    supported: str, rejected: set[RequestType]
-) -> None:
-    module = TransferModeGuardModule(MagicMock(), supported)
-
-    assert {spec.request_type for spec in module.get_handlers()} == rejected
+def test_guard_registers_only_unsupported_modes(supported, rejected):
+    module = create_transfer_mode_guard(MagicMock(), supported)
+    assert {entry.operation for entry in iter_request_handlers(module)} == rejected
     assert module.report_status() == {"supported_transfer_mode": supported}
 
 
 @pytest.mark.parametrize(
-    ("supported", "request_type", "requested"),
+    ("supported", "operation", "requested"),
     [
-        ("engine_driven", RequestType.REGISTER_KV_CACHE, "lmcache_driven"),
-        ("engine_driven", RequestType.REGISTER_Q_CACHE, "lmcache_driven"),
+        ("engine_driven", "register_kv_cache", "lmcache_driven"),
+        ("engine_driven", "register_q_cache", "lmcache_driven"),
         (
             "lmcache_driven",
-            RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+            "register_kv_cache_engine_driven_context",
             "engine_driven",
         ),
     ],
 )
 def test_guard_error_names_requested_and_supported_modes(
-    supported: str,
-    request_type: RequestType,
-    requested: str,
-) -> None:
-    module = TransferModeGuardModule(MagicMock(), supported)
-    handler = {spec.request_type: spec.handler for spec in module.get_handlers()}[
-        request_type
-    ]
-
+    supported, operation, requested
+):
+    module = create_transfer_mode_guard(MagicMock(), supported)
+    handler = {
+        entry.operation: entry.handler for entry in iter_request_handlers(module)
+    }[operation]
     with pytest.raises(
         ValueError,
-        match=(
-            rf"requested transfer mode '{requested}'.*"
-            rf"supported_transfer_mode='{supported}'"
-        ),
+        match=rf"requested transfer mode '{requested}'.*supported_transfer_mode='{supported}'",
     ):
-        handler(*([None] * len(get_payload_classes(request_type))))
+        handler(*([None] * len(get_rpc_spec(operation).payload_types)))
 
 
-def test_guard_rejects_unknown_server_mode() -> None:
+def test_guard_rejects_unknown_server_mode():
     with pytest.raises(ValueError, match="Unsupported supported_transfer_mode"):
-        TransferModeGuardModule(MagicMock(), "invalid")
+        create_transfer_mode_guard(MagicMock(), "invalid")
 
 
-def test_mode_mismatch_reaches_client_without_timeout() -> None:
-    """A mismatched registration completes with the server's useful error."""
+def test_mode_mismatch_reaches_client_without_timeout():
     context = zmq.Context()
     server = MessageQueueServer("tcp://127.0.0.1:*", context)
     server_url = server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
-    module = TransferModeGuardModule(MagicMock(), "lmcache_driven")
-    for spec in module.get_handlers():
-        add_handler_helper(server, spec.request_type, spec.handler)
+    module = create_transfer_mode_guard(MagicMock(), "lmcache_driven")
+    for entry in iter_request_handlers(module):
+        add_handler_helper(server, entry.operation, entry.handler)
     server.start()
     client = RequestClientFactory.create(server_url, context=context)
-
     try:
         future = client.register_kv_cache_engine_driven_context(
             RegisterEngineDrivenContextPayload(
@@ -113,13 +88,10 @@ def test_mode_mismatch_reaches_client_without_timeout() -> None:
                 num_physical_slots=16,
             )
         )
-
         with pytest.raises(
             RemoteHandlerError,
-            match=(
-                "requested transfer mode 'engine_driven'.*"
-                "supported_transfer_mode='lmcache_driven'"
-            ),
+            match="requested transfer mode 'engine_driven'.*"
+            "supported_transfer_mode='lmcache_driven'",
         ):
             future.result(timeout=1)
     finally:
