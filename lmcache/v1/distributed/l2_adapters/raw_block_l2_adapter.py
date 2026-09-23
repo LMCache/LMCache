@@ -798,15 +798,16 @@ class RawBlockL2Adapter(L2AdapterInterface):
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete keys from raw-block L2 and notify listeners for removals."""
         encoded_keys = [encode_object_key(key).encoded for key in keys]
-        metas = self._core.get_metadata_many(encoded_keys)
-        deleted_bitmap = self._core.delete_many(encoded_keys, force=False)
+        delete_results = self._core.delete_many(encoded_keys, force=False)
         deleted_keys: list[ObjectKey] = []
         deleted_sizes: list[int] = []
-        for key, meta, deleted in zip(keys, metas, deleted_bitmap, strict=False):
-            if not deleted:
+        for key, result in zip(keys, delete_results, strict=False):
+            if not result.deleted:
                 continue
             deleted_keys.append(key)
-            deleted_sizes.append(0 if meta is None else int(self._core.slot_bytes))
+            deleted_sizes.append(
+                int(self._core.slot_bytes) if result.was_indexed else 0
+            )
         if deleted_keys:
             try:
                 self._notify_keys_deleted(deleted_keys, deleted_sizes)

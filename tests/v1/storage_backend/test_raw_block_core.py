@@ -25,6 +25,7 @@ from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
 from lmcache.v1.storage_backend.raw_block import (
     RawBlockCore,
     RawBlockCoreConfig,
+    RawBlockDeleteResult,
     encode_object_key,
     normalize_raw_block_placement_ids,
 )
@@ -363,7 +364,10 @@ def test_raw_block_core_delete_and_missing_load(tmp_path):
         assert put_result.results == [True]
         assert core.contains_key(existing.encoded) is True
 
-        assert core.delete_many([existing.encoded, missing.encoded]) == [True, False]
+        assert core.delete_many([existing.encoded, missing.encoded]) == [
+            RawBlockDeleteResult(deleted=True, was_indexed=True),
+            RawBlockDeleteResult(deleted=False, was_indexed=False),
+        ]
         assert core.exists_many([existing.encoded, missing.encoded]) == [False, False]
 
         loaded = make_empty_memory_obj(len(b"delete-me"))
@@ -1496,7 +1500,10 @@ def test_raw_block_core_reuses_free_slot_with_matching_placement_id(
         assert second_offset is not None
         assert first_offset != second_offset
 
-        assert core.delete_many([first.encoded, second.encoded]) == [True, True]
+        assert core.delete_many([first.encoded, second.encoded]) == [
+            RawBlockDeleteResult(deleted=True, was_indexed=True),
+            RawBlockDeleteResult(deleted=True, was_indexed=True),
+        ]
         assert core.put_many(
             [replacement],
             [make_memory_obj(b"c")],
@@ -1530,7 +1537,10 @@ def test_raw_block_core_falls_back_and_rebinds_slot_placement_id(tmp_path, monke
         second_offset = core.entry_offset(second.encoded)
         assert second_offset is not None
 
-        assert core.delete_many([first.encoded, second.encoded]) == [True, True]
+        assert core.delete_many([first.encoded, second.encoded]) == [
+            RawBlockDeleteResult(deleted=True, was_indexed=True),
+            RawBlockDeleteResult(deleted=True, was_indexed=True),
+        ]
         assert core.put_many(
             [fallback],
             [make_memory_obj(b"c")],
@@ -1538,7 +1548,9 @@ def test_raw_block_core_falls_back_and_rebinds_slot_placement_id(tmp_path, monke
         ).results == [True]
         assert core.entry_offset(fallback.encoded) == second_offset
 
-        assert core.delete_many([fallback.encoded]) == [True]
+        assert core.delete_many([fallback.encoded]) == [
+            RawBlockDeleteResult(deleted=True, was_indexed=True)
+        ]
         assert core.put_many(
             [replacement],
             [make_memory_obj(b"d")],
@@ -1568,7 +1580,10 @@ def test_raw_block_core_slot_affinity_none_preserves_global_lifo(tmp_path, monke
         second_offset = core.entry_offset(second.encoded)
         assert second_offset is not None
 
-        assert core.delete_many([first.encoded, second.encoded]) == [True, True]
+        assert core.delete_many([first.encoded, second.encoded]) == [
+            RawBlockDeleteResult(deleted=True, was_indexed=True),
+            RawBlockDeleteResult(deleted=True, was_indexed=True),
+        ]
         assert core.put_many(
             [replacement],
             [make_memory_obj(b"c")],
@@ -1605,10 +1620,15 @@ def test_raw_block_core_omitted_placement_clears_previous_affinity(
         second_offset = core.entry_offset(second.encoded)
         assert second_offset is not None
 
-        assert core.delete_many([first.encoded, second.encoded]) == [True, True]
+        assert core.delete_many([first.encoded, second.encoded]) == [
+            RawBlockDeleteResult(deleted=True, was_indexed=True),
+            RawBlockDeleteResult(deleted=True, was_indexed=True),
+        ]
         assert core.put_many([unplaced], [make_memory_obj(b"c")]).results == [True]
         assert core.entry_offset(unplaced.encoded) == second_offset
-        assert core.delete_many([unplaced.encoded]) == [True]
+        assert core.delete_many([unplaced.encoded]) == [
+            RawBlockDeleteResult(deleted=True, was_indexed=True)
+        ]
 
         assert core.put_many(
             [replacement],
@@ -1649,7 +1669,9 @@ def test_raw_block_core_does_not_restore_slot_affinity_from_checkpoint(tmp_path)
 
     recovered = RawBlockCore(config, key_namespace="object")
     try:
-        assert recovered.delete_many([original.encoded]) == [True]
+        assert recovered.delete_many([original.encoded]) == [
+            RawBlockDeleteResult(deleted=True, was_indexed=True)
+        ]
         assert recovered.put_many(
             [replacement],
             [make_memory_obj(b"after-restart")],
