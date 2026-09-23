@@ -10,8 +10,12 @@ These tests verify the RESP protocol client implementation, including:
 """
 
 # Standard
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from typing import Any
 from unittest.mock import patch
 import asyncio
+import threading
 
 # Third Party
 import pytest
@@ -32,6 +36,59 @@ from ..utils import (
     dumb_cache_engine_key,
     init_asyncio_loop,
 )
+
+#: Default deadline (seconds) for synchronous waits on futures submitted to
+#: the test event-loop thread. A stalled loop must fail fast with diagnostics
+#: instead of hanging CI until the whole job is cancelled.
+_FUTURE_RESULT_TIMEOUT_S = 60.0
+
+
+def bounded_result(
+    future: Future[Any],
+    op: str,
+    async_loop: asyncio.AbstractEventLoop,
+    async_thread: threading.Thread,
+    timeout: float = _FUTURE_RESULT_TIMEOUT_S,
+) -> Any:
+    """Wait for a test future with a deadline, failing fast with diagnostics.
+
+    Args:
+        future: Future submitted to the test event-loop thread.
+        op: Operation label (e.g. "exists", "put", "get") for the message.
+        async_loop: Event loop the future was submitted to.
+        async_thread: Thread running ``async_loop``.
+        timeout: Maximum seconds to wait before failing.
+
+    Returns:
+        The future's result.
+
+    Raises:
+        AssertionError: On deadline expiry. The message reports the operation
+            plus loop/thread/future liveness; the future is cancelled first.
+    """
+    try:
+        return future.result(timeout=timeout)
+    except FuturesTimeoutError as exc:
+        diagnosis = (
+            f"RESP test operation {op!r} timed out after {timeout}s "
+            f"(loop_running={async_loop.is_running()} "
+            f"loop_closed={async_loop.is_closed()} "
+            f"thread_alive={async_thread.is_alive()} "
+            f"future_done={future.done()} "
+            f"future_cancelled={future.cancelled()})"
+        )
+        future.cancel()
+        raise AssertionError(diagnosis) from exc
+
+
+async def _never_completes() -> None:
+    """Coroutine that never completes (stall stand-in for regression test)."""
+    await asyncio.Future()
+
+
+async def _return_hello() -> str:
+    """Trivial coroutine proving the loop still works after a stall."""
+    return "hello"
 
 
 @pytest.fixture(autouse=True)
@@ -119,7 +176,9 @@ def test_resp_connector_basic_operations(
         future = asyncio.run_coroutine_threadsafe(
             connector.exists(random_key), async_loop
         )
-        assert not future.result(), "Key should not exist initially"
+        assert not bounded_result(
+            future, op="exists", async_loop=async_loop, async_thread=async_thread
+        ), "Key should not exist initially"
 
         # Test 2: Create and store test data
         num_tokens = 256  # Full chunk
@@ -139,18 +198,24 @@ def test_resp_connector_basic_operations(
         future = asyncio.run_coroutine_threadsafe(
             connector.put(random_key, memory_obj), async_loop
         )
-        future.result()
+        bounded_result(
+            future, op="put", async_loop=async_loop, async_thread=async_thread
+        )
 
         # Test 4: Key exists after put
         future = asyncio.run_coroutine_threadsafe(
             connector.exists(random_key), async_loop
         )
-        assert future.result(), "Key should exist after put"
+        assert bounded_result(
+            future, op="exists", async_loop=async_loop, async_thread=async_thread
+        ), "Key should exist after put"
         assert memory_obj.get_ref_count() == 1
 
         # Test 5: Get and verify data
         future = asyncio.run_coroutine_threadsafe(connector.get(random_key), async_loop)
-        retrieved_memory_obj = future.result()
+        retrieved_memory_obj = bounded_result(
+            future, op="get", async_loop=async_loop, async_thread=async_thread
+        )
 
         check_mem_obj_equal([retrieved_memory_obj], [memory_obj])
 
@@ -177,7 +242,9 @@ def test_resp_connector_batch_operations(
         future = asyncio.run_coroutine_threadsafe(
             connector.batched_async_contains("test_lookup", keys), async_loop
         )
-        count = future.result()
+        count = bounded_result(
+            future, op="batch_exists", async_loop=async_loop, async_thread=async_thread
+        )
         assert count == 0, "No keys should exist initially"
 
         # Test 2: Create memory objects
@@ -202,20 +269,26 @@ def test_resp_connector_batch_operations(
         future = asyncio.run_coroutine_threadsafe(
             connector.batched_put(keys, memory_objs), async_loop
         )
-        future.result()
+        bounded_result(
+            future, op="put", async_loop=async_loop, async_thread=async_thread
+        )
 
         # Test 4: Batch exists - all should be True now
         future = asyncio.run_coroutine_threadsafe(
             connector.batched_async_contains("test_lookup", keys), async_loop
         )
-        count = future.result()
+        count = bounded_result(
+            future, op="batch_exists", async_loop=async_loop, async_thread=async_thread
+        )
         assert count == num_keys, "All keys should exist after batch_put"
 
         # Test 5: Batch get and verify
         future = asyncio.run_coroutine_threadsafe(
             connector.batched_get(keys), async_loop
         )
-        retrieved_objs = future.result()
+        retrieved_objs = bounded_result(
+            future, op="batch_get", async_loop=async_loop, async_thread=async_thread
+        )
 
         assert len(retrieved_objs) == num_keys
         check_mem_obj_equal(retrieved_objs, memory_objs)
@@ -277,10 +350,14 @@ def test_resp_connector_different_chunk_sizes(resp_url, autorelease_v1):
         future = asyncio.run_coroutine_threadsafe(
             connector.put(key1, memory_obj), async_loop
         )
-        future.result()
+        bounded_result(
+            future, op="put", async_loop=async_loop, async_thread=async_thread
+        )
 
         future = asyncio.run_coroutine_threadsafe(connector.get(key1), async_loop)
-        retrieved_obj = future.result()
+        retrieved_obj = bounded_result(
+            future, op="get", async_loop=async_loop, async_thread=async_thread
+        )
 
         check_mem_obj_equal([retrieved_obj], [memory_obj])
 
@@ -306,7 +383,9 @@ def test_resp_connector_nonexistent_key(
         future = asyncio.run_coroutine_threadsafe(
             connector.exists(nonexistent_key), async_loop
         )
-        assert not future.result()
+        assert not bounded_result(
+            future, op="exists", async_loop=async_loop, async_thread=async_thread
+        )
 
         # Test get returns None (RESP protocol should handle this gracefully)
         # Note: This might throw an error depending on how RESP handles missing keys
@@ -315,8 +394,12 @@ def test_resp_connector_nonexistent_key(
         )
 
         try:
-            result = future.result()
+            result = bounded_result(
+                future, op="get", async_loop=async_loop, async_thread=async_thread
+            )
             assert result is None, "Getting non-existent key should return None"
+        except AssertionError:
+            raise
         except Exception:
             # RESP might throw an error for missing keys, which is also acceptable
             pass
@@ -358,11 +441,15 @@ def test_resp_connector_sequential_operations(
             future = asyncio.run_coroutine_threadsafe(
                 connector.put(key, memory_obj), async_loop
             )
-            future.result()
+            bounded_result(
+                future, op="put", async_loop=async_loop, async_thread=async_thread
+            )
 
             # Get and verify
             future = asyncio.run_coroutine_threadsafe(connector.get(key), async_loop)
-            retrieved_obj = future.result()
+            retrieved_obj = bounded_result(
+                future, op="get", async_loop=async_loop, async_thread=async_thread
+            )
 
             check_mem_obj_equal([retrieved_obj], [memory_obj])
 
@@ -411,7 +498,9 @@ def test_resp_connector_concurrent_operations(
 
         # Wait for all puts to complete
         for future in put_futures:
-            future.result()
+            bounded_result(
+                future, op="put", async_loop=async_loop, async_thread=async_thread
+            )
 
         # Submit all gets concurrently
         get_futures = []
@@ -420,7 +509,12 @@ def test_resp_connector_concurrent_operations(
             get_futures.append(future)
 
         # Verify all gets
-        retrieved_objs = [future.result() for future in get_futures]
+        retrieved_objs = [
+            bounded_result(
+                f, op="get", async_loop=async_loop, async_thread=async_thread
+            )
+            for f in get_futures
+        ]
         check_mem_obj_equal(retrieved_objs, memory_objs)
 
     finally:
@@ -464,14 +558,46 @@ def test_resp_connector_thread_scaling(resp_url, num_threads, autorelease_v1):
         future = asyncio.run_coroutine_threadsafe(
             connector.put(key, memory_obj), async_loop
         )
-        future.result()
+        bounded_result(
+            future, op="put", async_loop=async_loop, async_thread=async_thread
+        )
 
         # Get and verify
         future = asyncio.run_coroutine_threadsafe(connector.get(key), async_loop)
-        retrieved_obj = future.result()
+        retrieved_obj = bounded_result(
+            future, op="get", async_loop=async_loop, async_thread=async_thread
+        )
 
         check_mem_obj_equal([retrieved_obj], [memory_obj])
 
     finally:
         close_asyncio_loop(async_loop, async_thread)
         local_backend.close()
+
+
+def test_resp_connector_stalled_operation_fails_fast() -> None:
+    """A stalled loop operation must fail fast with actionable diagnostics."""
+    async_loop, async_thread = init_asyncio_loop()
+    try:
+        stalled = asyncio.run_coroutine_threadsafe(_never_completes(), async_loop)
+        with pytest.raises(AssertionError, match="timed out"):
+            bounded_result(
+                stalled,
+                op="get",
+                async_loop=async_loop,
+                async_thread=async_thread,
+                timeout=5.0,
+            )
+        assert stalled.done(), "Stalled future should be done after cancel"
+        healthy = asyncio.run_coroutine_threadsafe(_return_hello(), async_loop)
+        assert (
+            bounded_result(
+                healthy,
+                op="get",
+                async_loop=async_loop,
+                async_thread=async_thread,
+            )
+            == "hello"
+        )
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
