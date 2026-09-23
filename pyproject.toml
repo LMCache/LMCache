@@ -124,7 +124,6 @@ ignore = [
 "benchmarks/multi_round_qa/utils.py" = ["G004"]
 "benchmarks/rag/rag.py" = ["G004"]
 "benchmarks/rag/utils.py" = ["G004"]
-"benchmarks/storage_backend_io/**" = ["G004"]
 "examples/disagg_prefill/**" = ["G004"]
 "examples/disagg_prefill_mp/**" = ["G004"]
 "examples/token_dropping/random_token_dropping.ipynb" = ["G004"]
