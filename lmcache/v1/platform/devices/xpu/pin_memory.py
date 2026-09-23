@@ -34,7 +34,7 @@ def _load_xpu_ops() -> _XpuOps | None:
     try:
         ops = importlib.import_module("lmcache.xpu_ops")
     except (ImportError, OSError, RuntimeError) as exc:
-        logger.debug("XpuPinMemoryBackend: xpu_ops is unavailable: %s", exc)
+        logger.warning("XpuPinMemoryBackend: xpu_ops is unavailable: %s", exc)
         return None
 
     if not callable(getattr(ops, "xpu_host_register", None)) or not callable(
@@ -44,6 +44,7 @@ def _load_xpu_ops() -> _XpuOps | None:
             "XpuPinMemoryBackend: xpu_ops lacks host-registration operations"
         )
         return None
+    logger.info("XpuPinMemoryBackend is initialized")
     return cast(_XpuOps, ops)
 
 
