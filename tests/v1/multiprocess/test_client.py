@@ -6,6 +6,7 @@ import ast
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
 from lmcache.v1.multiprocess.rpc import get_rpc_specs
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
@@ -160,6 +161,16 @@ def test_compatibility_alias_delegates_to_same_zmq_request_type() -> None:
     client.cb_unregister_rope_v3(7)
 
     assert transport.calls == [("cb_unregister_rope", [7])]
+
+
+def test_server_module_call_delegates_to_zmq_request_envelope() -> None:
+    transport = _RecordingMessageQueueClient()
+    client = ZmqMultiprocessClient(transport)  # type: ignore[abstract]
+    request = ServerModuleCallRequest(method="fake.echo", payload=b"hello")
+
+    client.server_module_call(request)
+
+    assert transport.calls == [("server_module_call", [request])]
 
 
 def test_close_delegates_to_zmq_client() -> None:
