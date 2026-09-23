@@ -131,7 +131,7 @@ _path_filter_should_skip_for_pipeline() {
                     # Example-only changes should not trigger correctness tests.
                     return 0
                     ;;
-                tests/*|.buildkite/k3_tests/*)
+                .buildkite/k3_tests/*)
                     return 0
                     ;;
             esac
@@ -163,7 +163,7 @@ _path_filter_should_skip_for_pipeline() {
                     # They are treated as safe no-op paths for this suite.
                     return 0
                     ;;
-                tests/*|.buildkite/k3_tests/*)
+                .buildkite/k3_tests/*)
                     return 0
                     ;;
             esac
@@ -177,7 +177,7 @@ _path_filter_should_skip_for_pipeline() {
                     # Example-only changes should not trigger blend tests.
                     return 0
                     ;;
-                tests/*|.buildkite/k3_tests/*)
+                .buildkite/k3_tests/*)
                     return 0
                     ;;
             esac
@@ -191,7 +191,7 @@ _path_filter_should_skip_for_pipeline() {
                     # Example-only changes should not trigger sglang tests.
                     return 0
                     ;;
-                tests/*|.buildkite/k3_tests/*)
+                .buildkite/k3_tests/*)
                     return 0
                     ;;
             esac

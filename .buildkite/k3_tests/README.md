@@ -92,8 +92,9 @@ Not all tests should run on every push. The general pattern:
 Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so adding a label to an existing PR kicks off the build.
 
 Keep `full` on tests-only auto-merge PRs so required Buildkite statuses are
-reported. For changes confined to `tests/`, the upload wrapper succeeds without
-uploading integration or multiprocess test steps; unit tests still run.
+reported. For changes confined to `tests/`, only integration and multiprocess
+skip their test steps and report success. Other suites retain their normal
+triggers and device-specific filters.
 Use `force-ci` to bypass the path filter.
 
 ## Adding a New Test
