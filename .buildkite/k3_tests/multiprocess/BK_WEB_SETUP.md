@@ -7,9 +7,14 @@
 - Rebuild on PR label change: Yes
 - Skip queued / cancel running branch builds: Yes
 
-Heavy test (2 GPUs, Docker-in-Docker, ~45 min) — run on `"mp"`/`"full"` label or dev push, not every PR.
+This pipeline reports the required `buildkite/k3-multiprocess-test` status.
+Keep adding `full` when auto-merge is enabled, including on tests-only PRs;
+alternatively, add `mp` to start it earlier. Suppressing the build entirely
+leaves the required status missing and blocks merging.
 
-> Builds whose only changes are docs/`*.md`/`LICENSE`/`.github/**` auto-pass
-> via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).
-> Changes under `.buildkite/` always run. Add `force-ci` label to the PR to
-> bypass.
+The initial upload job uses the [path filter](../README.md#required-checks-and-tests-only-changes)
+to skip test steps for changes confined to `tests/` and trivial files such as
+docs/`*.md`/`LICENSE`/`.github/**`. It exits successfully so Buildkite reports a
+passing required status without starting the GPU tests. Relevant runtime and
+CI changes still run the tests. Add `force-ci` alongside `mp` or `full` to
+bypass the path filter.

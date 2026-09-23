@@ -44,7 +44,7 @@ The upload step in `buildkite-pipeline.yml` runs `common_scripts/upload-pipeline
 instead of `buildkite-agent pipeline upload` directly. The wrapper
 (`common_scripts/path-filter.sh`) inspects the changed files in the build and:
 
-- **Skips** the build (exits 0 without uploading `pipeline.yml` → build is
+- **Skips test steps** (exits 0 without uploading `pipeline.yml` → build is
   green with just the upload step) when the changed files are not relevant to
   the uploaded test pipeline. This includes docs-only / trivial changes such
   as `*.md`, `LICENSE*`, `NOTICE*`, `.gitignore`, `.gitattributes`,
@@ -91,18 +91,34 @@ Not all tests should run on every push. The general pattern:
 
 Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so adding a label to an existing PR kicks off the build.
 
-Enabling auto-merge adds `full` automatically only when a PR changes a file
-outside `tests/`. A tests-only PR still runs its unit-test checks, but does not
-automatically trigger the pipelines gated on `full`. If later commits add
-changes outside `tests/` while auto-merge remains enabled, the labeler adds
-`full` then. Maintainers can still add `full` manually.
+### Required checks and tests-only changes
 
-Build creation and test execution are separate: a pipeline configured for every
-PR can still create its initial upload job. The path filter skips integration
-and multiprocess test steps for changes confined to `tests/`, even if `full` is
-present. Keep the wrapper command above in the Buildkite Steps editor; a direct
-`buildkite-agent pipeline upload` bypasses this filter. Use `force-ci` alongside
-any label needed to trigger the pipeline when deliberately running those steps.
+Required Buildkite pipelines must still start and report a status for the PR's
+current commit. Suppressing a required pipeline entirely leaves GitHub waiting
+for its status and blocks merging. Keep the automatic `full` label when enabling
+auto-merge, including on tests-only PRs, so label-gated required pipelines start.
+The `full` label triggers builds; it does not bypass their path filters.
+
+For changes confined to `tests/`, the integration and multiprocess upload jobs
+exit successfully without uploading their test steps. Buildkite reports success
+under the existing required status names, while the unit-test pipeline still
+uploads its tests. The same skip applies when only trivial documentation files
+accompany the test changes. Production code, dependencies, and relevant CI
+scripts still trigger the corresponding tests.
+
+Keep the wrapper command above in the Buildkite Steps editor; a direct
+`buildkite-agent pipeline upload` bypasses the filter. Use `force-ci` alongside
+any label needed to trigger the pipeline when deliberately running test steps.
+Scheduled builds and builds whose changed files cannot be determined also run
+the tests.
+
+The Code Quality workflow exercises this contract using temporary Git
+repositories and a fake `buildkite-agent`. To run the same regression tests
+locally from the repository root, only Python 3.10+ and Git are needed:
+
+```bash
+python3 .buildkite/k3_tests/common_scripts/tests/test_upload_pipeline.py
+```
 
 ## Adding a New Test
 

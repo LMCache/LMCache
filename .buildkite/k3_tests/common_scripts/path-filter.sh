@@ -293,11 +293,13 @@ _path_filter_get_changed_files() {
 
         if base=$(git rev-parse --verify "origin/${base_branch}" 2>/dev/null); then
             if merge_base=$(git merge-base HEAD "$base" 2>/dev/null); then
-                git diff --name-only "$merge_base" HEAD
+                # Include both sides of a rename: moving runtime code into
+                # tests/ must not make a production change look tests-only.
+                git diff --name-only --no-renames "$merge_base" HEAD
                 return 0
             fi
             # No merge-base (history not deep enough): diff directly.
-            git diff --name-only "$base" HEAD
+            git diff --name-only --no-renames "$base" HEAD
             return 0
         fi
         echo "path-filter: could not resolve origin/${base_branch}" >&2
@@ -306,7 +308,7 @@ _path_filter_get_changed_files() {
 
     # Push build (or unknown context): diff against the previous commit.
     if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-        git diff --name-only HEAD~1 HEAD
+        git diff --name-only --no-renames HEAD~1 HEAD
         return 0
     fi
 

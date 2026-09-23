@@ -59,10 +59,12 @@ jobs:
           with:
             python-version: "3.13"
 
+        - name: Check Buildkite path filtering
+          run: python .buildkite/k3_tests/common_scripts/tests/test_upload_pipeline.py
+
         - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
 
         - name: Run code quality checks - lint, format, spell, & static checks
           uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
           with:
             extra_args: --all-files
-
