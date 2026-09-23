@@ -2,7 +2,7 @@
 """Tests for the outcome-attribution fields on ``MP_LOOKUP_PREFETCH_END``.
 
 Covers the per-tier hit split (``l1_hit_tokens`` / ``l2_hit_tokens``) and
-``early_exit_reason``.  ``fold_unfold_ranked`` is patched out: these tests are
+``early_exit_reason``.  ``fold_unfold_grouped`` is patched out: these tests are
 about how its chunk count and ``PrefetchHandle.l1_hit_chunks`` become event
 metadata, not about the fold itself (which needs the native kernel).
 """
@@ -90,7 +90,7 @@ def _end_metadata(
 
     module = LookupModule(ctx)
     with patch.object(
-        lookup_module, "fold_unfold_ranked", return_value=(found_count, MagicMock())
+        lookup_module, "fold_unfold_grouped", return_value=(found_count, MagicMock())
     ):
         module.lookup(_lookup_key(world_size), tp_size=1)
         module.query_prefetch_status("req-1")

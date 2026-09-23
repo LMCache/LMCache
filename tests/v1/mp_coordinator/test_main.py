@@ -10,7 +10,11 @@ import pytest
 
 # First Party
 from lmcache.v1.mp_coordinator.__main__ import main
-from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.config import (
+    HttpCacheEventSourceConfig,
+    KafkaCacheEventSourceConfig,
+    MPCoordinatorConfig,
+)
 
 
 def _serve(argv: list[str]) -> tuple[list[str], MPCoordinatorConfig, MagicMock]:
@@ -71,3 +75,33 @@ def test_main_applies_flags() -> None:
 def test_main_rejects_unknown_flag() -> None:
     with pytest.raises(SystemExit):
         _serve(["--not-a-flag"])
+
+
+def test_main_selects_kafka_event_source() -> None:
+    _, config, _ = _serve(
+        [
+            "--event-transport",
+            "kafka",
+            "--kafka-bootstrap-servers",
+            "broker:9092",
+            "--kafka-topic",
+            "events",
+            "--kafka-group-id",
+            "coord",
+        ]
+    )
+
+    assert config.event_source_config == KafkaCacheEventSourceConfig(
+        bootstrap_servers="broker:9092", topic="events", group_id="coord"
+    )
+
+
+def test_main_kafka_event_source_requires_bootstrap_servers() -> None:
+    with pytest.raises(ValueError, match="bootstrap servers"):
+        _serve(["--event-transport", "kafka"])
+
+
+def test_main_ignores_kafka_flags_under_http_transport() -> None:
+    _, config, _ = _serve(["--kafka-bootstrap-servers", "broker:9092"])
+
+    assert isinstance(config.event_source_config, HttpCacheEventSourceConfig)

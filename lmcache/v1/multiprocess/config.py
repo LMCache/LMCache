@@ -98,6 +98,11 @@ class MPServerConfig:
     script_allowed_imports: list[str] = field(default_factory=list)
     """Modules that /run_script endpoint is allowed to import."""
 
+    run_script_api_enabled: bool = False
+    """Enable the /run_script HTTP endpoint. It executes caller-supplied
+    Python in-process (the restricted builtins are not a security boundary),
+    so it is disabled by default; only enable on a trusted network."""
+
     instance_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     """Stable identity of this MP server, the single source of truth for who
     this server is. Used as the coordinator membership key and projected onto
@@ -207,7 +212,7 @@ DEFAULT_MP_SERVER_CONFIG = MPServerConfig()
 class HTTPFrontendConfig:
     """Configuration for the HTTP frontend (uvicorn/FastAPI)."""
 
-    http_host: str = "0.0.0.0"
+    http_host: str = "127.0.0.1"
     """HTTP server host."""
 
     http_port: int = 8080
@@ -215,6 +220,46 @@ class HTTPFrontendConfig:
 
 
 DEFAULT_HTTP_FRONTEND_CONFIG = HTTPFrontendConfig()
+
+DEFAULT_KAFKA_CACHE_EVENT_TOPIC = "lmcache-cache-events"
+DEFAULT_KAFKA_DELIVERY_TIMEOUT = 10.0
+
+
+@dataclass(frozen=True)
+class HttpCacheEventSinkConfig:
+    """Configuration for direct HTTP cache-event delivery."""
+
+
+@dataclass(frozen=True)
+class KafkaCacheEventSinkConfig:
+    """Configuration for publishing cache events to Kafka.
+
+    Attributes:
+        bootstrap_servers: Comma-separated Kafka bootstrap servers.
+        topic: Topic receiving cache-event records.
+        delivery_timeout: Seconds to wait for broker acknowledgement.
+    """
+
+    bootstrap_servers: str
+    topic: str = DEFAULT_KAFKA_CACHE_EVENT_TOPIC
+    delivery_timeout: float = DEFAULT_KAFKA_DELIVERY_TIMEOUT
+
+    def __post_init__(self) -> None:
+        """Validate the bootstrap servers, topic, and delivery timeout.
+
+        Raises:
+            ValueError: If bootstrap servers or the topic are empty, or the
+                delivery timeout is not a positive finite number.
+        """
+        if not self.bootstrap_servers.strip():
+            raise ValueError("Kafka bootstrap servers must be non-empty")
+        if not self.topic.strip():
+            raise ValueError("Kafka cache-event topic must be non-empty")
+        if not math.isfinite(self.delivery_timeout) or self.delivery_timeout <= 0:
+            raise ValueError(
+                "Kafka delivery timeout must be a finite number > 0, "
+                f"got {self.delivery_timeout}"
+            )
 
 
 @dataclass
@@ -245,6 +290,11 @@ class CoordinatorConfig:
 
     event_flush_interval: float = 1.0
     """Seconds between cache-event flush attempts to the coordinator."""
+
+    event_sink_config: HttpCacheEventSinkConfig | KafkaCacheEventSinkConfig = field(
+        default_factory=HttpCacheEventSinkConfig
+    )
+    """Transport-specific cache-event delivery configuration."""
 
     blend_timeout: float = 1.0
     """Seconds a fleet CacheBlend lookup may take: both the per-request HTTP
@@ -408,6 +458,15 @@ def add_mp_server_args(
         "import. Example: --script-allowed-imports numpy pandas",
     )
     mp_group.add_argument(
+        "--run-script-api-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable the /run_script HTTP endpoint, which executes "
+        "caller-supplied Python in-process (full remote code execution; the "
+        "restricted builtins are not a security boundary). Default is False. "
+        "Only enable it on a trusted network.",
+    )
+    mp_group.add_argument(
         "--separate-object-groups",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -499,6 +558,7 @@ def parse_args_to_mp_server_config(
         p2p_config=parse_args_to_p2p_config(args),
         shm_name=args.shm_name,
         script_allowed_imports=args.script_allowed_imports or [],
+        run_script_api_enabled=args.run_script_api_enabled,
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
@@ -592,8 +652,10 @@ def add_http_frontend_args(
     http_group.add_argument(
         "--http-host",
         type=str,
-        default="0.0.0.0",
-        help="Host to bind the HTTP server. Default is 0.0.0.0.",
+        default="127.0.0.1",
+        help="Host to bind the HTTP server. Default is 127.0.0.1; the admin "
+        "API has no authentication, so only bind a non-loopback address on a "
+        "trusted network.",
     )
     http_group.add_argument(
         "--http-port",
@@ -630,7 +692,8 @@ def add_coordinator_args(
     The registration flags fall back to their ``LMCACHE_COORDINATOR_*``
     environment variables so the server can be configured either way (the env
     var is convenient for the Kubernetes downward API); an explicit flag wins
-    over the env var. The blend client flags have no env fallback.
+    over the env var. The event-transport and blend client flags have no env
+    fallback.
 
     Args:
         parser: The argument parser to add arguments to.
@@ -680,6 +743,34 @@ def add_coordinator_args(
         "Defaults to LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL, then 1.0.",
     )
     group.add_argument(
+        "--coordinator-event-transport",
+        choices=("http", "kafka"),
+        default="http",
+        help="Cache-event transport: http posts batches to the coordinator, "
+        "kafka publishes them to a Kafka topic. Default is http.",
+    )
+    group.add_argument(
+        "--coordinator-kafka-bootstrap-servers",
+        type=str,
+        default="",
+        help="Comma-separated Kafka bootstrap servers. Required when the "
+        "cache-event transport is kafka.",
+    )
+    group.add_argument(
+        "--coordinator-kafka-topic",
+        type=str,
+        default=DEFAULT_KAFKA_CACHE_EVENT_TOPIC,
+        help="Kafka topic receiving cache events. Default is "
+        f"{DEFAULT_KAFKA_CACHE_EVENT_TOPIC}.",
+    )
+    group.add_argument(
+        "--coordinator-kafka-delivery-timeout",
+        type=float,
+        default=DEFAULT_KAFKA_DELIVERY_TIMEOUT,
+        help="Seconds to wait for Kafka broker acknowledgement (must be > 0). "
+        f"Default is {DEFAULT_KAFKA_DELIVERY_TIMEOUT}.",
+    )
+    group.add_argument(
         "--coordinator-blend-timeout",
         type=float,
         default=DEFAULT_COORDINATOR_CONFIG.blend_timeout,
@@ -721,10 +812,10 @@ def parse_args_to_coordinator_config(
     """Convert parsed command line arguments to a CoordinatorConfig.
 
     For the registration settings a flag value takes precedence over its
-    environment variable; the blend client settings come from their flags
-    alone. Timing values are validated here so a malformed one fails fast at
-    startup (runtime best-effort only covers coordinator *reachability*, not
-    config).
+    environment variable; the event-transport and blend client settings come
+    from their flags alone. Timing values are validated here so a malformed
+    one fails fast at startup (runtime best-effort only covers coordinator
+    *reachability*, not config).
 
     The event-reporting flags also accept their deprecated pre-v0.5.3
     spellings (``--coordinator-l2-event-*``), logging a deprecation warning
@@ -739,8 +830,10 @@ def parse_args_to_coordinator_config(
 
     Raises:
         ValueError: If the heartbeat interval, the event flush interval or the
-            blend timeout is not a positive finite number, or if the blend
-            match concurrency is less than 1.
+            blend timeout is not a positive finite number, if the blend match
+            concurrency is less than 1, or if the Kafka transport is selected
+            with empty bootstrap servers, an empty topic, or a non-positive
+            delivery timeout.
     """
     url = (
         args.coordinator_url
@@ -814,6 +907,16 @@ def parse_args_to_coordinator_config(
             "got %s" % event_flush_interval
         )
 
+    event_sink_config: HttpCacheEventSinkConfig | KafkaCacheEventSinkConfig = (
+        HttpCacheEventSinkConfig()
+    )
+    if args.coordinator_event_transport == "kafka":
+        event_sink_config = KafkaCacheEventSinkConfig(
+            bootstrap_servers=args.coordinator_kafka_bootstrap_servers,
+            topic=args.coordinator_kafka_topic,
+            delivery_timeout=args.coordinator_kafka_delivery_timeout,
+        )
+
     blend_timeout = args.coordinator_blend_timeout
     if not math.isfinite(blend_timeout) or blend_timeout <= 0:
         raise ValueError(
@@ -833,6 +936,7 @@ def parse_args_to_coordinator_config(
         heartbeat_interval=heartbeat_interval,
         event_reporting=event_reporting,
         event_flush_interval=event_flush_interval,
+        event_sink_config=event_sink_config,
         blend_timeout=blend_timeout,
         blend_match_concurrency=blend_match_concurrency,
     )
