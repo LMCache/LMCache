@@ -16,7 +16,7 @@ import urllib.request
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.commands.describe import normalize_url
+from lmcache.cli.http import DEFAULT_URLS, normalize_url
 
 # -------------------------------------------------------------------
 # Constants
@@ -25,11 +25,6 @@ from lmcache.cli.commands.describe import normalize_url
 HEALTH_ENDPOINTS: dict[str, str] = {
     "kvcache": "/healthcheck",
     "engine": "/health",
-}
-
-DEFAULT_URLS: dict[str, str] = {
-    "kvcache": "http://localhost:8080",
-    "engine": "http://localhost:8000",
 }
 
 TITLES: dict[str, str] = {

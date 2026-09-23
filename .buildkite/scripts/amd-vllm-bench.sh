@@ -26,6 +26,11 @@ esac
 CONTAINER_NAME="lmcache-amd-vllm-bench-${BUILDKITE_BUILD_ID}-${MODE}"
 
 cd "${REPO_ROOT}"
+
+# shellcheck source=.buildkite/k3_tests/common_scripts/helpers.sh
+source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
+merge_pr_base_branch
+
 echo "AMD kernel mode: ${MODE}"
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -119,6 +124,7 @@ echo "Pulling ${VLLM_ROCM_IMAGE}"
     --env "GPU_FOR_BASELINE=${GPU_FOR_BASELINE}" \
     --env "PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH:-gfx942}" \
     --env "AMD_KERNEL_MODE=${MODE}" \
+    --env "LMCACHE_REQUEST_TRANSPORT=${LMCACHE_REQUEST_TRANSPORT:-zmq}" \
     "${SERIALIZE_ENV[@]}" \
     --env ATTENTION_BACKEND=auto \
     --env BATCH_INVARIANT=0 \
