@@ -17,6 +17,7 @@ on:
             - 'requirements/build.txt'
             - 'lmcache/__init__.py'
             - '.github/workflows/build_cpu_artifacts.yml'
+            - '.github/actions/build-artifacts/action.yml'
 
 env:
     LC_ALL: en_US.UTF-8
@@ -57,6 +58,7 @@ jobs:
                 pip_index_packages: torch
                 pip_packages: build
                 requirements_file: requirements/build.txt
+                release_tag_pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
 
             - name: Clean up release artifacts
               run: |

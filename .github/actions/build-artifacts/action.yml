@@ -42,6 +42,10 @@ inputs:
     description: Version to use when no stable release tag is available.
     required: false
     default: "0.0.0.dev0"
+  release_tag_pattern:
+    description: Regex matching tags to retain for package versioning.
+    required: false
+    default: '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$'
   dockerhub_username:
     description: DockerHub username for authenticated image pulls.
     required: false
@@ -76,9 +80,11 @@ runs:
 
     - name: Remove non-release tags
       shell: bash
+      env:
+        RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
       run: |
         set -euo pipefail
-        non_release_tags=$(git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' || true)
+        non_release_tags=$(git tag -l | grep -vE "${RELEASE_TAG_PATTERN}" || true)
         if [[ -n "${non_release_tags}" ]]; then
           while IFS= read -r tag; do
             git tag -d "${tag}"

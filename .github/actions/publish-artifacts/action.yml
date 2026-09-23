@@ -50,38 +50,12 @@ runs:
         fi
 
         if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-          mapfile -t previous_assets < <(
-            gh release view "${RELEASE_TAG}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --json assets \
-              --jq '.assets[].name'
-          )
-          gh release upload "${RELEASE_TAG}" "${assets[@]}" \
-            --clobber \
-            --repo "${GITHUB_REPOSITORY}"
-
-          declare -A current_asset_names=()
-          for asset in "${assets[@]}"; do
-            current_asset_names["$(basename "${asset}")"]=1
-          done
-          for previous_asset in "${previous_assets[@]}"; do
-            if [[ -z "${current_asset_names[${previous_asset}]:-}" ]]; then
-              gh release delete-asset "${RELEASE_TAG}" "${previous_asset}" \
-                --yes \
-                --repo "${GITHUB_REPOSITORY}"
-            fi
-          done
-
-          gh release edit "${RELEASE_TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "${RELEASE_TITLE}" \
-            --notes "${RELEASE_NOTES}" \
-            --prerelease
-        else
-          gh release create "${RELEASE_TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "${RELEASE_TITLE}" \
-            --notes "${RELEASE_NOTES}" \
-            --prerelease \
-            "${assets[@]}"
+          gh release delete "${RELEASE_TAG}" \
+            --yes --cleanup-tag --repo "${GITHUB_REPOSITORY}"
         fi
+        gh release create "${RELEASE_TAG}" \
+          --repo "${GITHUB_REPOSITORY}" \
+          --title "${RELEASE_TITLE}" \
+          --notes "${RELEASE_NOTES}" \
+          --prerelease \
+          "${assets[@]}"

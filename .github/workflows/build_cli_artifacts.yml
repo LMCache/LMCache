@@ -14,6 +14,7 @@ on:
             - 'pyproject_cli.toml'
             - 'requirements/cli.txt'
             - '.github/workflows/build_cli_artifacts.yml'
+            - '.github/actions/build-artifacts/action.yml'
 
 env:
     LC_ALL: en_US.UTF-8
