@@ -237,6 +237,46 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
+      # Engine-driven coverage for the same cross-TP-rank restore. Both
+      # transports are exercised: pickle keeps L1 allocation lazy, while SHM
+      # disables it so the test's 80Gi L1 pool is actually mapped, which needs
+      # the dedicated /dev/shm pod below.
+      - label: ":electric_plug: kimi_linear_tp_engine_driven / {{matrix.transport}}"
+        command: |
+          export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+          export ENGINE_DRIVEN_TRANSPORT="{{matrix.transport}}"
+          case "{{matrix.transport}}" in
+            pickle) export L1_USE_LAZY="true" ;;
+            shm) export L1_USE_LAZY="false" ;;
+          esac
+          .buildkite/k3_tests/multiprocess/run.sh kimi_linear_tp
+        matrix:
+          setup:
+            transport:
+              - "pickle"
+              - "shm"
+        env:
+          INFERENCE_ENGINE: "vllm"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+        timeout_in_minutes: 60
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec: &pod-2gpu-dshm
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "2" } }
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 128Gi } }
+        artifact_paths: ["*.log"]
+
   - group: ":compression: Multiprocess (1-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
