@@ -53,9 +53,6 @@ class _ImmediateFuture:
         del timeout
         return self._result
 
-    def prepare(self, timeout: Optional[float] = None) -> bool:
-        return self.result(timeout)
-
     def wait_on_stream(self, stream: Any, timeout: Optional[float] = None) -> bool:
         del stream
         return self.result(timeout)
@@ -941,11 +938,10 @@ class UnifiedLMCacheMPConnector:
             releases destination slots.
         """
         local_success = False
-        prepared = False
         try:
-            local_success = bool(operation.future.prepare(timeout=self._mq_timeout))
-            prepared = True
-            operation.future.wait_on_stream(stream, timeout=0)
+            local_success = bool(
+                operation.future.wait_on_stream(stream, timeout=self._mq_timeout)
+            )
         except Exception:
             logger.exception(
                 "LMCache retrieve preparation failed for %s", operation.request_id
@@ -958,13 +954,12 @@ class UnifiedLMCacheMPConnector:
         # Another rank may have failed after this rank successfully enqueued
         # H2D. Wait locally before SGLang returns these destination slots to its
         # allocator; otherwise LMCache could still be writing reused memory.
-        if prepared:
-            try:
-                operation.future.result(timeout=self._mq_timeout)
-            except Exception:
-                logger.exception(
-                    "Failed to drain LMCache retrieve for %s", operation.request_id
-                )
+        try:
+            operation.future.result(timeout=self._mq_timeout)
+        except Exception:
+            logger.exception(
+                "Failed to drain LMCache retrieve for %s", operation.request_id
+            )
         operation.lookup.locks_held = False
         operation.result = False
         self._cleanup_lookup_result(operation.lookup)
