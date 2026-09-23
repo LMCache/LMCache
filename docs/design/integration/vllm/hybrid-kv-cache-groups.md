@@ -21,7 +21,7 @@ store/retrieve address those infos directly.
 
 ## Goals / Non-Goals
 
-- Keep the ZMQ API engine-neutral; confine vLLM field reads to
+- Keep the request API engine-neutral; confine vLLM field reads to
   `lmcache.integration.vllm`.
 - Registration defines the protocol-visible group order; store/retrieve block
   IDs are indexed by that order.
@@ -215,4 +215,4 @@ no cross-backend cache sharing).
 | Group metadata edits (Mamba, sub-paged attention) | `lmcache/integration/vllm/kv_cache_group_edits.py` |
 | Register / store / retrieve | `lmcache/integration/vllm/{lmcache_mp_connector,vllm_multi_process_adapter}.py` |
 | Server GPU context / transfer | `lmcache/v1/multiprocess/{gpu_context,modules/lmcache_driven_transfer}.py` |
-| ZMQ protocol | `lmcache/v1/multiprocess/protocols/engine.py` |
+| Request RPC contract | `lmcache/v1/multiprocess/transport/base.py` |
