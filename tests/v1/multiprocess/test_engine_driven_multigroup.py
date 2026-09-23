@@ -451,7 +451,7 @@ class _FakeStorageManager:
         self.finished_reads: list[ObjectKey] = []
         self.deleted: list[ObjectKey] = []
 
-    def reserve_write(self, obj_keys, _layout, _mode):
+    def reserve_write(self, obj_keys, _layout):
         reserved = {}
         for obj_key in obj_keys:
             obj = _FakeMemoryObj(self._shapes[obj_key.object_group_id])
