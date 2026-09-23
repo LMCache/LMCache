@@ -428,3 +428,21 @@ class TestStorageManagerPrefetchCallback:
             assert not obj.ref_count_down_called
         for obj in tier0_objs[4:]:
             assert obj.ref_count_down_called
+
+
+def test_is_hot_cache_object_without_cpu_backend():
+    """
+    StorageManager.is_hot_cache_object must return False (not raise)
+    when there is no local CPU backend, so the retrieve cleanup falls
+    back to unpinning pinned staging objects.
+    """
+    key = CacheEngineKey("test_model", 1, 0, 123, torch.float32)
+    memory_obj = MockMemoryObj(1)
+
+    manager = SimpleNamespace(local_cpu_backend=None)
+    assert (
+        StorageManager.is_hot_cache_object(
+            cast(StorageManager, manager), key, cast(MemoryObj, memory_obj)
+        )
+        is False
+    )

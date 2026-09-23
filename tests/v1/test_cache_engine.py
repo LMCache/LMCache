@@ -148,6 +148,77 @@ def test_paged_same_retrieve_store(save_unfull_chunk, autorelease_v1):
     check_paged_kv_cache_equal(retrieved_cache, kv_cache, slot_mapping[:expected_count])
 
 
+def test_retrieve_preserves_lookup_pin(autorelease_v1):
+    """
+    Regression test for #5090: on a plain local-CPU cache hit, the pin
+    placed by lookup(pin=True) is owned by the lookup and released via
+    lookup_unpin(). retrieve() must not consume it; otherwise the later
+    lookup_unpin() drives pin_count to -1 ("Double unpin occurred").
+    """
+    device = torch_device_type
+    chunk_size = 256
+    num_tokens = 1024  # multiple of chunk_size, so every chunk is full
+    num_blocks = 1000
+    block_size = 16
+    dtype = torch.bfloat16
+    kv_shape = (32, 2, chunk_size, 8, 128)
+    connector = create_gpu_connector(1024, 32)
+
+    tokens = generate_tokens(num_tokens, device)
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
+    )
+    retrieved_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks, device, block_size, dtype
+    )
+    slot_mapping = torch.tensor(
+        random.sample(range(0, num_blocks * block_size), num_tokens), device=device
+    )
+
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=chunk_size, remote_url=None)
+    engine = autorelease_v1(
+        LMCacheEngineBuilder.get_or_create(
+            "test",
+            cfg,
+            dumb_metadata(kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
+        )
+    )
+
+    engine.store(tokens=tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
+    recover_engine_states(engine)
+
+    timeout = 1.5
+    start_time = time.time()
+    while engine.lookup(tokens) < num_tokens:
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Operation timed out after {timeout} seconds.")
+        time.sleep(0.01)
+
+    # vLLM-style pinned lookup at scheduling time
+    req_id = "req-pin-balance"
+    assert engine.lookup(tokens, lookup_id=req_id, pin=True) == num_tokens
+
+    cpu_backend = engine.storage_manager.storage_backends["LocalCPUBackend"]
+    hot_objs = list(cpu_backend.hot_cache.values())
+    assert hot_objs
+    assert all(obj.metadata.pin_count == 1 for obj in hot_objs)
+
+    # retrieve() must leave the lookup pin on hot-cache residents intact
+    ret_mask = engine.retrieve(
+        tokens, kvcaches=retrieved_cache, slot_mapping=slot_mapping, req_id=req_id
+    )
+    recover_engine_states(engine)
+    assert torch.sum(ret_mask) == num_tokens
+    assert all(obj.metadata.pin_count == 1 for obj in hot_objs)
+
+    # The owner releases the pin exactly once: 1 -> 0, never negative
+    engine.lookup_unpin(req_id)
+    assert all(obj.metadata.pin_count == 0 for obj in hot_objs)
+
+
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize("backend", ["cpu", "local_disk", "remote", "remote_cachegen"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
@@ -2037,6 +2108,13 @@ def test_retrieve_cleanup_ref_count_and_unpin() -> None:
     engine.async_loading = False
     engine._process_tokens_internal.return_value = (reordered_chunks, 1024)
     engine._is_sync_pd_backend.return_value = False
+
+    # The pinned object here models a staging buffer, not a hot-cache
+    # resident: residents keep their lookup pin (see #5090).
+    # storage_manager is an instance attribute, absent from the spec'd
+    # mock, so it must be assigned explicitly.
+    engine.storage_manager = MagicMock()
+    engine.storage_manager.is_hot_cache_object.return_value = False
 
     # Mock stats monitor
     engine.stats_monitor = MagicMock()
