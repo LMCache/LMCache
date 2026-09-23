@@ -20,12 +20,14 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
+from lmcache.v1.multiprocess.request_handler import request_handler
 
 logger = init_logger(__name__)
 
 
 # Default for the wire-typed group_rot parameter; never mutated.
 _EMPTY_GROUP_ROT: list[list[int]] = []
+_EMPTY_GROUP_HEAD_SIZE: list[int] = []
 
 
 class RegistrationMixin:
@@ -46,6 +48,7 @@ class RegistrationMixin:
             self, gpu_context: Any, rope_state: _CBRopeState, max_batch: int
         ) -> Any: ...
 
+    @request_handler()
     def cb_register_rope(
         self,
         instance_id: int,
@@ -56,6 +59,7 @@ class RegistrationMixin:
         # Annotation must equal the protocol payload class exactly (mq.py
         # same_type check); direct callers may still pass tuples/None entries.
         group_rot: list[list[int]] = _EMPTY_GROUP_ROT,
+        group_head_size: list[int] = _EMPTY_GROUP_HEAD_SIZE,
     ) -> None:
         """Attach CB re-RoPE state to a registered KV-cache instance.
 
@@ -69,13 +73,16 @@ class RegistrationMixin:
             head_size: Rotary head dimension.
             is_neox_style: True for NeoX (contiguous halves), else GPT-J.
             group_to_cache: Per-engine-group index into the caches list;
-                empty means every group uses cache 0.
+                ``-1`` skips re-RoPE for that group; empty means every
+                group uses cache 0.
             group_rot: Per-engine-group rotation window ``(offset_elems,
                 width_elems)``, or ``None`` per entry to skip that group.
                 Empty/omitted = legacy inference (rotate ``head_size`` dims at
                 offset 0). MLA models must declare this: a single-plane MLA
                 row is indistinguishable from a key-only cache to the legacy
                 inference and would get its content dims rotated.
+            group_head_size: Per-engine-group scatter head size. Empty means
+                ``head_size`` covers every group.
 
         Raises:
             ValueError: On a missing KV cache, bad ``group_to_cache``
@@ -90,12 +97,12 @@ class RegistrationMixin:
         # Zero caches is legal (NoPE): rope state still carries scatter
         # geometry; every re-RoPE consumer skips.
         if group_to_cache:
-            if min(group_to_cache) < 0 or max(group_to_cache) >= len(
+            if min(group_to_cache) < -1 or max(group_to_cache) >= len(
                 cos_sin_caches_ipc
             ):
                 raise ValueError(
                     f"group_to_cache {group_to_cache} contains indices outside "
-                    f"[0, {len(cos_sin_caches_ipc)}) for the sent cache(s)."
+                    f"[-1, {len(cos_sin_caches_ipc)}) for the sent cache(s)."
                 )
             # Every engine group needs a mapping; fail here, not mid-retrieve.
             max_eg_idx = max(
@@ -153,12 +160,13 @@ class RegistrationMixin:
             cos_sin_caches=cos_sin_caches,
             group_to_cache=list(group_to_cache),
             group_rot=norm_rot,
+            group_head_size=list(group_head_size),
         )
 
         logger.info(
             "Registered CB rope state for instance %d "
             "(%d cache(s), shapes=%s dtype=%s, head_size=%d, is_neox=%s, "
-            "group_map=%s, group_rot=%s)",
+            "group_map=%s, group_rot=%s, group_hs=%s)",
             instance_id,
             len(cos_sin_caches),
             [tuple(c.shape) for c in cos_sin_caches],
@@ -167,6 +175,7 @@ class RegistrationMixin:
             is_neox_style,
             "uniform" if not group_to_cache else str(group_to_cache),
             "legacy" if not norm_rot else str(norm_rot),
+            "uniform" if not group_head_size else str(list(group_head_size)),
         )
 
         # Pre-warm plan invariants + slot staging off the retrieve critical
@@ -193,6 +202,7 @@ class RegistrationMixin:
         except Exception:
             logger.debug("CB plan pre-warm skipped", exc_info=True)
 
+    @request_handler()
     def cb_unregister_rope(self, instance_id: int) -> None:
         """Drop the instance's CB rope state; the paged KV cache stays intact."""
         self._cb_rope_state.pop(instance_id, None)

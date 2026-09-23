@@ -69,6 +69,7 @@ lmcache/v1/mp_coordinator/
     event_broadcaster.py  # fans admitted events to the registered consumers
     event_source.py     # source lifecycle/status contract
     http_event_source.py  # non-durable POST /events push source
+    kafka_event_source.py  # durable Kafka pull source (poll thread -> gate)
   discovery.py          # Registry + package scan, shared by views and controllers
   views/                # read models of the fleet: what is cached, and how much
     __init__.py         # build_views: scans this package
@@ -81,6 +82,7 @@ lmcache/v1/mp_coordinator/
     __init__.py         # build_controllers: scans this package + named ones
     base.py             # Controller: construction + run(); views only
     eviction_controller.py  # the fleet L2 control loop: quota + usage + LRU + pins
+    eviction_http_api.py    # the /quota and /cache/pins endpoints it owns
     prefetch_manager.py # dispatches warm prefetch to a named MP server
   http_routes.py        # HttpRoutes: a controller registering its own endpoints
   http_apis/
@@ -88,8 +90,7 @@ lmcache/v1/mp_coordinator/
     dependencies.py     # shared FastAPI dependencies (registry, key directory, ...)
     instances_api.py    # /instances REST resource
     health_api.py       # /healthz
-    quota_api.py        # /quota/config, /quota/{cache_salt}, /quota
-    cache_api.py        # /cache/prefetches, /cache/pins, /cache/delete
+    cache_api.py        # /cache/prefetches, /cache/delete
     events_api.py       # /events (fleet cache-event ingest)
     directory_api.py    # /directory/lookup, /directory/blend-lookup, /directory/keys, ...
     instances_usage_api.py  # /instances/usage, /instances/{id}/usage
@@ -184,10 +185,13 @@ through this layer, which decides **what** is admitted and **who** sees
 it. It holds no cache state itself. See [ingest.md](ingest.md).
 
 - `event_source.py` — common source lifecycle/status contract.
-- `http_event_source.py` — `HttpCacheEventSource`, today's non-durable
-  `POST /events` push adapter. Future durable sources use the same
-  `EventGate.ingest_batches` method but own their transport lifecycle
-  separately.
+- `http_event_source.py` — `HttpCacheEventSource`, the non-durable
+  `POST /events` push adapter.
+- `kafka_event_source.py` — `KafkaCacheEventSource`, the durable pull
+  adapter: a poll thread reads the fleet's Kafka topic and offers each
+  record to the same `EventGate.ingest_batches`; offsets commit via the
+  consumer group. Selected by `--event-transport kafka` in place of the
+  HTTP source; a coordinator runs exactly one.
 - `event_gate.py` — the admission point for every source. Owns the
   per-emitter stream cursor: incarnation fencing (a restart voids the
   emitter's L1 facts), `seq` dedup, and gap detection. Scan sources
@@ -270,7 +274,10 @@ path, matches verified token-exact, and eviction exact because it follows
 binding lifecycle. Blend servers query it with `POST
 /directory/blend-lookup` and get `(chunk_hash, old_st, cur_st)` per match,
 which they expand into per-rank object keys with their own model and salt.
-The match window is the fleet chunk size (`CHUNK_SIZE`), probed at
+The query's `model_name`/`cache_salt`/`world_size` scope matches to chunks
+stored in that namespace, so a match always expands into keys that exist.
+The match
+window is the fleet chunk size (`CHUNK_SIZE`), probed at
 `BLEND_PROBE_STRIDE`. See [blend_index.md](blend_index.md).
 
 The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
