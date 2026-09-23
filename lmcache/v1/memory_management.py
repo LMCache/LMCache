@@ -962,7 +962,17 @@ class BytesBufferMemoryObj(MemoryObj):
         return [self.get_shape()]
 
     def get_dtypes(self) -> list[torch.dtype]:
-        return []
+        # Must be parallel to get_shapes() (one dtype per shape): the remote
+        # metadata path zips shapes and dtypes with strict=True. A byte buffer
+        # has no tensor dtype, so report the single logical None;
+        # RemoteMetadata encodes it via DTYPE_TO_INT[None] == 0 and recovers it
+        # via INT_TO_DTYPE[0] == None, so it round-trips. Returning [] left the
+        # dtypes list one element short of the shapes list and raised
+        # "zip() argument 2 is shorter than argument 1" on every put for a
+        # byte-buffer serde (e.g. cachegen) over a remote connector such as fs.
+        # The declared list[torch.dtype] return type is kept to match the base
+        # contract; the None element is a documented byte-buffer special case.
+        return [self.get_dtype()]  # type: ignore[list-item]
 
     def get_memory_format(self) -> MemoryFormat:
         return self.metadata.fmt
