@@ -81,9 +81,7 @@ from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     PrefetchPolicy,
 )
-from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
-)
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -297,7 +295,7 @@ class PrefetchController(StorageControllerInterface):
         self,
         l1_manager: L1Manager,
         l2_adapters: list[L2AdapterInterface],
-        adapter_descriptors: list[AdapterDescriptor],
+        adapter_descriptors: list[L2AdapterDescriptor],
         policy: PrefetchPolicy,
         max_in_flight: int = 8,
     ) -> None:
@@ -306,7 +304,7 @@ class PrefetchController(StorageControllerInterface):
             desc.index: adapter
             for desc, adapter in zip(adapter_descriptors, l2_adapters, strict=True)
         }
-        self._adapter_descriptors: dict[int, AdapterDescriptor] = {
+        self._adapter_descriptors: dict[int, L2AdapterDescriptor] = {
             desc.index: desc for desc in adapter_descriptors
         }
         self._policy = policy
@@ -632,7 +630,7 @@ class PrefetchController(StorageControllerInterface):
         self,
         adapter_id: int,
         adapter: L2AdapterInterface,
-        descriptor: AdapterDescriptor,
+        descriptor: L2AdapterDescriptor,
     ) -> None:
         """Blocking function to add a new adapter into the prefetch
         controller with the specified adapter ID and descriptor.
