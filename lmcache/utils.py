@@ -738,7 +738,10 @@ def handle_thread_exception(args):
         args: Thread exception information provided by ``threading``.
     """
     logger.error(
-        f"Thread {args.thread.name} crashed: {args.exc_type.__name__}: {args.exc_value}"
+        "Thread %s crashed: %s: %s",
+        args.thread.name,
+        args.exc_type.__name__,
+        args.exc_value,
     )
 
 
