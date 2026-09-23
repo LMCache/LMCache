@@ -22,6 +22,7 @@ pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
     KVConnectorRole,
 )
+from vllm.v1.request import RequestStatus  # noqa: E402
 from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
@@ -67,6 +68,7 @@ class _FakeRequest:
     ):
         self.request_id = "req-0"
         self.resumable = False
+        self.status = RequestStatus.WAITING
         self.cache_salt = cache_salt
         self.prompt_token_ids = list(prompt_token_ids)
         self._live_token_ids = list(prompt_token_ids)
@@ -190,6 +192,7 @@ def test_eager_prefetch_forwards_request_configs():
     connector = SimpleNamespace(
         role=KVConnectorRole.SCHEDULER,
         _eager_prefetch=True,
+        _reserve_last_token_for_lookup=False,
         scheduler_adapter=scheduler_adapter,
         _get_or_create_request_tracker=MagicMock(return_value=tracker),
     )
@@ -201,8 +204,37 @@ def test_eager_prefetch_forwards_request_configs():
         token_ids=[1, 2, 3],
         cache_salt="",
         request_configs={"lmcache.skip_save": True},
+        reserve_last_token=False,
     )
     assert tracker.lookup_started_at is not None
+
+
+def test_recurrent_lookup_reserves_final_prompt_token() -> None:
+    """A recurrent full hit stops at the preceding checkpoint boundary."""
+    request = _FakeRequest(list(range(128)))
+    scheduler_adapter = MagicMock()
+    scheduler_adapter.lmcache_tokens_per_chunk = 64
+    scheduler_adapter.check_lookup_result.return_value = 64
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector.request_trackers = {}
+    connector.scheduler_adapter = scheduler_adapter
+    connector._reserve_last_token_for_lookup = True
+    connector._hit_alignment_tokens = 64
+    connector._connector_stats = MagicMock()
+    connector.lazy_offload = False
+
+    matched_tokens, load_async = connector.get_num_new_matched_tokens(request, 0)
+
+    assert (matched_tokens, load_async) == (64, True)
+    scheduler_adapter.maybe_submit_lookup_request.assert_called_once_with(
+        request.request_id,
+        token_ids=list(range(128)),
+        cache_salt="",
+        request_configs=None,
+        reserve_last_token=True,
+    )
+    tracker = connector.request_trackers[request.request_id]
+    assert tracker.num_lmcache_hit_tokens == 64
 
 
 def _prepare_storable_tracker(request: _FakeRequest) -> LMCacheMPRequestTracker:

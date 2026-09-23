@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the POST /cache/checksums endpoint (and other MP HTTP routes)."""
+"""Tests for MP HTTP server routes and lifespan wiring."""
 
 # Standard
 from unittest.mock import MagicMock, PropertyMock
@@ -12,7 +12,15 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.mp_coordinator.cache_events import CacheEventSink
+from lmcache.v1.mp_observability.config import ObservabilityConfig
 from lmcache.v1.multiprocess import http_server as http_server_module
+from lmcache.v1.multiprocess.config import (
+    CoordinatorConfig,
+    HTTPFrontendConfig,
+    KafkaCacheEventSinkConfig,
+    MPServerConfig,
+)
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_server import app
 import lmcache.lmcache_native as lmcache_native
@@ -61,6 +69,104 @@ def test_lifespan_owns_transport_neutral_request_server(
     request_server.close.assert_called_once_with()
     engine.close.assert_called_once_with()
     event_bus.stop.assert_called_once_with()
+
+
+def _patch_lifespan_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    coordinator_config: CoordinatorConfig,
+    request_server: MagicMock,
+    engine: MagicMock,
+    event_bus: MagicMock,
+) -> None:
+    """Point the lifespan at stand-ins so it runs without a cache engine.
+
+    Coordinator registration is replaced by a task that never contacts a
+    coordinator, so a config with a URL exercises the wiring only.
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        coordinator_config: Coordinator settings the lifespan reads.
+        request_server: Returned by the patched ``run_cache_server``.
+        engine: Returned by the patched ``run_cache_server``.
+        event_bus: Returned by the patched ``get_event_bus``.
+    """
+    monkeypatch.setattr(
+        http_server_module,
+        "_configs",
+        {
+            "mp": MPServerConfig(),
+            "storage_manager": MagicMock(),
+            "observability": ObservabilityConfig(),
+            "http": HTTPFrontendConfig(),
+            "coordinator": coordinator_config,
+        },
+    )
+    monkeypatch.setattr(
+        http_server_module,
+        "run_cache_server",
+        MagicMock(return_value=(request_server, engine)),
+    )
+    monkeypatch.setattr(http_server_module, "build_context", MagicMock())
+    monkeypatch.setattr(
+        http_server_module,
+        "get_event_bus",
+        MagicMock(return_value=event_bus),
+    )
+
+    async def _never_registers(*args: object, **kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(http_server_module, "keep_registered", _never_registers)
+
+
+def test_event_reporting_builds_sink_from_transport_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lifespan hands the whole coordinator config to the sink factory."""
+    coordinator_config = CoordinatorConfig(
+        url="http://coordinator:9300",
+        event_reporting=True,
+        event_sink_config=KafkaCacheEventSinkConfig(bootstrap_servers="broker:9092"),
+    )
+    request_server = MagicMock()
+    engine = MagicMock()
+    event_bus = MagicMock()
+    create_sink = MagicMock(return_value=MagicMock(spec=CacheEventSink))
+    _patch_lifespan_dependencies(
+        monkeypatch, coordinator_config, request_server, engine, event_bus
+    )
+    monkeypatch.setattr(http_server_module, "create_cache_event_sink", create_sink)
+
+    async def exercise_lifespan() -> None:
+        async with http_server_module.lifespan(FastAPI()):
+            create_sink.assert_called_once_with(coordinator_config)
+            event_bus.register_subscriber.assert_called_once()
+
+    asyncio.run(exercise_lifespan())
+
+    event_bus.stop.assert_called_once_with()
+    request_server.close.assert_called_once_with()
+    engine.close.assert_called_once_with()
+
+
+def test_http_event_reporting_without_coordinator_url_registers_no_subscriber(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default HTTP transport still needs a coordinator URL to report."""
+    coordinator_config = CoordinatorConfig(event_reporting=True)
+    event_bus = MagicMock()
+    create_sink = MagicMock()
+    _patch_lifespan_dependencies(
+        monkeypatch, coordinator_config, MagicMock(), MagicMock(), event_bus
+    )
+    monkeypatch.setattr(http_server_module, "create_cache_event_sink", create_sink)
+
+    async def exercise_lifespan() -> None:
+        async with http_server_module.lifespan(FastAPI()):
+            create_sink.assert_not_called()
+            event_bus.register_subscriber.assert_not_called()
+
+    asyncio.run(exercise_lifespan())
 
 
 def _make_kv_tensors(

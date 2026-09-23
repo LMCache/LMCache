@@ -765,7 +765,10 @@ class LMCacheMPSchedulerAdapter:
         # It will be lazily started on the first lookup
         # request, by which time vLLM is fully ready.
         self._heartbeat_interval = heartbeat_interval
-        self._heartbeats: dict[str, HeartbeatThread] = {}
+        # ``None`` distinguishes "not started" from a populated per-server
+        # heartbeat map.  An empty map cannot be used as the sentinel because
+        # it is also the natural initial value before any heartbeat is made.
+        self._heartbeats: dict[str, HeartbeatThread] | None = None
         self._heartbeat_lock = threading.Lock()
 
         # For TP/PP: track partial store completions across steps.
@@ -795,6 +798,7 @@ class LMCacheMPSchedulerAdapter:
         with self._heartbeat_lock:
             if self._heartbeats is not None:
                 return
+            heartbeats: dict[str, HeartbeatThread] = {}
             for url, client in self.req_clients.items():
                 hb = HeartbeatThread(
                     req_client=client,
@@ -802,7 +806,8 @@ class LMCacheMPSchedulerAdapter:
                     interval=self._heartbeat_interval,
                 )
                 hb.start()
-                self._heartbeats[url] = hb
+                heartbeats[url] = hb
+            self._heartbeats = heartbeats
 
     @_lmcache_nvtx_annotate
     def maybe_submit_lookup_request(
@@ -811,7 +816,8 @@ class LMCacheMPSchedulerAdapter:
         token_ids: list[int],
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
-    ):
+        reserve_last_token: bool = False,
+    ) -> None:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
 
@@ -827,6 +833,8 @@ class LMCacheMPSchedulerAdapter:
                 cache_salt values produce separate cache entries.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+            reserve_last_token: Whether to exclude the final token before
+                aligning the lookup range.
 
         Returns:
             None
@@ -847,8 +855,9 @@ class LMCacheMPSchedulerAdapter:
             # Skip if there is already a lookup request
             return
 
+        lookup_tokens = max(0, len(token_ids) - int(reserve_last_token))
         aligned_end = (
-            len(token_ids) // self.lmcache_tokens_per_chunk
+            lookup_tokens // self.lmcache_tokens_per_chunk
         ) * self.lmcache_tokens_per_chunk
 
         key = self._create_key(
@@ -1091,8 +1100,9 @@ class LMCacheMPSchedulerAdapter:
         for client in self.req_clients.values():
             client.close()
         with self._heartbeat_lock:
-            for hb in self._heartbeats.values():
-                hb.stop()
+            if self._heartbeats is not None:
+                for hb in self._heartbeats.values():
+                    hb.stop()
 
     def free_lookup_locks(
         self,

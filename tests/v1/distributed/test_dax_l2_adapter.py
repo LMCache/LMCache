@@ -19,7 +19,6 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
 )
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -52,6 +51,9 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.mp_observability.event_bus import EventBus
 from lmcache.v1.platform import consume_fd
+
+# Test helpers
+from tests.v1.distributed.utils import single_row_spec
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -837,7 +839,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
         adapter = sm._l2_adapters[0]
         assert isinstance(adapter, DaxL2Adapter)
 
-        reserved = sm.reserve_write([key], layout, mode="new")
+        reserved = sm.reserve_write([key], layout)
         assert key in reserved
         assert reserved[key].tensor is not None
         reserved[key].tensor.fill_(11)
@@ -851,7 +853,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
             timeout=5.0,
         )
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec([key], {0: layout}))
+        handle = sm.submit_prefetch_task(single_row_spec([key], layout))
         assert wait_for_condition(
             lambda: sm.query_prefetch_lookup_hits(handle) is not None,
             timeout=5.0,
@@ -865,7 +867,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
             result = sm.query_prefetch_status(handle)
             if result is None:
                 return False
-            final_result["value"] = result.count_leading_ones()
+            final_result["value"] = result[0].count_leading_ones()
             return True
 
         assert wait_for_condition(_capture_prefetch_result, timeout=5.0)
@@ -942,7 +944,7 @@ def test_storage_manager_dax_adapter_uses_global_l2_eviction(tmp_path):
         key2 = create_object_key(72)
 
         def _write_key(key: ObjectKey, fill_value: int, usage_fraction: float) -> None:
-            reserved = sm.reserve_write([key], layout, mode="new")
+            reserved = sm.reserve_write([key], layout)
             assert key in reserved
             assert reserved[key].tensor is not None
             reserved[key].tensor.fill_(fill_value)
