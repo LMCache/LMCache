@@ -1214,25 +1214,3 @@ def _to_block_id_list(block_ids: torch.Tensor | list[int]) -> list[int]:
     if isinstance(block_ids, list):
         return [int(x) for x in block_ids]
     raise TypeError("block_ids must be a torch.Tensor or list[int]")
-
-
-def batch_memcpy_supported() -> bool:
-    """Whether the copy-engine direct transfer (``cudaMemcpyBatchAsync``) is
-    available. The torch baseline has no copy engine, so this is always False;
-    the CUDA extension answers from the runtime and driver versions."""
-    return False
-
-
-def direct_copy_format_supported(engine_kv_format: EngineKVFormat) -> bool:
-    """Whether the direct copy path can address blocks of ``engine_kv_format``.
-
-    The torch baseline never runs the direct path (no ``cudaMemcpyBatchAsync``),
-    so no layout is eligible here; the CUDA extension answers per format.
-
-    Args:
-        engine_kv_format: The paged KV layout to check.
-
-    Returns:
-        Always False on the torch baseline.
-    """
-    return False

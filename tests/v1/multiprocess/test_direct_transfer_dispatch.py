@@ -75,7 +75,7 @@ def test_every_kernel_group_must_be_eligible(native):
     """One ineligible group disqualifies the whole object group, logged once."""
     cc = _cache_context([_FMT_ELIGIBLE, _FMT_HND])
     # lmcache's init_logger sets propagate=False and levels the handlers at
-    # LMCACHE_LOG_LEVEL, so caplog sees nothing when that is above INFO. Attach
+    # LMCACHE_LOG_LEVEL, so caplog sees nothing when that is above WARNING. Attach
     # our own handler and force the level for the duration of the test.
     handler = _RecordingHandler()
     original_level = mod.logger.level

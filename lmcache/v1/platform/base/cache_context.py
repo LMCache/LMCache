@@ -233,11 +233,10 @@ class BaseCacheContext(ABC):
     def get_kernel_group_kv_pointer_list(self, kernel_group_idx: int) -> list[int]:
         """Returns the host-side list of paged KV pointers of a kernel group.
 
-        Same pointers and order as :meth:`get_kernel_group_kv_pointers`
-        (per layer; K layers then V layers for the SGLang two-list formats; a
-        single base for cross-layer formats), as Python ints for host-side
-        address arithmetic. This default reads the device tensor back, which
-        synchronizes the current stream; subclasses cache the list.
+        Same pointers and order as :meth:`get_kernel_group_kv_pointers`, as
+        Python ints for host-side address arithmetic. This default reads the
+        device tensor back, which synchronizes the current stream; subclasses
+        cache the list.
 
         Args:
             kernel_group_idx: Index of the kernel group.

@@ -49,7 +49,9 @@ _HAS_TRANSFER_PHASE_TIMING: bool = hasattr(device_ops, "pop_completed_phase_timi
 # extension exports ``execute_direct_copy_transfer`` (built against CUDA >=
 # 12.8, not HIP) and ``cudaMemcpyBatchAsync`` is usable on this runtime and
 # driver. Resolved once -- ``device_ops`` is native-bound during
-# ``import lmcache``, before this module is imported.
+# ``import lmcache``, before this module is imported. ``batch_memcpy_supported``
+# and ``direct_copy_format_supported`` are native-only and exported together
+# with ``execute_direct_copy_transfer``, so the ``hasattr`` check guards them.
 _HAS_BATCH_MEMCPY_ASYNC: bool = (
     hasattr(device_ops, "execute_direct_copy_transfer")
     and device_ops.batch_memcpy_supported()
@@ -102,7 +104,7 @@ def direct_transfer_supported(
             format_name = str(engine_kv_format)
             if format_name not in _direct_copy_rejected_formats:
                 _direct_copy_rejected_formats.add(format_name)
-                logger.info(
+                logger.warning(
                     "Layout %s of kernel group %d is not eligible for the direct "
                     "copy path (only token-major layouts whose paged block is one "
                     "contiguous run qualify); using the block transfer kernel",

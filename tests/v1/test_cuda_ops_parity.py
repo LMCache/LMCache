@@ -218,6 +218,8 @@ _EXCLUDED_FUNCS: set[str] = {
     "execute_cb_retrieve_plan_flat",
     "pop_completed_phase_timings",
     "execute_direct_copy_transfer",
+    "batch_memcpy_supported",
+    "direct_copy_format_supported",
 }
 
 # CUDA-only plan descriptors intentionally remain native-only. Descriptor
