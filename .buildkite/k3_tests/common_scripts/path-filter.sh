@@ -191,7 +191,7 @@ _path_filter_should_skip_for_pipeline() {
                     # Example-only changes should not trigger sglang tests.
                     return 0
                     ;;
-                .buildkite/k3_tests/*)
+                tests/*|.buildkite/k3_tests/*)
                     return 0
                     ;;
             esac
