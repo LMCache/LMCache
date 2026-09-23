@@ -15,9 +15,9 @@ export LM_EVAL_SCORE_MIN_DEFAULT="0.30"
 export BK_SETUP_ENV_SCRIPT=".buildkite/k3_harness/setup-lmcache-only-env.sh"
 
 # Force explicit backend on XPU to avoid auto fallback to Flash Attention.
-export ATTENTION_BACKEND="${ATTENTION_BACKEND:-TRITON_ATTN}"
+#export ATTENTION_BACKEND="${ATTENTION_BACKEND:-TRITON_ATTN}"
 # Keep low-level env override for debugging parity.
-export VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-TRITON_ATTN}"
+#export VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-TRITON_ATTN}"
 # XPU startup occasionally stalls while waiting for EngineCore READY during
 # compile/warmup. Keep eager on by default to skip compile/cudagraph paths.
 export ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
