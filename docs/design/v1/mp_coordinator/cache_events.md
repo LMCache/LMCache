@@ -34,19 +34,26 @@ storage layer ──► EventBus ──► CacheEventSubscriber ──► CacheE
   raise `CacheEventPublishError`. Retrying is safe; the current subscriber
   drops a failed drained list, consumes its sequence numbers, and leaves a
   gap that marks the coordinator view stale.
-- A future **Kafka sink** produces to a topic with the message key set
-  to `instance_id`, so one partition carries one instance's stream —
-  partition FIFO is exactly the per-instance FIFO the directory needs.
-  The coordinator side gains a consumer that feeds
-  the coordinator's `EventGate`; the subscriber and producers are
-  untouched.
+- **`KafkaCacheEventSink`** produces one JSON record per batch with the
+  message key set to `instance_id`, so Kafka assigns one instance's
+  records to one partition. The producer enables idempotence, requires
+  `acks=all`, and waits for every delivery report before `publish`
+  succeeds. The JSON value uses the existing `CacheEventsRequest`
+  envelope with exactly one batch, keeping the HTTP and Kafka wire
+  vocabulary identical.
+
+A coordinator started with `--event-transport kafka` consumes the topic
+through `KafkaCacheEventSource` (see [ingest.md](ingest.md)) instead of
+serving `POST /events`; direct HTTP remains the default end-to-end
+transport.
 
 On the coordinator side, transport adapters converge at
-`EventGate.ingest_batches`. The current
-`HttpCacheEventSource` is explicitly non-durable and advertises no replay
-capability. Gate cursors (`instance_id` / `incarnation` / `seq`) remain
-separate from a future durable transport's seek position (for example
-Kafka partition offsets).
+`EventGate.ingest_batches`. `HttpCacheEventSource` is non-durable and
+advertises no replay capability; `KafkaCacheEventSource` (selected by
+`--event-transport kafka` in place of the HTTP source, see
+[ingest.md](ingest.md)) polls the topic and advertises `seekable`. Gate cursors (`instance_id` / `incarnation` /
+`seq`) remain separate from Kafka's partition offsets, which the consumer
+group commits.
 
 ## Batching and sequencing (inside the subscriber)
 
@@ -185,6 +192,14 @@ and `--coordinator-event-reporting` (or
 `LMCACHE_COORDINATOR_EVENT_REPORTING`) is on;
 `--coordinator-event-flush-interval` paces the subscriber's
 event-driven flushes (default 1s).
+
+`--coordinator-event-transport kafka` selects Kafka instead of HTTP and
+requires `--coordinator-kafka-bootstrap-servers`. The topic defaults to
+`lmcache-cache-events`; `--coordinator-kafka-delivery-timeout` bounds how
+long one flush waits for broker acknowledgement. These flags have no
+environment-variable fallback. `confluent-kafka` ships as the optional
+`lmcache[kafka]` extra and is imported only when the Kafka sink is built,
+so HTTP-only deployments never load it.
 
 ## Known limitations (follow-ups)
 

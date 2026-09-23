@@ -14,9 +14,7 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
     RetainPrefetchPolicy,
 )
-from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
-)
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 
 # =============================================================================
 # Helpers
@@ -32,10 +30,10 @@ def make_object_key(chunk_id: int) -> ObjectKey:
     )
 
 
-def make_descriptor(index: int) -> AdapterDescriptor:
-    """Create an AdapterDescriptor for testing."""
+def make_descriptor(index: int) -> L2AdapterDescriptor:
+    """Create an L2AdapterDescriptor for testing."""
     config = MockL2AdapterConfig(max_size_gb=1.0, mock_bandwidth_gb=10.0)
-    return AdapterDescriptor(index=index, config=config)
+    return L2AdapterDescriptor(index=index, config=config)
 
 
 def make_bitmap(size: int, set_bits: list[int]) -> Bitmap:
