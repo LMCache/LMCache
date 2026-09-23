@@ -194,7 +194,7 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         self.event_ = event
         self._raw_response_processed = True
 
-    def prepare(self, timeout: Optional[float] = None) -> T:
+    def _prepare(self, timeout: Optional[float] = None) -> T:
         """Import the remote completion event without waiting for it.
 
         Args:
@@ -243,7 +243,7 @@ class DeviceMessagingFuture(MessagingFuture[T]):
             device completion is ordered by a stream wait rather than a host
             synchronization.
         """
-        result = self.prepare(timeout)
+        result = self._prepare(timeout)
         if self.event_ is not None:
             self._event_backend.wait_event(self.event_, stream)
         return result

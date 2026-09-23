@@ -50,9 +50,6 @@ class _ResultFuture(_Future):
         self.waited_stream = stream
         return self.result()
 
-    def prepare(self, timeout=None):
-        return self.result(timeout)
-
 
 class _TransferContext:
     def __init__(self):
@@ -748,6 +745,40 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual(future.waited_stream, "forward")
         self.assertIsNone(operation.result)
         self.assertTrue(lookup.locks_held)
+
+    def test_prepare_load_drains_failed_retrieve_before_releasing_slots(self):
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector._mq_timeout = 10
+        connector._sync_success = lambda success: success
+        lookup = LMCacheLookupOperation(
+            request_id="request",
+            token_ids=list(range(8)),
+            local_hit_tokens=0,
+            cache_salt="",
+            total_hit_tokens=8,
+            locks_held=True,
+        )
+        connector._lookups = {lookup.request_id: lookup}
+        future = Mock()
+        future.wait_on_stream.return_value = False
+        future.result.return_value = False
+        operation = LMCacheLoadOperation(
+            request_id="request",
+            token_ids=list(range(8)),
+            start=0,
+            end=8,
+            local_hit_tokens=0,
+            device_indices=torch.arange(8),
+            future=future,
+            lookup=lookup,
+        )
+
+        self.assertFalse(connector.prepare_load_on_stream(operation, "forward"))
+
+        future.wait_on_stream.assert_called_once_with("forward", timeout=10)
+        future.result.assert_called_once_with(timeout=10)
+        self.assertFalse(lookup.locks_held)
+        self.assertFalse(operation.result)
 
     def test_free_lookup_locks_sends_one_leader_prefix_range(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
