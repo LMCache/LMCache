@@ -19,7 +19,6 @@ if not (torch_device_type == "xpu" and torch_dev.is_available()):
 pytestmark = pytest.mark.xpu
 
 _PAGE_SIZE = mmap.PAGESIZE
-_TRANSFER_CHUNK_SIZE = 64 << 20
 _LARGE_RANGE_SIZE = (10 << 30) + 99
 
 
@@ -95,21 +94,8 @@ def test_xpu_pin_memory_round_trip_with_large_unaligned_range() -> None:
         assert spec.pin_memory(host_tensor.data_ptr(), host_tensor.nbytes) is True
 
         try:
-            for offset in range(0, host_tensor.nbytes, _TRANSFER_CHUNK_SIZE):
-                chunk_size = min(
-                    _TRANSFER_CHUNK_SIZE,
-                    host_tensor.nbytes - offset,
-                )
-                host_chunk = host_tensor[offset : offset + chunk_size]
-                host_chunk.fill_((offset // _TRANSFER_CHUNK_SIZE) % 251)
-
-                _assert_xpu_round_trip(host_chunk)
-                del host_chunk
-                host_mapping.madvise(
-                    mmap.MADV_DONTNEED,
-                    offset,
-                    chunk_size,
-                )
+            host_tensor.fill_(0xA5)
+            _assert_xpu_round_trip(host_tensor)
         finally:
             assert spec.unpin_memory(host_tensor.data_ptr()) is True
     finally:
