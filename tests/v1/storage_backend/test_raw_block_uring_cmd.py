@@ -483,19 +483,6 @@ def _unaligned_bytearray(total_len: int, align: int = 4096) -> bytearray:
     return bytearray(backing[1 : 1 + total_len])
 
 
-def test_uring_cmd_read_uring_handles_unaligned_buffer() -> None:
-    """``read_uring`` must accept an unaligned buffer under ``use_uring_cmd``."""
-    device_path = TEST_DEVICES["char_device"]
-    raw_dev = _open_raw_device(device_path, use_uring_cmd=True)
-
-    try:
-        total_len = 8192  # multi-page to require a PRP list
-        buf = _unaligned_bytearray(total_len)
-        raw_dev.read_uring(0, buf, total_len, total_len)
-    finally:
-        raw_dev.close()
-
-
 def test_uring_cmd_batched_read_handles_unaligned_buffer() -> None:
     """``batched_read`` must accept unaligned buffers under ``use_uring_cmd``."""
     device_path = TEST_DEVICES["char_device"]

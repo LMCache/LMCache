@@ -109,7 +109,6 @@ def write_keys_to_l1(
         keys=keys,
         is_temporary=[False] * len(keys),
         layout_desc=layout,
-        mode="new",
     )
     written = [k for k, (e, m) in results.items() if m is not None]
     if written:
@@ -293,7 +292,7 @@ class TestStorageManagerRuntimeAdapters:
 
             layout = make_layout()
             keys = [make_object_key(i) for i in range(4)]
-            ret = sm.reserve_write(keys, layout, mode="new")
+            ret = sm.reserve_write(keys, layout)
             sm.finish_write(list(ret.keys()))
 
             assert wait_for_condition(
@@ -357,7 +356,7 @@ class TestStorageManagerRuntimeAdapters:
 
             layout = make_layout()
             keys = [make_object_key(i) for i in range(3)]
-            ret = sm.reserve_write(keys, layout, mode="new")
+            ret = sm.reserve_write(keys, layout)
             sm.finish_write(list(ret.keys()))
 
             assert wait_for_condition(

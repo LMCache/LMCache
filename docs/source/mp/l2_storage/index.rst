@@ -193,7 +193,9 @@ policy evicts a fraction of the least-recently-used keys.
      - Description
    * - ``--eviction-policy``
      - *(required)*
-     - Policy name: ``LRU``, ``IsolatedLRU``, or ``noop``. ``IsolatedLRU``
+     - Policy name: ``LRU``, ``ARC``, ``IsolatedLRU``, or ``noop``. ``ARC``
+       balances recent and frequent keys using key-only ghost history.
+       ``IsolatedLRU``
        maintains one LRU list per ``cache_salt`` and relies on per-salt
        quotas registered via the ``/quota`` HTTP endpoints; see
        :doc:`/mp/configuration` for the full description.
@@ -236,7 +238,7 @@ drops by ``eviction_ratio``.
      - Description
    * - ``eviction_policy``
      - *(required)*
-     - Policy name: ``"LRU"`` or ``"noop"``.
+     - Policy name: ``"LRU"``, ``"ARC"``, ``"IsolatedLRU"``, or ``"noop"``.
    * - ``trigger_watermark``
      - ``0.8``
      - Adapter usage fraction [0, 1] above which eviction is triggered.
@@ -259,6 +261,10 @@ drops by ``eviction_ratio``.
         "eviction_ratio": 0.2
       }
     }'
+
+To use ARC for an adapter, set ``"eviction_policy": "ARC"`` in that
+adapter's ``"eviction"`` object. ARC operates independently for each adapter
+because every ``L2AdapterEvictionState`` owns its own policy instance.
 
 **Adapter support:**
 

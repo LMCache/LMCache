@@ -104,9 +104,12 @@ keeps the default below.
    * - ``--extra-config``
      - (empty)
      - JSON object of settings the core flags do not name, read by whichever
-       view or controller looks for them. ``controller_packages`` is read by
-       the coordinator itself: a list of importable paths to load
-       out-of-tree controllers from.
+       view or controller looks for them. Two keys are read by the
+       coordinator itself: ``controller_packages``, a list of importable
+       paths to load out-of-tree controllers from, and
+       ``disabled_controllers``, a list of class names to leave unbuilt --
+       which is how one of those takes a built-in controller's place
+       instead of running beside it.
    * - ``--timeout-keep-alive``
      - ``10``
      - Seconds the HTTP server keeps idle connections open before closing
@@ -123,6 +126,27 @@ keeps the default below.
      - OTLP gRPC endpoint for metrics push mode. When unset, Prometheus pull
        mode exposes ``/metrics`` on the coordinator HTTP port. When set, the
        local ``/metrics`` endpoint returns 404.
+   * - ``--event-transport``
+     - ``http``
+     - Transport the fleet's cache events arrive on, exactly one. ``http``
+       serves ``POST /events``; ``kafka`` consumes ``--kafka-topic`` instead
+       (one ``CacheEventsRequest`` JSON envelope per record, the same body
+       ``POST /events`` accepts) and ``POST /events`` answers 404. ``kafka``
+       needs the ``lmcache[kafka]`` extra (``pip install 'lmcache[kafka]'``).
+   * - ``--kafka-bootstrap-servers``
+     - (empty)
+     - Comma-separated Kafka bootstrap servers. Required with
+       ``--event-transport kafka``.
+   * - ``--kafka-topic``
+     - ``lmcache-cache-events``
+     - Topic to consume; must match the MP servers'
+       ``--coordinator-kafka-topic``. Ignored unless
+       ``--event-transport kafka``.
+   * - ``--kafka-group-id``
+     - ``lmcache-coordinator``
+     - Consumer group whose committed offsets a restart resumes from. A new
+       group reads the whole retained stream. Ignored unless
+       ``--event-transport kafka``.
 
 Loading your own controllers
 ----------------------------
@@ -202,6 +226,20 @@ does not import raises at startup; a controller that raises while starting is
 logged and skipped. Views cannot be added this way: they are the coordinator's
 own shared state, which your controller reads.
 
+**Disabling a built-in controller.** Name its class in
+``disabled_controllers`` and it is not built, taking its endpoints with it —
+which is how a controller of your own replaces one rather than running beside
+it:
+
+.. code-block:: bash
+
+    lmcache coordinator --extra-config '{
+      "controller_packages": ["acme_controllers"],
+      "disabled_controllers": ["FleetEvictionController"]
+    }'
+
+A name matching no discovered controller raises at startup.
+
 Coordinator metrics export
 --------------------------
 
@@ -257,6 +295,28 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL``
      - Seconds between cache-event batch flushes (must be ``> 0``, default
        ``1``).
+   * - ``--coordinator-event-transport``
+     - (none)
+     - Event delivery transport: ``http`` (default) or ``kafka``.
+   * - ``--coordinator-kafka-bootstrap-servers``
+     - (none)
+     - Comma-separated Kafka bootstrap servers. Required for the ``kafka``
+       event transport.
+   * - ``--coordinator-kafka-topic``
+     - (none)
+     - Kafka event topic (default ``lmcache-cache-events``).
+   * - ``--coordinator-kafka-delivery-timeout``
+     - (none)
+     - Seconds to wait for Kafka broker acknowledgement (default ``10``).
+
+With the Kafka transport, start the coordinator with
+``--event-transport kafka`` and the same topic so it consumes the stream
+instead of serving ``POST /events``; without that, the broker retains the
+records but nothing reads them. Both sides need the optional
+``lmcache[kafka]`` extra (``pip install 'lmcache[kafka]'``), imported only
+when Kafka is selected. A restarted coordinator resumes from its consumer
+group's committed offsets; coordinator-driven replay of a detected gap is a
+follow-up.
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
@@ -341,8 +401,11 @@ startup.
        when it is not in P2P.
    * - ``mq_port``
      - int
-     - Optional (default ``0``). ZMQ message-queue port P2P peers send
-       lookup/unlock RPCs to; ``0`` when P2P is disabled.
+     - Optional (default ``0``). Request-server port P2P peers send
+       lookup/unlock RPCs to. The field name is retained for compatibility;
+       the server's configured ZMQ or gRPC transport is used. ``0`` when P2P
+       is disabled.
+
 **Response** (``200 OK``):
 
 .. code-block:: json

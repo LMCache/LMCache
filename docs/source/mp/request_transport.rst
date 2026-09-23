@@ -25,17 +25,17 @@ Transport schemes
        binds ZMQ over TCP.
    * - ``grpc://host:port`` or ``grpc+unix:///path``
      - gRPC
-     - Not supported yet. gRPC support is planned soon.
+     - Supported.
 
-gRPC schema development
------------------------
+gRPC implementation and schema development
+------------------------------------------
 
-The protobuf schemas for the planned gRPC transport live under
-``lmcache/v1/multiprocess/transport/grpc_impl/protos``. Package builds generate
-their Python bindings under the sibling ``_proto_gen`` package. Landing these
-schemas and the build-time generator does not enable the gRPC client or server;
-``grpc://`` endpoints remain unavailable until the runtime implementation
-lands.
+The gRPC client and server live under
+``lmcache/v1/multiprocess/transport/grpc_impl``. They expose the same named
+``RequestClient`` operations and annotated engine-module handlers as ZMQ, while
+protobuf defines the gRPC wire format. Schemas live in the sibling ``protos``
+directory, and package builds generate their Python bindings under
+``_proto_gen``.
 
 After changing a schema, regenerate and validate all bindings with:
 
@@ -45,7 +45,7 @@ After changing a schema, regenerate and validate all bindings with:
    python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
 
 For a single vLLM connector, set the scheme in ``lmcache.mp.host`` and keep the
-port in ``lmcache.mp.port``. The current ZMQ configuration is:
+port in ``lmcache.mp.port``. A ZMQ configuration is:
 
 .. code-block:: json
 
@@ -54,8 +54,7 @@ port in ``lmcache.mp.port``. The current ZMQ configuration is:
      "lmcache.mp.port": 5555
    }
 
-When gRPC becomes available, selecting it will use the same configuration
-shape with a ``grpc://`` host:
+To select gRPC, use the same configuration shape with a ``grpc://`` host:
 
 .. code-block:: json
 
@@ -64,7 +63,15 @@ shape with a ``grpc://`` host:
      "lmcache.mp.port": 5555
    }
 
+Start the server with the matching request transport:
+
+.. code-block:: bash
+
+   lmcache server --transport zmq --host localhost --port 5555
+   lmcache server --transport grpc --host localhost --port 5555
+
 For multiple servers, specify the scheme on every entry in
 ``lmcache.mp.server_urls``, for example
-``tcp://host1:5555,tcp://host2:5555``. All clients and servers in a deployment
-must use matching transports.
+``tcp://host1:5555,tcp://host2:5555`` or
+``grpc://host1:5555,grpc://host2:5555``. All clients and servers in a
+deployment must use matching transports.
