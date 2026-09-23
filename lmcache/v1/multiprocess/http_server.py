@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import argparse
 import asyncio
@@ -22,7 +23,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.mp_coordinator.cache_events import (
     CacheEventSubscriber,
-    HttpCacheEventSink,
+    create_cache_event_sink,
 )
 from lmcache.v1.mp_coordinator.registrar import keep_registered
 from lmcache.v1.mp_observability.config import (
@@ -66,12 +67,12 @@ _configs: dict = {}
 # FastAPI lifespan for initialization and cleanup
 # ----------------------------
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     Manage the lifecycle of the LMCache HTTP server.
 
-    On startup: Initialize ZMQ server and cache engine.
-    On shutdown: Clean up ZMQ server and cache engine resources.
+    On startup: Initialize the selected request server and cache engine.
+    On shutdown: Clean up request server and cache engine resources.
     """
     # Startup
     logger.info(
@@ -90,7 +91,7 @@ async def lifespan(app: FastAPI):
         coordinator_config=coordinator_config,
     )
     assert result is not None, "run_cache_server returned None with return_engine=True"
-    zmq_server, engine = result
+    request_server, engine = result
 
     # Launch runtime plugins if configured. Plugins receive the full
     # server config (including HTTP host/port) via the
@@ -110,7 +111,7 @@ async def lifespan(app: FastAPI):
         )
         plugin_launcher.launch_plugins()
 
-    app.state.zmq_server = zmq_server
+    app.state.request_server = request_server
     app.state.engine = engine
     # Typed per-app context the cache handlers resolve via ``get_context``
     # (built now that the engine is ready).
@@ -149,7 +150,7 @@ async def lifespan(app: FastAPI):
     ):
         get_event_bus().register_subscriber(
             CacheEventSubscriber(
-                sink=HttpCacheEventSink(coordinator_config.url),
+                sink=create_cache_event_sink(coordinator_config),
                 instance_id=mp_config.instance_id,
                 # Server start time: fences out placements this instance
                 # reported before a restart (its pools restarted empty).
@@ -181,8 +182,7 @@ async def lifespan(app: FastAPI):
     if launcher is not None:
         launcher.stop_plugins()
     get_event_bus().stop()
-    if hasattr(app.state, "zmq_server") and app.state.zmq_server is not None:
-        app.state.zmq_server.close()
+    request_server.close()
     engine.close()
     logger.info("LMCache HTTP server stopped")
 
@@ -206,11 +206,11 @@ def run_http_server(
     coordinator_config: CoordinatorConfig,
 ) -> None:
     """
-    Run the LMCache HTTP server with integrated MP (ZMQ) server.
+    Run the LMCache HTTP server with an integrated MP request server.
 
     Args:
         http_config: Configuration for the HTTP frontend
-        mp_config: Configuration for the ZMQ multiprocess server
+        mp_config: Configuration for the multiprocess request server
         storage_manager_config: Configuration for the storage manager
         obs_config: Configuration for the observability stack
         coordinator_config: Configuration for MP coordinator registration

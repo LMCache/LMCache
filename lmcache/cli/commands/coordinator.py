@@ -204,6 +204,46 @@ class CoordinatorCommand(BaseCommand):
                 "Prometheus scrapes /metrics on the coordinator HTTP port."
             ),
         )
+        parser.add_argument(
+            "--event-transport",
+            choices=("http", "kafka"),
+            default=None,
+            help=(
+                "Transport the fleet's cache events arrive on, exactly one: "
+                "http (default) serves POST /events; kafka consumes "
+                "--kafka-topic instead and POST /events answers 404 (needs "
+                "the lmcache[kafka] extra)."
+            ),
+        )
+        parser.add_argument(
+            "--kafka-bootstrap-servers",
+            type=str,
+            default=None,
+            help=(
+                "Comma-separated Kafka bootstrap servers. Required with "
+                "--event-transport kafka."
+            ),
+        )
+        parser.add_argument(
+            "--kafka-topic",
+            type=str,
+            default=None,
+            help=(
+                "Kafka topic to consume cache events from; must match the MP "
+                "servers' --coordinator-kafka-topic (default: "
+                "lmcache-cache-events). Ignored unless --event-transport kafka."
+            ),
+        )
+        parser.add_argument(
+            "--kafka-group-id",
+            type=str,
+            default=None,
+            help=(
+                "Consumer group whose committed offsets a restart resumes "
+                "from (default: lmcache-coordinator). Ignored unless "
+                "--event-transport kafka."
+            ),
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Build the coordinator config and serve the app with uvicorn.
@@ -216,6 +256,8 @@ class CoordinatorCommand(BaseCommand):
 
         Raises:
             SystemExit: When coordinator dependencies are not installed.
+            ValueError: When ``--event-transport kafka`` is selected without
+                ``--kafka-bootstrap-servers``.
         """
         # Standard
         import sys
@@ -226,7 +268,10 @@ class CoordinatorCommand(BaseCommand):
 
             # First Party
             from lmcache.v1.mp_coordinator.app import create_app
-            from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+            from lmcache.v1.mp_coordinator.config import (
+                KafkaCacheEventSourceConfig,
+                MPCoordinatorConfig,
+            )
             from lmcache.v1.mp_coordinator.observability import (
                 init_coordinator_metrics,
             )
@@ -260,6 +305,17 @@ class CoordinatorCommand(BaseCommand):
             )
             if value is not None
         }
+        if args.event_transport == "kafka":
+            kafka_fields = {
+                field: value
+                for field, value in (
+                    ("bootstrap_servers", args.kafka_bootstrap_servers),
+                    ("topic", args.kafka_topic),
+                    ("group_id", args.kafka_group_id),
+                )
+                if value is not None
+            }
+            fields["event_source_config"] = KafkaCacheEventSourceConfig(**kafka_fields)
         if args.disable_metrics is not None:
             fields["metrics_enabled"] = not args.disable_metrics
         extra_config = _parse_extra_config(args.extra_config)

@@ -203,6 +203,90 @@ def test_pin_invalid_cache_salt_returns_400():
         assert resp.status_code == 400
 
 
+def test_list_pins_empty_table():
+    """No pins yet: an empty page with total 0, not a 404."""
+    with _pin_client() as client:
+        resp = client.get("/cache/pins")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"total": 0, "pins": []}
+
+
+def test_list_pins_shows_pinned_keys_with_counts():
+    """GET lists every key the POSTs resolved to, with the wire form of the
+    key and a pin count that tracks repeated POSTs and DELETEs."""
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        keys = _resolve(ctx)
+        assert client.post("/cache/pins", json=_pin_body()).status_code == 200
+        assert client.post("/cache/pins", json=_pin_body()).status_code == 200
+
+        resp = client.get("/cache/pins")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["total"] == len(keys)
+        assert body["pins"] == [
+            {
+                "key": {
+                    "chunk_hash_hex": k.chunk_hash.hex(),
+                    "model_name": "m",
+                    "kv_rank": k.kv_rank,
+                    "object_group_id": 0,
+                    "cache_salt": "alice",
+                },
+                "pin_count": 2,
+            }
+            for k in keys
+        ]
+
+        client.request("DELETE", "/cache/pins", json=_pin_body())
+        counts = {p["pin_count"] for p in client.get("/cache/pins").json()["pins"]}
+        assert counts == {1}
+
+        client.request("DELETE", "/cache/pins", json=_pin_body())
+        assert client.get("/cache/pins").json() == {"total": 0, "pins": []}
+
+
+def test_list_pins_filters_by_cache_salt_and_model():
+    """cache_salt and model_name narrow the listing; total follows the filter."""
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        alice = _resolve(ctx, "alice")
+        bob = _resolve(ctx, "bob")
+        client.post("/cache/pins", json=_pin_body("alice"))
+        client.post("/cache/pins", json=_pin_body("bob"))
+
+        body = client.get("/cache/pins", params={"cache_salt": "bob"}).json()
+        assert body["total"] == len(bob)
+        assert {p["key"]["cache_salt"] for p in body["pins"]} == {"bob"}
+
+        body = client.get("/cache/pins", params={"model_name": "m"}).json()
+        assert body["total"] == len(alice) + len(bob)
+
+        body = client.get("/cache/pins", params={"model_name": "other"}).json()
+        assert body == {"total": 0, "pins": []}
+
+
+def test_list_pins_pages_and_validates_bounds():
+    """offset/limit page the filtered set; out-of-range values are a 422."""
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        alice = _resolve(ctx, "alice")
+        bob = _resolve(ctx, "bob")
+        client.post("/cache/pins", json=_pin_body("alice"))
+        client.post("/cache/pins", json=_pin_body("bob"))
+        expected = [k.chunk_hash.hex() for k in alice + bob]
+
+        first = client.get("/cache/pins", params={"offset": 0, "limit": 1}).json()
+        second = client.get("/cache/pins", params={"offset": 1, "limit": 10}).json()
+        assert first["total"] == second["total"] == len(expected)
+        listed = [p["key"]["chunk_hash_hex"] for p in first["pins"] + second["pins"]]
+        assert listed == expected
+
+        assert client.get("/cache/pins", params={"offset": -1}).status_code == 422
+        assert client.get("/cache/pins", params={"limit": 0}).status_code == 422
+        assert client.get("/cache/pins", params={"limit": 10001}).status_code == 422
+
+
 # -- Delete dispatch (coordinator resolves; key-addressed L1 + L2 to the node) --
 
 
