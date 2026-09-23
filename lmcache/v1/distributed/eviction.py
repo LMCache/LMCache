@@ -187,8 +187,9 @@ class L1EvictionPolicy(L1ManagerListener):
         pass
 
     def on_l1_keys_reserved_write(self, keys: list[ObjectKey]):
-        # No-op
-        pass
+        # Track keys from the moment they are reserved, so an abandoned
+        # reservation (expired write lock) is evicted like any unlocked key.
+        self._policy.on_keys_created(keys)
 
     def on_l1_keys_write_finished(self, keys: list[ObjectKey]):
         # TODO (ApostaC): we don't differentiate between the created keys and

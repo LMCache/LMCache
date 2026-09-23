@@ -5,7 +5,11 @@
 import pytest
 
 # First Party
-from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.config import (
+    HttpCacheEventSourceConfig,
+    KafkaCacheEventSourceConfig,
+    MPCoordinatorConfig,
+)
 
 
 def test_defaults_are_valid() -> None:
@@ -42,3 +46,23 @@ def test_explicit_values_kept() -> None:
     assert config.otlp_endpoint == "http://collector:4317"
     # Unspecified fields keep their defaults.
     assert config.health_check_interval == MPCoordinatorConfig.health_check_interval
+
+
+def test_event_source_defaults_to_http() -> None:
+    config = MPCoordinatorConfig()
+    assert isinstance(config.event_source_config, HttpCacheEventSourceConfig)
+
+
+def test_kafka_source_config_requires_servers_topic_and_group() -> None:
+    with pytest.raises(ValueError, match="bootstrap servers"):
+        KafkaCacheEventSourceConfig()
+    with pytest.raises(ValueError, match="topic"):
+        KafkaCacheEventSourceConfig(bootstrap_servers="broker:9092", topic=" ")
+    with pytest.raises(ValueError, match="consumer group"):
+        KafkaCacheEventSourceConfig(bootstrap_servers="broker:9092", group_id="")
+
+
+def test_kafka_source_config_defaults() -> None:
+    config = KafkaCacheEventSourceConfig(bootstrap_servers="broker:9092")
+    assert config.topic == "lmcache-cache-events"
+    assert config.group_id == "lmcache-coordinator"
