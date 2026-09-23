@@ -26,13 +26,12 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
     create_transfer_context,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 
 logger = init_logger(__name__)
@@ -175,7 +174,7 @@ class AtomMPSchedulerAdapter:
         *,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
     ) -> None:
-        client = ZmqMultiprocessClient(MessageQueueClient(server_url, context))
+        client = RequestClientFactory.create(server_url, context=context)
         self._model_name = model_name
         self._parallel = parallel_config
         self._mq_timeout = mq_timeout
@@ -275,7 +274,7 @@ class AtomMPSchedulerAdapter:
         self._client.end_session(request_id)
 
     def shutdown(self) -> None:
-        """Close the scheduler-side message queue client."""
+        """Close the scheduler-side request client."""
         if self._closed:
             return
         self._closed = True
@@ -320,7 +319,7 @@ class AtomMPWorkerAdapter:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         transfer_mode: str | None = None,
     ) -> None:
-        client = ZmqMultiprocessClient(MessageQueueClient(server_url, context))
+        client = RequestClientFactory.create(server_url, context=context)
         self._model_name = model_name
         self._block_size = block_size
         self._parallel = parallel_config
@@ -444,7 +443,6 @@ class AtomMPWorkerAdapter:
             future = context.submit_store(
                 request_id,
                 self._create_key(request_id, spec),
-                self.instance_id,
                 kv_caches,
                 block_ids,
                 event,
@@ -484,7 +482,6 @@ class AtomMPWorkerAdapter:
             future = context.submit_retrieve(
                 request_id,
                 self._create_key(request_id, spec),
-                self.instance_id,
                 kv_caches,
                 block_ids,
                 event,
@@ -539,9 +536,9 @@ class AtomMPWorkerAdapter:
 
             if registered and transfer_context is not None:
                 try:
-                    self._client.unregister_kv_cache(self.instance_id).result(
-                        timeout=self._mq_timeout
-                    )
+                    future = transfer_context.unregister()
+                    if future is not None:
+                        future.result(timeout=self._mq_timeout)
                 except Exception:
                     logger.warning(
                         "ATOM LMCache unregister failed during shutdown",
@@ -579,15 +576,15 @@ class AtomMPWorkerAdapter:
         try:
             transfer_context = create_transfer_context(
                 kv_caches,
+                instance_id=self.instance_id,
+                req_client=self._client,
                 mode=self._transfer_mode,
             )
             transfer_context.register(
-                self.instance_id,
                 kv_caches,
                 self._model_name,
                 self._parallel.world_size,
                 self.blocks_in_chunk,
-                self._client,
                 self._mq_timeout,
                 layout_hints={},
                 engine_group_infos=engine_group_infos,
@@ -654,9 +651,9 @@ class AtomMPWorkerAdapter:
         # late server registration and never publish its local context.
         try:
             try:
-                self._client.unregister_kv_cache(self.instance_id).result(
-                    timeout=self._mq_timeout
-                )
+                future = transfer_context.unregister()
+                if future is not None:
+                    future.result(timeout=self._mq_timeout)
             except Exception:
                 logger.warning(
                     "Failed to remove late ATOM LMCache registration",
@@ -778,9 +775,9 @@ class AtomMPWorkerAdapter:
     ) -> None:
         """Best-effort removal of an ambiguously registered candidate."""
         try:
-            self._client.unregister_kv_cache(self.instance_id).result(
-                timeout=self._mq_timeout
-            )
+            future = transfer_context.unregister()
+            if future is not None:
+                future.result(timeout=self._mq_timeout)
         except Exception:
             logger.warning(
                 "Failed to roll back rejected ATOM LMCache registration",

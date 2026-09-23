@@ -6,11 +6,9 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 import hashlib
-import mmap
-import os
 import time
 
 # First Party
@@ -25,6 +23,7 @@ if TYPE_CHECKING:
     import torch
 
     # First Party
+    from lmcache.v1.multiprocess.transfer_context import TransferContext
     from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
@@ -121,9 +120,9 @@ class TransferResult:
 class RequestContext:
     """Resolved token and block geometry for one request."""
 
-    seq_no: int
+    sequence_id: int
     request_id: str
-    label: str
+    request_kind: str
     token_ids: tuple[int, ...]
     num_full_tokens: int
     total_chunks: int
@@ -137,10 +136,8 @@ class WorkerContext:
     """Live resources for one simulated Worker."""
 
     spec: WorkerSpec
-    kv_tensors: "list[torch.Tensor]"
-    ipc_wrappers: list[Any]
-    server_pool: "mmap.mmap | None" = None
-    shm_mappings: list[tuple[int, int]] = field(default_factory=list)
+    kv_caches: "dict[str, torch.Tensor]"
+    transfer_context: "TransferContext"
 
 
 class ServerBenchClient:
@@ -162,12 +159,11 @@ class ServerBenchClient:
         self._zmq_context: Any | None = None
         self._req_client: "RequestClient | None" = None
         self._workers: list[WorkerContext] = []
-        self._registered_instance_ids: list[int] = []
-        self._shm_names: list[str] = []
         self._started = False
 
         self._chunk_size = 0
         self._block_size = 0
+        self._blocks_in_chunk = 0
         self._num_blocks = 0
         self._num_engine_group_infos = 0
         self._kv_world_size = 0
@@ -192,16 +188,16 @@ class ServerBenchClient:
 
     def create_request(
         self,
-        seq_no: int,
+        sequence_id: int,
         request_id: str,
-        label: str,
+        request_kind: str,
     ) -> RequestContext | None:
         """Create a request with resolved token and block ranges.
 
         Args:
-            seq_no: Sequence number used to generate tokens and block offsets.
+            sequence_id: Sequence ID used to generate tokens and block offsets.
             request_id: Server session ID.
-            label: Label used in logs.
+            request_kind: Request kind used in logs.
 
         Returns:
             The request, or ``None`` if it has no full chunk.
@@ -214,26 +210,26 @@ class ServerBenchClient:
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import _build_token_ids
 
-        token_ids = tuple(_build_token_ids(seq_no, self._config.num_tokens))
+        token_ids = tuple(_build_token_ids(sequence_id, self._config.num_tokens))
         num_full_tokens = (len(token_ids) // self._chunk_size) * self._chunk_size
         if num_full_tokens == 0:
             self._log(
                 "  [seq %d/%s] SKIP: %d tokens < chunk_size %d"
-                % (seq_no, label, len(token_ids), self._chunk_size)
+                % (sequence_id, request_kind, len(token_ids), self._chunk_size)
             )
             return None
 
         num_blocks = num_full_tokens // self._block_size
         usable_blocks = max(self._num_blocks - num_blocks, 1)
         return RequestContext(
-            seq_no=seq_no,
+            sequence_id=sequence_id,
             request_id=request_id,
-            label=label,
+            request_kind=request_kind,
             token_ids=token_ids,
             num_full_tokens=num_full_tokens,
             total_chunks=num_full_tokens // self._chunk_size,
             chunk_size=self._chunk_size,
-            block_offset=(seq_no * num_blocks) % usable_blocks,
+            block_offset=(sequence_id * num_blocks) % usable_blocks,
             num_blocks=num_blocks,
         )
 
@@ -268,7 +264,10 @@ class ServerBenchClient:
         started_at = time.monotonic()
         if not _send_lookup(req_client, lookup_key, tp_size=len(self._workers)):
             latency_ms = (time.monotonic() - started_at) * 1000
-            self._log("  [seq %d/%s] LOOKUP timeout" % (request.seq_no, request.label))
+            self._log(
+                "  [seq %d/%s] LOOKUP timeout"
+                % (request.sequence_id, request.request_kind)
+            )
             return LookupResult(
                 hit_chunks=0,
                 total_chunks=request.total_chunks,
@@ -283,8 +282,8 @@ class ServerBenchClient:
         self._log(
             "  [seq %d/%s] LOOKUP: %d/%d chunks hit (%.1f ms)"
             % (
-                request.seq_no,
-                request.label,
+                request.sequence_id,
+                request.request_kind,
                 hit_chunks,
                 request.total_chunks,
                 latency_ms,
@@ -316,15 +315,16 @@ class ServerBenchClient:
             RuntimeError: If the client is not started.
             ValueError: If a non-empty range is invalid or not chunk-aligned.
         """
-        req_client = self._require_started()
+        self._require_started()
         if token_count == 0:
             return None
         self._validate_token_range(request, start_token, token_count)
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
+            _TIMEOUT,
             _make_key,
-            _send_store,
+            _wait_for_result,
         )
 
         attempted: list[int] = []
@@ -333,6 +333,8 @@ class ServerBenchClient:
         status = "stored"
         started_at = time.monotonic()
         block_offset = request.block_offset + (start_token // self._block_size)
+        num_blocks = token_count // self._block_size
+        block_ids = list(range(block_offset, block_offset + num_blocks))
         for worker in self._workers:
             if not worker.spec.store_enabled:
                 continue
@@ -345,19 +347,25 @@ class ServerBenchClient:
                 worker_id=worker.spec.kv_worker_id,
                 world_size=self._kv_world_size,
             )
-            worker_status = _send_store(
-                req_client,
+            block_ids_per_group = [
+                block_ids.copy() for _ in range(self._num_engine_group_infos)
+            ]
+            event = worker.transfer_context.create_recorded_event()
+            future = worker.transfer_context.submit_store(
+                request.request_id,
                 key,
-                block_offset=block_offset,
-                block_size=self._block_size,
-                num_engine_group_infos=self._num_engine_group_infos,
-                use_gpu=self._config.is_gpu,
-                use_handle=self._config.uses_handle_transfer,
-                client_tensors=self._data_tensors(worker),
-                chunk_size=self._chunk_size,
-                server_pool=worker.server_pool,
-                instance_id=worker.spec.instance_id,
+                worker.kv_caches,
+                block_ids_per_group,
+                event,
+                self._blocks_in_chunk,
             )
+            reply = _wait_for_result(
+                future, retain_refs=(event,) if event is not None else ()
+            )
+            if reply is _TIMEOUT:
+                worker_status = "timeout"
+            else:
+                worker_status = "stored" if reply else "store_failed"
             if worker_status == "stored":
                 successful.append(worker.spec.rank)
             else:
@@ -376,8 +384,8 @@ class ServerBenchClient:
         self._log(
             "  [seq %d/%s] STORE: %s (%d tokens, %.1f ms, %d writers)"
             % (
-                request.seq_no,
-                request.label,
+                request.sequence_id,
+                request.request_kind,
                 status,
                 token_count,
                 latency_ms,
@@ -406,15 +414,16 @@ class ServerBenchClient:
             RuntimeError: If the client is not started.
             ValueError: If a non-empty range is invalid or not chunk-aligned.
         """
-        req_client = self._require_started()
+        self._require_started()
         if token_count == 0:
             return None
         self._validate_token_range(request, start_token, token_count)
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
+            _TIMEOUT,
             _make_key,
-            _send_retrieve,
+            _wait_for_result,
         )
 
         attempted: list[int] = []
@@ -423,7 +432,8 @@ class ServerBenchClient:
         status = "retrieved"
         started_at = time.monotonic()
         block_offset = request.block_offset + (start_token // self._block_size)
-        hit_chunks = token_count // self._chunk_size
+        num_blocks = token_count // self._block_size
+        block_ids = list(range(block_offset, block_offset + num_blocks))
         for worker in self._workers:
             if not worker.spec.retrieve_enabled:
                 continue
@@ -436,20 +446,26 @@ class ServerBenchClient:
                 worker_id=worker.spec.kv_worker_id,
                 world_size=self._kv_world_size,
             )
-            worker_status = _send_retrieve(
-                req_client,
+            block_ids_per_group = [
+                block_ids.copy() for _ in range(self._num_engine_group_infos)
+            ]
+            event = worker.transfer_context.create_recorded_event()
+            future = worker.transfer_context.submit_retrieve(
+                request.request_id,
                 key,
-                self._chunk_size,
-                hit_chunks,
-                block_offset=block_offset,
-                block_size=self._block_size,
-                num_engine_group_infos=self._num_engine_group_infos,
-                use_gpu=self._config.is_gpu,
-                use_handle=self._config.uses_handle_transfer,
-                client_tensors=self._data_tensors(worker),
-                server_pool=worker.server_pool,
-                instance_id=worker.spec.instance_id,
+                worker.kv_caches,
+                block_ids_per_group,
+                event,
+                self._blocks_in_chunk,
+                skip_first_n_tokens=0,
             )
+            reply = _wait_for_result(
+                future, retain_refs=(event,) if event is not None else ()
+            )
+            if reply is _TIMEOUT:
+                worker_status = "timeout"
+            else:
+                worker_status = "retrieved" if reply else "retrieve_failed"
             if worker_status == "retrieved":
                 successful.append(worker.spec.rank)
             else:
@@ -468,8 +484,8 @@ class ServerBenchClient:
         self._log(
             "  [seq %d/%s] RETRIEVE: %s (%d tokens, %.1f ms, %d workers)"
             % (
-                request.seq_no,
-                request.label,
+                request.sequence_id,
+                request.request_kind,
                 status,
                 token_count,
                 latency_ms,
@@ -512,7 +528,7 @@ class ServerBenchClient:
         for worker in self._workers:
             if worker.spec.retrieve_enabled:
                 _zero_fill_client_blocks(
-                    worker.kv_tensors,
+                    list(worker.kv_caches.values()),
                     block_offset,
                     num_blocks,
                 )
@@ -571,7 +587,7 @@ class ServerBenchClient:
                     continue
                 parts.extend(
                     _compute_client_checksums(
-                        worker.kv_tensors,
+                        list(worker.kv_caches.values()),
                         block_offset,
                         num_blocks,
                         self._block_size,
@@ -584,19 +600,17 @@ class ServerBenchClient:
             digest = hashlib.md5("".join(checksums).encode()).hexdigest()[:16]
             self._log(
                 "  [seq %d/%s] CHECKSUM: %s (%d chunks)"
-                % (request.seq_no, request.label, digest, len(checksums))
+                % (
+                    request.sequence_id,
+                    request.request_kind,
+                    digest,
+                    len(checksums),
+                )
             )
         return checksums
 
     def end_session(self, request: RequestContext) -> None:
-        """End one Server-side request session.
-
-        Args:
-            request: Request whose session should end.
-
-        Raises:
-            RuntimeError: If the client is not started.
-        """
+        """End the request's Server-side session."""
         req_client = self._require_started()
 
         # First Party
@@ -608,55 +622,47 @@ class ServerBenchClient:
         """Idempotently release resources, including after partial startup."""
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
-            _send_unregister_kv_cache,
+            _DEFAULT_RPC_TIMEOUT_S,
         )
 
         if self._req_client is not None:
-            for instance_id in self._registered_instance_ids:
+            for worker in self._workers:
+                instance_id = worker.spec.instance_id
                 try:
-                    ok = _send_unregister_kv_cache(
-                        self._req_client,
-                        instance_id=instance_id,
-                        use_handle=self._config.uses_handle_transfer,
-                    )
+                    worker.transfer_context.flush_inflight_stores()
+                except Exception as exc:
                     self._log(
-                        "[iid %d] UNREGISTER_KV_CACHE: %s"
-                        % (instance_id, "OK" if ok else "FAIL")
+                        "  [warning] TransferContext flush failed for iid %d: %s"
+                        % (instance_id, exc)
                     )
+                try:
+                    future = worker.transfer_context.unregister()
+                    if future is not None:
+                        future.result(timeout=_DEFAULT_RPC_TIMEOUT_S)
+                        self._log("[iid %d] UNREGISTER_KV_CACHE: OK" % instance_id)
                 except Exception as exc:
                     self._log(
                         "  [warning] UNREGISTER_KV_CACHE failed for "
                         "iid %d: %s" % (instance_id, exc)
                     )
-
         for worker in self._workers:
-            if worker.server_pool is None:
-                continue
             try:
-                worker.server_pool.close()
-            except (BufferError, ValueError):
-                pass
+                worker.transfer_context.close()
+            except Exception as exc:
+                self._log(
+                    "  [warning] TransferContext close failed for iid %d: %s"
+                    % (worker.spec.instance_id, exc)
+                )
 
-        # Drop buffer owners before unmapping SHM.
+        # Drop tensors after contexts release their local transfer resources.
         for worker in self._workers:
-            worker.kv_tensors.clear()
-            worker.ipc_wrappers.clear()
-        if any(worker.shm_mappings for worker in self._workers):
-            # First Party
-            from lmcache.v1.platform.cpu.shm import shm_munmap
-
-            for worker in self._workers:
-                for address, size in worker.shm_mappings:
-                    try:
-                        shm_munmap(address, size)
-                    except OSError:
-                        pass
+            worker.kv_caches.clear()
 
         if self._req_client is not None:
             try:
                 self._req_client.close()
             except Exception as exc:
-                self._log("  [warning] MessageQueueClient close failed: %s" % exc)
+                self._log("  [warning] Request client close failed: %s" % exc)
             finally:
                 self._req_client = None
         if self._zmq_context is not None:
@@ -667,19 +673,7 @@ class ServerBenchClient:
             finally:
                 self._zmq_context = None
 
-        if self._shm_names:
-            # First Party
-            from lmcache.v1.platform.cpu.shm import shm_unlink
-
-            for name in self._shm_names:
-                try:
-                    shm_unlink(name)
-                except OSError:
-                    pass
-
-        self._registered_instance_ids.clear()
         self._workers.clear()
-        self._shm_names.clear()
         self._started = False
 
     def _initialize(self) -> None:
@@ -691,22 +685,26 @@ class ServerBenchClient:
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
+            _DEFAULT_RPC_TIMEOUT_S,
             _INSTANCE_ID_BASE,
+            _MODEL_NAME,
             DTYPE_MAP,
-            _allocate_cpu_shm_kv_cache,
-            _allocate_gpu_kv_cache,
+            _allocate_kv_cache,
             _get_chunk_size,
             _is_mla_kv_size,
-            _send_register_kv_cache,
-            shm_open_pool_as_mmap,
         )
+        from lmcache.utils import EngineType
+        from lmcache.v1.gpu_connector.utils import LayoutHints
         from lmcache.v1.kv_layer_groups import (
             format_kvcache_shape_spec,
             parse_kvcache_shape_spec,
         )
         from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-        from lmcache.v1.multiprocess.mq import MessageQueueClient
-        from lmcache.v1.multiprocess.transport.zmq_impl import ZmqMultiprocessClient
+        from lmcache.v1.multiprocess.transfer_context import (
+            EngineDrivenTransferContext,
+            create_transfer_context,
+        )
+        from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
         config = self._config
         use_gpu = config.is_gpu
@@ -724,8 +722,10 @@ class ServerBenchClient:
             % (config.rpc_url, config.mode)
         )
         self._zmq_context = zmq.Context()
-        self._req_client = ZmqMultiprocessClient(
-            MessageQueueClient(config.rpc_url, self._zmq_context)
+        self._zmq_context.setsockopt(zmq.LINGER, 0)
+        self._req_client = RequestClientFactory.create(
+            config.rpc_url,
+            context=self._zmq_context,
         )
 
         self._chunk_size = _get_chunk_size(self._req_client)
@@ -756,6 +756,7 @@ class ServerBenchClient:
                 "Server chunk_size %d must be a multiple of block_size %d"
                 % (self._chunk_size, self._block_size)
             )
+        self._blocks_in_chunk = self._chunk_size // self._block_size
         if spec_nb and spec_nb != config.num_blocks:
             self._log(
                 "  [info] spec nb=%d overrides --num-blocks=%d"
@@ -788,15 +789,7 @@ class ServerBenchClient:
         else:
             dtype_string = "mixed"
 
-        layout_hints = {
-            "num_layers": num_layers,
-            "num_heads": num_heads_display,
-            "head_size": head_size_display,
-            "num_blocks": self._num_blocks,
-            "block_size": self._block_size,
-            "dtype": dtype_string,
-            "kv_size": kv_size_display,
-        }
+        layout_hints: LayoutHints = {"kv_layout": "NHD"}
         engine_group_infos = [
             EngineGroupInfo(
                 engine_group_id=group_index,
@@ -841,46 +834,36 @@ class ServerBenchClient:
             )
         self._kv_world_size = 1 if use_mla else config.tp_size
 
-        if use_gpu:
-            # First Party
-            from lmcache.v1.platform.kv_wrap import wrap_one_kv_cache
-        else:
-            # First Party
-            from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
-
         for rank in range(config.tp_size):
             instance_id = _INSTANCE_ID_BASE + rank
             kv_worker_id = 0 if use_mla else rank
-            if use_gpu:
-                allocated = _allocate_gpu_kv_cache(groups=layer_groups)
-                self._log(
-                    "[rank %d] Allocated %d GPU tensors on %s"
-                    % (rank, len(allocated), allocated[0].device)
+            tensors = _allocate_kv_cache(
+                groups=layer_groups,
+                device=None if use_gpu else "cpu",
+            )
+            kv_caches = {
+                "layer.%d" % layer_index: tensor
+                for layer_index, tensor in enumerate(tensors)
+            }
+            self._log(
+                "[rank %d] Allocated %d KV tensors on %s"
+                % (rank, len(tensors), tensors[0].device)
+            )
+            # CPU bench tensors can coexist with process-global accelerator
+            # support. Keep this workaround local until factory dispatch is
+            # made device-aware.
+            transfer_context: TransferContext
+            if not use_gpu and config.transfer_mode in ("auto", "engine_driven"):
+                transfer_context = EngineDrivenTransferContext(
+                    instance_id, self._req_client
                 )
-                kv_wrappers = [wrap_one_kv_cache(tensor) for tensor in allocated]
-                client_kv_tensors = allocated
-                rank_shm_mappings: list[tuple[int, int]] = []
             else:
-                shm_prefix = CpuShmTensorWrapper.SHM_NAME_PREFIX + "%s_r%d" % (
-                    os.getpid(),
-                    rank,
+                transfer_context = create_transfer_context(
+                    kv_caches,
+                    mode=config.transfer_mode,
+                    instance_id=instance_id,
+                    req_client=self._req_client,
                 )
-                (
-                    cpu_tensors,
-                    cpu_wrappers,
-                    rank_shm_names,
-                    rank_shm_mappings,
-                ) = _allocate_cpu_shm_kv_cache(
-                    groups=layer_groups,
-                    shm_prefix=shm_prefix,
-                )
-                self._shm_names.extend(rank_shm_names)
-                self._log(
-                    "[rank %d] Allocated %d CPU SHM tensors (prefix=%s)"
-                    % (rank, len(cpu_tensors), shm_prefix)
-                )
-                kv_wrappers = list(cpu_wrappers)
-                client_kv_tensors = cpu_tensors
 
             worker = WorkerContext(
                 spec=WorkerSpec(
@@ -891,41 +874,37 @@ class ServerBenchClient:
                     store_enabled=(rank == 0) if use_mla else True,
                     retrieve_enabled=True,
                 ),
-                kv_tensors=client_kv_tensors,
-                ipc_wrappers=kv_wrappers,
-                shm_mappings=rank_shm_mappings,
+                kv_caches=kv_caches,
+                transfer_context=transfer_context,
             )
             self._workers.append(worker)
 
-            register_result = _send_register_kv_cache(
-                self._req_client,
-                instance_id=instance_id,
-                world_size=self._kv_world_size,
-                layout_hints=layout_hints,
-                kv_caches=kv_wrappers if use_handle else None,
-                use_gpu=use_gpu,
-                use_handle=use_handle,
-                engine_group_infos=engine_group_infos,
-                num_physical_slots=self._chunk_size,
-            )
-            self._log(
-                "[rank %d] REGISTER_KV_CACHE: %s"
-                % (rank, "OK" if register_result else "FAIL")
-            )
-            if not register_result:
+            if (
+                isinstance(transfer_context, EngineDrivenTransferContext)
+                and len(layer_groups) > 1
+            ):
+                raise ValueError(
+                    "engine_driven supports only one KV group; "
+                    "use --transfer-mode lmcache_driven for multiple groups"
+                )
+
+            try:
+                transfer_context.register(
+                    kv_caches,
+                    _MODEL_NAME,
+                    self._kv_world_size,
+                    self._blocks_in_chunk,
+                    _DEFAULT_RPC_TIMEOUT_S,
+                    layout_hints=layout_hints,
+                    engine_group_infos=engine_group_infos,
+                    engine_type=EngineType.VLLM,
+                )
+            except TimeoutError:
                 raise RuntimeError(
                     "REGISTER_KV_CACHE failed for rank %d (instance_id=%d)"
                     % (rank, instance_id)
-                )
-            self._registered_instance_ids.append(instance_id)
-
-            rank_server_pool: mmap.mmap | None = None
-            if not use_handle and not isinstance(register_result, bool):
-                shm_name = getattr(register_result, "shm_name", "")
-                pool_size = getattr(register_result, "pool_size", 0)
-                if shm_name and pool_size > 0:
-                    rank_server_pool = shm_open_pool_as_mmap(shm_name, pool_size)
-            worker.server_pool = rank_server_pool
+                ) from None
+            self._log("[rank %d] REGISTER_KV_CACHE: OK" % rank)
 
         self._log("")
 
@@ -948,9 +927,3 @@ class ServerBenchClient:
             raise ValueError("token range exceeds request")
         if start_token % self._chunk_size or token_count % self._chunk_size:
             raise ValueError("token range must be chunk-aligned")
-
-    def _data_tensors(self, worker: WorkerContext) -> "list[torch.Tensor] | None":
-        """Return tensors only for the engine-driven transfer path."""
-        if self._config.uses_handle_transfer:
-            return None
-        return worker.kv_tensors

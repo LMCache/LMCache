@@ -47,7 +47,7 @@ def _public_callables(module):
         and callable(obj)
         and not inspect.isclass(obj)  # classes tested by descriptor/enum tests
         and not hasattr(obj, "__members__")  # exclude pybind11 enums
-        and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
+        and getattr(obj, "__module__", "").startswith(module.__name__)
     }
 
 
@@ -216,6 +216,7 @@ def _has_real_names(params):
 _EXCLUDED_FUNCS: set[str] = {
     "execute_object_group_transfer",
     "execute_cb_retrieve_plan_flat",
+    "pop_completed_phase_timings",
 }
 
 # CUDA-only plan descriptors intentionally remain native-only. Descriptor
