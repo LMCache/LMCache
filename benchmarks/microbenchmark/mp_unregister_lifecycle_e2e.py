@@ -20,8 +20,10 @@ import zmq
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.mq import MessageQueueClient, MessageQueueServer
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
+    MessageQueueClient,
+    MessageQueueServer,
+)
 from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     add_handler_helper,
     get_zmq_handler_specs,
@@ -99,9 +101,9 @@ def _run_client(
         for instance_id in instance_ids:
             for attempt in range(duplicates):
                 request_type = (
-                    RequestType.UNREGISTER_KV_CACHE
+                    "unregister_kv_cache"
                     if attempt % 2 == 0
-                    else RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+                    else "unregister_kv_cache_engine_driven_context"
                 )
                 assert (
                     client.submit_request(request_type, [instance_id]).result(
@@ -149,12 +151,12 @@ def run_e2e(instances: int, workers: int, duplicates: int) -> dict[str, object]:
     )
     server = MessageQueueServer(server_url, context)
     unregister_types = {
-        RequestType.UNREGISTER_KV_CACHE,
-        RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+        "unregister_kv_cache",
+        "unregister_kv_cache_engine_driven_context",
     }
     for spec in get_zmq_handler_specs(management):
-        if spec.request_type in unregister_types:
-            add_handler_helper(server, spec.request_type, spec.handler)
+        if spec.operation in unregister_types:
+            add_handler_helper(server, spec.operation, spec.handler)
 
     partitions = [instance_ids[offset::workers] for offset in range(workers)]
     started = time.perf_counter()

@@ -30,10 +30,9 @@ CPU-testable by import. All mutable state is created in
 
 ## Wire contract
 
-Request ids are pinned and append-only (`protocols/base.py`); payload and
-response shapes are frozen per `BLEND_PROTOCOL_VERSION`
-(`protocols/blend.py`) — an incompatible shape change means a **new request
-name**, never a changed one.
+The existing ZMQ request IDs are frozen for compatibility; payload and response
+types come from the typed `RequestClient` contract. An incompatible shape
+change requires a **new operation name**, never a changed existing contract.
 
 | RPC | Payload → Response | Semantics |
 |---|---|---|

@@ -5,6 +5,7 @@
 #include <pybind11/stl.h>
 #include "mem_kernels.cuh"
 #include "mp_mem_kernels.cuh"
+#include "phase_timing_recorder.cuh"
 #include "blend_kernels.cuh"
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
@@ -175,14 +176,36 @@ PYBIND11_MODULE(cuda_ops, m) {
       [](int direction, const torch::Device& device,
          size_t host_buffer_alignment,
          const std::vector<KernelGroupSpec>& kernel_group_specs,
-         const std::vector<BatchStep>& batch_steps) {
+         const std::vector<BatchStep>& batch_steps, bool phase_timing_enabled,
+         const std::string& session_id) {
         return execute_object_group_transfer(
             static_cast<TransferDirection>(direction), device,
-            host_buffer_alignment, kernel_group_specs, batch_steps);
+            host_buffer_alignment, kernel_group_specs, batch_steps,
+            phase_timing_enabled, session_id);
       },
       py::arg("direction"), py::arg("device"), py::arg("host_buffer_alignment"),
       py::arg("kernel_group_specs"), py::arg("batch_steps"),
+      py::arg("phase_timing_enabled") = false, py::arg("session_id") = "",
       py::call_guard<py::gil_scoped_release>());
+  m.def(
+      "pop_completed_phase_timings",
+      []() {
+        std::vector<PhaseTimingSample> samples;
+        {
+          py::gil_scoped_release release;
+          samples = pop_completed_phase_timings();
+        }
+        py::list out;
+        for (const auto& s : samples) {
+          out.append(py::make_tuple(s.phase, s.direction, s.device_index,
+                                    s.elapsed_ms, s.nbytes, s.session_id,
+                                    s.start_time_s, s.end_time_s));
+        }
+        return out;
+      },
+      "Pop completed (phase, direction, device_index, elapsed_ms, nbytes, "
+      "session_id, start_time_s, end_time_s) samples recorded by "
+      "execute_object_group_transfer.");
   // CB retrieve plan spec (see blend_kernels.cuh). Built on the Python side
   // (blend.cb_retrieve_pre_computed) and consumed by
   // execute_cb_retrieve_plan_flat.
@@ -195,7 +218,8 @@ PYBIND11_MODULE(cuda_ops, m) {
                  int block_size, int head_size, uintptr_t slot_mapping_base,
                  int64_t slot_mapping_capacity, uintptr_t cos_sin_cache,
                  int rot_dim, int rope_num_kv_heads, int64_t rope_head_stride,
-                 int key_scalar_type, bool is_neox, int64_t rope_base_offset) {
+                 int key_scalar_type, bool is_neox, int64_t rope_base_offset,
+                 int64_t block_stride_elems) {
                 return CBGroupSpec{
                     paged_kv_ptrs,
                     std::move(temp_buffer_ptrs),
@@ -207,6 +231,7 @@ PYBIND11_MODULE(cuda_ops, m) {
                     page_buffer_size,
                     block_size,
                     head_size,
+                    block_stride_elems,
                     slot_mapping_base,
                     slot_mapping_capacity,
                     cos_sin_cache,
@@ -226,7 +251,7 @@ PYBIND11_MODULE(cuda_ops, m) {
           py::arg("cos_sin_cache"), py::arg("rot_dim"),
           py::arg("rope_num_kv_heads"), py::arg("rope_head_stride"),
           py::arg("key_scalar_type"), py::arg("is_neox"),
-          py::arg("rope_base_offset") = 0)
+          py::arg("rope_base_offset") = 0, py::arg("block_stride_elems") = 0)
       // Mutable so the Python planner can cache one spec per (context, group)
       // and re-stamp only the per-request slot-mapping tensor between calls;
       // every other field is invariant for the life of the paged registration.

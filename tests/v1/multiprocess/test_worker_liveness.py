@@ -29,7 +29,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.transport.zmq_impl.server import get_zmq_handler_specs
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
@@ -233,14 +232,14 @@ def test_non_gpu_resolve_for_transfer_refreshes_and_raises() -> None:
 def test_transfer_modules_delegate_main_unregister_to_management() -> None:
     """Primary transfer modules must not register competing unregister handlers."""
     gpu_handlers = {
-        spec.request_type for spec in get_zmq_handler_specs(_bare_gpu_module())
+        spec.operation for spec in get_zmq_handler_specs(_bare_gpu_module())
     }
     non_gpu_handlers = {
-        spec.request_type for spec in get_zmq_handler_specs(_bare_non_gpu_module())
+        spec.operation for spec in get_zmq_handler_specs(_bare_non_gpu_module())
     }
 
-    assert RequestType.UNREGISTER_KV_CACHE not in gpu_handlers
-    assert RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT not in non_gpu_handlers
+    assert "unregister_kv_cache" not in gpu_handlers
+    assert "unregister_kv_cache_engine_driven_context" not in non_gpu_handlers
 
 
 class _FakeTarget:
@@ -353,12 +352,12 @@ def test_management_owns_unified_unregister_handlers() -> None:
     """Both transfer modes route their main unregister through management."""
     mgmt = ManagementModule(MagicMock(), liveness_targets=[_StateOwner(7)])
 
-    handlers = {spec.request_type: spec.handler for spec in get_zmq_handler_specs(mgmt)}
+    handlers = {spec.operation: spec.handler for spec in get_zmq_handler_specs(mgmt)}
 
-    assert handlers[RequestType.UNREGISTER_KV_CACHE] == mgmt.unregister_instance
+    assert handlers["unregister_kv_cache"] == mgmt.unregister_instance
     assert (
-        handlers[RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT]
-        == mgmt.unregister_instance
+        handlers["unregister_kv_cache_engine_driven_context"]
+        == mgmt.unregister_engine_driven_context
     )
 
 
@@ -443,6 +442,24 @@ def test_management_reaper_isolates_drop_failure() -> None:
     assert observer.dropped == [9]
     assert summary.success is False
     assert summary.message == "reaped=1, failures=1"
+
+
+def test_management_clear_defaults_to_non_force() -> None:
+    ctx = MagicMock()
+    mgmt = ManagementModule(ctx)
+
+    mgmt.clear()
+
+    ctx.storage_manager.clear.assert_called_once_with(force=False)
+
+
+def test_management_clear_accepts_force() -> None:
+    ctx = MagicMock()
+    mgmt = ManagementModule(ctx)
+
+    mgmt.clear(force=True)
+
+    ctx.storage_manager.clear.assert_called_once_with(force=True)
 
 
 def test_management_reaper_reaps_and_drops() -> None:

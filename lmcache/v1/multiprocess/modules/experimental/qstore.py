@@ -12,28 +12,31 @@ import threading
 import time
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
-    check_interprocess_event_support,
 )
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
-    downsample_and_stage_block_ids,
     get_layout_desc,
-    transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
+from lmcache.v1.multiprocess.object_group_transfer import (
+    downsample_and_stage_block_ids,
+    transfer_kv_per_object_group,
+)
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
 
@@ -217,6 +220,7 @@ class QStoreModule(InstanceLivenessTarget):
             self._q_contexts.clear()
         self._release_entries(entries)
 
+    @request_handler()
     def register_q_cache(
         self,
         instance_id: int,
@@ -270,6 +274,8 @@ class QStoreModule(InstanceLivenessTarget):
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0
         )
+        event_backend = get_event_ipc_backend(cache_context.device)
+        event_backend.check_event_support(cache_context.device)
         kv_groups_manager = cache_context.kv_layer_groups_manager
         attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(
@@ -283,6 +289,7 @@ class QStoreModule(InstanceLivenessTarget):
                 world_size=world_size,
                 last_seen=now,
                 has_liveness_signal=False,
+                event_backend=event_backend,
             )
 
         logger.info(
@@ -291,6 +298,7 @@ class QStoreModule(InstanceLivenessTarget):
             cache_context.num_layers,
         )
 
+    @request_handler()
     def unregister_q_cache(self, instance_id: int) -> None:
         """Unregister the paged Q ring tensors for a given worker instance ID.
 
@@ -319,6 +327,10 @@ class QStoreModule(InstanceLivenessTarget):
         logger.info("Unregistered Q ring for instance ID %d", instance_id)
         return True
 
+    @request_handler(
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
     @_lmcache_nvtx_annotate
     def store_q(
         self,
@@ -363,7 +375,12 @@ class QStoreModule(InstanceLivenessTarget):
             raise ValueError(f"No Q ring registered for instance ID {instance_id}")
         cache_context = entry.cache_context
         model_name = entry.model_name
-
+        event_backend = entry.event_backend
+        if event_backend is None:
+            raise RuntimeError(
+                "Q ring event backend is not initialized; register the Q cache "
+                "before submitting store requests"
+            )
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
             key, list(range(num_object_groups))
@@ -384,8 +401,7 @@ class QStoreModule(InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            check_interprocess_event_support()
-            event = torch_dev.Event(interprocess=True)
+            event = event_backend.create_event(cache_context.device)
 
             # Fail closed: every LMCache group must have block IDs covering all
             # chunks. A short list (e.g. a caller/protocol bug) would otherwise
@@ -408,23 +424,17 @@ class QStoreModule(InstanceLivenessTarget):
                     num_chunks,
                     blocks_per_chunk,
                 )
-                event.record()
-                return event.ipc_handle(), False
+                event_backend.record_event(event, cache_context.stream)
+                return event_backend.export_event(event, cache_context.device), False
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
 
-            if not hasattr(torch_dev.Event, "from_ipc_handle"):
-                raise RuntimeError(
-                    f"Backend '{torch_device_type}' does not support IPC event "
-                    "handles (Event.from_ipc_handle not available). "
-                    "Multiprocess IPC requires CUDA."
-                )
-            vllm_event = torch_dev.Event.from_ipc_handle(
-                cache_context.device, event_ipc_handle
+            vllm_event = event_backend.import_event(
+                event_ipc_handle, cache_context.device
             )
-            vllm_event.wait(stream=cache_context.stream)
+            event_backend.wait_event(vllm_event, cache_context.stream)
 
             # CPU-synchronous sentinel: a GPU store is about to be enqueued.
             # Must be published via publish() (not publish_on_stream) so the
@@ -437,12 +447,14 @@ class QStoreModule(InstanceLivenessTarget):
                 )
             )
 
+            transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
                 cache_context.cupy_stream,
                 Event(
                     event_type=EventType.MP_STORE_START,
                     session_id=key.request_id,
                     metadata={
+                        "transfer_key": transfer_key,
                         "device": str(cache_context.device),
                         "engine_id": instance_id,
                         "model_name": model_name,
@@ -463,7 +475,7 @@ class QStoreModule(InstanceLivenessTarget):
                         object_group_id=obj_group_id,
                     )
                     reserved_dict = self._ctx.storage_manager.reserve_write(
-                        obj_keys, layout_desc, "new"
+                        obj_keys, layout_desc
                     )
                     all_dict.update(reserved_dict)
                     if reserved_dict:
@@ -486,14 +498,14 @@ class QStoreModule(InstanceLivenessTarget):
                         batch_size=1,
                         skip_first_n_tokens=0,
                         direction=lmcache_native.TransferDirection.D2H,
+                        transfer_key=transfer_key,
                     )
 
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store Q keys due to exception")
-                return event.ipc_handle(), False
             finally:
-                event.record()
+                event_backend.record_event(event, cache_context.stream)
                 # Fail closed: commit the reserved objects only when every chunk
                 # copied successfully; otherwise the whole store is skipped.
                 stored_count = len(all_dict) if store_succeeded else 0
@@ -511,6 +523,7 @@ class QStoreModule(InstanceLivenessTarget):
                         event_type=EventType.MP_STORE_END,
                         session_id=key.request_id,
                         metadata={
+                            "transfer_key": transfer_key,
                             "stored_count": stored_count,
                             "device": str(cache_context.device),
                             "engine_id": instance_id,
@@ -527,4 +540,4 @@ class QStoreModule(InstanceLivenessTarget):
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
-        return event.ipc_handle(), True
+        return event_backend.export_event(event, cache_context.device), store_succeeded

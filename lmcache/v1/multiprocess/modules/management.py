@@ -11,6 +11,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
@@ -104,6 +105,7 @@ class ManagementModule:
         if self._reaper is not None:
             self._reaper.stop()
 
+    @request_handler(HandlerType.BLOCKING)
     def ping(self, instance_id: int | None) -> bool:
         """Respond to a ping and refresh the sender's liveness.
 
@@ -127,6 +129,7 @@ class ManagementModule:
                     )
         return True
 
+    @request_handler(operation="unregister_kv_cache")
     def unregister_instance(self, instance_id: int) -> None:
         """Immediately release every state fragment owned by an instance.
 
@@ -146,6 +149,10 @@ class ManagementModule:
                 instance_id,
                 failures,
             )
+
+    @request_handler(operation="unregister_kv_cache_engine_driven_context")
+    def unregister_engine_driven_context(self, instance_id: int) -> None:
+        self.unregister_instance(instance_id)
 
     def _drop_instance_state(self, instance_id: int) -> int:
         """Fan one instance cleanup out to all targets exactly once.
@@ -200,6 +207,7 @@ class ManagementModule:
             message=f"reaped={len(reaped)}, failures={failures}",
         )
 
+    @request_handler()
     def get_chunk_size(self) -> int:
         """Return the chunk size used for KV cache operations.
 
@@ -208,6 +216,7 @@ class ManagementModule:
         """
         return self._ctx.chunk_size
 
+    @request_handler()
     def get_experimental(self) -> list[str]:
         """Return the experimental intermediate tensor transfer built in the
         server.
@@ -218,13 +227,15 @@ class ManagementModule:
         """
         return list(self._experimental_transfer)
 
-    def clear(self) -> None:
+    @request_handler(HandlerType.BLOCKING)
+    def clear(self, force: bool = False) -> None:
         """Clear all stored KV cache data from the storage manager."""
         with self._clear_lock:
             self._ctx.storage_manager.memcheck()
-            self._ctx.storage_manager.clear(force=True)
+            self._ctx.storage_manager.clear(force=force)
             self._ctx.storage_manager.memcheck()
 
+    @request_handler(operation="noop")
     def debug(self) -> str:
         """Return a simple health-check string.
 
@@ -233,6 +244,10 @@ class ManagementModule:
         """
         return "OK"
 
+    @request_handler(
+        HandlerType.BLOCKING,
+        operation="report_block_allocation",
+    )
     def report_block_allocations(
         self,
         instance_id: int,

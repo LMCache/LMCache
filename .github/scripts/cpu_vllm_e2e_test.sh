@@ -13,6 +13,8 @@
 #   lmcache_driven -> LMCACHE_DATA_MODE selects shm (default) or pickle
 #
 # Environment variables (all optional, defaults shown):
+#   LMCACHE_REQUEST_TRANSPORT Request RPC transport: zmq|grpc (default: zmq)
+#   LMCACHE_REQUEST_PORT      Request RPC port (default: 5555)
 #   LMCACHE_TRANSPORT_MODE   Transport: engine_driven|lmcache_driven
 #                             (default: engine_driven)
 #   LMCACHE_DATA_MODE        Data transfer mode: shm|pickle (default: shm)
