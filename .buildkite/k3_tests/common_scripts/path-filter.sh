@@ -82,11 +82,11 @@ _path_filter_should_skip_for_pipeline() {
                     ;;
                 lmcache/v1/platform/*)
                     # For CUDA unit, platform implementation changes under
-                    # lmcache/v1/platform/{base,cuda,devices}/ are relevant and
+                    # lmcache/v1/platform/{base,devices}/ are relevant and
                     # should trigger the pipeline; keep explicitly special-cased
                     # device directories above as non-targets.
                     case "$changed_file" in
-                        lmcache/v1/platform/base/*|lmcache/v1/platform/cuda/*|lmcache/v1/platform/devices/*)
+                        lmcache/v1/platform/base/*|lmcache/v1/platform/devices/*)
                             return 1
                             ;;
                     esac
