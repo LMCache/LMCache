@@ -2006,10 +2006,13 @@ def test_compress_decompress_unpin_when_pinned() -> None:
         mock_compressed_mem_obj.unpin.assert_called_once()
 
 
-def test_retrieve_cleanup_ref_count_and_unpin() -> None:
-    """Verify that retrieve() unpins and ref_count_downs all retrieved chunks.
+@pytest.mark.no_shared_allocator
+@pytest.mark.parametrize("async_loading", [False, True])
+def test_retrieve_cleanup_ref_count_and_unpin(async_loading: bool) -> None:
+    """Release get references, but only consume pins owned by async prefetch.
 
-    Specifically in the else branch when remove_after_retrieve is False.
+    Args:
+        async_loading: Whether chunks came from async prefetch or blocking gets.
     """
     # Create mock memory objects
     mem_obj_pinned = MagicMock()
@@ -2034,8 +2037,9 @@ def test_retrieve_cleanup_ref_count_and_unpin() -> None:
         (k1, mem_obj_not_pinned, 10, 20),
     ]
 
-    engine.async_loading = False
+    engine.async_loading = async_loading
     engine._process_tokens_internal.return_value = (reordered_chunks, 1024)
+    engine._async_process_tokens_internal.return_value = (reordered_chunks, 1024)
     engine._is_sync_pd_backend.return_value = False
 
     # Mock stats monitor
@@ -2061,7 +2065,10 @@ def test_retrieve_cleanup_ref_count_and_unpin() -> None:
 
     # Assertions
     mem_obj_pinned.ref_count_down.assert_called_once()
-    mem_obj_pinned.unpin.assert_called_once()
+    if async_loading:
+        mem_obj_pinned.unpin.assert_called_once()
+    else:
+        mem_obj_pinned.unpin.assert_not_called()
 
     mem_obj_not_pinned.ref_count_down.assert_called_once()
     mem_obj_not_pinned.unpin.assert_not_called()
