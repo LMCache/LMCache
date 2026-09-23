@@ -564,6 +564,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         group_tokens_per_block = get_group_tokens_per_block(
             vllm_config, kv_cache_config
         )
+        mamba_cache_mode = getattr(vllm_config.cache_config, "mamba_cache_mode", "none")
+        self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
         scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
         )
@@ -1112,6 +1114,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler-side methods
     # ==============================
 
+    def reset_cache(self) -> bool | None:
+        """Request a best-effort LMCache MP cache clear from the scheduler.
+
+        Active request trackers are preserved. Backing servers retain objects
+        protected by in-flight read or write locks.
+
+        Returns:
+            True when every MP server answers the clear, False on timeout or
+            RPC failure, and None for worker-role connectors.
+        """
+        if self.role != KVConnectorRole.SCHEDULER:
+            return None
+
+        return self.scheduler_adapter.reset_cache()
+
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind GPU block pool so that we can touch blocks during stores.
         Called by Scheduler after kv_cache_manager is ready."""
@@ -1199,6 +1216,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
+            reserve_last_token=self._reserve_last_token_for_lookup,
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -1263,6 +1281,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
+            reserve_last_token=self._reserve_last_token_for_lookup,
         )
 
     def update_state_after_alloc(
