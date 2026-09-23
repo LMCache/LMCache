@@ -24,10 +24,6 @@ amend or rebase to add it before pushing.
 
 We recommend using [uv](https://docs.astral.sh/uv/) to manage Python environments and dependencies:
 
-For standalone CI/workflow validation that does not import LMCache, use
-`uv run --no-project --python 3.12 --with <dependency> <command>`. Plain `uv run`
-inside this checkout attempts to install LMCache and build its native extensions.
-
 ```bash
 # Create and activate a virtual environment
 uv venv --python 3.12
