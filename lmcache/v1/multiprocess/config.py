@@ -125,6 +125,11 @@ class MPServerConfig:
     """List of experimental transfer modules to enable. Options: transfer_query
     (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
 
+    null_block_id: int = 0
+    """Engine block ID that denotes absent KV data. The default ``0`` keeps
+    compatibility with vLLM; engines where block zero is valid can select a
+    different sentinel, for example ``-1``."""
+
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
 
@@ -357,6 +362,12 @@ def add_mp_server_args(
         help="Chunk size for KV cache operations. Default is 256.",
     )
     mp_group.add_argument(
+        "--null-block-id",
+        type=int,
+        default=0,
+        help="Engine block ID that denotes absent KV data. Default is 0.",
+    )
+    mp_group.add_argument(
         "--max-workers",
         type=int,
         default=1,
@@ -540,6 +551,7 @@ def parse_args_to_mp_server_config(
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,
+        null_block_id=args.null_block_id,
         max_workers=base,
         max_gpu_workers=max_gpu,
         max_cpu_workers=max_cpu,
