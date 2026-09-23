@@ -368,6 +368,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         success = True
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
+        reserved_keys: list[tuple[ObjectKey, int]] = []
         try:
             # ── Phase 1: reserve capacity and build the coroutine list ────────
             # Each entry in ``prepared`` carries everything needed to either
@@ -390,6 +391,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                         break
                     self._inflight_stores.add(key)
                     self._total_bytes += mem_size
+                    reserved_keys.append((key, mem_size))
 
                 mem_indices = self.nixl_agent.get_memory_indices(
                     obj.meta.address, mem_size
@@ -433,6 +435,15 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         except Exception:
             logger.exception("Dynamic NIXL store task %d failed", task_id)
             success = False
+        finally:
+            if not success:
+                # Un-reserve any reserved keys that were not successfully
+                # stored and committed
+                with self._lock:
+                    for key, mem_size in reserved_keys:
+                        if key in self._inflight_stores:
+                            self._inflight_stores.discard(key)
+                            self._total_bytes -= mem_size
 
         if stored_keys:
             self._notify_keys_stored(stored_keys, stored_sizes)

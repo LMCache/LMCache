@@ -185,7 +185,7 @@ class NixlStorageAgent:
             device_id=0,  # 0 indicates cpu
         )
 
-        if self.backend in ["GDS", "GDS_MT", "POSIX", "HF3FS"]:
+        if self.backend in _FILE_BACKENDS:
             file_size = int(
                 self.backend_params.get("file_size", l1_memory_desc.align_bytes)
             )
