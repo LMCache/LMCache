@@ -228,13 +228,6 @@ def _bind_primary_context(device_index: int) -> None:
     ``cuMemGetAddressRange`` failed with ``CUDA_ERROR_INVALID_CONTEXT`` on
     every retry, so the worker never recovered.
 
-    ``torch.cuda.device`` is not a substitute: on a fresh thread torch
-    skips the underlying runtime call when the target equals its cached
-    current device (0), so nothing is bound. Verified on an RTX PRO 6000
-    (torch 2.13.0+cu130) by constructing a wrapper from a fresh
-    ``threading.Thread``: unpatched and ``torch.cuda.device`` both fail,
-    while binding the context explicitly succeeds.
-
     A thread that already has a current context is left untouched.
 
     Args:
