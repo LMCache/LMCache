@@ -98,6 +98,11 @@ class MPServerConfig:
     script_allowed_imports: list[str] = field(default_factory=list)
     """Modules that /run_script endpoint is allowed to import."""
 
+    run_script_api_enabled: bool = False
+    """Enable the /run_script HTTP endpoint. It executes caller-supplied
+    Python in-process (the restricted builtins are not a security boundary),
+    so it is disabled by default; only enable on a trusted network."""
+
     instance_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     """Stable identity of this MP server, the single source of truth for who
     this server is. Used as the coordinator membership key and projected onto
@@ -212,7 +217,7 @@ DEFAULT_MP_SERVER_CONFIG = MPServerConfig()
 class HTTPFrontendConfig:
     """Configuration for the HTTP frontend (uvicorn/FastAPI)."""
 
-    http_host: str = "0.0.0.0"
+    http_host: str = "127.0.0.1"
     """HTTP server host."""
 
     http_port: int = 8080
@@ -464,6 +469,15 @@ def add_mp_server_args(
         "import. Example: --script-allowed-imports numpy pandas",
     )
     mp_group.add_argument(
+        "--run-script-api-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable the /run_script HTTP endpoint, which executes "
+        "caller-supplied Python in-process (full remote code execution; the "
+        "restricted builtins are not a security boundary). Default is False. "
+        "Only enable it on a trusted network.",
+    )
+    mp_group.add_argument(
         "--separate-object-groups",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -556,6 +570,7 @@ def parse_args_to_mp_server_config(
         p2p_config=parse_args_to_p2p_config(args),
         shm_name=args.shm_name,
         script_allowed_imports=args.script_allowed_imports or [],
+        run_script_api_enabled=args.run_script_api_enabled,
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
@@ -649,8 +664,10 @@ def add_http_frontend_args(
     http_group.add_argument(
         "--http-host",
         type=str,
-        default="0.0.0.0",
-        help="Host to bind the HTTP server. Default is 0.0.0.0.",
+        default="127.0.0.1",
+        help="Host to bind the HTTP server. Default is 127.0.0.1; the admin "
+        "API has no authentication, so only bind a non-loopback address on a "
+        "trusted network.",
     )
     http_group.add_argument(
         "--http-port",

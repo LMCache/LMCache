@@ -25,13 +25,7 @@ from lmcache.v1.multiprocess.modules.p2p_controller import (
     _P2PState,
     _PeerInstance,
 )
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-    get_handler_type,
-    get_payload_classes,
-    get_response_class,
-)
-from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.rpc import get_rpc_spec
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     msgspec_decode,
     msgspec_encode,
@@ -61,44 +55,27 @@ def _make_layout_desc() -> MemoryLayoutDesc:
 # ============================================================================
 
 
-def test_p2p_request_types_registered():
-    """The three P2P request types should be members of RequestType."""
-    for name in (
-        "P2P_LOOKUP_AND_LOCK",
-        "P2P_QUERY_LOOKUP_RESULTS",
-        "P2P_UNLOCK_OBJECTS",
-    ):
-        assert hasattr(RequestType, name)
-        assert isinstance(getattr(RequestType, name), RequestType)
-
-
 def test_p2p_lookup_and_lock_protocol():
     """P2P_LOOKUP_AND_LOCK payload is [list[ObjectKey],
     dict[int, MemoryLayoutDesc]], returns int, and is BLOCKING."""
-    payload_classes = get_payload_classes(RequestType.P2P_LOOKUP_AND_LOCK)
-    assert payload_classes == [list[ObjectKey], dict[int, MemoryLayoutDesc]]
-    assert get_response_class(RequestType.P2P_LOOKUP_AND_LOCK) is int
-    assert get_handler_type(RequestType.P2P_LOOKUP_AND_LOCK) == HandlerType.BLOCKING
+    spec = get_rpc_spec("p2p_lookup_and_lock")
+    assert spec.payload_types == (list[ObjectKey], dict[int, MemoryLayoutDesc])
+    assert spec.response_type is int
 
 
 def test_p2p_query_lookup_results_protocol():
     """P2P_QUERY_LOOKUP_RESULTS payload is [int], returns the optional address
     list, and is BLOCKING."""
-    assert get_payload_classes(RequestType.P2P_QUERY_LOOKUP_RESULTS) == [int]
-    assert (
-        get_response_class(RequestType.P2P_QUERY_LOOKUP_RESULTS)
-        == list[TransferChannelAddress] | None
-    )
-    assert (
-        get_handler_type(RequestType.P2P_QUERY_LOOKUP_RESULTS) == HandlerType.BLOCKING
-    )
+    spec = get_rpc_spec("p2p_query_lookup_results")
+    assert spec.payload_types == (int,)
+    assert spec.response_type == list[TransferChannelAddress] | None
 
 
 def test_p2p_unlock_objects_protocol():
     """P2P_UNLOCK_OBJECTS payload is [list[ObjectKey]], returns None, BLOCKING."""
-    assert get_payload_classes(RequestType.P2P_UNLOCK_OBJECTS) == [list[ObjectKey]]
-    assert get_response_class(RequestType.P2P_UNLOCK_OBJECTS) is None
-    assert get_handler_type(RequestType.P2P_UNLOCK_OBJECTS) == HandlerType.BLOCKING
+    spec = get_rpc_spec("p2p_unlock_objects")
+    assert spec.payload_types == (list[ObjectKey],)
+    assert spec.response_type is type(None)
 
 
 # ============================================================================

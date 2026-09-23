@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 import ast
 
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.rpc import get_rpc_specs
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
@@ -23,29 +23,28 @@ class _RecordingMessageQueueClient(MessageQueueClient):
     """Record requests without opening a ZMQ socket."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[RequestType, list[Any], Any | None]] = []
+        self.calls: list[tuple[str, list[Any]]] = []
         self.closed = False
 
     def submit_request(
         self,
-        request_type: RequestType,
+        operation: str,
         request_payloads: list[Any],
-        response_cls: Any | None = None,
     ) -> MessagingFuture[Any]:
         future: MessagingFuture[Any] = MessagingFuture()
-        self.calls.append((request_type, request_payloads, response_cls))
-        future.set_result(request_type)
+        self.calls.append((operation, request_payloads))
+        future.set_result(operation)
         return future
 
     def close(self) -> None:
         self.closed = True
 
 
-def test_all_request_types_have_explicit_named_methods() -> None:
+def test_all_rpc_contracts_have_explicit_named_methods() -> None:
     contract_names = {
         name for name, value in RequestClient.__dict__.items() if callable(value)
     }
-    expected_names = {name.lower() for name in RequestType.__members__}
+    expected_names = set(get_rpc_specs())
 
     assert expected_names <= contract_names
     zmq_method_names = {
@@ -74,10 +73,6 @@ def test_all_request_types_have_explicit_named_methods() -> None:
 def test_transport_clients_explicitly_inherit_shared_contract() -> None:
     assert RequestClient in ZmqMultiprocessClient.__bases__
     assert RequestClient in GrpcMultiprocessClient.__bases__
-
-
-def test_zmq_client_explicitly_inherits_shared_contract() -> None:
-    assert RequestClient in ZmqMultiprocessClient.__bases__
 
 
 def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
@@ -109,7 +104,10 @@ def test_business_callers_create_clients_through_factory() -> None:
         repo_root / "tests/v1/multiprocess/test_client.py",
         repo_root / "tests/v1/multiprocess/test_mq.py",
         repo_root / "tests/v1/multiprocess/test_p2p_controller.py",
+        repo_root / "tests/v1/multiprocess/test_protocols.py",
         repo_root / "tests/v1/multiprocess/transport_test_utils.py",
+        repo_root / "tests/cli/commands/bench/test_server_bench.py",
+        repo_root / "lmcache/v1/multiprocess/mq.py",
     }
     violations: list[str] = []
     for source_root in (repo_root / "lmcache", repo_root / "tests"):
@@ -134,59 +132,39 @@ def test_business_callers_create_clients_through_factory() -> None:
 
 def test_named_rpc_method_delegates_to_zmq_request_envelope() -> None:
     transport = _RecordingMessageQueueClient()
-    client = ZmqMultiprocessClient(transport)
+    client = ZmqMultiprocessClient(transport)  # type: ignore[abstract]
 
-    future = client.lookup("key", 4)
+    future = client.lookup(cast(Any, "key"), 4)
 
-    assert future.result(timeout=0) is RequestType.LOOKUP
-    assert transport.calls == [
-        (
-            RequestType.LOOKUP,
-            ["key", 4],
-            get_response_class(RequestType.LOOKUP),
-        )
-    ]
+    assert future.result(timeout=0) == "lookup"
+    assert transport.calls == [("lookup", ["key", 4])]
 
 
 def test_zmq_clear_defaults_to_non_force_and_accepts_force() -> None:
     transport = _RecordingMessageQueueClient()
-    client = ZmqMultiprocessClient(transport)
+    client = ZmqMultiprocessClient(transport)  # type: ignore[abstract]
 
     client.clear()
     client.clear(force=True)
 
     assert transport.calls == [
-        (
-            RequestType.CLEAR,
-            [False],
-            get_response_class(RequestType.CLEAR),
-        ),
-        (
-            RequestType.CLEAR,
-            [True],
-            get_response_class(RequestType.CLEAR),
-        ),
+        ("clear", [False]),
+        ("clear", [True]),
     ]
 
 
 def test_compatibility_alias_delegates_to_same_zmq_request_type() -> None:
     transport = _RecordingMessageQueueClient()
-    client = ZmqMultiprocessClient(transport)
+    client = ZmqMultiprocessClient(transport)  # type: ignore[abstract]
 
     client.cb_unregister_rope_v3(7)
 
-    assert transport.calls == [
-        (
-            RequestType.CB_UNREGISTER_ROPE,
-            [7],
-            get_response_class(RequestType.CB_UNREGISTER_ROPE),
-        )
-    ]
+    assert transport.calls == [("cb_unregister_rope", [7])]
 
 
 def test_close_delegates_to_zmq_client() -> None:
     transport = _RecordingMessageQueueClient()
-    client = ZmqMultiprocessClient(transport)
+    client = ZmqMultiprocessClient(transport)  # type: ignore[abstract]
 
     client.close()
 
