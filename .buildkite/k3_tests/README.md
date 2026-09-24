@@ -99,12 +99,15 @@ selection.
 | Unit tests, shared/mixed suites, and unclassified pipelines | Existing selection | Existing selection |
 
 The AMD unit step stays enabled when its MP benchmark step is skipped. MUSA
-hardware smoke, MetaX, the external legacy E2E harness, and GitHub Actions keep
-their existing selection. This selector controls audited runtime-specific
-Buildkite jobs; it does not filter individual pytest cases, change runtime
+hardware smoke, MetaX, and GitHub Actions keep their existing selection.
+This selector controls audited runtime-specific Buildkite jobs; it does not
+filter individual pytest cases, change runtime
 configuration, or depend on the allocator-fixture isolation PR.
 
-Eligible jobs still use their existing path/`full` trigger conditions. Labels
+The older correctness and multiprocessing bootstraps still merge the PR base
+before uploading their `*.steps.yml` files. Mode guards live in those step files,
+so the upstream bootstrap order is preserved. Eligible jobs still use their
+existing path/`full` triggers and `good first issue` skip policy. Labels
 cannot create a build rejected by the pipeline's GitHub trigger settings.
 Enable label-change events in Buildkite if changing a label should launch a new
 build. A rebuild reuses the original labels and environment; create a new build

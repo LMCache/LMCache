@@ -20,7 +20,7 @@ def run_shell(script: str, **variables: str) -> subprocess.CompletedProcess[str]
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("BUILDKITE_", "LMCACHE_CI_"))
+        if not key.startswith(("BUILDKITE_", "LMCACHE_CI_", "LMCACHE_PR_BASE_MERGE"))
     }
     return subprocess.run(
         ["bash", "-c", script],
@@ -141,9 +141,9 @@ class TestCIMode(unittest.TestCase):
         """Older entry points skip before installing or launching anything."""
         pipelines = {
             ".buildkite/pipelines/comprehensive-tests.yml": "inprocess",
-            ".buildkite/pipelines/multiprocessing-test.yml": "mp",
+            ".buildkite/pipelines/multiprocessing-test.steps.yml": "mp",
             ".buildkite/vllm-integration-tests.yml": "inprocess",
-            ".buildkite/correctness/pipeline.correctness.yml": "inprocess",
+            ".buildkite/correctness/pipeline.correctness.steps.yml": "inprocess",
             ".buildkite/correctness/pipeline.mmlu.yml": "inprocess",
             ".buildkite/k3_tests/amd/pipeline.yml": "mp",
         }
@@ -165,24 +165,42 @@ class TestCIMode(unittest.TestCase):
                     )
 
     def test_upload_skips_and_failure_propagation(self) -> None:
-        """Excluded pipelines never upload; selected uploads preserve failures."""
+        """Retain admission/base-merge gates and propagate upload failures."""
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             agent = path / "buildkite-agent"
             agent.write_text('#!/bin/sh\necho "$*"\n[ "$1" != pipeline ] || exit 7\n')
             git = path / "git"
-            git.write_text('#!/bin/sh\n[ "$1" != diff ] || echo lmcache/utils.py\n')
+            git.write_text(
+                '#!/bin/sh\n[ "$1" != fetch ] || exit "${FETCH_EXIT:-0}"\n'
+                '[ "$1" != diff ] || echo lmcache/utils.py\n'
+            )
             agent.chmod(0o755)
             git.chmod(0o755)
-            for mode, code in (("inprocess", 0), ("mp", 7)):
-                result = run_shell(
-                    f'bash "{SCRIPTS}/upload-pipeline.sh" '
-                    ".buildkite/k3_tests/multiprocess/pipeline.yml",
-                    PATH=f"{directory}:{os.environ['PATH']}",
-                    LMCACHE_CI_MODE=mode,
-                )
-                self.assertEqual(result.returncode, code, result.stderr)
-                self.assertEqual("pipeline upload" in result.stdout, mode == "mp")
+            cases = [
+                ("inprocess", {}, 0, False),
+                ("mp", {}, 7, True),
+                ("mp", {"BUILDKITE_PULL_REQUEST_LABELS": "good first issue"}, 0, False),
+                (
+                    "inprocess",
+                    {"BUILDKITE_PULL_REQUEST_LABELS": "good first issue,force-ci"},
+                    7,
+                    True,
+                ),
+                ("mp", {"FETCH_EXIT": "9"}, 9, False),
+            ]
+            for mode, overrides, code, uploaded in cases:
+                with self.subTest(mode=mode, overrides=overrides):
+                    result = run_shell(
+                        f'bash "{SCRIPTS}/upload-pipeline.sh" '
+                        ".buildkite/k3_tests/multiprocess/pipeline.yml",
+                        PATH=f"{directory}:{os.environ['PATH']}",
+                        LMCACHE_CI_MODE=mode,
+                        BUILDKITE_PULL_REQUEST="5303",
+                        **overrides,
+                    )
+                    self.assertEqual(result.returncode, code, result.stderr)
+                    self.assertEqual("pipeline upload" in result.stdout, uploaded)
 
 
 if __name__ == "__main__":

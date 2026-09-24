@@ -27,6 +27,7 @@ logger = init_logger(__name__)
 
 # Default for the wire-typed group_rot parameter; never mutated.
 _EMPTY_GROUP_ROT: list[list[int]] = []
+_EMPTY_GROUP_HEAD_SIZE: list[int] = []
 
 
 class RegistrationMixin:
@@ -58,6 +59,7 @@ class RegistrationMixin:
         # Annotation must equal the protocol payload class exactly (mq.py
         # same_type check); direct callers may still pass tuples/None entries.
         group_rot: list[list[int]] = _EMPTY_GROUP_ROT,
+        group_head_size: list[int] = _EMPTY_GROUP_HEAD_SIZE,
     ) -> None:
         """Attach CB re-RoPE state to a registered KV-cache instance.
 
@@ -79,6 +81,8 @@ class RegistrationMixin:
                 offset 0). MLA models must declare this: a single-plane MLA
                 row is indistinguishable from a key-only cache to the legacy
                 inference and would get its content dims rotated.
+            group_head_size: Per-engine-group scatter head size. Empty means
+                ``head_size`` covers every group.
 
         Raises:
             ValueError: On a missing KV cache, bad ``group_to_cache``
@@ -156,12 +160,13 @@ class RegistrationMixin:
             cos_sin_caches=cos_sin_caches,
             group_to_cache=list(group_to_cache),
             group_rot=norm_rot,
+            group_head_size=list(group_head_size),
         )
 
         logger.info(
             "Registered CB rope state for instance %d "
             "(%d cache(s), shapes=%s dtype=%s, head_size=%d, is_neox=%s, "
-            "group_map=%s, group_rot=%s)",
+            "group_map=%s, group_rot=%s, group_hs=%s)",
             instance_id,
             len(cos_sin_caches),
             [tuple(c.shape) for c in cos_sin_caches],
@@ -170,6 +175,7 @@ class RegistrationMixin:
             is_neox_style,
             "uniform" if not group_to_cache else str(group_to_cache),
             "legacy" if not norm_rot else str(norm_rot),
+            "uniform" if not group_head_size else str(list(group_head_size)),
         )
 
         # Pre-warm plan invariants + slot staging off the retrieve critical
