@@ -3,15 +3,16 @@
 // Authors: Wenwen Chen <wenwen.chen@samsung.com>
 
 #include "connector.h"
-#include <cerrno>
-#include <cstring>
-#include <stdexcept>
-#include <sstream>
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <cstddef>
+#include <cstring>
 #include <functional>
 #include <limits.h>
+#include <stdexcept>
+#include <sstream>
 #include <thread>
-#include <chrono>
 
 namespace lmcache {
 namespace connector {
@@ -322,8 +323,9 @@ void Hf3fsConnector::read_file(WorkerHf3fsConn& conn, hf3fs_ior& ior,
       throw std::runtime_error("I/O failed: " + std::to_string(-cqe.result));
     }
     if (cqe.result != sub_len) {
-      throw std::runtime_error("read_file (" + conn.file_path + ") failed, requested "+
-            std::to_string(sub_len) + " but got "+ std::to_string(cqe.result));
+      throw std::runtime_error(
+          "read_file (" + conn.file_path + ") failed, requested " +
+          std::to_string(sub_len) + " but got " + std::to_string(cqe.result));
     }
     memcpy(static_cast<char*>(buf) + total_read, iov.base, sub_len);
     total_read += sub_len;
@@ -383,8 +385,9 @@ void Hf3fsConnector::write_file(WorkerHf3fsConn& conn, hf3fs_ior& ior,
     }
 
     if (cqe.result != sub_len) {
-      throw std::runtime_error("write_file (" + conn.file_path + ") failed, requested "+
-            std::to_string(sub_len) + " but got "+ std::to_string(cqe.result));
+      throw std::runtime_error(
+          "write_file (" + conn.file_path + ") failed, requested " +
+          std::to_string(sub_len) + " but got " + std::to_string(cqe.result));
     }
     total_written += sub_len;
     file_offset += sub_len;
@@ -628,9 +631,8 @@ bool Hf3fsConnector::do_single_delete(WorkerHf3fsConn& conn,
     }
     return removed;
   } catch (const std::filesystem::filesystem_error& e) {
-    fprintf(stderr,
-            "[LMCache HF3FS] Delete file %s failed: %s\n",
-            file_path, e.what());
+    fprintf(stderr, "[LMCache HF3FS] Delete file %s failed: %s\n", file_path,
+            e.what());
     return false;
   }
 }
@@ -638,8 +640,9 @@ bool Hf3fsConnector::do_single_delete(WorkerHf3fsConn& conn,
 /**
  * Scan all base_paths in parallel and populate the key buffer.
  *
- * Runs one thread per base_path (bounded by num_workers_), each thread
- * builds a private local_set to avoid contention, then merges into
+ * Splits base_paths_ into num_workers_ contiguous slices (bounded by the
+ * number of base_paths). Each thread scans one slice of directories into a
+ * private local_set to avoid contention, then all local_sets are merged into
  * key_buffer_ in a single-threaded pass.
  *
  * Called from the constructor (single-threaded, before workers start).
@@ -660,17 +663,18 @@ void Hf3fsConnector::scan_and_build_buffer_() {
   std::vector<std::unordered_set<std::string>> local_sets(num_workers);
 
   for (int i = 0; i < num_workers; ++i) {
-    size_t start = static_cast<size_t>(i) * (base_paths_.size() / num_workers);
-    size_t end =
-        (i == num_workers - 1)
-            ? base_paths_.size()
-            : static_cast<size_t>(i + 1) * (base_paths_.size() / num_workers);
-    if (start >= end) {
-      break;
-    }
+    // slice sizes differ by at most one.
+    size_t start = static_cast<size_t>(i) * base_paths_.size() /
+                   static_cast<size_t>(num_workers);
+    size_t end = static_cast<size_t>(i + 1) * base_paths_.size() /
+                 static_cast<size_t>(num_workers);
 
-    threads.emplace_back(&Hf3fsConnector::buffer_scan_worker_, this,
-                         base_paths_[start], std::ref(local_sets[i]));
+    threads.emplace_back(
+        &Hf3fsConnector::buffer_scan_worker_, this,
+        std::vector<std::string>(
+            base_paths_.begin() + static_cast<std::ptrdiff_t>(start),
+            base_paths_.begin() + static_cast<std::ptrdiff_t>(end)),
+        std::ref(local_sets[i]));
   }
 
   for (auto& t : threads) {
@@ -688,13 +692,13 @@ void Hf3fsConnector::scan_and_build_buffer_() {
 }
 
 /**
- * Scan one base_path directory and recover keys from .data filenames.
+ * Scan the given base_path directories and recover keys from .data filenames.
  *
  * Inverts key_to_filename() for the new format:
  *   Filename: <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>.data
  *   Key:      <model>@<kv_rank_hex>@<chunk_hash_hex>
  *
- * Steps:
+ * Each path in base_paths is iterated in turn; within one directory:
  * 1. Skip non-regular files (e.g. subdirectories)
  * 2. Skip files that do not end with ".data"
  * 3. Strip the ".data" suffix
@@ -704,67 +708,71 @@ void Hf3fsConnector::scan_and_build_buffer_() {
  *
  * Called from worker threads spawned in scan_and_build_buffer_().
  *
- * @param base_path Directory to scan for .data files
+ * @param base_paths Directories to scan for .data files
  * @param local_set Set to populate with recovered keys
  */
 void Hf3fsConnector::buffer_scan_worker_(
-    const std::string& base_path, std::unordered_set<std::string>& local_set) {
+    const std::vector<std::string>& base_paths,
+    std::unordered_set<std::string>& local_set) {
   std::error_code ec;
-  for (const auto& entry : std::filesystem::directory_iterator(base_path, ec)) {
-    if (!entry.is_regular_file(ec)) {
-      continue;
-    }
-
-    const std::string filename = entry.path().filename().string();
-    if (filename.length() <= 5 ||
-        filename.compare(filename.length() - 5, 5, ".data") != 0) {
-      continue;
-    }
-
-    std::string key = filename.substr(0, filename.length() - 5);
-
-    // Split on '@' to recover original key parts
-    // Format: <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt?>
-    std::vector<std::string> parts;
-    size_t start = 0;
-    for (size_t pos = 0; pos <= key.size(); ++pos) {
-      if (pos == key.size() || key[pos] == '@') {
-        parts.emplace_back(key.substr(start, pos - start));
-        start = pos + 1;
+  for (const auto& base_path : base_paths) {
+    for (const auto& entry :
+         std::filesystem::directory_iterator(base_path, ec)) {
+      if (!entry.is_regular_file(ec)) {
+        continue;
       }
-    }
 
-    if (parts.size() < 3) {
-      // Malformed filename, skip
-      continue;
-    }
+      const std::string filename = entry.path().filename().string();
+      if (filename.length() <= 5 ||
+          filename.compare(filename.length() - 5, 5, ".data") != 0) {
+        continue;
+      }
 
-    // Reconstruct key: <model>@<kv_rank_hex>@<chunk_hash_hex>[@<cache_salt>]
-    // Remove "0x" prefix from kv_rank field (parts[1])
-    std::string kv_rank = parts[1];
-    if (kv_rank.size() >= 2 && kv_rank.substr(0, 2) == "0x") {
-      kv_rank = kv_rank.substr(2);
-    }
+      std::string key = filename.substr(0, filename.length() - 5);
 
-    std::string recovered;
-    recovered += parts[0];
-    recovered += '@';
-    recovered += kv_rank;
-    recovered += '@';
-    recovered += parts[2];
-    for (size_t i = 3; i < parts.size(); ++i) {
+      // Split on '@' to recover original key parts
+      // Format: <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt?>
+      std::vector<std::string> parts;
+      size_t start = 0;
+      for (size_t pos = 0; pos <= key.size(); ++pos) {
+        if (pos == key.size() || key[pos] == '@') {
+          parts.emplace_back(key.substr(start, pos - start));
+          start = pos + 1;
+        }
+      }
+
+      if (parts.size() < 3) {
+        // Malformed filename, skip
+        continue;
+      }
+
+      // Reconstruct key: <model>@<kv_rank_hex>@<chunk_hash_hex>[@<cache_salt>]
+      // Remove "0x" prefix from kv_rank field (parts[1])
+      std::string kv_rank = parts[1];
+      if (kv_rank.size() >= 2 && kv_rank.substr(0, 2) == "0x") {
+        kv_rank = kv_rank.substr(2);
+      }
+
+      std::string recovered;
+      recovered += parts[0];
       recovered += '@';
-      recovered += parts[i];
-    }
+      recovered += kv_rank;
+      recovered += '@';
+      recovered += parts[2];
+      for (size_t i = 3; i < parts.size(); ++i) {
+        recovered += '@';
+        recovered += parts[i];
+      }
 
-    // Replace '-SEP-' with '/' to recover original model_name with slashes
-    size_t spos = 0;
-    while ((spos = recovered.find("-SEP-", spos)) != std::string::npos) {
-      recovered.replace(spos, 5, "/");
-      spos += 1;
-    }
+      // Replace '-SEP-' with '/' to recover original model_name with slashes
+      size_t spos = 0;
+      while ((spos = recovered.find("-SEP-", spos)) != std::string::npos) {
+        recovered.replace(spos, 5, "/");
+        spos += 1;
+      }
 
-    local_set.insert(std::move(recovered));
+      local_set.insert(std::move(recovered));
+    }
   }
 }
 

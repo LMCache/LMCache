@@ -887,6 +887,71 @@ class TestHf3fsNativeConnector:
         assert bytes(buf) == data
         new_client.close()
 
+    def test_key_buffer_scan_multipath_no_missing(self):
+        """Regression: scan_and_build_buffer_ must scan every base_path even
+        when there are more base_paths than worker threads.
+
+        Seed one distinct `.data` file per key into each of 5 base_paths, then
+        build a fresh client (2 workers < 5 paths) and require every seeded
+        key to be discovered by the constructor scan.
+        """
+        # First Party
+        from lmcache.lmcache_hf3fs import LMCacheHf3fsClient
+
+        def _seed_file(directory: Path, key: ObjectKey) -> None:
+            """Write a key's .data file directly, matching the C++
+            connector's key_to_filename() encoding (no hash-based placement)."""
+            safe_model = key.model_name.replace("/", "-SEP-")
+            fname = (
+                f"{safe_model}@{key.kv_rank:#010x}@{key.object_group_id:x}"
+                f"@{key.chunk_hash.hex()}.data"
+            )
+            (directory / fname).write_bytes(b"\x00")
+
+        mp = Path(_HF3FS_MOUNT_POINT)
+        n_paths = 5
+        num_workers = 2  # deliberately less than n_paths to force slice scan
+        paths = [mp / f"test_scan_{uuid.uuid4().hex[:8]}_{i}" for i in range(n_paths)]
+        for p in paths:
+            p.mkdir(parents=True, exist_ok=True)
+        base_paths = ",".join(str(p) for p in paths)
+
+        # Put two distinct keys in every directory so a skipped path would
+        # deterministically leave a seeded key undiscovered.
+        keys: list[str] = []
+        idx = 0
+        for i, p in enumerate(paths):
+            for _ in range(2):
+                key = create_object_key(1000 + idx)
+                _seed_file(p, key)
+                keys.append(_object_key_to_string(key))
+                idx += 1
+        assert len(keys) == 2 * n_paths
+        for p in paths:
+            assert any(p.iterdir()), f"seed left {p} empty"
+
+        scanner = LMCacheHf3fsClient(
+            mount_point=str(mp),
+            base_paths=base_paths,
+            num_workers=num_workers,
+            ior_entries=128,
+            io_depth=0,
+            numa_id=-1,
+            iov_size=209715200,
+            time_out=200,
+            enable_key_buffer=True,
+        )
+        try:
+            scanner.submit_batch_exists(keys)
+            completions = _wait_for_completions(scanner)
+            assert all(completions[0][3]), (
+                "some preloaded keys were not discovered -> a base_path was skipped"
+            )
+        finally:
+            scanner.close()
+            for p in paths:
+                shutil.rmtree(p, ignore_errors=True)
+
 
 @requires_hf3fs_cluster
 class TestHf3fsL2AdapterIntegration:

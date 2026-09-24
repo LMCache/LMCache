@@ -175,7 +175,7 @@ class Hf3fsConnector : public ConnectorBase<WorkerHf3fsConn> {
   const bool buffer_enabled_;
 
   void scan_and_build_buffer_();
-  void buffer_scan_worker_(const std::string& base_path,
+  void buffer_scan_worker_(const std::vector<std::string>& base_paths,
                            std::unordered_set<std::string>& local_set);
   void buffer_add_(const std::string& key);
   void buffer_remove_(const std::string& key);
