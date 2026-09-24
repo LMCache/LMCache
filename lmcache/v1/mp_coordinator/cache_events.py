@@ -244,9 +244,9 @@ class KafkaCacheEventSink(CacheEventSink):
 #: ``CacheEventsRequest.batches`` as ``POST /events`` would carry it.
 EVENTS_TRACE_BATCH = "events.batch"
 #: ``Record.qualname`` of a lifecycle mark in an ``events``-level trace.
-#: ``args`` carries ``phase`` (:class:`TraceLifecyclePhase`) and, at start,
-#: the emitter's identity: ``instance_id``, ``incarnation``, ``ip``,
-#: ``http_port``, ``mq_port``.
+#: ``args`` carries ``phase`` (:class:`TraceLifecyclePhase`) and
+#: ``instance_id``; at start also the rest of the emitter's identity:
+#: ``incarnation``, ``ip``, ``http_port``, ``mq_port``.
 EVENTS_TRACE_LIFECYCLE = "events.lifecycle"
 
 
@@ -278,6 +278,7 @@ class TraceCacheEventSink(CacheEventSink):
 
     def __init__(self, recorder: EventsTraceRecorder) -> None:
         self._recorder = recorder
+        self._instance_id = ""
 
     def record_lifecycle(
         self,
@@ -290,6 +291,10 @@ class TraceCacheEventSink(CacheEventSink):
     ) -> None:
         """Write one :data:`EVENTS_TRACE_LIFECYCLE` record.
 
+        Every mark names the emitter, so a file's marks stay attributable
+        once its records are merged with other servers'. The ``STOP`` mark
+        takes the id from the ``START`` mark written before it.
+
         Args:
             phase: Which mark this is.
             instance_id: The emitter's id (``START`` only).
@@ -300,10 +305,14 @@ class TraceCacheEventSink(CacheEventSink):
             mq_port: The emitter's message-queue port, ``0`` when P2P is
                 off (``START`` only).
         """
-        args: dict[str, object] = {"phase": phase.value}
+        if phase is TraceLifecyclePhase.START:
+            self._instance_id = instance_id
+        args: dict[str, object] = {
+            "phase": phase.value,
+            "instance_id": self._instance_id,
+        }
         if phase is TraceLifecyclePhase.START:
             args.update(
-                instance_id=instance_id,
                 incarnation=incarnation,
                 ip=ip,
                 http_port=http_port,
