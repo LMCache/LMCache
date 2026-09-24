@@ -40,8 +40,7 @@ from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups,
     _classify_cb_read_groups,
 )
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
-from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 
 logger = init_logger(__name__)
 
@@ -424,7 +423,7 @@ class LookupMixin:
         )
         return leading, retained
 
-    @request_handler(RequestType.CB_UNIFIED_LOOKUP, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def cb_unified_lookup(
         self, key: IPCCacheServerKey, tp_size: int
     ) -> CBUnifiedLookupResult | None:

@@ -55,9 +55,7 @@ from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
 )
-from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
-)
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
@@ -161,10 +159,10 @@ def make_adapter() -> MockL2Adapter:
     return MockL2Adapter(config)
 
 
-def make_descriptor(index: int) -> AdapterDescriptor:
-    """Create an AdapterDescriptor for testing."""
+def make_descriptor(index: int) -> L2AdapterDescriptor:
+    """Create an L2AdapterDescriptor for testing."""
     config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
-    return AdapterDescriptor(index=index, config=config)
+    return L2AdapterDescriptor(index=index, config=config)
 
 
 def store_keys_in_l2(

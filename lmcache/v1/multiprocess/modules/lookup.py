@@ -23,8 +23,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
-from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -148,7 +147,7 @@ class LookupModule:
     # Handlers
     # -----------------------------------------------------------------
 
-    @request_handler(RequestType.LOOKUP, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def lookup(
         self,
         key: IPCCacheServerKey,
@@ -324,7 +323,7 @@ class LookupModule:
             )
         )
 
-    @request_handler(RequestType.QUERY_PREFETCH_LOOKUP_HITS, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def query_prefetch_lookup_hits(
         self,
         request_id: str,
@@ -352,7 +351,7 @@ class LookupModule:
         # Result is already in chunk-level units (l1_hit_chunks + l2_hit_chunks).
         return self._ctx.storage_manager.query_prefetch_lookup_hits(job.handle)
 
-    @request_handler(RequestType.QUERY_PREFETCH_STATUS, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def query_prefetch_status(
         self,
         request_id: str,
@@ -441,7 +440,7 @@ class LookupModule:
 
         return found_count
 
-    @request_handler(RequestType.WAIT_PREFETCH_STATUS, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def wait_prefetch_status(
         self,
         request_id: str,
@@ -475,7 +474,7 @@ class LookupModule:
             return None
         return self.query_prefetch_status(request_id)
 
-    @request_handler(RequestType.FREE_LOOKUP_LOCKS, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def free_lookup_locks(
         self,
         key: IPCCacheServerKey,
@@ -525,7 +524,7 @@ class LookupModule:
             obj_keys, read_locks=key.require_num_kv_readers()
         )
 
-    @request_handler(RequestType.END_SESSION, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def end_session(self, request_id: str) -> None:
         """Remove the session for a finished request.
 
