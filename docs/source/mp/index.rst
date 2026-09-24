@@ -498,10 +498,15 @@ and ``tracing/`` (OTel spans built from START/END event pairs).
 
 **OTel providers** are set up via ``otel_init.py`` before subscribers
 are constructed, so module-level ``get_meter()`` / ``get_tracer()``
-calls bind to the real provider. Metrics are exported both to an
-in-process Prometheus ``/metrics`` endpoint (``--prometheus-port``,
-default 9090) and, when ``--otlp-endpoint`` is set, pushed to an OTel
-collector.
+calls bind to the real provider. Metrics have one of two mutually
+exclusive export paths, selected at startup by ``--otlp-endpoint``:
+when it is unset (pull mode) metrics are served from an in-process
+Prometheus ``/metrics`` endpoint (``--prometheus-port``, default 9090;
+under ``lmcache server`` the endpoint is served on ``--http-port``
+instead and ``--prometheus-port`` is ignored); when it is set (push
+mode) metrics are pushed to that OTel collector and no ``/metrics``
+endpoint is served. See :ref:`mp-obs-metrics-endpoint` for the full
+table of entrypoints and where ``/metrics`` lives for each.
 
 How to Extend
 -------------
