@@ -33,7 +33,7 @@ def _copy_rows(bitmaps: list[Bitmap]) -> list[Bitmap]:
         New bitmaps with the same sizes and bits, sharing no storage with
         the inputs.
     """
-    return [Bitmap(bitmap.size()) | bitmap for bitmap in bitmaps]
+    return [bitmap.copy() for bitmap in bitmaps]
 
 
 @dataclass(frozen=True)

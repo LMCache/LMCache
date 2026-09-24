@@ -521,6 +521,11 @@ class PrefetchTaskSpec:
         """Number of keys in every key group (the request's chunk count)."""
         return len(self.key_groups[0].keys)
 
+    @property
+    def group_layout_descs(self) -> dict[int, MemoryLayoutDesc]:
+        """Map each object group id to its memory layout."""
+        return {row.object_group_id: row.layout_desc for row in self.key_groups}
+
 
 @dataclass(frozen=True)
 class PrefetchHandle:
