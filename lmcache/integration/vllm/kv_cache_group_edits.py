@@ -51,6 +51,9 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector.kv_format.contiguity import (
+    attempt_permute_to_contiguous_view,
+)
 from lmcache.v1.gpu_connector.kv_format.types import KV_LAYOUT_NAMES
 from lmcache.v1.gpu_connector.utils import LayoutHints
 
@@ -413,9 +416,8 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
             # backend's physical layout (get_kv_cache_stride_order), so it need
             # not be contiguous. Pages only tile by byte range in memory order:
             # re-view dims outermost-first by stride (a no-op if contiguous).
-            order = sorted(range(kv_cache.ndim), key=kv_cache.stride, reverse=True)
-            ordered = kv_cache.permute(*order)
-            if not ordered.is_contiguous():
+            ordered = attempt_permute_to_contiguous_view(kv_cache)
+            if not isinstance(ordered, torch.Tensor) or not ordered.is_contiguous():
                 raise ValueError(
                     "kernel-paged attention KV tensor must be contiguous in "
                     "memory order to re-view as logical pages (shape "
