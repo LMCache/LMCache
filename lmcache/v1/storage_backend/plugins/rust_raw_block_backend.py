@@ -411,10 +411,25 @@ class RustRawBlockBackend(StoragePluginInterface):
         transfer_spec: Any = None,  # noqa: ARG002
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> list[Future] | None:
+        """Schedule writes unless the native io_uring worker has failed.
+
+        Args:
+            keys: Cache keys corresponding to ``objs``.
+            objs: Memory objects retained until their writes finish.
+            transfer_spec: Unused transfer metadata.
+            on_complete_callback: Callback for each successfully stored key.
+
+        Returns:
+            Scheduled futures, or None when no writes are needed.
+
+        Raises:
+            RuntimeError: If no event loop exists or the worker has failed.
+        """
         del transfer_spec
         loop = self.loop
         if loop is None:
             raise RuntimeError("RustRawBlockBackend requires an asyncio event loop")
+        self._core.raise_if_failed()
 
         pending: list[tuple[CacheEngineKey, RawBlockKeySpec, MemoryObj]] = []
         for key, obj in zip(keys, objs, strict=False):

@@ -686,6 +686,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         Raises:
             ValueError: If either list is empty or the lengths differ.
+            RuntimeError: If the adapter is closed or its io_uring worker failed.
         """
         if not keys or not objects:
             raise ValueError("keys and objects must be non-empty")
@@ -728,6 +729,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         Raises:
             ValueError: If ``keys`` is empty.
+            RuntimeError: If the adapter is closed or its io_uring worker failed.
         """
         if not keys:
             raise ValueError("keys must be non-empty")
@@ -770,6 +772,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         Raises:
             ValueError: If either list is empty or the lengths differ.
+            RuntimeError: If the adapter is closed or its io_uring worker failed.
         """
         if not keys or not objects:
             raise ValueError("keys and objects must be non-empty")
@@ -963,6 +966,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
     def _raise_if_closed_locked(self) -> None:
         if self._closed:
             raise RuntimeError("RawBlockL2Adapter is closed")
+        self._core.raise_if_failed()
 
     def _get_next_task_id_locked(self) -> L2TaskId:
         task_id = self._next_task_id
