@@ -32,6 +32,51 @@ from lmcache.v1.distributed.serde.base import Deserializer, SerdeProcessor, Seri
 from lmcache.v1.distributed.serde.factory import register_serde_factory
 from lmcache.v1.memory_management import MemoryObj
 
+
+def _group_range(
+    memory_obj: MemoryObj, index: int
+) -> tuple[int, int, torch.dtype, torch.Size]:
+    """Byte span, dtype, and shape of one group."""
+    shapes = memory_obj.get_shapes()
+    dtypes = memory_obj.get_dtypes()
+    begin = 0
+    for shape, dtype in zip(shapes[:index], dtypes[:index], strict=True):
+        begin += shape.numel() * dtype.itemsize
+    shape = shapes[index]
+    dtype = dtypes[index]
+    return begin, begin + shape.numel() * dtype.itemsize, dtype, shape
+
+
+def _read_group(memory_obj: MemoryObj, index: int) -> torch.Tensor:
+    """Read one group. Copy bytes when the offset cannot be viewed in place."""
+    begin, end, dtype, shape = _group_range(memory_obj, index)
+    if begin % dtype.itemsize == 0:
+        group = memory_obj.get_tensor(index)
+        if group is None:
+            raise ValueError(
+                "TurboQuant serde requires every logical group to have a tensor"
+            )
+        return group
+    return memory_obj.raw_data[begin:end].clone().view(dtype).view(shape)
+
+
+def _kv_groups(memory_obj: MemoryObj) -> list[torch.Tensor]:
+    """Groups in metadata order. A single tensor stays on ``.tensor``."""
+    get_shapes = getattr(memory_obj, "get_shapes", None)
+    shapes: list[torch.Size] | None = None
+    if callable(get_shapes):
+        try:
+            shapes = list(get_shapes())
+        except (AssertionError, NotImplementedError):
+            shapes = None
+    if shapes is None or len(shapes) <= 1:
+        tensor = memory_obj.tensor
+        if tensor is None:
+            raise ValueError("TurboQuant serde requires src and dst to have tensors")
+        return [tensor]
+    return [_read_group(memory_obj, index) for index in range(len(shapes))]
+
+
 TQ_PRESETS: dict[str, dict[str, object]] = {
     "turboquant_k8v4": {
         "key_quant_bits": 8,
@@ -548,11 +593,40 @@ class TurboQuantSerializer(Serializer):
             RuntimeError: If CUDA is unavailable or no CUDA device has enough
                 memory for TurboQuant staging.
         """
-        src_tensor = src.tensor
+        del key
         dst_tensor = dst.tensor
-        if src_tensor is None or dst_tensor is None:
+        if dst_tensor is None:
             raise ValueError("TurboQuant serde requires src and dst to have tensors")
+        groups = _kv_groups(src)
+        if len(groups) == 1:
+            return self._serialize_tensor(groups[0], dst_tensor)
 
+        if dst_tensor.dtype != torch.uint8:
+            raise ValueError(
+                "TurboQuant serialized destination must be torch.uint8, "
+                f"got {dst_tensor.dtype}"
+            )
+        sizes = [
+            _serialized_nbytes_for_shape(group.shape, group.dtype, self._cfg)
+            for group in groups
+        ]
+        n_bytes = sum(sizes)
+        if dst_tensor.numel() < n_bytes:
+            raise ValueError(
+                f"Destination buffer too small: got {dst_tensor.numel()} bytes, "
+                f"need {n_bytes}"
+            )
+        offset = 0
+        flat = dst_tensor.flatten()
+        for group, size in zip(groups, sizes, strict=True):
+            self._serialize_tensor(group, flat[offset : offset + size])
+            offset += size
+        return n_bytes
+
+    def _serialize_tensor(
+        self, src_tensor: torch.Tensor, dst_tensor: torch.Tensor
+    ) -> int:
+        """Compress one ``[2, L, T, hidden_dim]`` tensor into ``dst_tensor``."""
         n_bytes = _serialized_nbytes_for_shape(
             src_tensor.shape, src_tensor.dtype, self._cfg
         )
@@ -695,11 +769,51 @@ class TurboQuantDeserializer(Deserializer):
             RuntimeError: If CUDA is unavailable or no CUDA device has enough
                 memory for TurboQuant staging.
         """
+        del key
         src_tensor = src.tensor
-        dst_tensor = dst.tensor
-        if src_tensor is None or dst_tensor is None:
+        if src_tensor is None:
             raise ValueError("TurboQuant serde requires src and dst to have tensors")
+        groups = _kv_groups(dst)
+        if len(groups) == 1:
+            self._deserialize_tensor(src_tensor, groups[0])
+            return
 
+        if src_tensor.dtype != torch.uint8:
+            raise ValueError(
+                "TurboQuant serialized source must be torch.uint8, "
+                f"got {src_tensor.dtype}"
+            )
+        sizes = [
+            _serialized_nbytes_for_shape(group.shape, group.dtype, self._cfg)
+            for group in groups
+        ]
+        n_bytes = sum(sizes)
+        if src_tensor.numel() < n_bytes:
+            raise ValueError(
+                f"Source buffer too small: got {src_tensor.numel()} bytes, "
+                f"need {n_bytes}"
+            )
+        offset = 0
+        flat = src_tensor.flatten()
+        for index, (group, size) in enumerate(zip(groups, sizes, strict=True)):
+            self._deserialize_tensor(flat[offset : offset + size], group)
+            self._store_group(dst, index, group)
+            offset += size
+
+    def _store_group(
+        self, memory_obj: MemoryObj, index: int, values: torch.Tensor
+    ) -> None:
+        """Write a group that was restored into a copy back to the allocation."""
+        begin, end, dtype, _shape = _group_range(memory_obj, index)
+        if begin % dtype.itemsize == 0:
+            return
+        as_bytes = values.contiguous().view(torch.uint8).reshape(-1)
+        memory_obj.raw_data[begin:end].copy_(as_bytes)
+
+    def _deserialize_tensor(
+        self, src_tensor: torch.Tensor, dst_tensor: torch.Tensor
+    ) -> None:
+        """Restore one ``[2, L, T, hidden_dim]`` tensor from packed bytes."""
         n_bytes = _serialized_nbytes_for_shape(
             dst_tensor.shape, dst_tensor.dtype, self._cfg
         )

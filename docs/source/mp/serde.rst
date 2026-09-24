@@ -72,12 +72,30 @@ serde factory.
        ``max_workers`` (thread pool size, default 1)
 
 
+FP8 and separate object groups
+------------------------------
+
+``fp8`` quantizes every logical group from ``MemoryObj.get_tensor`` and
+concatenates those bytes in metadata order. Layouts produced by
+``--separate-object-groups`` therefore round-trip through L2: each group
+keeps its own shape and dtype. A single-group layout keeps the same byte
+order as before. The stored size is one byte per element, summed across
+groups.
+
+TurboQuant compresses each group separately. Every group must still
+have shape ``[2, num_layers, num_tokens, hidden_dim]``. The compressed
+bytes are concatenated in metadata order, so
+``--separate-object-groups`` round-trips when each group has that shape.
+
+
 TurboQuant serde
 ----------------
 
 TurboQuant serde can be enabled by setting ``"type": "turboquant"`` in the
 adapter serde config. If ``preset`` is omitted, TurboQuant serde defaults to
-``turboquant_k8v4``.
+``turboquant_k8v4``. Each group must be shaped
+``[2, num_layers, num_tokens, hidden_dim]``. Several groups are compressed
+one by one and stored in that order.
 
 .. code-block:: bash
 
