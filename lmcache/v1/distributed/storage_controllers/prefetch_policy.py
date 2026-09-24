@@ -13,9 +13,7 @@ from abc import ABC, abstractmethod
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
-)
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 
 
 class PrefetchPolicy(ABC):
@@ -32,7 +30,7 @@ class PrefetchPolicy(ABC):
         self,
         keys: list[ObjectKey],
         lookup_results: dict[int, Bitmap],
-        adapters: list[AdapterDescriptor],
+        adapters: list[L2AdapterDescriptor],
     ) -> dict[int, Bitmap]:
         """
         Decide which adapter loads which keys.
@@ -136,7 +134,7 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
         self,
         keys: list[ObjectKey],
         lookup_results: dict[int, Bitmap],
-        adapters: list[AdapterDescriptor],
+        adapters: list[L2AdapterDescriptor],
     ) -> dict[int, Bitmap]:
         """
         Assign each key to the first adapter (by index) that has it.

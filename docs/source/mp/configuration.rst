@@ -59,6 +59,9 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - Argument
      - Default
      - Description
+   * - ``--transport``
+     - ``zmq``
+     - Request transport exposed by the server. Choices: ``zmq`` or ``grpc``.
    * - ``--instance-id``
      - *(unset, default UUID v4)*
      - Stable identity of this MP server. Used as the coordinator
@@ -69,13 +72,18 @@ Source: ``lmcache/v1/multiprocess/config.py``
        minted at startup.
    * - ``--host``
      - ``localhost``
-     - Host address to bind the ZMQ server.
+     - Host address to bind the selected request server.
    * - ``--port``
      - ``5555``
-     - Port to bind the ZMQ server.
+     - Port to bind the selected request server.
    * - ``--chunk-size``
      - ``256``
      - Chunk size for KV cache operations (in tokens).
+   * - ``--null-block-id``
+     - ``0``
+     - Engine block ID that denotes absent KV data. Keep the default for
+       vLLM-compatible layouts. Engines where block ``0`` is valid, such as
+       ATOM native PAGE/STATE transfer, can use ``-1``.
    * - ``--max-workers``
      - ``1``
      - Base number of worker threads. Sets the default for both the GPU
@@ -89,6 +97,9 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--max-cpu-workers``
      - (inherits ``--max-workers``)
      - Worker threads for the normal CPU pool (LOOKUP, etc.).
+   * - ``--grpc-server-workers``
+     - ``32``
+     - gRPC request-dispatch threads. Used only with ``--transport grpc``.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.
@@ -141,6 +152,12 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Space-separated list of Python module names that scripts posted
        to the HTTP ``/run_script`` endpoint are allowed to import.
        Example: ``--script-allowed-imports numpy pandas``.
+   * - ``--run-script-api-enabled``
+     - ``false``
+     - Enable the ``POST /run_script`` HTTP endpoint, which executes
+       caller-supplied Python in-process. The restricted builtins are
+       **not** a security boundary — treat this as full remote code
+       execution and only enable it on a trusted network.
    * - ``--shm-name``
      - ``""``
      - SHM segment name for non-GPU KV transfer (only used when the
@@ -236,8 +253,10 @@ The HTTP frontend is included when running ``lmcache server``.
      - Default
      - Description
    * - ``--http-host``
-     - ``0.0.0.0``
-     - Host to bind the HTTP (FastAPI/uvicorn) server.
+     - ``127.0.0.1``
+     - Host to bind the HTTP (FastAPI/uvicorn) server. The admin API has
+       no authentication; only bind a non-loopback address on a trusted
+       network.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
@@ -454,7 +473,10 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-policy``
      - *required*
      - Eviction policy.
-       Choices: ``LRU``, ``IsolatedLRU``, ``noop``.
+       Choices: ``LRU``, ``ARC``, ``IsolatedLRU``, ``noop``.
+       ``ARC`` adaptively balances recently created keys and frequently
+       accessed keys. It keeps key-only ghost history for completed policy
+       evictions; no KV data is retained in the ghost lists.
        Use ``noop`` for buffer-only mode where L1 acts as a pure
        write buffer (data is deleted from L1 after L2 store).
        ``IsolatedLRU`` maintains one LRU list per ``cache_salt``
@@ -588,10 +610,11 @@ logging, tracing).
        setting.
    * - ``--trace-level``
      - *(none)*
-     - Enable trace recording at the given level. Currently only
-       ``storage`` is supported (records ``StorageManager`` public-API
-       calls for offline replay via ``lmcache trace``). See
-       :doc:`tracing_and_debugging`.
+     - Enable trace recording at the given level. ``storage`` records
+       ``StorageManager`` public-API calls for offline replay via
+       ``lmcache trace``. ``events`` records the cache-event stream this
+       server emits for the MP coordinator, with or without one
+       configured. See :doc:`tracing_and_debugging`.
    * - ``--trace-output``
      - *(none)*
      - Path to write the trace file. If omitted while ``--trace-level``
@@ -610,9 +633,10 @@ vLLM Client Configuration
 --------------------------
 
 On the vLLM side, specify the LMCache server host and port via the
-``kv_connector_extra_config`` parameter. The ``tcp://`` transport prefix
-on ``lmcache.mp.host`` is optional -- a bare host is accepted and
-normalized to ``tcp://`` by the connector:
+``kv_connector_extra_config`` parameter. The URL scheme selects the request
+transport: use ``tcp://`` for ZMQ or ``grpc://`` for gRPC, matching the
+server's ``--transport`` setting. A bare host is accepted and normalized to
+``tcp://`` for backward compatibility:
 
 .. code-block:: bash
 
@@ -729,8 +753,8 @@ All connector-level options are passed through
        locally-assigned server.
    * - ``lmcache.mp.host``
      - ``tcp://localhost``
-     - Single-server deployment: host of the LMCache MP server. A ZMQ
-       transport prefix (e.g. ``tcp://``) is optional -- a bare
+     - Single-server deployment: request transport and host of the LMCache MP
+       server. Use ``tcp://`` for ZMQ or ``grpc://`` for gRPC. A bare
        ``localhost`` / ``127.0.0.1`` is normalized to ``tcp://`` by the
        connector. Ignored when ``lmcache.mp.server_urls`` is set.
    * - ``lmcache.mp.port``
@@ -761,6 +785,31 @@ All connector-level options are passed through
        allowing L2-to-L1 KV staging to overlap with scheduler queue wait.
        Resumable requests are skipped because their token IDs may be incomplete
        at enqueue time.
+   * - ``lmcache.mp.autostart``
+     - ``false``
+     - Whether vLLM worker 0 should start a local ``lmcache server`` process
+       before workers connect to it. Other local workers wait for the server to
+       become reachable. Only ``localhost`` and ``127.0.0.1`` are supported.
+       IPv6 endpoints, including ``::1``, raise ``ValueError`` before startup
+       because the MP ZMQ transport does not enable IPv6 sockets.
+       Auto-start supports exactly one server endpoint; configuring
+       multiple ``lmcache.mp.server_urls`` raises ``ValueError`` during
+       connector initialization.
+   * - ``lmcache.mp.autostart.wait_timeout``
+     - ``90.0``
+     - Timeout (seconds) to wait for the auto-started server to respond to
+       ZMQ ``PING`` requests. Must be positive and finite.
+   * - ``lmcache.mp.autostart.server_args``
+     - ``""``
+     - Extra command-line arguments passed to the auto-started MP HTTP server
+       process. Required server settings such as ``--l1-size-gb`` and
+       ``--eviction-policy`` must be supplied here. For example, pass
+       ``--l1-size-gb 20 --eviction-policy LRU``. Endpoint flags such as
+       ``--host``, ``--port``, and ``--http-host`` are rejected because the
+       auto-started ZMQ and HTTP listeners are bound to the local connector
+       endpoint. If multiple auto-started MP servers run on the same host, pass
+       distinct ``--http-port`` values here to avoid HTTP frontend port
+       conflicts.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
@@ -828,6 +877,50 @@ All connector-level options are passed through
    * - ``lmcache.mp.lazy_offload_select_count``
      - ``10``
      - ``FIFO`` only: maximum finished requests emitted by one drain.
+
+To let vLLM worker 0 start a local MP server automatically:
+
+.. code-block:: bash
+
+    vllm serve Qwen/Qwen3-14B \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.autostart": true, "lmcache.mp.autostart.server_args": "--l1-size-gb 20 --eviction-policy LRU"}}'
+
+Auto-start is a convenience for single-node, single-server deployments. The MP
+server is a child of vLLM worker 0, not an independently managed service.
+
+.. note::
+
+   LMCache's adapter shutdown does not explicitly terminate this child, but
+   vLLM's process-tree cleanup may terminate it. Its lifetime depends on the
+   vLLM version and exit path; neither survival nor automatic cleanup is
+   guaranteed. Stop any remaining auto-started server when it is no longer
+   needed.
+
+For servers that must survive vLLM restarts or be shared across vLLM instances,
+and for multi-node TP/PP deployments, start and manage the server separately.
+For example, run the server in a separate terminal or service manager and leave
+auto-start disabled in vLLM:
+
+.. code-block:: bash
+
+    # Terminal 1: independently managed MP server
+    lmcache server --host 127.0.0.1 --port 5555 \
+        --http-host 127.0.0.1 --l1-size-gb 20 --eviction-policy LRU
+
+    # Terminal 2: connect-only vLLM instance
+    vllm serve Qwen/Qwen3-14B \
+        --kv-transfer-config '{
+            "kv_connector": "LMCacheMPConnector",
+            "kv_connector_module_path":
+                "lmcache.integration.vllm.lmcache_mp_connector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "lmcache.mp.host": "127.0.0.1",
+                "lmcache.mp.port": 5555,
+                "lmcache.mp.autostart": false
+            }
+        }'
 
 Environment Variables
 ---------------------

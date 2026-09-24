@@ -102,7 +102,7 @@ class RedisConnectorAdapter(ConnectorAdapter):
             ) or extra_config.get("redis_url")
             url = cfg_redis_url or remote_url or "redis://localhost:6379"
 
-        logger.info(f"Creating Redis connector for URL: {url}")
+        logger.info("Creating Redis connector for URL: %s", url)
         return RedisConnector(
             url=url,
             loop=context.loop,
@@ -120,7 +120,7 @@ class RedisSentinelConnectorAdapter(ConnectorAdapter):
         # Local
         from .redis_connector import RedisSentinelConnector
 
-        logger.info(f"Creating Redis Sentinel connector for URL: {context.url}")
+        logger.info("Creating Redis Sentinel connector for URL: %s", context.url)
         url = context.url[len(self.schema) :]
 
         # Parse username and password
@@ -165,7 +165,7 @@ class RedisClusterConnectorAdapter(ConnectorAdapter):
         # Local
         from .redis_connector import RedisClusterConnector
 
-        logger.info(f"Creating Redis Cluster connector for URL: {context.url}")
+        logger.info("Creating Redis Cluster connector for URL: %s", context.url)
         url = context.url[len(self.schema) :]
 
         # Parse username and password

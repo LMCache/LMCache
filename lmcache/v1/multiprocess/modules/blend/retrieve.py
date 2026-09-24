@@ -42,8 +42,7 @@ from lmcache.v1.multiprocess.modules.blend.rope import (
     _CBRopeState,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
-from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
@@ -235,7 +234,10 @@ class RetrieveMixin:
                 engine_kv_format=gpu_context.get_engine_kv_format(group_idx),
                 page_buffer_size=group.shape_desc.nb * group_bs,
                 block_size=group_bs,
-                head_size=rope_state.head_size,
+                head_size=rope_state.head_size_for_group(group.engine_group_idx),
+                # Physical per-block stride; padded pools are wider than bs*hs.
+                block_stride_elems=getattr(group.shape_desc, "block_stride_elems", 0)
+                or 0,
                 slot_mapping_base=0,
                 slot_mapping_capacity=0,
                 is_neox=rope_state.is_neox_style,
@@ -266,7 +268,7 @@ class RetrieveMixin:
                     group,
                     int(buf0.shape[0]),
                     hidden_dim,
-                    rope_state.head_size,
+                    rope_state.head_size_for_group(group.engine_group_idx),
                     group_idx,
                     rot,
                 )
@@ -534,7 +536,6 @@ class RetrieveMixin:
         return len(release_keys)
 
     @request_handler(
-        RequestType.CB_RETRIEVE_PRE_COMPUTED,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )

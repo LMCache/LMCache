@@ -99,6 +99,18 @@ class VLLM_Detector(EngineDetector):
             if first_tensor.dtype == torch.uint8 and int(first_tensor.shape[-1]) == 132:
                 return lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS, kv_caches
             return lmcache_native.EngineKVFormat.NL_X_NB_BS_HS, kv_caches
-        if list_depth == 2 and tensor_ndim == 4 and len(kv_caches[0]) == 2:
-            return lmcache_native.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS, kv_caches
+        if list_depth == 2 and tensor_ndim == 4:
+            layer0_planes = kv_caches[0]
+            single_head = all(int(t.shape[2]) == 1 for t in layer0_planes)
+            widths = {int(t.shape[-1]) for t in layer0_planes}
+            if single_head and (len(layer0_planes) in (1, 3) or len(widths) > 1):
+                return (
+                    lmcache_native.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,
+                    kv_caches,
+                )
+            if len(layer0_planes) == 2:
+                return (
+                    lmcache_native.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS,
+                    kv_caches,
+                )
         return None, kv_caches
