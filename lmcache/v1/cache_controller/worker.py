@@ -636,8 +636,9 @@ class LMCacheWorker:
             await self.register()
 
             logger.info(
-                f"Starting lmcache worker {self.worker_id}"
-                f"for instance {self.lmcache_instance_id}"
+                "Starting lmcache worker %sfor instance %s",
+                self.worker_id,
+                self.lmcache_instance_id,
             )
             await asyncio.gather(
                 self.push(),
@@ -646,8 +647,10 @@ class LMCacheWorker:
             )
         except Exception as e:
             logger.error(
-                f"Instance {self.lmcache_instance_id}, "
-                f"worker {self.worker_id} error: {e}"
+                "Instance %s, worker %s error: %s",
+                self.lmcache_instance_id,
+                self.worker_id,
+                e,
             )
 
     def close(self):

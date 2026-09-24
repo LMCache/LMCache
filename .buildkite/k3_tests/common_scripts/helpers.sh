@@ -45,6 +45,35 @@ pr_base_merge_mode() {
     esac
 }
 
+pr_has_label() {
+    local wanted_label="${1:?label name is required}"
+    [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",${wanted_label},"* ]]
+}
+
+should_skip_k3_pipeline_for_good_first_issue() {
+    local pipeline_name="${1:?pipeline name is required}"
+
+    if [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
+        return 1
+    fi
+
+    if pr_has_label "force-ci"; then
+        echo "--- :label: PR has 'force-ci'; running ${pipeline_name} tests"
+        return 1
+    fi
+
+    if pr_has_label "good first issue"; then
+        echo "--- :label: PR has 'good first issue'; skipping ${pipeline_name} tests"
+        return 0
+    fi
+
+    return 1
+}
+
+should_skip_multiprocess_for_good_first_issue() {
+    should_skip_k3_pipeline_for_good_first_issue "multiprocess"
+}
+
 # Merge the PR base branch into the current checkout for Buildkite PR builds.
 # Buildkite's checkout step may leave the pod on the raw PR head commit rather
 # than a synthetic merge commit, so tests can miss conflicts/regressions that
