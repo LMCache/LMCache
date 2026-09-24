@@ -10,6 +10,7 @@
   <h3 align="center">
     <a href="https://blog.lmcache.ai/">Blog</a> |
     <a href="https://docs.lmcache.ai/">Documentation</a> |
+    <a href="https://docs.lmcache.ai/community/faq.html">FAQ</a> |
     <a href="https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA">Join Slack</a> |
     <a href="https://docs.lmcache.ai/community/meetings.html">Community Meeting</a> |
     <a href="https://github.com/LMCache/LMCache/issues/2923">Roadmap</a>
@@ -98,6 +99,7 @@ For more setup options and examples, see:
 - [CLI Reference](https://docs.lmcache.ai/cli/index.html)
 - [Benchmarking Guide](https://docs.lmcache.ai/getting_started/benchmarking.html)
 - [Production Deployment](https://docs.lmcache.ai/mp/deployment.html)
+- [FAQ](https://docs.lmcache.ai/community/faq.html) (also in [简体中文](https://docs.lmcache.ai/zh_CN/community/faq.html))
 
 ## Contributing
 We welcome and value contributions and collaborations. Join us in improving LMCache. Check out the [Contributing Guide](https://docs.lmcache.ai/developer_guide/contributing.html) or join our [Slack community](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA) to get started.
