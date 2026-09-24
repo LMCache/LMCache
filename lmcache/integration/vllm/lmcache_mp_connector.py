@@ -359,7 +359,8 @@ def validate_mamba_step_alignment(
     the end of each scheduler step, on the last block the step advanced. A step
     advancing more than one block fills the skipped block-table positions with
     the null block (``MambaManager.allocate_new_blocks``); LMCache handles those
-    safely -- ``store`` never commits an all-null-block chunk and ``retrieve``
+    safely -- the request tracker nulls the slot of a relocated speculative
+    block, ``store`` never commits an all-null-block chunk and ``retrieve``
     loads only each object group's sliding-window suffix -- so
     ``max_num_batched_tokens`` may exceed ``2 * block_size`` (with
     ``--separate-object-groups``). Only the lower bound remains: a step must
@@ -533,6 +534,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       enters vLLM's waiting queue. Disabled by default.
     """
 
+    # Tail block slots vLLM may relocate for one request; 0 means vLLM only
+    # appends. The scheduler role sets it from the vLLM config.
+    _mamba_relocation_window: int = 0
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -564,6 +569,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         group_tokens_per_block = get_group_tokens_per_block(
             vllm_config, kv_cache_config
         )
+        mamba_cache_mode = getattr(vllm_config.cache_config, "mamba_cache_mode", "none")
+        self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
         scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
         )
@@ -698,6 +705,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
             self._kv_cache_events: LMCacheMPKVEvents | None = None
+
+            # Align-mode Mamba keeps one speculative block per draft token at
+            # the tail of a request's block list.
+            spec_config = getattr(vllm_config, "speculative_config", None)
+            self._mamba_relocation_window = (
+                spec_config.num_speculative_tokens or 0
+                if mamba_cache_mode == "align" and spec_config is not None
+                else 0
+            )
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
@@ -1214,6 +1230,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
+            reserve_last_token=self._reserve_last_token_for_lookup,
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -1278,6 +1295,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
+            reserve_last_token=self._reserve_last_token_for_lookup,
         )
 
     def update_state_after_alloc(
@@ -1316,7 +1334,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             existing = existing_counts.get(engine_group_idx, 0)
             new_block_ids.append(list(group_blocks[existing:]))
         if any(new_block_ids):
-            tracker.append_block_ids(tuple(new_block_ids))
+            tracker.append_block_ids(
+                tuple(new_block_ids), self._mamba_relocation_window
+            )
 
         # Update the state of the tracker
         if tracker.state == LMCacheMPRequestState.BYPASS_LMCACHE:
@@ -1641,7 +1661,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # Update block ids
             new_block_ids = cached_reqs.new_block_ids[idx] or ()
             if request_id not in cached_reqs.resumed_req_ids:
-                request_tracker.append_block_ids(new_block_ids)
+                request_tracker.append_block_ids(
+                    new_block_ids, self._mamba_relocation_window
+                )
 
             # Use the incremental num_scheduled_tokens to
             # stay consistent with _process_new_requests.

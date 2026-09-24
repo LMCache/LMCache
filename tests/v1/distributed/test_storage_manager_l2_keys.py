@@ -18,13 +18,13 @@ import threading
 
 # First Party
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
-from lmcache.v1.distributed.storage_controllers.store_policy import AdapterDescriptor
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.distributed.storage_manager import StorageManager
 
 
 @dataclass
 class _StubDescriptor:
-    """Replaces ``AdapterDescriptor`` — only ``type_name`` is read."""
+    """Replaces ``L2AdapterDescriptor`` — only ``type_name`` is read."""
 
     type_name: str
 
@@ -42,7 +42,7 @@ def _make_sm(adapters: list[_StubAdapter], names: list[str]) -> StorageManager:
     sm._adapters_lock = threading.Lock()
     sm._l2_adapters = cast("dict[int, L2AdapterInterface]", dict(enumerate(adapters)))
     sm._adapter_descriptors = cast(
-        "dict[int, AdapterDescriptor]",
+        "dict[int, L2AdapterDescriptor]",
         {i: _StubDescriptor(type_name=n) for i, n in enumerate(names)},
     )
     return sm
@@ -99,7 +99,7 @@ class TestL2Adapters:
         # Reconfigure: swap a1 → a2 (and the descriptor with it).
         sm._l2_adapters = cast("dict[int, L2AdapterInterface]", {0: a2})
         sm._adapter_descriptors = cast(
-            "dict[int, AdapterDescriptor]", {0: _StubDescriptor(type_name="fs")}
+            "dict[int, L2AdapterDescriptor]", {0: _StubDescriptor(type_name="fs")}
         )
 
         second = sm.l2_adapters()

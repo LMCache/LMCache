@@ -9,12 +9,15 @@ package ``README.md`` for the fold -> highest-set-bit -> unfold design.
 from lmcache.v1.distributed.bitmap_ops.fold import (
     FULL_ATTENTION_WINDOW,
     fold,
+    fold_grouped,
     fold_unfold,
+    fold_unfold_grouped,
     fold_unfold_ranked,
     highest_set_bit,
     merge_bitmaps,
     select_retained,
     unfold,
+    unfold_grouped,
     unfold_range,
 )
 
@@ -22,10 +25,13 @@ __all__ = [
     "FULL_ATTENTION_WINDOW",
     "highest_set_bit",
     "fold",
+    "fold_grouped",
     "fold_unfold",
+    "fold_unfold_grouped",
     "fold_unfold_ranked",
     "merge_bitmaps",
     "select_retained",
     "unfold",
+    "unfold_grouped",
     "unfold_range",
 ]

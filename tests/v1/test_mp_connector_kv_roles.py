@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (  # noqa: E402
     KVConnectorFactory,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
+    KVConnectorBase_V1,
     KVConnectorRole,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (  # noqa: E402
@@ -358,6 +359,13 @@ def test_multi_connector_child_role_and_completion(
         (None, None),
         ({"request"} if peer_delays_free else None, None),
     ]
+    # MultiConnector polls children through get_transfer_results(), whose base
+    # implementation wraps get_finished(). A bare MagicMock would answer that
+    # call with a mock whose result sets iterate empty, silently dropping the
+    # peer's completions, so route it through the real base implementation.
+    worker_peer.get_transfer_results.side_effect = lambda finished_req_ids: (
+        KVConnectorBase_V1.get_transfer_results(worker_peer, finished_req_ids)
+    )
     peer_factory = MagicMock(side_effect=[scheduler_peer, worker_peer])
 
     def connector_class(config: KVTransferConfig) -> Any:

@@ -20,9 +20,9 @@
 #     to that suite, while shared harness changes under .buildkite/k3_harness/
 #     are classified by the harness file they touch.
 #   - Special-case platform tests are treated as unrelated for the unit
-#     pipeline: tests/v1/platform/{musa,rbln,xpu} do not trigger unit. The xpu
-#     pipeline also treats these platform paths as non-targets while allowing
-#     tests/platform/* to remain relevant.
+#     pipeline: tests/v1/platform/devices/{musa,rbln,xpu} do not trigger unit.
+#     Other platform tests remain relevant after backend implementations moved
+#     under platform/devices/.
 #
 # Opt-out: add a "force-ci" label to the PR on GitHub. Buildkite exposes
 # PR labels via BUILDKITE_PULL_REQUEST_LABELS; if "force-ci" is present
@@ -71,22 +71,25 @@ _path_filter_should_skip_for_pipeline() {
     case "$pipeline_kind" in
         unit)
             case "$changed_file" in
+                tests/v1/platform/devices/musa/*|tests/v1/platform/devices/rbln/*|tests/v1/platform/devices/xpu/*)
+                    return 0
+                    ;;
                 tests/v1/platform/*)
-                    # skip all files under second-level platform dirs
-                    if [[ "$changed_file" == tests/v1/platform/*/* ]]; then
-                        return 0
-                    fi
-                    # direct pytest file under tests/v1/platform/ still counts
                     return 1
+                    ;;
+                lmcache/v1/platform/devices/musa/*|lmcache/v1/platform/devices/rbln/*|lmcache/v1/platform/devices/xpu/*)
+                    return 0
                     ;;
                 lmcache/v1/platform/*)
                     # For CUDA unit, platform implementation changes under
-                    # lmcache/v1/platform/{base,cuda}/ are relevant and should
-                    # trigger the pipeline; keep other nested device directories
-                    # as non-targets.
-                    if [[ "$changed_file" == lmcache/v1/platform/base/* || "$changed_file" == lmcache/v1/platform/cuda/* ]]; then
-                        return 1
-                    fi
+                    # lmcache/v1/platform/{base,devices}/ are relevant and
+                    # should trigger the pipeline; keep explicitly special-cased
+                    # device directories above as non-targets.
+                    case "$changed_file" in
+                        lmcache/v1/platform/base/*|lmcache/v1/platform/devices/*)
+                            return 1
+                            ;;
+                    esac
                     if [[ "$changed_file" == lmcache/v1/platform/*/* ]]; then
                         return 0
                     fi
