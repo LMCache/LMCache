@@ -3436,6 +3436,20 @@ impl RawBlockDevice {
         Ok(())
     }
 
+    /// Close the device after draining accepted I/O, without holding the GIL.
+    ///
+    /// Repeated calls are harmless. This may wait indefinitely if an accepted
+    /// request cannot complete or be cancelled. Raises `OSError` if closing
+    /// the underlying file descriptor fails.
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
+        if !self.closed.load(Ordering::Relaxed) {
+            py.allow_threads(|| self.do_close())?;
+        }
+        Ok(())
+    }
+}
+
+impl RawBlockDevice {
     /// Internal function to perform the cleanup operation.
     ///
     /// Accepted io_uring requests retain their buffers until terminal completion.
@@ -3489,19 +3503,14 @@ impl RawBlockDevice {
         self.closed.store(true, Ordering::Relaxed);
         Ok(())
     }
-
-    fn close(&mut self) -> PyResult<()> {
-        if !self.closed.load(Ordering::Relaxed) {
-            self.do_close()?;
-        }
-        Ok(())
-    }
 }
 
 impl Drop for RawBlockDevice {
     fn drop(&mut self) {
         if !self.closed.load(Ordering::Relaxed) {
-            let _ = self.do_close();
+            Python::with_gil(|py| {
+                let _ = py.allow_threads(|| self.do_close());
+            });
         }
     }
 }

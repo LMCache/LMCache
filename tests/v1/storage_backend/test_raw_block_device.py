@@ -185,6 +185,63 @@ finally:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.skipif(platform.system() != "Linux", reason="io_uring is Linux only")
+@pytest.mark.parametrize("cleanup", ["close", "drop", "exit"])
+@pytest.mark.no_shared_allocator
+def test_raw_block_device_iouring_cleanup_without_wait(
+    tmp_path: Path, cleanup: str
+) -> None:
+    """Clean up outstanding batches on close, deallocation, and interpreter exit."""
+    path = make_raw_block_file(tmp_path)
+    try:
+        device = RawBlockDevice(
+            str(path),
+            writable=True,
+            io_engine="io_uring",
+            use_odirect=False,
+            iouring_queue_depth=2,
+        )
+    except Exception as error:
+        if is_skip_safe_io_error(error):
+            pytest.skip(f"io_uring unavailable: {error}")
+        raise
+    device.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import gc
+import sys
+from lmcache_rust_raw_block_io import RawBlockDevice
+
+device = RawBlockDevice(
+    sys.argv[1], writable=True, io_engine="io_uring", use_odirect=False,
+    iouring_queue_depth=2,
+)
+buffers = [bytearray([index]) * 4096 for index in range(32)]
+device.batched_write(
+    [4096 * index for index in range(len(buffers))], buffers, [4096] * len(buffers)
+)
+del buffers
+if sys.argv[2] == "close":
+    device.close()
+    device.close()
+elif sys.argv[2] == "drop":
+    del device
+    gc.collect()
+""",
+            str(path),
+            cleanup,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.skipif(
     os.getenv("LMCACHE_RUN_ODIRECT_SMOKE") != "1",
     reason="O_DIRECT smoke is opt-in and not part of default PR CI",
