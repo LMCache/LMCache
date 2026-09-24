@@ -80,10 +80,12 @@ class _StorageManagerStub:
         self,
         l1: dict[L1BackendType, int],
         adapters: list[tuple[_FakeDescriptor, _FakeAdapter]],
+        shared_l1: bool = False,
     ) -> None:
         # A real config, so the stub exercises the actual L1 derivation.
         self._l1_config = _config_yielding(l1)
         self._adapters = adapters
+        self.uses_shared_l1 = shared_l1
         self._lifecycle_lock = threading.Lock()
         self._event_bus = _RecordingBus()
 
@@ -105,6 +107,7 @@ class _StorageManagerStub:
 def _capacities(
     l1: dict[L1BackendType, int],
     adapters: list[tuple[_FakeDescriptor, _FakeAdapter]],
+    shared_l1: bool = False,
 ) -> list[ModuleMemoryCapacity]:
     """Run ``StorageManager._build_capacities`` against fakes.
 
@@ -115,7 +118,7 @@ def _capacities(
     Returns:
         The capacities the method assembles.
     """
-    return _StorageManagerStub(l1, adapters)._build_capacities()
+    return _StorageManagerStub(l1, adapters, shared_l1)._build_capacities()
 
 
 def _config_yielding(capacities: dict[L1BackendType, int]) -> L1ManagerConfig:
@@ -260,6 +263,13 @@ class TestStorageManagerCapacities:
         }
         assert all(c.shared is False for c in found)
 
+    def test_reports_shared_devdax_l1(self) -> None:
+        found = _capacities({L1BackendType.DEVDAX: 100 * GIB}, [], shared_l1=True)
+        assert len(found) == 1
+        assert found[0].tier == Tier.L1
+        assert found[0].backend == "devdax"
+        assert found[0].shared is True
+
     def test_reports_each_l2_adapter_with_its_shared_flag(self) -> None:
         found = _capacities(
             {L1BackendType.DRAM: 40 * GIB},
@@ -331,6 +341,7 @@ class TestReportStatusSharesTheSource:
                 return True
 
         manager = L1Manager.__new__(L1Manager)
+        manager._shared_backend = None
         manager._memory_manager = cast("L1ManagerProtocol", _MemoryManager())
         # report_status reads the total precomputed at construction.
         manager._configured_capacity_bytes = sum(

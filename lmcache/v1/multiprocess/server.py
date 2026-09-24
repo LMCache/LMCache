@@ -292,6 +292,31 @@ def _build_modules(
     ]
 
 
+def _validate_shared_l1_runtime_config(
+    mp_config: MPServerConfig,
+    storage_manager_config: StorageManagerConfig,
+) -> None:
+    """Reject transfer paths the minimal shared-L1 M0 does not support.
+
+    Args:
+        mp_config: Configuration for the ZMQ multiprocess server.
+        storage_manager_config: Configuration for the storage manager.
+
+    Raises:
+        ValueError: Shared L1 is combined with a non-``lmcache_driven``
+            transfer mode or with P2P.
+    """
+    shared_config = storage_manager_config.l1_manager_config.shared_l1_config
+    if shared_config is None:
+        return
+    if mp_config.supported_transfer_mode != "lmcache_driven":
+        raise ValueError("shared L1 requires supported_transfer_mode='lmcache_driven'")
+    if mp_config.p2p_config.enabled:
+        raise ValueError("shared L1 cannot be combined with P2P")
+    if mp_config.engine_type != "default" or mp_config.enable:
+        raise ValueError("shared L1 cannot be combined with optional MP modules")
+
+
 def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
@@ -322,6 +347,7 @@ def run_cache_server(
     # Before any event IPC backend is resolved (KV-cache registration), so
     # the setting is observed by every resolver in this process.
     set_isolated_ipc(mp_config.isolated_ipc)
+    _validate_shared_l1_runtime_config(mp_config, storage_manager_config)
 
     # mp_config.instance_id is this server's single source of identity (set via
     # --instance-id, else a random UUID v4). Project it onto the OTel

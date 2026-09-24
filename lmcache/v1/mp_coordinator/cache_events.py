@@ -651,16 +651,16 @@ class CacheEventSubscriber(EventSubscriber):
         event's ``meta`` list (parallel to ``keys``)."""
         keys: list[ObjectKey] = event.metadata["keys"]
         metadata: list[L1ObjectMeta] = event.metadata["meta"]
-        by_backend: dict[L1BackendType, list[CacheEventEntry]] = {}
+        by_backend: dict[tuple[L1BackendType, bool], list[CacheEventEntry]] = {}
         is_store = event_type is CacheEventType.STORE
         for key, meta in zip(keys, metadata, strict=True):
-            by_backend.setdefault(meta.backend, []).append(
+            by_backend.setdefault((meta.backend, meta.shared), []).append(
                 self._store_entry(key, meta.size_bytes)
                 if is_store
                 else CacheEventEntry(key=key.to_encoded_object_key())
             )
-        for backend, entries in by_backend.items():
-            self._record(event_type, Tier.L1, backend.value, entries)
+        for (backend, shared), entries in by_backend.items():
+            self._record(event_type, Tier.L1, backend.value, entries, shared=shared)
 
     def _record_l2_keys(self, event_type: CacheEventType, event: Event) -> None:
         """Record a size-less L2 batch (deletes and accesses)."""

@@ -196,6 +196,45 @@ class GdsL1Config:
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
 
 
+@dataclass(frozen=True)
+class SharedL1Config:
+    """Validated coordinator contract and host-local mapping settings."""
+
+    coordinator_endpoint: str
+    """Base URL of the Memory Coordinator, e.g. ``http://host:9400``."""
+
+    coordinator_token_file: str
+    """Absolute path to the bearer-token file (mounted Secret)."""
+
+    region_id: str
+    """Expected stable identity of the shared physical region."""
+
+    layout_id: str
+    """Expected operator-supplied immutable layout fingerprint."""
+
+    mapping_offset_bytes: int = 0
+    """Host-local byte offset at which the logical shared pool starts."""
+
+    visibility_library_path: str = ""
+    """Absolute path to the platform-qualified visibility ABI library."""
+
+    def __post_init__(self) -> None:
+        if not self.coordinator_endpoint.startswith(("http://", "https://")):
+            raise ValueError("l1-coordinator-endpoint must be an http(s) URL")
+        if not os.path.isabs(self.coordinator_token_file):
+            raise ValueError("l1-coordinator-token-file must be an absolute path")
+        if not self.region_id.strip():
+            raise ValueError("l1-shared-region-id must not be empty")
+        if not self.layout_id.strip():
+            raise ValueError("l1-shared-layout-id must not be empty")
+        if self.mapping_offset_bytes < 0:
+            raise ValueError("l1-shared-mapping-offset-bytes must be non-negative")
+        if not os.path.isabs(self.visibility_library_path):
+            raise ValueError(
+                "l1-shared-visibility-library-path must be an absolute path"
+            )
+
+
 @dataclass
 class L1ManagerConfig:
     """
@@ -208,6 +247,11 @@ class L1ManagerConfig:
     gds_l1_config: "GdsL1Config | None" = None
     """ Optional GDS L1 tier. When set, the GDS slab is the L1 medium
     (mutually exclusive with the pinned-DRAM tier in ``memory_config``). """
+
+    shared_l1_config: "SharedL1Config | None" = None
+    """ Optional coordinator-owned shared Device-DAX path. When set, the
+    Memory Coordinator is the allocation and lifetime authority and the
+    local allocators are not constructed. """
 
     write_ttl_seconds: int = field(default=600)
     """ Time to live for each object's write lock. Default is 600s (10 minutes). """
@@ -333,6 +377,11 @@ def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
     Raises:
         ValueError: If more than one DAX device matches ``l1-devdax-path``.
     """
+    if config.l1_manager_config.shared_l1_config is not None:
+        # Shared L1 owns the complete Device-DAX region. Do not consume a
+        # matching DAX L2 adapter as private-L1 overflow before validation
+        # can reject the unsupported L2 combination.
+        return
     memory_config = config.l1_manager_config.memory_config
     _infer_l1_devdax_overflow_from_dax_adapter(memory_config, config.l2_adapter_config)
 
@@ -360,6 +409,21 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
 
     memory_config = config.l1_manager_config.memory_config
+    shared_config = config.l1_manager_config.shared_l1_config
+    if shared_config is not None:
+        if not memory_config.devdax_path:
+            raise ValueError("shared L1 requires l1-devdax-path")
+        if memory_config.devdax_size_in_bytes:
+            raise ValueError("shared L1 cannot use hybrid DRAM and Device-DAX")
+        if config.l2_adapter_config.adapters:
+            raise ValueError(
+                "the minimal shared-L1 functional path cannot be combined "
+                "with L2 adapters"
+            )
+        if config.eviction_config.eviction_policy != "noop":
+            raise ValueError(
+                "the minimal shared-L1 functional path requires eviction_policy='noop'"
+            )
     if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
         return
 
@@ -463,6 +527,43 @@ def add_storage_manager_args(
             "If a DAX L2 adapter with the same device_path is registered, "
             "that adapter's max_dax_size_gb is used as L1 overflow size."
         ),
+    )
+
+    # Shared Device-DAX L1 (optional, opt-in via --l1-coordinator-endpoint)
+    shared_group = parser.add_argument_group(
+        "Shared Device-DAX L1",
+        'Requires Device-DAX, --no-l1-use-lazy, --shm-name "", '
+        "--eviction-policy noop, no L2 adapters, and TP=1.",
+    )
+    shared_group.add_argument(
+        "--l1-coordinator-endpoint",
+        help="Memory Coordinator HTTP(S) URL; unset keeps private L1.",
+    )
+    shared_group.add_argument(
+        "--l1-coordinator-token-file",
+        default="",
+        help="Absolute bearer-token file path; do not pass the token itself.",
+    )
+    shared_group.add_argument(
+        "--l1-shared-region-id",
+        default="",
+        help="Expected stable identity of the shared physical region.",
+    )
+    shared_group.add_argument(
+        "--l1-shared-layout-id",
+        default="",
+        help="Expected operator-supplied immutable layout fingerprint.",
+    )
+    shared_group.add_argument(
+        "--l1-shared-mapping-offset-bytes",
+        type=int,
+        default=0,
+        help="Host-local byte offset at which the logical shared pool starts.",
+    )
+    shared_group.add_argument(
+        "--l1-shared-visibility-library-path",
+        default="",
+        help="Absolute path to the platform-qualified visibility ABI library.",
     )
 
     # GDS L1 tier (optional, opt-in via --gds-l1-path)
@@ -652,9 +753,21 @@ def parse_args_to_config(
             backend=args.gds_l1_backend,
         )
 
+    shared_l1_config: SharedL1Config | None = None
+    if args.l1_coordinator_endpoint is not None:
+        shared_l1_config = SharedL1Config(
+            coordinator_endpoint=args.l1_coordinator_endpoint,
+            coordinator_token_file=args.l1_coordinator_token_file,
+            region_id=args.l1_shared_region_id,
+            layout_id=args.l1_shared_layout_id,
+            mapping_offset_bytes=args.l1_shared_mapping_offset_bytes,
+            visibility_library_path=args.l1_shared_visibility_library_path,
+        )
+
     l1_manager_config = L1ManagerConfig(
         memory_config=memory_config,
         gds_l1_config=gds_l1_config,
+        shared_l1_config=shared_l1_config,
         write_ttl_seconds=args.l1_write_ttl_seconds,
         read_ttl_seconds=args.l1_read_ttl_seconds,
     )

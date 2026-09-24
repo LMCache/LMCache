@@ -70,9 +70,11 @@ def _entry(hash_byte: int, size_bytes: int = 0) -> CacheEventEntry:
 
 
 def _meta(
-    size_bytes: int = 0, backend: L1BackendType = L1BackendType.DRAM
+    size_bytes: int = 0,
+    backend: L1BackendType = L1BackendType.DRAM,
+    shared: bool = False,
 ) -> L1ObjectMeta:
-    return L1ObjectMeta(size_bytes=size_bytes, backend=backend)
+    return L1ObjectMeta(size_bytes=size_bytes, backend=backend, shared=shared)
 
 
 class _RecordingSink(CacheEventSink):
@@ -501,6 +503,31 @@ def test_l2_shared_flag_rides_the_batch():
     assert [(b.backend, b.shared) for b in batches] == [
         ("fs", True),
         ("fs", False),
+    ]
+
+
+def test_l1_shared_flag_rides_the_batch():
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={
+                "keys": [_key(1), _key(2)],
+                "meta": [
+                    _meta(100, L1BackendType.DEVDAX, shared=True),
+                    _meta(200, L1BackendType.DEVDAX),
+                ],
+            },
+        ),
+    )
+    subscriber.flush()
+    assert [
+        (batch.tier, batch.backend, batch.shared) for batch in sink.published[0]
+    ] == [
+        (Tier.L1, "devdax", True),
+        (Tier.L1, "devdax", False),
     ]
 
 
