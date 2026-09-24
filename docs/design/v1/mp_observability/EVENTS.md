@@ -290,9 +290,11 @@ inside `metadata` discriminates ops.
 
 ## Blend Server Lifecycle Sentinels
 
-CPU-synchronous sentinels published by `modules/blend.py` (`BlendModule`) to
-bracket request scope and guard GPU callback races.  Published via
-`EventBus.publish()` (not `publish_on_stream`).
+CPU-synchronous sentinels published by the `modules/blend/` package
+(`BlendModule`; specifically the `cb_unified_lookup` mixin in
+`blend/lookup.py` and the `cb_retrieve_pre_computed` mixin in
+`blend/retrieve.py`) to bracket request scope and guard GPU callback
+races.  Published via `EventBus.publish()` (not `publish_on_stream`).
 
 | EventType | Metadata keys | Types | Published by / when |
 |---|---|---|---|
@@ -344,9 +346,10 @@ arrive as the string `"None"` — treat any non-`int` value as "no worker".
 
 ### Blend Server sub-phase events
 
-Published by `blend.py` around the legs of the unified lookup and the
-retrieve scatter, correlated by `session_id` (plus `worker_id` for the scatter
-pair, see above).  The scatter pair goes through `publish_on_stream`, so its
+Published by the `modules/blend/` package (specifically `blend/lookup.py`
+for the unified-lookup legs and `blend/retrieve.py` for the retrieve
+scatter) around those two phases, correlated by `session_id` (plus
+`worker_id` for the scatter pair, see above).  The scatter pair goes through `publish_on_stream`, so its
 timing is GPU-accurate.
 
 | EventType | Metadata keys | Types |
