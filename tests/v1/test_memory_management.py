@@ -181,6 +181,42 @@ def test_tensor_allocator_negative_batch_size(
         allocator.close()
 
 
+def test_tensor_allocator_zero_size_shape() -> None:
+    """A zero-element shape is rejected as a caller bug.
+
+    The address manager raises ``ValueError`` for the zero-byte request. That
+    must not be confused with an out-of-memory condition: the tensor allocator
+    only maps ``RuntimeError`` to ``None``, and the storage backends react to a
+    failed allocation by evicting cached objects (or retrying in a busy loop).
+    Beforehand ``allocate`` handed out a zero-length block (fragmenting the free
+    list) and ``batched_allocate`` raised ``ZeroDivisionError``.
+    """
+    tensor_buffer = torch.zeros(4096 * 4, dtype=torch.uint8, device="cpu")
+    allocator = TensorMemoryAllocator(tensor_buffer)
+    existing = None
+    try:
+        empty_shape = torch.Size([0])
+        allocated_before = allocator.total_allocated_size
+        active_before = allocator.num_active_allocations
+
+        with pytest.raises(ValueError, match="size must be greater than 0"):
+            allocator.allocate(empty_shape, torch.uint8)
+        with pytest.raises(ValueError, match="size must be greater than 0"):
+            allocator.batched_allocate(empty_shape, torch.uint8, 3)
+
+        assert allocator.total_allocated_size == allocated_before
+        assert allocator.num_active_allocations == active_before
+        assert allocator.memcheck()
+
+        # The rejected requests must not have damaged the pool.
+        existing = allocator.allocate(torch.Size([4096 * 4]), torch.uint8)
+        assert existing is not None
+    finally:
+        if existing is not None:
+            allocator.free(existing)
+        allocator.close()
+
+
 @pytest.mark.parametrize(
     "alloc_cls",
     [
