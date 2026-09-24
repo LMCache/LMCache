@@ -26,6 +26,11 @@ esac
 CONTAINER_NAME="lmcache-amd-vllm-bench-${BUILDKITE_BUILD_ID}-${MODE}"
 
 cd "${REPO_ROOT}"
+
+# shellcheck source=.buildkite/k3_tests/common_scripts/helpers.sh
+source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
+merge_pr_base_branch
+
 echo "AMD kernel mode: ${MODE}"
 
 if ! command -v docker >/dev/null 2>&1; then

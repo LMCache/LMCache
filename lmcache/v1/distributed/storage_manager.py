@@ -61,9 +61,9 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     create_prefetch_policy,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     create_store_policy,
 )
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -171,7 +171,7 @@ class StorageManager:
         self._adapters_lock = threading.Lock()
         self._registered_l2_listeners: list[L2AdapterListener] = []
         self._l2_adapters: dict[int, L2AdapterInterface] = {}
-        self._adapter_descriptors: dict[int, AdapterDescriptor] = {}
+        self._adapter_descriptors: dict[int, L2AdapterDescriptor] = {}
         for ac in config.l2_adapter_config.adapters:
             adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
             self._l2_adapters[adapter_id] = adapter
@@ -1161,7 +1161,7 @@ class StorageManager:
             logger.info("Deleted L2 adapter %d", adapter_id)
             self._publish_capacity_changed()
 
-    def l2_adapters(self) -> list[tuple[AdapterDescriptor, L2AdapterInterface]]:
+    def l2_adapters(self) -> list[tuple[L2AdapterDescriptor, L2AdapterInterface]]:
         """Return all active L2 adapters paired with descriptors, in
         ascending adapter-id order (== configuration order for the initial
         set, then runtime-added adapters). The list is empty when no L2 is
@@ -1250,7 +1250,7 @@ class StorageManager:
 
     def _snapshot_adapters(
         self,
-    ) -> list[tuple[int, AdapterDescriptor, L2AdapterInterface]]:
+    ) -> list[tuple[int, L2AdapterDescriptor, L2AdapterInterface]]:
         """Snapshot the active adapters under the lock, in ascending
         adapter-id order. Iterate this instead of the live dicts so a
         concurrent add/delete cannot change them mid-iteration.
@@ -1272,7 +1272,7 @@ class StorageManager:
     def _build_l2_adapter(
         self,
         config: L2AdapterConfigBase,
-    ) -> tuple[int, L2AdapterInterface, AdapterDescriptor]:
+    ) -> tuple[int, L2AdapterInterface, L2AdapterDescriptor]:
         """Create a L2 adapter instance based on the config.
 
         Args:
@@ -1292,7 +1292,7 @@ class StorageManager:
                 serde=create_serde_processor(config.serde_config),
                 l1_manager=self._l1_manager,
             )
-        descriptor = AdapterDescriptor(index=adapter_id, config=config)
+        descriptor = L2AdapterDescriptor(index=adapter_id, config=config)
         # Stamp the registered type name so the adapter's cache events on
         # the observability bus carry their backend identity.
         adapter.set_backend_identity(descriptor.type_name, shared=config.shared)

@@ -54,9 +54,13 @@ class LMCTritonSparseBackend(AttentionInterface):
         self.device = torch.device(f"{torch_device_type}:{idx}")
 
         logger.info(
-            f"Initialized LMCTritonSparseBackend: "
-            f"heads={self.num_qo_heads}, kv_heads={self.num_kv_heads}, "
-            f"head_dim={self.head_dim}, scale={self.sm_scale:.4f}"
+            "Initialized LMCTritonSparseBackend: "
+            "heads=%s, kv_heads=%s, "
+            "head_dim=%s, scale=%.4f",
+            self.num_qo_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.sm_scale,
         )
 
     def forward_contiguous(
