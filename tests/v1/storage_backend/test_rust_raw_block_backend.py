@@ -67,6 +67,10 @@ class _FakeRawBlockDevice:
     def size_bytes(self):
         return len(self._data)
 
+    def worker_error(self) -> str | None:
+        """Return no terminal error unless a failure test overrides this method."""
+        return None
+
     def pread_into(self, offset, out, payload_len, total_len=None):
         del total_len
         out[:payload_len] = self._data[offset : offset + payload_len]
@@ -2712,6 +2716,35 @@ def _make_raw_block_backend(
         loop=loop,
         dst_device="cpu",
     )
+
+
+@pytest.mark.no_shared_allocator
+def test_rust_raw_block_backend_rejects_worker_failure_without_retaining_objects(
+    monkeypatch: pytest.MonkeyPatch,
+    loop_in_thread: asyncio.AbstractEventLoop,
+) -> None:
+    _install_fake_raw_block_device(monkeypatch, size_bytes=64 * 1024 * 1024)
+    allocator = AdHocMemoryAllocator(device="cpu")
+    backend = _make_raw_block_backend(
+        "/tmp/plugin-worker-failure", allocator, loop_in_thread
+    )
+    key = CacheEngineKey("test_model", 1, 0, 7001, torch.bfloat16)
+    memory_obj = _make_byte_obj(32)
+    try:
+        ref_count = memory_obj.get_ref_count()
+        with patch.object(
+            _FakeRawBlockDevice,
+            "worker_error",
+            return_value="io_uring worker submission failed: test error",
+        ):
+            with pytest.raises(RuntimeError, match="worker submission failed"):
+                backend.batched_submit_put_task([key], [memory_obj])
+            assert not backend.contains(key)
+            assert not backend.exists_in_put_tasks(key)
+            assert memory_obj.get_ref_count() == ref_count
+    finally:
+        memory_obj.ref_count_down()
+        backend.close()
 
 
 def test_rust_raw_block_backend_batched_submit_rolls_back_refs_on_dispatch_failure(

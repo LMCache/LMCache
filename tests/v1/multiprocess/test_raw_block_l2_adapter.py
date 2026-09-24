@@ -129,15 +129,23 @@ class _FakeFdpCore:
         self.slot_bytes = RAW_BLOCK_CI_SLOT_BYTES
         self.meta_checkpoint_placement_id: int | None = None
         self.put_many_calls: list[list[int | None] | None] = []
+        self.worker_failure: str | None = None
 
     def fetch_fdp_status(self) -> list[tuple[int, int]]:
         return self.status
 
     def report_status(self) -> dict:
+        """Return worker health and capacity for adapter status propagation."""
         return {
-            "is_healthy": True,
+            "is_healthy": self.worker_failure is None,
+            "worker_error": self.worker_failure,
             "usable_capacity_bytes": RAW_BLOCK_CI_SLOT_BYTES * 8,
         }
+
+    def raise_if_failed(self) -> None:
+        """Raise RuntimeError when a terminal worker failure is configured."""
+        if self.worker_failure is not None:
+            raise RuntimeError(self.worker_failure)
 
     def put_many(
         self,
@@ -217,6 +225,36 @@ def test_raw_block_meta_checkpoint_placement_id_reaches_core_config() -> None:
 
     assert config.meta_checkpoint_placement_id == 7
     assert config.to_core_config().meta_checkpoint_placement_id == 7
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.parametrize("operation", ["store", "lookup", "load"])
+def test_raw_block_l2_adapter_rejects_tasks_after_worker_failure(
+    operation: str,
+) -> None:
+    fake_core = _FakeFdpCore()
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    try:
+        assert adapter.report_status()["is_healthy"] is True
+        fake_core.worker_failure = "io_uring worker submission failed: test error"
+        key = make_object_key(700)
+        with pytest.raises(RuntimeError, match="worker submission failed"):
+            if operation == "store":
+                adapter.submit_store_task([key], [make_memory_obj(b"payload")])
+            elif operation == "lookup":
+                adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
+            else:
+                adapter.submit_load_task([key], [make_empty_memory_obj(7)])
+
+        status = adapter.report_status()
+        assert status["is_healthy"] is False
+        assert status["core"]["worker_error"] == fake_core.worker_failure
+        for task_kind in ("store", "lookup", "load"):
+            assert status[f"{task_kind}_inflight_task_count"] == 0
+            assert status[f"completed_{task_kind}_task_count"] == 0
+        assert fake_core.put_many_calls == []
+    finally:
+        adapter.close()
 
 
 def test_raw_block_meta_checkpoint_placement_id_requires_uring_cmd() -> None:

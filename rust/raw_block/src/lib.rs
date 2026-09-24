@@ -28,7 +28,7 @@ use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use io_uring::cqueue::{Entry, Entry32};
 use io_uring::squeue::{Entry as SqueueEntry, Entry128};
@@ -952,23 +952,21 @@ impl UringNotify {
         }
     }
 
-    /// Blocks the worker until either eventfd is readable, then drains
+    /// Blocks until an eventfd is readable or the optional timeout expires, then drains
     /// each fired fd. Drain is required because epoll is level-triggered:
     /// without consuming the counter, the next epoll_wait would return
     /// immediately on the same already-handled signal.
-    fn wait(&self) {
+    fn wait(&self, timeout: Option<Duration>) {
         // A capacity of 2 is enough: only two fds are registered with this
         // epoll instance, so at most two events can come back per call.
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; 2];
 
-        // Timeout = -1 means "block indefinitely". Shutdown wakes us by
-        // writing producer_efd from do_close, so we never need a timeout.
-        let n = unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), 2, -1) };
-
-        // n < 0 is usually EINTR (signal interruption); we just return and
-        // the worker's outer loop will call wait() again. n == 0 should
-        // not happen with timeout=-1 but is handled defensively.
-        if n <= 0 {
+        let timeout_ms = timeout.map_or(-1, |delay| {
+            delay.as_millis().max(1).min(i32::MAX as u128) as i32
+        });
+        let event_count =
+            unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), 2, timeout_ms) };
+        if event_count <= 0 {
             return;
         }
 
@@ -977,7 +975,7 @@ impl UringNotify {
         // ev.u64 during epoll_ctl registration. We discard the read value
         // (we only care that a signal arrived, not how many).
         let mut buf = [0u8; 8];
-        for ev in &events[..n as usize] {
+        for ev in &events[..event_count as usize] {
             let fd = ev.u64 as RawFd;
             // Discard the result. The wake-up was already delivered by
             // epoll_wait; this read only exists to reset the eventfd
@@ -1056,9 +1054,82 @@ fn stop_submissions(queue: &Mutex<Vec<IoSubmission>>, shutdown: &AtomicBool) {
     shutdown.store(true, Ordering::Relaxed);
 }
 
-fn submit_pending(ring: &IoUringWrapper, pending: &mut VecDeque<u64>) -> io::Result<()> {
+fn fail_submissions(
+    queue: &Mutex<Vec<IoSubmission>>,
+    shutdown: &AtomicBool,
+    worker_error: &Mutex<Option<String>>,
+    error: io::Error,
+) {
+    let _queue = queue.lock().unwrap();
+    *worker_error.lock().unwrap() = Some(format!("io_uring worker submission failed: {error}"));
+    shutdown.store(true, Ordering::Relaxed);
+}
+
+const SUBMISSION_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(1);
+const SUBMISSION_RETRY_MAX_DELAY: Duration = Duration::from_millis(100);
+const SUBMISSION_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct SubmissionRetry {
+    stalled_since: Option<Instant>,
+    retry_at: Option<Instant>,
+    delay: Duration,
+}
+
+impl SubmissionRetry {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn remaining_delay(&self, now: Instant) -> Option<Duration> {
+        self.retry_at
+            .and_then(|deadline| deadline.checked_duration_since(now))
+            .filter(|delay| !delay.is_zero())
+    }
+
+    fn record_result(&mut self, result: io::Result<usize>, now: Instant) -> io::Result<()> {
+        let error = match result {
+            Ok(submitted) if submitted > 0 => {
+                self.reset();
+                return Ok(());
+            }
+            Ok(_) => io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "io_uring submit accepted no requests",
+            ),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::EAGAIN) | Some(libc::EINTR) | Some(libc::EBUSY)
+                ) =>
+            {
+                error
+            }
+            Err(error) => return Err(error),
+        };
+        let stalled_since = *self.stalled_since.get_or_insert(now);
+        if now.duration_since(stalled_since) >= SUBMISSION_STALL_TIMEOUT {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "io_uring submission made no progress for {}s: {error}",
+                    SUBMISSION_STALL_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        self.delay = if self.delay.is_zero() {
+            SUBMISSION_RETRY_INITIAL_DELAY
+        } else {
+            (self.delay * 2).min(SUBMISSION_RETRY_MAX_DELAY)
+        };
+        self.retry_at = Some(now + self.delay);
+        Ok(())
+    }
+}
+
+fn submit_pending(ring: &IoUringWrapper, pending: &mut VecDeque<u64>) -> io::Result<usize> {
     if pending.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     record_submission_result(pending, ring.submit())
 }
@@ -1066,10 +1137,10 @@ fn submit_pending(ring: &IoUringWrapper, pending: &mut VecDeque<u64>) -> io::Res
 fn record_submission_result(
     pending: &mut VecDeque<u64>,
     result: io::Result<usize>,
-) -> io::Result<()> {
+) -> io::Result<usize> {
     let submitted = result?;
     pending.drain(..submitted.min(pending.len()));
-    Ok(())
+    Ok(submitted)
 }
 
 #[cfg(test)]
@@ -1090,7 +1161,7 @@ mod submission_lifecycle_tests {
 
     #[test]
     fn submission_errors_preserve_pending_entries() {
-        for error_code in [libc::EAGAIN, libc::EINTR, libc::EIO] {
+        for error_code in [libc::EAGAIN, libc::EINTR, libc::EBUSY, libc::EIO] {
             let mut pending = VecDeque::from([10, 11, 12]);
             let error = record_submission_result(
                 &mut pending,
@@ -1199,6 +1270,7 @@ struct RawBlockDevice {
     worker: Option<thread::JoinHandle<()>>,
     // Shutdown signal for worker thread
     shutdown: Option<Arc<AtomicBool>>,
+    worker_error: Arc<Mutex<Option<String>>>,
     // Map from buffer pointer address to registered fixed buffer index
     // Used for zero-copy I/O with pre-registered buffers
     fixed_buffer_map: Arc<Mutex<HashMap<usize, (u16, usize)>>>,
@@ -1344,6 +1416,7 @@ impl RawBlockDevice {
             fd_size_bytes(fd)?
         };
 
+        let worker_error = Arc::new(Mutex::new(None));
         let (
             ring_opt,
             queue_opt,
@@ -1428,6 +1501,7 @@ impl RawBlockDevice {
             let ring_clone = ring.clone();
             let queue_clone = Arc::clone(&queue);
             let shutdown_clone = Arc::clone(&shutdown);
+            let worker_error_clone = Arc::clone(&worker_error);
             let batch_ready_clone = Arc::clone(&batch_ready);
             let in_flight_count_clone = Arc::clone(&in_flight_count);
             let in_flight_cvar_clone = Arc::clone(&in_flight_cvar);
@@ -1664,6 +1738,7 @@ impl RawBlockDevice {
                     let mut in_flight: HashMap<u64, IoSubmission> = HashMap::new();
                     let mut pending = VecDeque::with_capacity(ring_size);
                     let mut next_user_data: u64 = 1;
+                    let mut submission_retry = SubmissionRetry::default();
 
                     while !shutdown_clone.load(Ordering::Relaxed) {
                         // This drains all completed I/O operations from the completion queue (CQ).
@@ -1682,6 +1757,7 @@ impl RawBlockDevice {
                                 for cqe in completions {
                                     let user_data = cqe.user_data();
                                     if let Some(mut sub) = in_flight.remove(&user_data) {
+                                        submission_retry.reset();
                                         let batch_id = sub.batch_id;
                                         let cqe_result = cqe.result();
 
@@ -1774,6 +1850,7 @@ impl RawBlockDevice {
                                 for cqe in completions {
                                     let user_data = cqe.user_data();
                                     if let Some(mut sub) = in_flight.remove(&user_data) {
+                                        submission_retry.reset();
                                         let batch_id = sub.batch_id;
                                         let cqe_result = cqe.result();
 
@@ -1862,6 +1939,12 @@ impl RawBlockDevice {
                             ring_clone.submission_sync();
                         }
 
+                        if let Some(delay) = submission_retry.remaining_delay(Instant::now()) {
+                            let _ = ring_clone.reap_without_submitting();
+                            batch_ready_clone.wait(Some(delay));
+                            continue;
+                        }
+
                         // Block on epoll only if there's truly nothing pending. The empty +
                         // shutdown checks short-circuit so we don't sleep when a producer or
                         // do_close() already left work for us. Race-free against a late
@@ -1874,7 +1957,7 @@ impl RawBlockDevice {
                             && pending.is_empty()
                             && queue_clone.lock().unwrap().is_empty()
                         {
-                            batch_ready_clone.wait();
+                            batch_ready_clone.wait(None);
                         }
 
                         let mut q = queue_clone.lock().unwrap();
@@ -1930,12 +2013,17 @@ impl RawBlockDevice {
                         } else {
                             drop(q);
                         }
-                        if let Err(error) = submit_pending(&ring_clone, &mut pending) {
-                            if !matches!(
-                                error.raw_os_error(),
-                                Some(libc::EAGAIN) | Some(libc::EINTR)
-                            ) {
-                                stop_submissions(&queue_clone, &shutdown_clone);
+                        if !pending.is_empty() {
+                            let result = submit_pending(&ring_clone, &mut pending);
+                            if let Err(error) =
+                                submission_retry.record_result(result, Instant::now())
+                            {
+                                fail_submissions(
+                                    &queue_clone,
+                                    &shutdown_clone,
+                                    &worker_error_clone,
+                                    error,
+                                );
                             }
                         }
                     }
@@ -2072,6 +2160,7 @@ impl RawBlockDevice {
             queue: queue_opt,
             worker: worker_opt,
             shutdown: shutdown_opt,
+            worker_error,
             fixed_buffer_map: Arc::new(Mutex::new(HashMap::new())),
             fixed_buffers_registered: Arc::new(AtomicBool::new(false)),
             in_flight_count: in_flight_count_opt.unwrap_or_else(|| Arc::new(AtomicU64::new(0))),
@@ -2147,6 +2236,16 @@ impl RawBlockDevice {
     // Expose cached size to Python.
     fn size_bytes(&self) -> PyResult<u64> {
         Ok(self.size)
+    }
+
+    /// Return the terminal io_uring submission error, or None if none occurred.
+    ///
+    /// Recoverable errors are retried with 1-100 ms backoff, waking on completions.
+    /// After 30 seconds without submission or completion progress, the worker
+    /// stops accepting requests. The error is available before accepted I/O
+    /// finishes draining. Normal shutdown and POSIX mode do not set an error.
+    fn worker_error(&self) -> Option<String> {
+        self.worker_error.lock().unwrap().clone()
     }
 
     /// Get NVMe namespace ID (only available when use_uring_cmd=true)
