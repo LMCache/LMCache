@@ -86,11 +86,12 @@ def all_null_chunk_masks(
     object_groups: Sequence[ObjectGroupInfo],
     blocks_per_chunk: Sequence[int],
     num_chunks: int,
+    null_block_id: int = 0,
 ) -> list[list[bool]]:
     """Mark, per object group, the chunks whose engine block ids are all null.
 
-    A chunk is null for an object group when every block id of every kernel
-    group in that group is 0 (the vLLM null block). Align-mode Mamba/linear
+    A chunk is null for an object group when every block ID of every kernel
+    group equals the server's null marker. Align-mode Mamba/linear
     layers produce such chunks: only the block holding the last recurrent state
     is real, so every earlier chunk is null. These chunks must not be stored --
     the null block carries no valid KV, and object keys are content hashes, so
@@ -103,6 +104,8 @@ def all_null_chunk_masks(
         blocks_per_chunk: Blocks in one chunk per kernel group, indexed by
             kernel-group index.
         num_chunks: Number of chunks in the request.
+        null_block_id: Server-wide block ID denoting absent data. Defaults to
+            the historical vLLM null block zero.
 
     Returns:
         ``mask[g][i]`` is True iff chunk ``i`` is all-null for object group ``g``.
@@ -114,7 +117,10 @@ def all_null_chunk_masks(
             is_null = True
             for kg in group.kernel_group_indices:
                 bpc = blocks_per_chunk[kg]
-                if any(block_ids[kg][i * bpc : (i + 1) * bpc]):
+                if any(
+                    block != null_block_id
+                    for block in block_ids[kg][i * bpc : (i + 1) * bpc]
+                ):
                     is_null = False
                     break
             chunk_null.append(is_null)
@@ -627,11 +633,13 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # Mamba chunks holding no real state) carry no valid KV and must not
             # be committed. Computed on the raw block ids before downsampling
             # mutates them.
+            null_block_id = self._ctx.null_block_id
             skipped_chunks = all_null_chunk_masks(
                 gpu_block_ids,
                 cache_context.kv_layer_groups_manager.object_groups,
                 blocks_per_chunk,
                 num_chunks,
+                null_block_id,
             )
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
@@ -720,6 +728,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         skip_first_n_tokens=0,
                         direction=lmcache_native.TransferDirection.D2H,
                         transfer_key=transfer_key,
+                        block_ids_host=gpu_block_ids,
                     )
 
                 store_succeeded = True
@@ -965,6 +974,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             skip_first_n_tokens=skip_first_n_tokens,
                             direction=lmcache_native.TransferDirection.H2D,
                             transfer_key=transfer_key,
+                            block_ids_host=gpu_block_ids,
                         )
                         # Extend only after the copy is enqueued: on exception,
                         # read_prefetched_results releases this group's locks

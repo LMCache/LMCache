@@ -182,6 +182,7 @@ class RequestClient(Protocol):
         is_neox_style: bool,
         group_to_cache: list[int],
         group_rot: list[list[int]],
+        group_head_size: list[int],
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -238,6 +239,7 @@ class RequestClient(Protocol):
         is_neox_style: bool,
         group_to_cache: list[int],
         group_rot: list[list[int]],
+        group_head_size: list[int],
     ) -> MessagingFuture[None]: ...
 
     def cb_unregister_rope_v3(self, instance_id: int) -> MessagingFuture[None]: ...
