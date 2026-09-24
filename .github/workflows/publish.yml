@@ -342,9 +342,9 @@ jobs:
               with:
                 verbose: true
 
-    # Publish cu12.9 wheel to GitHub Release (not PyPI) when a release is published
+    # Publish cu12.9 wheels to GitHub Release (not PyPI) when a release is published
     publish-cu129-github-release:
-        name: Publish cu129 wheel to GitHub Release
+        name: Publish cu129 wheels to GitHub Release
         if: |
             needs.build-cu129.result == 'success' &&
             needs.test.result == 'success' &&
@@ -366,10 +366,11 @@ jobs:
             - name: Fetch cu12.9 release artifacts
               uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
               with:
-                  name: release-cu129-artifacts
+                  pattern: release-cu129-artifacts-*
+                  merge-multiple: true
                   path: dist
 
-            - name: Publish cu12.9 wheel to dedicated GitHub Release
+            - name: Publish cu12.9 wheels to dedicated GitHub Release
               env:
                   GITHUB_TOKEN: ${{ github.token }}
               run: |
@@ -378,7 +379,7 @@ jobs:
                     --target "$GITHUB_SHA" \
                     --latest=false \
                     --title "Release ${{ github.ref_name }} · CUDA 12.9" \
-                    --notes "CUDA 12.9 wheel for LMCache ${{ github.ref_name }}.
+                    --notes "CUDA 12.9 wheels for LMCache ${{ github.ref_name }} on linux/amd64 and linux/arm64.
 
                   \`\`\`
                   VERSION=${{ github.ref_name }}
@@ -748,49 +749,51 @@ jobs:
                 docker builder prune -af
 
             - name: Build lmcache/vllm-openai container image (cu12.9)
-              if: matrix.arch == 'amd64' && needs.publish-cu129-github-release.result == 'success'
+              if: needs.publish-cu129-github-release.result == 'success'
               run: |
-                docker build \
+                docker buildx build --load \
+                  --platform linux/${{ matrix.arch }} \
                   --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
                   --build-arg CUDA_VERSION=12.9 \
                   --build-arg LMCACHE_VERSION=${{ env.LATEST_TAG }} \
                   --target image-release-cu129 \
-                  --tag lmcache/vllm-openai:latest-cu129 --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129 \
+                  --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} \
                   --file docker/Dockerfile .
 
             - name: Smoke test lmcache/vllm-openai (cu12.9)
-              if: matrix.arch == 'amd64' && needs.publish-cu129-github-release.result == 'success'
+              if: needs.publish-cu129-github-release.result == 'success'
               run: |
-                docker run --rm --entrypoint lmcache lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129 --help
+                test "$(docker image inspect --format '{{.Architecture}}' lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }})" = "${{ matrix.arch }}"
+                docker run --rm --entrypoint lmcache lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} --help
 
             - name: Push lmcache/vllm-openai cu129 container image to DockerHub
-              if: matrix.arch == 'amd64' && needs.publish-cu129-github-release.result == 'success'
+              if: needs.publish-cu129-github-release.result == 'success'
               run: |
-                docker push lmcache/vllm-openai:latest-cu129
-                docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129
+                docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }}
 
             # Payload extracts lmcache from the cu129 image just pushed above —
             # still local, and dropped by the prune below, so build here.
             - name: Build lmcache/lmcache-payload image (cu129)
-              if: matrix.arch == 'amd64' && needs.publish-cu129-github-release.result == 'success'
+              if: needs.publish-cu129-github-release.result == 'success'
               run: |
-                docker build \
-                  --build-arg SOURCE_IMAGE=lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129 \
-                  --tag lmcache/lmcache-payload:latest-cu129 --tag lmcache/lmcache-payload:${{ env.LATEST_TAG }}-cu129 \
+                docker buildx build --load \
+                  --platform linux/${{ matrix.arch }} \
+                  --build-arg SOURCE_IMAGE=lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} \
+                  --tag lmcache/lmcache-payload:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} \
                   --file docker/Dockerfile.payload .
 
             # Run the ENTRYPOINT copy; assert the lmcache tree lands.
             - name: Smoke test lmcache/lmcache-payload (cu129)
-              if: matrix.arch == 'amd64' && needs.publish-cu129-github-release.result == 'success'
+              if: needs.publish-cu129-github-release.result == 'success'
               run: |
-                docker run --rm -e SHARED_DIR=/out -v "$PWD/payload-out-cu129:/out" lmcache/lmcache-payload:${{ env.LATEST_TAG }}-cu129
+                test "$(docker image inspect --format '{{.Architecture}}' lmcache/lmcache-payload:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }})" = "${{ matrix.arch }}"
+                docker run --rm -e SHARED_DIR=/out -v "$PWD/payload-out-cu129:/out" lmcache/lmcache-payload:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }}
                 test -f payload-out-cu129/lmcache/__init__.py
 
             - name: Push lmcache/lmcache-payload cu129 image to DockerHub
-              if: matrix.arch == 'amd64' && needs.publish-cu129-github-release.result == 'success'
+              if: needs.publish-cu129-github-release.result == 'success'
               run: |
-                docker push lmcache/lmcache-payload:latest-cu129
-                docker push lmcache/lmcache-payload:${{ env.LATEST_TAG }}-cu129
+                docker push lmcache/lmcache-payload:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }}
 
             - name: Clean up Docker layers and cache
               run: |
@@ -798,25 +801,26 @@ jobs:
                 docker builder prune -af
 
             - name: Build lmcache/standalone container image (cu12.9)
-              if: matrix.arch == 'amd64' && needs.publish-cu129-github-release.result == 'success'
+              if: needs.publish-cu129-github-release.result == 'success'
               run: |
-                docker build \
+                docker buildx build --load \
+                  --platform linux/${{ matrix.arch }} \
                   --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
                   --build-arg CUDA_VERSION=12.9 \
                   --target lmcache-final \
-                  --tag lmcache/standalone:latest-cu129 --tag lmcache/standalone:${{ env.LATEST_TAG }}-cu129 \
+                  --tag lmcache/standalone:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} \
                   --file docker/Dockerfile.standalone .
 
             - name: Smoke test lmcache/standalone (cu12.9)
-              if: matrix.arch == 'amd64' && needs.publish-cu129-github-release.result == 'success'
+              if: needs.publish-cu129-github-release.result == 'success'
               run: |
-                docker run --rm --entrypoint lmcache lmcache/standalone:${{ env.LATEST_TAG }}-cu129 --help
+                test "$(docker image inspect --format '{{.Architecture}}' lmcache/standalone:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }})" = "${{ matrix.arch }}"
+                docker run --rm --entrypoint lmcache lmcache/standalone:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }} --help
 
             - name: Push lmcache/standalone cu129 container image to DockerHub
-              if: matrix.arch == 'amd64' && needs.publish-cu129-github-release.result == 'success'
+              if: needs.publish-cu129-github-release.result == 'success'
               run: |
-                docker push lmcache/standalone:latest-cu129
-                docker push lmcache/standalone:${{ env.LATEST_TAG }}-cu129
+                docker push lmcache/standalone:${{ env.LATEST_TAG }}-cu129-${{ matrix.arch }}
 
     publish-image-manifests:
         name: Publish multi-arch image manifests
@@ -851,6 +855,17 @@ jobs:
                   "lmcache/vllm-openai:${LATEST_TAG}-arm64"
                 docker buildx imagetools inspect "lmcache/vllm-openai:${LATEST_TAG}"
 
+            - name: Publish lmcache/vllm-openai cu129 manifest
+              env:
+                LATEST_TAG: ${{ github.ref_name }}
+              run: |
+                docker buildx imagetools create \
+                  --tag lmcache/vllm-openai:latest-cu129 \
+                  --tag "lmcache/vllm-openai:${LATEST_TAG}-cu129" \
+                  "lmcache/vllm-openai:${LATEST_TAG}-cu129-amd64" \
+                  "lmcache/vllm-openai:${LATEST_TAG}-cu129-arm64"
+                docker buildx imagetools inspect "lmcache/vllm-openai:${LATEST_TAG}-cu129"
+
             - name: Publish lmcache/vllm-openai:lightweight manifest
               env:
                 LATEST_TAG: ${{ github.ref_name }}
@@ -873,6 +888,17 @@ jobs:
                   "lmcache/lmcache-payload:${LATEST_TAG}-arm64"
                 docker buildx imagetools inspect "lmcache/lmcache-payload:${LATEST_TAG}"
 
+            - name: Publish lmcache/lmcache-payload cu129 manifest
+              env:
+                LATEST_TAG: ${{ github.ref_name }}
+              run: |
+                docker buildx imagetools create \
+                  --tag lmcache/lmcache-payload:latest-cu129 \
+                  --tag "lmcache/lmcache-payload:${LATEST_TAG}-cu129" \
+                  "lmcache/lmcache-payload:${LATEST_TAG}-cu129-amd64" \
+                  "lmcache/lmcache-payload:${LATEST_TAG}-cu129-arm64"
+                docker buildx imagetools inspect "lmcache/lmcache-payload:${LATEST_TAG}-cu129"
+
             - name: Publish lmcache/standalone manifests
               env:
                 LATEST_TAG: ${{ github.ref_name }}
@@ -885,6 +911,17 @@ jobs:
                   "lmcache/standalone:${LATEST_TAG}-amd64" \
                   "lmcache/standalone:${LATEST_TAG}-arm64"
                 docker buildx imagetools inspect "lmcache/standalone:${LATEST_TAG}"
+
+            - name: Publish lmcache/standalone cu129 manifest
+              env:
+                LATEST_TAG: ${{ github.ref_name }}
+              run: |
+                docker buildx imagetools create \
+                  --tag lmcache/standalone:latest-cu129 \
+                  --tag "lmcache/standalone:${LATEST_TAG}-cu129" \
+                  "lmcache/standalone:${LATEST_TAG}-cu129-amd64" \
+                  "lmcache/standalone:${LATEST_TAG}-cu129-arm64"
+                docker buildx imagetools inspect "lmcache/standalone:${LATEST_TAG}-cu129"
 
     # Build RC container image and push to DockerHub when:
     # - a new RC GitHub release is created (e.g. v0.4.8rc1)
