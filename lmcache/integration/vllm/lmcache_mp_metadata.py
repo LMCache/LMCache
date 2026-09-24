@@ -138,15 +138,45 @@ class LMCacheMPRequestTracker:
     def append_block_ids(
         self,
         new_block_ids: tuple[list[int], ...],
-    ):
-        """Update the block ids for the current request
-        This function will be called when processing the cached requests.
+        relocation_window: int = 0,
+    ) -> None:
+        """Append one step's block ids, per engine group.
+
+        An id already in one of the last ``relocation_window`` tracked
+        slots is a moved block: that slot is set to 0 before the id is
+        appended. The null id 0 is never matched. With
+        ``relocation_window=0`` the ids are appended as-is.
+
+        Examples, each starting from tracked ``[10, 11, 12, 13]`` with
+        ``relocation_window=2``::
+
+            append [12, 14] -> [10, 11, 0, 13, 12, 14]   # 12 was in the last 2
+            append [10, 14] -> [10, 11, 12, 13, 10, 14]  # 10 was not
+
+        Args:
+            new_block_ids: Block ids reported this step, one list per engine
+                group.
+            relocation_window: Number of tail slots checked for a moved
+                block; 0 disables the check.
         """
         for engine_group_idx, group_block_ids in enumerate(new_block_ids):
-            if group_block_ids:
-                self.allocated_block_ids.setdefault(engine_group_idx, []).extend(
-                    group_block_ids
-                )
+            if not group_block_ids:
+                continue
+            block_ids = self.allocated_block_ids.setdefault(engine_group_idx, [])
+            if relocation_window == 0:
+                block_ids.extend(group_block_ids)
+                continue
+            prev_len = len(block_ids)
+            window_start = max(0, prev_len - relocation_window)
+            # A relocated block keeps its id: only its slot changes. An id seen
+            # again within the window is that block, so null its old slot.
+            for block_id in group_block_ids:
+                if block_id != 0:
+                    for slot in range(window_start, prev_len):
+                        if block_ids[slot] == block_id:
+                            block_ids[slot] = 0
+                            break
+                block_ids.append(block_id)
 
     def num_allocated_blocks(self) -> dict[int, int]:
         return {
