@@ -16,6 +16,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
+from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import (
     BoundRequestHandler,
     HandlerType,
@@ -52,7 +53,6 @@ class _GrpcRequestHandler:
     requires_client_affinity: bool
     request_decoder: RequestDecoder
     response_encoder: ResponseEncoder
-    streaming: bool
 
 
 class _GeneratedServicer:
@@ -78,16 +78,13 @@ class _GeneratedServicer:
         if handler is None:
             raise AttributeError(method_name)
 
-        if handler.streaming:
+        if self._binding.descriptor.methods_by_name[method_name].server_streaming:
 
             def subscribe(
                 request: Any, context: grpc.ServicerContext, send: Callable
             ) -> None:
-                if handler.handler is None:
-                    context.abort(grpc.StatusCode.UNIMPLEMENTED, handler.operation)
-                    return
                 try:
-                    stream = handler.handler(*handler.request_decoder(request))
+                    stream = self._dispatch(handler, request, context)
                 except ValueError as exc:
                     context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
                     return
@@ -160,6 +157,8 @@ class _GeneratedServicer:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"
                 )
+            if isinstance(result, MessagingStream):
+                return result
             return registered.response_encoder(result)
         except NotImplementedError as exc:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
@@ -260,7 +259,6 @@ class GrpcMultiprocessServer(RequestServer):
                 ),
                 request_decoder=method_codec.request_decoder,
                 response_encoder=method_codec.response_encoder,
-                streaming=method_codec.streaming,
             )
             self._handlers[full_name] = registered
             service_handlers[full_name] = registered

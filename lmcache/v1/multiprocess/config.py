@@ -124,10 +124,10 @@ class MPServerConfig:
     enable: list[str] = field(default_factory=list)
     """List of experimental transfer modules to enable. Options: transfer_query
     (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
-    
+
     kv_event_log_size: int = 32768
     """CPU store/eviction records retained for KV-event subscribers; 0 disables it."""
-    
+
     null_block_id: int = 0
     """Engine block ID that denotes absent KV data. The default ``0`` keeps
     compatibility with vLLM; engines where block zero is valid can select a

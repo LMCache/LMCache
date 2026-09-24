@@ -142,7 +142,7 @@ class GrpcMultiprocessClient(RequestClient):
         kwargs: dict[str, Any],
     ) -> MessagingFuture[Any] | MessagingStream[Any]:
         request = rpc.codec.request_encoder(args, kwargs)
-        if rpc.codec.streaming:
+        if isinstance(rpc.stub_method, grpc.UnaryStreamMultiCallable):
             call = rpc.stub_method(
                 request, metadata=self._metadata, wait_for_ready=True
             )

@@ -48,7 +48,6 @@ LEGACY_OPERATION_IDS = MappingProxyType(
         "p2p_unlock_objects": 31,
         "get_experimental": 32,
         "cb_protocol_handshake": 33,
-        # The KV-event branch emitted this ID before adopting RPC discovery.
     }
 )
 _LEGACY_ID_TO_OPERATION = {value: key for key, value in LEGACY_OPERATION_IDS.items()}

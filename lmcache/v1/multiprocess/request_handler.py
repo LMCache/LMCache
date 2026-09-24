@@ -76,7 +76,8 @@ def _normalize_none_type(value: Any) -> Any:
     return type(None) if value is None else value
 
 
-def _validate_handler(operation: RpcOperation, handler: Callable[..., Any]) -> None:
+def validate_handler(operation: RpcOperation, handler: Callable[..., Any]) -> None:
+    """Check handler against operation's RPC types; raise TypeError on mismatch."""
     spec = get_rpc_spec(operation)
     handler_signature = inspect.signature(handler)
     hints = get_type_hints(handler)
@@ -118,7 +119,7 @@ def iter_request_handlers(module: object) -> tuple[BoundRequestHandler, ...]:
             raise ValueError(
                 f"{module_type.__name__} has multiple handlers for {operation!r}"
             )
-        _validate_handler(operation, handler)
+        validate_handler(operation, handler)
         seen.add(operation)
         handlers.append(
             BoundRequestHandler(
