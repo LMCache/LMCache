@@ -74,8 +74,6 @@ class LMCacheMPRequestTracker:
 
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
-    max_offload_tokens: int | None = None
-    lookup_started_at: float | None = None
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
@@ -83,10 +81,6 @@ class LMCacheMPRequestTracker:
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.request_configs = extract_request_configs_from_request(request)
-        self.max_offload_tokens = (self.request_configs or {}).get(
-            "lmcache.max_offload_tokens"
-        )
-        self.lookup_started_at = None
         self.all_token_ids = request.all_token_ids
         self.allocated_block_ids = {}
         self.num_stored_tokens = 0
@@ -265,7 +259,9 @@ class LMCacheMPRequestMetadata:
         # Each group covers ``len(block_ids) * tokens_per_block`` tokens; the
         # storable prefix is bounded by the least-covered group (e.g.
         # gemma-4 sliding: one 32-token ID covers 2x the tokens of a
-        # 16-token full-attention ID).
+        # 16-token full-attention ID). Scratch groups (``tokens_per_block`` 0)
+        # cover no tokens and must not cap the prefix, or no chunk would ever
+        # be produced.
         allocated_lengths = tracker.num_allocated_blocks()
         allocated_tokens = min(
             (
@@ -282,8 +278,6 @@ class LMCacheMPRequestMetadata:
             allocated_tokens,
             computed_tokens,
         )
-        if tracker.max_offload_tokens is not None:
-            min_available_tokens = min(min_available_tokens, tracker.max_offload_tokens)
         num_staging_tokens = min_available_tokens - tracker.num_stored_tokens
         num_chunks = num_staging_tokens // lmcache_tokens_per_chunk
 
@@ -333,8 +327,7 @@ class LMCacheMPRequestMetadata:
             group_tokens_per_block: per-engine-group tokens covered by one
                 paged chunk (one block ID) of that group, i.e. the group's
                 KV cache spec ``block_size``. Must each divide
-                ``lmcache_tokens_per_chunk`` (hybrid models can mix different
-                values); ``0`` marks a scratch group that is never retrieved.
+                ``lmcache_tokens_per_chunk`` (hybrid models can mix different values).
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -430,43 +423,19 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
 class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
     """Worker -> Scheduler metadata for completed store events.
 
-    Attributes:
-        completed_store_requests: Newly completed stores of this worker, as
-            ``{request_id: 1}``. ``aggregate()`` sums the counts across the
-            workers of one step; the scheduler-side manager accumulates
-            across steps and settles a store only once its count reaches
-            ``world_size``.
-        failed_store_requests: Requests whose store did not succeed on this
-            worker, either with a failed result or dropped while unhealthy.
-            Their completion receipts are still counted -- the pinned blocks
-            must be unpinned either way -- but the scheduler additionally
-            breaks the request's stored-prefix chain so later chunks are not
-            stored unreachable. ``aggregate()`` unions the sets: one rank's
-            failure breaks the chain even when the other ranks succeeded.
+    Each worker reports {req_id: 1} for newly completed stores.
+    ``aggregate()`` sums counts across workers within a step.
+    The scheduler-side manager accumulates across steps and processes
+    a store completion only when count reaches ``world_size``.
     """
 
     completed_store_requests: dict[str, int]
-    failed_store_requests: set[str] = field(default_factory=set)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
     ) -> "KVConnectorWorkerMetadata":
-        """Merge another worker's report of the same step into this one.
-
-        Args:
-            other: The report of another rank, for the same scheduler step.
-
-        Returns:
-            A new metadata whose completion counts are summed per request
-            and whose failed-request sets are unioned.
-        """
         assert isinstance(other, LMCacheMPWorkerMetadata)
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
-        return LMCacheMPWorkerMetadata(
-            completed_store_requests=merged,
-            failed_store_requests=(
-                self.failed_store_requests | other.failed_store_requests
-            ),
-        )
+        return LMCacheMPWorkerMetadata(completed_store_requests=merged)

@@ -37,15 +37,8 @@ def is_scratch_spec(spec: Any) -> bool:
 
     vLLM never hashes or restores the blocks of such a scratch group, so they
     carry no token range LMCache could store (e.g. the per-request rings
-    ``CircularBufferSpec`` and ``KpoolTailSpec``). Specs without the property
-    (older vLLM) are prefix-cacheable. ``UniformTypeKVCacheSpecs`` is
-    unwrapped first.
-
-    Args:
-        spec: A vLLM KV cache spec, or a ``UniformTypeKVCacheSpecs`` container.
-
-    Returns:
-        ``True`` for a scratch spec, ``False`` for a prefix-cacheable one.
+    ``CircularBufferSpec``). Specs without the property (older vLLM) are
+    prefix-cacheable. ``UniformTypeKVCacheSpecs`` is unwrapped first.
     """
     inner = getattr(spec, "kv_cache_specs", None)
     if isinstance(inner, dict) and inner:
@@ -287,9 +280,7 @@ def create_engine_group_infos_from_vllm(
         Under DCP each attention group's ``tokens_per_block`` is scaled by
         ``dcp_size`` to stay in the scheduler's coordinate space; its ratio
         to the physical slot count is what sizes each rank's memory object.
-        Mamba groups are replicated per rank and stay unscaled. Layers of
-        scratch groups (see :func:`is_scratch_spec`) are excluded and never
-        form an info.
+        Mamba groups are replicated per rank and stay unscaled.
 
     Returns:
         The list of ``EngineGroupInfo`` in protocol order, i.e. the LMCache group
@@ -344,7 +335,6 @@ def create_engine_group_infos_from_vllm(
     # target owner's KV tensor, so the owner's group already covers them. Tag
     # them EXCLUDED_ENGINE_GROUP so they form no group of their own (a
     # wrong-block-size group would corrupt the per-group block-id counts).
-    # Scratch groups (tokens_per_block 0) are excluded the same way.
     per_layer_group_idx: list[int] | None = None
     group_tokens_per_block: dict[int, int] = {}
     per_layer_sw_size = [-1] * num_layers
@@ -359,6 +349,9 @@ def create_engine_group_infos_from_vllm(
             group_tokens_per_block[engine_group_id] = get_tokens_per_block(
                 group.kv_cache_spec, dcp_size
             )
+            # Scratch group (tokens_per_block 0): keep the key so the per-group
+            # lists stay index-aligned, but assign no layers -- they stay
+            # EXCLUDED_ENGINE_GROUP and form no kernel group.
             if group_tokens_per_block[engine_group_id] == 0:
                 continue
             for name in group.layer_names:
