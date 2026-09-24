@@ -22,15 +22,18 @@ PYBIND11_MODULE(lmcache_mooncake, m) {
   py::class_<lmcache::connector::MooncakeConnector>(m, "LMCacheMooncakeClient")
       .def(py::init([](lmcache::connector::ConfigDict config, int num_workers,
                        lmcache::connector::L1RegistrationConfig l1_registration,
-                       py::object per_op_workers) {
+                       py::object per_op_workers,
+                       lmcache::connector::ConfigDict replicate_config) {
              return new lmcache::connector::MooncakeConnector(
                  std::move(config), num_workers, l1_registration,
                  lmcache::connector::pybind_utils::parse_per_op_workers(
-                     per_op_workers));
+                     per_op_workers),
+                 std::move(replicate_config));
            }),
            py::arg("config"), py::arg("num_workers"),
            py::arg("l1_registration") =
                lmcache::connector::L1RegistrationConfig{},
-           py::arg("per_op_workers") = py::none())
+           py::arg("per_op_workers") = py::none(),
+           py::arg("replicate_config") = lmcache::connector::ConfigDict{})
           LMCACHE_BIND_CONNECTOR_METHODS(lmcache::connector::MooncakeConnector);
 }
