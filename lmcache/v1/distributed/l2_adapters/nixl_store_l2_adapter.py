@@ -876,6 +876,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         try:
             mem_indices_flat = []
             storage_indices_flat = []
+            loaded_indices: list[int] = []
 
             with self._lock:
                 for i, key in enumerate(keys):
@@ -887,17 +888,21 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
                     mem_indices_flat.extend(mem_indices)
                     storage_indices_flat.extend(storage_obj.page_indices)
-
-                    bitmap.set(i)
-                    accessed_keys.append(key)
+                    loaded_indices.append(i)
 
             if mem_indices_flat:
                 handle = self.nixl_agent.get_storage_to_mem_handle(
                     mem_indices_flat,
                     storage_indices_flat,
                 )
-                await self.nixl_agent.post_non_blocking(handle)
-                self.nixl_agent.release_handle(handle)
+                try:
+                    await self.nixl_agent.post_non_blocking(handle)
+                finally:
+                    self.nixl_agent.release_handle(handle)
+
+                for i in loaded_indices:
+                    bitmap.set(i)
+                    accessed_keys.append(keys[i])
         except Exception:
             logger.exception("NIXL load task %d failed", task_id)
 

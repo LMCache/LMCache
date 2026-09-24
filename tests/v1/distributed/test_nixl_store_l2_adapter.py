@@ -562,6 +562,97 @@ class TestLoadInterface:
         # Data should be copied
         assert torch.all(load_obj.raw_data == 42.0)
 
+    @pytest.mark.parametrize(
+        "failure_stage",
+        ["prepare", "create_handle", "transfer", "release_handle"],
+    )
+    def test_failed_load_reports_no_hits_and_can_retry(
+        self, adapter, failure_stage: str
+    ) -> None:
+        """Failed batches report no hits or accesses, release handles, and retry."""
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+        keys = [create_object_key(1), create_object_key(2)]
+        store_objs = [
+            create_memory_obj(buf, page_index=i, fill_value=float(i + 1))
+            for i in range(2)
+        ]
+        adpt.submit_store_task(keys, store_objs)
+        assert wait_for_event_fd(adpt.get_store_event_fd())
+        adpt.pop_completed_store_tasks()
+        lookup_id = adpt.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+        assert wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+        lookup = adpt.query_lookup_and_lock_result(lookup_id)
+        assert lookup is not None
+        assert all(lookup.test(i) for i in range(2))
+
+        # Keep a missing key between hits to verify result positions on retry.
+        load_keys = [keys[0], create_object_key(999), keys[1]]
+        load_objs = [
+            create_memory_obj(buf, page_index=i + 2, fill_value=0.0) for i in range(3)
+        ]
+        agent = adpt.nixl_agent
+        release_handle = agent.release_handle
+
+        def release_then_fail(handle: object) -> None:
+            release_handle(handle)
+            raise RuntimeError("injected handle release failure")
+
+        try:
+            with (
+                patch.object(
+                    agent, "get_memory_indices", wraps=agent.get_memory_indices
+                ) as prepare,
+                patch.object(
+                    agent,
+                    "get_storage_to_mem_handle",
+                    wraps=agent.get_storage_to_mem_handle,
+                ) as create_handle,
+                patch.object(
+                    agent, "post_non_blocking", wraps=agent.post_non_blocking
+                ) as transfer,
+                patch.object(agent, "release_handle", wraps=release_handle) as release,
+            ):
+                if failure_stage == "prepare":
+                    # Fail after the first object was prepared for loading.
+                    prepare.side_effect = [
+                        [2],
+                        RuntimeError("injected preparation failure"),
+                    ]
+                elif failure_stage == "create_handle":
+                    create_handle.side_effect = RuntimeError("injected handle failure")
+                elif failure_stage == "transfer":
+                    transfer.side_effect = RuntimeError("injected transfer failure")
+                else:
+                    release.side_effect = release_then_fail
+
+                task_id = adpt.submit_load_task(load_keys, load_objs)
+                assert wait_for_event_fd(adpt.get_load_event_fd())
+                result = adpt.query_load_result(task_id)
+                assert result is not None
+                assert not any(result.test(i) for i in range(3))
+                assert listener.accessed == []
+                assert adpt.query_load_result(task_id) is None
+                if failure_stage in ("transfer", "release_handle"):
+                    release.assert_called_once_with(transfer.call_args.args[0])
+                else:
+                    release.assert_not_called()
+                    transfer.assert_not_called()
+
+            # The failure must not poison metadata or prevent future loads.
+            task_id = adpt.submit_load_task(load_keys, load_objs)
+            assert wait_for_event_fd(adpt.get_load_event_fd())
+            result = adpt.query_load_result(task_id)
+            assert result is not None
+            assert [result.test(i) for i in range(3)] == [True, False, True]
+            assert listener.accessed == [keys]
+            assert torch.all(load_objs[0].raw_data == 1.0)
+            assert torch.all(load_objs[1].raw_data == 0.0)
+            assert torch.all(load_objs[2].raw_data == 2.0)
+        finally:
+            adpt.submit_unlock(keys)
+
     def test_query_load_result_returns_none_for_unknown_task(self, adapter):
         """Querying an unknown task ID should return None."""
         adpt, _ = adapter
