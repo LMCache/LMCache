@@ -13,7 +13,7 @@ import threading
 import torch
 
 # First Party
-from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
+from lmcache.utils import _lmcache_nvtx_annotate, get_device_identity, get_size_bytes
 from lmcache.v1.memory_allocators.buffer_allocator import BufferAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
@@ -728,6 +728,25 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
+    def owns_device(self, device_path: str) -> bool:
+        """Return whether an arena maps the physical device at a path.
+
+        Args:
+            device_path: Candidate device path or alias.
+
+        Returns:
+            ``True`` if a retained arena's fd matches, regardless of its state.
+            Invalid, missing, or unsupported paths return ``False``.
+        """
+        requested_identity = get_device_identity(device_path)
+        if requested_identity is None:
+            return False
+        with self.host_mem_lock:
+            for arena in self._arenas:
+                if get_device_identity(arena.fd) == requested_identity:
+                    return True
+        return False
+
     def add_device(self, device_path: str, size_in_bytes: int) -> DevDaxArenaStatus:
         """Map an additional Device-DAX device and add it to the pool.
 
@@ -743,7 +762,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             The status of the newly added arena.
 
         Raises:
-            ValueError: If ``device_path`` is empty, ``size_in_bytes`` is not
+            ValueError: If ``device_path`` is invalid, ``size_in_bytes`` is not
                 positive, or the device is already mapped.
             RuntimeError: If the allocator is closed or the device capacity is
                 smaller than ``size_in_bytes``.
@@ -753,13 +772,20 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError("device_path must be a non-empty string")
         if size_in_bytes <= 0:
             raise ValueError("size_in_bytes must be > 0")
+        requested_identity = get_device_identity(device_path)
+        if requested_identity is None:
+            raise ValueError("failed to identify DAX device")
+
         with self.host_mem_lock:
             if self._unregistered:
                 raise RuntimeError(
                     "cannot add a device to a closed DevDaxMemoryAllocator"
                 )
             for arena in self._arenas:
-                if arena.device_path == device_path:
+                if (
+                    arena.device_path == device_path
+                    or get_device_identity(arena.fd) == requested_identity
+                ):
                     raise ValueError(
                         f"Device-DAX arena {device_path} is already mapped"
                     )

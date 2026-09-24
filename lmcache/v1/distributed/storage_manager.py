@@ -4,8 +4,8 @@ Distributed multi-tier storage manager for MP mode
 """
 
 # Standard
-from contextlib import contextmanager
-from typing import Iterator, Optional
+from contextlib import contextmanager, nullcontext
+from typing import Any, Iterator, Optional, cast
 import threading
 import time
 
@@ -26,13 +26,17 @@ from lmcache.v1.distributed.config import (
     EvictionConfig,
     StorageManagerConfig,
     requires_single_l1_memory_region,
+    unwrap_l2_adapter_config,
 )
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError, strerror
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
-from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
+from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdapterConfigBase,
+    get_type_name_for_config,
+)
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2DeviceOwner,
     L2ReconfigurableAdapter,
@@ -100,7 +104,8 @@ class StorageManager:
         # and serde is transparent.
         self._l1_memory_desc = self._l1_manager.get_l1_memory_desc()
         self._next_adapter_id = 0
-        # Serializes add_l2_adapter / delete_l2_adapter against each other.
+        # Serializes L1/L2 additions and L2 adapter registration/deletion.
+        # Held from ownership check through add, before allocator/device locks.
         self._lifecycle_lock = threading.Lock()
         # Keeps capacity snapshots ordered by the point at which they are
         # built. Registration can publish concurrently with runtime changes.
@@ -910,8 +915,13 @@ class StorageManager:
         Returns:
             JSON-serializable operation result.
         """
-        adapter = self._get_reconfigurable_l2_adapter(adapter_index)
-        result = adapter.reconfigure(operation, payload)
+        with self._lifecycle_lock if operation == "add" else nullcontext():
+            adapter = self._get_reconfigurable_l2_adapter(adapter_index)
+            result = adapter.reconfigure(
+                operation,
+                payload,
+                device_owners=lambda path: self._device_owner_names(path, adapter),
+            )
         result["adapter_index"] = adapter_index
         self._publish_capacity_changed()
         return result
@@ -928,7 +938,8 @@ class StorageManager:
         Raises:
             ValueError: If the adapter registers a single L1 memory region
                 while L1 spans more than one (hybrid DRAM + Device-DAX, or
-                more than one Device-DAX arena).
+                more than one Device-DAX arena), or a DAX device is already
+                mapped by L1 or another L2 adapter.
         """
         with self._lifecycle_lock:
             # Mirror of the check in add_l1_devdax_device: a single-region
@@ -942,6 +953,16 @@ class StorageManager:
                     "Device-DAX, or more than one Device-DAX arena); remove the "
                     "additional Device-DAX regions before adding it"
                 )
+            # Check all DAX devices before the constructor maps any.
+            device_config = unwrap_l2_adapter_config(config)
+            if get_type_name_for_config(device_config) == "dax":
+                for device in cast(Any, device_config).devices:
+                    owners = self._device_owner_names(device.device_path)
+                    if owners:
+                        raise ValueError(
+                            f"device {device.device_path} is already mapped by "
+                            f"{', '.join(owners)}"
+                        )
             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
             for listener in self._registered_l2_listeners:
                 adapter.register_listener(listener)
@@ -1183,14 +1204,24 @@ class StorageManager:
 
         return None
 
-    def _l2_device_owner_names(self, device_path: str) -> list[str]:
+    def _device_owner_names(
+        self, device_path: str, exclude: Optional[L2ReconfigurableAdapter] = None
+    ) -> list[str]:
+        """Return other L1/L2 owners while the caller holds the lifecycle lock."""
+        owners = ["L1"] if self._l1_manager.owns_device(device_path) else []
+        return owners + self._l2_device_owner_names(device_path, exclude)
+
+    def _l2_device_owner_names(
+        self, device_path: str, exclude: Optional[L2ReconfigurableAdapter] = None
+    ) -> list[str]:
         """Return L2 type names that own the physical device at a path.
 
         The caller holds ``_lifecycle_lock`` so registered adapters cannot be
-        added or deleted between this check and the L1 mapping attempt.
+        added or deleted between this check and the mapping attempt.
 
         Args:
-            device_path: Candidate Device-DAX path for the L1 arena.
+            device_path: Candidate Device-DAX path.
+            exclude: L2 adapter whose own mappings are ignored.
 
         Returns:
             Registered adapter type names whose open device has the same
@@ -1199,7 +1230,11 @@ class StorageManager:
         owners: list[str] = []
         for _adapter_id, descriptor, adapter in self._snapshot_adapters():
             owner = self._unwrap_reconfigurable_l2_adapter(adapter)
-            if isinstance(owner, L2DeviceOwner) and owner.owns_device(device_path):
+            if (
+                owner is not exclude
+                and isinstance(owner, L2DeviceOwner)
+                and owner.owns_device(device_path)
+            ):
                 owners.append(descriptor.type_name)
         return owners
 

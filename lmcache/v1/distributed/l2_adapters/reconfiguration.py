@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 # Standard
-from typing import Optional, Protocol, TypedDict, runtime_checkable
+from typing import Callable, Optional, Protocol, TypedDict, runtime_checkable
 
 
 class L2ReconfigureError(RuntimeError):
@@ -68,12 +68,18 @@ class L2ReconfigurableAdapter(Protocol):
         self,
         operation: str,
         payload: dict[str, object],
+        *,
+        device_owners: Callable[[str], list[str]],
     ) -> dict:
         """Apply an adapter-specific runtime reconfiguration operation.
 
         Args:
             operation: Adapter-specific operation name.
             payload: Adapter-specific operation payload.
+            device_owners: Query other L1 or L2 owners on each add, before
+                acquiring the adapter's device lock. The caller holds the
+                lifecycle lock through add completion. The callback must not
+                reacquire it; it may acquire other owners' locks one at a time.
 
         Returns:
             JSON-serializable operation result.

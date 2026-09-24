@@ -148,6 +148,9 @@ such as ``"100GiB"``. ``remove`` supports these modes:
 ``resize`` supports ``migrate`` and ``evict`` modes. It does not support
 ``drain`` because resize completes synchronously.
 
+An add returns ``409 Conflict`` when L1 or another DAX L2 adapter already
+maps the same physical device, including through an alias.
+
 Hotplug operations are lock-safe by default. A remove or shrink that would
 delete externally locked or borrowed slots returns ``409 Conflict`` unless
 ``force`` is set. A migration that has no active destination capacity returns

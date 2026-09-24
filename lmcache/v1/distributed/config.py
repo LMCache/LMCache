@@ -31,13 +31,30 @@ _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS = {
 }
 
 
+def unwrap_l2_adapter_config(
+    adapter_config: L2AdapterConfigBase,
+) -> L2AdapterConfigBase:
+    """Return the innermost L2 adapter config.
+
+    Args:
+        adapter_config: Config whose ``inner_config`` wrappers to follow.
+
+    Returns:
+        The innermost config, or the input if it has no wrapper.
+    """
+    while isinstance(
+        inner_config := getattr(adapter_config, "inner_config", None),
+        L2AdapterConfigBase,
+    ):
+        adapter_config = inner_config
+    return adapter_config
+
+
 def requires_single_l1_memory_region(
     adapter_config: L2AdapterConfigBase,
 ) -> str | None:
     """Return the adapter type requiring a single L1 memory region, if any."""
-    inner_config = getattr(adapter_config, "inner_config", None)
-    if isinstance(inner_config, L2AdapterConfigBase):
-        return requires_single_l1_memory_region(inner_config)
+    adapter_config = unwrap_l2_adapter_config(adapter_config)
     type_name = get_type_name_for_config(adapter_config)
     if type_name in _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS:
         return type_name

@@ -200,10 +200,10 @@ while the path is still draining is safe and returns the current status; once
 the arena has been unmapped the path is no longer known and a repeat raises the
 404-mapped lookup error.
 
-`add_device` rejects a path that is already registered, and `remove_device`
-rejects the primary arena (the initial device in pure Device-DAX mode). Status
-and removal use the exact path supplied when adding the arena. Callers must
-avoid adding the same physical device under different paths.
+`add_device` rejects a physical device that is already mapped, including its
+aliases, and `remove_device` rejects the primary arena (the initial device in
+pure Device-DAX mode). Status and removal use the exact path supplied when
+adding the arena.
 
 The manager translates request conflicts into `L1ReconfigureError` (409, or
 404 for an unregistered path). Devices must already be provisioned with the

@@ -1005,6 +1005,20 @@ class L1Manager:
         """
         return self._require_devdax_memory_manager().get_arena_status(device_path)
 
+    def owns_device(self, device_path: str) -> bool:
+        """Return whether L1 maps the physical device at a path.
+
+        Args:
+            device_path: Candidate device path or alias.
+
+        Returns:
+            ``True`` while the device remains mapped; ``False`` for non-DAX L1.
+        """
+        manager = self._memory_manager
+        return isinstance(manager, DevDaxL1MemoryManager) and manager.owns_device(
+            device_path
+        )
+
     def memory_region_count(self) -> int:
         """Return the number of memory regions backing L1.
 

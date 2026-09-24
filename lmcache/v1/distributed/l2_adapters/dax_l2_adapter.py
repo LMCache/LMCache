@@ -7,9 +7,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, Optional, Protocol, cast
+from typing import TYPE_CHECKING, Callable, Literal, Optional, Protocol, cast
 import os
-import stat
 import threading
 
 if TYPE_CHECKING:
@@ -18,6 +17,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.utils import get_device_identity
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
@@ -60,24 +60,6 @@ HotplugRemoveMode = Literal["migrate", "evict", "drain"]
 HotplugResizeMode = Literal["migrate", "evict"]
 DaxHotplugError = L2ReconfigureError
 _DAX_RECONFIGURE_OPERATIONS = ["status", "add", "remove", "resize"]
-_DaxDeviceIdentity = tuple[bool, int, int]
-
-
-def _device_identity(fd_status: os.stat_result) -> _DaxDeviceIdentity | None:
-    """Return the physical identity of a supported DAX backing object.
-
-    Args:
-        fd_status: Result of ``stat`` or ``fstat`` for the backing object.
-
-    Returns:
-        A comparable identity tuple, or ``None`` for an unsupported file type.
-    """
-    if stat.S_ISCHR(fd_status.st_mode):
-        return True, fd_status.st_rdev, 0
-    if stat.S_ISREG(fd_status.st_mode):
-        return False, fd_status.st_dev, fd_status.st_ino
-    return None
-
 
 _READABLE_STATES: set[DaxDeviceState] = {
     "active",
@@ -319,7 +301,8 @@ class DaxL2Adapter(L2AdapterInterface):
 
         Raises:
             RuntimeError: If a configured DAX device cannot be opened or mapped.
-            ValueError: If a mapped arena cannot fit at least one slot.
+            ValueError: If a mapped arena cannot fit at least one slot, or two
+                configured devices map the same physical device.
         """
         super().__init__(
             max_capacity_bytes=sum(d.max_dax_size_bytes for d in config.devices)
@@ -359,6 +342,10 @@ class DaxL2Adapter(L2AdapterInterface):
         try:
             with self._device_lock:
                 for device_config in config.devices:
+                    if self.owns_device(device_config.device_path):
+                        raise ValueError(
+                            f"device {device_config.device_path} is already mapped"
+                        )
                     self._add_device_entry_locked(
                         device_path=device_config.device_path,
                         size_bytes=device_config.max_dax_size_bytes,
@@ -419,10 +406,7 @@ class DaxL2Adapter(L2AdapterInterface):
             paths return ``False`` so their normal add validation remains the
             error boundary.
         """
-        try:
-            requested_identity = _device_identity(os.stat(device_path))
-        except (OSError, ValueError):
-            return False
+        requested_identity = get_device_identity(device_path)
         if requested_identity is None:
             return False
 
@@ -431,11 +415,7 @@ class DaxL2Adapter(L2AdapterInterface):
                 fd = entry.core.fd
                 if fd is None:
                     continue
-                try:
-                    mapped_identity = _device_identity(os.fstat(fd))
-                except OSError:
-                    continue
-                if mapped_identity == requested_identity:
+                if get_device_identity(fd) == requested_identity:
                     return True
         return False
 
@@ -768,25 +748,34 @@ class DaxL2Adapter(L2AdapterInterface):
         self,
         operation: str,
         payload: dict[str, object],
+        *,
+        device_owners: Callable[[str], list[str]],
     ) -> dict:
         """Apply one generic runtime reconfiguration operation.
 
         Args:
             operation: One of ``status``, ``add``, ``remove``, or ``resize``.
             payload: DAX-specific operation payload.
+            device_owners: Query other L1 or L2 owners on each add. The caller
+                must hold the lifecycle lock from this check until add completes.
 
         Returns:
             JSON-serializable operation result.
 
         Raises:
-            L2ReconfigureError: If the operation or payload is invalid, or if the
-                underlying DAX hotplug operation fails.
+            L2ReconfigureError: If another owner maps the device (409), the
+                operation or payload is invalid, or DAX hotplug fails.
         """
         if operation == "status":
             return dict(self.reconfigure_status())
 
         if operation == "add":
             device_path = _reconfigure_device_path(payload)
+            owners = device_owners(device_path)
+            if owners:
+                raise L2ReconfigureError(
+                    409, f"physical device is already mapped by {', '.join(owners)}"
+                )
             size_bytes = _reconfigure_size_bytes(payload)
             return self.hotplug_add_device(device_path, size_bytes)
 
@@ -847,13 +836,19 @@ class DaxL2Adapter(L2AdapterInterface):
         if size_bytes // self._config.slot_bytes <= 0:
             raise L2ReconfigureError(400, "size_bytes does not fit one slot")
 
+        requested_identity = get_device_identity(device_path)
+        if requested_identity is None:
+            raise L2ReconfigureError(400, "failed to identify DAX device")
+
         with self._device_lock:
             for index, entry in enumerate(self._devices):
-                if entry.device_path != device_path or entry.state in {
-                    "closed",
-                    "removed",
-                    "failed",
-                }:
+                if entry.state in {"closed", "removed", "failed"}:
+                    continue
+                same_device = (
+                    entry.core.fd is not None
+                    and get_device_identity(entry.core.fd) == requested_identity
+                )
+                if not same_device and entry.device_path != device_path:
                     continue
                 if entry.max_dax_size_bytes == size_bytes:
                     return {

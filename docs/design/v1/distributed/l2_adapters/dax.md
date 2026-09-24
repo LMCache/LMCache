@@ -96,6 +96,10 @@ Add:
 3. Append a `DaxDeviceEntry(state="active")`.
 4. Return per-device status. Existing KV entries stay on their current devices.
 
+Re-adding the same device at the same size, including through an alias, returns
+its existing entry without mapping it again. Use the returned
+`device_path` for remove or resize; the alias is not registered as another path.
+
 Remove with migration:
 
 1. Mark the source device `draining` so new stores do not choose it.

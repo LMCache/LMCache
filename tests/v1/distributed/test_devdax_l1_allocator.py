@@ -7,12 +7,16 @@ manager wiring while keeping CI portable.
 """
 
 # Standard
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 import argparse
 import gc
 import json
 import os
+import stat
+import threading
 
 # Third Party
 import pytest
@@ -42,12 +46,14 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.dax_l2_adapter import (
     DaxDeviceConfig,
+    DaxL2Adapter,
     DaxL2AdapterConfig,
 )
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2AdapterConfig,
 )
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
+from lmcache.v1.distributed.l2_adapters.reconfiguration import L2ReconfigureError
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
@@ -59,6 +65,7 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
 )
 from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.storage_backend.dax.core import DaxCore
 import lmcache.v1.memory_management as memory_management
 
 
@@ -454,6 +461,24 @@ def _mock_l2_config() -> MockL2AdapterConfig:
     return MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
 
 
+def _dax_l2_config(*paths: str) -> DaxL2AdapterConfig:
+    return DaxL2AdapterConfig(
+        devices=[DaxDeviceConfig(path, 4096 / (1024**3)) for path in paths],
+        slot_bytes=4096,
+        hotplug_enabled=True,
+    )
+
+
+def _add_l2_dax_device(
+    storage_manager: StorageManager, path: str, route: str
+) -> object:
+    if route == "hotplug":
+        return storage_manager.reconfigure_l2_adapter(
+            0, "add", {"device_path": path, "size_bytes": 4096}
+        )
+    return storage_manager.add_l2_adapter(_dax_l2_config(path))
+
+
 _SINGLE_REGION_PREDICATE = (
     "lmcache.v1.distributed.storage_manager.requires_single_l1_memory_region"
 )
@@ -510,6 +535,148 @@ def test_storage_manager_rejects_l1_add_of_l2_dax_device_alias(
         statuses = storage_manager.get_l1_devdax_arena_statuses()
         assert [status.device_path for status in statuses] == [primary]
     finally:
+        storage_manager.close()
+
+
+@pytest.mark.parametrize("route", ["hotplug", "registration"])
+def test_storage_manager_rejects_l2_add_of_other_l2_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    owned = _make_mmap_file(tmp_path, size=4096, name="owned.bin")
+    alias = tmp_path / "alias.bin"
+    os.link(owned, alias)
+    storage_manager = _pure_devdax_storage_manager(
+        primary, [_dax_l2_config(), _dax_l2_config(owned)]
+    )
+
+    def unexpected_mapping(*args: object, **kwargs: object) -> None:
+        pytest.fail("ownership conflict must be rejected before mapping")
+
+    try:
+        monkeypatch.setattr(DaxCore, "__init__", unexpected_mapping)
+        error = L2ReconfigureError if route == "hotplug" else ValueError
+        with pytest.raises(error, match="mapped by dax") as rejected:
+            _add_l2_dax_device(storage_manager, str(alias), route)
+        if isinstance(rejected.value, L2ReconfigureError):
+            assert rejected.value.status_code == 409
+        if route == "hotplug":
+            repeated = storage_manager.reconfigure_l2_adapter(
+                1, "add", {"device_path": owned, "size_bytes": 4096}
+            )
+            assert repeated["status"] == "ok"
+            assert repeated["device"]["device_path"] == owned
+    finally:
+        storage_manager.close()
+
+
+@pytest.mark.parametrize("route", ["hotplug", "registration"])
+def test_storage_manager_rejects_l2_add_after_empty_l1_gains_device(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+) -> None:
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    storage_manager = StorageManager(
+        StorageManagerConfig(
+            l1_manager_config=L1ManagerConfig(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=4096,
+                    use_lazy=False,
+                    shm_name="",
+                    align_bytes=4096,
+                    devdax_path=primary,
+                    devdax_size_in_bytes=4096,
+                )
+            ),
+            eviction_config=EvictionConfig(eviction_policy="LRU"),
+        )
+    )
+    try:
+        storage_manager.remove_l1_devdax_device(primary)
+        assert storage_manager.get_l1_devdax_arena_statuses() == []
+        storage_manager.add_l2_adapter(_dax_l2_config())
+        storage_manager.add_l1_devdax_device(primary, 4096)
+
+        def unexpected_mapping(*args: object, **kwargs: object) -> None:
+            pytest.fail("ownership conflict must be rejected before mapping")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(DaxCore, "__init__", unexpected_mapping)
+            error = L2ReconfigureError if route == "hotplug" else ValueError
+            with pytest.raises(error, match="mapped by L1") as rejected:
+                _add_l2_dax_device(storage_manager, primary, route)
+            if isinstance(rejected.value, L2ReconfigureError):
+                assert rejected.value.status_code == 409
+        storage_manager.remove_l1_devdax_device(primary)
+        _add_l2_dax_device(storage_manager, primary, route)
+        with pytest.raises(L1ReconfigureError) as conflict:
+            storage_manager.add_l1_devdax_device(primary, 4096)
+        assert conflict.value.status_code == 409
+    finally:
+        storage_manager.close()
+
+
+@pytest.mark.parametrize("route", ["hotplug", "registration"])
+@pytest.mark.parametrize("first_tier", ["l1", "l2"])
+def test_storage_manager_serializes_competing_dax_adds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+    first_tier: str,
+) -> None:
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    device = _make_mmap_file(tmp_path, size=4096, name="candidate.bin")
+    storage_manager = _pure_devdax_storage_manager(primary, [_dax_l2_config()])
+    paused = threading.Event()
+    release = threading.Event()
+    contender_started = threading.Event()
+    mapping_class, method = (
+        (DevDaxL1MemoryManager, "add_device")
+        if first_tier == "l1"
+        else (DaxL2Adapter, "hotplug_add_device" if route == "hotplug" else "__init__")
+    )
+    original_map = getattr(mapping_class, method)
+
+    def delayed_mapping(self: object, *args: Any, **kwargs: Any) -> Any:
+        paused.set()
+        assert release.wait(10), "mapping was not released"
+        return original_map(self, *args, **kwargs)
+
+    monkeypatch.setattr(mapping_class, method, delayed_mapping)
+
+    def add(tier: str) -> object:
+        if tier != first_tier:
+            contender_started.set()
+        if tier == "l1":
+            return storage_manager.add_l1_devdax_device(device, 4096)
+        return _add_l2_dax_device(storage_manager, device, route)
+
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
+        winner = executor.submit(add, first_tier)
+        assert paused.wait(5), "first add did not reach mapping"
+        other_tier = "l2" if first_tier == "l1" else "l1"
+        loser = executor.submit(add, other_tier)
+        assert contender_started.wait(5)
+        with pytest.raises(TimeoutError):
+            loser.result(timeout=0.1)
+        release.set()
+        winner.result(timeout=5)
+        error = (
+            L1ReconfigureError
+            if other_tier == "l1"
+            else L2ReconfigureError
+            if route == "hotplug"
+            else ValueError
+        )
+        with pytest.raises(error, match="mapped by L[12]"):
+            loser.result(timeout=5)
+        statuses = storage_manager.get_l1_devdax_arena_statuses()
+        assert any(s.device_path == device for s in statuses) == (first_tier == "l1")
+    finally:
+        release.set()
+        executor.shutdown(wait=True)
         storage_manager.close()
 
 
@@ -1167,6 +1334,8 @@ def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
     lingering_view = second[0].tensor
 
     manager.remove_device(extra)
+    # A draining arena remains owned while allocations are live.
+    assert manager.owns_device(extra)
     manager.free(second)
     del second
     gc.collect()
@@ -1179,6 +1348,8 @@ def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
         DevDaxArenaState.DRAINING,
     ]
     assert statuses[1].active_allocations == 0
+    # Ownership persists while an external view prevents unmapping.
+    assert manager.owns_device(extra)
 
     # Once the view is gone, the next free retries and reaps the arena.
     del lingering_view
@@ -1187,6 +1358,8 @@ def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
     del first
     gc.collect()
     assert [status.device_path for status in manager.get_arena_statuses()] == [primary]
+    # Ownership ends after the arena is actually unmapped.
+    assert not manager.owns_device(extra)
     manager.close()
 
 
@@ -1292,17 +1465,56 @@ def test_remove_primary_arena_rejected(tmp_path):
     manager.close()
 
 
-def test_add_duplicate_device_rejected(tmp_path):
+@pytest.mark.parametrize("alias_kind", ["exact", "symlink", "hardlink"])
+def test_add_duplicate_device_rejected(tmp_path: Path, alias_kind: str) -> None:
     primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
     manager = _pure_devdax_manager(primary)
 
     extra = _make_mmap_file(tmp_path, size=4096, name="extra.bin")
+    alias = str(tmp_path / "extra-alias.bin")
+    if alias_kind == "symlink":
+        os.symlink(extra, alias)
+    elif alias_kind == "hardlink":
+        os.link(extra, alias)
     manager.add_device(extra, 4096)
-    with pytest.raises(L1ReconfigureError, match="already mapped"):
-        manager.add_device(extra, 4096)
+    with pytest.raises(L1ReconfigureError, match="already mapped") as exc_info:
+        manager.add_device(extra if alias_kind == "exact" else alias, 4096)
 
+    assert exc_info.value.status_code == 409
     assert len(manager.get_arena_statuses()) == 2
     manager.close()
+
+
+@pytest.mark.parametrize("same_device", [True, False])
+def test_owns_device_uses_character_device_number(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_device: bool
+) -> None:
+    primary = _make_mmap_file(tmp_path, size=4096)
+    manager = _pure_devdax_manager(primary)
+    original_stat, original_fstat = os.stat, os.fstat
+    mapped = original_stat(primary)
+
+    def device_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if path == "/dev/alias":
+            return SimpleNamespace(
+                st_mode=stat.S_IFCHR, st_rdev=123 if same_device else 124
+            )
+        return original_stat(path, *args, **kwargs)
+
+    def device_fstat(fd: int) -> Any:
+        info = original_fstat(fd)
+        if (info.st_dev, info.st_ino) == (mapped.st_dev, mapped.st_ino):
+            return SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=123)
+        return info
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "stat", device_stat)
+            patch.setattr(os, "fstat", device_fstat)
+            assert manager.owns_device("/dev/alias") is same_device
+            assert not manager.owns_device(str(tmp_path / "missing.bin"))
+    finally:
+        manager.close()
 
 
 def test_add_device_validates_arguments(tmp_path):

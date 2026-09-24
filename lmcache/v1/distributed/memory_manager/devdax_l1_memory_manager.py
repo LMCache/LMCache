@@ -99,6 +99,17 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             align_bytes=self._align_bytes,
         )
 
+    def owns_device(self, device_path: str) -> bool:
+        """Return whether the allocator maps the physical device at a path.
+
+        Args:
+            device_path: Candidate device path or alias.
+
+        Returns:
+            ``True`` while the device remains mapped; otherwise ``False``.
+        """
+        return cast(DevDaxMemoryAllocator, self._allocator).owns_device(device_path)
+
     def add_device(self, device_path: str, size_in_bytes: int) -> DevDaxArenaStatus:
         """Map an additional Device-DAX device into the L1 arena pool at runtime.
 
