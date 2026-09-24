@@ -119,7 +119,6 @@ ignore = [
 # why mixed directories are listed file by file, and "<dir>/**" is used only
 # where every file below the directory still violates the rule.
 # Tracking issue: https://github.com/LMCache/LMCache/issues/5118
-".buildkite/correctness/async_request.py" = ["G004"]
 "benchmarks/multi_round_qa/multi-round-qa.py" = ["G004"]
 "benchmarks/multi_round_qa/utils.py" = ["G004"]
 "benchmarks/storage_backend_io/**" = ["G004"]
