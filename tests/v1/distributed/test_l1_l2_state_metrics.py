@@ -18,9 +18,9 @@ from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
 )
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.internal_api import PrefetchRequestSpec
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
@@ -36,9 +36,9 @@ from lmcache.v1.distributed.storage_controllers.store_controller import (
     StoreController,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     DefaultStorePolicy,
 )
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 
 # Importing this sets the process-wide MeterProvider with an
@@ -76,9 +76,9 @@ def make_adapter(bandwidth_gb: float = 10.0) -> MockL2Adapter:
     return MockL2Adapter(config)
 
 
-def make_descriptor(index: int) -> AdapterDescriptor:
+def make_descriptor(index: int) -> L2AdapterDescriptor:
     config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
-    return AdapterDescriptor(index=index, config=config)
+    return L2AdapterDescriptor(index=index, config=config)
 
 
 def wait_for_condition(predicate, timeout: float = 5.0) -> bool:
@@ -99,7 +99,6 @@ def write_keys_to_l1(
         keys=keys,
         is_temporary=[False] * len(keys),
         layout_desc=layout,
-        mode="new",
     )
     written = [k for k, (e, m) in results.items() if m is not None]
     if written:

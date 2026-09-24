@@ -166,6 +166,28 @@ With an implicit timestamped output path under ``$TMPDIR``:
 The trace file is closed cleanly on shutdown (SIGTERM is handled by
 the EventBus stop path).
 
+Capturing the cache-event stream
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``--trace-level events`` records what this server would report to an MP
+coordinator: every cache-event batch (stores, deletes, accesses, capacity
+declarations) in the exact form ``POST /events`` carries. No coordinator is
+needed, so a fleet that runs without one can be captured and replayed later
+against a coordinator or a test double.
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 --eviction-policy LRU \
+        --trace-level events --trace-output /data/events-$(hostname).lct
+
+One file is written per server; capture every server in the fleet. When
+``--coordinator-url`` and ``--coordinator-event-reporting`` are also set, the
+same batches go to both the coordinator and the file. ``lmcache trace info``
+prints instances, restarts, batches by type and tier, and bytes stored.
+Store entries carry the chunks' token ids, which are the prompt: treat the
+file as sensitive.
+
 Replay
 ^^^^^^
 

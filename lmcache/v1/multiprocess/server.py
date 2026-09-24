@@ -135,11 +135,11 @@ class MPCacheServer:
                 }
         return None
 
-    def clear(self) -> None:
+    def clear(self, force: bool = False) -> None:
         """Used by ``/cache/clear``; delegates to :class:`ManagementModule`."""
         for module in self._modules:
             if isinstance(module, ManagementModule):
-                module.clear()
+                module.clear(force=force)
                 return
         raise RuntimeError("MPCacheServer.clear: no ManagementModule registered")
 
@@ -336,7 +336,9 @@ def run_cache_server(
 
     init_gc_monitor(obs_config.gc_monitor)
 
-    maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
+    maybe_initialize_trace_recorder(
+        event_bus, obs_config, storage_manager_config, instance_id=mp_config.instance_id
+    )
 
     # When the engine-driven path is loaded (auto or engine_driven):
     # apply shm_name from mp_config and verify capacity.
@@ -373,6 +375,7 @@ def run_cache_server(
         storage_manager_config=storage_manager_config,
         chunk_size=mp_config.chunk_size,
         hash_algorithm=mp_config.hash_algorithm,
+        null_block_id=mp_config.null_block_id,
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
     )
