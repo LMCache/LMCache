@@ -35,20 +35,19 @@ class NeuronDeviceSpec(DeviceSpec):
     def is_available(self) -> bool:
         """Check Neuron availability.
 
-        Imports ``torch_neuronx`` to trigger
-        ``rename_privateuse1_backend("neuron")``, which registers
-        ``torch.neuron``.  Without this import the device module does
-        not exist on ``torch`` and detection silently fails.
+        Uses ``torch.neuron`` if already registered (e.g. by vllm-neuron),
+        else imports ``torch_neuronx`` to register it.
         """
         try:
             # Third Party
             import torch
 
-            try:
-                # Third Party
-                import torch_neuronx  # noqa: F401 — side-effect: registers torch.neuron
-            except ImportError:
-                return False
+            if not hasattr(torch, "neuron"):
+                try:
+                    # Third Party
+                    import torch_neuronx  # noqa: F401 — side-effect: registers torch.neuron
+                except ImportError:
+                    return False
             return hasattr(torch, "neuron") and torch.neuron.is_available()  # type: ignore[attr-defined]
         except Exception:
             return False
