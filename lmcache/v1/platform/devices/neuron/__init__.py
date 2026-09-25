@@ -12,9 +12,15 @@ spec.
 # Future
 from __future__ import annotations
 
+# Standard
+from typing import TYPE_CHECKING
+
 # First Party
-from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.platform.base.device_ops import DeviceOps
 
 
 class NeuronDeviceSpec(DeviceSpec):
@@ -30,7 +36,10 @@ class NeuronDeviceSpec(DeviceSpec):
 
     @property
     def ops_cls(self) -> type[DeviceOps]:
-        return DeviceOps
+        # First Party
+        from lmcache.v1.platform.devices.neuron.device_ops import NeuronDeviceOps
+
+        return NeuronDeviceOps
 
     def is_available(self) -> bool:
         """Check Neuron availability.

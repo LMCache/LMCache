@@ -18,8 +18,8 @@ import pytest
 # First Party
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform._device_detect import _detect_device, get_device_spec
-from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.devices.neuron import NeuronDeviceSpec
+from lmcache.v1.platform.devices.neuron.device_ops import NeuronDeviceOps
 import lmcache.v1.platform as platform_pkg
 
 
@@ -68,7 +68,7 @@ def test_neuron_spec_properties(neuron_spec: NeuronDeviceSpec) -> None:
     """NeuronDeviceSpec exposes the correct device identity."""
     assert neuron_spec.device_type == "neuron"
     assert neuron_spec.torch_module_name == "neuron"
-    assert neuron_spec.ops_cls is DeviceOps
+    assert neuron_spec.ops_cls is NeuronDeviceOps
 
 
 # -- Registry integration --------------------------------------------------
@@ -83,7 +83,7 @@ def test_neuron_registry_integration(
         "_DEVICE_REGISTRY",
         {**isolated_registry, "neuron": NeuronDeviceSpec()},
     )
-    assert type(resolve_device_ops("neuron")) is DeviceOps
+    assert type(resolve_device_ops("neuron")) is NeuronDeviceOps
 
 
 # -- Availability guards ---------------------------------------------------
