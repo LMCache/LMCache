@@ -1,0 +1,61 @@
+name: Publish Artifacts
+description: Download an artifact and publish it to a rolling GitHub prerelease.
+
+inputs:
+  artifact_name:
+    description: Name of the GitHub Actions artifact to download.
+    required: true
+  artifact_path:
+    description: Directory where the artifact is downloaded.
+    required: true
+  release_tag:
+    description: Git tag of the rolling prerelease to replace.
+    required: true
+  release_title:
+    description: Title for the prerelease.
+    required: true
+  release_notes:
+    description: Markdown release notes.
+    required: true
+  asset_glob:
+    description: Glob matching the release assets after artifact download.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ inputs.artifact_path }}
+
+    - name: Publish rolling prerelease
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: ${{ inputs.release_tag }}
+        RELEASE_TITLE: ${{ inputs.release_title }}
+        RELEASE_NOTES: ${{ inputs.release_notes }}
+        ASSET_GLOB: ${{ inputs.asset_glob }}
+      run: |
+        set -euo pipefail
+        current_date=$(date +'%Y-%m-%d')
+        RELEASE_TITLE=${RELEASE_TITLE//\{\{date\}\}/${current_date}}
+        RELEASE_NOTES=${RELEASE_NOTES//\{\{date\}\}/${current_date}}
+        mapfile -t assets < <(compgen -G "${ASSET_GLOB}" || true)
+        if (( ${#assets[@]} == 0 )); then
+          echo "No release assets matched: ${ASSET_GLOB}" >&2
+          exit 1
+        fi
+
+        if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+          gh release delete "${RELEASE_TAG}" \
+            --yes --cleanup-tag --repo "${GITHUB_REPOSITORY}"
+        fi
+        gh release create "${RELEASE_TAG}" \
+          --repo "${GITHUB_REPOSITORY}" \
+          --title "${RELEASE_TITLE}" \
+          --notes "${RELEASE_NOTES}" \
+          --prerelease \
+          "${assets[@]}"
