@@ -6,6 +6,7 @@ shared by SHM-based transports.
 """
 
 # Standard
+from collections.abc import Callable
 import os
 
 # Third Party
@@ -70,6 +71,48 @@ def test_open_pool_as_mmap_zero_copy_view():
             mm.close()
     finally:
         shm_munmap(addr, nbytes)
+        shm_unlink(name)
+
+
+@pytest.mark.parametrize(
+    "open_segment",
+    [shm_map_readwrite, shm_open_pool_as_mmap],
+)
+def test_mapping_rejects_size_above_segment_capacity(
+    open_segment: Callable[[str, int], object],
+) -> None:
+    name = _unique_name("oversize")
+    addr = shm_create_readwrite(name, 4096)
+    try:
+        with pytest.raises(ValueError, match="exceeds segment capacity"):
+            open_segment(name, 1024 * 1024)
+    finally:
+        shm_munmap(addr, 4096)
+        shm_unlink(name)
+
+
+@pytest.mark.parametrize("nbytes", [0, -1])
+def test_create_rejects_non_positive_size(nbytes: int) -> None:
+    name = _unique_name(f"create{nbytes}")
+    with pytest.raises(ValueError, match="must be positive"):
+        shm_create_readwrite(name, nbytes)
+
+
+@pytest.mark.parametrize("nbytes", [0, -1])
+@pytest.mark.parametrize(
+    "open_segment",
+    [shm_map_readwrite, shm_open_pool_as_mmap],
+)
+def test_mapping_rejects_non_positive_size(
+    open_segment: Callable[[str, int], object], nbytes: int
+) -> None:
+    name = _unique_name(f"map{nbytes}")
+    addr = shm_create_readwrite(name, 4096)
+    try:
+        with pytest.raises(ValueError, match="must be positive"):
+            open_segment(name, nbytes)
+    finally:
+        shm_munmap(addr, 4096)
         shm_unlink(name)
 
 
