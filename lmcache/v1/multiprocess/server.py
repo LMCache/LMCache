@@ -29,6 +29,7 @@ from lmcache.v1.mp_observability.config import (
     add_observability_args,
     init_observability,
     parse_args_to_observability_config,
+    resolve_grpc_metrics_enabled,
 )
 from lmcache.v1.mp_observability.gc_monitor import (
     init_gc_monitor,
@@ -329,6 +330,11 @@ def run_cache_server(
     # metrics/traces and coordinator membership all key on the same id.
     if obs_config.service_instance_id is None:
         obs_config.service_instance_id = mp_config.instance_id
+    if obs_config.grpc_metrics_enabled is None:
+        obs_config.grpc_metrics_enabled = resolve_grpc_metrics_enabled(
+            obs_config.grpc_metrics_enabled,
+            mp_config.transport,
+        )
 
     event_bus = init_observability(
         obs_config, start_prometheus_http_server=start_prometheus_http_server

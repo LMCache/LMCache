@@ -19,9 +19,35 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.v1.mp_observability.gc_monitor import GCMonitorConfig
-from lmcache.v1.mp_observability.subscribers.logging.lookup_hash import (
-    LookupHashLogConfig,
-)
+
+
+@dataclass
+class LookupHashLogConfig:
+    """Configuration for lookup hash file logging.
+
+    When ``output_dir`` is non-empty, chunk hashes computed during
+    lookup are written to rotating JSONL files for offline analysis.
+    """
+
+    output_dir: str = ""
+    """Directory to write lookup hash JSONL files.
+    Empty string disables logging."""
+
+    rotation_interval_sec: int = 6 * 3600
+    """Time interval in seconds before rotating to a new file
+    (default 6 hours)."""
+
+    rotation_max_size: int = 100 * 1024 * 1024
+    """Max file size in bytes before rotating even if the time
+    interval has not elapsed (default 100MB)."""
+
+    max_files: int = 100
+    """Max number of log files to keep before deleting oldest."""
+
+    @property
+    def enabled(self) -> bool:
+        """Whether lookup hash logging is enabled."""
+        return bool(self.output_dir)
 
 
 @dataclass
@@ -40,6 +66,14 @@ class ObservabilityConfig:
 
     metrics_enabled: bool = True
     """Register metrics subscribers (OTel counters / histograms)."""
+
+    grpc_metrics_enabled: bool | None = None
+    """Register gRPC Python runtime metrics with the OTel provider.
+
+    ``None`` means the MP server resolves this from its request transport:
+    enabled for gRPC, disabled for ZMQ. Non-MP callers leave it disabled
+    unless they opt in explicitly.
+    """
 
     logging_enabled: bool = True
     """Register logging subscribers."""
@@ -129,6 +163,16 @@ def add_observability_args(
         action="store_true",
         default=False,
         help="Disable metrics subscribers (OTel counters).",
+    )
+    group.add_argument(
+        "--disable-grpc-metrics",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable gRPC Python runtime metrics. Has no effect when "
+            "--disable-metrics is set. By default, MP server enables "
+            "these metrics only when --transport grpc is selected."
+        ),
     )
     group.add_argument(
         "--disable-logging",
@@ -306,17 +350,13 @@ def parse_args_to_observability_config(
         enabled=not args.disable_observability,
         max_queue_size=args.event_bus_queue_size,
         metrics_enabled=not args.disable_metrics,
+        grpc_metrics_enabled=False if args.disable_grpc_metrics else None,
         logging_enabled=not args.disable_logging,
         tracing_enabled=args.enable_tracing,
         otlp_endpoint=args.otlp_endpoint,
         prometheus_port=args.prometheus_port,
         metrics_sample_rate=args.metrics_sample_rate,
-        lookup_hash_log=LookupHashLogConfig(
-            output_dir=args.lookup_hash_log_dir,
-            rotation_interval_sec=args.lookup_hash_log_rotation_interval,
-            rotation_max_size=args.lookup_hash_log_rotation_max_size,
-            max_files=args.lookup_hash_log_max_files,
-        ),
+        lookup_hash_log=_build_lookup_hash_log_config(args),
         gc_monitor=GCMonitorConfig(
             enabled=args.enable_gc_monitor,
             min_pause_ms=args.gc_monitor_min_pause_ms,
@@ -344,6 +384,33 @@ def parse_args_to_observability_config(
         raise ValueError("--extra-logging-interval must be > 0.")
 
     return config
+
+
+def _build_lookup_hash_log_config(args: argparse.Namespace) -> LookupHashLogConfig:
+    return LookupHashLogConfig(
+        output_dir=args.lookup_hash_log_dir,
+        rotation_interval_sec=args.lookup_hash_log_rotation_interval,
+        rotation_max_size=args.lookup_hash_log_rotation_max_size,
+        max_files=args.lookup_hash_log_max_files,
+    )
+
+
+def resolve_grpc_metrics_enabled(
+    grpc_metrics_enabled: bool | None,
+    transport: str,
+) -> bool:
+    """Resolve the gRPC runtime metrics auto setting for a request transport.
+
+    Args:
+        grpc_metrics_enabled: User/programmatic setting. ``None`` means auto.
+        transport: MP request transport name.
+
+    Returns:
+        True when gRPC runtime metrics should be registered.
+    """
+    if grpc_metrics_enabled is not None:
+        return grpc_metrics_enabled
+    return transport == "grpc"
 
 
 def init_observability(
@@ -386,6 +453,7 @@ def init_observability(
             prometheus_port=obs_config.prometheus_port,
             resource_attributes=resource_attrs,
             start_http_server=start_prometheus_http_server,
+            enable_grpc_metrics=bool(obs_config.grpc_metrics_enabled),
         )
 
     if obs_config.enabled and obs_config.tracing_enabled:

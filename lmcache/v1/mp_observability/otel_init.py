@@ -16,15 +16,19 @@ from __future__ import annotations
 # Standard
 from collections.abc import Callable
 from typing import TYPE_CHECKING
+import sys
 
 if TYPE_CHECKING:
     # Third Party
+    from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.resources import Resource
 
 # First Party
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
+
+_GRPC_OTEL_PLUGIN: object | None = None
 
 
 def _build_resource(resource_attributes: dict[str, str] | None) -> "Resource":
@@ -46,6 +50,7 @@ def init_otel_metrics(
     prometheus_port: int | None = None,
     resource_attributes: dict[str, str] | None = None,
     start_http_server: bool = True,
+    enable_grpc_metrics: bool = False,
 ) -> None:
     """Set up the OpenTelemetry MeterProvider.
 
@@ -64,6 +69,8 @@ def init_otel_metrics(
         start_http_server: Whether to start a standalone Prometheus
             HTTP server.  Set to ``False`` when metrics are already
             served by an external HTTP framework (e.g. FastAPI).
+        enable_grpc_metrics: Whether to register gRPC Python's
+            OpenTelemetry metrics plugin against the same MeterProvider.
     """
     # Third Party
     from opentelemetry import metrics
@@ -85,6 +92,8 @@ def init_otel_metrics(
         reader = PeriodicExportingMetricReader(exporter, export_interval_millis=10000)
         provider = MeterProvider(metric_readers=[reader], resource=resource)
         metrics.set_meter_provider(provider)
+        if enable_grpc_metrics:
+            init_grpc_otel_metrics(provider)
         logger.info(
             "OTel MeterProvider initialised with OTLP exporter (%s), resource=%s",
             otlp_endpoint,
@@ -102,6 +111,8 @@ def init_otel_metrics(
         reader = PrometheusMetricReader()
         provider = MeterProvider(metric_readers=[reader], resource=resource)
         metrics.set_meter_provider(provider)
+        if enable_grpc_metrics:
+            init_grpc_otel_metrics(provider)
         if start_http_server:
             prometheus_client.start_http_server(prometheus_port)
             logger.info(
@@ -117,6 +128,57 @@ def init_otel_metrics(
                 "/metrics must be exposed by the caller), resource=%s",
                 dict(resource.attributes),
             )
+
+
+def init_grpc_otel_metrics(meter_provider: "MeterProvider") -> None:
+    """Register gRPC Python runtime metrics with the active OTel provider.
+
+    The official ``grpcio-observability`` package exports gRPC Core metrics
+    into OpenTelemetry. It is currently distributed for Linux, so LMCache
+    treats it as an optional runtime integration and keeps metrics startup
+    working when the package is unavailable.
+
+    Args:
+        meter_provider: The OTel SDK provider used by the LMCache metrics
+            pipeline.
+    """
+    global _GRPC_OTEL_PLUGIN  # pylint: disable=global-statement # noqa: PLW0603
+
+    if _GRPC_OTEL_PLUGIN is not None:
+        logger.debug("gRPC OpenTelemetry metrics plugin is already registered")
+        return
+
+    if sys.platform != "linux":
+        logger.info(
+            "gRPC runtime metrics are not available on %s; "
+            "grpcio-observability currently supports Linux.",
+            sys.platform,
+        )
+        return
+
+    try:
+        # Third Party
+        from grpc_observability import OpenTelemetryPlugin
+    except ImportError:
+        logger.warning(
+            "grpcio-observability is not installed; gRPC runtime metrics "
+            "will not be exported. Install grpcio-observability on Linux "
+            "or pass --disable-grpc-metrics to suppress this warning."
+        )
+        return
+
+    plugin = OpenTelemetryPlugin(meter_provider=meter_provider)
+    try:
+        plugin.register_global()
+    except RuntimeError as exc:
+        logger.warning(
+            "gRPC OpenTelemetry metrics plugin could not be registered: %s",
+            exc,
+        )
+        return
+
+    _GRPC_OTEL_PLUGIN = plugin
+    logger.info("gRPC OpenTelemetry runtime metrics are enabled")
 
 
 def init_otel_tracing(
