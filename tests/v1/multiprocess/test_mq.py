@@ -24,6 +24,7 @@ from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
+    RemoteHandlerError,
     MessageQueueClient,
     MessageQueueServer,
 )
@@ -342,6 +343,72 @@ def test_mq_noop_multiple_clients():
         num_requests=5,
         num_clients=3,
     )
+
+
+def _raise_sync_handler_error() -> str:
+    raise RuntimeError("sync boom")
+
+
+def _raise_blocking_handler_error(key: IPCCacheServerKey, tp_size: int) -> None:
+    raise RuntimeError(f"blocking boom for {key.request_id}/{tp_size}")
+
+
+@pytest.mark.parametrize(
+    ("operation", "handler", "payloads", "expected_message"),
+    [
+        (
+            "noop",
+            _raise_sync_handler_error,
+            [],
+            "Remote noop handler failed with RuntimeError: sync boom",
+        ),
+        (
+            "lookup",
+            _raise_blocking_handler_error,
+            [create_cache_key(7), 2],
+            "Remote lookup handler failed with RuntimeError: "
+            "blocking boom for test_request_7/2",
+        ),
+    ],
+)
+def test_mq_handler_error_reaches_client_future(
+    operation, handler, payloads, expected_message
+):
+    context = zmq.Context.instance()
+    endpoint = f"inproc://handler-error-{operation}-{time.monotonic_ns()}"
+    server = MessageQueueServer(endpoint, context)
+    handler_type = HandlerType.BLOCKING if operation == "lookup" else HandlerType.SYNC
+    add_handler_helper(server, operation, handler, handler_type)
+    if handler_type is HandlerType.BLOCKING:
+        server.add_normal_thread_pool([operation], max_workers=1)
+    server.start()
+    client = MessageQueueClient(endpoint, context)
+    try:
+        future = client.submit_request(operation, payloads)
+        with pytest.raises(RemoteHandlerError, match=expected_message):
+            future.result(timeout=1)
+    finally:
+        client.close()
+        server.close()
+
+
+def test_mq_missing_handler_reaches_client_future():
+    context = zmq.Context.instance()
+    endpoint = f"inproc://missing-handler-{time.monotonic_ns()}"
+    server = MessageQueueServer(endpoint, context)
+    server.start()
+    client = MessageQueueClient(endpoint, context)
+    try:
+        future = client.submit_request("noop", [])
+        with pytest.raises(
+            RemoteHandlerError,
+            match="Remote noop handler failed with LookupError: "
+            "No handler registered for operation noop",
+        ):
+            future.result(timeout=1)
+    finally:
+        client.close()
+        server.close()
 
 
 @pytest.mark.cuda
