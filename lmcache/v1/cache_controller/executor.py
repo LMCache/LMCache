@@ -197,7 +197,7 @@ class LMCacheClusterExecutor:
             )
             serialized_msgs.append(serialized_msg)
             logger.debug(
-                f"Sending compress operation to worker ({instance_id}, {worker_id})"
+                "Sending compress operation to worker (%s, %s)", instance_id, worker_id
             )
         serialized_results = await self.execute_workers(
             sockets=sockets,
@@ -257,7 +257,9 @@ class LMCacheClusterExecutor:
             )
             serialized_msgs.append(serialized_msg)
             logger.debug(
-                f"Sending decompress operation to worker ({instance_id}, {worker_id})"
+                "Sending decompress operation to worker (%s, %s)",
+                instance_id,
+                worker_id,
             )
         serialized_results = await self.execute_workers(
             sockets=sockets,
@@ -327,7 +329,9 @@ class LMCacheClusterExecutor:
             )
             serialized_msgs.append(serialized_msg)
             logger.debug(
-                f"Sending move operation to worker ({src_instance_id}, {src_worker_id})"
+                "Sending move operation to worker (%s, %s)",
+                src_instance_id,
+                src_worker_id,
             )
         serialized_results = await self.execute_workers(
             sockets=sockets,
@@ -384,7 +388,9 @@ class LMCacheClusterExecutor:
             )
             serialized_msgs.append(serialized_msg)
             logger.debug(
-                f"Sending health check operation to worker ({instance_id}, {worker_id})"
+                "Sending health check operation to worker (%s, %s)",
+                instance_id,
+                worker_id,
             )
 
         # Collect results from all workers
@@ -406,8 +412,9 @@ class LMCacheClusterExecutor:
                     error_codes[worker_ids[i]] = -1002  # Unexpected response
             except Exception as e:
                 logger.error(
-                    f"Failed to parse health response from worker "
-                    f"{worker_ids[i]}: {str(e)}"
+                    "Failed to parse health response from worker %s: %s",
+                    worker_ids[i],
+                    e,
                 )
                 error_codes[worker_ids[i]] = -1003  # Failed to parse response
 

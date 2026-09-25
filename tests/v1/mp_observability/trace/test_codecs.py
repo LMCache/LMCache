@@ -88,44 +88,25 @@ class TestPrefetchHandle:
         h = PrefetchHandle(
             prefetch_request_id=7,
             external_request_id="req-1",
-            l1_found_indices=(0, 1, 2),
-            l1_hit_chunks=3,
             total_requested_keys=10,
             submit_time=12345.6,
-            l2_orig_indices=(3, 4, 5),
+            sliding_windows=(-1, 2),
         )
         out = _roundtrip(h)
         assert out == h
 
-
-class TestPrefetchHandleKeyGroups:
-    def test_num_key_groups_roundtrip(self):
-        h = PrefetchHandle(
-            prefetch_request_id=1,
-            external_request_id="r",
-            l1_found_indices=(0, 3),
-            l1_hit_chunks=1,
-            total_requested_keys=4,
-            submit_time=1.5,
-            l2_orig_indices=(1, 2),
-            num_key_groups=2,
-        )
-        assert _roundtrip(h) == h
-
-    def test_record_without_num_key_groups_decodes_to_one(self):
-        """Handles recorded before key groups existed decode as one group."""
+    def test_record_without_sliding_windows_decodes_to_empty(self):
+        """Handles recorded before windows were carried decode with none."""
         encoded = codecs.encode_value(
             PrefetchHandle(
                 prefetch_request_id=-1,
                 external_request_id="r",
-                l1_found_indices=(),
-                l1_hit_chunks=0,
                 total_requested_keys=3,
                 submit_time=0.0,
             )
         )
-        del encoded["v"]["num_key_groups"]
-        assert codecs.decode_value(encoded).num_key_groups == 1
+        del encoded["v"]["sliding_windows"]
+        assert codecs.decode_value(encoded).sliding_windows == ()
 
 
 def _grouped_object_keys(gid: int, window: int = -1) -> GroupedObjectKeys:

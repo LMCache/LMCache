@@ -390,9 +390,10 @@ class LookupMixin:
             under SEGMENTED_PREFIX, else None.
         """
         if job.prefix_handle is not None:
-            rows = self._ctx.storage_manager.query_prefetch_status(job.prefix_handle)
-            if rows is None:
+            result = self._ctx.storage_manager.query_prefetch_status(job.prefix_handle)
+            if result is None:
                 return None  # still loading
+            rows = result.hit_cells
             # Window-aware fold: a windowed group's out-of-window keys are
             # trimmed from the load (bits legitimately unset), so a plain
             # count_leading_ones would read those bits as a miss.
@@ -564,7 +565,7 @@ class LookupMixin:
                         job.hash_to_col,
                     ) = self._sparse_prefetch_submit(key, resolved, job.non_prefix)
                     # Trace the span only when the prefetch actually reads L2.
-                    job.l2_keys = len(job.handle.l2_orig_indices)
+                    job.l2_keys = job.handle.total_requested_keys
                     if job.l2_keys > 0:
                         self._event_bus.publish(
                             Event(
@@ -590,18 +591,18 @@ class LookupMixin:
 
         # --- Sparse leg: poll (consume-once) until the scattered chunks land. ---
         if job.handle is not None and job.found_rows is None:
-            rows = self._ctx.storage_manager.query_prefetch_status(job.handle)
-            if rows is None:
+            result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+            if result is None:
                 return None  # sparse still loading -> defer
-            job.found_rows = rows
+            job.found_rows = result.hit_cells
             if job.l2_keys > 0:
                 self._event_bus.publish(
                     Event(
                         event_type=EventType.CB_SPARSE_PREFETCH_END,
                         session_id=rid,
                         metadata={
-                            "found_keys": sum(row.popcount() for row in rows),
-                            "l2_keys": job.l2_keys,
+                            "found_keys": sum(r.popcount() for r in result.hit_cells),
+                            "l2_keys": result.l2_hit_count,
                         },
                     )
                 )

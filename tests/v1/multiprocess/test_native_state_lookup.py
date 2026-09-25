@@ -89,8 +89,6 @@ class _PresenceStorage:
             return PrefetchHandle(
                 prefetch_request_id=task_id,
                 external_request_id=external_request_id,
-                l1_found_indices=(),
-                l1_hit_chunks=hit,
                 total_requested_keys=sum(len(row.keys) for row in rows),
                 submit_time=0.0,
             )
@@ -110,15 +108,23 @@ class _PresenceStorage:
         return PrefetchHandle(
             prefetch_request_id=task_id,
             external_request_id=external_request_id,
-            l1_found_indices=tuple(retained.get_indices_list()),
-            l1_hit_chunks=hit,
             total_requested_keys=len(request.keys),
             submit_time=0.0,
         )
 
     def query_prefetch_status(self, handle: PrefetchHandle) -> Any:
-        """Return the completed prefetch's retain mask."""
-        return self.results[handle.prefetch_request_id]
+        """Return the completed prefetch's retain mask; every hit is served
+        from L1 in this double."""
+        # First Party
+        from lmcache.v1.distributed.api import PrefetchResult
+
+        result = self.results[handle.prefetch_request_id]
+        rows = result if isinstance(result, list) else [result]
+        return PrefetchResult(
+            hit_cells=rows,
+            l1_hit_cells=[row.copy() for row in rows],
+            l2_hit_cells=[Bitmap(len(row)) for row in rows],
+        )
 
     def finish_read_prefetched(self, keys: list[ObjectKey], read_locks: int) -> None:
         """Release only locks actually acquired by a lookup."""

@@ -239,7 +239,13 @@ class EventBus:
 
     def stop(self) -> None:
         """Stop the drain thread, flush remaining events, and shut down
-        all registered subscribers.  Safe to call when not started."""
+        all registered subscribers.  Safe to call when not started.
+
+        Subscribers shut down in reverse registration order.  A subscriber
+        registered later may write into one registered earlier (a sink into
+        a recorder, for example), so the writer must shut down first or its
+        final output lands on a closed target.
+        """
         self._stop_flag.set()
         self._wake.set()
         if self._thread is not None and self._thread.is_alive():
@@ -248,10 +254,10 @@ class EventBus:
         # Final drain
         self._drain_all()
 
-        # Shutdown subscribers
+        # Shutdown subscribers, last registered first
         with self._lock:
             snapshot = list(self._registered_subscribers)
-        for sub in snapshot:
+        for sub in reversed(snapshot):
             try:
                 sub.shutdown()
             except Exception:

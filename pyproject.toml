@@ -119,7 +119,6 @@ ignore = [
 # why mixed directories are listed file by file, and "<dir>/**" is used only
 # where every file below the directory still violates the rule.
 # Tracking issue: https://github.com/LMCache/LMCache/issues/5118
-".buildkite/correctness/async_request.py" = ["G004"]
 "benchmarks/multi_round_qa/multi-round-qa.py" = ["G004"]
 "benchmarks/multi_round_qa/utils.py" = ["G004"]
 "examples/disagg_prefill/**" = ["G004"]
@@ -134,13 +133,8 @@ ignore = [
 "lmcache/storage_backend/serde/cachegen_basics.py" = ["G004"]
 "lmcache/utils.py" = ["G004"]
 "lmcache/v1/api_server/__main__.py" = ["G004"]
-"lmcache/v1/cache_controller/controller_manager.py" = ["G004"]
-"lmcache/v1/cache_controller/executor.py" = ["G004"]
-"lmcache/v1/cache_controller/worker.py" = ["G004"]
 "lmcache/v1/cache_engine.py" = ["G004"]
 "lmcache/v1/check/__init__.py" = ["G004"]
-"lmcache/v1/compute/attention/triton_sparse.py" = ["G004"]
-"lmcache/v1/compute/attention/utils.py" = ["G004"]
 "lmcache/v1/compute/blend/blender.py" = ["G004"]
 "lmcache/v1/compute/blend/utils.py" = ["G004"]
 "lmcache/v1/compute/models/utils.py" = ["G004"]

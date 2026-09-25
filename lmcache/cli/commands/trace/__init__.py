@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``lmcache trace`` command — inspect and replay storage-level trace files.
+"""``lmcache trace`` command — inspect and replay trace files.
 
 Sub-subcommands are auto-discovered from modules in this package.
 To add a new subcommand, create a module defining a concrete
 :class:`BaseCommand` subclass — no edits to this file are required.
 
 Trace *capture* is not a ``trace`` subcommand — recording is bound to
-the live process via ``lmcache server --trace-level storage
+the live process via ``lmcache server --trace-level {storage,events}
 [--trace-output ...]``.
 """
 
@@ -21,4 +21,4 @@ class TraceCommand(CompositeCommand):
         return "trace"
 
     def help(self) -> str:
-        return "Inspect and replay LMCache storage-level trace files."
+        return "Inspect and replay LMCache trace files."

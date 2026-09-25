@@ -18,7 +18,8 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey, PrefetchResult
 from lmcache.v1.multiprocess.cache_control.object_service import MAX_DELETE_BATCH
 from lmcache.v1.multiprocess.http_apis.cache_api import router as cache_router
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
@@ -440,14 +441,6 @@ class _PrefetchHandle:
         self.total_requested_keys = total
 
 
-class _PrefetchBitmap:
-    def __init__(self, n: int) -> None:
-        self._n = n
-
-    def popcount(self) -> int:
-        return self._n
-
-
 @dataclass
 class _PrefetchStorageManager:
     submit_calls: list[dict] = field(default_factory=list)
@@ -457,8 +450,14 @@ class _PrefetchStorageManager:
         self.submit_calls.append({"keys": keys, "lock_mode": spec.lock_mode})
         return _PrefetchHandle(len(keys))
 
-    def query_prefetch_status(self, handle) -> list[_PrefetchBitmap]:
-        return [_PrefetchBitmap(handle.total_requested_keys)]
+    def query_prefetch_status(self, handle) -> PrefetchResult:
+        # Every requested key was loaded from L2: one all-set row.
+        n = handle.total_requested_keys
+        return PrefetchResult(
+            hit_cells=[Bitmap(n, n)],
+            l1_hit_cells=[Bitmap(n)],
+            l2_hit_cells=[Bitmap(n, n)],
+        )
 
 
 @dataclass
