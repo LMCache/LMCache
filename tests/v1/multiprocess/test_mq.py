@@ -2,7 +2,9 @@
 # Standard
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable
+from unittest.mock import MagicMock
 import multiprocessing as mp
+import queue
 import sys
 import threading
 import time
@@ -22,6 +24,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.request_handler import HandlerType
+from lmcache.v1.multiprocess.rpc import get_rpc_spec
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
@@ -593,6 +596,123 @@ def test_mq_report_block_allocation_empty():
 # ==============================================================================
 
 
+def test_outbound_payload_error_completes_future_and_keeps_draining() -> None:
+    """One malformed request must not poison later outbound work."""
+
+    class RecordingSocket:
+        def __init__(self) -> None:
+            self.messages: list[list[bytes]] = []
+
+        def send_multipart(self, message: list[bytes]) -> None:
+            self.messages.append(message)
+
+    client = MessageQueueClient.__new__(MessageQueueClient)
+    client.input_queue = queue.Queue()
+    client.pending_futures = {}
+    client.socket = RecordingSocket()  # type: ignore[assignment]
+
+    malformed: MessagingFuture[None] = MessagingFuture()
+    healthy: MessagingFuture[None] = MessagingFuture()
+    client.input_queue.put(
+        MessageQueueClient.WrappedRequest(
+            request_uid=10,
+            future=malformed,
+            rpc_spec=get_rpc_spec("noop"),
+            request_payloads=["unexpected"],
+        )
+    )
+    client.input_queue.put(
+        MessageQueueClient.WrappedRequest(
+            request_uid=11,
+            future=healthy,
+            rpc_spec=get_rpc_spec("noop"),
+            request_payloads=[],
+        )
+    )
+
+    client.process_outbound_task()
+
+    with pytest.raises(ValueError, match="Payload count mismatch"):
+        malformed.result(timeout=0)
+    assert 10 not in client.pending_futures
+    assert client.pending_futures[11][0] is healthy
+    assert len(client.socket.messages) == 1
+
+
+def test_outbound_send_error_rolls_back_pending_and_keeps_draining() -> None:
+    """A socket error must fail only its request and allow the next send."""
+
+    class FailOnceSocket:
+        def __init__(self) -> None:
+            self.attempts = 0
+            self.messages: list[list[bytes]] = []
+
+        def send_multipart(self, message: list[bytes]) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("injected send failure")
+            self.messages.append(message)
+
+    client = MessageQueueClient.__new__(MessageQueueClient)
+    client.input_queue = queue.Queue()
+    client.pending_futures = {}
+    client.socket = FailOnceSocket()  # type: ignore[assignment]
+
+    failed: MessagingFuture[None] = MessagingFuture()
+    healthy: MessagingFuture[None] = MessagingFuture()
+    for request_uid, future in ((20, failed), (21, healthy)):
+        client.input_queue.put(
+            MessageQueueClient.WrappedRequest(
+                request_uid=request_uid,
+                future=future,
+                rpc_spec=get_rpc_spec("noop"),
+                request_payloads=[],
+            )
+        )
+
+    client.process_outbound_task()
+
+    with pytest.raises(RuntimeError, match="injected send failure"):
+        failed.result(timeout=0)
+    assert 20 not in client.pending_futures
+    assert client.pending_futures[21][0] is healthy
+    assert len(client.socket.messages) == 1
+
+
+def test_shared_loop_isolates_malformed_outbound_between_clients() -> None:
+    """One client's bad request must not strand another client's request."""
+    # First Party
+    from lmcache.v1.multiprocess.transport.zmq_impl.mq import ClientPollingLoop
+
+    server_url = "tcp://127.0.0.1:16031"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    client_a = MessageQueueClient(server_url, context)
+    client_b = MessageQueueClient(server_url, context)
+    try:
+        malformed: MessagingFuture[None] = client_a.submit_request(
+            "noop", ["unexpected"]
+        )
+        healthy: MessagingFuture[str] = client_b.submit_request("noop", [])
+
+        with pytest.raises(ValueError, match="Payload count mismatch"):
+            malformed.result(timeout=5)
+        assert healthy.result(timeout=5) == "NOOP_OK"
+
+        loop = ClientPollingLoop._instance
+        assert loop is not None and loop._thread.is_alive()
+        assert all(
+            future is not malformed for future, _ in client_a.pending_futures.values()
+        )
+    finally:
+        client_a.close()
+        client_b.close()
+        server.close()
+
+
 def test_shared_loop_lifecycle():
     """
     Test that multiple clients share a single ClientPollingLoop and
@@ -669,6 +789,38 @@ def test_shared_loop_dispatch():
         assert ClientPollingLoop._instance is None
     finally:
         server.close()
+
+
+def test_client_outbound_batch_is_bounded_and_ordered() -> None:
+    """One client drain must yield after its budget without reordering."""
+    client = MessageQueueClient.__new__(MessageQueueClient)
+    client.input_queue = queue.Queue()
+    client.pending_futures = {}
+    client.socket = MagicMock()
+
+    for request_uid in range(3):
+        client.input_queue.put(
+            MessageQueueClient.WrappedRequest(
+                request_uid=request_uid,
+                future=MessagingFuture(),
+                rpc_spec=get_rpc_spec("noop"),
+                request_payloads=[],
+            )
+        )
+
+    assert client.process_outbound_task(max_batch=2) is True
+    assert client.input_queue.qsize() == 1
+    assert [
+        msgspec.msgpack.decode(call.args[0][0])
+        for call in client.socket.send_multipart.call_args_list
+    ] == [0, 1]
+
+    assert client.process_outbound_task(max_batch=2) is False
+    assert client.input_queue.empty()
+    assert [
+        msgspec.msgpack.decode(call.args[0][0])
+        for call in client.socket.send_multipart.call_args_list
+    ] == [0, 1, 2]
 
 
 def test_invalid_outbound_request_does_not_block_later_requests() -> None:
