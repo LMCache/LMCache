@@ -140,6 +140,9 @@ func (r *LMCacheCoordinatorReconciler) reconcileCoordinatorServiceMonitor(ctx co
 			}
 			return err
 		}
+		if !metav1.IsControlledBy(existing, coordinator) {
+			return nil
+		}
 		log.Info("Deleting coordinator ServiceMonitor", "name", coordinator.Name)
 		return r.Delete(ctx, existing)
 	}
