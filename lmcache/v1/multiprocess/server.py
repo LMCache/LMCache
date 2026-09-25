@@ -57,6 +57,9 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
+from lmcache.v1.multiprocess.modules.transfer_mode_guard import (
+    create_transfer_mode_guard,
+)
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
@@ -278,6 +281,10 @@ def _build_modules(
         experimental_transfer=experimental_transfer,
     )
 
+    transfer_mode_guard = create_transfer_mode_guard(
+        ctx, mp_config.supported_transfer_mode
+    )
+
     # ManagementModule precedes the transfer/blend modules so close() stops
     # and joins the reaper before those modules clear their state and before
     # storage_manager.close() runs.
@@ -286,6 +293,7 @@ def _build_modules(
         lookup_module,
         p2p_controller,
         management,
+        transfer_mode_guard,
         *transfer_modules,
         *experimental_modules,
         *blend_modules,
