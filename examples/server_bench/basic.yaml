@@ -1,0 +1,8 @@
+model:
+  layer_definitions:
+    state: {kind: kda, num_heads: 96}
+    attention: {kind: mla}
+  layer_types: [state, state, attention]
+parallel: {tp_size: 2}
+allocation: {num_blocks: 3}
+# basic layout and 256-token blocks are the defaults.

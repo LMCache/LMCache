@@ -77,6 +77,8 @@ def attempt_permute_to_contiguous_view(
     preserved.
     """
     if isinstance(kv_caches, torch.Tensor):
+        if kv_caches.numel() == 0:
+            return kv_caches
         strides = kv_caches.stride()
         shape = kv_caches.shape
         # A size-1 dim can tie on stride with its neighbour (e.g. one head
@@ -89,7 +91,8 @@ def attempt_permute_to_contiguous_view(
             reverse=True,
         )
         result = kv_caches.permute(perm)
-        if result.is_contiguous():
+        # A singleton block can be contiguous while retaining a padded stride.
+        if result.is_contiguous() and result.stride(0) <= result.numel():
             return result.view(_get_expected_shape(result.stride(), result.numel()))
         padding_per_block = _validate_dim0_padded_layout(result)
         logger.debug(

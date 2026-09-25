@@ -92,6 +92,12 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         parser: The ``ArgumentParser`` for the server bench subcommand.
     """
 
+    # First Party
+    from lmcache.cli.commands.bench.server_bench.config import RecordLayoutOption
+
+    parser.add_argument(
+        "--model-layout", help="YAML model layers and basic/vllm layout"
+    )
     parser.add_argument(
         "--rpc-url",
         default="tcp://localhost:5555",
@@ -125,6 +131,7 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--tp-size",
+        action=RecordLayoutOption,
         type=int,
         default=1,
         help=(
@@ -138,7 +145,8 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--use-mla",
-        action="store_true",
+        action=RecordLayoutOption,
+        nargs=0,
         default=False,
         help=(
             "MLA mode: fold all TP ranks into a single kv_worker "
@@ -159,6 +167,7 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     kv = parser.add_argument_group("KV cache shape")
     kv.add_argument(
         "--kvcache-shape-spec",
+        action=RecordLayoutOption,
         type=str,
         default=_DEFAULT_SHAPE_SPEC,
         help=(
@@ -183,12 +192,14 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     )
     kv.add_argument(
         "--num-blocks",
+        action=RecordLayoutOption,
         type=int,
         default=1024,
         help="Paged blocks (default: 1024)",
     )
     kv.add_argument(
         "--block-size",
+        action=RecordLayoutOption,
         type=int,
         default=16,
         help="Tokens per block (default: 16)",
@@ -370,7 +381,11 @@ def run_server_bench(
         args: Parsed CLI arguments for ``lmcache bench server``.
     """
     _require_full_install()
-    config = parse_args_to_config(args)
+    try:
+        config = parse_args_to_config(args)
+    except (ValueError, OSError) as exc:
+        print(f"Invalid server-bench configuration: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
     sequence_count = None if args.end is None else max(0, args.end - args.start)
     run_spec = BenchRunSpec(
         config=config,

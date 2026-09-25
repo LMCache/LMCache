@@ -6,10 +6,15 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 import argparse
 
 # First Party
 from lmcache.cli.commands.bench.server_bench.cases.base import BenchCase
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.cli.commands.bench.server_bench.model_layout import ModelLayout
 
 
 @dataclass(frozen=True)
@@ -43,6 +48,7 @@ class BenchConfig:
     kvcache_shape_spec: str
     num_blocks: int
     block_size: int
+    model_layout: ModelLayout | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in ("cpu", "gpu"):
@@ -55,6 +61,9 @@ class BenchConfig:
             raise ValueError(f"unsupported transfer mode: {self.transfer_mode}")
         if self.tp_size < 1:
             raise ValueError(f"tp_size must be positive, got {self.tp_size}")
+
+        if self.model_layout and (not self.is_gpu or not self.uses_handle_transfer):
+            raise ValueError("--model-layout requires GPU lmcache_driven transfer")
 
     @property
     def is_gpu(self) -> bool:
@@ -124,15 +133,43 @@ class BenchRunSpec:
 
 def parse_args_to_config(args: argparse.Namespace) -> BenchConfig:
     """Build a config while preserving CLI defaults and TP clamping."""
+    layout = None
+    if getattr(args, "model_layout", None):
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.model_layout import (
+            load_model_layout,
+        )
+
+        if getattr(args, "layout_options", ()):
+            raise ValueError("--model-layout conflicts with explicit shape/TP options")
+        layout = load_model_layout(args.model_layout)
     return BenchConfig(
         rpc_url=args.rpc_url,
         http_url=args.url,
         mode=args.mode,
         transfer_mode=getattr(args, "transfer_mode", "auto"),
-        tp_size=max(1, int(getattr(args, "tp_size", 1))),
+        tp_size=layout.parallel.tp_size
+        if layout
+        else max(1, int(getattr(args, "tp_size", 1))),
         use_mla=bool(getattr(args, "use_mla", False)),
         num_tokens=args.num_tokens,
         kvcache_shape_spec=args.kvcache_shape_spec,
         num_blocks=args.num_blocks,
         block_size=args.block_size,
+        model_layout=layout,
     )
+
+
+class RecordLayoutOption(argparse.Action):
+    """Track explicit legacy flags while preserving argparse default values."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        """Record this option in namespace and assign its parsed value; returns None."""
+        namespace.layout_options = True
+        setattr(namespace, self.dest, True if self.nargs == 0 else values)

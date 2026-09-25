@@ -21,7 +21,10 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import (
+    SKIP_L2_REQUEST_CONFIG_KEY,
+    IPCCacheServerKey,
+)
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -157,7 +160,8 @@ class LookupModule:
 
         Hashes the key, submits a prefetch task to the storage manager,
         and registers the job under ``key.request_id`` for later polling
-        via query_prefetch_status.
+        via query_prefetch_status. ``lmcache.skip_l2=True`` in the request
+        configuration limits the lookup to objects already visible in L1.
 
         Args:
             key: Cache key with request_id embedded.
@@ -303,6 +307,7 @@ class LookupModule:
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
             external_request_id=key.request_id,
+            skip_l2=(key.request_configs or {}).get(SKIP_L2_REQUEST_CONFIG_KEY) is True,
         )
         self._register_prefetch_job(
             _PrefetchJob(

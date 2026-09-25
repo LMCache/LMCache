@@ -29,6 +29,7 @@ from lmcache.cli.commands.bench import BenchCommand
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _allocate_kv_cache,
     _build_token_ids,
+    _compute_client_checksums,
     _make_key,
     _poll_prefetch_status,
     _query_checksum,
@@ -381,6 +382,14 @@ class TestMakeKey:
         )
         assert key.worker_id == 0
 
+    def test_request_configs(self):
+        key = _make_key(
+            (0, 9906),
+            request_id="req-config",
+            request_configs={"lmcache.skip_l2": True},
+        )
+        assert key.request_configs == {"lmcache.skip_l2": True}
+
 
 # ------------------------------------------------------------------ #
 #  _query_checksum
@@ -582,6 +591,26 @@ class TestAllocateKVCache:
             # to match the vLLM ``NL_X_NB_BS_HS`` detector contract.
             assert t.shape == (2, 2, 4 * 32)
             assert t.dtype == torch.bfloat16
+
+
+def test_client_checksum_moves_tensor_to_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Checksum conversion must work for CUDA tensors as well as CPU tensors."""
+    original_cpu = torch.Tensor.cpu
+    cpu_calls: list[torch.device] = []
+
+    def tracked_cpu(tensor: torch.Tensor) -> torch.Tensor:
+        cpu_calls.append(tensor.device)
+        return original_cpu(tensor)
+
+    monkeypatch.setattr(torch.Tensor, "cpu", tracked_cpu)
+    tensor = torch.arange(16, dtype=torch.float32).reshape(1, 2, 2, 2, 2)
+
+    checksums = _compute_client_checksums([tensor], 0, 2, 1, 2)
+
+    assert len(checksums) == 1
+    assert cpu_calls == [torch.device("cpu")]
 
 
 # ------------------------------------------------------------------ #
