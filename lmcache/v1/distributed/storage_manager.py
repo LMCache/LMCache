@@ -10,7 +10,7 @@ import threading
 import time
 
 # First Party
-from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
+from lmcache.lmcache_native import PeriodicEventNotifier
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.distributed.api import (
@@ -19,6 +19,7 @@ from lmcache.v1.distributed.api import (
     ModuleMemoryCapacity,
     ObjectKey,
     PrefetchHandle,
+    PrefetchResult,
     PrefetchTaskSpec,
     Tier,
 )
@@ -48,9 +49,6 @@ from lmcache.v1.distributed.storage_controllers import (
     PrefetchController,
     StoreController,
 )
-from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
-    PrefetchResult,
-)
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     create_prefetch_policy,
 )
@@ -58,7 +56,6 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     create_store_policy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import (
-    Bitmap2D,
     L1ManagerDescriptor,
     L2AdapterDescriptor,
 )
@@ -106,10 +103,6 @@ class StorageManager:
         self._lifecycle_lock = threading.Lock()
         # Guards the _l2_adapters and _adapter_descriptors dicts.
         self._adapters_lock = threading.Lock()
-        # Finished prefetch results, held until query_prefetch_status consumes
-        # them so the hit counts can be read before the rows.
-        self._prefetch_results_lock = threading.Lock()
-        self._prefetch_results: dict[int, PrefetchResult] = {}
         self._registered_l2_listeners: list[L2AdapterListener] = []
         self._l2_adapters: dict[int, L2AdapterInterface] = {}
         self._adapter_descriptors: dict[int, L2AdapterDescriptor] = {}
@@ -458,33 +451,44 @@ class StorageManager:
             sliding_windows=tuple(row.sliding_window_size for row in spec.key_groups),
         )
 
-    def _fetch_prefetch_result(self, handle: PrefetchHandle) -> PrefetchResult | None:
-        """Return the finished result of ``handle`` without consuming it.
-
-        The first successful fetch moves the result out of the controller
-        into this manager, where it stays until ``query_prefetch_status``
-        consumes it.
+    def query_prefetch_status(self, handle: PrefetchHandle) -> PrefetchResult | None:
+        """
+        Query the status of the prefetch task.
 
         Args:
-            handle: The handle of the prefetch task.
+            handle (PrefetchHandle): The handle of the prefetch task.
 
         Returns:
-            The result, or None while the prefetch is still in progress.
+            The task's result once it has finished, None while it is still
+            in progress.
+
+        Note:
+            Each result is returned once; later calls for the same handle
+            return None.
         """
         if handle.prefetch_request_id == -1:
-            return PrefetchResult(
-                hit_cells=Bitmap2D([]), l1_hit_count=0, l2_hit_count=0
+            return PrefetchResult(hit_cells=[], l1_hit_cells=[], l2_hit_cells=[])
+        result = self._prefetch_controller.query_prefetch_result(
+            handle.prefetch_request_id
+        )
+        if result is None:
+            return None
+        total_hits = sum(row.popcount() for row in result.hit_cells)
+        if total_hits > 0:
+            elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
+            logger.info(
+                "Prefetch request completed (L1+L2): "
+                "%d/%d retained keys (%d L1, %d L2) in %.1f ms "
+                "(external_request_id=%s, prefetch_request_id=%d)",
+                total_hits,
+                handle.total_requested_keys,
+                sum(row.popcount() for row in result.l1_hit_cells),
+                sum(row.popcount() for row in result.l2_hit_cells),
+                elapsed_ms,
+                handle.external_request_id,
+                handle.prefetch_request_id,
             )
-        with self._prefetch_results_lock:
-            cached = self._prefetch_results.get(handle.prefetch_request_id)
-            if cached is not None:
-                return cached
-            result = self._prefetch_controller.query_prefetch_result(
-                handle.prefetch_request_id
-            )
-            if result is not None:
-                self._prefetch_results[handle.prefetch_request_id] = result
-            return result
+        return result
 
     @lmcache_deprecate(
         "the lookup hit is no longer reported before the prefetch finishes; "
@@ -505,42 +509,17 @@ class StorageManager:
             None while it is still in progress.
 
         Note:
-            Does not consume the result; ``query_prefetch_status`` still
-            returns it afterwards.
+            Consumes the result like ``query_prefetch_status``.
         """
-        result = self._fetch_prefetch_result(handle)
+        result = self.query_prefetch_status(handle)
         if result is None:
             return None
-        if len(result.hit_cells) == 0:
+        if not result.hit_cells:
             return 0
         hit_length, _retain = fold_unfold_grouped(
-            result.hit_cells.to_list(), list(handle.sliding_windows)
+            result.hit_cells, list(handle.sliding_windows)
         )
         return hit_length
-
-    def query_prefetch_hit_counts(
-        self,
-        handle: PrefetchHandle,
-    ) -> tuple[int, int] | None:
-        """
-        Query how many hit cells of a finished prefetch task came from each
-        tier.
-
-        Args:
-            handle (PrefetchHandle): The handle of the prefetch task.
-
-        Returns:
-            ``(l1_hit_count, l2_hit_count)`` once the prefetch has finished,
-            None while it is still in progress.
-
-        Note:
-            Does not consume the result; ``query_prefetch_status`` still
-            returns it afterwards.
-        """
-        result = self._fetch_prefetch_result(handle)
-        if result is None:
-            return None
-        return result.l1_hit_count, result.l2_hit_count
 
     def wait_prefetch_status(
         self,
@@ -563,54 +542,9 @@ class StorageManager:
         """
         if handle.prefetch_request_id == -1:
             return True
-        with self._prefetch_results_lock:
-            if handle.prefetch_request_id in self._prefetch_results:
-                return True
         return self._prefetch_controller.wait_prefetch_result(
             handle.prefetch_request_id, timeout
         )
-
-    def query_prefetch_status(
-        self,
-        handle: PrefetchHandle,
-    ) -> list[Bitmap] | None:
-        """
-        Query the status of the prefetch task.
-
-        Args:
-            handle (PrefetchHandle): The handle of the prefetch task.
-
-        Returns:
-            ``None`` while the prefetch is still in progress. Otherwise one
-            found-key bitmap per key row of the submitted request, in row
-            order: bit ``i`` of ``rows[k]`` is set iff key ``i`` of row ``k``
-            is resident in L1 (and read-locked under ``LOCK``).
-
-        Note:
-            Each result is returned once; later calls for the same handle
-            return ``None``.
-        """
-        result = self._fetch_prefetch_result(handle)
-        if result is None:
-            return None
-        with self._prefetch_results_lock:
-            self._prefetch_results.pop(handle.prefetch_request_id, None)
-        total_hits = result.hit_cells.popcount()
-        if total_hits > 0:
-            elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
-            logger.info(
-                "Prefetch request completed (L1+L2): "
-                "%d/%d retained keys (%d L1, %d L2) in %.1f ms "
-                "(external_request_id=%s, prefetch_request_id=%d)",
-                total_hits,
-                handle.total_requested_keys,
-                result.l1_hit_count,
-                result.l2_hit_count,
-                elapsed_ms,
-                handle.external_request_id,
-                handle.prefetch_request_id,
-            )
-        return result.hit_cells.to_list()
 
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """

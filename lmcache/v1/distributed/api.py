@@ -19,6 +19,7 @@ from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.lmcache_native import Bitmap
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
@@ -551,6 +552,25 @@ class PrefetchHandle:
     sliding_windows: tuple[int, ...] = ()
     """Sliding-window size of every key group of the request, in group
     order; ``FULL_ATTENTION_WINDOW_CHUNKS`` for a full-attention group."""
+
+
+@dataclass(frozen=True)
+class PrefetchResult:
+    """The outcome of a prefetch task, one bitmap per key group of the task.
+
+    Bit ``i`` of ``hit_cells[k]`` is set iff key ``i`` of key group ``k`` is
+    resident in L1 when the task finished (and read-locked under ``LOCK``).
+    ``l1_hit_cells`` marks the hit cells L1 already held, ``l2_hit_cells``
+    those the task loaded from L2.
+
+    Note:
+        ``l1_hit_cells`` and ``l2_hit_cells`` are disjoint and their union is
+        ``hit_cells``.
+    """
+
+    hit_cells: list["Bitmap"]
+    l1_hit_cells: list["Bitmap"]
+    l2_hit_cells: list["Bitmap"]
 
 
 def ipc_key_to_object_keys(

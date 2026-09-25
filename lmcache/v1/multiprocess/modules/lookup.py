@@ -375,10 +375,14 @@ class LookupModule:
             )
             return 0
 
-        hit_counts = self._ctx.storage_manager.query_prefetch_hit_counts(job.handle)
-        found_rows = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if found_rows is None or hit_counts is None:
+        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        if result is None:
             return None
+        found_rows = result.hit_cells
+        hit_counts = (
+            sum(row.popcount() for row in result.l1_hit_cells),
+            sum(row.popcount() for row in result.l2_hit_cells),
+        )
 
         if job.row_windows:
             found_count, _retain = fold_unfold_grouped(found_rows, job.row_windows)

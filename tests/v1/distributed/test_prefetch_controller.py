@@ -26,6 +26,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchLockMode,
+    PrefetchResult,
     PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
@@ -40,7 +41,6 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
-    PrefetchResult,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
@@ -48,6 +48,7 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     RetainPrefetchPolicy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import (
+    Bitmap2D,
     L1ManagerDescriptor,
     L2AdapterDescriptor,
 )
@@ -204,9 +205,18 @@ def row_bits(result: PrefetchResult | None, row: int = 0) -> list[int]:
 
 
 def hit_counts(result: PrefetchResult | None) -> tuple[int, int]:
-    """Return the (L1, L2) hit counts of a result, failing on None."""
+    """Return the (L1, L2) hit cell counts of a result, failing on None.
+
+    Also checks the documented invariant: the two tier grids are disjoint
+    and together make up ``hit_cells``.
+    """
     assert result is not None, "prefetch did not complete"
-    return result.l1_hit_count, result.l2_hit_count
+    l1, l2 = Bitmap2D(result.l1_hit_cells), Bitmap2D(result.l2_hit_cells)
+    assert (l1 & l2).popcount() == 0
+    assert [r.get_indices_list() for r in l1 + l2] == [
+        r.get_indices_list() for r in result.hit_cells
+    ]
+    return l1.popcount(), l2.popcount()
 
 
 def store_keys_in_l2(
@@ -624,7 +634,8 @@ class TestQueryResult:
         result = wait_for_result(ctrl, req_id)
 
         assert result is not None
-        assert result.hit_cells.size() == (2, 3)
+        assert len(result.hit_cells) == 2
+        assert all(len(row) == 3 for row in result.hit_cells)
         assert row_bits(result, 0) == [0, 1, 2]
         assert row_bits(result, 1) == [0, 1, 2]
         l1_manager.finish_read(rows[0].keys + rows[1].keys)
@@ -940,6 +951,8 @@ class TestL1AndL2:
 
         assert row_bits(result) == [0, 1, 2, 3, 4]
         assert hit_counts(result) == (3, 2)
+        assert result.l1_hit_cells[0].get_indices_list() == [2, 3, 4]
+        assert result.l2_hit_cells[0].get_indices_list() == [0, 1]
         assert_read_locked(l1_manager, keys)
         l1_manager.finish_read(keys)
 

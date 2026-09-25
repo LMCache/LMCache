@@ -15,7 +15,8 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
@@ -36,6 +37,19 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
         request_id="req-1",
         cache_salt="salt",
         num_kv_readers=1,
+    )
+
+
+def _result(num_rows: int, num_cols: int, l1_hit_cells: int) -> PrefetchResult:
+    """A finished result with ``l1_hit_cells`` cells set row-major, all L1."""
+    rows = [Bitmap(num_cols) for _ in range(num_rows)]
+    for cell in range(l1_hit_cells):
+        row, col = divmod(cell, num_cols)
+        rows[row].set(col)
+    return PrefetchResult(
+        hit_cells=rows,
+        l1_hit_cells=[row.copy() for row in rows],
+        l2_hit_cells=[Bitmap(num_cols) for _ in rows],
     )
 
 
@@ -83,7 +97,11 @@ def _end_metadata(
         total_requested_keys=len(chunk_hashes) * world_size * num_groups,
         submit_time=time.monotonic(),
     )
-    ctx.storage_manager.query_prefetch_hit_counts.return_value = (l1_hit_cells, 0)
+    ctx.storage_manager.query_prefetch_status.return_value = _result(
+        num_rows=num_groups * world_size,
+        num_cols=len(chunk_hashes),
+        l1_hit_cells=l1_hit_cells,
+    )
 
     module = LookupModule(ctx)
     with patch.object(

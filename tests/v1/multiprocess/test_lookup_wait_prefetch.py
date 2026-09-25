@@ -14,15 +14,25 @@ import threading
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import PrefetchHandle
+from lmcache.v1.distributed.api import PrefetchHandle, PrefetchResult
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
+
+
+def _result(found):
+    """A finished result whose hits all came from L1, or None."""
+    if found is None:
+        return None
+    return PrefetchResult(
+        hit_cells=found,
+        l1_hit_cells=[row.copy() for row in found],
+        l2_hit_cells=[Bitmap(len(row)) for row in found],
+    )
 
 
 def _make_ctx(wait_result=True, found=None):
     storage_manager = mock.Mock()
     storage_manager.wait_prefetch_status.return_value = wait_result
-    storage_manager.query_prefetch_status.return_value = found
-    storage_manager.query_prefetch_hit_counts.return_value = (0, 0)
+    storage_manager.query_prefetch_status.return_value = _result(found)
     ctx = mock.Mock()
     ctx.storage_manager = storage_manager
     ctx.event_bus = mock.Mock()

@@ -346,12 +346,12 @@ class P2PController:
             )
             return None
 
-        found_rows = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if found_rows is None:
+        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        if result is None:
             # Still in progress (only possible once L2 prefetch is enabled).
             return None
 
-        addresses = self._build_addresses(job, found_rows)
+        addresses = self._build_addresses(job, result.hit_cells)
 
         with self._job_lock:
             self._jobs.pop(task_id, None)

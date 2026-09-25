@@ -854,25 +854,13 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
         )
 
         handle = sm.submit_prefetch_task(single_row_spec([key], layout))
-        assert wait_for_condition(
-            lambda: sm.query_prefetch_lookup_hits(handle) is not None,
-            timeout=5.0,
-        )
-        lookup_hits = sm.query_prefetch_lookup_hits(handle)
-        assert lookup_hits == 1
-
-        final_result: dict[str, int | None] = {"value": None}
-
-        def _capture_prefetch_result() -> bool:
-            result = sm.query_prefetch_status(handle)
-            if result is None:
-                return False
-            final_result["value"] = result[0].count_leading_ones()
-            return True
-
-        assert wait_for_condition(_capture_prefetch_result, timeout=5.0)
-        final_hits = final_result["value"]
+        assert sm.wait_prefetch_status(handle, timeout=5.0)
+        result = sm.query_prefetch_status(handle)
+        assert result is not None
+        final_hits = result.hit_cells[0].count_leading_ones()
         assert final_hits == 1
+        # The key came back from the DAX adapter, not from L1.
+        assert result.l2_hit_cells[0].count_leading_ones() == 1
 
         with sm.read_prefetched_results([key]) as results:
             assert results is not None

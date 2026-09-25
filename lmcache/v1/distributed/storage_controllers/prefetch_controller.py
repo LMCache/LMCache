@@ -32,6 +32,7 @@ from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
     ObjectKey,
     PrefetchLockMode,
+    PrefetchResult,
     PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
@@ -309,21 +310,6 @@ def _build_request(
 
 
 # Class definitions
-
-
-@dataclass(frozen=True)
-class PrefetchResult:
-    """The outcome of a prefetch request.
-
-    ``hit_cells`` has one row per key group of the request and one column
-    per chunk; a set bit marks a key resident in L1 when the request finished
-    (and read-locked under ``LOCK``). The two counts split those cells by
-    the tier that provided them.
-    """
-
-    hit_cells: Bitmap2D
-    l1_hit_count: int
-    l2_hit_count: int
 
 
 @dataclass
@@ -1517,21 +1503,25 @@ class PrefetchController(StorageControllerInterface):
                 },
             )
         )
-        l2_hit_count = 0
         if len(request.l2_loaded_cells) > 0:
-            l2_hit_count = (hit_cells & request.l2_loaded_cells).popcount()
-        result = PrefetchResult(
-            hit_cells=hit_cells,
-            l1_hit_count=hit_cells.popcount() - l2_hit_count,
-            l2_hit_count=l2_hit_count,
+            l2_hit_cells = hit_cells & request.l2_loaded_cells
+        else:
+            l2_hit_cells = hit_cells.zeros_like()
+        l1_hit_cells = hit_cells - l2_hit_cells
+        self._publish_result(
+            request,
+            PrefetchResult(
+                hit_cells=hit_cells.to_list(),
+                l1_hit_cells=l1_hit_cells.to_list(),
+                l2_hit_cells=l2_hit_cells.to_list(),
+            ),
         )
-        self._publish_result(request, result)
         logger.debug(
             "Prefetch request %d completed: %d hit cells (%d from L1, %d from L2)",
             request.request_id,
             hit_cells.popcount(),
-            result.l1_hit_count,
-            result.l2_hit_count,
+            l1_hit_cells.popcount(),
+            l2_hit_cells.popcount(),
         )
 
     def _publish_result(
@@ -1549,7 +1539,12 @@ class PrefetchController(StorageControllerInterface):
         self._release_all_locks(request)
         empty = Bitmap2D.zeros(len(request.key_groups), len(request.key_groups[0].keys))
         self._publish_result(
-            request, PrefetchResult(hit_cells=empty, l1_hit_count=0, l2_hit_count=0)
+            request,
+            PrefetchResult(
+                hit_cells=empty.to_list(),
+                l1_hit_cells=empty.zeros_like().to_list(),
+                l2_hit_cells=empty.zeros_like().to_list(),
+            ),
         )
         self._retire_request(request)
 

@@ -616,11 +616,20 @@ class _LockCountingStorageManager:
         return handle
 
     def query_prefetch_status(self, handle):
-        # Every submitted key is found: one all-set bitmap per row.
+        # Every submitted key is found and was loaded from L2: one all-set
+        # bitmap per row.
         # First Party
         from lmcache.lmcache_native import Bitmap
+        from lmcache.v1.distributed.api import PrefetchResult
 
-        return [Bitmap(len(row.keys), len(row.keys)) for row in handle.key_groups]
+        def rows():
+            return [Bitmap(len(row.keys), len(row.keys)) for row in handle.key_groups]
+
+        return PrefetchResult(
+            hit_cells=rows(),
+            l1_hit_cells=[Bitmap(len(row.keys)) for row in handle.key_groups],
+            l2_hit_cells=rows(),
+        )
 
     def finish_read_prefetched(self, keys, read_locks: int = 1) -> None:
         for key in keys:
