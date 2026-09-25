@@ -379,10 +379,7 @@ class LookupModule:
         if result is None:
             return None
         found_rows = result.hit_cells
-        hit_counts = (
-            sum(row.popcount() for row in result.l1_hit_cells),
-            sum(row.popcount() for row in result.l2_hit_cells),
-        )
+        hit_counts = (result.l1_hit_count, result.l2_hit_count)
 
         if job.row_windows:
             found_count, _retain = fold_unfold_grouped(found_rows, job.row_windows)

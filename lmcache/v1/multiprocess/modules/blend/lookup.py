@@ -602,7 +602,7 @@ class LookupMixin:
                         session_id=rid,
                         metadata={
                             "found_keys": sum(r.popcount() for r in result.hit_cells),
-                            "l2_keys": sum(r.popcount() for r in result.l2_hit_cells),
+                            "l2_keys": result.l2_hit_count,
                         },
                     )
                 )

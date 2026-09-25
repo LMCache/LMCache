@@ -7,7 +7,7 @@ Could be implemented by native code in the future
 """
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
@@ -571,6 +571,27 @@ class PrefetchResult:
     hit_cells: list["Bitmap"]
     l1_hit_cells: list["Bitmap"]
     l2_hit_cells: list["Bitmap"]
+    _l1_hit_count: int = field(init=False, repr=False, compare=False)
+    _l2_hit_count: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # Frozen dataclass: the cached counts are set through object.__setattr__.
+        object.__setattr__(
+            self, "_l1_hit_count", sum(row.popcount() for row in self.l1_hit_cells)
+        )
+        object.__setattr__(
+            self, "_l2_hit_count", sum(row.popcount() for row in self.l2_hit_cells)
+        )
+
+    @property
+    def l1_hit_count(self) -> int:
+        """Number of hit cells L1 already held."""
+        return self._l1_hit_count
+
+    @property
+    def l2_hit_count(self) -> int:
+        """Number of hit cells loaded from L2."""
+        return self._l2_hit_count
 
 
 def ipc_key_to_object_keys(
