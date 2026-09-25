@@ -272,7 +272,7 @@ def _wait_for_fs_l2_store(
         stored_files = [
             path
             for path in Path(base_dir).rglob("*")
-            if path.is_file() and path.suffix != ".tmp"
+            if path.is_file() and not path.is_relative_to(Path(base_dir) / "tmp")
         ]
         status = sm.report_status()
         controller = status["store_controller"]
