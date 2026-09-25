@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 
 # First Party
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
@@ -214,9 +215,15 @@ def _make_checkpoint_module(
     module.context.chunk_size = 2
     module.context.null_block_id = -1
     module.context.session_manager.get.return_value = None
-    module.context.storage_manager.reserve_write.side_effect = lambda keys, layout: {
-        key: MagicMock(get_size=MagicMock(return_value=10)) for key in keys
-    }
+    module.context.storage_manager.reserve_write_with_status.side_effect = (
+        lambda keys, layout: {
+            key: (
+                L1Error.SUCCESS,
+                MagicMock(get_size=MagicMock(return_value=10)),
+            )
+            for key in keys
+        }
+    )
     monkeypatch.setattr(
         mod, "downsample_and_stage_block_ids", downsample_and_stage_block_ids
     )
@@ -238,7 +245,7 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
     assert [
         call.args[0]
         for call in cast(
-            MagicMock, module.context.storage_manager.reserve_write
+            MagicMock, module.context.storage_manager.reserve_write_with_status
         ).call_args_list
     ] == [["g0c0", "g0c1"], ["g1c1"]]
     assert [obj is None for obj in transfers[1][1]] == [True, False]
@@ -247,6 +254,37 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
         [-1, -1, 0, 1],
         [-1, -1, 2, 3],
     ]
+
+
+def test_store_aborts_prior_reservations_after_later_group_oom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An allocation failure must not publish an earlier group's objects."""
+    module, _context, _reads, transfers = _make_checkpoint_module(monkeypatch)
+    first_group_objs = {
+        key: MagicMock(get_size=MagicMock(return_value=10)) for key in ("g0c0", "g0c1")
+    }
+    module.context.storage_manager.reserve_write_with_status.side_effect = [
+        {key: (L1Error.SUCCESS, obj) for key, obj in first_group_objs.items()},
+        {"g1c1": (L1Error.OUT_OF_MEMORY, None)},
+    ]
+    callbacks: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(
+        mod,
+        "submit_callback_to_stream",
+        lambda _stream, kind, keys: callbacks.append((kind, list(keys))),
+    )
+
+    _handle, ok = module.store(
+        SimpleNamespace(request_id="req", worker_id=1),
+        1,
+        [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
+        b"producer",
+    )
+
+    assert not ok
+    assert callbacks == [("abort_write", ["g0c0", "g0c1"])]
+    assert [group_id for group_id, _ in transfers] == [0]
 
 
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
