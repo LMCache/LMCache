@@ -2,12 +2,12 @@
 """Tests for the BaseWorkload abstract class."""
 
 # Standard
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 import queue
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import WarmupPolicy
-from lmcache.cli.commands.bench.engine_bench.stats import RequestResult
+from lmcache.cli.commands.bench.engine_bench.stats import RequestResult, StatsCollector
 from lmcache.cli.commands.bench.engine_bench.workloads.base import BaseWorkload
 
 # ---------------------------------------------------------------------------
@@ -116,6 +116,62 @@ class TestBaseWorkloadDrainQueue:
 
 
 class TestBaseWorkloadRunLoop:
+    def test_run_excludes_cleanup_and_reporting_from_elapsed_time(self) -> None:
+        """Freeze timing after final callbacks but before reporting/client cleanup."""
+        with patch("time.monotonic", return_value=100.0) as clock:
+            collector = StatsCollector()
+            sender = MagicMock()
+            monitor = MagicMock()
+            workload = StubWorkload(sender, collector, monitor)
+            result = RequestResult(
+                request_id="r0",
+                successful=True,
+                ttft=0.1,
+                request_latency=1.0,
+                num_input_tokens=1000,
+                num_output_tokens=100,
+                decode_speed=100 / 0.9,
+                submit_time=100.0,
+                first_token_time=100.1,
+                finish_time=101.0,
+                error="",
+            )
+
+            async def step(time_offset: float) -> float:
+                clock.return_value = 101.0
+                collector.on_request_finished(result)
+                workload.request_finished(result, "answer")
+                return -1.0
+
+            def finished(request_id: str, output: str) -> None:
+                workload.finished_calls.append((request_id, output))
+                clock.return_value = 102.0
+
+            def log_message(message: str) -> None:
+                if message == "Benchmark complete":
+                    clock.return_value = 110.0
+
+            async def close() -> None:
+                clock.return_value = 120.0
+
+            sender.close = AsyncMock(side_effect=close)
+            monitor.log_message.side_effect = log_message
+            with (
+                patch.object(workload, "step", side_effect=step),
+                patch.object(workload, "on_request_finished", side_effect=finished),
+            ):
+                workload.run(WarmupPolicy.SKIP)
+
+            # Model the additional display-thread join after workload.run().
+            clock.return_value = 130.0
+            final = collector.get_final_stats()
+
+        assert workload.finished_calls == [("r0", "answer")]
+        sender.close.assert_awaited_once()
+        assert final.elapsed_time == 2.0
+        assert final.input_throughput == 500.0
+        assert final.output_throughput == 50.0
+
     def test_run_calls_warmup(self) -> None:
         w = _make_stub()
         w.run()
