@@ -18,15 +18,16 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 # First Party
-from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     FULL_ATTENTION_WINDOW_CHUNKS,
     FetchingPolicy,
     GroupedObjectKeys,
+    ObjectKey,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.distributed.storage_controllers.utils import (
+    Bitmap2D,
     L1ManagerDescriptor,
     L2AdapterDescriptor,
     MapState,
@@ -37,105 +38,41 @@ logger = init_logger(__name__)
 # Helper functions
 
 
-def _intersect_rows(left: list[Bitmap], right: list[Bitmap]) -> list[Bitmap]:
-    """Return the row-wise intersection of two bitmap lists.
-
-    Args:
-        left: One bitmap per row.
-        right: One bitmap per row, parallel to ``left`` with equal widths.
-
-    Returns:
-        New bitmaps, one per row, with a bit set where both inputs set it.
-
-    Raises:
-        ValueError: If the two lists differ in length.
-    """
-    return [a & b for a, b in zip(left, right, strict=True)]
-
-
-def _subtract_rows(left: list[Bitmap], right: list[Bitmap]) -> list[Bitmap]:
-    """Return the row-wise difference of two bitmap lists.
-
-    Args:
-        left: One bitmap per row.
-        right: One bitmap per row, parallel to ``left`` with equal widths.
-
-    Returns:
-        New bitmaps, one per row, with the bits of ``left`` that are not set
-        in ``right``.
-
-    Raises:
-        ValueError: If the two lists differ in length.
-    """
-    return [a & ~b for a, b in zip(left, right, strict=True)]
-
-
-def _union_rows(left: list[Bitmap], right: list[Bitmap]) -> list[Bitmap]:
-    """Return the row-wise union of two bitmap lists.
-
-    Args:
-        left: One bitmap per row.
-        right: One bitmap per row, parallel to ``left`` with equal widths.
-
-    Returns:
-        New bitmaps, one per row, with a bit set where either input sets it.
-
-    Raises:
-        ValueError: If the two lists differ in length.
-    """
-    return [a | b for a, b in zip(left, right, strict=True)]
-
-
-def _empty_rows(rows: list[Bitmap]) -> list[Bitmap]:
-    """Return all-zero bitmaps with the same widths as ``rows``."""
-    return [Bitmap(bitmap.size()) for bitmap in rows]
-
-
-def _has_any_bit(rows: list[Bitmap]) -> bool:
-    """Return whether any bitmap in ``rows`` has a set bit."""
-    return any(bitmap.popcount() > 0 for bitmap in rows)
-
-
-def _rows_match_groups(rows: list[Bitmap], key_groups: list[GroupedObjectKeys]) -> bool:
-    """Return whether ``rows`` has one bitmap per key group, each as wide as
+def _grid_matches_groups(grid: Bitmap2D, key_groups: list[GroupedObjectKeys]) -> bool:
+    """Return whether ``grid`` has one row per key group, each as wide as
     that group's key list."""
-    if len(rows) != len(key_groups):
-        return False
-    return all(
-        bitmap.size() == len(group.keys)
-        for bitmap, group in zip(rows, key_groups, strict=True)
-    )
+    if not key_groups:
+        return grid.size() == (0, 0)
+    return grid.size() == (len(key_groups), len(key_groups[0].keys))
 
 
-def _merged_or_empty(
-    state: MapState, key_groups: list[GroupedObjectKeys]
-) -> list[Bitmap]:
-    """Union a map across its indices, or return all-zero rows for an empty map.
+def _merged_or_zeros(state: MapState, key_groups: list[GroupedObjectKeys]) -> Bitmap2D:
+    """Union a map across its indices, or return an all-zero grid for an empty map.
 
     Args:
         state: The map to merge.
         key_groups: The rows the result is shaped after when ``state`` is empty.
 
     Returns:
-        One bitmap per key group.
+        A grid with one row per key group.
     """
     merged = state.merge()
-    if merged:
+    if len(merged) > 0:
         return merged
-    return [Bitmap(len(group.keys)) for group in key_groups]
+    return Bitmap2D.zeros(len(key_groups), len(key_groups[0].keys))
 
 
 def _plan_tier(
-    needed: list[Bitmap],
+    needed: Bitmap2D,
     locked_keys: MapState,
     indices: list[int],
-) -> tuple[MapState, list[Bitmap]]:
+) -> tuple[MapState, Bitmap2D]:
     """Assign still-needed cells to the given indices, first index wins.
 
     Args:
-        needed: One bitmap per row of the cells not yet planned.
-        locked_keys: Index -> per-row bitmaps of the cells locked there.
-        indices: The adapter/manager indices to consider, in priority order.
+        needed: The cells not yet planned.
+        locked_keys: Index -> grid of the cells locked there.
+        indices: The indices to consider, in priority order.
 
     Returns:
         The per-index plan and the cells that remain unplanned afterwards.
@@ -146,11 +83,11 @@ def _plan_tier(
     for index in indices:
         if index not in locked_keys:
             continue
-        local = _intersect_rows(remaining, locked_keys[index])
-        if not _has_any_bit(local):
+        local = remaining & locked_keys[index]
+        if local.popcount() == 0:
             continue
         plan[index] = local
-        remaining = _subtract_rows(remaining, local)
+        remaining = remaining - local
     return plan, remaining
 
 
@@ -196,7 +133,6 @@ class PrefetchPolicy(ABC):
         l2_locked_keys: MapState,
         l1_manager_descs: dict[int, L1ManagerDescriptor],
         l2_adapter_descs: dict[int, L2AdapterDescriptor],
-        sliding_windows: list[int],
         fetching_policy: FetchingPolicy,
     ) -> PrefetchPlan:
         """Decide which cells are served from L1 and which are loaded from L2.
@@ -212,8 +148,6 @@ class PrefetchPolicy(ABC):
                 manager that may appear in ``l1_locked_keys``.
             l2_adapter_descs: L2 adapter index -> descriptor, for every L2
                 adapter that may appear in ``l2_locked_keys``.
-            sliding_windows: sliding window lengths for each key group. Has
-                the same length as the ``key_groups`` list.
             fetching_policy: ``"prefix"`` or ``"full"``.
 
         Returns:
@@ -230,9 +164,10 @@ class PrefetchPolicy(ABC):
 
     def plan_l1_retention(
         self,
-        key_groups: list[GroupedObjectKeys],
-        loading_keys: list[Bitmap],
-    ) -> list[Bitmap]:
+        keys: list[ObjectKey],
+        l1_manager_desc: L1ManagerDescriptor,
+        l2_adapter_desc: L2AdapterDescriptor,
+    ) -> list[bool]:
         """Decide which keys loaded from L2 stay resident in L1 after L1-L0
         retrieve.
 
@@ -240,17 +175,15 @@ class PrefetchPolicy(ABC):
         the L1-L0 transfer finishes on that key.
 
         Args:
-            key_groups: The original object keys in the request, grouped by
-                different (object_group_id, kv_rank) tuples.
-            loading_keys: One (global) bitmap per group marking the keys about
-                to be written into L1 from L2. Should have the same length
-                as ``key_groups``.
+            keys: The keys about to be written into the L1 manager from the
+                L2 adapter, in the order they will be written.
+            l1_manager_desc: Descriptor of the L1 manager receiving the keys.
+            l2_adapter_desc: Descriptor of the L2 adapter the keys are loaded
+                from.
 
         Returns:
-            Global bitmaps indicating which keys to retain in L1 (for each group).
-            The length of the returned list is the same as ``loading_keys``.
-
-            The returned bitmap is guaranteed to be a subset of the input bitmap.
+            One flag per key, parallel to ``keys``. ``True`` retains the key
+            in L1; ``False`` marks it temporary.
 
         Note:
             This function should not raise.
@@ -272,7 +205,6 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
         l2_locked_keys: MapState,
         l1_manager_descs: dict[int, L1ManagerDescriptor],
         l2_adapter_descs: dict[int, L2AdapterDescriptor],
-        sliding_windows: list[int],
         fetching_policy: FetchingPolicy,
     ) -> PrefetchPlan:
         """Plan the needed cells, L1 first, then L2, lowest index first.
@@ -292,8 +224,6 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
                 manager that may appear in ``l1_locked_keys``.
             l2_adapter_descs: L2 adapter index -> descriptor, for every L2
                 adapter that may appear in ``l2_locked_keys``.
-            sliding_windows: sliding window lengths for each key group. Has
-                the same length as the ``key_groups`` list.
             fetching_policy: ``"prefix"`` or ``"full"``.
 
         Returns:
@@ -308,22 +238,16 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
         if not key_groups:
             logger.error("plan_load: request has no key groups")
             return empty
-        if len(sliding_windows) != len(key_groups):
-            logger.error(
-                "plan_load: %d sliding windows for %d key groups",
-                len(sliding_windows),
-                len(key_groups),
-            )
-            return empty
+        sliding_windows = [group.sliding_window_size for group in key_groups]
 
-        l1_found = _merged_or_empty(l1_locked_keys, key_groups)
-        l2_found = _merged_or_empty(l2_locked_keys, key_groups)
-        if not _rows_match_groups(l1_found, key_groups) or not _rows_match_groups(
+        l1_found = _merged_or_zeros(l1_locked_keys, key_groups)
+        l2_found = _merged_or_zeros(l2_locked_keys, key_groups)
+        if not _grid_matches_groups(l1_found, key_groups) or not _grid_matches_groups(
             l2_found, key_groups
         ):
             logger.error("plan_load: locked-key layout does not match key groups")
             return empty
-        found = _union_rows(l1_found, l2_found)
+        found = l1_found + l2_found
 
         if fetching_policy == "full":
             if any(w > FULL_ATTENTION_WINDOW_CHUNKS for w in sliding_windows):
@@ -336,11 +260,13 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
             needed = found
         else:
             try:
-                _hit_length, retain = fold_unfold_grouped(found, sliding_windows)
+                _hit_length, retain = fold_unfold_grouped(
+                    found.to_list(), sliding_windows
+                )
             except ValueError:
                 logger.exception("plan_load: prefix fold failed")
                 return empty
-            needed = _intersect_rows(retain, found)
+            needed = Bitmap2D(retain) & found
 
         l1_plan, needed = _plan_tier(needed, l1_locked_keys, sorted(l1_manager_descs))
         l2_plan, _needed = _plan_tier(needed, l2_locked_keys, sorted(l2_adapter_descs))
@@ -348,24 +274,26 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
 
     def plan_l1_retention(
         self,
-        key_groups: list[GroupedObjectKeys],
-        loading_keys: list[Bitmap],
-    ) -> list[Bitmap]:
+        keys: list[ObjectKey],
+        l1_manager_desc: L1ManagerDescriptor,
+        l2_adapter_desc: L2AdapterDescriptor,
+    ) -> list[bool]:
         """Retain nothing: every loaded key is temporary.
 
         Args:
-            key_groups: The original object keys in the request, grouped by
-                different (object_group_id, kv_rank) tuples.
-            loading_keys: One (global) bitmap per group marking the keys about
-                to be written into L1 from L2.
+            keys: The keys about to be written into the L1 manager from the
+                L2 adapter.
+            l1_manager_desc: Descriptor of the L1 manager receiving the keys.
+            l2_adapter_desc: Descriptor of the L2 adapter the keys are loaded
+                from.
 
         Returns:
-            All-zero bitmaps with the same layout as ``loading_keys``.
+            ``False`` for every key.
 
         Note:
             This function does not raise.
         """
-        return _empty_rows(loading_keys)
+        return [False] * len(keys)
 
 
 class RetainPrefetchPolicy(DefaultPrefetchPolicy):
@@ -377,30 +305,26 @@ class RetainPrefetchPolicy(DefaultPrefetchPolicy):
 
     def plan_l1_retention(
         self,
-        key_groups: list[GroupedObjectKeys],
-        loading_keys: list[Bitmap],
-    ) -> list[Bitmap]:
+        keys: list[ObjectKey],
+        l1_manager_desc: L1ManagerDescriptor,
+        l2_adapter_desc: L2AdapterDescriptor,
+    ) -> list[bool]:
         """Retain every loaded key.
 
         Args:
-            key_groups: The original object keys in the request, grouped by
-                different (object_group_id, kv_rank) tuples.
-            loading_keys: One (global) bitmap per group marking the keys about
-                to be written into L1 from L2.
+            keys: The keys about to be written into the L1 manager from the
+                L2 adapter.
+            l1_manager_desc: Descriptor of the L1 manager receiving the keys.
+            l2_adapter_desc: Descriptor of the L2 adapter the keys are loaded
+                from.
 
         Returns:
-            Copies of ``loading_keys``.
+            ``True`` for every key.
 
         Note:
-            This function does not raise. A layout that does not match
-            ``key_groups`` is logged and retains nothing.
+            This function does not raise.
         """
-        if not _rows_match_groups(loading_keys, key_groups):
-            logger.error(
-                "plan_l1_retention: loading-key layout does not match key groups"
-            )
-            return _empty_rows(loading_keys)
-        return [b.copy() for b in loading_keys]
+        return [True] * len(keys)
 
 
 # -----------------------------------------------------------------------------

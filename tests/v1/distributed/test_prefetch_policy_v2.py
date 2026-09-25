@@ -38,6 +38,7 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy_v2 import (
     register_prefetch_policy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import (
+    Bitmap2D,
     L1ManagerDescriptor,
     L2AdapterDescriptor,
     MapState,
@@ -107,7 +108,7 @@ def _state(entries: dict[int, list[Bitmap]]) -> MapState:
     """Build a map from index to rows."""
     state = MapState()
     for index, rows in entries.items():
-        state[index] = rows
+        state[index] = Bitmap2D(rows)
     return state
 
 
@@ -132,14 +133,16 @@ def _plan(
         l2,
         _l1_descs(*l1_indices),
         _l2_descs(*l2_indices),
-        [group.sliding_window_size for group in key_groups],
         fetching_policy,
     )
 
 
 def _is_empty(plan: PrefetchPlan) -> bool:
     """Return whether the plan has no index in either map."""
-    return plan.l1_planned_keys.merge() == [] and plan.l2_planned_keys.merge() == []
+    return plan.l1_planned_keys.merge().size() == (
+        0,
+        0,
+    ) and plan.l2_planned_keys.merge().size() == (0, 0)
 
 
 def _assert_plan_contract(
@@ -337,7 +340,7 @@ class TestDefaultPrefix:
         plan = _plan(DefaultPrefetchPolicy(), groups, l1, MapState(), l2_indices=())
 
         assert _rows(plan.l1_planned_keys, 0) == [[0, 1]]
-        assert plan.l2_planned_keys.merge() == []
+        assert plan.l2_planned_keys.merge().size() == (0, 0)
 
 
 # =============================================================================
@@ -453,21 +456,10 @@ class TestDefaultContract:
 
         assert _rows(l2, 0) == [[0, 1, 2]]
 
-    def test_window_count_mismatch_gives_empty_plan(self) -> None:
-        """A window list that does not match the rows is invalid input."""
-        groups = [_group(3, gid=0), _group(3, gid=1)]
-        l2 = _state({0: [_row(3, 0), _row(3, 0)]})
-
-        plan = DefaultPrefetchPolicy().plan_load(
-            groups, MapState(), l2, _l1_descs(), _l2_descs(0), [FULL], "prefix"
-        )
-
-        assert _is_empty(plan)
-
     def test_empty_key_groups_give_empty_plan(self) -> None:
         """A request with no rows plans nothing."""
         plan = DefaultPrefetchPolicy().plan_load(
-            [], MapState(), MapState(), _l1_descs(), _l2_descs(), [], "prefix"
+            [], MapState(), MapState(), _l1_descs(), _l2_descs(), "prefix"
         )
 
         assert _is_empty(plan)
@@ -500,51 +492,61 @@ class TestDefaultContract:
 class TestRetention:
     def test_default_retains_nothing(self) -> None:
         """The default policy marks every loading key temporary."""
-        groups = [_group(4, gid=0), _group(4, gid=1)]
-        loading = [_row(4, 0, 2), _row(4, 3)]
+        keys = _group(4).keys
 
-        retained = DefaultPrefetchPolicy().plan_l1_retention(groups, loading)
+        retained = DefaultPrefetchPolicy().plan_l1_retention(
+            keys, _l1_descs(0)[0], _l2_descs(0)[0]
+        )
 
-        assert [b.size() for b in retained] == [4, 4]
-        assert [_bits(b) for b in retained] == [[], []]
-
-    def test_default_ignores_layout_mismatch_without_raising(self) -> None:
-        """The default keeps its no-raise promise on a mismatched layout."""
-        groups = [_group(4)]
-        loading = [_row(4, 0), _row(4, 1)]
-
-        retained = DefaultPrefetchPolicy().plan_l1_retention(groups, loading)
-
-        assert all(b.popcount() == 0 for b in retained)
+        assert retained == [False] * 4
 
     def test_retain_keeps_every_loading_key(self) -> None:
-        """The retain policy marks exactly the loading keys as retained."""
-        groups = [_group(4, gid=0), _group(4, gid=1)]
-        loading = [_row(4, 0, 2), _row(4, 3)]
+        """The retain policy marks every loading key retained."""
+        keys = _group(4).keys
 
-        retained = RetainPrefetchPolicy().plan_l1_retention(groups, loading)
+        retained = RetainPrefetchPolicy().plan_l1_retention(
+            keys, _l1_descs(0)[0], _l2_descs(0)[0]
+        )
 
-        assert [_bits(b) for b in retained] == [[0, 2], [3]]
-        assert [b.size() for b in retained] == [4, 4]
+        assert retained == [True] * 4
 
-    def test_retain_returns_copies(self) -> None:
-        """Mutating the retention result leaves the input untouched."""
-        groups = [_group(4)]
-        loading = [_row(4, 0, 2)]
+    @pytest.mark.parametrize(
+        "policy_cls", [DefaultPrefetchPolicy, RetainPrefetchPolicy]
+    )
+    def test_result_is_parallel_to_keys(self, policy_cls: type[PrefetchPolicy]) -> None:
+        """One flag comes back per key, including for keys spanning groups."""
+        keys = _group(3, gid=0).keys + _group(2, gid=1).keys
 
-        retained = RetainPrefetchPolicy().plan_l1_retention(groups, loading)
-        retained[0].set(3)
+        retained = policy_cls().plan_l1_retention(
+            keys, _l1_descs(0)[0], _l2_descs(0)[0]
+        )
 
-        assert _bits(loading[0]) == [0, 2]
+        assert len(retained) == len(keys)
+        assert all(isinstance(flag, bool) for flag in retained)
 
-    def test_retain_with_layout_mismatch_retains_nothing(self) -> None:
-        """A loading layout that does not match the groups retains nothing."""
-        groups = [_group(4, gid=0), _group(4, gid=1)]
-        loading = [_row(4, 0, 2)]
+    @pytest.mark.parametrize(
+        "policy_cls", [DefaultPrefetchPolicy, RetainPrefetchPolicy]
+    )
+    def test_no_keys_gives_no_flags(self, policy_cls: type[PrefetchPolicy]) -> None:
+        """An empty key list yields an empty flag list without raising."""
+        assert (
+            policy_cls().plan_l1_retention([], _l1_descs(0)[0], _l2_descs(0)[0]) == []
+        )
 
-        retained = RetainPrefetchPolicy().plan_l1_retention(groups, loading)
+    @pytest.mark.parametrize(
+        "policy_cls", [DefaultPrefetchPolicy, RetainPrefetchPolicy]
+    )
+    def test_decision_does_not_depend_on_the_pair(
+        self, policy_cls: type[PrefetchPolicy]
+    ) -> None:
+        """Both built-in policies give the same answer for any manager/adapter pair."""
+        keys = _group(3).keys
+        policy = policy_cls()
 
-        assert all(b.popcount() == 0 for b in retained)
+        first = policy.plan_l1_retention(keys, _l1_descs(0)[0], _l2_descs(0)[0])
+        second = policy.plan_l1_retention(keys, _l1_descs(2)[2], _l2_descs(5)[5])
+
+        assert first == second
 
     def test_retain_plans_loads_like_default(self) -> None:
         """Retain differs from default only in retention, not in planning."""
