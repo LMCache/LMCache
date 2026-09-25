@@ -71,7 +71,7 @@ from lmcache.v1.distributed.internal_api import (
     PrefetchRequestSpec,
     TrimPolicy,
 )
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import EvictionCandidateSelector, L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
@@ -298,6 +298,7 @@ class PrefetchController(StorageControllerInterface):
         adapter_descriptors: list[L2AdapterDescriptor],
         policy: PrefetchPolicy,
         max_in_flight: int = 8,
+        eviction_candidate_selector: EvictionCandidateSelector | None = None,
     ) -> None:
         self._l1_manager = l1_manager
         self._l2_adapters: dict[int, L2AdapterInterface] = {
@@ -309,6 +310,7 @@ class PrefetchController(StorageControllerInterface):
         }
         self._policy = policy
         self._max_in_flight = max_in_flight
+        self._eviction_candidate_selector = eviction_candidate_selector
 
         # Adapters that are being drained and will be removed after all
         # the in-flight operations are done.
@@ -1095,6 +1097,7 @@ class PrefetchController(StorageControllerInterface):
                 is_temporary=[not retention_map[k] for k in group_keys],
                 layout_desc=gld,
                 tag=_get_prefetch_write_tag(request.request_id),
+                eviction_candidate_selector=self._eviction_candidate_selector,
             )
             write_results.update(gr)
 

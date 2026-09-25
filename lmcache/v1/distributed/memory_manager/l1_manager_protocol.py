@@ -30,6 +30,14 @@ class L1ManagerProtocol(Protocol):
         """Free the given memory objects."""
         ...
 
+    def get_allocation_size(self, layout_desc: MemoryLayoutDesc) -> int:
+        """Return the aligned allocation size in bytes for one layout object.
+
+        This is a capacity estimate, not a guarantee that fragmented free
+        space can satisfy the allocation.
+        """
+        ...
+
     def get_memory_usage(self) -> tuple[int, int]:
         """Return ``(used_bytes, total_bytes)``."""
         ...

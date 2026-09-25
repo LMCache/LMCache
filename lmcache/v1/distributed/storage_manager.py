@@ -234,6 +234,9 @@ class StorageManager:
             adapter_descriptors=list(self._adapter_descriptors.values()),
             policy=create_prefetch_policy(config.prefetch_policy),
             max_in_flight=config.prefetch_max_in_flight,
+            eviction_candidate_selector=(
+                self._eviction_controller.get_eviction_candidates
+            ),
         )
         self._prefetch_controller.start()
 

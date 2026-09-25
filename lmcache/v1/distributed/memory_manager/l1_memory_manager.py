@@ -6,6 +6,7 @@ from multiprocessing import shared_memory
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import get_size_bytes
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
@@ -155,6 +156,15 @@ class L1MemoryManager:
             ``L1BackendType.DRAM`` — the CPU tier is pinned DRAM only.
         """
         return L1BackendType.DRAM
+
+    def get_allocation_size(self, layout_desc: MemoryLayoutDesc) -> int:
+        """Return the bytes needed by one object, including allocator alignment.
+
+        Args:
+            layout_desc: Shapes and dtypes of the object to allocate.
+        """
+        raw_size = get_size_bytes(layout_desc.shapes, layout_desc.dtypes)
+        return (raw_size + self._align_bytes - 1) & ~(self._align_bytes - 1)
 
     def get_memory_usage(self) -> tuple[int, int]:
         """

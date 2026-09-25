@@ -71,6 +71,15 @@ pytest -xvs tests/v1/test_cache_engine.py::test_function_name
 
 Test dependencies: `uv pip install -r requirements/test.txt`
 
+For CPU-only L1/prefetch tests, build the common native extension with
+`NO_GPU_EXT=1` (the tests use real `TTLLock` and `Bitmap` objects). The CPU
+platform intentionally reports `torch_dev.is_available() == False`; do not
+use that check alone to skip tests that only need host memory. Use
+`use_lazy=False` on CPU, since the lazy allocator requires memory pinning.
+The L2 quota eviction tests in `test_cache_salt_l2_eviction.py` call
+`os.eventfd_read` directly and currently require Linux, even though the L1
+and prefetch controller tests support CPU-only macOS runs.
+
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 
 ### Testing Practices
