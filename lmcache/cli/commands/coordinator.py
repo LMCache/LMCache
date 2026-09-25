@@ -244,6 +244,17 @@ class CoordinatorCommand(BaseCommand):
                 "--event-transport kafka."
             ),
         )
+        parser.add_argument(
+            "--max-ready-lag",
+            type=int,
+            default=None,
+            help=(
+                "Records the coordinator may be behind its Kafka topic and "
+                "still start: above it, startup blocks (serving nothing) "
+                "until ingest catches up (default: 1000). "
+                "Ignored unless --event-transport kafka."
+            ),
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Build the coordinator config and serve the app with uvicorn.
@@ -312,6 +323,7 @@ class CoordinatorCommand(BaseCommand):
                     ("bootstrap_servers", args.kafka_bootstrap_servers),
                     ("topic", args.kafka_topic),
                     ("group_id", args.kafka_group_id),
+                    ("max_ready_lag", args.max_ready_lag),
                 )
                 if value is not None
             }

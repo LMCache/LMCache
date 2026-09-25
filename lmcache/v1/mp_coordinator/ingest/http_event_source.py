@@ -46,11 +46,13 @@ class HttpCacheEventSource(CacheEventSource):
         """Return the HTTP source's non-replayable status.
 
         Returns:
-            HTTP source identity with replay capability set to ``NONE``.
+            HTTP source identity, replay capability ``NONE``, and lag
+            ``0``: nothing is retained, so nothing can be behind.
         """
         return CacheEventSourceStatus(
             source_name="http",
             replay_capability=EventReplayCapability.NONE,
+            lag=0,
         )
 
     def ingest(self, batches: list[CacheEventBatch]) -> CacheEventIngestSummary:

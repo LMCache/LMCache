@@ -3,10 +3,12 @@
 
 Modelled: ``Producer.produce`` / ``flush`` with delivery callbacks, and a
 single-reader ``Consumer`` (``subscribe`` / ``poll`` / ``store_offsets`` /
-``close``) over one logical partition per topic. Consumer groups, retention,
-and rebalancing are out of scope. :func:`install_fake_confluent_kafka` swaps
-the stand-ins in for the real module, so tests run without ``confluent-kafka``
-installed.
+``position`` / ``get_watermark_offsets`` / ``close``) over one logical
+partition per topic. Consumer groups, retention, and rebalancing are out
+of scope; the single partition is assigned once, synchronously, in
+:meth:`FakeKafkaConsumer.subscribe`. :func:`install_fake_confluent_kafka`
+swaps the stand-ins in for the real module, so tests run without
+``confluent-kafka`` installed.
 """
 
 # Standard
@@ -22,6 +24,28 @@ import pytest
 DeliveryCallback = Callable[[object | None, "FakeKafkaRecord"], None]
 ProducerFactory = Callable[[dict[str, str | int | bool]], "FakeKafkaProducer"]
 ConsumerFactory = Callable[[dict[str, str | int | bool]], "FakeKafkaConsumer"]
+AssignCallback = Callable[[object, list["FakeTopicPartition"]], None]
+
+OFFSET_INVALID = -1001
+"""Stands in for ``confluent_kafka.OFFSET_INVALID``."""
+
+
+@dataclass
+class FakeTopicPartition:
+    """Stands in for ``confluent_kafka.TopicPartition``.
+
+    Attributes:
+        topic: The partition's topic.
+        partition: The partition number (always ``0``: one logical
+            partition per topic).
+        offset: Meaning depends on context, exactly as the real type: an
+            assignment offset, a queried position, or (from
+            ``get_watermark_offsets``) unused.
+    """
+
+    topic: str
+    partition: int = 0
+    offset: int = OFFSET_INVALID
 
 
 class FakeKafkaException(Exception):
@@ -253,13 +277,74 @@ class FakeKafkaConsumer:
         """
         self._errors.append(error)
 
-    def subscribe(self, topics: list[str]) -> None:
+    def subscribe(
+        self, topics: list[str], on_assign: "AssignCallback | None" = None
+    ) -> None:
         """Subscribe to ``topics``, polled in list order.
 
         Args:
             topics: Topics to read from their first record.
+            on_assign: If given, called once, synchronously, with the
+                single partition assigned for each topic -- this fake
+                never rebalances, so there is only ever one assignment,
+                and it never happens later on ``poll()`` the way a real
+                consumer's does.
         """
         self._topics = list(topics)
+        if on_assign is not None:
+            partitions = [
+                FakeTopicPartition(topic, offset=self._positions.get(topic, 0))
+                for topic in self._topics
+            ]
+            on_assign(self, partitions)
+
+    def assign(self, partitions: list[FakeTopicPartition]) -> None:
+        """Seek each partition to the offset given, as a real consumer's
+        ``assign`` does when called from an ``on_assign`` callback.
+
+        Args:
+            partitions: Partitions with the position to resume each from.
+        """
+        for partition in partitions:
+            self._positions[partition.topic] = partition.offset
+
+    def position(
+        self, partitions: list[FakeTopicPartition]
+    ) -> list[FakeTopicPartition]:
+        """Return each partition's current read position.
+
+        Args:
+            partitions: Partitions to report; only ``.topic`` is read.
+
+        Returns:
+            One :class:`FakeTopicPartition` per input, ``.offset`` set to
+            the next offset :meth:`poll` will read from that topic.
+        """
+        return [
+            FakeTopicPartition(p.topic, offset=self._positions.get(p.topic, 0))
+            for p in partitions
+        ]
+
+    def get_watermark_offsets(
+        self,
+        partition: FakeTopicPartition,
+        timeout: float | None = None,
+        cached: bool = False,
+    ) -> tuple[int, int]:
+        """Return ``(low, high)`` for one topic's single partition.
+
+        Args:
+            partition: The partition to measure; only ``.topic`` is read.
+            timeout: Accepted for signature compatibility; unused --
+                nothing here blocks.
+            cached: Accepted for signature compatibility; unused -- this
+                fake has no separate cached value to distinguish from a
+                live query.
+
+        Returns:
+            ``(0, len(records))``: this fake never trims retention.
+        """
+        return (0, len(self._broker.records(partition.topic)))
 
     def poll(self, timeout: float | None = None) -> FakeKafkaMessage | None:
         """Return the next error or unread record, or ``None`` when caught up.
@@ -310,6 +395,8 @@ def install_fake_confluent_kafka(
     """
     module = types.ModuleType("confluent_kafka")
     module.__dict__["KafkaException"] = FakeKafkaException
+    module.__dict__["OFFSET_INVALID"] = OFFSET_INVALID
+    module.__dict__["TopicPartition"] = FakeTopicPartition
     if producer_factory is not None:
         module.__dict__["Producer"] = producer_factory
     if consumer_factory is not None:
