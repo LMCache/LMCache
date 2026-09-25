@@ -766,10 +766,20 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
         ed = time.perf_counter()
         if stored_count:
+            region_tokens: dict[str, int] = {}
+            for mo in all_dict.values():
+                rname = self._ctx.storage_manager.region_of(mo)
+                region_tokens[rname] = (
+                    region_tokens.get(rname, 0) + self._ctx.chunk_size
+                )
+            region_str = ", ".join(
+                f"{name}: {cnt}" for name, cnt in region_tokens.items()
+            )
             logger.info(
-                "Stored %d tokens in %.3f seconds",
+                "Stored %d tokens in %.3f seconds. regions [%s]",
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
+                region_str,
             )
         return (
             event_backend.export_event(event, cache_context.device),
@@ -939,6 +949,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
 
             prefetched_keys: list[ObjectKey] = []
+            region_tokens: dict[str, int] = {}
             total_bytes = 0
             retrieve_succeeded = True
             try:
@@ -956,6 +967,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             break
 
                         total_bytes += sum(mo.get_size() for mo in window_objs)
+
+                        if obj_group_id == 0:
+                            for mo in window_objs:
+                                rname = self._ctx.storage_manager.region_of(mo)
+                                region_tokens[rname] = (
+                                    region_tokens.get(rname, 0)
+                                    + self._ctx.chunk_size
+                                )
 
                         # None-pad the skipped prefix to full length so the
                         # transfer's ``num_objects_to_skip`` and block-id slicing
@@ -1015,10 +1034,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         if retrieve_succeeded:
             tokens_retrieved = num_chunks * self._ctx.chunk_size
             ed = time.perf_counter()
+            region_str = ", ".join(
+                f"{name}: {cnt}" for name, cnt in region_tokens.items()
+            )
             logger.info(
-                "Retrieved %d tokens in %.3f seconds",
+                "Retrieved %d tokens in %.3f seconds. regions [%s]",
                 tokens_retrieved,
                 ed - st,
+                region_str,
             )
 
         return (

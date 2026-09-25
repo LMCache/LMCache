@@ -872,8 +872,11 @@ class StorageManager:
         return self._quota_manager
 
     @property
-    def l1_memory_desc(self) -> L1MemoryDesc:
-        """Descriptor of the L1 memory buffer backing this storage manager."""
+    def l1_memory_desc(self) -> Optional[L1MemoryDesc]:
+        """Descriptor of the L1 memory buffer backing this storage manager.
+
+        Returns None when L1 has no single registerable buffer (e.g. PCIe BAR-only).
+        """
         return self._l1_memory_desc
 
     def get_l2_usages(
@@ -966,6 +969,10 @@ class StorageManager:
                 )
             )
         return capacities
+
+    def region_of(self, memory_obj: MemoryObj) -> str:
+        """Return the region name that owns ``memory_obj``."""
+        return self._l1_manager.region_of(memory_obj)
 
     def get_l1_usage(self) -> tuple[int, int]:
         """Current occupancy of the L1 memory pool.
