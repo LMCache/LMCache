@@ -25,10 +25,12 @@ from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import KV_EVENT_CAPABILITY
 from lmcache.v1.multiprocess.modules import engine_driven_transfer as non_gpu_mod
+from lmcache.v1.multiprocess.modules import kv_events as kv_events_mod
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as gpu_mod
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
+from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
     LMCacheDrivenTransferModule,
@@ -42,14 +44,10 @@ from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 def _event_module(
     size: int = 3,
     bus: EventBus | None = None,
-) -> tuple[ManagementModule, EventBus]:
+) -> tuple[KVEventModule, EventBus]:
     bus = bus or EventBus(EventBusConfig())
     ctx = MagicMock(event_bus=bus)
-    return ManagementModule(
-        ctx,
-        kv_event_log_size=size,
-        experimental_transfer=("transfer_query",),
-    ), bus
+    return KVEventModule(ctx, kv_event_log_size=size), bus
 
 
 def _publish_kv(bus: EventBus, event_type: EventType, **metadata: Any) -> None:
@@ -454,7 +452,7 @@ def test_bus_loss_is_visible_without_later_bus_traffic() -> None:
         (True, 3),
     ],
 )
-def test_event_channel_capability_and_disabled_state(
+def test_event_channel_enabled_and_disabled_state(
     bus_enabled: bool,
     size: int,
 ) -> None:
@@ -465,9 +463,7 @@ def test_event_channel_capability_and_disabled_state(
     enabled = bus_enabled and size > 0
     result = module.read_kv_events("model", 0, 8)
     assert result.enabled == enabled and result.events == []
-    assert module.get_experimental() == (
-        ["transfer_query", KV_EVENT_CAPABILITY] if enabled else ["transfer_query"]
-    )
+    assert module.enabled == enabled
     assert (
         _event_module()[0].read_kv_events("model", 0, 8).incarnation
         != result.incarnation
@@ -485,7 +481,7 @@ def test_event_log_validates_arguments() -> None:
 
 def test_unknown_and_expired_token_bindings_skip_stores(monkeypatch) -> None:
     monkeypatch.setattr(
-        "lmcache.v1.multiprocess.modules.management._TOKEN_BINDING_CACHE_SIZE",
+        "lmcache.v1.multiprocess.modules.kv_events._TOKEN_BINDING_CACHE_SIZE",
         4,
     )
     module, bus = _event_module()
@@ -511,7 +507,12 @@ def test_event_subscription_pushes_without_polling_and_keeps_requests_live(
         max_cpu_workers=1,
         grpc_server_workers=1,
     )
-    server: Any = create_request_server([module], config)
+    management = ManagementModule(
+        module.context,
+        liveness_targets=[module],
+        experimental_transfer=[KV_EVENT_CAPABILITY],
+    )
+    server: Any = create_request_server([management, module], config)
     if transport == "grpc":
         url = f"grpc://127.0.0.1:{server.bound_port}"
     else:
@@ -550,7 +551,8 @@ def test_event_subscription_pushes_without_polling_and_keeps_requests_live(
         # Reuse the same client/channel after a server restart.
         module, bus = _event_module()
         config.port = int(url.rsplit(":", 1)[1])
-        server = create_request_server([module], config)
+        management = ManagementModule(module.context, liveness_targets=[module])
+        server = create_request_server([management, module], config)
         server.start()
         resumed = client.subscribe_kv_events(0, "model", 2, 8)
         streams.append(resumed)
@@ -580,3 +582,54 @@ def test_subscription_wakes_for_final_dropped_event_and_close() -> None:
             assert pending.result(timeout=5).lost
         finally:
             stream.close()
+
+
+@pytest.mark.parametrize("log_size", [0, 3])
+def test_subscription_liveness_uses_management_ping_without_reaping_workers(
+    monkeypatch: pytest.MonkeyPatch,
+    log_size: int,
+) -> None:
+    now = 0.0
+    monkeypatch.setattr(kv_events_mod.time, "monotonic", lambda: now)
+    module, _ = _event_module(size=log_size)
+    management = ManagementModule(module.context, liveness_targets=[module])
+    streams = [module.subscribe_kv_events(i, "model", 0, 8) for i in (1, 2)]
+    try:
+        now = 10.0
+        management.ping(1)
+        now = 15.0
+        assert module.reap_stale_instances(10.0, 120.0) == []
+        assert module.report_status()["kv_events"]["subscribers"] == 1
+        with pytest.raises(StopIteration):
+            next(streams[1])
+        # A subscription is not another worker registration in status counts.
+        assert management.report_status()["worker_liveness"]["tracked_instances"] == 0
+        module.drop_instance_state(1)
+        with pytest.raises(StopIteration):
+            next(streams[0])
+    finally:
+        management.close()
+        module.close()
+
+
+def test_management_reaper_closes_subscription_for_reaped_worker() -> None:
+    module, _ = _event_module()
+    target = _FakeTarget()
+    management = ManagementModule(
+        module.context,
+        liveness_targets=[target, module],
+        worker_reap_timeout_seconds=0.4,
+        worker_registration_grace_seconds=0.8,
+    )
+    stream = module.subscribe_kv_events(7, "model", 0, 8)
+    assert next(stream).events == []
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        waiting = pool.submit(next, stream)
+        try:
+            target.to_reap = [7]
+            with pytest.raises(StopIteration):
+                waiting.result(timeout=5)
+            assert 7 in target.dropped
+        finally:
+            management.close()
+            module.close()

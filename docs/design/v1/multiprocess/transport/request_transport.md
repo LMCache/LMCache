@@ -89,7 +89,7 @@ boundary.
 The CPU/L1 channel reuses the event bus and the existing vLLM publisher:
 
 ```text
-MP_TOKENS + L1 write/eviction -> ManagementModule's bounded log
+MP_TOKENS + L1 write/eviction -> KVEventModule's bounded log
     -> subscribe_kv_events(instance, model, cursor, limit)
     -> ZMQ / gRPC push -> MP worker buffer -> vLLM -> router
 ```
@@ -112,6 +112,11 @@ credit per acknowledgment. Slow subscribers do not create unbounded server
 queues; if the shared log overruns their cursor, they receive a loss marker.
 Stream readers do not occupy the ordinary request executor. Cancellation,
 server shutdown and the existing worker reaper release subscriptions.
+
+`modules/kv_events.py` owns the log, token bindings, subscriptions and status.
+It uses the existing `InstanceLivenessTarget` hooks for PING refresh and cleanup;
+`ManagementModule` retains the shared reaper. Subscription expiry only closes
+that stream; it does not reap the worker's cache registrations.
 
 The connector retains `KVEventAggregator` and an ordered batch buffer for
 store/remove/store transitions. Workers receive pushes while idle; vLLM still

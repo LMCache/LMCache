@@ -111,7 +111,7 @@ based on ``--engine-type`` and ``--supported-transfer-mode``.
 
 **``server.py``** -- The transport-neutral server compositor. Creates an
 ``MPCacheServer``, assembles the engine modules
-(``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
+(``LookupModule`` + ``ManagementModule`` + ``KVEventModule`` + ``LMCacheDrivenTransferModule``
 and/or ``EngineDrivenTransferModule`` depending on
 ``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
 ``engine_driven`` loads just one,
@@ -590,7 +590,8 @@ Key Source Files
      - gRPC service binding, handler scheduling, and request-server construction
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
-       ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
+       ``management.py`` (``ManagementModule``), ``kv_events.py``
+       (``KVEventModule``, CPU event subscriptions), ``lmcache_driven_transfer.py``
        (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
        (``EngineDrivenTransferModule``), and ``blend.py``
        (``BlendModule``, the paged-aware blend pipeline selected by
