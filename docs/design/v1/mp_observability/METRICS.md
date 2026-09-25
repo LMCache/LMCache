@@ -213,6 +213,8 @@ scrape time with `metric_relabel_configs` if storage cost matters.
 | `lmcache_mp.lookup_hit` | `lmcache_mp_lookup_hit_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+hit_tokens` |
 | `lmcache_mp.lookup_hit_l1` | `lmcache_mp_lookup_hit_l1_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l1_hit_tokens` (0 if absent) |
 | `lmcache_mp.lookup_hit_l2` | `lmcache_mp_lookup_hit_l2_tokens_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l2_hit_tokens` (0 if absent); `l1 + l2 == lookup_hit` per event |
+| `lmcache_mp.lookup_hit_l1_keys` | `lmcache_mp_lookup_hit_l1_keys_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l1_hit_keys` (0 if absent) |
+| `lmcache_mp.lookup_hit_l2_keys` | `lmcache_mp_lookup_hit_l2_keys_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+l2_hit_keys` (0 if absent) |
 | `lmcache_mp.lookups` | `lmcache_mp_lookups_requests_total` | Counter (attrs: `model_name`, `cache_salt`) | `MP_LOOKUP_PREFETCH_END` | `+1` per completed lookup |
 | `lmcache_mp.lookup_early_exit` | `lmcache_mp_lookup_early_exit_requests_total` | Counter (attrs: `model_name`, `cache_salt`, `reason` ∈ {`no_gpu_context`, `empty_chunk_hashes`, `no_group_layout_descs`}) | `MP_LOOKUP_PREFETCH_END` | `+1` when `early_exit_reason != ""` |
 
@@ -235,6 +237,12 @@ sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
 rate(lmcache_mp_lookup_hit_l1_tokens_total[5m])
 / rate(lmcache_mp_lookup_hit_tokens_total[5m])
 
+# Share of hit keys L1 already held (hybrid models: L1 may hold most keys
+# while L2 serves the sliding-window keys that complete the prefix):
+rate(lmcache_mp_lookup_hit_l1_keys_total[5m])
+/ (rate(lmcache_mp_lookup_hit_l1_keys_total[5m])
+   + rate(lmcache_mp_lookup_hit_l2_keys_total[5m]))
+
 # Fraction of lookups that early-exited, by reason:
 sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)
 / sum(rate(lmcache_mp_lookups_requests_total[5m]))
@@ -243,7 +251,7 @@ sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)
 > **Note:** All lookup counters are driven by the *same* event, so they always
 > advance together per completed lookup.  Early-exit lookups (no GPU
 > context matches, empty `chunk_hashes`) contribute `0` tokens to all four
-> token counters and `+1` to `lookups` and `lookup_early_exit{reason}`, and
+> token counters, `0` keys to both key counters, and `+1` to `lookups` and `lookup_early_exit{reason}`, and
 > abandoned lookups (client never polls `query_prefetch_status`)
 > contribute to neither.  See
 > [L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the full rationale.

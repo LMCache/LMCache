@@ -50,6 +50,11 @@ L1_hit_rate         = L1_hit_tokens_total
                     / increase(lmcache_mp_lookup_requested_tokens_total)
 ```
 
+On hybrid models the token split can credit L2 with a whole prefix whose
+full-attention keys all came from L1 (L2 served only the sliding-window
+keys). `lmcache_mp_lookup_hit_{l1,l2}_keys_total` count hit keys per tier
+and show that case directly.
+
 The older recipe `lookup_hit - l2_prefetch_hit_chunks * chunk_size` counts
 keys found in L2 rather than the window-rule remainder, so the two differ
 on hybrid-attention or TP>1 deployments; prefer the direct counters.

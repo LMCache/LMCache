@@ -66,6 +66,9 @@ class LookupMetricsSubscriber(EventSubscriber):
       on its own under each object group's attention-window rule.
     - ``lmcache_mp.lookup_hit_l2`` — of lookup_hit, tokens L2 added beyond
       the L1-servable prefix.  ``l1 + l2 == lookup_hit`` per event.
+    - ``lmcache_mp.lookup_hit_l1_keys`` — hit keys (one per object group,
+      kv rank and chunk) L1 already held.
+    - ``lmcache_mp.lookup_hit_l2_keys`` — hit keys loaded from L2.
     - ``lmcache_mp.lookups`` — completed lookups (denominator for
       ``lookup_early_exit``).
     - ``lmcache_mp.lookup_early_exit`` — lookups that exited before a
@@ -110,6 +113,19 @@ class LookupMetricsSubscriber(EventSubscriber):
             ),
             unit="tokens",
         )
+        self._l1_hit_keys = meter.create_counter(
+            "lmcache_mp.lookup_hit_l1_keys",
+            description=(
+                "Hit keys (one per object group, kv rank and chunk) that L1 "
+                "already held."
+            ),
+            unit="keys",
+        )
+        self._l2_hit_keys = meter.create_counter(
+            "lmcache_mp.lookup_hit_l2_keys",
+            description="Hit keys loaded from L2 into L1.",
+            unit="keys",
+        )
         self._lookups = meter.create_counter(
             "lmcache_mp.lookups",
             description="Completed lookups (denominator for lookup_early_exit).",
@@ -143,6 +159,8 @@ class LookupMetricsSubscriber(EventSubscriber):
         self._l2_hit_tokens.add(
             event.metadata.get("l2_hit_tokens", 0), attributes=attrs
         )
+        self._l1_hit_keys.add(event.metadata.get("l1_hit_keys", 0), attributes=attrs)
+        self._l2_hit_keys.add(event.metadata.get("l2_hit_keys", 0), attributes=attrs)
         early_exit_reason = event.metadata.get("early_exit_reason", "")
         if early_exit_reason:
             self._early_exits.add(1, attributes={**attrs, "reason": early_exit_reason})

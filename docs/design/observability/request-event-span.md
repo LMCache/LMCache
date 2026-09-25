@@ -58,7 +58,7 @@ closes the root span before the retrieve child span ends.
 
 ## Root Span Attributes
 
-In addition to `session_id`, the root `"request"` span carries eight hit rate
+In addition to `session_id`, the root `"request"` span carries ten hit rate
 and outcome attributes that are set when `MP_LOOKUP_PREFETCH_END` is processed:
 
 | Attribute | OTel type | Value |
@@ -70,6 +70,8 @@ and outcome attributes that are set when `MP_LOOKUP_PREFETCH_END` is processed:
 | `l2_hit_tokens` | `int` | tokens by which L2 extended that prefix |
 | `l1_hit_rate` | `float` | `l1_hit_tokens / requested_tokens`; `0.0` when denominator is zero |
 | `l2_hit_rate` | `float` | `l2_hit_tokens / requested_tokens`; `0.0` when denominator is zero |
+| `l1_hit_keys` | `int` | hit keys (one per object group, kv rank and chunk) L1 already held |
+| `l2_hit_keys` | `int` | hit keys loaded from L2 |
 | `early_exit_reason` | `str` | branch of `lookup()` that returned before submitting a prefetch; `""` on the normal path |
 
 `hit_rate` is stored as a precomputed float because trace UIs (Tempo, Jaeger)

@@ -378,14 +378,17 @@ class LookupModule:
         result = self._ctx.storage_manager.query_prefetch_status(job.handle)
         if result is None:
             return None
-        found_rows = result.hit_cells
-        hit_counts = (result.l1_hit_count, result.l2_hit_count)
-
         if job.row_windows:
-            found_count, _retain = fold_unfold_grouped(found_rows, job.row_windows)
+            found_count, _retain = fold_unfold_grouped(
+                result.hit_cells, job.row_windows
+            )
+            l1_found_count, _l1_retain = fold_unfold_grouped(
+                result.l1_hit_cells, job.row_windows
+            )
         else:
             # Nothing was submitted (early exit), so nothing can be hit.
             found_count = 0
+            l1_found_count = 0
 
         # Record the model-wide hit length on the session so a later
         # free_lookup_locks can reconstruct which keys the prefetch
@@ -397,12 +400,9 @@ class LookupModule:
             tuple(range(job.attn_desc.num_object_groups)),
         )
 
-        # The hit counts are cells (one per row and chunk); one chunk spans
-        # one cell per row, so divide by the row count to get chunks and
-        # attribute the remainder of the hit to L2.
-        l1_cells, _l2_cells = hit_counts
-        num_rows = max(len(job.row_windows), 1)
-        l1_chunks = min(l1_cells // num_rows, found_count)
+        # L1 is credited with the prefix its own cells serve under the same
+        # window rule; L2 with however far it extended that prefix.
+        l1_chunks = min(l1_found_count, found_count)
         l2_chunks = found_count - l1_chunks
         self._ctx.event_bus.publish(
             Event(
@@ -414,6 +414,8 @@ class LookupModule:
                     "hit_tokens": found_count * self._ctx.chunk_size,
                     "l1_hit_tokens": l1_chunks * self._ctx.chunk_size,
                     "l2_hit_tokens": l2_chunks * self._ctx.chunk_size,
+                    "l1_hit_keys": result.l1_hit_count,
+                    "l2_hit_keys": result.l2_hit_count,
                     "early_exit_reason": job.early_exit_reason,
                     "model_name": job.model_name,
                     "cache_salt": job.cache_salt,
