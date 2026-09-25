@@ -182,14 +182,14 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
             )
         elif status == -1:
             logger.error(
-                f"Transfer failed {self._remote_session_id} batch_id {batch_id}"
+                "Transfer failed %s batch_id %d", self._remote_session_id, batch_id
             )
             return TransferChannelReadResult(
                 finished=True, succeeded_mask=[False] * len(remote_addresses)
             )
         elif status == -2:
             logger.error(
-                f"Transfer timed out {self._remote_session_id} batch_id {batch_id}"
+                "Transfer timed out %s batch_id %d", self._remote_session_id, batch_id
             )
             return TransferChannelReadResult(
                 finished=True, succeeded_mask=[False] * len(remote_addresses)
@@ -263,8 +263,10 @@ class MooncakeTeTransferChannelServer(TransferChannelServer):
         if isinstance(req, InitReq):
             # Learn the connecting peer's agent (idempotent on repeat).
             logger.info(
-                f"initialized transfer channel server with mooncake transfer engine "
-                f"{self._ctx.advertise_host}:{self._ctx.mooncake_te_port}"
+                "initialized transfer channel server with mooncake transfer engine "
+                "%s:%d",
+                self._ctx.advertise_host,
+                self._ctx.mooncake_te_port,
             )
             self._ctx.register_client(
                 key=req.advertise_url,
@@ -333,9 +335,11 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
         if ret != 0:
             raise RuntimeError(f"Failed to initialize mooncake_te engine, ret={ret}")
         logger.info(
-            f"mooncake_te engine created, mooncake transfer engine port "
-            f"{self._mooncake_te_engine.get_rpc_port()}, protocol: "
-            f"{self._protocol}, device: {self._device_id}"
+            "mooncake_te engine created, mooncake transfer engine port %d, "
+            "protocol: %s, device: %s",
+            self._mooncake_te_engine.get_rpc_port(),
+            self._protocol,
+            self._device_id,
         )
         self._mooncake_te_port = self._mooncake_te_engine.get_rpc_port()
         # Register the whole L1 buffer once (CPU/DRAM, fixed mooncake_te dev_id=0).

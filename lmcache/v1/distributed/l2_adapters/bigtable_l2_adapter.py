@@ -146,8 +146,12 @@ def _extract_shards_from_row(row: Any, family_name: str) -> dict[str, bytes]:
             shards[qual] = val
         else:
             logger.warning(
-                f"Discarding stale shard {qual} with timestamp {ts} "
-                f"(max timestamp is {max_ts}, diff is {(max_ts - ts) / 1e6:.2f}s)"
+                "Discarding stale shard %s with timestamp %d "
+                "(max timestamp is %d, diff is %.2fs)",
+                qual,
+                ts,
+                max_ts,
+                (max_ts - ts) / 1e6,
             )
 
     return shards
@@ -707,18 +711,23 @@ class BigtableL2Adapter(L2AdapterInterface):
                     limit_bytes = 240 * 1024 * 1024
                     if size > limit_bytes:
                         logger.warning(
-                            f"Skipping write to Bigtable for key {key_str} "
-                            f"because total payload size {size} bytes exceeds "
-                            f"the absolute row size limit of 240 MB."
+                            "Skipping write to Bigtable for key %s "
+                            "because total payload size %d bytes exceeds "
+                            "the absolute row size limit of 240 MB.",
+                            key_str,
+                            size,
                         )
                         continue
                 else:
                     limit_bytes = int(self._config.max_chunk_size_mb * 1024 * 1024)
                     if size > limit_bytes:
                         logger.warning(
-                            f"Skipping write to Bigtable for key {key_str} "
-                            f"because payload size {size} bytes exceeds the limit "
-                            f"of {limit_bytes} bytes without sharding."
+                            "Skipping write to Bigtable for key %s "
+                            "because payload size %d bytes exceeds the limit "
+                            "of %d bytes without sharding.",
+                            key_str,
+                            size,
+                            limit_bytes,
                         )
                         continue
 
@@ -739,9 +748,10 @@ class BigtableL2Adapter(L2AdapterInterface):
                         if max(len(s) for s in shards.values()) > 90 * 1024 * 1024:
                             rk_str = rk.decode("utf-8", errors="ignore")
                             logger.warning(
-                                f"Skipping write to Bigtable for key {rk_str} "
-                                f"because a single shard exceeds the 90MB cell "
-                                f"size limit."
+                                "Skipping write to Bigtable for key %s "
+                                "because a single shard exceeds the 90MB cell "
+                                "size limit.",
+                                rk_str,
                             )
                             return ValueError("Shard size exceeds cell limit")
 
@@ -1094,8 +1104,9 @@ class BigtableL2Adapter(L2AdapterInterface):
 
                     if val is None:
                         logger.warning(
-                            f"Column {self._config.column_name} not "
-                            f"found in row {key_str}"
+                            "Column %s not found in row %s",
+                            self._config.column_name,
+                            key_str,
                         )
                         with self._lock:
                             size = self._key_sizes.pop(key, None)
