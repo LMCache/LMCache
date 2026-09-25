@@ -630,10 +630,13 @@ class MessageQueueServer(RequestServer):
             # Process the incoming requests
             if inbound_state and inbound_state & zmq.POLLIN:
                 msg = self.socket.recv_multipart()
-                assert len(msg) >= 3, (
-                    "Expected at least 3 message parts "
-                    "[identity, request_uid, operation, *payloads]"
-                )
+                if len(msg) < 3:
+                    logger.error(
+                        "Malformed request: expected at least 3 message parts "
+                        "[identity, request_uid, operation, *payloads], got %d",
+                        len(msg),
+                    )
+                    continue
 
                 identity, b_request_uid, b_operation, *payloads = msg
                 try:
