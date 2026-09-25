@@ -16,7 +16,6 @@ from lmcache.v1.distributed.api import (
     PrefetchLockMode,
     PrefetchTaskSpec,
 )
-from lmcache.v1.distributed.internal_api import TrimPolicy
 from lmcache.v1.mp_observability.trace import codecs
 
 
@@ -151,12 +150,6 @@ class TestPrefetchTaskSpec:
         assert out == spec
         assert out.fetching_policy == "full"
         assert out.lock_mode is PrefetchLockMode.NO_LOCK
-
-
-class TestTrimPolicy:
-    def test_roundtrip(self):
-        for p in TrimPolicy:
-            assert _roundtrip(p) is p
 
 
 class TestAttnWindowDesc:

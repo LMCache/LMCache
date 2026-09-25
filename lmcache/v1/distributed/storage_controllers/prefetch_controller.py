@@ -1469,7 +1469,7 @@ class PrefetchController(StorageControllerInterface):
             )
 
         windows = [group.sliding_window_size for group in request.key_groups]
-        hit_length, retain_rows = fold_unfold_grouped(found.to_list(), windows)
+        _hit_length, retain_rows = fold_unfold_grouped(found.to_list(), windows)
         if request.fetching_policy == "prefix":
             hit_cells = Bitmap2D(retain_rows) & found
         else:
@@ -1491,18 +1491,6 @@ class PrefetchController(StorageControllerInterface):
             if hit_keys:
                 self._l1_managers[l1_idx].touch_keys(hit_keys)
 
-        # TODO(ApostaC): the lookup hit is no longer reported separately;
-        # remove this event and the ``prefetch_lookup_hit`` metric and log
-        # handlers that consume it.
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
-                metadata={
-                    "request_id": request.request_id,
-                    "prefix_hit_count": hit_length,
-                },
-            )
-        )
         if len(request.l2_loaded_cells) > 0:
             l2_hit_cells = hit_cells & request.l2_loaded_cells
         else:
