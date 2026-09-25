@@ -3,7 +3,7 @@
 
 Covers the per-tier hit split (``l1_hit_tokens`` / ``l2_hit_tokens``) and
 ``early_exit_reason``.  ``fold_unfold_grouped`` is patched out: these tests are
-about how its chunk count and ``PrefetchHandle.l1_hit_chunks`` become event
+about how its chunk count and the storage manager's per-tier hit counts become event
 metadata, not about the fold itself (which needs the native kernel).
 """
 
@@ -41,9 +41,8 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
 
 def _end_metadata(
     chunk_hashes: list[bytes],
-    l1_hit_chunks: int = 0,
+    l1_hit_cells: int = 0,
     found_count: int = 0,
-    l1_found_indices: tuple[int, ...] = (),
     num_groups: int = 1,
     world_size: int = 1,
     layout_found: bool = True,
@@ -54,9 +53,8 @@ def _end_metadata(
     Args:
         chunk_hashes: Chunk hashes the token hasher reports; empty triggers the
             ``empty_chunk_hashes`` early exit.
-        l1_hit_chunks: Prefix, in chunks, that L1 alone could serve.
+        l1_hit_cells: Hit cells (one per row and chunk) that L1 served.
         found_count: Prefix, in chunks, served after L2 completed.
-        l1_found_indices: Retain mask the fold left read-locked in L1.
         num_groups: Object groups per chunk.
         world_size: kv_rank shards per chunk.
         layout_found: False triggers the ``no_gpu_context`` early exit.
@@ -82,11 +80,10 @@ def _end_metadata(
     ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
         prefetch_request_id=0,
         external_request_id="req-1",
-        l1_found_indices=l1_found_indices,
-        l1_hit_chunks=l1_hit_chunks,
         total_requested_keys=len(chunk_hashes) * world_size * num_groups,
         submit_time=time.monotonic(),
     )
+    ctx.storage_manager.query_prefetch_hit_counts.return_value = (l1_hit_cells, 0)
 
     module = LookupModule(ctx)
     with patch.object(
@@ -106,35 +103,31 @@ def _end_metadata(
     (
         "num_chunks",
         "num_groups",
-        "l1_found_indices",
-        "l1_hit_chunks",
+        "l1_hit_cells",
         "found_count",
         "l1_chunks",
         "l2_chunks",
     ),
     [
-        (4, 1, (), 4, 4, 4, 0),
-        (4, 1, (), 0, 4, 0, 4),
-        (4, 1, (), 2, 4, 2, 2),
-        (4, 1, (), 0, 0, 0, 0),
-        # Sliding window: group 1 has window=1, so the fold's retain mask keeps
-        # only group 0 for chunks 0-1.  All three chunks are still L1-served --
-        # attribution follows l1_hit_chunks, never the mask.
-        (3, 2, (0, 2, 4, 5), 3, 3, 3, 0),
+        (4, 1, 4, 4, 4, 0),
+        (4, 1, 0, 4, 0, 4),
+        (4, 1, 2, 4, 2, 2),
+        (4, 1, 0, 0, 0, 0),
+        # Two rows per chunk: six L1 cells are three chunks, all L1-served.
+        (3, 2, 6, 3, 3, 0),
     ],
     ids=[
         "all_l1",
         "all_l2",
         "l2_extends_l1",
         "cold_miss",
-        "sliding_window_retain_mask",
+        "two_rows_per_chunk",
     ],
 )
 def test_end_event_splits_hit_tokens_by_tier(
     num_chunks,
     num_groups,
-    l1_found_indices,
-    l1_hit_chunks,
+    l1_hit_cells,
     found_count,
     l1_chunks,
     l2_chunks,
@@ -142,9 +135,8 @@ def test_end_event_splits_hit_tokens_by_tier(
     """L2 is credited with however far it extended the L1-servable prefix."""
     meta = _end_metadata(
         chunk_hashes=[f"c{i}".encode() for i in range(num_chunks)],
-        l1_hit_chunks=l1_hit_chunks,
+        l1_hit_cells=l1_hit_cells,
         found_count=found_count,
-        l1_found_indices=l1_found_indices,
         num_groups=num_groups,
     )
 
@@ -154,19 +146,17 @@ def test_end_event_splits_hit_tokens_by_tier(
     assert meta["early_exit_reason"] == ""
 
 
-def test_l1_hit_chunks_above_found_count_is_clamped_and_logged():
-    """The storage manager guarantees l1 <= total; a breach must be visible."""
-    with patch.object(lookup_module.logger, "error") as log_error:
-        meta = _end_metadata(
-            chunk_hashes=[b"c0", b"c1", b"c2", b"c3"],
-            l1_hit_chunks=4,
-            found_count=2,
-        )
+def test_l1_hit_cells_above_found_count_is_clamped():
+    """L1 can never be credited with more than the total hit."""
+    meta = _end_metadata(
+        chunk_hashes=[b"c0", b"c1", b"c2", b"c3"],
+        l1_hit_cells=4,
+        found_count=2,
+    )
 
     assert meta["l1_hit_tokens"] == 2 * CHUNK_SIZE
     assert meta["l2_hit_tokens"] == 0
     assert meta["l1_hit_tokens"] + meta["l2_hit_tokens"] == meta["hit_tokens"]
-    log_error.assert_called_once()
 
 
 @pytest.mark.parametrize(

@@ -564,7 +564,7 @@ class LookupMixin:
                         job.hash_to_col,
                     ) = self._sparse_prefetch_submit(key, resolved, job.non_prefix)
                     # Trace the span only when the prefetch actually reads L2.
-                    job.l2_keys = len(job.handle.l2_orig_indices)
+                    job.l2_keys = job.handle.total_requested_keys
                     if job.l2_keys > 0:
                         self._event_bus.publish(
                             Event(

@@ -5,7 +5,6 @@ Distributed multi-tier storage manager for MP mode
 
 # Standard
 from contextlib import contextmanager
-from dataclasses import replace
 from typing import Iterator, Optional
 import threading
 import time
@@ -15,30 +14,22 @@ from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
     CapacitySnapshot,
     MemoryLayoutDesc,
     ModuleMemoryCapacity,
     ObjectKey,
     PrefetchHandle,
-    PrefetchLockMode,
     PrefetchTaskSpec,
     Tier,
 )
-from lmcache.v1.distributed.bitmap_ops import fold_unfold_ranked
+from lmcache.v1.distributed.bitmap_ops import fold_unfold_grouped
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     StorageManagerConfig,
     get_configured_capacity_bytes,
 )
 from lmcache.v1.distributed.error import L1Error, strerror
-from lmcache.v1.distributed.internal_api import (
-    L1MemoryDesc,
-    L2AdapterListener,
-    PrefetchMode,
-    PrefetchRequestSpec,
-    TrimPolicy,
-)
+from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
@@ -57,13 +48,20 @@ from lmcache.v1.distributed.storage_controllers import (
     PrefetchController,
     StoreController,
 )
+from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
+    PrefetchResult,
+)
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     create_prefetch_policy,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     create_store_policy,
 )
-from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
+from lmcache.v1.distributed.storage_controllers.utils import (
+    Bitmap2D,
+    L1ManagerDescriptor,
+    L2AdapterDescriptor,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -81,67 +79,6 @@ logger = init_logger(__name__)
 # L1 write tag for every object reserved through this manager. Sharing one
 # tag makes concurrent stores of the same key exclude each other.
 _L1_WRITE_TAG = "storage_manager"
-
-
-@lmcache_deprecate(
-    "transitional adapter to the flat PrefetchRequestSpec; removed with the "
-    "prefetch controller refactor"
-)
-def _flatten_rows(spec: PrefetchTaskSpec) -> list[ObjectKey]:
-    """Flatten the key groups of a request into a single key list.
-
-    Args:
-        spec: The grouped request.
-
-    Returns:
-        The flat key list of ``spec.group_size * len(spec.key_groups)`` keys.
-
-    Note:
-        The groups are interleaved chunk-major: every group's key 0, then
-        every group's key 1, and so on. :func:`_split_rows` is the exact
-        inverse.
-    """
-    rows = spec.key_groups
-    return [row.keys[c] for c in range(spec.group_size) for row in rows]
-
-
-@lmcache_deprecate(
-    "transitional adapter to the flat PrefetchRequestSpec; removed with the "
-    "prefetch controller refactor"
-)
-def _split_rows(found: Bitmap, num_key_groups: int) -> list[Bitmap]:
-    """Split a flat result bitmap into one bitmap per key group.
-
-    Args:
-        found: Bitmap over the flat key list built by :func:`_flatten_rows`.
-        num_key_groups: Number of key groups the flat list interleaves.
-
-    Returns:
-        ``num_key_groups`` bitmaps of ``len(found) // num_key_groups`` bits
-        each; bit ``i`` of bitmap ``k`` is set iff the flat bit of group
-        ``k``'s key ``i`` is set.
-
-    Raises:
-        ValueError: If ``num_key_groups`` is not positive or does not divide
-            the bitmap size.
-    """
-    if num_key_groups < 1:
-        raise ValueError(f"num_key_groups must be >= 1 (got {num_key_groups})")
-    total = len(found)
-    if total % num_key_groups != 0:
-        raise ValueError(
-            f"bitmap of {total} bits cannot be split into {num_key_groups} "
-            "equal key groups"
-        )
-    per_row: list[list[int]] = [[] for _ in range(num_key_groups)]
-    # Chunk-major interleave: flat index i -> (chunk i // R, group i % R).
-    for i in found.get_indices_list():
-        chunk, row_idx = divmod(i, num_key_groups)
-        per_row[row_idx].append(chunk)
-    rows = [Bitmap(total // num_key_groups) for _ in range(num_key_groups)]
-    for bitmap, indices in zip(rows, per_row, strict=True):
-        bitmap.batched_set(indices)
-    return rows
 
 
 class StorageManager:
@@ -169,6 +106,10 @@ class StorageManager:
         self._lifecycle_lock = threading.Lock()
         # Guards the _l2_adapters and _adapter_descriptors dicts.
         self._adapters_lock = threading.Lock()
+        # Finished prefetch results, held until query_prefetch_status consumes
+        # them so the hit counts can be read before the rows.
+        self._prefetch_results_lock = threading.Lock()
+        self._prefetch_results: dict[int, PrefetchResult] = {}
         self._registered_l2_listeners: list[L2AdapterListener] = []
         self._l2_adapters: dict[int, L2AdapterInterface] = {}
         self._adapter_descriptors: dict[int, L2AdapterDescriptor] = {}
@@ -229,7 +170,10 @@ class StorageManager:
 
         # Prefetch controller
         self._prefetch_controller = PrefetchController(
-            l1_manager=self._l1_manager,
+            l1_managers=[self._l1_manager],
+            l1_manager_descriptors=[
+                L1ManagerDescriptor(index=0, config=config.l1_manager_config)
+            ],
             l2_adapters=list(self._l2_adapters.values()),
             adapter_descriptors=list(self._adapter_descriptors.values()),
             policy=create_prefetch_policy(config.prefetch_policy),
@@ -488,258 +432,115 @@ class StorageManager:
         Args:
             spec: The request (see :class:`PrefetchTaskSpec`).
             external_request_id: Caller id for end-to-end log tracing.
-            skip_l2: If True, do not load from L2. Under ``LOCK`` only
-                already-resident L1 keys are locked and reported; under
-                ``NO_LOCK`` nothing is loaded and an empty handle is returned.
+            skip_l2: If True, serve from L1 only. The result is available
+                as soon as this returns.
 
         Returns:
             PrefetchHandle to track the task.
         """
-        num_key_groups = len(spec.key_groups)
-        request = self._to_controller_spec(spec)
-        keys = request.keys
-
-        if request.mode is PrefetchMode.WARM:
-            # Warm path: load all keys, lock none. skip_l2 makes it a no-op.
-            prefetch_request_id = -1
-            if not skip_l2 and keys and self._l2_adapters:
-                prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                    request
-                )
-            return PrefetchHandle(
-                prefetch_request_id=prefetch_request_id,
-                external_request_id=external_request_id,
-                l1_found_indices=(),
-                l1_hit_chunks=0,
-                total_requested_keys=len(keys),
-                submit_time=time.monotonic(),
-                l2_orig_indices=(
-                    tuple(range(len(keys))) if prefetch_request_id != -1 else ()
-                ),
-                num_key_groups=num_key_groups,
-            )
-
-        # NOTE: now we only have L1, so the prefetch is essentially checking how many
-        # objects are already in L1, and adding read locks to them.
-
-        l1_read_result = self._l1_manager.reserve_read(
-            keys, read_locks=request.num_kv_readers
+        prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
+            spec, skip_l2=skip_l2
         )
-
-        if request.policy is TrimPolicy.SPARSE:
-            # SPARSE: retain a read lock on every L1 hit (not just the leading
-            # prefix) and send all L1 misses to L2 as one coalesced request.
-            # reserve_read locks only SUCCESS keys, so the found-set already
-            # equals the locked set -- nothing to release.
-            l1_found_indices: list[int] = []
-            succeeded_keys: list[ObjectKey] = []
-            sparse_l2_indices: list[int] = []
-            remaining_keys: list[ObjectKey] = []
-            for i, key in enumerate(keys):
-                ent = l1_read_result.get(key)
-                if ent is not None and ent[0] == L1Error.SUCCESS and ent[1] is not None:
-                    l1_found_indices.append(i)
-                    succeeded_keys.append(key)
-                else:
-                    sparse_l2_indices.append(i)
-                    remaining_keys.append(key)
-
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.SM_READ_PREFETCHED,
-                    metadata={
-                        "succeeded_keys": succeeded_keys,
-                        "failed_keys": remaining_keys,
-                    },
-                )
-            )
-
-            prefetch_request_id = -1
-            if not skip_l2 and remaining_keys and self._has_l2_adapters():
-                prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                    replace(request, keys=remaining_keys)
-                )
-            return PrefetchHandle(
-                prefetch_request_id=prefetch_request_id,
-                external_request_id=external_request_id,
-                l1_found_indices=tuple(l1_found_indices),
-                l1_hit_chunks=0,
-                total_requested_keys=len(keys),
-                submit_time=time.monotonic(),
-                l2_orig_indices=(
-                    tuple(sparse_l2_indices) if prefetch_request_id != -1 else ()
-                ),
-                num_key_groups=num_key_groups,
-            )
-
-        # PREFIX: fold the per-(group, chunk, rank) L1 presence into the
-        # model-wide hit and the per-object-group retain set (sliding-window
-        # aware). All-full-attention reduces to the contiguous leading-ones
-        # prefix. Keys past the L1 hit are sent to L2.
-        elif request.policy is TrimPolicy.PREFIX:
-            return self._submit_prefix_fold(
-                request,
-                l1_read_result,
-                external_request_id,
-                skip_l2,
-                num_key_groups,
-            )
-
-        raise ValueError(f"Unsupported trim policy: {request.policy}")
-
-    def _submit_prefix_fold(
-        self,
-        request: PrefetchRequestSpec,
-        l1_read_result: dict[ObjectKey, tuple[L1Error, "MemoryObj | None"]],
-        external_request_id: str,
-        skip_l2: bool,
-        num_key_groups: int,
-    ) -> PrefetchHandle:
-        """PREFIX path: fold L1 presence, retain in-window keys, submit rest to L2.
-
-        Args:
-            request: The flat prefetch request; must carry the ``PREFIX``
-                policy.
-            l1_read_result: Per-key ``reserve_read`` results from the L1
-                probe; SUCCESS entries count as L1-present and stay
-                read-locked until the fold releases the out-of-window ones.
-            external_request_id: Engine-side request id, for logging/trace.
-            skip_l2: When True, serve from L1 only (no L2 prefetch).
-            num_key_groups: Number of key groups in the request, recorded on
-                the returned handle.
-
-        Returns:
-            A :class:`PrefetchHandle` carrying the L1 hit (retained indices
-            and hit chunks) and the pending L2 prefetch request id (``-1``
-            when nothing was submitted to L2).
-        """
-        keys = request.keys
-        attn_desc = request.attn_desc
-        num_object_groups = attn_desc.num_object_groups
-        stride = num_object_groups * attn_desc.world_size
-        num_chunks = len(keys) // stride
-
-        l1_presence = Bitmap(len(keys))
-        for i, key in enumerate(keys):
-            ent = l1_read_result.get(key)
-            if ent is not None and ent[0] == L1Error.SUCCESS and ent[1] is not None:
-                l1_presence.set(i)
-
-        l1_hit_chunks, retain = fold_unfold_ranked(
-            l1_presence,
-            num_chunks,
-            attn_desc.world_size,
-            attn_desc.num_chunks_in_sw,
-        )
-        retained_indices = retain.get_indices_list()
-
-        released_bitmap = l1_presence & (~retain)
-        released = released_bitmap.gather(keys)
-        if released:
-            self._l1_manager.finish_read(released, read_locks=request.num_kv_readers)
-
-        # Keys from chunk l1_hit_chunks onwards are candidates for L2.
-        l1_key_boundary = l1_hit_chunks * stride
-        remaining_keys = keys[l1_key_boundary:]
-
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.SM_READ_PREFETCHED,
-                metadata={
-                    "succeeded_keys": retain.gather(keys),
-                    "failed_keys": (~retain).gather(keys),
-                },
-            )
-        )
-
-        l1_only = skip_l2 or not self._has_l2_adapters()
-        prefetch_request_id = -1
-        l2_orig_indices: tuple[int, ...] = ()
-
-        if not l1_only and remaining_keys:
-            prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                replace(request, keys=remaining_keys)
-            )
-            l2_orig_indices = tuple(range(l1_key_boundary, len(keys)))
-
-        submit_time = time.monotonic()
         logger.debug(
-            "Prefetch request submitted: "
-            "%d total keys, %d L1 hit chunks (%d retained keys), "
-            "%d remaining for L2 "
-            "(external_request_id=%s, "
-            "prefetch_request_id=%d)",
-            len(keys),
-            l1_hit_chunks,
-            len(retained_indices),
-            len(remaining_keys),
+            "Prefetch request submitted: %d keys in %d groups "
+            "(external_request_id=%s, prefetch_request_id=%d, skip_l2=%s)",
+            len(spec.key_groups) * spec.group_size,
+            len(spec.key_groups),
             external_request_id,
             prefetch_request_id,
+            skip_l2,
         )
-
         return PrefetchHandle(
             prefetch_request_id=prefetch_request_id,
             external_request_id=external_request_id,
-            l1_found_indices=tuple(retained_indices),
-            l1_hit_chunks=l1_hit_chunks,
-            total_requested_keys=len(keys),
-            submit_time=submit_time,
-            l2_orig_indices=l2_orig_indices,
-            num_key_groups=num_key_groups,
+            total_requested_keys=len(spec.key_groups) * spec.group_size,
+            submit_time=time.monotonic(),
+            sliding_windows=tuple(row.sliding_window_size for row in spec.key_groups),
         )
 
-    def _combine_found(
-        self, handle: PrefetchHandle, l2_local: "Bitmap | None"
-    ) -> Bitmap:
-        """Merge the L1 found indices with an L2 result bitmap into one bitmap
-        over the original key positions.
+    def _fetch_prefetch_result(self, handle: PrefetchHandle) -> PrefetchResult | None:
+        """Return the finished result of ``handle`` without consuming it.
 
-        ``l2_local`` is indexed over the keys submitted to L2 (0-based); its
-        set bits are mapped back to original positions via
-        ``handle.l2_orig_indices``.
+        The first successful fetch moves the result out of the controller
+        into this manager, where it stays until ``query_prefetch_status``
+        consumes it.
+
+        Args:
+            handle: The handle of the prefetch task.
+
+        Returns:
+            The result, or None while the prefetch is still in progress.
         """
-        found = Bitmap(handle.total_requested_keys)
-        found.batched_set(handle.l1_found_indices)
-        if l2_local is not None:
-            # gather maps each L2 set bit i to its original position
-            # ``l2_orig_indices[i]``; batched_set drops any position >= size.
-            found.batched_set(l2_local.gather(handle.l2_orig_indices))
-        return found
+        if handle.prefetch_request_id == -1:
+            return PrefetchResult(
+                hit_cells=Bitmap2D([]), l1_hit_count=0, l2_hit_count=0
+            )
+        with self._prefetch_results_lock:
+            cached = self._prefetch_results.get(handle.prefetch_request_id)
+            if cached is not None:
+                return cached
+            result = self._prefetch_controller.query_prefetch_result(
+                handle.prefetch_request_id
+            )
+            if result is not None:
+                self._prefetch_results[handle.prefetch_request_id] = result
+            return result
 
+    @lmcache_deprecate(
+        "the lookup hit is no longer reported before the prefetch finishes; "
+        "use query_prefetch_status"
+    )
     def query_prefetch_lookup_hits(
         self,
         handle: PrefetchHandle,
     ) -> int | None:
         """
-        Query the number of prefix-hit chunks for a prefetch task before the
-        L2 prefetching is done.
+        Query the number of prefix-hit chunks of a finished prefetch task.
 
         Args:
-            handle (PrefetchHandle): The handle of the lookup task.
+            handle (PrefetchHandle): The handle of the prefetch task.
 
         Returns:
-            the number of prefix-hit chunks (L1 + L2) if the lookup is done,
-            None if it's still in progress or the prefetch task is already done.
+            The number of prefix-hit chunks once the prefetch has finished,
+            None while it is still in progress.
 
         Note:
-            This function is designed for the scenario where the caller wants
-            to check the L1 prefix hits as soon as possible without waiting for
-            the whole prefetch task to be done.
-            When the prefetch task is already done and the prefetch task result
-            has already been queried by `query_prefetch_status`, this function
-            will return None forever for the same prefetch handle.
-            Therefore, it's the caller’s responsibility to make sure not calling
-            this function after the prefetch task is done.
+            Does not consume the result; ``query_prefetch_status`` still
+            returns it afterwards.
         """
-        if handle.prefetch_request_id == -1:
-            return handle.l1_hit_chunks
-
-        l2_r = self._prefetch_controller.query_lookup_result(handle.prefetch_request_id)
-        if l2_r is None:
-            # Still in progress, or already consumed by query_prefetch_status.
+        result = self._fetch_prefetch_result(handle)
+        if result is None:
             return None
-        # Both l1_hit_chunks and l2_r are chunk-level counts.
-        return handle.l1_hit_chunks + l2_r
+        if len(result.hit_cells) == 0:
+            return 0
+        hit_length, _retain = fold_unfold_grouped(
+            result.hit_cells.to_list(), list(handle.sliding_windows)
+        )
+        return hit_length
+
+    def query_prefetch_hit_counts(
+        self,
+        handle: PrefetchHandle,
+    ) -> tuple[int, int] | None:
+        """
+        Query how many hit cells of a finished prefetch task came from each
+        tier.
+
+        Args:
+            handle (PrefetchHandle): The handle of the prefetch task.
+
+        Returns:
+            ``(l1_hit_count, l2_hit_count)`` once the prefetch has finished,
+            None while it is still in progress.
+
+        Note:
+            Does not consume the result; ``query_prefetch_status`` still
+            returns it afterwards.
+        """
+        result = self._fetch_prefetch_result(handle)
+        if result is None:
+            return None
+        return result.l1_hit_count, result.l2_hit_count
 
     def wait_prefetch_status(
         self,
@@ -749,21 +550,22 @@ class StorageManager:
         """
         Block until the prefetch task for ``handle`` has a result, or timeout.
 
-        L1-only prefetches (``prefetch_request_id == -1``) have no L2 result to
-        wait for and return immediately. This lets a caller avoid busy-polling
-        query_prefetch_status; the status itself is still retrieved via
-        query_prefetch_status afterwards.
+        This lets a caller avoid busy-polling query_prefetch_status; the
+        status itself is still retrieved via query_prefetch_status afterwards.
 
         Args:
             handle (PrefetchHandle): The handle of the prefetch task.
-            timeout: Maximum number of seconds to wait for the L2 result.
+            timeout: Maximum number of seconds to wait for the result.
 
         Returns:
-            True if a result is available within the timeout (always True for
-            an L1-only prefetch), False if the wait timed out.
+            True if a result is available within the timeout, False if the
+            wait timed out.
         """
         if handle.prefetch_request_id == -1:
             return True
+        with self._prefetch_results_lock:
+            if handle.prefetch_request_id in self._prefetch_results:
+                return True
         return self._prefetch_controller.wait_prefetch_result(
             handle.prefetch_request_id, timeout
         )
@@ -783,38 +585,32 @@ class StorageManager:
             found-key bitmap per key row of the submitted request, in row
             order: bit ``i`` of ``rows[k]`` is set iff key ``i`` of row ``k``
             is resident in L1 (and read-locked under ``LOCK``).
+
+        Note:
+            Each result is returned once; later calls for the same handle
+            return ``None``.
         """
-        l2_r: Bitmap | None = None
-        if handle.prefetch_request_id != -1:
-            l2_r = self._prefetch_controller.query_prefetch_result(
-                handle.prefetch_request_id
-            )
-            if l2_r is None:
-                return None
-
-        found = self._combine_found(handle, l2_r)
-        # popcount (not count_leading_ones) so the log is accurate for
-        # non-contiguous policies (SEGMENTED_PREFIX / SPARSE) too.
-        total_hits = found.popcount()
-        elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
-
+        result = self._fetch_prefetch_result(handle)
+        if result is None:
+            return None
+        with self._prefetch_results_lock:
+            self._prefetch_results.pop(handle.prefetch_request_id, None)
+        total_hits = result.hit_cells.popcount()
         if total_hits > 0:
-            # L1 and L2 sets are disjoint (only L1-misses go to L2).
-            l1_hits = len(handle.l1_found_indices)
-            l2_hits = l2_r.popcount() if l2_r is not None else 0
+            elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
             logger.info(
                 "Prefetch request completed (L1+L2): "
                 "%d/%d retained keys (%d L1, %d L2) in %.1f ms "
                 "(external_request_id=%s, prefetch_request_id=%d)",
                 total_hits,
                 handle.total_requested_keys,
-                l1_hits,
-                l2_hits,
+                result.l1_hit_count,
+                result.l2_hit_count,
                 elapsed_ms,
                 handle.external_request_id,
                 handle.prefetch_request_id,
             )
-        return _split_rows(found, handle.num_key_groups)
+        return result.hit_cells.to_list()
 
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
@@ -1359,46 +1155,3 @@ class StorageManager:
         if adapter_index < 0 or adapter_index >= len(adapters):
             raise L2ReconfigureError(404, "L2 adapter not reconfigurable")
         return adapters[adapter_index][1]
-
-    @lmcache_deprecate(
-        "transitional adapter to the flat PrefetchRequestSpec; removed with "
-        "the prefetch controller refactor"
-    )
-    def _to_controller_spec(self, spec: PrefetchTaskSpec) -> PrefetchRequestSpec:
-        """Convert a grouped prefetch request into the flat-key payload.
-
-        Args:
-            spec: The grouped request.
-
-        Returns:
-            The equivalent flat payload.
-
-        Note:
-            The flat key order is defined by :func:`_flatten_rows`. Each key
-            group becomes one fold unit of the flat payload (``attn_desc``
-            lists one window per key group, ``world_size`` 1), so the groups
-            may appear in any order. ``group_layout_descs`` is keyed by the
-            groups' object group ids.
-        """
-        group_layout_descs: dict[int, MemoryLayoutDesc] = {
-            row.object_group_id: row.layout_desc for row in spec.key_groups
-        }
-        return PrefetchRequestSpec(
-            keys=_flatten_rows(spec),
-            group_layout_descs=group_layout_descs,
-            num_kv_readers=spec.num_kv_readers,
-            policy=(
-                TrimPolicy.PREFIX
-                if spec.fetching_policy == "prefix"
-                else TrimPolicy.SPARSE
-            ),
-            attn_desc=AttnWindowDesc(
-                num_chunks_in_sw=[row.sliding_window_size for row in spec.key_groups],
-                world_size=1,
-            ),
-            mode=(
-                PrefetchMode.LOOKUP
-                if spec.lock_mode is PrefetchLockMode.LOCK
-                else PrefetchMode.WARM
-            ),
-        )

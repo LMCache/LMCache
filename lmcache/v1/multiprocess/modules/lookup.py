@@ -189,8 +189,6 @@ class LookupModule:
                     handle=PrefetchHandle(
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
-                        l1_found_indices=(),
-                        l1_hit_chunks=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -215,8 +213,6 @@ class LookupModule:
                     handle=PrefetchHandle(
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
-                        l1_found_indices=(),
-                        l1_hit_chunks=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -281,8 +277,6 @@ class LookupModule:
                     handle=PrefetchHandle(
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
-                        l1_found_indices=(),
-                        l1_hit_chunks=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -348,7 +342,8 @@ class LookupModule:
             )
             return 0
 
-        # Result is already in chunk-level units (l1_hit_chunks + l2_hit_chunks).
+        # The storage manager reports the prefix hit in chunks once the
+        # prefetch has finished, and None before that.
         return self._ctx.storage_manager.query_prefetch_lookup_hits(job.handle)
 
     @request_handler(HandlerType.BLOCKING)
@@ -380,8 +375,9 @@ class LookupModule:
             )
             return 0
 
+        hit_counts = self._ctx.storage_manager.query_prefetch_hit_counts(job.handle)
         found_rows = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if found_rows is None:
+        if found_rows is None or hit_counts is None:
             return None
 
         if job.row_windows:
@@ -400,24 +396,13 @@ class LookupModule:
             tuple(range(job.attn_desc.num_object_groups)),
         )
 
-        # ``l1_hit_chunks`` is the prefix L1 could serve on its own under each
-        # object group's window rule, so L2's contribution is however much
-        # further ``found_count`` reaches -- not a count of L1-resident keys.
-        l1_chunks = job.handle.l1_hit_chunks
-        if l1_chunks > found_count:
-            logger.error(
-                "L1 hit chunks exceed total hit chunks: l1=%d total=%d request=%s",
-                l1_chunks,
-                found_count,
-                request_id,
-            )
-            l1_chunks = found_count
+        # The hit counts are cells (one per row and chunk); one chunk spans
+        # one cell per row, so divide by the row count to get chunks and
+        # attribute the remainder of the hit to L2.
+        l1_cells, _l2_cells = hit_counts
+        num_rows = max(len(job.row_windows), 1)
+        l1_chunks = min(l1_cells // num_rows, found_count)
         l2_chunks = found_count - l1_chunks
-
-        # TODO(ApostaC): there are something wrong with the current
-        # l1_hit_tokens and l2_hit_tokens calculations for hybrid models.
-        # The found count is not directly the same as the number of chunks
-        # hit for hybrid models.
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,

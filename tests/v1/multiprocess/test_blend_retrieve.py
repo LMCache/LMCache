@@ -612,7 +612,7 @@ class _LockCountingStorageManager:
                     self.locks[key] = self.locks.get(key, 0) + n
         handle = MagicMock()
         handle.key_groups = list(spec.key_groups)
-        handle.l2_orig_indices = []
+        handle.total_requested_keys = 0
         return handle
 
     def query_prefetch_status(self, handle):

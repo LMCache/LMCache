@@ -655,10 +655,12 @@ class TestStorageManagerL2Prefetch:
             skip_l2=True,
         )
 
-        # skip_l2 honored: the controller was never asked.
-        assert handle.prefetch_request_id == -1
-        assert handle.l2_orig_indices == ()
+        # skip_l2 honored: nothing was loaded from L2, and the L1-only result
+        # is available as soon as the submit returns.
         assert handle.total_requested_keys == len(keys)
+        found = sm.query_prefetch_status(handle)
+        assert found is not None
+        assert [row.get_indices_list() for row in found] == [[]]
 
         sm.close()
 
@@ -683,11 +685,7 @@ class TestStorageManagerL2Prefetch:
             skip_l2=True,
         )
 
-        # skip_l2 honored: the controller was never asked.
-        assert handle.prefetch_request_id == -1
-        assert handle.l2_orig_indices == ()
-        assert handle.l1_found_indices == (0, 2)
-
+        # skip_l2 honored: the L2-only key is a miss.
         found = sm.query_prefetch_status(handle)
         assert found is not None
         assert [row.get_indices_list() for row in found] == [[0, 2]]
@@ -855,15 +853,11 @@ class TestStorageManagerL2Prefetch:
         full_row, sw_row = result
         # All full-attn chunks should be retained
         assert full_row.get_indices_list() == list(range(num_chunks))
-        # L1 retain: fold over L1 presence (chunks 0-1) → hit=2
-        # SW w=2: both chunks 0-1 in window → retained
-        # L2: provides chunks 2-3, fold there → SW retains chunks 2-3
-        # Combined: all SW keys retained (w=2 and hit=4 means last 2 chunks)
-        # But L1's fold was done with hit=2, retaining SW chunks 0-1.
-        # After L2 extends to hit=4, the caller folds the combined rows
-        # and would trim SW to chunks 2-3 only. But here we're testing
-        # the raw combined rows before the caller's fold.
-        assert sw_row.get_indices_list() == [0, 1, 2, 3]
+        # The union of L1 (chunks 0-1) and L2 (chunks 2-3) serves a 4-chunk
+        # prefix; a window-2 row retains only its trailing two chunks, so
+        # the L1-resident SW chunks 0-1 are released.
+        assert sw_row.get_indices_list() == [2, 3]
+        assert sm.delete_l1_keys(sw_keys[:2]) == (2, 0)
 
         retained_keys = full_row.gather(full_keys) + sw_row.gather(sw_keys)
         sm.finish_read_prefetched(retained_keys)
@@ -1031,9 +1025,7 @@ class TestStorageManagerGroupedRows:
             ]
         )
         handle = sm.submit_prefetch_task(spec)
-        assert handle.prefetch_request_id == -1
-        assert handle.l1_hit_chunks == 2
-        assert handle.num_key_groups == 4
+        assert handle.total_requested_keys == 12
 
         found = sm.query_prefetch_status(handle)
         assert found is not None
@@ -1079,7 +1071,6 @@ class TestStorageManagerGroupedRows:
                 fetching_policy="full",
             )
         )
-        assert handle.num_key_groups == 2
         found = sm.query_prefetch_status(handle)
         assert found is not None
         assert [row.get_indices_list() for row in found] == [[1], [0, 2]]

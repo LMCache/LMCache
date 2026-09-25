@@ -89,8 +89,6 @@ class _PresenceStorage:
             return PrefetchHandle(
                 prefetch_request_id=task_id,
                 external_request_id=external_request_id,
-                l1_found_indices=(),
-                l1_hit_chunks=hit,
                 total_requested_keys=sum(len(row.keys) for row in rows),
                 submit_time=0.0,
             )
@@ -110,8 +108,6 @@ class _PresenceStorage:
         return PrefetchHandle(
             prefetch_request_id=task_id,
             external_request_id=external_request_id,
-            l1_found_indices=tuple(retained.get_indices_list()),
-            l1_hit_chunks=hit,
             total_requested_keys=len(request.keys),
             submit_time=0.0,
         )
@@ -119,6 +115,12 @@ class _PresenceStorage:
     def query_prefetch_status(self, handle: PrefetchHandle) -> Any:
         """Return the completed prefetch's retain mask."""
         return self.results[handle.prefetch_request_id]
+
+    def query_prefetch_hit_counts(self, handle: PrefetchHandle) -> tuple[int, int]:
+        """Every hit is served from L1 in this double."""
+        result = self.results[handle.prefetch_request_id]
+        rows = result if isinstance(result, list) else [result]
+        return sum(row.popcount() for row in rows), 0
 
     def finish_read_prefetched(self, keys: list[ObjectKey], read_locks: int) -> None:
         """Release only locks actually acquired by a lookup."""

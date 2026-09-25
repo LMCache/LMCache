@@ -157,7 +157,7 @@ def test_lookup_and_lock_submits_skip_l2_and_returns_task_id():
     """p2p_lookup_and_lock submits a "full" (gap-tolerant) skip_l2 prefetch
     with all keys in one object-group row, and returns a fresh id."""
     controller, ctx = _make_controller()
-    handle = MagicMock(l1_found_indices=(0, 1))
+    handle = MagicMock(total_requested_keys=2)
     ctx.storage_manager.submit_prefetch_task.return_value = handle
 
     keys = [_make_key(0), _make_key(1)]
@@ -181,7 +181,7 @@ def test_lookup_and_lock_groups_keys_per_object_group():
     order, request order within a row), each with that group's layout."""
     controller, ctx = _make_controller()
     ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
-        l1_found_indices=()
+        total_requested_keys=1
     )
 
     layouts = {0: _make_layout_desc(), 1: _make_layout_desc()}
@@ -246,7 +246,7 @@ def test_query_lookup_results_builds_addresses_for_prefix():
     """A completed lookup returns one address per key: real offsets for the
     found prefix, invalid offsets for the rest."""
     controller, ctx = _make_controller()
-    handle = MagicMock(l1_found_indices=(0, 1))
+    handle = MagicMock(total_requested_keys=2)
     ctx.storage_manager.submit_prefetch_task.return_value = handle
 
     keys = [_make_key(0), _make_key(1), _make_key(2)]
@@ -269,7 +269,7 @@ def test_query_lookup_results_builds_addresses_for_sparse_hits():
     """A lookup with a mid-sequence L1 gap returns real offsets at the found
     indices and an invalid offset at the gap."""
     controller, ctx = _make_controller()
-    handle = MagicMock(l1_found_indices=(0, 2))
+    handle = MagicMock(total_requested_keys=2)
     ctx.storage_manager.submit_prefetch_task.return_value = handle
 
     keys = [_make_key(0), _make_key(1), _make_key(2)]
@@ -296,7 +296,7 @@ def test_query_lookup_results_multi_group_addresses_in_request_order():
     back to the request order of the flat key list."""
     controller, ctx = _make_controller()
     ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
-        l1_found_indices=()
+        total_requested_keys=1
     )
     layouts = {0: _make_layout_desc(), 1: _make_layout_desc()}
     keys = [
@@ -329,7 +329,7 @@ def test_query_lookup_results_exactly_once():
     """Re-querying a completed task returns None (the job is consumed)."""
     controller, ctx = _make_controller()
     ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
-        l1_found_indices=()
+        total_requested_keys=1
     )
     task_id = controller.p2p_lookup_and_lock([_make_key(0)], {0: _make_layout_desc()})
 
@@ -352,7 +352,7 @@ def test_query_lookup_results_in_progress():
     the job."""
     controller, ctx = _make_controller()
     ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
-        l1_found_indices=()
+        total_requested_keys=1
     )
     task_id = controller.p2p_lookup_and_lock([_make_key(0)], {0: _make_layout_desc()})
 
@@ -382,7 +382,7 @@ def test_report_status_counts_active_jobs():
     """report_status reflects the number of in-flight lookup jobs."""
     controller, ctx = _make_controller()
     ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
-        l1_found_indices=()
+        total_requested_keys=1
     )
     assert controller.report_status()["active_p2p_lookup_jobs"] == 0
     controller.p2p_lookup_and_lock([_make_key(0)], {0: _make_layout_desc()})
