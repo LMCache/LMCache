@@ -95,15 +95,6 @@ _KV_EVENT_RESYNCS = Counter(
 )
 # Maximum records in each pushed batch.
 _KV_EVENT_BATCH_SIZE = 1024
-# Reasons a resync withdraws every announced placement (metric label values).
-_KV_EVENT_RESYNC_SERVER_RESTART = "server_restart"
-_KV_EVENT_RESYNC_EVENTS_LOST = "events_lost"
-_KV_EVENT_RESYNC_STREAM_CLOSED = "stream_closed"
-_KV_EVENT_RESYNC_REASONS = (
-    _KV_EVENT_RESYNC_SERVER_RESTART,
-    _KV_EVENT_RESYNC_EVENTS_LOST,
-    _KV_EVENT_RESYNC_STREAM_CLOSED,
-)
 
 
 class ExtraConfigDefault(enum.Enum):
@@ -156,8 +147,6 @@ class ExtraConfigDefault(enum.Enum):
     # Must match the MP server's --hash-algorithm setting because KV events
     # expose the same chunk hashes used by server-side object keys.
     hash_algorithm = "blake3"
-    # Subscribe to CPU events; False keeps only the worker's completed stores.
-    kv_event_stream = True
 
 
 # Backward-compatible aliases for callers that still pass these as
@@ -1375,7 +1364,6 @@ class LMCacheMPWorkerAdapter:
         )
         self._mp_server_launcher = None
         hash_algorithm = ExtraConfigDefault.hash_algorithm.default
-        kv_event_stream = ExtraConfigDefault.kv_event_stream.default
         if extra_config is not None:
             # ``kv_worker_id`` may be shared by multiple TP ranks under MLA.
             # Only connectors that pass the actual vLLM worker rank can elect a
@@ -1398,7 +1386,6 @@ class LMCacheMPWorkerAdapter:
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
             hash_algorithm = cfg[ExtraConfigDefault.hash_algorithm.name]
-            kv_event_stream = cfg[ExtraConfigDefault.kv_event_stream.name]
             # Only treat ``mp_transfer_mode`` as an explicit override when
             # the user actually set it in extra_config; otherwise leave it
             # as ``None`` so ``create_transfer_context`` can still consult
@@ -1486,11 +1473,9 @@ class LMCacheMPWorkerAdapter:
         )
         self._pending_store_kv_events: dict[str, list[CacheStoreEvent]] = {}
         self._kv_events: list[CacheEvent] = []
-        self._kv_event_stream_enabled = kv_event_stream
         self._kv_event_lock = threading.RLock()
         self._kv_event_server_source = False
         self._kv_event_subscriber = False
-        self._kv_event_cursor = 0
         self._kv_event_incarnation: int | None = None
         self._kv_event_stream: MessagingStream[KVEventBatch] | None = None
         self._kv_event_receiver: threading.Thread | None = None
@@ -1506,7 +1491,7 @@ class LMCacheMPWorkerAdapter:
             self._kv_event_batches = _KV_EVENT_BATCHES.labels(*labels)
             self._kv_event_resyncs = {
                 reason: _KV_EVENT_RESYNCS.labels(*labels, reason)
-                for reason in _KV_EVENT_RESYNC_REASONS
+                for reason in ("server_restart", "events_lost", "stream_closed")
             }
         if lmcache_tokens_per_chunk % vllm_block_size != 0:
             raise ValueError(
@@ -2483,9 +2468,9 @@ class LMCacheMPWorkerAdapter:
     # Helper functions
     def _publish_store_kv_events(self, request_id: str) -> None:
         """Buffer successful store events and update metrics without a drain."""
-        self._buffer_kv_events(list(self._pending_store_kv_events.pop(request_id, [])))
+        self._buffer_kv_events(self._pending_store_kv_events.pop(request_id, []))
 
-    def _buffer_kv_events(self, events: list[CacheEvent]) -> None:
+    def _buffer_kv_events(self, events: Sequence[CacheEvent]) -> None:
         """Append events to the buffer vLLM drains and update its metrics."""
         if not events:
             return
@@ -2502,7 +2487,7 @@ class LMCacheMPWorkerAdapter:
                 stream = self.req_client.subscribe_kv_events(
                     self.instance_id,
                     self.model_name,
-                    self._kv_event_cursor,
+                    0,
                     _KV_EVENT_BATCH_SIZE,
                 )
                 with self._kv_event_lock:
@@ -2521,8 +2506,7 @@ class LMCacheMPWorkerAdapter:
                 if not self._kv_event_stop.is_set():
                     with self._kv_event_lock:
                         logger.warning("Reconnecting KV event subscription: %s", exc)
-                        self._resync_kv_events(_KV_EVENT_RESYNC_STREAM_CLOSED)
-                        self._kv_event_cursor = 0
+                        self._resync_kv_events("stream_closed")
             except Exception as exc:
                 if not self._kv_event_stop.is_set():
                     with self._kv_event_lock:
@@ -2544,21 +2528,20 @@ class LMCacheMPWorkerAdapter:
         )
         self._kv_event_subscriber = False
         self._kv_event_server_source = False
-        self._resync_kv_events(_KV_EVENT_RESYNC_STREAM_CLOSED)
+        self._resync_kv_events("stream_closed")
 
     def _resolve_kv_event_source(
         self, enable_kv_events: bool, parallel_strategy: ParallelStrategy
     ) -> None:
         """Use server records when advertised; elect one subscriber per server."""
-        if not enable_kv_events or not self._kv_event_stream_enabled:
+        if not enable_kv_events:
             return
         if KV_EVENT_CAPABILITY not in self.experimental:
             logger.warning(
                 "The LMCache server does not advertise the '%s' capability, "
                 "so this worker reports only its own completed stores and the "
                 "router will not learn LMCache host-cache evictions from it. "
-                "Upgrade the server, or set lmcache.mp.kv_event_stream "
-                "to false to silence this warning.",
+                "Check the server version and KV event configuration.",
                 KV_EVENT_CAPABILITY,
             )
             return
@@ -2580,10 +2563,9 @@ class LMCacheMPWorkerAdapter:
             self._kv_event_incarnation = result.incarnation
         elif result.incarnation != self._kv_event_incarnation:
             self._kv_event_incarnation = result.incarnation
-            self._resync_kv_events(_KV_EVENT_RESYNC_SERVER_RESTART)
+            self._resync_kv_events("server_restart")
         elif result.lost:
-            self._resync_kv_events(_KV_EVENT_RESYNC_EVENTS_LOST)
-        self._kv_event_cursor = result.next_cursor
+            self._resync_kv_events("events_lost")
         for record in result.events:
             self._apply_kv_event_record(record)
 

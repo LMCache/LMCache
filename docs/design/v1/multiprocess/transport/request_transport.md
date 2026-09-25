@@ -124,6 +124,7 @@ drains and publishes during engine steps, so idle routing entries can remain
 stale until stepping resumes.
 
 Both transports advertise `kv_event_stream`. Enable the event
-bus and vLLM KV events, and match hash algorithms and chunk sizes. See
-`docs/source/mp/configuration.rst` for the log-size and subscription controls.
+bus and vLLM KV events, and match hash algorithms and chunk sizes. Workers
+subscribe automatically to capable servers. See
+`docs/source/mp/configuration.rst` for the server's log-size/disable control.
 L2 events, access events and salted hash interoperability are outside scope.

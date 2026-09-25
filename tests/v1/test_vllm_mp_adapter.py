@@ -87,10 +87,13 @@ def _parallel_strategy(
 def _event_adapter(
     fake_adapter: tuple,
     parallel_strategy: ParallelStrategy | None = None,
-    extra_config: dict | None = None,
+    advertised: bool = True,
 ) -> tuple[LMCacheMPWorkerAdapter, MagicMock, list[Callable]]:
     """Use cancellable streams at the stubbed network boundary."""
     _, client, _ = fake_adapter
+    client.get_experimental.return_value.result.return_value = (
+        [KV_EVENT_CAPABILITY] if advertised else []
+    )
     senders = []
     ready = threading.Event()
 
@@ -127,15 +130,10 @@ def _event_adapter(
     adapter = _make_worker_adapter(
         enable_kv_events=True,
         parallel_strategy=parallel_strategy,
-        extra_config=extra_config,
     )
     assert adapter.get_kv_events() == []
     strategy = parallel_strategy or _parallel_strategy()
-    if (
-        KV_EVENT_CAPABILITY in adapter.experimental
-        and (extra_config or {}).get("lmcache.mp.kv_event_stream", True)
-        and strategy.is_kv_event_subscriber
-    ):
+    if KV_EVENT_CAPABILITY in adapter.experimental and strategy.is_kv_event_subscriber:
         assert ready.wait(5)
     return adapter, client, senders
 
@@ -224,11 +222,6 @@ class FakeHeartbeatThread:
             ok = self.recover_callback()
         if ok:
             self.health_event.set()
-
-
-# Own completed-store events are the fallback path: they are published only
-# while the server event subscription is disabled.
-_OWN_STORE_EVENTS: dict[str, object] = {"lmcache.mp.kv_event_stream": False}
 
 
 def _make_worker_adapter(
@@ -338,13 +331,12 @@ def fake_adapter(monkeypatch):
     req_client = MagicMock(name="req_client", spec=RequestClient)
     _patch_request_client_factory(monkeypatch, req_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
-    monkeypatch.setattr(
-        adapter_mod, "get_experimental", lambda *a, **kw: {KV_EVENT_CAPABILITY}
-    )
 
     future = MagicMock(name="future")
     future.result.return_value = None
     _return_future_from_request_methods(req_client, future)
+    req_client.get_experimental.return_value = MagicMock()
+    req_client.get_experimental.return_value.result.return_value = []
 
     FakeHeartbeatThread.instances.clear()
     FakeHeartbeatThread.start_hook = None
@@ -807,9 +799,7 @@ def test_store_kv_events_are_reported_after_successful_store(
     # First Party
     from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
-    adapter = _make_worker_adapter(
-        extra_config=_OWN_STORE_EVENTS, enable_kv_events=True
-    )
+    adapter = _make_worker_adapter(enable_kv_events=True)
     monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
     transfer_ctx = MagicMock()
     store_future = MagicMock()
@@ -851,9 +841,7 @@ def test_store_kv_events_are_discarded_after_failed_store(
     monkeypatch,
 ):
     """Failed MP stores must not emit cache-store events."""
-    adapter = _make_worker_adapter(
-        extra_config=_OWN_STORE_EVENTS, enable_kv_events=True
-    )
+    adapter = _make_worker_adapter(enable_kv_events=True)
     monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
     transfer_ctx = MagicMock()
     store_future = MagicMock()
@@ -883,7 +871,7 @@ def test_lazy_store_kv_events_preserve_completion_and_failure_reporting(
 ) -> None:
     """Only successful stores emit events; every lazy store reports completion."""
     adapter = _make_worker_adapter(
-        extra_config={"lmcache.mp.lazy_offload": True, **_OWN_STORE_EVENTS},
+        extra_config={"lmcache.mp.lazy_offload": True},
         enable_kv_events=True,
     )
     adapter.transfer_ctx = MagicMock()
@@ -922,7 +910,7 @@ def test_kv_event_buffer_metrics(
 ) -> None:
     """A stalled drain is visible; failed/pending stores do not count as events."""
     adapter = _make_worker_adapter(
-        extra_config={"lmcache.mp.lazy_offload": lazy_offload, **_OWN_STORE_EVENTS},
+        extra_config={"lmcache.mp.lazy_offload": lazy_offload},
         enable_kv_events=enable_kv_events,
     )
     adapter.transfer_ctx = MagicMock()
@@ -1014,7 +1002,7 @@ def test_store_kv_events_use_hash_algorithm_extra_config(
     monkeypatch.setattr(adapter_mod, "TokenHasher", FakeTokenHasher)
 
     adapter = _make_worker_adapter(
-        extra_config={"lmcache.mp.hash_algorithm": "builtin", **_OWN_STORE_EVENTS},
+        extra_config={"lmcache.mp.hash_algorithm": "builtin"},
         enable_kv_events=True,
     )
 
@@ -1896,6 +1884,7 @@ def test_stream_failure_or_loss_withdraws_announced_cpu_placements(
             assert isinstance(adapter.get_kv_events()[0], CacheStoreEvent)
         else:
             assert reconnected.wait(5)
+            assert client.subscribe_kv_events.call_args.args[2] == 0
             senders[-1](batch)
             assert isinstance(adapter.get_kv_events()[0], CacheStoreEvent)
     finally:
@@ -1934,22 +1923,10 @@ def test_one_publisher_per_server(
         adapter.shutdown()
 
 
-@pytest.mark.parametrize("advertised, enabled", [(False, True), (True, False)])
-def test_old_or_disabled_channels_keep_completed_store_reporting(
+def test_unadvertised_channel_keeps_completed_store_reporting(
     fake_adapter: tuple,
-    monkeypatch: pytest.MonkeyPatch,
-    advertised: bool,
-    enabled: bool,
 ) -> None:
-    monkeypatch.setattr(
-        adapter_mod,
-        "get_experimental",
-        lambda *a, **kw: {KV_EVENT_CAPABILITY} if advertised else set(),
-    )
-    adapter, _, senders = _event_adapter(
-        fake_adapter,
-        extra_config={"lmcache.mp.kv_event_stream": enabled},
-    )
+    adapter, _, senders = _event_adapter(fake_adapter, advertised=False)
     try:
         _complete_event_store(adapter)
         assert isinstance(adapter.get_kv_events()[0], CacheStoreEvent)
