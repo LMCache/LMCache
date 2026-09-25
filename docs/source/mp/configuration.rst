@@ -79,6 +79,11 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--chunk-size``
      - ``256``
      - Chunk size for KV cache operations (in tokens).
+   * - ``--null-block-id``
+     - ``0``
+     - Engine block ID that denotes absent KV data. Keep the default for
+       vLLM-compatible layouts. Engines where block ``0`` is valid, such as
+       ATOM native PAGE/STATE transfer, can use ``-1``.
    * - ``--max-workers``
      - ``1``
      - Base number of worker threads. Sets the default for both the GPU
@@ -605,10 +610,11 @@ logging, tracing).
        setting.
    * - ``--trace-level``
      - *(none)*
-     - Enable trace recording at the given level. Currently only
-       ``storage`` is supported (records ``StorageManager`` public-API
-       calls for offline replay via ``lmcache trace``). See
-       :doc:`tracing_and_debugging`.
+     - Enable trace recording at the given level. ``storage`` records
+       ``StorageManager`` public-API calls for offline replay via
+       ``lmcache trace``. ``events`` records the cache-event stream this
+       server emits for the MP coordinator, with or without one
+       configured. See :doc:`tracing_and_debugging`.
    * - ``--trace-output``
      - *(none)*
      - Path to write the trace file. If omitted while ``--trace-level``

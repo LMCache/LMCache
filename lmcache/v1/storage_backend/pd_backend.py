@@ -299,7 +299,7 @@ class PDBackend(AllocatorBackendInterface):
         self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> PagedCpuGpuMemoryAllocator:
         if self.corrected_device != "cpu":
-            logger.info(f"Setting device to {self.corrected_device} ")
+            logger.info("Setting device to %s ", self.corrected_device)
             torch_dev.set_device(self.corrected_device)
 
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
@@ -327,10 +327,14 @@ class PDBackend(AllocatorBackendInterface):
 
         if aligned_buffer_size != origin_buffer_size:
             logger.info(
-                f"Auto align pd_buffer_size, origin: {origin_buffer_size}, "
-                f"aligned: {aligned_buffer_size}, chunk size: {chunk_size_bytes}. "
-                f"The remaining {origin_buffer_size - aligned_buffer_size} bytes "
-                f"will not be allocated."
+                "Auto align pd_buffer_size, origin: %s, "
+                "aligned: %s, chunk size: %s. "
+                "The remaining %s bytes "
+                "will not be allocated.",
+                origin_buffer_size,
+                aligned_buffer_size,
+                chunk_size_bytes,
+                origin_buffer_size - aligned_buffer_size,
             )
 
         init_func(
@@ -638,7 +642,7 @@ class PDBackend(AllocatorBackendInterface):
                     success = True
                 except Exception as e:
                     write_error = e
-                    logger.error(f"NIXL write failed in worker thread: {e}")
+                    logger.error("NIXL write failed in worker thread: %s", e)
                 finally:
                     for mem_obj in mem_objs:
                         mem_obj.ref_count_down()
@@ -655,7 +659,7 @@ class PDBackend(AllocatorBackendInterface):
                             callback(key)
                         except Exception as e:
                             logger.warning(
-                                f"on_complete_callback failed for key {key}: {e}"
+                                "on_complete_callback failed for key %s: %s", key, e
                             )
 
                 # Resolve the Future AFTER proxy notification + callbacks so
@@ -681,7 +685,7 @@ class PDBackend(AllocatorBackendInterface):
                                 callback(key)
                             except Exception as e:
                                 logger.warning(
-                                    f"on_complete_callback failed for key {key}: {e}"
+                                    "on_complete_callback failed for key %s: %s", key, e
                                 )
                     completion_future.set_result(0)
                 except Exception as e:
@@ -696,7 +700,7 @@ class PDBackend(AllocatorBackendInterface):
                         )
                     completion_future.set_result(num_read)
                 except Exception as e:
-                    logger.error(f"NIXL read failed in worker thread: {e}")
+                    logger.error("NIXL read failed in worker thread: %s", e)
                     completion_future.set_exception(e)
 
     ############################################################
