@@ -147,6 +147,8 @@ PYBIND11_MODULE(lmcache_native, m) {
            "Clear the bit at the specified index to 0.")
       .def("test", &Bitmap::test, py::arg("index"),
            "Test the bit at the specified index.")
+      .def("copy", &Bitmap::copy,
+           "Return an independent copy with the same size and bits.")
       .def("popcount", &Bitmap::popcount, "Count the number of bits set to 1.")
       .def("size", &Bitmap::size, "Number of bits in the bitmap.")
       .def("__len__", &Bitmap::size, "Number of bits in the bitmap.")
