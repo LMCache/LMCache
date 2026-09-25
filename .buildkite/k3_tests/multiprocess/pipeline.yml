@@ -318,6 +318,38 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu-dshm } }]
         artifact_paths: ["*.log"]
 
+      # ShareGPT differential correctness under preemption. Both servers are
+      # pinned to a 1024-block KV pool (16k tokens) so the 40-way rung preempts
+      # and the 3-way reference provably cannot, independent of the GPU. The
+      # LMCache rung must reproduce the reference's answers exactly and must
+      # show requests resuming with a KV load. Set PREEMPT_FULL_LADDER=1 to add
+      # the rungs that isolate a failure (see the workload script's header).
+      # lmcache-driven only: that is the transfer path this covers.
+      - label: ":compression: preemption_correctness / async={{matrix.async_scheduling}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh preemption_correctness
+        matrix:
+          setup:
+            async_scheduling:
+              - "0"
+              - "1"
+        # Two rungs (~15 min of client time) plus two model loads.
+        timeout_in_minutes: 45
+        env:
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          ASYNC_SCHEDULING: "{{matrix.async_scheduling}}"
+          NUM_GPU_BLOCKS_OVERRIDE: "1024"
+          MAX_MODEL_LEN: "8192"
+          CHUNK_SIZE: "256"
+          # Exact cross-concurrency comparison was qualified with eager mode
+          # and the default FLASH_ATTN backend.
+          ENFORCE_EAGER: "1"
+          MAX_WAIT_SECONDS: "600"
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        # The answer files are the evidence this test produces, not just the
+        # logs; cleanup.sh stages RESULTS_DIR as ci_results_<build>.
+        artifact_paths: ["*.log", "ci_results_*/preemption_correctness/*.txt"]
+
       # Temporarily disabled: hma_lm_eval_gemma4.
 
       - label: ":compression: {{matrix.inference_engine}} / fault_tolerance / {{matrix.request_transport}}"
