@@ -335,6 +335,37 @@ class TestStoreInterface:
         assert task_id in completed
         assert completed[task_id].is_successful()
 
+    def test_failed_store_releases_handle_and_can_retry(
+        self, adapter: tuple[NixlStoreL2Adapter, torch.Tensor]
+    ) -> None:
+        """A failed transfer releases its handle and leaves the key retryable."""
+        adpt, buf = adapter
+        key = create_object_key(1)
+        obj = create_memory_obj(buf, page_index=0)
+        agent = adpt.nixl_agent
+
+        with (
+            patch.object(
+                agent,
+                "post_non_blocking",
+                side_effect=RuntimeError("injected transfer failure"),
+            ) as transfer,
+            patch.object(
+                agent, "release_handle", wraps=agent.release_handle
+            ) as release,
+        ):
+            task_id = adpt.submit_store_task([key], [obj])
+            assert wait_for_event_fd(adpt.get_store_event_fd())
+            result = adpt.pop_completed_store_tasks()[task_id]
+
+            assert not result.is_successful()
+            release.assert_called_once_with(transfer.call_args.args[0])
+
+        retry_task_id = adpt.submit_store_task([key], [obj])
+        assert wait_for_event_fd(adpt.get_store_event_fd())
+        retry_result = adpt.pop_completed_store_tasks()[retry_task_id]
+        assert retry_result.is_successful()
+
 
 # =============================================================================
 # Lookup and Lock Interface Tests

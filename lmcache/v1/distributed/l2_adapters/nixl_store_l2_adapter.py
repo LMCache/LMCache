@@ -785,9 +785,10 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 mem_indices_flat,
                 storage_indices_flat,
             )
-
-            await self.nixl_agent.post_non_blocking(handle)
-            self.nixl_agent.release_handle(handle)
+            try:
+                await self.nixl_agent.post_non_blocking(handle)
+            finally:
+                self.nixl_agent.release_handle(handle)
 
             with self._lock:
                 for key, storage_obj in zip(stored_keys, storage_objs, strict=False):
