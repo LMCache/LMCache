@@ -124,16 +124,18 @@ class WarmPrefetchJobs:
             return WarmStatus(state=PENDING)
 
         with self._lock:
-            self._jobs.pop(request_id, None)
+            consumed_handle = self._jobs.pop(request_id, None)
+        if consumed_handle is None:
+            return WarmStatus(state=UNKNOWN)
         found_keys = sum(row.popcount() for row in found_rows)
         logger.info(
             "Warm prefetch %s completed: %d/%d keys loaded into L1",
             request_id,
             found_keys,
-            handle.total_requested_keys,
+            consumed_handle.total_requested_keys,
         )
         return WarmStatus(
             state=COMPLETED,
             found_keys=found_keys,
-            total_keys=handle.total_requested_keys,
+            total_keys=consumed_handle.total_requested_keys,
         )

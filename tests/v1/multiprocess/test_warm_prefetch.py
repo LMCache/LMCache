@@ -8,11 +8,14 @@ releases **nothing** (no ``finish_read`` — the warm holds no lock).
 """
 
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, cast
+import threading
 
 # First Party
 from lmcache.v1.distributed.api import GroupedObjectKeys, ObjectKey, PrefetchLockMode
+from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.multiprocess.warm_prefetch import (
     COMPLETED,
     PENDING,
@@ -48,6 +51,7 @@ class _FakeBitmap:
 class _FakeStorageManager:
     found: int = 0
     delay_polls: int = 0
+    completion_barrier: Optional[threading.Barrier] = None
 
     submit_args: Optional[dict] = None
     finish_called: bool = False
@@ -68,6 +72,8 @@ class _FakeStorageManager:
         if self._polls < self.delay_polls:
             self._polls += 1
             return None
+        if self.completion_barrier is not None:
+            self.completion_barrier.wait(timeout=5)
         return [_FakeBitmap(self.found)]
 
     def finish_read_prefetched(self, keys, read_locks: int = 1) -> None:
@@ -111,3 +117,28 @@ def test_poll_unknown_request_id():
     jobs = WarmPrefetchJobs()
     assert jobs.poll(sm, "does-not-exist").state == UNKNOWN
     assert sm.finish_called is False
+
+
+def test_concurrent_completed_poll_is_consumed_exactly_once() -> None:
+    """Only one concurrent poller may consume a completed job."""
+    sm = _FakeStorageManager(
+        found=1,
+        completion_barrier=threading.Barrier(2),
+    )
+    storage_manager = cast(StorageManager, sm)
+    jobs = WarmPrefetchJobs()
+    request_id = jobs.submit(
+        storage_manager,
+        [GroupedObjectKeys(keys=[_key(0)], object_group_id=0, layout_desc=object())],
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = [
+            future.result(timeout=5)
+            for future in (
+                executor.submit(jobs.poll, storage_manager, request_id),
+                executor.submit(jobs.poll, storage_manager, request_id),
+            )
+        ]
+
+    assert sorted(status.state for status in statuses) == [COMPLETED, UNKNOWN]
