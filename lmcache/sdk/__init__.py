@@ -2,10 +2,18 @@
 """Public LMCache SDK helpers."""
 
 # First Party
-from lmcache.sdk import batch, context, kvcache, qcache, request
+from lmcache.sdk import batch, context, drop_lifecycle, kvcache, qcache, request
 from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 
-__all__ = ["batch", "context", "kvcache", "qcache", "request", "LMCacheSDKCacheKind"]
+__all__ = [
+    "batch",
+    "context",
+    "drop_lifecycle",
+    "kvcache",
+    "qcache",
+    "request",
+    "LMCacheSDKCacheKind",
+]
 
 
 def connect(
