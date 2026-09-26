@@ -65,7 +65,7 @@ def test_http_source_delegates_to_event_gate() -> None:
     assert consumer.batches == [batch]
 
 
-def test_http_source_reports_no_replay_capability() -> None:
+def test_http_source_reports_no_replay_capability_and_zero_lag() -> None:
     source, _ = _source()
 
     asyncio.run(source.start())
@@ -74,3 +74,4 @@ def test_http_source_reports_no_replay_capability() -> None:
 
     assert status.source_name == "http"
     assert status.replay_capability == EventReplayCapability.NONE
+    assert status.lag == 0

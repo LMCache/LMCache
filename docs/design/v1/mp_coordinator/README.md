@@ -70,6 +70,8 @@ lmcache/v1/mp_coordinator/
     event_source.py     # source lifecycle/status contract
     http_event_source.py  # non-durable POST /events push source
     kafka_event_source.py  # durable Kafka pull source (poll thread -> gate)
+    stream_position.py  # StreamPosition: checkpoint's own read-so-far marker
+    readiness.py        # IngestReadiness: source lag vs. an operator's budget
   discovery.py          # Registry + package scan, shared by views and controllers
   views/                # read models of the fleet: what is cached, and how much
     __init__.py         # build_views: scans this package
@@ -189,9 +191,15 @@ it. It holds no cache state itself. See [ingest.md](ingest.md).
   `POST /events` push adapter.
 - `kafka_event_source.py` — `KafkaCacheEventSource`, the durable pull
   adapter: a poll thread reads the fleet's Kafka topic and offers each
-  record to the same `EventGate.ingest_batches`; offsets commit via the
-  consumer group. Selected by `--event-transport kafka` in place of the
-  HTTP source; a coordinator runs exactly one.
+  record to the same `EventGate.ingest_batches`. Selected by
+  `--event-transport kafka` in place of the HTTP source; a coordinator
+  runs exactly one.
+- `stream_position.py` — `StreamPosition`, checkpointed beside the state
+  it describes: what a restarted `KafkaCacheEventSource` seeks each
+  partition to, rather than trusting the consumer group's own committed
+  offset (which is saved on a different timer and can race ahead of the
+  last checkpoint). A partition it has never seen falls back to the
+  group's committed offset.
 - `event_gate.py` — the admission point for every source. Owns the
   per-emitter stream cursor: incarnation fencing (a restart voids the
   emitter's L1 facts), `seq` dedup, and gap detection. Scan sources
@@ -200,6 +208,12 @@ it. It holds no cache state itself. See [ingest.md](ingest.md).
   notifications) to its registered `CacheEventConsumer`s: the key
   directory and the eviction manager. Adding a consumer is a wiring
   change in `app.py`, not a router or gate change.
+- `readiness.py` — `IngestReadiness`, comparing the one source's `lag`
+  against `--max-ready-lag`. `app.py`'s lifespan blocks on
+  `wait_until_ready()` before starting any controller, so a coordinator
+  resuming from a Kafka backlog never gets to plan against a view that
+  is only partly filled back in -- there is no partially-ready state to
+  gate per controller.
 
 ## Controllers (`controllers/`)
 

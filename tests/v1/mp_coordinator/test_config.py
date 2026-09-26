@@ -62,7 +62,13 @@ def test_kafka_source_config_requires_servers_topic_and_group() -> None:
         KafkaCacheEventSourceConfig(bootstrap_servers="broker:9092", group_id="")
 
 
+def test_kafka_source_config_rejects_a_negative_ready_lag() -> None:
+    with pytest.raises(ValueError, match="max_ready_lag"):
+        KafkaCacheEventSourceConfig(bootstrap_servers="broker:9092", max_ready_lag=-1)
+
+
 def test_kafka_source_config_defaults() -> None:
     config = KafkaCacheEventSourceConfig(bootstrap_servers="broker:9092")
     assert config.topic == "lmcache-cache-events"
     assert config.group_id == "lmcache-coordinator"
+    assert config.max_ready_lag == 1000

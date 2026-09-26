@@ -30,17 +30,23 @@ class KafkaCacheEventSourceConfig:
         group_id: Consumer group whose committed offsets a restarted
             coordinator resumes from; a new group reads the whole retained
             stream.
+        max_ready_lag: Records the coordinator may be behind and still
+            start. Above it, startup blocks -- serving nothing, not even
+            ``/healthz`` -- until ingest catches up: a coordinator still
+            replaying the stream has an incomplete view, and planning
+            against one orders evictions the fleet does not need.
     """
 
     bootstrap_servers: str = ""
     topic: str = DEFAULT_KAFKA_CACHE_EVENT_TOPIC
     group_id: str = "lmcache-coordinator"
+    max_ready_lag: int = 1000
 
     def __post_init__(self) -> None:
-        """Validate the bootstrap servers, topic, and consumer group.
+        """Validate the bootstrap servers, topic, consumer group, and lag budget.
 
         Raises:
-            ValueError: If any of them is empty.
+            ValueError: If a string field is empty or the lag budget is negative.
         """
         if not self.bootstrap_servers.strip():
             raise ValueError("Kafka bootstrap servers must be non-empty")
@@ -48,6 +54,8 @@ class KafkaCacheEventSourceConfig:
             raise ValueError("Kafka cache-event topic must be non-empty")
         if not self.group_id.strip():
             raise ValueError("Kafka consumer group must be non-empty")
+        if self.max_ready_lag < 0:
+            raise ValueError(f"max_ready_lag must be >= 0, got {self.max_ready_lag}")
 
 
 @dataclass(frozen=True)

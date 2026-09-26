@@ -4,8 +4,11 @@ Modules: `lmcache/v1/mp_coordinator/ingest/`
  - `event_source.py` — source lifecycle/status contract
  - `http_event_source.py` — non-durable `POST /events` push source
  - `kafka_event_source.py` — durable Kafka pull source (poll thread)
+ - `stream_position.py` — `StreamPosition`: the checkpoint's own record of
+   how far into the Kafka stream it reaches
  - `event_gate.py` — `EventGate`: admission (fencing, dedup, gap detection)
  - `event_broadcaster.py` — `CacheEventBroadcaster` + the `CacheEventConsumer` protocol
+ - `readiness.py` — `IngestReadiness`: source lag vs. an operator's budget
 Contract vocabulary: `lmcache/v1/mp_coordinator/api.py`
 HTTP surface: `http_apis/events_api.py` (`POST /events`)
 
@@ -83,25 +86,86 @@ duplicate it never was.
   seek or replay events that failed before the coordinator accepted them. It
   reports `replay_capability=none` and implements no silent no-op `seek`.
 - **`KafkaCacheEventSource`**, selected by `--event-transport kafka` (with
-  `--kafka-bootstrap-servers`, `--kafka-topic`, `--kafka-group-id`);
+  `--kafka-bootstrap-servers`, `--kafka-topic`, `--kafka-group-id`,
+  `--max-ready-lag`);
   `POST /events` then answers 404. One
   poll thread reads the topic the MP servers' `KafkaCacheEventSink`
   produces to -- one `CacheEventsRequest` envelope per record (the
   `POST /events` body), keyed by `instance_id` so a partition is one
   instance's stream in order -- and
   offers each
-  record's batches to `ingest_batches`. A record's offset is stored only
-  after the gate has seen it and is committed by the consumer group, so
-  delivery is at-least-once and a restarted coordinator resumes where the
-  last one stopped; the gate's dedup absorbs any redelivery. A record that
-  does not decode, or that makes a consumer raise, is logged and skipped so
-  it cannot stall its partition. It reports `replay_capability=seekable`
-  because the topic retains the stream: resetting the group's offsets
-  replays it. A coordinator-driven seek/lag API is the replay follow-up.
+  record's batches to `ingest_batches`. A record's offset is recorded
+  into `StreamPosition` (see below) only after the gate has seen it, and
+  stored for the consumer group's own auto-commit at the same point, so
+  delivery is at-least-once; the gate's dedup absorbs any redelivery. A
+  record that does not decode, or that makes a consumer raise, is logged
+  and skipped -- and still recorded, so it cannot stall its partition. It
+  reports `replay_capability=seekable` because the topic retains the
+  stream: `StreamPosition`, and an operator resetting the group's offsets
+  by hand, both replay it.
 
-Transport positions (Kafka partition offsets, committed by the consumer
-group) are separate from the gate's per-emitter seq cursors, which are what
-the checkpoint carries.
+  The same poll thread also refreshes a cached `lag`: the sum, across its
+  assigned partitions, of each partition's high watermark minus the
+  consumer's current position (cached watermarks first, a live query only
+  for a partition nothing has been fetched from yet). `lag` is
+  `UNKNOWN_LAG` (`-1`) until the first refresh resolves, or whenever the
+  broker cannot answer -- an unreachable broker must never read as
+  "caught up." `HttpCacheEventSource` always reports `lag=0`: nothing is
+  retained, so nothing can be behind.
+
+## Resuming correctly (`StreamPosition`)
+
+Two things could answer "where does a restarted consumer resume from,"
+and they disagree in exactly the window that matters. Kafka's own
+consumer-group commit and the coordinator's own checkpoint save are
+independent, on independent timers (offsets commit roughly every few
+seconds; a checkpoint every `--checkpoint-interval`, default 60s, or
+only at a clean shutdown). On an ungraceful crash between two checkpoint
+saves, the committed offset is already ahead of what the last saved
+checkpoint reflects -- and resuming from it, as a plain consumer group
+would, replays nothing in between: the broker considers those records
+delivered, and the checkpoint that gets restored does not.
+
+`StreamPosition` is checkpointed in the *same* artifact as the state it
+describes (registered alongside `EventGate` in `app.py`'s
+`checkpoint_components`), recording each partition's offset only after
+the gate has admitted that record -- so a captured position can only
+ever lag the state beside it in the checkpoint, never lead it.
+`KafkaCacheEventSource`'s `on_assign` callback seeks every assigned
+partition to `StreamPosition.next_offset(...)` rather than trusting the
+group's committed offset, so a restart always resumes from what the
+coordinator's own restored state proves it has seen. A partition with no
+recorded position (a first run, or a genuinely new partition) falls back
+to the group's committed offset, or `auto.offset.reset` if the group has
+none either -- so a deployment with no checkpoint configured still gets
+Kafka's own best-effort resumption, just not the stronger guarantee.
+
+Transport positions (Kafka partition offsets) are a separate coordinate
+system from the gate's per-emitter seq cursors -- one counts records
+per topic-partition, the other per logical emitter -- and both ride in
+the checkpoint, independently.
+
+## Readiness (`IngestReadiness`)
+
+A coordinator resuming from `StreamPosition` is behind for a while
+whenever that resumption point is far behind the topic's tip -- a
+coordinator down for a while, replaying a real backlog: it restores
+quotas in full (metadata) before ingest starts, but the usage those
+quotas are enforced against fills back in only as the poll thread
+applies the backlog. Planning in that window compares a
+real limit against partial usage, which orders evictions the fleet does
+not need -- not a smaller correct plan, a wrong one.
+
+Rather than let every controller reason about a partially-caught-up
+coordinator, the lifespan (`app.py`) does not let one exist:
+`IngestReadiness.wait_until_ready()` blocks startup -- serving nothing,
+not even `/healthz` -- until the source's `lag` is within
+`--max-ready-lag` (default `1000`, Kafka-only), logging progress on a
+timer while it waits. Only once that clears do controllers start. An
+`UNKNOWN_LAG` source counts as not ready and holds startup indefinitely
+-- the safe direction, since a coordinator that cannot reach its broker
+must not come up acting on a view it knows is incomplete. A deployment
+with no durable transport clears immediately: HTTP's lag is always `0`.
 
 A source that is a *scan* of current contents rather than a stream —
 the startup L2 resync that used to paginate `GET /cache/objects` — has
@@ -148,9 +212,19 @@ follow-up below.
 
 ## Deliberately out of scope (follow-ups)
 
-- **Replay integration**: exposing `gap_detected` over HTTP, then acting
-  on it by seeking the Kafka source back through the topic's retention.
-  Today replay is operator-driven: reset the consumer group's offsets.
+- **Gap visibility**: `gap_detected` still has no HTTP endpoint --
+  `GET /directory/stats` deliberately reports directory contents only.
+  Lag (how far behind) now gates startup but is not otherwise exposed;
+  a gap (events that will never arrive) is a different condition and
+  stays invisible either way.
+- **Operator-driven replay from an arbitrary point**: a restart already
+  resumes correctly from `StreamPosition` (or, absent one, the group's
+  committed offset), and `IngestReadiness` makes it safe to act on once
+  caught up. Replaying from further back than that -- reprocessing
+  retained history the checkpoint has already moved past -- is still
+  manual: an operator clears the `kafka_stream_position` checkpoint
+  section (and resets the consumer group's offsets, if a checkpoint isn't
+  the only thing pinning them) by hand.
 - **Registry integration**: calling `EventGate.drop_instance` from
   deregistration / heartbeat-timeout eviction.
 - **Allocation generations** for shared pools (deterministic

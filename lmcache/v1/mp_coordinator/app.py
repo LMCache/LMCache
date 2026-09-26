@@ -46,6 +46,8 @@ from lmcache.v1.mp_coordinator.ingest.http_event_source import HttpCacheEventSou
 from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
     KafkaCacheEventSource,
 )
+from lmcache.v1.mp_coordinator.ingest.readiness import IngestReadiness
+from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
 from lmcache.v1.mp_coordinator.observability import register_key_directory_metrics
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
@@ -125,18 +127,32 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # every emitter's stream has one ordered path in (which is what the
     # gate's per-emitter seq cursor assumes).
     event_source: CacheEventSource
+    stream_position: StreamPosition | None = None
     if isinstance(config.event_source_config, KafkaCacheEventSourceConfig):
-        event_source = KafkaCacheEventSource(event_gate, config.event_source_config)
+        stream_position = StreamPosition()
+        event_source = KafkaCacheEventSource(
+            event_gate, config.event_source_config, stream_position
+        )
+        max_ready_lag = config.event_source_config.max_ready_lag
     else:
         event_source = HttpCacheEventSource(event_gate)
+        max_ready_lag = 0
+    # HTTP's lag is always 0, so the budget above is moot for it; it is
+    # only ever compared against a source that can actually be behind.
+    ingest_readiness = IngestReadiness(event_source, max_ready_lag)
 
     # The gate is named because it is durable but is neither a view nor
-    # a controller; everything else advertises its own state.
+    # a controller; everything else advertises its own state. The stream
+    # position rides beside them for the same reason a partial checkpoint
+    # must never look complete: captured under the same quiesce, restored
+    # before the source seeks to it.
     checkpoint_components: list[DurableComponent] = [
         event_gate,
         *views.durable_components()[PersistenceType.CHECKPOINT],
         *controllers.durable_components()[PersistenceType.CHECKPOINT],
     ]
+    if stream_position is not None:
+        checkpoint_components.append(stream_position)
     checkpoint_store = _artifact_store(config.checkpoint_path)
     metadata_persister = MetadataPersister(_artifact_store(config.metadata_path))
     for component in controllers.durable_components()[PersistenceType.METADATA]:
@@ -189,12 +205,20 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         """Start background work and unwind it in order on shutdown.
 
-        Registration order is teardown order reversed, and the order is
-        load-bearing: timers stop before the source so no checkpoint races
-        ingestion, the source before controllers so no new work arrives while
-        they settle, controllers before the final write so it captures what
-        they settled on, and the client closes last because a draining
-        controller is still using it.
+        The source starts, and is waited on, before any controller: a
+        controller that plans the moment it starts would compare a fully
+        restored quota against only the fraction of usage ingest has
+        replayed so far, and order evictions the fleet does not need.
+        Nothing here (not even ``/healthz``) answers until that wait
+        clears, which is the point -- there is no partially-ready state to
+        reason about.
+
+        Registration order is teardown order reversed past that point,
+        and the order is load-bearing: timers stop before the source so
+        no checkpoint races ingestion, the source before controllers so no
+        new work arrives while they settle, controllers before the final
+        write so it captures what they settled on, and the client closes
+        last because a draining controller is still using it.
 
         A controller that raises on the way in is logged and skipped;
         the rest still run.
@@ -216,6 +240,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
                     quiesce,
                     checkpoint_components,
                 )
+            await event_source.start()
+            await ingest_readiness.wait_until_ready()
             # One controller is not allowed to take the coordinator down
             # with it: the endpoints belonging to no controller keep
             # working, and whatever the failed one does simply is not
@@ -228,7 +254,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
                     logger.exception(
                         "Controller %s failed to start", type(controller).__name__
                     )
-            await event_source.start()
+            # Registered only now, so it still unwinds before the
+            # controllers above despite starting before them.
             stack.push_async_callback(event_source.stop)
             # Nested, so they stop before the stack unwinds. Awaited too:
             # ``save_checkpoint`` runs in a thread a cancel cannot reach.

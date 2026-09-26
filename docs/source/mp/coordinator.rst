@@ -147,6 +147,13 @@ keeps the default below.
      - Consumer group whose committed offsets a restart resumes from. A new
        group reads the whole retained stream. Ignored unless
        ``--event-transport kafka``.
+   * - ``--max-ready-lag``
+     - ``1000``
+     - Records the coordinator may be behind its Kafka topic and still
+       start. Above it, startup blocks -- serving nothing -- until ingest
+       catches up, rather than coming up and planning against a fleet
+       view that is only partly filled back in. Ignored unless
+       ``--event-transport kafka``.
 
 Loading your own controllers
 ----------------------------
@@ -537,6 +544,14 @@ Coordinator liveness probe (for Kubernetes).
 
     curl -s http://localhost:9300/healthz
     # -> {"status": "healthy"}
+
+.. note::
+
+   Under ``--event-transport kafka``, the coordinator answers nothing --
+   not even ``/healthz`` -- until it has caught up on the topic (lag
+   within ``--max-ready-lag``). A coordinator resuming from a backlog is
+   simply not up yet from the outside; there is no separate readiness
+   state to probe for.
 
 Quota, usage, and eviction
 --------------------------
