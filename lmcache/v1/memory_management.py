@@ -923,9 +923,7 @@ class TensorMemoryObj(MemoryObj):
 
 
 class BytesBufferMemoryObj(MemoryObj):
-    """
-    Wraps a raw flat tensor with some metadata
-    """
+    """Wrap opaque bytes with metadata accounting for their payload size."""
 
     def __init__(self, raw_bytes: bytes, metadata: Optional[MemoryObjMetadata] = None):
         self.raw_data = raw_bytes
@@ -935,7 +933,7 @@ class BytesBufferMemoryObj(MemoryObj):
                 shape=bytes_shape,
                 dtype=None,
                 address=0,
-                phy_size=0,
+                phy_size=len(self.raw_data),
                 ref_count=1,
                 pin_count=0,
                 fmt=MemoryFormat.BINARY_BUFFER,
