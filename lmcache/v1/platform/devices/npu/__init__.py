@@ -16,7 +16,7 @@ so ``import lmcache`` loads the plugin's ``c_ops`` on an NPU host.
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # First Party
 from lmcache.v1.platform.base.device_spec import DeviceSpec
@@ -25,7 +25,10 @@ from lmcache.v1.platform.devices.npu.pin_memory import NpuPinMemoryBackend
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.platform.base.cache_context import BaseCacheContext
     from lmcache.v1.platform.base.device_ops import DeviceOps
+    from lmcache.v1.platform.base.event_ipc import EventIPCBackend
+    from lmcache.v1.platform.devices.npu.ipc_wrapper import NpuIPCWrapper
 
 # ---------------------------------------------------------------------------
 # Device detection registry entry
@@ -34,6 +37,8 @@ if TYPE_CHECKING:
 
 class NpuDeviceSpec(DeviceSpec):
     """Ascend NPU device specification for the detection registry."""
+
+    _event_backend_cache: "EventIPCBackend | None" = None
 
     @property
     def device_type(self) -> str:
@@ -53,6 +58,33 @@ class NpuDeviceSpec(DeviceSpec):
     @property
     def pin_memory_backend(self) -> type[PinMemoryBackend] | None:
         return NpuPinMemoryBackend
+
+    @property
+    def ipc_wrapper_cls(self) -> "type[NpuIPCWrapper]":
+        """Plane-aggregating KV-cache IPC wrapper for Ascend."""
+        # First Party
+        from lmcache.v1.platform.devices.npu.ipc_wrapper import NpuIPCWrapper
+
+        return NpuIPCWrapper
+
+    @property
+    def event_ipc_backend(self) -> "EventIPCBackend":
+        """Return the cached torch_npu event IPC backend."""
+        backend = self._event_backend_cache
+        if backend is None:
+            # First Party
+            from lmcache.v1.platform.devices.npu.event_ipc import NpuEventIPCBackend
+
+            backend = NpuEventIPCBackend()
+            self._event_backend_cache = backend
+        return backend
+
+    def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
+        """Create the NPU cache context for LMCache-driven transfer."""
+        # First Party
+        from lmcache.v1.platform.devices.npu.cache_context import NpuCacheContext
+
+        return NpuCacheContext(*args, **kwargs)
 
     def is_available(self) -> bool:
         """Check NPU availability without importing ``lmcache.__init__``.

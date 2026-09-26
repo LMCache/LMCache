@@ -2,6 +2,7 @@
 # Standard
 from typing import Any, Union
 import ctypes
+import importlib
 import os
 import sys
 import time
@@ -3229,6 +3230,51 @@ def test_tensor_from_ptr_routes_musa_pointer(
         "shape": (2, 3),
         "dtype": torch.float16,
         "device_type": "musa",
+        "total_bytes": 12,
+    }
+
+
+def test_tensor_from_ptr_routes_npu_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NPU pointers are routed through the NPU pointer helper."""
+
+    class FakeDevice:
+        def __init__(self, value: object) -> None:
+            self.type = str(value).split(":", maxsplit=1)[0]
+
+    captured: dict[str, object] = {}
+
+    def fake_npu_ptr(
+        ptr: int,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: Any,
+        total_bytes: int,
+    ) -> torch.Tensor:
+        captured.update(
+            ptr=ptr,
+            shape=shape,
+            dtype=dtype,
+            device_type=device.type,
+            total_bytes=total_bytes,
+        )
+        return torch.empty(shape, dtype=dtype)
+
+    monkeypatch.setattr(_py_ops.torch, "device", FakeDevice)
+    # The package re-export shadows the submodule with the function name, so
+    # resolve the defining module explicitly.
+    ptr_mod = importlib.import_module("lmcache.v1.platform.torch_ops._tensor_from_ptr")
+    monkeypatch.setattr(ptr_mod, "_tensor_from_npu_ptr", fake_npu_ptr)
+
+    tensor = _py_ops._tensor_from_ptr(0x1000, (2, 3), torch.float16, "npu:0")
+
+    assert tensor.shape == (2, 3)
+    assert captured == {
+        "ptr": 0x1000,
+        "shape": (2, 3),
+        "dtype": torch.float16,
+        "device_type": "npu",
         "total_bytes": 12,
     }
 
