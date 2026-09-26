@@ -361,7 +361,7 @@ def load_config(config_file: Optional[str] = None) -> LMCacheEngineConfig:
     config_file = config_file or os.getenv("LMCACHE_CONFIG_FILE")
 
     if config_file:
-        logger.info(f"Loading configuration from file: {config_file}")
+        logger.info("Loading configuration from file: %s", config_file)
         config = LMCacheEngineConfig.from_file(config_file)
     else:
         logger.info("No config file specified, loading from environment variables")
@@ -385,9 +385,9 @@ def override_config_from_dict(config: LMCacheEngineConfig, overrides: Dict[str, 
             else:
                 setattr(config, key, value)
             if old_value != value:
-                logger.info(f"Override config: {key} = {value} (was {old_value})")
+                logger.info("Override config: %s = %s (was %s)", key, value, old_value)
         else:
-            logger.warning(f"Unknown config key: {key}, ignoring")
+            logger.warning("Unknown config key: %s, ignoring", key)
 
 
 def parse_kv_shape(shape_str: str) -> Tuple[int, int, int, int, int]:
@@ -407,7 +407,7 @@ def setup_signal_handlers(starter: LMCacheStandaloneStarter):
     """Setup signal handlers for graceful shutdown"""
 
     def signal_handler(signum, frame):
-        logger.info(f"Received signal {signum}")
+        logger.info("Received signal %s", signum)
         starter.stop()
         sys.exit(0)
 
@@ -572,7 +572,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
+        logger.error("Fatal error: %s", e, exc_info=True)
         sys.exit(1)
 
     logger.info("=" * 80)
