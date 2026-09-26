@@ -205,38 +205,42 @@ class StorageManager:
                 reserved memory objects. Note that not all requested keys could be
                 reserved (e.g., out of memory or write conflict)
         """
-        reserve_result = self._l1_manager.reserve_write(
-            keys=keys,
-            is_temporary=[False] * len(keys),
-            layout_desc=layout_desc,
-            tag=_L1_WRITE_TAG,
-        )
+        reserve_result = self._reserve_write_with_status(keys, layout_desc)
+        return {k: m for k, (_, m) in reserve_result.items() if m is not None}
 
-        result = {k: m for k, (e, m) in reserve_result.items() if m is not None}
-        successful_keys = list(result.keys())
-        failed_keys = [k for k, (e, m) in reserve_result.items() if m is None]
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.SM_WRITE_RESERVED,
-                metadata={
-                    "succeeded_keys": successful_keys,
-                    "failed_keys": failed_keys,
-                },
-            )
-        )
+    @enable_tracing()
+    def reserve_write_with_status(
+        self,
+        keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
+    ) -> dict[ObjectKey, tuple[L1Error, MemoryObj | None]]:
+        """Reserve objects for writing and preserve each key's status.
 
-        oom_keys = [
-            k for k, (e, _) in reserve_result.items() if e == L1Error.OUT_OF_MEMORY
-        ]
-        if oom_keys:
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.L1_ALLOCATION_FAILED,
-                    metadata={"during": "l1_store", "keys": oom_keys},
-                )
-            )
+        Unlike :meth:`reserve_write`, this method does not discard failed
+        reservation results. Callers that require fail-closed behavior can
+        therefore distinguish an allocation failure from a skipped key.
 
-        return result
+        Args:
+            keys: Object keys to reserve for writing.
+            layout_desc: Memory layout of each requested object.
+
+        Returns:
+            A mapping from every requested key to its L1 error and optional
+            reserved memory object.
+        """
+        return self._reserve_write_with_status(keys, layout_desc)
+
+    @enable_tracing()
+    def abort_write(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
+        """Discard staged writes without publishing them to readers.
+
+        Args:
+            keys: Keys successfully returned by a preceding write reservation.
+
+        Returns:
+            A mapping from every requested key to its L1 completion status.
+        """
+        return self._l1_manager.finish_write_and_delete(keys, tag=_L1_WRITE_TAG)
 
     @enable_tracing()
     def finish_write(
@@ -659,6 +663,52 @@ class StorageManager:
         ever reconfigured. Later changes announce themselves.
         """
         self._publish_capacity_changed()
+
+    def _reserve_write_with_status(
+        self,
+        keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
+    ) -> dict[ObjectKey, tuple[L1Error, MemoryObj | None]]:
+        """Reserve writes and publish reservation outcome events."""
+        reserve_result = self._l1_manager.reserve_write(
+            keys=keys,
+            is_temporary=[False] * len(keys),
+            layout_desc=layout_desc,
+            tag=_L1_WRITE_TAG,
+        )
+
+        successful_keys = [
+            key
+            for key, (_, memory_obj) in reserve_result.items()
+            if memory_obj is not None
+        ]
+        failed_keys = [
+            k for k, (_, memory_obj) in reserve_result.items() if memory_obj is None
+        ]
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_WRITE_RESERVED,
+                metadata={
+                    "succeeded_keys": successful_keys,
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
+
+        oom_keys = [
+            key
+            for key, (error, _) in reserve_result.items()
+            if error == L1Error.OUT_OF_MEMORY
+        ]
+        if oom_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_ALLOCATION_FAILED,
+                    metadata={"during": "l1_store", "keys": oom_keys},
+                )
+            )
+
+        return reserve_result
 
     def _build_capacities(self) -> list[ModuleMemoryCapacity]:
         """Assemble one capacity entry per memory compartment.
