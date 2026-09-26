@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, TypeVar,
 import asyncio
 import functools
 import hashlib
+import os
 import re
 import threading
 import traceback
@@ -34,6 +35,64 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+
+_SPDK_MEM_SIZE_MB_ENV = os.environ.get("LMCACHE_SPDK_MEM_SIZE_MB")
+SPDK_DEFAULT_MEM_SIZE_MB = (
+    int(_SPDK_MEM_SIZE_MB_ENV) if _SPDK_MEM_SIZE_MB_ENV is not None else 4096
+)
+HUGEPAGE_SIZE = 2 * 1024 * 1024
+HUGEPAGE_SIZE_MB = HUGEPAGE_SIZE // (1024 * 1024)
+
+
+def check_hugepage_availability(
+    required_cpu_bytes: int,
+    spdk_mem_size_mb: int,
+) -> None:
+    """Check if sufficient hugepages are available for SPDK operations.
+
+    SPDK requires hugepages for both its own memory allocation (mem_size)
+    and for zero-copy DMA registration of the LMCache CPU buffer.
+
+    Args:
+        required_cpu_bytes: Bytes required for LMCache KV cache buffer.
+        spdk_mem_size_mb: MB required for SPDK internal memory allocation.
+
+    Raises:
+        RuntimeError: If insufficient hugepages are available.
+    """
+    try:
+        with open("/proc/sys/vm/nr_hugepages", "r") as f:
+            available_hugepages = int(f.read().strip())
+    except (FileNotFoundError, ValueError, OSError) as e:
+        logger.warning(
+            "Could not read /proc/sys/vm/nr_hugepages: %s. "
+            "Skipping hugepage availability check.",
+            e,
+        )
+        return
+
+    required_cpu_pages = (required_cpu_bytes + HUGEPAGE_SIZE - 1) // HUGEPAGE_SIZE
+    required_spdk_pages = spdk_mem_size_mb // HUGEPAGE_SIZE_MB
+    total_required_pages = required_cpu_pages + required_spdk_pages
+
+    logger.debug(
+        "SPDK hugepage check: available=%d, required (CPU=%d + SPDK=%d) = %d",
+        available_hugepages,
+        required_cpu_pages,
+        required_spdk_pages,
+        total_required_pages,
+    )
+
+    if available_hugepages < total_required_pages:
+        cpu_mb = required_cpu_bytes / (1024**2)
+        raise RuntimeError(
+            f"Insufficient hugepages: {available_hugepages} available, "
+            f"{total_required_pages} required "
+            f"(CPU: {required_cpu_pages} pages ({cpu_mb:.0f} MB), "
+            f"SPDK: {required_spdk_pages} pages ({spdk_mem_size_mb} MB)). "
+            f"Set /proc/sys/vm/nr_hugepages to at least {total_required_pages}."
+        )
+
 
 if TYPE_CHECKING:
     # First Party
