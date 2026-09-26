@@ -38,6 +38,11 @@ from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
+
+class _NixlStorageCapacityError(RuntimeError):
+    """Raised when a store batch cannot reserve enough storage slots."""
+
+
 # Main class
 
 
@@ -724,9 +729,10 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
         For each key-object pair, memory page indices are mapped to storage
         slot indices and a single batched DMA write is issued. On success the
-        key-to-storage mapping is recorded in ``_memory_objects``. On transfer
-        failure, all allocated storage slots are freed and the task is marked
-        as failed.
+        key-to-storage mapping is recorded in ``_memory_objects``. On preparation
+        or transfer failure, all allocated storage slots are freed and the
+        task is marked as failed. Capacity exhaustion logs a warning; unexpected
+        failures include a traceback.
 
         Args:
             keys: Keys identifying each object to store.
@@ -739,7 +745,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         try:
             # Get memory page indices and storage slot indices
             mem_indices_flat = []
-            storage_indices_flat = []
+            storage_indices_flat: list[int] = []
             stored_keys = []
             storage_objs = []
             for key, obj in zip(keys, objects, strict=False):
@@ -755,8 +761,11 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                     num_objs=len(mem_indices)
                 )
 
-                if storage_indices == []:
-                    break
+                if not storage_indices:
+                    success = False
+                    raise _NixlStorageCapacityError(
+                        "Insufficient NIXL storage capacity"
+                    )
 
                 mem_indices_flat.extend(mem_indices)
                 storage_indices_flat.extend(storage_indices)
@@ -775,7 +784,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 )
 
             if not mem_indices_flat:
-                # Nothing to store (all keys already existed or pool empty)
+                # Nothing to store because all keys already existed
                 with self._lock:
                     self._completed_store_tasks[task_id] = L2StoreResult(True, 0)
                 self._signal_store_event()
@@ -793,21 +802,20 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 for key, storage_obj in zip(stored_keys, storage_objs, strict=False):
                     self._memory_objects[key] = storage_obj
                     storage_obj.decrease_pin_count()
-            # ``stored_keys`` and ``storage_objs`` are built together in the
-            # pre-alloc loop above, so the size lists stay aligned even
-            # when the pool ran out of slots mid-batch.
             if stored_keys:
                 stored_sizes = [obj.size for obj in storage_objs]
                 self._notify_keys_stored(stored_keys, stored_sizes)
             bytes_transferred = sum(obj.size for obj in storage_objs)
 
-        # success is only set to false for transfer failures
+        except _NixlStorageCapacityError as exc:
+            logger.warning("NIXL store task %d failed: %s", task_id, exc)
         except Exception:
             logger.exception("NIXL store task %d failed", task_id)
             success = False
-            bytes_transferred = 0
 
-            # free storage indices if transfer fails
+        if not success:
+            bytes_transferred = 0
+            # Free storage indices after preparation or transfer failures.
             self.nixl_agent.pool.batched_free(storage_indices_flat)
 
         with self._lock:
