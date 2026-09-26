@@ -148,6 +148,10 @@ class StorageManager:
         self._l2_eviction_controller = L2EvictionController(
             l2_eviction_states, quota_manager=self._quota_manager
         )
+        # After the eviction states registered their listeners, so objects
+        # recovered from persistent storage enter the eviction order too.
+        for adapter_id, adapter in self._l2_adapters.items():
+            self._recover_persisted_objects(adapter_id, adapter)
         self._l2_eviction_controller.start()
 
         # Controllers receive the initial set as ordered lists; they key
@@ -845,6 +849,7 @@ class StorageManager:
                         eviction_config=config.eviction_config,
                     )
                 )
+            self._recover_persisted_objects(adapter_id, adapter)
             logger.info("Added L2 adapter %d (%s)", adapter_id, descriptor.type_name)
             self._publish_capacity_changed()
             return adapter_id
@@ -998,6 +1003,21 @@ class StorageManager:
         """Return whether any L2 adapter is currently active."""
         with self._adapters_lock:
             return bool(self._l2_adapters)
+
+    @staticmethod
+    def _recover_persisted_objects(
+        adapter_id: int, adapter: L2AdapterInterface
+    ) -> None:
+        """Register objects a previous process left in the adapter's storage."""
+        recovered = adapter.recover_persisted_objects()
+        if recovered:
+            logger.info(
+                "L2 adapter %d: registered %d objects recovered from persistent "
+                "storage (usage %d bytes)",
+                adapter_id,
+                recovered,
+                adapter.get_usage().total_bytes_used,
+            )
 
     def _build_l2_adapter(
         self,

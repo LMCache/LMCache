@@ -315,6 +315,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     def get_usage(self) -> AdapterUsage:
         return self._inner.get_usage()
 
+    def recover_persisted_objects(self) -> int:
+        return self._inner.recover_persisted_objects()
+
     def delete(self, keys: list[ObjectKey]) -> None:
         self._inner.delete(keys)
 

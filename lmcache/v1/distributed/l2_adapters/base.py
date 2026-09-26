@@ -513,6 +513,24 @@ class L2AdapterInterface(ABC):
         """
         return self._max_capacity_bytes > 0
 
+    def recover_persisted_objects(self) -> int:
+        """Register objects that a previous process left in persistent storage.
+
+        Called once by the storage manager after the adapter's listeners
+        (including its eviction policy) are registered. Adapters whose
+        storage survives a restart implement it by feeding the surviving
+        objects through ``_notify_keys_stored``, so they count toward
+        ``max_capacity_bytes`` and become eviction candidates. Without it,
+        such objects stay readable through lookups but are never
+        accounted for or evicted.
+
+        The default implementation is a no-op.
+
+        Returns:
+            int: The number of objects registered.
+        """
+        return 0
+
     def delete(self, keys: list[ObjectKey]) -> None:
         """
         Delete a batch of objects from L2 storage.
