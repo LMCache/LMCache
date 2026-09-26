@@ -23,6 +23,7 @@ from lmcache.v1.platform.torch_ops._kv_format import (
     _is_kv_second_tuple_format,
     _is_mla_plane_tuple_format,
     _is_pbs_fused_format,
+    _is_single_kv_format,
     _is_two_major_format,
 )
 from lmcache.v1.platform.torch_ops._tensor_from_ptr import _tensor_from_ptr
@@ -289,8 +290,10 @@ def _normalize_lmcache_objects(
         chunk_tokens = lmcache_chunk_size
         if is_mla(engine_kv_format):
             chunk_shape: tuple[int, ...] = (nl, chunk_tokens, hs)
-        elif _is_fused_kv_format(engine_kv_format):
-            # Single plane: hs is the packed 2 * head_size.
+        elif _is_fused_kv_format(engine_kv_format) or _is_single_kv_format(
+            engine_kv_format
+        ):
+            # Single plane: hs is the complete per-head content width.
             chunk_shape = (nl, chunk_tokens, nh * hs)
         else:
             chunk_shape = (2, nl, chunk_tokens, nh * hs)
@@ -440,9 +443,10 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
-    elif _is_fused_kv_format(engine_kv_format):
-        # Before the HND branch: the fused formats are HND/NHD too, but their
-        # packed K/V axis needs the single-plane path.
+    elif _is_fused_kv_format(engine_kv_format) or _is_single_kv_format(
+        engine_kv_format
+    ):
+        # Before the HND branch: these formats use the single-plane path.
         _transfer_per_layer_fused(
             normalized,
             object_tensors,
@@ -1026,11 +1030,11 @@ def _transfer_per_layer_fused(
     is_d2h: bool,
     skip_prefix_n_blocks: int,
 ) -> None:
-    """Handle fused-K/V per-layer formats (kv_size == 1).
+    """Handle single-plane per-layer formats (kv_size == 1).
 
-    The K/V pair stays packed inside each ``2 * head_size`` head, so every
-    layer transfers as a single plane and the object layout is
-    ``[NL, tokens, NH * 2 * HS]`` — byte-identical to the device kernel's.
+    Every entry transfers as one plane with object layout
+    ``[NL, tokens, NH * HS]``. For fused K/V, ``HS`` is the packed content
+    width; for an independent component it is the regular head size.
     """
     if not layer_tensors or not object_tensors:
         return
