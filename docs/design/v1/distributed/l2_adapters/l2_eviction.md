@@ -215,7 +215,7 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 | `NixlStoreL2Adapter`       | ✓ (skips pinned) | ✓ (pool-based) | stored, deleted |
 | `RawBlockL2Adapter`        | ✓ (skips locked) | ✓ | stored, accessed, deleted |
 | `FSL2Adapter`              | ✓ (best-effort) | total only (no max cap) | stored, accessed, deleted |
-| `NativeConnectorL2Adapter` | ✓ (via `submit_batch_delete`) | ✓ (client-side, requires `max_capacity_gb`) | stored, deleted |
+| `NativeConnectorL2Adapter` | ✓ (per-key ordering) | ✓ (client-side, requires `max_capacity_gb`) | stored, accessed, deleted |
 
 **Note on `NativeConnectorL2Adapter`:** Eviction support requires two things:
 
@@ -225,6 +225,16 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 2. The adapter must be configured with `max_capacity_gb > 0` to enable client-side
    size tracking for `get_usage()`. Without it, `get_usage()` returns `(-1, -1)` and
    the eviction controller will not trigger.
+
+Deletes are coordinated with overlapping lookups and stores. Earlier lookups and
+stores protect their keys from deletion, while later lookups report misses until
+the delete completes. A store batch that overlaps a pending delete is deferred as
+a whole. Once all overlapping deletes complete, the batch is submitted before a
+later delete can overtake it.
+
+If a native delete exceeds 30 seconds, affected keys stay quarantined until
+completion: later deletes skip them, lookups report misses, and stores fail
+without retaining their buffers. Operations on other keys continue.
 
 **Note on `FSL2Adapter`:** `delete()` and the listener events are implemented, so
 the base class tracks `total_bytes_used` from the store / delete notifications.
