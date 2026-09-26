@@ -227,7 +227,7 @@ def test_round_trip_on_device() -> None:
     if torch_neuron is None or not torch_neuron.is_available():
         pytest.skip("no Neuron device")
     host = _paged_layers()
-    device = [t.to("neuron") for t in host]
+    device = [t.to("neuron:0") for t in host]
     cleared = [torch.zeros_like(t) for t in device]
     chunks = _chunks()
     _transfer(device, chunks, TransferDirection.D2H)
