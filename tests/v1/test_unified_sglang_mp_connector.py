@@ -13,6 +13,7 @@ import torch
 from lmcache.integration.sglang.lmcache_mp_metadata import (
     LMCacheLoadOperation,
     LMCacheLookupOperation,
+    LMCacheStoreOperation,
     SGLangKVComponentGroup,
 )
 from lmcache.integration.sglang.unified_lmcache_mp_connector import (
@@ -144,6 +145,32 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertIs(
             all_reduce.call_args_list[1].kwargs["group"], self.connector.pp_group
         )
+
+    def test_readiness_polling_failure_still_reaches_collective(self) -> None:
+        connector = object.__new__(UnifiedLMCacheMPConnector)
+        connector._store_submitted_tokens = {"request": 8}
+        future = Mock()
+        future.query.side_effect = RuntimeError("injected query failure")
+        future.result.side_effect = RuntimeError("injected result failure")
+        operation = LMCacheStoreOperation("request", 0, 8, future)
+
+        with (
+            patch.object(connector, "_parallel_all_reduce") as parallel_all_reduce,
+            patch.object(
+                connector, "_sync_success", return_value=False
+            ) as sync_success,
+        ):
+            self.assertEqual(connector.ready_prefix_count([operation]), 1)
+
+            future.query.assert_called_once_with()
+            parallel_all_reduce.assert_called_once()
+            ready_count = parallel_all_reduce.call_args.args[0]
+            self.assertEqual(ready_count.item(), 1)
+
+            self.assertFalse(connector.complete_store(operation))
+            future.result.assert_called_once_with(timeout=0)
+            sync_success.assert_called_once_with(False)
+            self.assertEqual(connector._store_submitted_tokens["request"], 0)
 
     def test_register_kv_cache_uses_context_owned_identity_and_client(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)

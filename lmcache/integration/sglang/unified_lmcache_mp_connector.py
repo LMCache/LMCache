@@ -11,7 +11,7 @@ by SGLang; LMCache accesses them through device-memory and event IPC handles.
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 import hashlib
 import logging
 import threading
@@ -480,11 +480,21 @@ class UnifiedLMCacheMPConnector:
         """Synchronize a tensor across the connector's TP and PP ranks."""
         self._parallel_all_reduce(tensor, op)
 
-    def ready_prefix_count(self, operations) -> int:
+    def ready_prefix_count(
+        self, operations: Sequence[LMCacheLoadOperation | LMCacheStoreOperation]
+    ) -> int:
         """Return the cross-rank count of ready leading operations."""
         count = 0
         for operation in operations:
-            if not operation.query():
+            try:
+                ready = operation.query()
+            except Exception:
+                logger.exception(
+                    "LMCache operation readiness polling failed for %s",
+                    operation.request_id,
+                )
+                ready = True
+            if not ready:
                 break
             count += 1
         tensor = torch.tensor([count], dtype=torch.int64, device="cpu")
@@ -957,6 +967,10 @@ class UnifiedLMCacheMPConnector:
         try:
             operation.future.result(timeout=self._mq_timeout)
         except Exception:
+            # TODO: Distinguish a terminal retrieve failure from a drain timeout.
+            # A timed-out remote operation may still write to the destination
+            # slots, so the connector/SGLang interface must retain the operation
+            # and its allocations until completion or confirmed cancellation.
             logger.exception(
                 "Failed to drain LMCache retrieve for %s", operation.request_id
             )
