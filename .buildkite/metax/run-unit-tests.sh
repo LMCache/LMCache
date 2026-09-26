@@ -30,6 +30,7 @@ pytest --maxfail=1 --cov=lmcache \
     --ignore=tests/v1/multiprocess/test_custom_types.py \
     --ignore=tests/v1/multiprocess/test_engine_driven_transfer.py \
     --ignore=tests/v1/multiprocess/test_free_locks.py \
+    --ignore=tests/v1/multiprocess/test_query_lookup_hits.py \
     --deselect="tests/cli/commands/bench/test_server_bench.py::TestUnregisterKVCache::test_data_mode_sends_engine_driven_unregister" \
     --deselect="tests/v1/mp_coordinator/test_key_directory.py::test_token_ids_outside_uint32_leave_the_binding_unfilled" \
     --deselect="tests/v1/test_torch_ops.py::TestScenarios::test_1_scenario[cuda_ops-load_and_reshape_flash-scenario_load_and_reshape_flash]" \

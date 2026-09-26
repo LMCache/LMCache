@@ -90,7 +90,7 @@ controller's decision.
   folded with `fold_unfold_grouped`.
 - `tests/v1/distributed/test_bitmap_ops.py`: grouped kernels against the flat
   kernels on random presence.
-- `tests/v1/multiprocess/test_lookup_key_groups.py`, `test_p2p_controller.py`,
+- `tests/v1/multiprocess/test_query_lookup_hits.py`, `test_p2p_controller.py`,
   `test_warm_prefetch.py`, blend tests: the rows each caller submits.
 - `tests/v1/mp_observability/trace/test_codecs.py`: trace round-trips of the
   request types and of `PrefetchHandle.sliding_windows`.
