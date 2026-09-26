@@ -253,24 +253,13 @@ def _normalize_lmcache_objects(
     lmcache_chunk_size: "int | None" = None,
     engine_kv_format: "EngineKVFormat | None" = None,
     dtype: "torch.dtype | None" = None,
-    device: "torch.device | str | None" = None,
 ) -> list[torch.Tensor]:
     """Normalize LMCache object inputs to chunk tensors.
 
-    Accepts either a list of chunk tensors or a ``list[int]`` of raw pointers.
+    Accepts either a list of chunk tensors or a ``list[int]`` of raw CPU pointers.
     When a pointer list is provided *shape_desc*, *lmcache_chunk_size*,
     *engine_kv_format*, and *dtype* must be supplied so the tensors can be
-    reconstructed via :func:`_tensor_from_ptr`.
-
-    Args:
-        lmcache_objects_ptrs: Chunk tensors or raw pointers to reconstruct.
-        shape_desc: Page-buffer geometry (used for the chunk shape).
-        lmcache_chunk_size: Tokens per LMCache object.
-        engine_kv_format: Format of the transferred KV cache.
-        dtype: Element dtype of the chunk buffers.
-        device: Device the pointers live on. ``None`` keeps the historical
-            CPU behavior; the MP block transfer passes its transfer device
-            so device-resident staging buffers alias correctly.
+    reconstructed via :func:`_tensor_from_ptr` on the CPU.
     """
     if not isinstance(lmcache_objects_ptrs, list):
         raise TypeError(
@@ -282,7 +271,7 @@ def _normalize_lmcache_objects(
     if isinstance(lmcache_objects_ptrs[0], torch.Tensor):
         return lmcache_objects_ptrs  # type: ignore[return-value]
     if isinstance(lmcache_objects_ptrs[0], int):
-        # Pointer mode: reconstruct chunk tensors on the transfer device.
+        # Pointer mode: reconstruct chunk tensors (always on CPU).
         if (
             shape_desc is None
             or lmcache_chunk_size is None
@@ -306,7 +295,7 @@ def _normalize_lmcache_objects(
         else:
             chunk_shape = (2, nl, chunk_tokens, nh * hs)
         return [
-            _tensor_from_ptr(ptr, chunk_shape, dtype, device)
+            _tensor_from_ptr(ptr, chunk_shape, dtype, "cpu")
             for ptr in lmcache_objects_ptrs
         ]
     raise TypeError(
@@ -380,7 +369,6 @@ def multi_layer_block_kv_transfer(
         lmcache_chunk_size=lmcache_chunk_size,
         engine_kv_format=engine_kv_format,
         dtype=kv_dtype,
-        device=device,
     )
     n_block_ids = (
         int(block_ids.numel())

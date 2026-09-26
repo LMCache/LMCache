@@ -3264,9 +3264,7 @@ def test_tensor_from_ptr_routes_npu_pointer(
     monkeypatch.setattr(_py_ops.torch, "device", FakeDevice)
     # The package re-export shadows the submodule with the function name, so
     # resolve the defining module explicitly.
-    ptr_mod = importlib.import_module(
-        "lmcache.v1.platform.torch_ops._tensor_from_ptr"
-    )
+    ptr_mod = importlib.import_module("lmcache.v1.platform.torch_ops._tensor_from_ptr")
     monkeypatch.setattr(ptr_mod, "_tensor_from_npu_ptr", fake_npu_ptr)
 
     tensor = _py_ops._tensor_from_ptr(0x1000, (2, 3), torch.float16, "npu:0")

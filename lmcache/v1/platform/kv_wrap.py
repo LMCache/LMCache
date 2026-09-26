@@ -58,8 +58,7 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     # verify the exact layer set & tensor geometry being shipped to the
     # LMCache server, then the low-noise count of handles being wrapped.
     kept_summary = [
-        (name, *_layer_shape_and_dtype(value))
-        for name, value in kv_caches.items()
+        (name, *_layer_shape_and_dtype(value)) for name, value in kv_caches.items()
     ]
     logger.debug(
         "KV cache transfer keeping %d layer(s) (name, shape, dtype):\n%s",

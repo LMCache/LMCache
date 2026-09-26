@@ -123,4 +123,3 @@ def test_ensure_native_keeps_plugin_page_buffer_shape_desc(
     ops = NpuDeviceOps()
     ops.ensure_native()
     assert ops.PageBufferShapeDesc is _CppDesc
-
