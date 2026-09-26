@@ -52,15 +52,15 @@ if [[ -n "${good_first_issue_pipeline}" ]] && \
     exit 0
 fi
 
-merge_pr_base_branch
+merge_pr_base_branch origin
 
 if should_skip_ci "${PIPELINE_FILE}"; then
-    echo "+++ :fast_forward: Skipping CI — no relevant files changed for ${PIPELINE_FILE}"
+    echo "+++ :fast_forward: Skipping CI — mode/path selection excluded ${PIPELINE_FILE}"
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent annotate \
             --style success \
             --context "path-filter-skip" \
-            "Skipped: no relevant files changed for ${PIPELINE_FILE}. Add a \`force-ci\` label to the PR to force a full run." \
+            "Skipped by mode/path selection: ${PIPELINE_FILE}. See the build log for the reason. Add a \`force-ci\` label to the PR to force a full run." \
             || true
     fi
     exit 0

@@ -35,6 +35,9 @@
 
 set -uo pipefail
 
+# shellcheck source=.buildkite/k3_tests/common_scripts/ci-mode.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ci-mode.sh"
+
 # ── Pattern lists ─────────────────────────────────────────────
 # Use explicit directory prefixes for nested paths so shell `case` matching
 # stays predictable across the different test surfaces.
@@ -320,7 +323,7 @@ _path_filter_get_changed_files() {
 # Prints a classification of every changed file to stderr for the build log.
 should_skip_ci() {
     local pipeline_file="${1:-}"
-    local pipeline_kind
+    local pipeline_kind suite_mode=shared
 
     # PR label opt-out: adding "force-ci" on GitHub forces a full run.
     if [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",force-ci,"* ]]; then
@@ -334,6 +337,20 @@ should_skip_ci() {
         return 1
     fi
 
+    pipeline_kind="$(_path_filter_pipeline_kind "$pipeline_file")"
+    case "$pipeline_kind" in
+        integration|correctness|comprehensive) suite_mode=inprocess ;;
+        multiprocess|blend|sglang) suite_mode=mp ;;
+        xpu)
+            if [[ "$pipeline_file" == */xpu/multiprocess/pipeline.yml ]]; then
+                suite_mode=mp
+            fi
+            ;;
+    esac
+    if should_skip_ci_mode "$suite_mode"; then
+        return 0
+    fi
+
     local changed_files
     if ! changed_files=$(_path_filter_get_changed_files); then
         echo "path-filter: could not determine changed files → not skipping" >&2
@@ -345,7 +362,6 @@ should_skip_ci() {
         return 1
     fi
 
-    pipeline_kind="$(_path_filter_pipeline_kind "$pipeline_file")"
     _path_filter_load_device_filter "$pipeline_kind"
 
     local has_non_trivial=0
