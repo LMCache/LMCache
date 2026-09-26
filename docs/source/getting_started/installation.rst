@@ -47,6 +47,7 @@ runtime, see :doc:`compatibility` before installing.
 
                         The CUDA 12.9 wheel is published to a dedicated
                         `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
+                        Each release includes wheels for Linux x86_64 and ARM64.
 
                         .. code-block:: bash
 

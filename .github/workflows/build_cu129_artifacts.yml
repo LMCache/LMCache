@@ -2,9 +2,9 @@ name: Build cu129 Artifacts
 
 # Reusable workflow that builds the cu129 CUDA 12.9 wheel via cibuildwheel
 # against the pytorch manylinux cu12.9 base image.
-# Uploaded as the `release-cu129-artifacts` GHA artifact.
+# Uploaded as architecture-specific `release-cu129-artifacts-*` GHA artifacts.
 # The cu12.9 wheel carries no local version suffix and is published to a
-# dedicated v{tag}-cu12 GitHub Release (not PyPI).
+# dedicated v{tag}-cu129 GitHub Release (not PyPI).
 
 on:
     workflow_call:
@@ -21,8 +21,18 @@ permissions:
 
 jobs:
     build-cu129-artifacts:
-        name: Build cu129 artifacts
-        runs-on: ubuntu-latest
+        name: Build cu129 artifacts (${{ matrix.arch }})
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - arch: amd64
+                      cibw_arch: x86_64
+                      runner: ubuntu-latest
+                    - arch: arm64
+                      cibw_arch: aarch64
+                      runner: ubuntu-24.04-arm
+        runs-on: ${{ matrix.runner }}
         steps:
             - name: "Harden Runner"
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
@@ -81,11 +91,13 @@ jobs:
 
             - name: Build cu12.9 CUDA wheels with cibuildwheel
               env:
+                CIBW_BUILD: cp3*-manylinux_${{ matrix.cibw_arch }}
                 CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda12.9
+                CIBW_MANYLINUX_AARCH64_IMAGE: docker.io/pytorch/manylinuxaarch64-builder:cuda12.9
                 CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0;10.0;12.0" ENABLE_CXX11_ABI=1 LMCACHE_CUDA_MAJOR=12 SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.CU129_VERSION }} PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu129 PIP_CONSTRAINT=/project/cibw-constraints.txt'
                 CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
                   auditwheel repair
-                  --plat manylinux_2_28_x86_64
+                  --plat manylinux_2_28_${{ matrix.cibw_arch }}
                   --exclude libtorch.so
                   --exclude libtorch_cuda.so
                   --exclude libtorch_python.so
@@ -101,5 +113,5 @@ jobs:
             - name: Upload cu12.9 release artifacts to GHA
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
               with:
-                name: release-cu129-artifacts
+                name: release-cu129-artifacts-${{ matrix.arch }}
                 path: dist/
