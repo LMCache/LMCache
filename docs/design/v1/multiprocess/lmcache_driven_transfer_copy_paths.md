@@ -24,7 +24,7 @@ staging copy's line rate, so the kernel dominates the transfer.
 | GPU resources | temp buffer (4 slots), SMs | copy engine only |
 | CPU cost | ~1 launch + 1 copy per chunk | ~0.6 us per (kv, layer, block) entry |
 | Layouts | all `EngineKVFormat`s | token-major, contiguous block: formats 0, 1, 2, 3, 4, 5, 9, 11, 13 |
-| Requirements | any CUDA / HIP | CUDA runtime and driver >= 12.8 |
+| Requirements | any CUDA / HIP | CUDA runtime and driver >= 12.8, or ROCm/HIP >= 7.15 |
 
 Every eligible format is affine in (kv plane, layer, block):
 `address = base(kv, layer) + kv * kv_stride + layer * layer_stride +
