@@ -26,6 +26,21 @@ I/O queue depth on a single Python thread.
   for reads that use ``O_DIRECT`` because direct I/O bypasses the page cache.
 - ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB
   for client-side usage tracking.  Default ``0`` disables tracking.
+- ``recover_on_start`` (bool, default ``true``): At startup, register the
+  ``.data`` files already in ``base_path`` (left by a previous process), in
+  modification-time order.  Files persist across restarts and stay readable
+  either way; only registered files count toward ``max_capacity_gb`` and can
+  be evicted.  With ``false``, files from earlier runs are never evicted and
+  disk usage can exceed the declared capacity.
+
+  Recovery assumes this server is the only one using ``base_path``: the
+  recovered files become eviction candidates, so a server would delete files
+  that another live server is still serving.  Set ``"shared": true`` on any
+  directory used by several servers; recovery is then skipped.  It is also
+  skipped with ``IsolatedLRU`` eviction, because quotas are registered after
+  startup and a ``cache_salt`` without a quota would be evicted entirely.  In
+  both cases files from earlier runs are served but not counted, as without
+  recovery.
 
 .. important::
 

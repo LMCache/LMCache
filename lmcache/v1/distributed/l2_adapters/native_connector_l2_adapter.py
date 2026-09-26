@@ -22,8 +22,9 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from dataclasses import dataclass
 from functools import cache
-from typing import Any
+from typing import Any, Callable
 import ctypes
 import select
 import threading
@@ -69,6 +70,17 @@ def _cached_ubyte_array_type(num_bytes: int) -> "type[ctypes.Array[ctypes.c_ubyt
         The cached ``ctypes.Array`` subclass for the given length.
     """
     return ctypes.c_ubyte * num_bytes
+
+
+@dataclass(frozen=True)
+class PersistedObject:
+    """An object found in a backend's persistent storage at startup."""
+
+    key: ObjectKey
+    size: int
+    """Bytes the object occupies, as recorded by a store of it."""
+    mtime: float
+    """Last-modified time (seconds since the epoch); orders eviction."""
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
@@ -160,6 +172,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         type_name: str = "",
         extra_status: dict[str, Any] | None = None,
         pad_buffers_to_alignment: bool = False,
+        persisted_object_scanner: Callable[[], list[PersistedObject]] | None = None,
     ) -> None:
         """Initialize the adapter over a native connector client.
 
@@ -179,6 +192,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 native connectors whose I/O path requires aligned buffer
                 lengths (e.g. O_DIRECT file storage). See
                 ``_obj_to_memoryview``.
+            persisted_object_scanner: Optional callable listing the objects
+                already in the backend's persistent storage, used by
+                ``recover_persisted_objects``. ``None`` disables recovery.
         """
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
         self._client = native_client
@@ -186,6 +202,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._type_name: str = type_name or type(native_client).__name__
         self._extra_status: dict[str, Any] = dict(extra_status or {})
         self._pad_buffers_to_alignment = pad_buffers_to_alignment
+        self._persisted_object_scanner = persisted_object_scanner
 
         # 3 distinct cross-platform notifiers for the L2 adapter
         # interface
@@ -366,6 +383,38 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # ---------------------------------------------------------------
     # Eviction Interface
     # ---------------------------------------------------------------
+
+    def recover_persisted_objects(self) -> int:
+        """Register the objects reported by ``persisted_object_scanner``.
+
+        Each object is recorded in ``_key_sizes`` (so eviction deletes can
+        decrement usage) and announced through ``_notify_keys_stored`` (so
+        usage counts it and the eviction policy tracks it). Objects are
+        announced newest first: LRU-style policies insert a batch in reverse,
+        which puts the oldest object at the head of the eviction order.
+        Keys already recorded, e.g. by a store that completed meanwhile,
+        are skipped.
+
+        Returns:
+            int: The number of objects registered.
+        """
+        if self._persisted_object_scanner is None:
+            return 0
+        found = sorted(
+            self._persisted_object_scanner(), key=lambda obj: obj.mtime, reverse=True
+        )
+        keys: list[ObjectKey] = []
+        sizes: list[int] = []
+        with self._lock:
+            for obj in found:
+                if obj.key in self._key_sizes:
+                    continue
+                self._key_sizes[obj.key] = obj.size
+                keys.append(obj.key)
+                sizes.append(obj.size)
+        if keys:
+            self._notify_keys_stored(keys, sizes)
+        return len(keys)
 
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete a batch of keys from the remote backend.

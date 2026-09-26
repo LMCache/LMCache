@@ -148,6 +148,14 @@ class StorageManager:
         self._l2_eviction_controller = L2EvictionController(
             l2_eviction_states, quota_manager=self._quota_manager
         )
+        # After the eviction states registered their listeners, so objects
+        # recovered from persistent storage enter the eviction order too.
+        for adapter_id, ac in zip(
+            self._l2_adapters, config.l2_adapter_config.adapters, strict=True
+        ):
+            self._recover_persisted_objects(
+                adapter_id, self._l2_adapters[adapter_id], ac
+            )
         self._l2_eviction_controller.start()
 
         # Controllers receive the initial set as ordered lists; they key
@@ -831,20 +839,25 @@ class StorageManager:
             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
             for listener in self._registered_l2_listeners:
                 adapter.register_listener(listener)
+            eviction_state = None
+            if self._should_enable_l2_eviction(adapter, config.eviction_config):
+                assert config.eviction_config is not None  # make linter happy
+                # Constructing the state registers its policy listener.
+                eviction_state = L2AdapterEvictionState(
+                    adapter_id=adapter_id,
+                    adapter=adapter,
+                    eviction_config=config.eviction_config,
+                )
+            # Recover once every listener is registered but before any
+            # controller can issue stores, loads, or deletes against it.
+            self._recover_persisted_objects(adapter_id, adapter, config)
             with self._adapters_lock:
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
             self._store_controller.add_adapter(adapter_id, adapter, descriptor)
             self._prefetch_controller.add_adapter(adapter_id, adapter, descriptor)
-            if self._should_enable_l2_eviction(adapter, config.eviction_config):
-                assert config.eviction_config is not None  # make linter happy
-                self._l2_eviction_controller.add_adapter_state(
-                    L2AdapterEvictionState(
-                        adapter_id=adapter_id,
-                        adapter=adapter,
-                        eviction_config=config.eviction_config,
-                    )
-                )
+            if eviction_state is not None:
+                self._l2_eviction_controller.add_adapter_state(eviction_state)
             logger.info("Added L2 adapter %d (%s)", adapter_id, descriptor.type_name)
             self._publish_capacity_changed()
             return adapter_id
@@ -998,6 +1011,44 @@ class StorageManager:
         """Return whether any L2 adapter is currently active."""
         with self._adapters_lock:
             return bool(self._l2_adapters)
+
+    @staticmethod
+    def _recover_persisted_objects(
+        adapter_id: int, adapter: L2AdapterInterface, config: L2AdapterConfigBase
+    ) -> None:
+        """Register objects a previous process left in the adapter's storage.
+
+        Decided on the adapter's effective (outermost) config, so wrappers
+        such as serde or fault_inject cannot bypass the skips. Skipped, with a
+        warning, where registering them would let this process delete files
+        it must not:
+
+        - ``shared: true``: other live instances use the same storage, and
+          this process would evict objects they are serving.
+        - ``IsolatedLRU`` eviction: quotas are registered over HTTP after
+          startup, and a cache_salt without a quota is evicted entirely on
+          the first pass, so every recovered salted object would be deleted.
+        """
+        eviction = config.eviction_config
+        if config.shared or (
+            eviction is not None and eviction.eviction_policy == "IsolatedLRU"
+        ):
+            logger.warning(
+                "L2 adapter %d: skipping recovery of persisted objects (%s); "
+                "objects from earlier runs will not count toward its capacity",
+                adapter_id,
+                "shared storage" if config.shared else "IsolatedLRU eviction",
+            )
+            return
+        recovered = adapter.recover_persisted_objects()
+        if recovered:
+            logger.info(
+                "L2 adapter %d: registered %d objects recovered from persistent "
+                "storage (usage %d bytes)",
+                adapter_id,
+                recovered,
+                adapter.get_usage().total_bytes_used,
+            )
 
     def _build_l2_adapter(
         self,
