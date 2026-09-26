@@ -633,6 +633,16 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
                         )
                         or []
                     )
+                    if not local_objs:
+                        # Fragmentation can make the free-byte estimate too large.
+                        # Use available DRAM slots before spilling to DAX.
+                        for _ in range(local_count):
+                            obj = self.local_allocator.allocate(
+                                shapes, dtypes, fmt, str(self)
+                            )
+                            if obj is None:
+                                break
+                            local_objs.append(obj)
 
             remaining = batch_size - len(local_objs)
             if remaining == 0:
