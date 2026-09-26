@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
@@ -1278,6 +1279,35 @@ class LMCacheMPSchedulerAdapter:
         self._health_events[url].clear()
 
 
+class _BoundedIdSet:
+    """A set-like container of hashable IDs with a bounded size.
+
+    Used for membership dedup (``in``) sets that need to remember an ID
+    for a while but have no natural point at which an entry becomes safe
+    to forget - callers only need "was this ID reported recently", not
+    perfect unbounded history. Evicts the least-recently-added entry once
+    ``max_size`` is exceeded, so process-lifetime memory stays bounded
+    instead of growing with the number of requests ever seen.
+    """
+
+    def __init__(self, max_size: int = 100_000) -> None:
+        self._max_size = max_size
+        self._ids: OrderedDict[str, None] = OrderedDict()
+
+    def __contains__(self, item: str) -> bool:
+        return item in self._ids
+
+    def update(self, items: "set[str]") -> None:
+        for item in items:
+            self._ids.pop(item, None)
+            self._ids[item] = None
+        while len(self._ids) > self._max_size:
+            self._ids.popitem(last=False)
+
+    def __len__(self) -> int:
+        return len(self._ids)
+
+
 class LMCacheMPWorkerAdapter:
     def __init__(
         self,
@@ -1417,7 +1447,13 @@ class LMCacheMPWorkerAdapter:
         self.previously_finished: set[str] = set()
         # Request IDs already returned as finished_sending to the scheduler.
         # Prevents re-reporting the same ID after drain clears tracking sets.
-        self._returned_finished: set[str] = set()
+        # Bounded (not a plain set) because there is no clear point at which
+        # an entry becomes safe to forget - it must outlive the drain of
+        # finished_stores/previously_finished, so unlike those it can't be
+        # pruned by intersecting with other tracking state. A generous LRU
+        # cap keeps memory bounded across a long-running worker's lifetime
+        # instead of retaining every request ID ever completed.
+        self._returned_finished = _BoundedIdSet()
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
