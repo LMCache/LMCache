@@ -121,7 +121,6 @@ ignore = [
 # Tracking issue: https://github.com/LMCache/LMCache/issues/5118
 "benchmarks/multi_round_qa/multi-round-qa.py" = ["G004"]
 "benchmarks/multi_round_qa/utils.py" = ["G004"]
-"examples/disagg_prefill/**" = ["G004"]
 "examples/token_dropping/random_token_dropping.ipynb" = ["G004"]
 "examples/token_dropping/rkv_colab.ipynb" = ["G004"]
 "examples/token_dropping/rkv_token_dropping.ipynb" = ["G004"]
