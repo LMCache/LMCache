@@ -272,6 +272,21 @@ class ClientPollingLoop:
         self._process_ops()
 
 
+# Bound (milliseconds) on each TCP connect attempt of the client socket. A
+# healthy handshake takes milliseconds; without a bound, a connect whose SYN
+# is silently dropped (e.g. racing a Kubernetes Service endpoint update while
+# the server pod restarts) inherits the OS connect timeout (~127s on Linux)
+# and wedges the socket, and every pending request on it including heartbeat
+# PINGs, for that long. Kept below the default 10s heartbeat interval. Only
+# tcp:// connects can stall this way; ipc:// and inproc:// fail fast.
+CONNECT_TIMEOUT_MS = 5000
+
+# Ceiling (milliseconds) for zmq's reconnect interval. zmq re-dials every
+# 100ms by default; a non-zero ceiling makes that interval double on each
+# failed attempt up to 1s, so a down server is not re-dialed at a flat 100ms.
+RECONNECT_IVL_MAX_MS = 1000
+
+
 # Main classes
 class MessageQueueClient:
     @dataclass
@@ -285,6 +300,11 @@ class MessageQueueClient:
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.DEALER)
+        # Bound each connect attempt and enable reconnect backoff BEFORE
+        # connect(): zmq applies socket options at connection time, so
+        # setting them afterwards would not affect the first dial.
+        self.socket.setsockopt(zmq.CONNECT_TIMEOUT, CONNECT_TIMEOUT_MS)
+        self.socket.setsockopt(zmq.RECONNECT_IVL_MAX, RECONNECT_IVL_MAX_MS)
         self.socket.connect(server_url)
 
         # Input queue
