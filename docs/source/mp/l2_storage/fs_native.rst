@@ -33,6 +33,15 @@ I/O queue depth on a single Python thread.
   be evicted.  With ``false``, files from earlier runs are never evicted and
   disk usage can exceed the declared capacity.
 
+  Recovery assumes this server is the only one using ``base_path``: the
+  recovered files become eviction candidates, so a server would delete files
+  that another live server is still serving.  Set ``"shared": true`` on any
+  directory used by several servers; recovery is then skipped.  It is also
+  skipped with ``IsolatedLRU`` eviction, because quotas are registered after
+  startup and a ``cache_salt`` without a quota would be evicted entirely.  In
+  both cases files from earlier runs are served but not counted, as without
+  recovery.
+
 .. important::
 
    ``O_DIRECT`` has two independent alignment requirements:

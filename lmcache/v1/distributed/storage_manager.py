@@ -150,8 +150,12 @@ class StorageManager:
         )
         # After the eviction states registered their listeners, so objects
         # recovered from persistent storage enter the eviction order too.
-        for adapter_id, adapter in self._l2_adapters.items():
-            self._recover_persisted_objects(adapter_id, adapter)
+        for adapter_id, ac in zip(
+            self._l2_adapters, config.l2_adapter_config.adapters, strict=True
+        ):
+            self._recover_persisted_objects(
+                adapter_id, self._l2_adapters[adapter_id], ac
+            )
         self._l2_eviction_controller.start()
 
         # Controllers receive the initial set as ordered lists; they key
@@ -846,7 +850,7 @@ class StorageManager:
                 )
             # Recover once every listener is registered but before any
             # controller can issue stores, loads, or deletes against it.
-            self._recover_persisted_objects(adapter_id, adapter)
+            self._recover_persisted_objects(adapter_id, adapter, config)
             with self._adapters_lock:
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
@@ -1010,9 +1014,32 @@ class StorageManager:
 
     @staticmethod
     def _recover_persisted_objects(
-        adapter_id: int, adapter: L2AdapterInterface
+        adapter_id: int, adapter: L2AdapterInterface, config: L2AdapterConfigBase
     ) -> None:
-        """Register objects a previous process left in the adapter's storage."""
+        """Register objects a previous process left in the adapter's storage.
+
+        Decided on the adapter's effective (outermost) config, so wrappers
+        such as serde or fault_inject cannot bypass the skips. Skipped, with a
+        warning, where registering them would let this process delete files
+        it must not:
+
+        - ``shared: true``: other live instances use the same storage, and
+          this process would evict objects they are serving.
+        - ``IsolatedLRU`` eviction: quotas are registered over HTTP after
+          startup, and a cache_salt without a quota is evicted entirely on
+          the first pass, so every recovered salted object would be deleted.
+        """
+        eviction = config.eviction_config
+        if config.shared or (
+            eviction is not None and eviction.eviction_policy == "IsolatedLRU"
+        ):
+            logger.warning(
+                "L2 adapter %d: skipping recovery of persisted objects (%s); "
+                "objects from earlier runs will not count toward its capacity",
+                adapter_id,
+                "shared storage" if config.shared else "IsolatedLRU eviction",
+            )
+            return
         recovered = adapter.recover_persisted_objects()
         if recovered:
             logger.info(

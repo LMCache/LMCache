@@ -24,6 +24,7 @@ from lmcache.v1.distributed.eviction import L2EvictionPolicy
 from lmcache.v1.distributed.eviction_policy.lru import LRUEvictionPolicy
 from lmcache.v1.distributed.l2_adapters import fs_native_l2_adapter
 from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdapterConfigBase,
     add_l2_adapters_args,
     parse_args_to_l2_adapters_config,
 )
@@ -31,7 +32,6 @@ from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import _object_key_to_file
 from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
     FSNativeL2AdapterConfig,
     _scan_persisted_objects,
-    _should_recover,
 )
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
@@ -45,6 +45,7 @@ from tests.v1.distributed.test_native_connector_l2_adapter import (
 )
 
 MODEL = "org/model"
+MIB = 1024 * 1024
 
 
 def make_key(chunk_id: int, cache_salt: str = "") -> ObjectKey:
@@ -56,16 +57,14 @@ def make_key(chunk_id: int, cache_salt: str = "") -> ObjectKey:
     )
 
 
-def parse_spec(spec: dict) -> FSNativeL2AdapterConfig:
+def parse_spec(spec: dict) -> L2AdapterConfigBase:
     """Parse an adapter spec through the server's own --l2-adapter path, which
     also attaches ``shared`` and the ``eviction`` block."""
     parser = argparse.ArgumentParser()
     add_l2_adapters_args(parser)
-    config = parse_args_to_l2_adapters_config(
+    return parse_args_to_l2_adapters_config(
         parser.parse_args(["--l2-adapter", json.dumps(spec)])
     ).adapters[0]
-    assert isinstance(config, FSNativeL2AdapterConfig)
-    return config
 
 
 def write_chunk_file(base: Path, key: ObjectKey, size: int, mtime: float) -> Path:
@@ -140,38 +139,6 @@ class TestScanPersistedObjects:
         ):
             assert _scan_persisted_objects(str(tmp_path)) == []
         error.assert_called_once()
-
-
-# =============================================================================
-# When recovery applies
-# =============================================================================
-
-
-class TestShouldRecover:
-    BASE = {
-        "type": "fs_native",
-        "base_path": "/d",
-        "max_capacity_gb": 1,
-        "eviction": {"eviction_policy": "LRU"},
-    }
-
-    def test_exclusive_directory_with_lru_recovers(self):
-        assert _should_recover(parse_spec(self.BASE)) is True
-
-    def test_disabled_by_config(self):
-        assert (
-            _should_recover(parse_spec({**self.BASE, "recover_on_start": False}))
-            is False
-        )
-
-    def test_shared_directory_is_not_recovered(self):
-        """Another live instance may be serving files in a shared directory."""
-        assert _should_recover(parse_spec({**self.BASE, "shared": True})) is False
-
-    def test_isolated_lru_is_not_recovered(self):
-        """IsolatedLRU would wipe recovered salts before their quotas exist."""
-        spec = {**self.BASE, "eviction": {"eviction_policy": "IsolatedLRU"}}
-        assert _should_recover(parse_spec(spec)) is False
 
 
 # =============================================================================
@@ -366,10 +333,7 @@ def _usage(storage_manager) -> int:
 def leftover_files(tmp_path):
     """Four 1 MiB chunk files left by a previous process, oldest = chunk 0."""
     pytest.importorskip("lmcache.lmcache_fs")
-    return [
-        write_chunk_file(tmp_path, make_key(i), 1024 * 1024, 1000.0 + i)
-        for i in range(4)
-    ]
+    return [write_chunk_file(tmp_path, make_key(i), MIB, 1000.0 + i) for i in range(4)]
 
 
 class TestStorageManagerRestartRecovery:
@@ -402,10 +366,47 @@ class TestStorageManagerRestartRecovery:
             assert _wait_until(lambda: not leftover_files[0].exists())
             assert leftover_files[3].exists()
             # Unlinks precede the batch's accounting update; wait for both to settle.
+            # exists() only (no stat): files keep vanishing while this polls.
             assert _wait_until(
-                lambda: _usage(sm)
-                == sum(p.stat().st_size for p in leftover_files if p.exists())
-            )
+                lambda: _usage(sm) == MIB * sum(p.exists() for p in leftover_files)
+            ), "L2 accounting did not settle to the files left on disk"
+        finally:
+            sm.close()
+
+    @pytest.mark.parametrize(
+        "wrapped",
+        [False, True],
+        ids=["direct", "fault_inject_wrapped"],
+    )
+    @pytest.mark.parametrize(
+        "settings",
+        [
+            {"shared": True, "eviction": {"eviction_policy": "LRU"}},
+            {"eviction": {"eviction_policy": "IsolatedLRU"}},
+        ],
+        ids=["shared", "isolated_lru"],
+    )
+    def test_shared_or_isolated_lru_skips_recovery(
+        self, tmp_path, leftover_files, settings, wrapped
+    ):
+        """With shared: true or IsolatedLRU on the adapter's effective (outer)
+        spec, leftover files are neither accounted nor evicted, also when a
+        wrapper holds those settings instead of the inner fs_native spec."""
+        fs = {
+            "type": "fs_native",
+            "base_path": str(tmp_path),
+            "max_capacity_gb": 4.2 / 1024,
+        }
+        spec = (
+            {"type": "fault_inject", "inner": fs, **settings}
+            if wrapped
+            else {**fs, **settings}
+        )
+        sm = _storage_manager([spec])
+        try:
+            time.sleep(2)  # two eviction-loop passes
+            assert _usage(sm) == 0
+            assert all(p.exists() for p in leftover_files)
         finally:
             sm.close()
 

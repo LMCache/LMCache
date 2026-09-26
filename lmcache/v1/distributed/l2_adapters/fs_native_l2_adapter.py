@@ -60,8 +60,8 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
       ``base_path`` (default true). They stay readable either way (lookup
       checks the file), but only registered files count toward
       ``max_capacity_gb`` and can be evicted; unregistered ones persist
-      until removed by hand. Not applied with ``shared: true`` or
-      ``IsolatedLRU`` eviction (see ``_should_recover``).
+      until removed by hand. The storage manager skips recovery for
+      ``shared: true`` and ``IsolatedLRU`` eviction.
     """
 
     def __init__(
@@ -276,42 +276,10 @@ def _create_fs_native_l2_adapter(
         },
         persisted_object_scanner=(
             (lambda: _scan_persisted_objects(config.base_path))
-            if _should_recover(config)
+            if config.recover_on_start
             else None
         ),
     )
-
-
-def _should_recover(config: FSNativeL2AdapterConfig) -> bool:
-    """Whether to register files from earlier runs at startup.
-
-    Skipped, with a warning, where registering them would let this process
-    delete files it must not:
-
-    - ``shared: true``: other live instances use the same directory, and
-      this process would evict files they are serving.
-    - ``IsolatedLRU`` eviction: quotas are registered over HTTP after
-      startup, and a cache_salt without a quota is evicted entirely on the
-      first pass, so every recovered salted file would be deleted.
-    """
-    if not config.recover_on_start:
-        return False
-    if config.shared:
-        logger.warning(
-            "fs_native: recover_on_start skipped for shared base_path %s: "
-            "another instance may be serving those files",
-            config.base_path,
-        )
-        return False
-    eviction = config.eviction_config
-    if eviction is not None and eviction.eviction_policy == "IsolatedLRU":
-        logger.warning(
-            "fs_native: recover_on_start skipped for %s: IsolatedLRU would "
-            "evict recovered files before their quotas are registered",
-            config.base_path,
-        )
-        return False
-    return True
 
 
 register_l2_adapter_type("fs_native", FSNativeL2AdapterConfig)
