@@ -13,11 +13,13 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
+from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 
@@ -654,3 +656,162 @@ class TestSubmitPutTask:
         memory_obj.get_physical_size.assert_not_called()
         memory_obj.ref_count_up.assert_not_called()
         callback.assert_not_called()
+
+
+_STALE_SHAPE = torch.Size([2, 2, 256, 8, 128])
+_STALE_DTYPE = torch.bfloat16
+_STALE_NBYTES = 2 * 2 * 256 * 8 * 128 * 2
+
+
+@pytest.fixture
+def live_disk_backend_factory(temp_disk_path, local_cpu_backend):
+    """Yield ``(make_backend, loop)`` with the loop running in a thread.
+
+    ``make_backend(max_chunks)`` builds a LocalDiskBackend whose capacity is
+    ``max_chunks`` test chunks. Backends are closed on teardown.
+    """
+    PinMonitor.GetOrCreate(LMCacheEngineConfig.from_defaults())
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    backends: list[LocalDiskBackend] = []
+
+    def make_backend(max_chunks: float = 16) -> LocalDiskBackend:
+        config = create_test_config(
+            temp_disk_path, max_disk_size=max_chunks * _STALE_NBYTES / 1024**3
+        )
+        backend = LocalDiskBackend(
+            config=config,
+            loop=loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+        )
+        backends.append(backend)
+        return backend
+
+    yield make_backend, loop
+
+    for backend in backends:
+        backend.close()
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join()
+    loop.close()
+    local_cpu_backend.memory_allocator.close()
+    PinMonitor.DestroyInstance()
+
+
+class TestStaleIndexEntries:
+    """A key the index lists but whose file is missing or truncated is stale.
+
+    Stale entries must be served as misses (never as garbage data), dropped
+    from the index with their space released, and counted in
+    ``local_disk_stale_index_count``.
+    """
+
+    def _put(self, backend: LocalDiskBackend, key: CacheEngineKey) -> bytes:
+        """Store random data for *key* through the public put path."""
+        mem_obj = backend.local_cpu_backend.allocate(
+            _STALE_SHAPE, _STALE_DTYPE, MemoryFormat.KV_2LTD
+        )
+        assert mem_obj is not None
+        data = os.urandom(_STALE_NBYTES)
+        mem_obj.byte_array.cast("B")[:] = data
+        done = threading.Event()
+        backend.submit_put_task(key, mem_obj, on_complete_callback=lambda _: done.set())
+        assert done.wait(timeout=10)
+        mem_obj.ref_count_down()
+        return data
+
+    @staticmethod
+    def _stale_count() -> int:
+        stats = LMCStatsMonitor.GetOrCreate().get_stats_and_clear()
+        return stats.interval_local_disk_stale_index_count
+
+    def test_missing_file_is_miss_and_counted(self, live_disk_backend_factory) -> None:
+        make_backend, _ = live_disk_backend_factory
+        backend = make_backend()
+        key = create_test_key(300)
+        self._put(backend, key)
+        self._stale_count()
+
+        os.remove(backend._key_to_path(key))
+
+        assert backend.get_blocking(key) is None
+        assert not backend.contains(key)
+        assert self._stale_count() == 1
+
+    def test_truncated_file_is_miss_and_removed(
+        self, live_disk_backend_factory
+    ) -> None:
+        make_backend, _ = live_disk_backend_factory
+        backend = make_backend()
+        key = create_test_key(301)
+        self._put(backend, key)
+        self._stale_count()
+
+        path = backend._key_to_path(key)
+        os.truncate(path, _STALE_NBYTES // 2)
+
+        assert backend.get_blocking(key) is None
+        assert not backend.contains(key)
+        assert not os.path.exists(path)
+        assert self._stale_count() == 1
+
+    def test_batched_get_blocking_isolates_stale_key(
+        self, live_disk_backend_factory
+    ) -> None:
+        make_backend, _ = live_disk_backend_factory
+        backend = make_backend()
+        good_key, stale_key = create_test_key(310), create_test_key(311)
+        good_data = self._put(backend, good_key)
+        self._put(backend, stale_key)
+        self._stale_count()
+
+        os.remove(backend._key_to_path(stale_key))
+
+        results = backend.batched_get_blocking([good_key, stale_key])
+        assert results[0] is not None
+        assert bytes(results[0].byte_array) == good_data
+        assert results[1] is None
+        assert self._stale_count() == 1
+        results[0].ref_count_down()
+
+    def test_prefetch_returns_prefix_before_stale_key(
+        self, live_disk_backend_factory
+    ) -> None:
+        make_backend, loop = live_disk_backend_factory
+        backend = make_backend()
+        keys = [create_test_key(i) for i in range(320, 323)]
+        first_data = self._put(backend, keys[0])
+        for key in keys[1:]:
+            self._put(backend, key)
+        self._stale_count()
+
+        os.remove(backend._key_to_path(keys[1]))
+
+        results = asyncio.run_coroutine_threadsafe(
+            backend.batched_get_non_blocking("lookup", keys), loop
+        ).result(timeout=10)
+
+        assert len(results) == 1
+        assert bytes(results[0].byte_array) == first_data
+        assert not backend.contains(keys[1])
+        assert backend.contains(keys[2])
+        assert self._stale_count() == 1
+        results[0].unpin()
+        results[0].ref_count_down()
+
+    def test_stale_entry_releases_capacity(self, live_disk_backend_factory) -> None:
+        """Space held by a stale entry is reusable without evicting live keys."""
+        make_backend, _ = live_disk_backend_factory
+        backend = make_backend(max_chunks=2.5)
+        stale_key, live_key, new_key = (create_test_key(i) for i in range(330, 333))
+        self._put(backend, stale_key)
+        self._put(backend, live_key)
+
+        os.remove(backend._key_to_path(stale_key))
+        assert backend.get_blocking(stale_key) is None
+
+        self._put(backend, new_key)
+        assert backend.contains(live_key)
+        assert backend.contains(new_key)

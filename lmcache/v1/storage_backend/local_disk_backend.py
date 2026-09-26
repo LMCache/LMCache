@@ -575,7 +575,9 @@ class LocalDiskBackend(StorageBackendInterface):
 
         try:
             buffer = memory_obj.byte_array
-            self.read_file(key, buffer, path)
+            if not self.read_file(key, buffer, path):
+                memory_obj.ref_count_down()
+                return None
 
             # Recover metadata (mirrors load_bytes_from_disk).
             with self.disk_lock:
@@ -732,13 +734,26 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> list[MemoryObj]:
         """
         Async load bytearray from disk.
+
+        Stops at the first key whose backing file is stale (missing or
+        truncated) and returns only the loaded prefix; staging buffers and
+        disk pins for the remaining keys are released.
         """
 
         logger.debug("Executing `async_load_bytes` from disk.")
-        # TODO (Jiayi): handle the case where loading fails.
-        for path, key, mem_obj in zip(paths, keys, memory_objs, strict=False):
+        for i, (path, key, mem_obj) in enumerate(
+            zip(paths, keys, memory_objs, strict=False)
+        ):
             buffer = mem_obj.byte_array
-            self.read_file(key, buffer, path)
+            if not self.read_file(key, buffer, path):
+                for tail_obj in memory_objs[i:]:
+                    tail_obj.unpin()
+                    tail_obj.ref_count_down()
+                with self.disk_lock:
+                    for tail_key in keys[i + 1 : len(memory_objs)]:
+                        if tail_key in self.dict:
+                            self.dict[tail_key].unpin()
+                return memory_objs[:i]
 
             # TODO(Jiayi): Please recover the metadata in a more
             # elegant way in the future.
@@ -760,13 +775,18 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> Optional[MemoryObj]:
         """
         Load bytearray from disk.
+
+        :returns: The loaded ``MemoryObj``, or ``None`` if the backing file
+            is stale (missing or truncated).
         """
 
         memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
         assert memory_obj is not None, "Memory allocation failed during disk load."
 
         buffer = memory_obj.byte_array
-        self.read_file(key, buffer, path)
+        if not self.read_file(key, buffer, path):
+            memory_obj.ref_count_down()
+            return None
 
         # TODO(Jiayi): Please recover the metadata in a more
         # elegant way in the future.
@@ -796,7 +816,20 @@ class LocalDiskBackend(StorageBackendInterface):
             logger.debug("Disk write size: %s bytes", size)
 
     @_lmcache_nvtx_annotate
-    def read_file(self, key, buffer, path):
+    def read_file(self, key: CacheEngineKey, buffer: Any, path: str) -> bool:
+        """Read the file backing *key* into *buffer*.
+
+        A missing file or a read shorter than ``len(buffer)`` means the index
+        entry for *key* is stale. The entry is dropped from the index, its
+        space is released, and ``local_disk_stale_index_count`` is
+        incremented.
+
+        :param key: Cache key whose file is read.
+        :param buffer: Writable buffer sized to the recorded chunk size.
+        :param path: Path of the backing file.
+        :returns: ``True`` if *buffer* was completely filled, ``False`` if
+            the entry was stale and *buffer* must not be used.
+        """
         start_time = time.time()
         size = len(buffer)
         fblock_aligned = size % self.os_disk_bs == 0
@@ -809,16 +842,25 @@ class LocalDiskBackend(StorageBackendInterface):
         try:
             if not fblock_aligned or not self.use_odirect:
                 with open(path, "rb") as f:
-                    f.readinto(buffer)
+                    num_read = f.readinto(buffer)
             else:
                 fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
                 with os.fdopen(fd, "rb", buffering=0) as fdo:
-                    fdo.readinto(buffer)
+                    num_read = fdo.readinto(buffer)
         except FileNotFoundError:
-            logger.warning("File not found on disk: %s", path)
-            if self.dict.get(key, None):
-                self.dict.pop(key)
-            return
+            logger.warning("Stale disk index entry, file not found: %s", path)
+            self._drop_stale_entry(key)
+            return False
+
+        if num_read != size:
+            logger.warning(
+                "Stale disk index entry, short read (%s of %s bytes): %s",
+                num_read,
+                size,
+                path,
+            )
+            self._drop_stale_entry(key)
+            return False
 
         disk_read_time = time.time() - start_time
         if disk_read_time > 0:
@@ -829,6 +871,7 @@ class LocalDiskBackend(StorageBackendInterface):
             )
         else:
             logger.debug("Disk read size: %s bytes", size)
+        return True
 
     def get_allocator_backend(self) -> LocalCPUBackend:
         return self.local_cpu_backend
@@ -838,3 +881,31 @@ class LocalDiskBackend(StorageBackendInterface):
             self.batched_msg_sender.close()
         self._read_thread_pool.shutdown(wait=True)
         self.disk_worker.close()
+
+    def _drop_stale_entry(self, key: CacheEngineKey) -> None:
+        """Remove *key* from the index after its file was found stale.
+
+        Releases the entry's space, deletes any truncated file, notifies the
+        controller, and counts the entry once even if several readers race.
+        """
+        with self.disk_lock:
+            meta = self.dict.pop(key, None)
+            if meta is None:
+                return
+            self.current_cache_size -= meta.size
+            self.usage -= meta.size
+            self.stats_monitor.update_local_storage_usage(self.usage)
+            self.cache_policy.update_on_force_evict(key)
+
+        try:
+            os.remove(meta.path)
+        except FileNotFoundError:
+            pass
+
+        self.stats_monitor.update_local_disk_stale_index_count(1)
+
+        if self.batched_msg_sender is not None:
+            self.batched_msg_sender.add_kv_op(
+                op_type=OpType.EVICT,
+                key=key.chunk_hash,
+            )
