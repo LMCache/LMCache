@@ -19,6 +19,69 @@ from lmcache.v1.distributed.serde.factory import register_serde_factory
 from lmcache.v1.memory_management import MemoryObj
 
 
+def _group_range(
+    memory_obj: MemoryObj, index: int
+) -> tuple[int, int, torch.dtype, torch.Size]:
+    """Byte span, dtype, and shape of one group."""
+    shapes = memory_obj.get_shapes()
+    dtypes = memory_obj.get_dtypes()
+    begin = 0
+    for shape, dtype in zip(shapes[:index], dtypes[:index], strict=True):
+        begin += shape.numel() * dtype.itemsize
+    shape = shapes[index]
+    dtype = dtypes[index]
+    return begin, begin + shape.numel() * dtype.itemsize, dtype, shape
+
+
+def _read_group(memory_obj: MemoryObj, index: int) -> torch.Tensor:
+    """Read one group. Copy bytes when the offset cannot be viewed in place."""
+    begin, end, dtype, shape = _group_range(memory_obj, index)
+    if begin % dtype.itemsize == 0:
+        group = memory_obj.get_tensor(index)
+        if group is None:
+            raise ValueError("Fp8 serde requires every logical group to have a tensor")
+        return group
+    return memory_obj.raw_data[begin:end].clone().view(dtype).view(shape)
+
+
+def _write_group(memory_obj: MemoryObj, index: int, values: torch.Tensor) -> None:
+    """Write one group back into the allocation, not into a read copy."""
+    begin, end, dtype, _shape = _group_range(memory_obj, index)
+    if begin % dtype.itemsize == 0:
+        group = memory_obj.get_tensor(index)
+        if group is None:
+            raise ValueError("Fp8 serde requires every logical group to have a tensor")
+        group.copy_(values)
+        return
+    as_bytes = values.contiguous().view(torch.uint8).reshape(-1)
+    memory_obj.raw_data[begin:end].copy_(as_bytes)
+
+
+def _kv_groups(memory_obj: MemoryObj) -> list[torch.Tensor]:
+    """Groups in metadata order. A single tensor stays on ``.tensor``."""
+    get_shapes = getattr(memory_obj, "get_shapes", None)
+    shapes: list[torch.Size] | None = None
+    if callable(get_shapes):
+        try:
+            shapes = list(get_shapes())
+        except (AssertionError, NotImplementedError):
+            shapes = None
+    if shapes is None or len(shapes) <= 1:
+        tensor = memory_obj.tensor
+        if tensor is None:
+            raise ValueError("Fp8 serde requires src and dst to have tensors")
+        return [tensor]
+    return [_read_group(memory_obj, index) for index in range(len(shapes))]
+
+
+def _flat_bytes(memory_obj: MemoryObj) -> torch.Tensor:
+    """Byte view of ``tensor``, including a ``set_used_size`` narrow."""
+    tensor = memory_obj.tensor
+    if tensor is None:
+        raise ValueError("Fp8 serde requires src and dst to have tensors")
+    return tensor.flatten()
+
+
 class Fp8QuantizationSerializer(Serializer):
     """Quantize KV cache tensors to fp8 for L2 storage.
 
@@ -32,19 +95,46 @@ class Fp8QuantizationSerializer(Serializer):
         self._fp8_dtype = fp8_dtype
 
     def serialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> int:
-        """Cast src tensor to fp8 and copy bytes into dst buffer (key unused)."""
-        src_tensor = src.tensor
-        dst_tensor = dst.tensor
-        if src_tensor is None or dst_tensor is None:
-            raise ValueError("Fp8 serde requires src and dst to have tensors")
+        """Quantize each source group to fp8 and pack the bytes into ``dst``.
 
-        # Cast to fp8 (1 byte per element)
-        fp8_tensor = src_tensor.to(self._fp8_dtype).contiguous()
-        n_bytes = fp8_tensor.numel()
+        Args:
+            src: KV object to quantize.
+            dst: Writable byte buffer, at least one byte per source element.
+            key: Unused. Present for the serializer interface.
 
-        # Reinterpret fp8 bytes as uint8 and copy into dst byte buffer
-        fp8_as_bytes = fp8_tensor.view(torch.uint8).flatten()
-        dst_tensor.flatten()[:n_bytes].copy_(fp8_as_bytes)
+        Returns:
+            Bytes written. One byte per source element.
+
+        Raises:
+            ValueError: If a tensor is missing, the fp8 dtype is not one
+                byte per element, or ``dst`` is too small.
+        """
+        del key
+        groups = _kv_groups(src)
+        dst_flat = _flat_bytes(dst)
+        # Convert first so a short dst or a wide dtype leaves dst unchanged.
+        packed_groups: list[torch.Tensor] = []
+        n_bytes = 0
+        for group in groups:
+            packed = group.to(self._fp8_dtype).contiguous().view(torch.uint8).flatten()
+            if packed.numel() != group.numel():
+                raise ValueError(
+                    "Fp8 serde requires a 1-byte dtype, got "
+                    f"{self._fp8_dtype} ({packed.numel()} bytes for "
+                    f"{group.numel()} elements)"
+                )
+            packed_groups.append(packed)
+            n_bytes += packed.numel()
+        if dst_flat.numel() < n_bytes:
+            raise ValueError(
+                f"Fp8 destination buffer too small: got {dst_flat.numel()} "
+                f"bytes, need {n_bytes}"
+            )
+
+        offset = 0
+        for packed in packed_groups:
+            dst_flat[offset : offset + packed.numel()].copy_(packed)
+            offset += packed.numel()
         return n_bytes
 
     def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
@@ -72,18 +162,42 @@ class Fp8QuantizationDeserializer(Deserializer):
         self._fp8_dtype = fp8_dtype
 
     def deserialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> None:
-        """Read fp8 bytes from src, cast to dst's dtype, copy into dst (key unused)."""
-        src_tensor = src.tensor
-        dst_tensor = dst.tensor
-        if src_tensor is None or dst_tensor is None:
-            raise ValueError("Fp8 serde requires src and dst to have tensors")
+        """Restore each destination group from packed fp8 bytes.
 
-        n_elements = dst_tensor.numel()
+        Args:
+            src: Packed fp8 byte buffer.
+            dst: KV object that receives the restored values.
+            key: Unused. Present for the deserializer interface.
 
-        # Read n_elements bytes from src, reinterpret as fp8, reshape, cast back
-        fp8_bytes = src_tensor.flatten()[:n_elements]
-        fp8_tensor = fp8_bytes.view(self._fp8_dtype).reshape(dst_tensor.shape)
-        dst_tensor.copy_(fp8_tensor.to(dst_tensor.dtype))
+        Raises:
+            ValueError: If a tensor is missing, or ``src`` has fewer
+                bytes than ``dst`` has elements.
+        """
+        del key
+        groups = _kv_groups(dst)
+        src_flat = _flat_bytes(src)
+        n_elements = sum(group.numel() for group in groups)
+        if src_flat.numel() < n_elements:
+            raise ValueError(
+                f"Fp8 source buffer too small: got {src_flat.numel()} "
+                f"bytes, need {n_elements}"
+            )
+
+        offset = 0
+        multi_group = len(groups) > 1
+        for index, group in enumerate(groups):
+            n = group.numel()
+            restored = (
+                src_flat[offset : offset + n]
+                .view(self._fp8_dtype)
+                .reshape(group.shape)
+                .to(dtype=group.dtype)
+            )
+            if multi_group:
+                _write_group(dst, index, restored)
+            else:
+                group.copy_(restored)
+            offset += n
 
 
 def _create_fp8_serde(kwargs: dict[str, object]) -> SerdeProcessor:
