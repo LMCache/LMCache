@@ -39,13 +39,40 @@ request metadata throughout the request lifecycle.
 
 .. important::
 
-   Forwarding a value does not by itself make the MP server act on it or make
-   it part of cache identity.  The current MP server treats request configs as
-   metadata.  Do not rely on ``lmcache.tag.*``, ``lmcache.ttl``,
+   Forwarding a value does not by itself make the MP server act on it. Most
+   request configs remain metadata. The strict ``lmcache.cache_identity.*``
+   family is the exception: once complete, it namespaces MP object hashes as
+   documented below. Do not rely on ``lmcache.tag.*``, ``lmcache.ttl``,
    ``lmcache.skip_save``, or another request config for isolation, expiration,
    or cache-control behavior in MP mode unless the selected server-side
-   feature explicitly documents support for it.  The in-process
+   feature explicitly documents support for it. The in-process
    ``LMCacheConnectorV1`` may interpret these values differently.
+
+Cache representation identity
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use a versioned cache identity when the same model name and token prefix may
+refer to KV produced by different weights or physical representations. Once
+any structured identity field is present, all of the following fields are
+required:
+
+- ``lmcache.cache_identity.model_revision``
+- ``lmcache.cache_identity.tokenizer_revision``
+- ``lmcache.cache_identity.weight_revision``
+- ``lmcache.cache_identity.topology_fingerprint``
+- ``lmcache.cache_identity.backend_revision``
+- ``lmcache.cache_identity.kv_dtype``
+
+``adapter_revision``, ``quantization_revision``, and
+``compression_revision`` are optional. ``drop_algorithm_id`` and
+``drop_policy_revision`` are optional but must be provided together. The same
+identity must be carried throughout a request lifecycle. A malformed or
+partial identity is rejected rather than falling back to an unversioned key.
+
+The identity is a cache-compatibility fence, not an authorization boundary;
+continue to use ``cache_salt`` for tenant isolation. Requests without an
+identity retain the legacy object hashes exactly, so existing cache entries
+remain addressable.
 
 MP Server
 ---------
