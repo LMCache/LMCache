@@ -363,7 +363,9 @@ class TestStorageManagerRestartRecovery:
         # 4 MiB on disk against a 4.2 MiB cap: 95% > the 0.9 watermark.
         sm = _storage_manager([_adapter_spec(tmp_path, 4.2 / 1024, recover=True)])
         try:
-            assert _wait_until(lambda: not leftover_files[0].exists())
+            assert _wait_until(lambda: not leftover_files[0].exists()), (
+                "eviction never removed the oldest leftover file"
+            )
             assert leftover_files[3].exists()
             # Unlinks precede the batch's accounting update; wait for both to settle.
             # exists() only (no stat): files keep vanishing while this polls.

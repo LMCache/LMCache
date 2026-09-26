@@ -43,7 +43,6 @@ from tests.v1.multiprocess.test_cache_server import (
     ClientContext,
     _recorded_event_handle,
     create_cache_key,
-    lookup_all,
     retrieve_keys,
     store_keys,
 )
@@ -96,6 +95,19 @@ class Server:
     def l2_idle(self) -> bool:
         store = self.status()["storage_manager"]["store_controller"]
         return store["pending_keys_count"] == 0 and store["in_flight_task_count"] == 0
+
+    def l2_stores_completed(self) -> float:
+        """Chunks whose L2 store completed (``/metrics`` counter)."""
+        url = f"http://127.0.0.1:{self.http_port}/metrics"
+        text = urllib.request.urlopen(url, timeout=10).read().decode()
+        total = 0.0
+        for line in text.splitlines():
+            if line.startswith("lmcache_mp_l2_store_completed_objects_chunks_total"):
+                total += float(line.rsplit(" ", 1)[1])
+        return total
+
+    def l2_evictions_triggered(self) -> int:
+        return self.log().count("L2 usage") - self.log().count("below watermark")
 
     def log(self) -> str:
         return self.log_path.read_text(errors="replace")
@@ -213,7 +225,26 @@ class Session:
         )
 
     def found(self, indices: list[int]) -> int:
-        return lookup_all(self.client, [key(i) for i in indices])
+        """Look up each key (which prefetches L2 hits into L1); count hits.
+
+        Same two-phase protocol as ``test_cache_server.lookup_all``, but with an
+        overall deadline per key so a stuck prefetch fails the test instead of
+        hanging it (and leaking the server subprocess)."""
+        total = 0
+        for i in indices:
+            lookup_key = key(i).no_worker_id_version()
+            self.client.lookup(lookup_key, 1).result(timeout=TIMEOUT_S)
+            deadline = time.monotonic() + TIMEOUT_S
+            while True:
+                result = self.client.query_prefetch_status(
+                    lookup_key.request_id
+                ).result(timeout=TIMEOUT_S)
+                if result is not None:
+                    total += result
+                    break
+                assert time.monotonic() < deadline, f"lookup of key {i} never finished"
+                time.sleep(0.05)
+        return total
 
     def retrieve_to(self, indices: list[int], offset_keys: int) -> list[bool]:
         return retrieve_keys(
@@ -316,6 +347,7 @@ class Seeded:
     bytes_stored: int
     bytes_per_key: int
     files: dict[str, float]
+    key_files: dict[int, str]
     log_dir: Path
 
     def start(self, **adapter: object) -> Server:
@@ -327,27 +359,38 @@ class Seeded:
 @pytest.fixture
 def seeded(base_path, tmp_path, ctx) -> Seeded:
     """First server run: store OLD_KEYS, wait >1 s, store NEW_KEYS; shut down
-    once every chunk is on disk and accounted."""
+    once every chunk is on disk and accounted.
+
+    Keys are stored one at a time and each new file is recorded, so every test
+    knows exactly which file holds which key (mtime order within a batch is not
+    guaranteed with several I/O workers). The 1.1 s gap orders the batches."""
     path, use_odirect = base_path
     server = start_server(path, tmp_path, use_odirect=use_odirect)
+    key_files: dict[int, str] = {}
     try:
         session = connect(server, ctx)
         try:
-            session.store(OLD_KEYS)
-            assert wait_until(lambda: len(chunk_files(path)) == len(OLD_KEYS))
-            time.sleep(1.1)  # distinct mtimes for the two batches
-            session.store(NEW_KEYS)
-            assert wait_until(
-                lambda: len(chunk_files(path)) == len(ALL_KEYS) and server.l2_idle()
-            ), f"L2 writes did not complete:\n{server.log()}"
+            for batch in (OLD_KEYS, NEW_KEYS):
+                for i in batch:
+                    before = set(chunk_files(path))
+                    session.store([i])
+                    assert wait_until(
+                        lambda before=before: len(set(chunk_files(path)) - before) == 1
+                    ), f"no chunk file for key {i}:\n{server.log()}"
+                    (key_files[i],) = set(chunk_files(path)) - before
+                time.sleep(1.1)  # the next batch gets strictly later mtimes
+            assert wait_until(server.l2_idle), server.log()
             stored = server.l2_bytes_tracked()
         finally:
             session.close()
     finally:
         stop_server(server)
     files = chunk_files(path)
+    assert files.keys() == set(key_files.values())
     assert stored == sum((path / f).stat().st_size for f in files)
-    return Seeded(path, use_odirect, stored, stored // len(ALL_KEYS), files, tmp_path)
+    return Seeded(
+        path, use_odirect, stored, stored // len(ALL_KEYS), files, key_files, tmp_path
+    )
 
 
 def remaining(seeded: Seeded) -> set[str]:
@@ -365,10 +408,8 @@ def sibling_name(name: str, n: int) -> str:
 
 
 def _files_of(seeded: Seeded, indices: list[int]) -> set[str]:
-    """Chunk files of the given key positions, by write order (mtime)."""
-    ordered = sorted(seeded.files, key=seeded.files.__getitem__)
-    by_index = dict(zip(ALL_KEYS, ordered, strict=True))
-    return {by_index[i] for i in indices}
+    """The chunk files holding the given key positions."""
+    return {seeded.key_files[i] for i in indices}
 
 
 # =============================================================================
@@ -405,8 +446,17 @@ class TestRestartHappyPath:
                 assert server.l2_bytes_tracked() == seeded.bytes_stored
                 session = connect(server, ctx)
                 try:
+                    done = server.l2_stores_completed()
                     session.store(ALL_KEYS)
-                    assert wait_until(server.l2_idle)
+                    # Every re-store must reach L2 (the connector skips the
+                    # existing file) before usage is compared.
+                    assert wait_until(
+                        lambda server=server, done=done: (
+                            server.l2_stores_completed() >= done + len(ALL_KEYS)
+                            and server.l2_idle()
+                        )
+                    ), f"re-stores did not complete:\n{server.log()}"
+                    time.sleep(1)  # accounting follows the completion signal
                     assert server.l2_bytes_tracked() == seeded.bytes_stored
                 finally:
                     session.close()
@@ -575,15 +625,14 @@ class TestAdversarialDirectory:
             stop_server(server)
         assert_retrieved_exactly(ctx, intact, offset=20)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Known limitation (PR #5372): a recovered file deleted by "
-        "another process stays accounted, because the native delete reports "
-        "False for a missing file and its bytes are never released.",
-    )
-    def test_externally_deleted_recovered_file_releases_its_bytes(self, seeded, ctx):
-        """A recovered file removed by someone else should stop counting once
-        eviction tries to delete it."""
+    def test_externally_deleted_recovered_file_stays_accounted(self, seeded, ctx):
+        """Known limitation (PR #5372): a recovered file deleted by another
+        process stays accounted, because the native delete reports False for a
+        missing file and its bytes are never released.
+
+        The scenario's preconditions are asserted normally, so an unrelated
+        failure fails the test; only the final accounting mismatch is an
+        expected failure, and the test fails if the limitation disappears."""
         extra = [40, 41, 42]
         # 12 recovered keys sit at 0.8 of this cap; 15 keys reach 1.0 > 0.9.
         cap_gib = len(ALL_KEYS) * seeded.bytes_per_key / 0.8 / 1024**3
@@ -592,13 +641,27 @@ class TestAdversarialDirectory:
             assert server.l2_bytes_tracked() == seeded.bytes_stored
             for name in _files_of(seeded, OLD_KEYS):
                 (seeded.path / name).unlink()  # deleted behind the server's back
+            evictions = server.l2_evictions_triggered()
+            done = server.l2_stores_completed()
             session = connect(server, ctx)
             try:
                 session.store(extra)  # pushes usage over the watermark
             finally:
                 session.close()
-            time.sleep(4)  # a few eviction passes
+            assert wait_until(
+                lambda: server.l2_stores_completed() >= done + len(extra)
+            ), server.log()
+            assert wait_until(lambda: server.l2_evictions_triggered() > evictions), (
+                f"eviction never ran:\n{server.log()}"
+            )
+            time.sleep(3)  # let eviction passes settle
             on_disk = sum(p.stat().st_size for p in seeded.path.glob("*.data"))
-            assert server.l2_bytes_tracked() == on_disk
+            tracked = server.l2_bytes_tracked()
         finally:
             stop_server(server)
+        if tracked == on_disk:
+            pytest.fail(
+                "externally deleted files are now released: the limitation is "
+                "fixed, so update this test and the PR's known limitations"
+            )
+        pytest.xfail(f"tracked {tracked} bytes vs {on_disk} on disk (known limitation)")

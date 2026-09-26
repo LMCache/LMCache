@@ -316,6 +316,8 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         return self._inner.get_usage()
 
     def recover_persisted_objects(self) -> int:
+        """Forward persisted-object recovery to the inner adapter, which owns
+        the stored objects and their accounting."""
         return self._inner.recover_persisted_objects()
 
     def delete(self, keys: list[ObjectKey]) -> None:
