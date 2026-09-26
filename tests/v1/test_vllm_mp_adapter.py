@@ -4,10 +4,12 @@ stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
 recovery: multiprocess ``workloads/common/restart-recovery.sh``."""
 
 # Standard
-from typing import Callable, ClassVar, cast
+from dataclasses import replace
+from typing import Any, Callable, ClassVar, cast
 from unittest.mock import MagicMock
 import gc
 import os
+import queue
 import threading
 import time
 import weakref
@@ -26,6 +28,13 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
+from lmcache.utils import CacheRemoveEvent, CacheStoreEvent
+from lmcache.v1.multiprocess.custom_types import (
+    KV_EVENT_CAPABILITY,
+    KVEventBatch,
+    KVEventRecord,
+)
+from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.ipc_policy import (
@@ -73,6 +82,82 @@ def _parallel_strategy(
         pp_size=1,
         n_servers=1,
     )
+
+
+def _event_adapter(
+    fake_adapter: tuple,
+    parallel_strategy: ParallelStrategy | None = None,
+    advertised: bool = True,
+) -> tuple[LMCacheMPWorkerAdapter, MagicMock, list[Callable]]:
+    """Use cancellable streams at the stubbed network boundary."""
+    _, client, _ = fake_adapter
+    client.get_experimental.return_value.result.return_value = (
+        [KV_EVENT_CAPABILITY] if advertised else []
+    )
+    senders = []
+    ready = threading.Event()
+
+    def subscribe(*args: object, **kwargs: object) -> MessagingStream[KVEventBatch]:
+        inbox: queue.Queue = queue.Queue()
+        processed: threading.Event | None = None
+
+        def read(closed: threading.Event) -> KVEventBatch:
+            nonlocal processed
+            if processed is not None:
+                processed.set()
+            value, processed = inbox.get()
+            if closed.is_set():
+                raise StopIteration
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        def cancel() -> None:
+            if processed is not None:
+                processed.set()
+            inbox.put((None, threading.Event()))
+
+        def send(value: KVEventBatch | Exception) -> None:
+            done = threading.Event()
+            inbox.put((value, done))
+            assert done.wait(5), "receiver did not process the pushed batch"
+
+        senders.append(send)
+        ready.set()
+        return MessagingStream(read, cancel)
+
+    client.subscribe_kv_events.side_effect = subscribe
+    adapter = _make_worker_adapter(
+        enable_kv_events=True,
+        parallel_strategy=parallel_strategy,
+    )
+    assert adapter.get_kv_events() == []
+    strategy = parallel_strategy or _parallel_strategy()
+    if KV_EVENT_CAPABILITY in adapter.experimental and strategy.is_kv_event_subscriber:
+        assert ready.wait(5)
+    return adapter, client, senders
+
+
+def _event_record(kind: str = "stored", chunk: bytes = b"chunk") -> KVEventRecord:
+    return KVEventRecord(
+        seq=1,
+        kind=kind,
+        medium="CPU",
+        model_name="test-model",
+        block_hashes=[chunk],
+        parent_block_hash=None,
+        token_ids=[1, 2] if kind == "stored" else [],
+    )
+
+
+def _complete_event_store(adapter: LMCacheMPWorkerAdapter) -> None:
+    adapter.transfer_ctx = MagicMock()
+    adapter.transfer_ctx.submit_store.return_value.query.return_value = True
+    adapter.transfer_ctx.submit_store.return_value.result.return_value = True
+    size = adapter.lmcache_tokens_per_chunk
+    op = replace(_op([[0]]), token_ids=list(range(size)), end=size)
+    adapter.submit_store_request("own-store", op, None)
+    adapter.get_finished({"own-store"})
 
 
 class FakeCudaEvent:
@@ -142,18 +227,21 @@ class FakeHeartbeatThread:
 def _make_worker_adapter(
     extra_config: dict[str, object] | None = None,
     enable_kv_events: bool = False,
+    parallel_strategy: ParallelStrategy | None = None,
 ) -> LMCacheMPWorkerAdapter:
     """Construct a worker adapter with the standard test arguments; the
     network boundary must already be patched (see ``fake_adapter``).
-    ``extra_config`` forwards ``lmcache.mp.*`` overrides."""
-    parallel_strategy = ParallelStrategy(
-        mla_only=False,
-        vllm_world_size=1,
-        vllm_worker_id=0,
-        tp_size=1,
-        pp_size=1,
-        n_servers=1,
-    )
+    ``extra_config`` forwards ``lmcache.mp.*`` overrides, and
+    ``parallel_strategy`` overrides the default single-rank placement."""
+    if parallel_strategy is None:
+        parallel_strategy = ParallelStrategy(
+            mla_only=False,
+            vllm_world_size=1,
+            vllm_worker_id=0,
+            tp_size=1,
+            pp_size=1,
+            n_servers=1,
+        )
     return LMCacheMPWorkerAdapter(
         server_url="tcp://127.0.0.1:0",
         context=MagicMock(name="zmq_context"),
@@ -243,11 +331,12 @@ def fake_adapter(monkeypatch):
     req_client = MagicMock(name="req_client", spec=RequestClient)
     _patch_request_client_factory(monkeypatch, req_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
-    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
 
     future = MagicMock(name="future")
     future.result.return_value = None
     _return_future_from_request_methods(req_client, future)
+    req_client.get_experimental.return_value = MagicMock()
+    req_client.get_experimental.return_value.result.return_value = []
 
     FakeHeartbeatThread.instances.clear()
     FakeHeartbeatThread.start_hook = None
@@ -1694,3 +1783,153 @@ def test_recovery_reports_the_ring_re_registration_result(fake_adapter, ring_ok)
     adapter.register_kv_caches({"layer.0": fake_tensor})
 
     assert adapter._reregister_kv_caches_callback() is ring_ok
+
+
+def test_pushed_cpu_events_preserve_transitions_without_worker_polls(
+    fake_adapter: tuple,
+) -> None:
+    adapter, client, senders = _event_adapter(fake_adapter)
+    try:
+        _complete_event_store(adapter)
+        assert adapter.get_kv_events() == []
+        stored = replace(_event_record(), parent_block_hash=b"parent")
+        batch = KVEventBatch(
+            True,
+            7,
+            4,
+            False,
+            [
+                _event_record("removed", b"unknown"),
+                stored,
+                stored,
+                replace(stored, medium="STORAGE"),
+            ],
+        )
+        senders[-1](batch)
+        assert any(
+            sample.name == "vllm:lmcache_mp_kv_events_buffered"
+            and sample.labels == {"model_name": "test-model", "worker_id": "0"}
+            and sample.value == 1
+            for metric in adapter_mod._KV_EVENTS_BUFFERED.collect()
+            for sample in metric.samples
+        )
+        events = adapter.get_kv_events()
+        assert len(events) == 1 and isinstance(events[0], CacheStoreEvent)
+        assert (events[0].parent_block_hash, events[0].token_ids, events[0].medium) == (
+            b"parent",
+            [1, 2],
+            "CPU",
+        )
+        senders[-1](replace(batch, events=[_event_record("removed"), stored]))
+        assert [type(e) for e in adapter.get_kv_events()] == [
+            CacheRemoveEvent,
+            CacheStoreEvent,
+        ]
+        senders[-1](replace(batch, events=[_event_record("removed")] * 2))
+        assert len(adapter.get_kv_events()) == 1
+        # Repeated engine drains never issue a new request.
+        for _ in range(10):
+            assert adapter.get_kv_events() == []
+        client.subscribe_kv_events.assert_called_once_with(
+            adapter.instance_id, "test-model", 0, 1024
+        )
+    finally:
+        adapter.shutdown()
+
+
+@pytest.mark.parametrize(
+    "reset", ["restart", "lost", "disabled", "error", "disconnect"]
+)
+def test_stream_failure_or_loss_withdraws_announced_cpu_placements(
+    fake_adapter: tuple,
+    reset: str,
+) -> None:
+    adapter, client, senders = _event_adapter(fake_adapter)
+    try:
+        batch = KVEventBatch(True, 7, 1, False, [_event_record()])
+        reconnected = threading.Event()
+        subscribe = client.subscribe_kv_events.side_effect
+
+        def reconnect(*args: Any, **kwargs: Any) -> MessagingStream[KVEventBatch]:
+            stream = subscribe(*args, **kwargs)
+            reconnected.set()
+            return stream
+
+        client.subscribe_kv_events.side_effect = reconnect
+        senders[-1](batch)
+        assert isinstance(adapter.get_kv_events()[0], CacheStoreEvent)
+        if reset in ("restart", "lost"):
+            senders[-1](
+                replace(
+                    batch,
+                    incarnation=8 if reset == "restart" else 7,
+                    lost=reset == "lost",
+                    next_cursor=41,
+                    events=[_event_record(chunk=b"new")],
+                )
+            )
+        elif reset == "disabled":
+            senders[-1](replace(batch, enabled=False, events=[]))
+        else:
+            error = ConnectionError if reset == "disconnect" else RuntimeError
+            senders[-1](error("stream failed"))
+        events = adapter.get_kv_events()
+        assert isinstance(events[0], CacheRemoveEvent)
+        assert events[0].block_hashes == [b"chunk"] and events[0].medium == "CPU"
+        if reset in ("restart", "lost"):
+            assert isinstance(events[1], CacheStoreEvent)
+            assert events[1].block_hashes == [b"new"]
+        elif reset != "disconnect":
+            _complete_event_store(adapter)
+            assert isinstance(adapter.get_kv_events()[0], CacheStoreEvent)
+        else:
+            assert reconnected.wait(5)
+            assert client.subscribe_kv_events.call_args.args[2] == 0
+            senders[-1](batch)
+            assert isinstance(adapter.get_kv_events()[0], CacheStoreEvent)
+    finally:
+        adapter.shutdown()
+
+
+@pytest.mark.parametrize(
+    "rank, servers, publishes",
+    [
+        (0, 1, True),
+        (1, 1, False),
+        (0, 2, True),
+        (1, 2, False),
+        (2, 2, True),
+        (3, 2, False),
+    ],
+)
+def test_one_publisher_per_server(
+    fake_adapter: tuple,
+    rank: int,
+    servers: int,
+    publishes: bool,
+) -> None:
+    strategy = replace(
+        _parallel_strategy(tp_size=4, vllm_worker_id=rank), n_servers=servers
+    )
+    adapter, _, senders = _event_adapter(fake_adapter, strategy)
+    try:
+        assert bool(senders) == publishes
+        if senders:
+            senders[-1](KVEventBatch(True, 7, 1, False, [_event_record()]))
+        assert bool(adapter.get_kv_events()) == publishes
+        _complete_event_store(adapter)
+        assert adapter.get_kv_events() == []
+    finally:
+        adapter.shutdown()
+
+
+def test_unadvertised_channel_keeps_completed_store_reporting(
+    fake_adapter: tuple,
+) -> None:
+    adapter, _, senders = _event_adapter(fake_adapter, advertised=False)
+    try:
+        _complete_event_store(adapter)
+        assert isinstance(adapter.get_kv_events()[0], CacheStoreEvent)
+        assert not senders
+    finally:
+        adapter.shutdown()

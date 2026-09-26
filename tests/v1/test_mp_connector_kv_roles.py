@@ -15,6 +15,11 @@ pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 
 # Third Party
 from vllm.config import KVTransferConfig, VllmConfig  # noqa: E402
+from vllm.distributed.kv_events import (  # noqa: E402
+    BlockRemoved,
+    BlockStored,
+    KVCacheEvent,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import (  # noqa: E402
     KVConnectorFactory,
 )
@@ -34,12 +39,56 @@ from lmcache.integration.vllm import lmcache_mp_connector as connector_mod  # no
 from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     LMCacheMPConnector,
+    LMCacheMPKVEvents,
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
 )
 
 pytestmark = pytest.mark.no_shared_allocator
+
+
+@pytest.mark.parametrize(
+    "batches, expected",
+    [
+        ([[0, 1], [1, 2], [0]], [0, 1, 2]),
+        ([[0], []], [0]),
+        ([[], [0]], [0]),
+        ([], []),
+        ([[], []], []),
+        ([[0, 3, 0], []], [0, 3, 0]),
+        ([[0, 3, 0], [0, 3, 0]], [0, 3, 0]),
+    ],
+)
+def test_kv_event_aggregation_preserves_worker_transitions(
+    batches: list[list[int]], expected: list[int]
+) -> None:
+    """Keep skewed stores and store/remove/store order across worker merges."""
+    events: list[KVCacheEvent] = [
+        BlockStored(
+            block_hashes=[index],
+            parent_block_hash=None,
+            token_ids=[index],
+            block_size=1,
+            lora_id=None,
+            medium="CPU",
+            lora_name=None,
+        )
+        for index in range(3)
+    ]
+    events.append(BlockRemoved([0], "CPU"))
+    aggregate = LMCacheMPKVEvents(num_workers=1)
+    for index, batch in enumerate(batches):
+        worker = LMCacheMPKVEvents(num_workers=1)
+        worker.add_events([events[index] for index in batch])
+        aggregate.merge(worker)
+        if index:
+            aggregate.increment_workers(worker.get_number_of_workers())
+    assert aggregate.get_number_of_workers() == max(1, len(batches))
+    assert aggregate.aggregate().get_all_events() == [events[i] for i in expected]
+    assert aggregate.get_number_of_workers() == 1
+    aggregate.clear_events()
+    assert aggregate.get_all_events() == []
 
 
 def _config(transfer_config: KVTransferConfig) -> VllmConfig:

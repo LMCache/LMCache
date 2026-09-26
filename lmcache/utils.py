@@ -642,6 +642,17 @@ class CacheStoreEvent:
     lora_name: str | None
 
 
+@dataclass
+class CacheRemoveEvent:
+    """Removal of previously announced CPU chunks, paired with CacheStoreEvent."""
+
+    block_hashes: list[int | bytes]
+    medium: str | None
+
+
+CacheEvent = CacheStoreEvent | CacheRemoveEvent
+
+
 class EngineType(Enum):
     VLLM = "vllm"
     ATOM = "atom"

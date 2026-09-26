@@ -116,6 +116,8 @@ class EventBus:
         self._thread: threading.Thread | None = None
         self._registered_subscribers: list[EventSubscriber] = []
         self._discard_count: int = 0
+        self._notified_discard_count = 0
+        self._drop_callbacks: list[Callable[[], None]] = []
         self._last_discard_warning: float = 0.0
         self._subscriber_exception_counts: dict[str, int] = {}
 
@@ -142,6 +144,12 @@ class EventBus:
 
     # -- Public API --------------------------------------------------------
 
+    @property
+    def enabled(self) -> bool:
+        """Whether ``publish()`` enqueues events (``False`` for the disabled
+        default bus, where nothing ever reaches a subscriber)."""
+        return self._config.enabled
+
     def subscribe(self, event_type: EventType, callback: EventCallback) -> None:
         """Register a callback for a specific event type (thread-safe)."""
         with self._lock:
@@ -152,6 +160,15 @@ class EventBus:
         subscriber.register(self)
         with self._lock:
             self._registered_subscribers.append(subscriber)
+
+    def subscribe_drops(self, callback: Callable[[], None]) -> None:
+        """Notify callback on the drain thread when events were discarded.
+
+        Callbacks may read dropped_events_count(). Notifications are coalesced;
+        they also run when no subsequent event is published.
+        """
+        with self._lock:
+            self._drop_callbacks.append(callback)
 
     def has_subscribers(self, event_type: EventType) -> bool:
         """Return True if at least one callback is registered for *event_type*.
@@ -205,6 +222,7 @@ class EventBus:
 
         if len(self._queue) >= self._config.max_queue_size:
             self._discard_count += 1
+            self._wake.set()
             now = time.monotonic()
             if now - self._last_discard_warning >= 1.0:
                 logger.warning(
@@ -359,6 +377,16 @@ class EventBus:
                         name,
                         event.event_type.value,
                     )
+
+        if self._discard_count != self._notified_discard_count:
+            self._notified_discard_count = self._discard_count
+            with self._lock:
+                callbacks = list(self._drop_callbacks)
+            for callback in callbacks:
+                try:
+                    callback()
+                except Exception:
+                    logger.exception("EventBus: error in drop notification")
 
 
 # ---------------------------------------------------------------------------

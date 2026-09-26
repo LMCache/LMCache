@@ -39,6 +39,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -1032,9 +1033,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """Publish one ``MP_TOKENS`` event for ``key``'s chunks.
 
         Pairs each complete chunk in ``[key.start, key.end)`` with its
-        ObjectKey chunk hash and token position. Must be called at store
+        ObjectKey chunk hash, token position, and the preceding chunk's hash
+        (``None`` for a sequence's first chunk). Must be called at store
         submission, before the write-finished events reach the bus, so the
-        cache-event subscriber can stamp them onto the STORE entries. A
+        cache-event subscribers can stamp them onto the STORE entries. A
         store that later fails leaves only unused cache entries.
 
         Args:
@@ -1066,6 +1068,18 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 key.end,
             )
             return
+        # Each chunk's hash chains to the preceding chunk's. The chunk before
+        # ``key.start`` was hashed when this store's keys were resolved, so
+        # the session still holds it.
+        parent_hashes: list[bytes | None] = [None] * len(obj_keys)
+        for index in range(1, len(obj_keys)):
+            parent_hashes[index] = obj_keys[index - 1].chunk_hash
+        if key.start >= chunk_size:
+            session = self._ctx.session_manager.get(key.request_id)
+            if session is not None:
+                previous = session.get_hashes(key.start - chunk_size, key.start)
+                if previous:
+                    parent_hashes[0] = TokenHasher.hash_to_bytes(previous[0])
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_TOKENS,
@@ -1074,6 +1088,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     "chunk_hashes": [obj_key.chunk_hash for obj_key in obj_keys],
                     "token_chunks": token_chunks,
                     "token_offsets": token_offsets,
+                    "parent_hashes": parent_hashes,
                 },
             )
         )

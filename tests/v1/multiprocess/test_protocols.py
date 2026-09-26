@@ -6,6 +6,7 @@ import msgspec
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess.custom_types import KVEventBatch
 from lmcache.v1.multiprocess.rpc import get_rpc_spec, get_rpc_specs
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
@@ -103,3 +104,8 @@ def test_rpc_types_come_from_request_client_annotations() -> None:
     assert clear.bind_payloads((), {}) == (False,)
     assert clear.bind_payloads((), {"force": True}) == (True,)
     assert clear.response_type is type(None)
+
+    stream = get_rpc_spec("subscribe_kv_events")
+    assert stream.payload_types == (int, str, int, int)
+    assert stream.response_type is KVEventBatch
+    assert stream.streaming
