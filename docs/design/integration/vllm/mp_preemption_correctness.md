@@ -75,8 +75,9 @@ lines.
 
 ## Testing
 
-`.buildkite/k3_tests/multiprocess/scripts/run-preemption-correctness.sh`, a
-ladder of agreements over real ShareGPT traffic. ShareGPT has no correct
+`.buildkite/k3_tests/multiprocess/scripts/workloads/vllm/preemption-correctness.sh`
+(driven by `.buildkite/k3_tests/multiprocess/run.sh preemption_correctness`),
+a ladder of agreements over real ShareGPT traffic. ShareGPT has no correct
 answers, so each rung is checked for *agreement* with the run below it rather
 than for accuracy. The reference is the simplest execution path there is:
 plain vLLM at a concurrency low enough that preemption is provably impossible.

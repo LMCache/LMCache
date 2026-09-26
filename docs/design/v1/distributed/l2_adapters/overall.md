@@ -434,12 +434,15 @@ handle = sm.submit_prefetch_task(
     )
 )
 
-# 2. Poll: busy-wait for completion (one found bitmap per key row)
+# 2. Poll: busy-wait for completion. The result is a PrefetchResult whose
+#    hit_cells carries one bitmap per key row (L1 hits already held +
+#    L2 hits loaded by this request), also split out on the result as
+#    l1_hit_cells / l2_hit_cells for per-tier accounting.
 while True:
-    rows = sm.query_prefetch_status(handle)
-    if rows is not None:
+    result = sm.query_prefetch_status(handle)
+    if result is not None:
         break
-hit_chunks, retain = fold_unfold_grouped(rows, windows=[-1])
+hit_chunks, retain = fold_unfold_grouped(result.hit_cells, windows=[-1])
 
 # 3. Read: access the prefetched data (holds read locks)
 with sm.read_prefetched_results(retain[0].gather(keys)) as objs:
@@ -457,12 +460,9 @@ sm.finish_read_prefetched(retain[0].gather(keys))
 class PrefetchHandle:
     prefetch_request_id: int        # -1 if no L2 request needed
     external_request_id: str
-    l1_found_indices: tuple[int, ...]
-    l1_hit_chunks: int
     total_requested_keys: int
     submit_time: float              # for latency logging
-    l2_orig_indices: tuple[int, ...]
-    num_key_groups: int             # key-group count, for per-group status
+    sliding_windows: tuple[int, ...] = ()  # per key group, in group order
 ```
 
 `submit_prefetch_task` first checks L1 for the prefix every object group can
@@ -470,8 +470,12 @@ serve:
 - If all keys hit L1: returns handle with `prefetch_request_id=-1` (no L2 work).
 - If some keys miss: submits the **remaining** keys to PrefetchController.
 
-`query_prefetch_status` combines the L1 hits with the L2 result and reports
-them per key row.
+`query_prefetch_status` combines the L1 hits with the L2 result and returns
+them as a `PrefetchResult`: `hit_cells` (one bitmap per key row, in row
+order — the union of both tiers), split into disjoint `l1_hit_cells`
+(already resident in L1 when the task started) and `l2_hit_cells` (loaded
+from L2 by this task). Cached `l1_hit_count` / `l2_hit_count` popcounts
+are exposed for callers that only need per-tier totals.
 
 ## Assumptions and Invariants Summary
 
