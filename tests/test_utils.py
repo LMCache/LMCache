@@ -196,8 +196,18 @@ class TestParseMixedSlotMapping:
 
     def test_empty_string(self):
         slots, err = parse_mixed_slot_mapping("")
-        assert err is None
-        assert slots == []
+        assert slots is None
+        assert err is not None
+
+    def test_whitespace_only(self):
+        slots, err = parse_mixed_slot_mapping("   ")
+        assert slots is None
+        assert err is not None
+
+    def test_commas_only(self):
+        slots, err = parse_mixed_slot_mapping(",,,")
+        assert slots is None
+        assert err is not None
 
 
 # ============================================================
