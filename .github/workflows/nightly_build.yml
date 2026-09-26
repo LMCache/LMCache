@@ -310,8 +310,17 @@ jobs:
             dist/musa/*.whl
 
   nightly-build:
-    name: Build image
-    runs-on: ubuntu-latest
+    name: Build image (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          # Build CUDA extensions on a native ARM runner rather than QEMU.
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
@@ -354,58 +363,70 @@ jobs:
         run: |
           docker system prune -f --all
           docker builder prune -af
-          docker build \
+          docker buildx build --load \
+          --platform linux/${{ matrix.arch }} \
           --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
           --build-arg CUDA_VERSION=13.0 \
           --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
           --target image-build \
-          --tag lmcache/vllm-openai:latest-nightly --tag lmcache/vllm-openai:nightly-${{ env.NOW }} \
+          --tag lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }} \
           --file docker/Dockerfile .
+
+      - name: Smoke test lmcache/vllm-openai (cu13 nightly)
+        run: |
+          test "$(docker image inspect --format '{{.Architecture}}' lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }})" = "${{ matrix.arch }}"
+          docker run --rm --entrypoint lmcache lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }} --help
 
       - name: Push lmcache/vllm-openai container image to DockerHub
         run: |
-          docker push lmcache/vllm-openai:latest-nightly
-          docker push lmcache/vllm-openai:nightly-${{ env.NOW }}
+          docker push lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }}
 
       # Payload (docker/Dockerfile.payload) extracts lmcache from the cu13 nightly
       # image just pushed above — still local, and dropped by the standalone
       # build's leading prune, so build here.
       - name: Build lmcache/lmcache-payload image (nightly)
         run: |
-          docker build \
-          --build-arg SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly \
-          --tag lmcache/lmcache-payload:latest-nightly --tag lmcache/lmcache-payload:nightly-${{ env.NOW }} \
+          docker buildx build --load \
+          --platform linux/${{ matrix.arch }} \
+          --build-arg SOURCE_IMAGE=lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }} \
+          --tag lmcache/lmcache-payload:nightly-${{ github.run_id }}-${{ matrix.arch }} \
           --file docker/Dockerfile.payload .
 
       # Run the ENTRYPOINT copy; assert the lmcache tree lands.
       - name: Smoke test lmcache/lmcache-payload (nightly)
         run: |
-          docker run --rm -e SHARED_DIR=/out -v "$PWD/payload-out:/out" lmcache/lmcache-payload:nightly-${{ env.NOW }}
+          test "$(docker image inspect --format '{{.Architecture}}' lmcache/lmcache-payload:nightly-${{ github.run_id }}-${{ matrix.arch }})" = "${{ matrix.arch }}"
+          docker run --rm -e SHARED_DIR=/out -v "$PWD/payload-out:/out" lmcache/lmcache-payload:nightly-${{ github.run_id }}-${{ matrix.arch }}
           test -f payload-out/lmcache/__init__.py
 
       - name: Push lmcache/lmcache-payload nightly image to DockerHub
         run: |
-          docker push lmcache/lmcache-payload:latest-nightly
-          docker push lmcache/lmcache-payload:nightly-${{ env.NOW }}
+          docker push lmcache/lmcache-payload:nightly-${{ github.run_id }}-${{ matrix.arch }}
 
       - name: Build lmcache/standalone container image (cu13 nightly)
         run: |
           docker system prune -f --all
           docker builder prune -af
-          docker build \
+          docker buildx build --load \
+          --platform linux/${{ matrix.arch }} \
           --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
           --build-arg CUDA_VERSION=13.0 \
           --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
           --target lmcache-final \
-          --tag lmcache/standalone:nightly --tag lmcache/standalone:nightly-${{ env.NOW }} \
+          --tag lmcache/standalone:nightly-${{ github.run_id }}-${{ matrix.arch }} \
           --file docker/Dockerfile.standalone .
+
+      - name: Smoke test lmcache/standalone (cu13 nightly)
+        run: |
+          test "$(docker image inspect --format '{{.Architecture}}' lmcache/standalone:nightly-${{ github.run_id }}-${{ matrix.arch }})" = "${{ matrix.arch }}"
+          docker run --rm --entrypoint lmcache lmcache/standalone:nightly-${{ github.run_id }}-${{ matrix.arch }} --help
 
       - name: Push lmcache/standalone container image to DockerHub
         run: |
-          docker push lmcache/standalone:nightly
-          docker push lmcache/standalone:nightly-${{ env.NOW }}
+          docker push lmcache/standalone:nightly-${{ github.run_id }}-${{ matrix.arch }}
 
       - name: Build lmcache/vllm-openai container image (cu12.9 nightly)
+        if: matrix.arch == 'amd64'
         run: |
           docker system prune -f --all
           docker builder prune -af
@@ -417,6 +438,7 @@ jobs:
           --file docker/Dockerfile .
 
       - name: Push lmcache/vllm-openai cu12.9 nightly image to DockerHub
+        if: matrix.arch == 'amd64'
         run: |
           docker push lmcache/vllm-openai:latest-nightly-cu129
           docker push lmcache/vllm-openai:nightly-${{ env.NOW }}-cu129
@@ -425,6 +447,7 @@ jobs:
       # still local, and dropped by the standalone build's leading prune, so
       # build here.
       - name: Build lmcache/lmcache-payload image (cu129 nightly)
+        if: matrix.arch == 'amd64'
         run: |
           docker build \
           --build-arg SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly-cu129 \
@@ -433,16 +456,19 @@ jobs:
 
       # Run the ENTRYPOINT copy; assert the lmcache tree lands.
       - name: Smoke test lmcache/lmcache-payload (cu129 nightly)
+        if: matrix.arch == 'amd64'
         run: |
           docker run --rm -e SHARED_DIR=/out -v "$PWD/payload-out-cu129:/out" lmcache/lmcache-payload:nightly-${{ env.NOW }}-cu129
           test -f payload-out-cu129/lmcache/__init__.py
 
       - name: Push lmcache/lmcache-payload cu12.9 nightly image to DockerHub
+        if: matrix.arch == 'amd64'
         run: |
           docker push lmcache/lmcache-payload:latest-nightly-cu129
           docker push lmcache/lmcache-payload:nightly-${{ env.NOW }}-cu129
 
       - name: Build lmcache/standalone container image (cu12.9 nightly)
+        if: matrix.arch == 'amd64'
         run: |
           docker system prune -f --all
           docker builder prune -af
@@ -454,9 +480,60 @@ jobs:
           --file docker/Dockerfile.standalone .
 
       - name: Push lmcache/standalone cu12.9 nightly image to DockerHub
+        if: matrix.arch == 'amd64'
         run: |
           docker push lmcache/standalone:nightly-cu129
           docker push lmcache/standalone:nightly-${{ env.NOW }}-cu129
+
+  nightly-publish-manifests:
+    name: Publish multi-arch image manifests
+    needs: nightly-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: false
+          egress-policy: audit
+
+      - name: Login to DockerHub
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Get the current date
+        run: echo "NOW=$(date +'%Y-%m-%d')" >> "$GITHUB_ENV"
+
+      - name: Publish lmcache/vllm-openai manifest
+        run: |
+          docker buildx imagetools create \
+            --tag lmcache/vllm-openai:latest-nightly \
+            --tag lmcache/vllm-openai:nightly-${{ env.NOW }} \
+            lmcache/vllm-openai:nightly-${{ github.run_id }}-amd64 \
+            lmcache/vllm-openai:nightly-${{ github.run_id }}-arm64
+          docker buildx imagetools inspect lmcache/vllm-openai:nightly-${{ env.NOW }}
+
+      - name: Publish lmcache/lmcache-payload manifest
+        run: |
+          docker buildx imagetools create \
+            --tag lmcache/lmcache-payload:latest-nightly \
+            --tag lmcache/lmcache-payload:nightly-${{ env.NOW }} \
+            lmcache/lmcache-payload:nightly-${{ github.run_id }}-amd64 \
+            lmcache/lmcache-payload:nightly-${{ github.run_id }}-arm64
+          docker buildx imagetools inspect lmcache/lmcache-payload:nightly-${{ env.NOW }}
+
+      - name: Publish lmcache/standalone manifest
+        run: |
+          docker buildx imagetools create \
+            --tag lmcache/standalone:nightly \
+            --tag lmcache/standalone:nightly-${{ env.NOW }} \
+            lmcache/standalone:nightly-${{ github.run_id }}-amd64 \
+            lmcache/standalone:nightly-${{ github.run_id }}-arm64
+          docker buildx imagetools inspect lmcache/standalone:nightly-${{ env.NOW }}
 
   nightly-verify-cpu-vllm:
     name: CPU device tests

@@ -163,7 +163,7 @@ class EventIPCBackend(Protocol):
 
 # Persist the reference to the IPC events for a while so that the inference engine
 # won't access the dangling references to the events.
-_EXPORTED_EVENT_RING_SIZE = 8192
+_EXPORTED_EVENT_RING_SIZE = 2048
 
 
 class DefaultEventIPCBackend(EventIPCBackend):

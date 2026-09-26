@@ -188,6 +188,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         direction,
         *,
         transfer_key,
+        block_ids_host=(),
     ):
         transfer_calls.append((object_group_id, list(memory_objs)))
 
