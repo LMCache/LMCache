@@ -60,7 +60,8 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
       ``base_path`` (default true). They stay readable either way (lookup
       checks the file), but only registered files count toward
       ``max_capacity_gb`` and can be evicted; unregistered ones persist
-      until removed by hand.
+      until removed by hand. Not applied with ``shared: true`` or
+      ``IsolatedLRU`` eviction (see ``_should_recover``).
     """
 
     def __init__(
@@ -153,7 +154,8 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "to enforce it\n"
             "- recover_on_start (bool): register the files already in "
             "base_path at startup so they count toward max_capacity_gb "
-            "and can be evicted (default true)"
+            "and can be evicted (default true; not applied with "
+            "shared: true or IsolatedLRU eviction)"
         )
 
 
@@ -161,14 +163,20 @@ def _scan_persisted_objects(base_path: str) -> list[PersistedObject]:
     """List the chunk files a previous process left in ``base_path``.
 
     The native connector writes one flat ``.data`` file per key, with the
-    same reversible name as the Python FS adapter. In-flight ``.tmp`` files
-    and names that do not decode to an ``ObjectKey`` are skipped. A file
-    removed between listing and ``stat`` is skipped too.
+    same reversible name as the Python FS adapter. Only regular files whose
+    name is exactly the canonical name of the key it decodes to are
+    reported: a foreign name that happens to parse would be deleted under a
+    different path, so it could never be evicted. In-flight ``.tmp`` files,
+    directories, symlinks, and entries that vanish or cannot be ``stat``-ed
+    are skipped. If ``base_path`` cannot be listed, recovery is skipped
+    (logged) rather than failing server startup: the files stay readable,
+    as before recovery existed.
     """
     # Lazy imports, as in the factory below, to avoid a circular dependency
     # First Party
     from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (  # noqa: PLC0415
         _filename_to_object_key,
+        _object_key_to_filename,
     )
     from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (  # noqa: E501, PLC0415
         PersistedObject,
@@ -177,19 +185,32 @@ def _scan_persisted_objects(base_path: str) -> list[PersistedObject]:
     start = time.monotonic()
     found: list[PersistedObject] = []
     skipped = 0
-    with os.scandir(base_path) as entries:
-        for entry in entries:
-            key = _filename_to_object_key(entry.name)
-            if key is None:
-                skipped += 1
-                continue
-            try:
-                stat = entry.stat(follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            found.append(
-                PersistedObject(key=key, size=stat.st_size, mtime=stat.st_mtime)
-            )
+    try:
+        with os.scandir(base_path) as entries:
+            for entry in entries:
+                key = _filename_to_object_key(entry.name)
+                if key is None or _object_key_to_filename(key) != entry.name:
+                    skipped += 1
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        skipped += 1
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                except OSError:
+                    skipped += 1
+                    continue
+                found.append(
+                    PersistedObject(key=key, size=stat.st_size, mtime=stat.st_mtime)
+                )
+    except OSError as e:
+        logger.error(
+            "fs_native: cannot list %s (%s); skipping restart recovery, so "
+            "files from earlier runs will not count toward max_capacity_gb",
+            base_path,
+            e,
+        )
+        return []
     logger.info(
         "fs_native: found %d persisted objects (%.2f GiB) in %s in %.1f s "
         "(%d entries skipped)",
@@ -255,10 +276,42 @@ def _create_fs_native_l2_adapter(
         },
         persisted_object_scanner=(
             (lambda: _scan_persisted_objects(config.base_path))
-            if config.recover_on_start
+            if _should_recover(config)
             else None
         ),
     )
+
+
+def _should_recover(config: FSNativeL2AdapterConfig) -> bool:
+    """Whether to register files from earlier runs at startup.
+
+    Skipped, with a warning, where registering them would let this process
+    delete files it must not:
+
+    - ``shared: true``: other live instances use the same directory, and
+      this process would evict files they are serving.
+    - ``IsolatedLRU`` eviction: quotas are registered over HTTP after
+      startup, and a cache_salt without a quota is evicted entirely on the
+      first pass, so every recovered salted file would be deleted.
+    """
+    if not config.recover_on_start:
+        return False
+    if config.shared:
+        logger.warning(
+            "fs_native: recover_on_start skipped for shared base_path %s: "
+            "another instance may be serving those files",
+            config.base_path,
+        )
+        return False
+    eviction = config.eviction_config
+    if eviction is not None and eviction.eviction_policy == "IsolatedLRU":
+        logger.warning(
+            "fs_native: recover_on_start skipped for %s: IsolatedLRU would "
+            "evict recovered files before their quotas are registered",
+            config.base_path,
+        )
+        return False
+    return True
 
 
 register_l2_adapter_type("fs_native", FSNativeL2AdapterConfig)

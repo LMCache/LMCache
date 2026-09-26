@@ -835,21 +835,25 @@ class StorageManager:
             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
             for listener in self._registered_l2_listeners:
                 adapter.register_listener(listener)
+            eviction_state = None
+            if self._should_enable_l2_eviction(adapter, config.eviction_config):
+                assert config.eviction_config is not None  # make linter happy
+                # Constructing the state registers its policy listener.
+                eviction_state = L2AdapterEvictionState(
+                    adapter_id=adapter_id,
+                    adapter=adapter,
+                    eviction_config=config.eviction_config,
+                )
+            # Recover once every listener is registered but before any
+            # controller can issue stores, loads, or deletes against it.
+            self._recover_persisted_objects(adapter_id, adapter)
             with self._adapters_lock:
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
             self._store_controller.add_adapter(adapter_id, adapter, descriptor)
             self._prefetch_controller.add_adapter(adapter_id, adapter, descriptor)
-            if self._should_enable_l2_eviction(adapter, config.eviction_config):
-                assert config.eviction_config is not None  # make linter happy
-                self._l2_eviction_controller.add_adapter_state(
-                    L2AdapterEvictionState(
-                        adapter_id=adapter_id,
-                        adapter=adapter,
-                        eviction_config=config.eviction_config,
-                    )
-                )
-            self._recover_persisted_objects(adapter_id, adapter)
+            if eviction_state is not None:
+                self._l2_eviction_controller.add_adapter_state(eviction_state)
             logger.info("Added L2 adapter %d (%s)", adapter_id, descriptor.type_name)
             self._publish_capacity_changed()
             return adapter_id

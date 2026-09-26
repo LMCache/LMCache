@@ -9,6 +9,7 @@ to a full cap on every restart.
 
 # Standard
 from pathlib import Path
+from unittest.mock import patch
 import argparse
 import json
 import os
@@ -21,10 +22,16 @@ import pytest
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.eviction import L2EvictionPolicy
 from lmcache.v1.distributed.eviction_policy.lru import LRUEvictionPolicy
+from lmcache.v1.distributed.l2_adapters import fs_native_l2_adapter
+from lmcache.v1.distributed.l2_adapters.config import (
+    add_l2_adapters_args,
+    parse_args_to_l2_adapters_config,
+)
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import _object_key_to_filename
 from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
     FSNativeL2AdapterConfig,
     _scan_persisted_objects,
+    _should_recover,
 )
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
@@ -47,6 +54,18 @@ def make_key(chunk_id: int, cache_salt: str = "") -> ObjectKey:
         kv_rank=0x08000800,
         cache_salt=cache_salt,
     )
+
+
+def parse_spec(spec: dict) -> FSNativeL2AdapterConfig:
+    """Parse an adapter spec through the server's own --l2-adapter path, which
+    also attaches ``shared`` and the ``eviction`` block."""
+    parser = argparse.ArgumentParser()
+    add_l2_adapters_args(parser)
+    config = parse_args_to_l2_adapters_config(
+        parser.parse_args(["--l2-adapter", json.dumps(spec)])
+    ).adapters[0]
+    assert isinstance(config, FSNativeL2AdapterConfig)
+    return config
 
 
 def write_chunk_file(base: Path, key: ObjectKey, size: int, mtime: float) -> Path:
@@ -87,6 +106,72 @@ class TestScanPersistedObjects:
         (tmp_path / "subdir.data").mkdir()
 
         assert [obj.key for obj in _scan_persisted_objects(str(tmp_path))] == [key]
+
+    def test_skips_directories_and_symlinks_with_chunk_names(self, tmp_path):
+        """Only regular files count, even when a name decodes to a valid key."""
+        key = make_key(1)
+        write_chunk_file(tmp_path, key, 4096, 1000.0)
+        (tmp_path / _object_key_to_filename(make_key(2))).mkdir()
+        target = tmp_path / "elsewhere"
+        target.write_bytes(b"\0" * 4096)
+        (tmp_path / _object_key_to_filename(make_key(3))).symlink_to(target)
+
+        assert [obj.key for obj in _scan_persisted_objects(str(tmp_path))] == [key]
+
+    def test_skips_names_that_are_not_canonical(self, tmp_path):
+        """A name that parses but is not the key's canonical filename is skipped:
+        eviction would delete the canonical path and never free this file."""
+        key = make_key(1)
+        canonical = _object_key_to_filename(key)
+        (tmp_path / canonical.replace("@0x08000800@", "@0x8000800@")).write_bytes(b"x")
+
+        assert _scan_persisted_objects(str(tmp_path)) == []
+
+    def test_unlistable_base_path_recovers_nothing(self, tmp_path):
+        """A listing error skips recovery (logged) instead of failing startup."""
+        write_chunk_file(tmp_path, make_key(1), 4096, 1000.0)
+        with (
+            patch.object(
+                fs_native_l2_adapter.os,
+                "scandir",
+                side_effect=PermissionError("denied"),
+            ),
+            patch.object(fs_native_l2_adapter.logger, "error") as error,
+        ):
+            assert _scan_persisted_objects(str(tmp_path)) == []
+        error.assert_called_once()
+
+
+# =============================================================================
+# When recovery applies
+# =============================================================================
+
+
+class TestShouldRecover:
+    BASE = {
+        "type": "fs_native",
+        "base_path": "/d",
+        "max_capacity_gb": 1,
+        "eviction": {"eviction_policy": "LRU"},
+    }
+
+    def test_exclusive_directory_with_lru_recovers(self):
+        assert _should_recover(parse_spec(self.BASE)) is True
+
+    def test_disabled_by_config(self):
+        assert (
+            _should_recover(parse_spec({**self.BASE, "recover_on_start": False}))
+            is False
+        )
+
+    def test_shared_directory_is_not_recovered(self):
+        """Another live instance may be serving files in a shared directory."""
+        assert _should_recover(parse_spec({**self.BASE, "shared": True})) is False
+
+    def test_isolated_lru_is_not_recovered(self):
+        """IsolatedLRU would wipe recovered salts before their quotas exist."""
+        spec = {**self.BASE, "eviction": {"eviction_policy": "IsolatedLRU"}}
+        assert _should_recover(parse_spec(spec)) is False
 
 
 # =============================================================================
@@ -213,24 +298,8 @@ class TestRecoverOnStartConfig:
 # =============================================================================
 
 
-def _storage_manager(base_path: Path, capacity_gb: float, recover: bool):
-    # First Party
-    from lmcache.v1.distributed.config import (  # noqa: PLC0415
-        EvictionConfig,
-        L1ManagerConfig,
-        L1MemoryManagerConfig,
-        StorageManagerConfig,
-    )
-    from lmcache.v1.distributed.l2_adapters.config import (  # noqa: PLC0415
-        add_l2_adapters_args,
-        parse_args_to_l2_adapters_config,
-    )
-    from lmcache.v1.distributed.storage_manager import StorageManager  # noqa: PLC0415
-    from tests.v1.distributed.utils import should_use_lazy_alloc  # noqa: PLC0415
-
-    # The server's own --l2-adapter parse path, which attaches the
-    # eviction block that from_dict() alone leaves unset.
-    spec = {
+def _adapter_spec(base_path: Path, capacity_gb: float, recover: bool) -> dict:
+    return {
         "type": "fs_native",
         "base_path": str(base_path),
         "max_capacity_gb": capacity_gb,
@@ -241,11 +310,23 @@ def _storage_manager(base_path: Path, capacity_gb: float, recover: bool):
             "eviction_ratio": 0.5,
         },
     }
-    parser = argparse.ArgumentParser()
-    add_l2_adapters_args(parser)
-    l2_config = parse_args_to_l2_adapters_config(
-        parser.parse_args(["--l2-adapter", json.dumps(spec)])
+
+
+def _storage_manager(specs: list[dict]):
+    # First Party
+    from lmcache.v1.distributed.config import (  # noqa: PLC0415
+        EvictionConfig,
+        L1ManagerConfig,
+        L1MemoryManagerConfig,
+        StorageManagerConfig,
     )
+    from lmcache.v1.distributed.l2_adapters.config import (  # noqa: PLC0415
+        L2AdaptersConfig,
+    )
+    from lmcache.v1.distributed.storage_manager import StorageManager  # noqa: PLC0415
+    from tests.v1.distributed.utils import should_use_lazy_alloc  # noqa: PLC0415
+
+    l2_config = L2AdaptersConfig(adapters=[parse_spec(spec) for spec in specs])
     return StorageManager(
         StorageManagerConfig(
             l1_manager_config=L1ManagerConfig(
@@ -262,6 +343,15 @@ def _storage_manager(base_path: Path, capacity_gb: float, recover: bool):
             l2_adapter_config=l2_config,
         )
     )
+
+
+def _wait_until(condition, timeout: float = 10.0) -> bool:
+    deadline = time.time() + timeout
+    while not condition():
+        if time.time() > deadline:
+            return False
+        time.sleep(0.2)
+    return True
 
 
 def _usage(storage_manager) -> int:
@@ -285,8 +375,19 @@ def leftover_files(tmp_path):
 class TestStorageManagerRestartRecovery:
     def test_leftover_files_are_accounted(self, tmp_path, leftover_files):
         """A new process counts the previous process's files toward its cap."""
-        sm = _storage_manager(tmp_path, capacity_gb=1, recover=True)
+        sm = _storage_manager([_adapter_spec(tmp_path, 1, recover=True)])
         try:
+            assert _usage(sm) == 4 * 1024 * 1024
+        finally:
+            sm.close()
+
+    def test_runtime_added_adapter_accounts_leftover_files(
+        self, tmp_path, leftover_files
+    ):
+        """add_l2_adapter recovers too, before the adapter serves traffic."""
+        sm = _storage_manager([])
+        try:
+            sm.add_l2_adapter(parse_spec(_adapter_spec(tmp_path, 1, recover=True)))
             assert _usage(sm) == 4 * 1024 * 1024
         finally:
             sm.close()
@@ -296,22 +397,21 @@ class TestStorageManagerRestartRecovery:
     ):
         """Over the cap, eviction deletes leftover files, oldest first."""
         # 4 MiB on disk against a 4.2 MiB cap: 95% > the 0.9 watermark.
-        sm = _storage_manager(tmp_path, capacity_gb=4.2 / 1024, recover=True)
+        sm = _storage_manager([_adapter_spec(tmp_path, 4.2 / 1024, recover=True)])
         try:
-            deadline = time.time() + 10
-            while leftover_files[0].exists() and time.time() < deadline:
-                time.sleep(0.2)
-            assert not leftover_files[0].exists()
+            assert _wait_until(lambda: not leftover_files[0].exists())
             assert leftover_files[3].exists()
-            assert _usage(sm) == sum(
-                p.stat().st_size for p in leftover_files if p.exists()
+            # Unlinks precede the batch's accounting update; wait for both to settle.
+            assert _wait_until(
+                lambda: _usage(sm)
+                == sum(p.stat().st_size for p in leftover_files if p.exists())
             )
         finally:
             sm.close()
 
     def test_recovery_disabled_leaves_files_unaccounted(self, tmp_path, leftover_files):
         """With recover_on_start false, usage starts at zero and files stay."""
-        sm = _storage_manager(tmp_path, capacity_gb=4.2 / 1024, recover=False)
+        sm = _storage_manager([_adapter_spec(tmp_path, 4.2 / 1024, recover=False)])
         try:
             time.sleep(2)  # two eviction-loop passes
             assert _usage(sm) == 0
