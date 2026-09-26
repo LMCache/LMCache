@@ -1,0 +1,58 @@
+name: Native connector ThreadSanitizer
+
+on:
+  push:
+    branches:
+      - "dev"
+      - "release-**"
+    paths:
+      - 'csrc/storage_backends/**'
+      - '.github/workflows/native_tsan.yml' # This workflow
+  pull_request:
+    branches:
+      - "dev"
+      - "release-**"
+    paths:
+      - 'csrc/storage_backends/**'
+      - '.github/workflows/native_tsan.yml' # This workflow
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  tsan:
+    name: ThreadSanitizer (FS connector)
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Harden Runner"
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: true
+          egress-policy: audit
+
+      - name: "Checkout"
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      # ConnectorBase and the FS connector pull in no pybind and no torch, so
+      # the batched submit / worker pool / completion path builds on its own.
+      - name: "Build instrumented test"
+        run: |
+          g++ -std=c++17 -fsanitize=thread -g -O1 \
+              -I csrc/storage_backends \
+              csrc/storage_backends/tests/tsan_batch_completion.cpp \
+              csrc/storage_backends/fs/connector.cpp \
+              -o tsan_batch_completion -lpthread
+
+      # setarch -R disables ASLR: without it ThreadSanitizer aborts with
+      # "unexpected memory mapping" on 6.x kernels.
+      - name: "Run"
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: |
+          mkdir -p "${RUNNER_TEMP}/tsan-store"
+          setarch "$(uname -m)" -R ./tsan_batch_completion \
+              "${RUNNER_TEMP}/tsan-store"
