@@ -37,6 +37,8 @@ class L2MetricsSubscriber(EventSubscriber):
     - ``lmcache_mp.l2_store_submitted_objects`` — chunks submitted for L2 store
     - ``lmcache_mp.l2_store_completed`` — store requests completed (attr: ``l2_name``)
     - ``lmcache_mp.l2_store_completed_objects`` — chunks successfully stored to L2
+    - ``lmcache_mp.l2_store_bytes`` — bytes the adapter reported writing
+      (attr: ``l2_name``)
     - ``lmcache_mp.l2_load_completed`` — per-adapter load tasks completed
       (attr: ``l2_name``)
     - ``lmcache_mp.l2_prefetch_lookup`` — prefetch lookup requests
@@ -74,6 +76,13 @@ class L2MetricsSubscriber(EventSubscriber):
             "lmcache_mp.l2_store_completed_objects",
             description="Total chunks successfully stored to L2",
             unit="chunks",
+        )
+        # Keys an adapter skips (already stored) add 0 bytes.
+        self._store_bytes = meter.create_counter(
+            "lmcache_mp.l2_store_bytes",
+            description="Total bytes written to L2 by successful store tasks "
+            "(per-adapter, as reported by the adapter)",
+            unit="By",
         )
 
         # Per-adapter load task counter (for IOPS via rate()).
@@ -147,6 +156,9 @@ class L2MetricsSubscriber(EventSubscriber):
     def _on_store_completed(self, event: Event) -> None:
         attrs = _l2_name_attrs(event)
         self._store_completed.add(1, attributes=attrs)
+        bytes_written = int(event.metadata.get("bytes_transferred", 0))
+        if bytes_written > 0:
+            self._store_bytes.add(bytes_written, attributes=attrs)
         emit_salt_counts(
             self._store_completed_objects,
             event.metadata.get("key_count_per_salt", {}),

@@ -156,8 +156,23 @@ contribute to histograms; counters above always count all events.
 | `lmcache_mp.l2_store_submitted_objects` | `lmcache_mp_l2_store_submitted_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_STORE_SUBMITTED` | `+count` per `cache_salt` via `key_count_per_salt` |
 | `lmcache_mp.l2_store_completed` | `lmcache_mp_l2_store_completed_requests_total` | Counter (attr: `l2_name`) | `L2_STORE_COMPLETED` | +1 per event |
 | `lmcache_mp.l2_store_completed_objects` | `lmcache_mp_l2_store_completed_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_STORE_COMPLETED` | `+count` per `cache_salt` via `key_count_per_salt` |
+| `lmcache_mp.l2_store_bytes` | `lmcache_mp_l2_store_bytes_total` | Counter (attr: `l2_name`) | `L2_STORE_COMPLETED` | `+bytes_transferred` per successful event |
 
 **What it answers:** How many chunks are being pushed to L2? What fraction fail?
+How many bytes does each backend actually write?
+
+**Write volume and endurance.**  `l2_store_bytes` counts the bytes the adapter
+reports in `L2StoreResult.bytes_transferred`, so keys the adapter skips because
+they are already stored add nothing, and failed tasks add nothing.  This is the
+number that wears flash, unlike `total_bytes` on `L2_STORE_SUBMITTED`, which
+is what was offered.  Drive writes per day for a backend that owns a device of
+`C` bytes:
+
+```promql
+increase(lmcache_mp_l2_store_bytes_total{l2_name="fs"}[1d]) / C
+```
+
+Adapters that do not report `bytes_transferred` (it stays `0`) are undercounted.
 
 ---
 

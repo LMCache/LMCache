@@ -504,6 +504,58 @@ class TestL2NameLabeledCounters:
         assert after.get(nixl_key, 0) == before.get(nixl_key, 0) + 2
 
 
+def _store_completed_event(
+    l2_name: str, succeeded: int, bytes_transferred: int
+) -> Event:
+    return Event(
+        event_type=EventType.L2_STORE_COMPLETED,
+        metadata={
+            "adapter_index": 0,
+            "task_id": 1,
+            "l2_name": l2_name,
+            "bytes_transferred": bytes_transferred,
+            "succeeded_count": succeeded,
+            "failed_count": 0 if succeeded else 1,
+        },
+    )
+
+
+class TestL2StoreBytes:
+    """``l2_store_bytes`` sums the bytes each adapter reports writing."""
+
+    def test_bytes_accumulate_per_l2_name(self, bus, subscriber):
+        bus.start()
+        before = _read_counters_by_attrs().get("lmcache_mp.l2_store_bytes", {})
+        bus.publish(_store_completed_event("fs", 4, 4_096))
+        bus.publish(_store_completed_event("fs", 2, 2_048))
+        bus.publish(_store_completed_event("nixl_store", 1, 1_000))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs().get("lmcache_mp.l2_store_bytes", {})
+        fs_key = (("l2_name", "fs"),)
+        nixl_key = (("l2_name", "nixl_store"),)
+        assert after.get(fs_key, 0) - before.get(fs_key, 0) == 6_144
+        assert after.get(nixl_key, 0) - before.get(nixl_key, 0) == 1_000
+
+    @pytest.mark.parametrize(
+        ("succeeded", "bytes_transferred"),
+        [(0, 0), (3, 0)],
+        ids=["failed_store", "all_keys_already_stored"],
+    )
+    def test_no_bytes_counted_without_a_write(
+        self, bus, subscriber, succeeded, bytes_transferred
+    ):
+        bus.start()
+        before = _read_counters_by_attrs().get("lmcache_mp.l2_store_bytes", {})
+        bus.publish(_store_completed_event("fs", succeeded, bytes_transferred))
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs().get("lmcache_mp.l2_store_bytes", {})
+        assert after == before
+
+
 # ---------------------------------------------------------------------------
 # Accumulation across multiple events
 # ---------------------------------------------------------------------------
