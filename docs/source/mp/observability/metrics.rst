@@ -184,6 +184,11 @@ L2 Metrics
    * - ``lmcache_mp.l2_store_completed_objects``
      - Counter (attr: ``cache_salt``)
      - Number of chunks successfully stored to L2, grouped by tenant.
+   * - ``lmcache_mp.l2_store_bytes``
+     - Counter (attr: ``l2_name``)
+     - Bytes written to L2 by successful store tasks, as reported by the
+       adapter. Keys the adapter skips because they are already stored add
+       nothing.
    * - ``lmcache_mp.l2_prefetch_lookup``
      - Counter
      - Number of L2 prefetch lookup requests.
@@ -215,6 +220,13 @@ The ``l2_name``-labeled counters (``l2_store_completed`` and
 demand via ``rate(lmcache_mp_l2_store_completed_requests_total{l2_name="..."}[1m])``
 (and the equivalent for loads).  No separate ``*_iops`` metric is exported;
 keeping the raw counter lets dashboard users pick their own window.
+
+``lmcache_mp.l2_store_bytes`` gives the write volume per backend. For a
+backend on a flash device of ``C`` bytes, drive writes per day (DWPD) is:
+
+.. code-block:: text
+
+   increase(lmcache_mp_l2_store_bytes_total{l2_name="fs"}[1d]) / C
 
 Failure & Health Counters
 ~~~~~~~~~~~~~~~~~~~~~~~~~
