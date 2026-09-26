@@ -252,6 +252,9 @@ def parse_mixed_slot_mapping(
                     raise ValueError(f"Invalid slot format: '{part}'") from ve
 
         # Decompress to individual slot indices
+        if not compressed:
+            raise ValueError("No slots specified")
+
         slot_indices = decompress_slot_mapping(compressed)
         return slot_indices, None
 
