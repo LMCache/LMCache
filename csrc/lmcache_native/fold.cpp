@@ -23,13 +23,27 @@ Bitmap fold(const Bitmap& found, size_t num_chunks, size_t num_ranks,
   // length-L prefix needs the last ``min(window, L)`` chunks present, i.e.
   // ``run >= min(window, L)``.
   std::vector<char> servable(num_chunks, 1);
+  size_t num_prefixes = num_chunks;
   for (size_t g = 0; g < num_groups; ++g) {
     const int64_t window = group_windows[g];
-    const size_t eff_window =
-        (window <= 0) ? num_chunks : static_cast<size_t>(window);
     const size_t gbase = g * num_ranks;
+    if (window <= 0) {
+      // A full-attention gap invalidates this and every longer prefix,
+      // including for groups that have not been checked yet.
+      for (size_t prefix_len = 1; prefix_len <= num_prefixes; ++prefix_len) {
+        const size_t cbase = (prefix_len - 1) * chunk_stride + gbase;
+        for (size_t r = 0; r < num_ranks; ++r) {
+          if (!found.test(cbase + r)) {
+            num_prefixes = prefix_len - 1;
+            break;
+          }
+        }
+      }
+      continue;
+    }
+    const size_t eff_window = static_cast<size_t>(window);
     size_t run = 0;
-    for (size_t prefix_len = 1; prefix_len <= num_chunks; ++prefix_len) {
+    for (size_t prefix_len = 1; prefix_len <= num_prefixes; ++prefix_len) {
       const size_t cbase = (prefix_len - 1) * chunk_stride + gbase;
       bool chunk_present = true;
       for (size_t r = 0; r < num_ranks; ++r) {
@@ -39,14 +53,14 @@ Bitmap fold(const Bitmap& found, size_t num_chunks, size_t num_ranks,
         }
       }
       run = chunk_present ? run + 1 : 0;
-      if (servable[prefix_len - 1] && run < std::min(eff_window, prefix_len)) {
+      if (run < eff_window && run < prefix_len) {
         servable[prefix_len - 1] = 0;
       }
     }
   }
 
   Bitmap servable_lengths(num_chunks);
-  for (size_t j = 0; j < num_chunks; ++j) {
+  for (size_t j = 0; j < num_prefixes; ++j) {
     if (servable[j]) servable_lengths.set(j);
   }
   return servable_lengths;

@@ -459,6 +459,59 @@ def _expected_retained_indices(hit, num_chunks, num_ranks, group_windows):
     return sorted(indices)
 
 
+@pytest.mark.parametrize("num_chunks", [0, 1, 9, 65])
+@pytest.mark.parametrize("num_ranks", [1, 2, 3, 8])
+@pytest.mark.parametrize("group_windows", [[-1], [0, -7], [0, -1, -2]])
+def test_full_attention_first_missing_shard(
+    num_chunks: int, num_ranks: int, group_windows: list[int]
+) -> None:
+    stride = len(group_windows) * num_ranks
+    num_keys = num_chunks * stride
+    gaps = (
+        range(num_keys + 1)
+        if num_chunks <= 9
+        else {
+            0,
+            1,
+            7,
+            8,
+            63,
+            64,
+            stride - 1,
+            stride,
+            num_keys // 2,
+            num_keys - 1,
+            num_keys,
+        }
+    )
+    for gap in gaps:
+        found = Bitmap(num_keys, num_keys)
+        found.clear(gap)
+        expected = _fold_python(found, num_chunks, num_ranks, group_windows)
+        actual = fold(found, num_chunks, num_ranks, group_windows)
+        assert actual.get_indices_list() == expected.get_indices_list()
+        hit, retained = fold_unfold_ranked(found, num_chunks, num_ranks, group_windows)
+        assert hit == gap // stride
+        assert retained.get_indices_list() == list(range(hit * stride))
+        assert found.popcount() == num_keys - (gap < num_keys)
+
+
+@pytest.mark.parametrize("num_ranks", [1, 2, 3])
+@pytest.mark.parametrize("group_windows", [[0, 4], [4, 0], [2, -1, 3]])
+def test_full_attention_gap_caps_windowed_prefixes(
+    num_ranks: int, group_windows: list[int]
+) -> None:
+    num_chunks = 9
+    num_keys = num_chunks * len(group_windows) * num_ranks
+    for gap in range(num_keys + 1):
+        found = Bitmap(num_keys, num_keys)
+        found.clear(gap)
+        expected = _fold_python(found, num_chunks, num_ranks, group_windows)
+        actual = fold(found, num_chunks, num_ranks, group_windows)
+        assert actual.get_indices_list() == expected.get_indices_list()
+        assert found.popcount() == num_keys - (gap < num_keys)
+
+
 class TestEndToEndAgainstVllmStyleReference:
     """Drive the full fold/highest_set_bit/unfold pipeline and compare the
     hit length and retain mask against an independent vLLM-style oracle."""
