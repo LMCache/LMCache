@@ -55,6 +55,7 @@ class ARCEvictionPolicy(EvictionPolicy):
         self._t2: OrderedDict[ObjectKey, None] = OrderedDict()
         self._b1: OrderedDict[ObjectKey, None] = OrderedDict()
         self._b2: OrderedDict[ObjectKey, None] = OrderedDict()
+        self._pending_admissions: set[ObjectKey] = set()
         self._pending_evictions: set[ObjectKey] = set()
         self._target_t1_size = 0.0
         self._capacity = 0
@@ -74,10 +75,9 @@ class ARCEvictionPolicy(EvictionPolicy):
     def on_keys_created(self, keys: list[ObjectKey]) -> None:
         """Track newly resident keys and apply ghost-history feedback.
 
-        Existing resident keys are treated as accesses because the MP listener
-        currently reports both newly created and updated keys through this
-        callback. Keys are processed in reverse request order so later suffix
-        chunks remain earlier eviction candidates, matching the MP LRU policy.
+        Existing resident keys are treated as accesses. Keys are processed in
+        reverse request order so later suffix chunks remain earlier eviction
+        candidates, matching the MP LRU policy.
 
         Args:
             keys: Keys that became resident after a completed write.
@@ -87,6 +87,9 @@ class ARCEvictionPolicy(EvictionPolicy):
         with self._lock:
             for key in reversed(keys):
                 self._pending_evictions.discard(key)
+                if key in self._pending_admissions:
+                    self._pending_admissions.remove(key)
+                    continue
                 if key in self._t1:
                     del self._t1[key]
                     self._t2[key] = None
@@ -111,6 +114,41 @@ class ARCEvictionPolicy(EvictionPolicy):
                 else:
                     self._remove_key(key)
                     self._t1[key] = None
+
+                self._capacity = max(self._capacity, self._resident_size())
+                self._trim_ghost_lists()
+
+    def on_keys_reserved(self, keys: list[ObjectKey]) -> None:
+        """Track reserved keys without treating admission as an access.
+
+        Reservations are placed in ``T1`` immediately so abandoned writes
+        remain eligible for eviction. A later admission notification for the
+        same key leaves it in ``T1``; explicit touches still promote it to
+        ``T2``.
+
+        Args:
+            keys: Keys reserved for creation.
+        """
+        if not keys:
+            return
+        with self._lock:
+            for key in reversed(keys):
+                self._pending_evictions.discard(key)
+                self._pending_admissions.add(key)
+                if key in self._b1:
+                    self._target_t1_size = min(
+                        self._capacity,
+                        self._target_t1_size
+                        + self._adaptation_delta(self._b1, self._b2),
+                    )
+                elif key in self._b2:
+                    self._target_t1_size = max(
+                        0.0,
+                        self._target_t1_size
+                        - self._adaptation_delta(self._b2, self._b1),
+                    )
+                self._remove_key(key)
+                self._t1[key] = None
 
                 self._capacity = max(self._capacity, self._resident_size())
                 self._trim_ghost_lists()
@@ -149,6 +187,7 @@ class ARCEvictionPolicy(EvictionPolicy):
                     self._retire(key)
                 else:
                     self._remove_key(key)
+                self._pending_admissions.discard(key)
                 self._pending_evictions.discard(key)
             self._trim_ghost_lists()
 
