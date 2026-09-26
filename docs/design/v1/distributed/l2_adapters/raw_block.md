@@ -137,8 +137,8 @@ Rules:
 - recovery by loading the latest durable checkpoint and rebuilding the in-memory
   index
 - POSIX recovery validates per-slot headers with an internal pool of 8 reader
-  threads. Regular `io_uring` batches header reads up to
-  `iouring_queue_depth`, while `io_uring_cmd` keeps serial validation.
+  threads. Both regular `io_uring` and `io_uring_cmd` batch header reads up to
+  `iouring_queue_depth`.
 
 The on-device format is intentionally unchanged by the MP adapter work.
 
