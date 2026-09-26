@@ -39,20 +39,22 @@ All client commands use a `--url` flag pointing to the **LMCache HTTP server**
 ### `lmcache server`
 
 Replaces `python3 -m lmcache.v1.multiprocess.http_server`. Runs in foreground,
-Ctrl-C to stop. HTTP frontend is enabled by default; use `--no-http` to run
-the request server without the HTTP frontend.
+Ctrl-C to stop. The HTTP frontend is always on under this subcommand; the
+frontend-less form (request server only) is `python3 -m
+lmcache.v1.multiprocess.server`, which composes the same argument groups
+minus `add_http_frontend_args()`.
 
 ```bash
 lmcache server \
     --engine-type blend --host 0.0.0.0 --port 5555 \
     --max-gpu-workers 2 \
-    --l1-size-gb 60 --eviction-policy LRU \
-    --no-http  # opt out of HTTP frontend
+    --l1-size-gb 60 --eviction-policy LRU
 ```
 
-Server args are composed from existing helpers: `add_mp_server_args()`,
-`add_storage_manager_args()`, `add_prometheus_args()`, `add_telemetry_args()`,
-`add_http_frontend_args()`.
+Server args are composed from existing helpers (see
+`lmcache/cli/commands/server.py:add_arguments`): `add_mp_server_args()`,
+`add_p2p_args()`, `add_storage_manager_args()`, `add_http_frontend_args()`,
+`add_observability_args()`, `add_coordinator_args()`.
 
 ### `lmcache coordinator`
 
