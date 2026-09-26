@@ -187,13 +187,23 @@ def test_context_keeps_submission_until_completion_and_closes_in_order(
     ctx.initialize(GdsL1Config(file_location="device://slab", size_in_bytes=4096))
     stream = Mock(cuda_stream=7)
     event = Mock()
-    event.query.return_value = False
-    monkeypatch.setattr(gds_context.torch_dev, "current_stream", lambda: stream)
-    monkeypatch.setattr(gds_context.torch_dev, "Event", lambda: event)
+    event.is_complete.return_value = False
+    record_completion = Mock(return_value=event)
     monkeypatch.setattr(
-        gds_context.torch_dev,
-        "synchronize",
-        lambda **kw: backend.calls.append("synchronize"),
+        gds_context.platform_stream, "current_stream", lambda device: stream
+    )
+    monkeypatch.setattr(
+        gds_context.platform_stream,
+        "stream_handle",
+        lambda device, stream: stream.cuda_stream,
+    )
+    monkeypatch.setattr(
+        gds_context.platform_stream, "record_completion_event", record_completion
+    )
+    monkeypatch.setattr(
+        gds_context.platform_stream,
+        "synchronize_device",
+        lambda device: backend.calls.append("synchronize"),
     )
     monkeypatch.setattr(gds_context, "_SUBMISSION_CHECKPOINT_EVERY", 1)
     submissions: list[weakref.ReferenceType[Submission]] = []
@@ -221,8 +231,8 @@ def test_context_keeps_submission_until_completion_and_closes_in_order(
     memory.get_size.return_value = 4096
     ctx.transfer_async(memory, buf, direction)
     assert submissions[0]() is not None
-    event.record.assert_called_once_with(stream)
-    event.query.return_value = True
+    record_completion.assert_called_once_with(buf.device, stream)
+    event.is_complete.return_value = True
     ctx.transfer_async(memory, buf, direction)
     assert submissions[0]() is None
     ctx.close()

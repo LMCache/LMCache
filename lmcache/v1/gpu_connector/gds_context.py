@@ -26,12 +26,12 @@ import threading
 import torch
 
 # First Party
-from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.gpu_connector._gds_backends import create_backend
 from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend, GDSHandle, Submission
 from lmcache.v1.memory_management import GDSMemoryObject
+from lmcache.v1.platform import stream as platform_stream
 
 logger = init_logger(__name__)
 
@@ -64,7 +64,9 @@ class _StreamSubmissions:
     """
 
     uncommitted: list[Submission] = field(default_factory=list)
-    inflight: list[tuple[torch.Event, list[Submission]]] = field(default_factory=list)
+    inflight: list[tuple[platform_stream.CompletionEvent, list[Submission]]] = field(
+        default_factory=list
+    )
     ops_since_checkpoint: int = 0
 
 
@@ -159,7 +161,8 @@ class GDSContext:
         """
         if not self.initialized:
             return
-        raw_stream = torch_dev.current_stream().cuda_stream
+        stream = platform_stream.current_stream(buffer.device)
+        raw_stream = platform_stream.stream_handle(buffer.device, stream)
         buf = buffer.view(torch.uint8)
         nbytes = buf.numel()
         with self._registry_lock:
@@ -179,10 +182,10 @@ class GDSContext:
         """
         if not self.initialized:
             return
-        stream = torch_dev.current_stream()
-        raw_stream = stream.cuda_stream
+        stream = platform_stream.current_stream(buffer.device)
+        raw_stream = platform_stream.stream_handle(buffer.device, stream)
         # No in-flight DMA on this stream may still reference the buffer.
-        stream.synchronize()
+        platform_stream.synchronize_stream(buffer.device, stream)
         buf = buffer.view(torch.uint8)
         nbytes = buf.numel()
         with self._registry_lock:
@@ -221,6 +224,8 @@ class GDSContext:
                 ``get_size()`` bytes are transferred.
             direction: :attr:`SlabDirection.READ` or ``.WRITE``.
         """
+        stream = platform_stream.current_stream(gpu_buffer.device)
+        raw_stream = platform_stream.stream_handle(gpu_buffer.device, stream)
         slab_op = (
             self._slab_read if direction is SlabDirection.READ else self._slab_write
         )
@@ -230,13 +235,26 @@ class GDSContext:
         while pos < nbytes:
             base_ptr, dev_offset, region_nbytes = self._resolve_buffer(buf[pos:])
             seg_len = min(nbytes - pos, region_nbytes - dev_offset)
-            slab_op(memory_obj.slab_offset + pos, seg_len, dev_offset, base_ptr)
+            submission = slab_op(
+                memory_obj.slab_offset + pos,
+                seg_len,
+                dev_offset,
+                base_ptr,
+                raw_stream,
+            )
+            self._record_submission(
+                submission,
+                gpu_buffer.device,
+                stream,
+                raw_stream,
+            )
             pos += seg_len
 
     def close(self) -> None:
         """Sync the stream, deregister GDS state, and close the slab handle."""
-        if self._buffers:
-            torch_dev.synchronize(device=self._buffers[0].device)
+        devices = {str(buffer.device): buffer.device for buffer in self._buffers}
+        for device in devices.values():
+            platform_stream.synchronize_device(device)
         with self._submissions_lock:
             self._submissions.clear()
         # Deregister any regions/streams still live (per-instance teardown via
@@ -323,37 +341,47 @@ class GDSContext:
         return base, offset, nbytes
 
     def _slab_read(
-        self, slab_offset: int, size: int, dev_offset: int, buf_base: int
-    ) -> None:
+        self,
+        slab_offset: int,
+        size: int,
+        dev_offset: int,
+        buf_base: int,
+        stream_handle: int,
+    ) -> Submission:
         """Submit one async GDS read against the slab handle (stream-ordered)."""
         if self._slab_handle is None:
             raise RuntimeError("GDSContext._slab_read: slab handle not open")
-        stream_handle = torch_dev.current_stream().cuda_stream
-        sub = self._slab_handle.read_async(
+        return self._slab_handle.read_async(
             buf_base, size, slab_offset, dev_offset, stream_handle
         )
-        self._record_submission(sub)
 
     def _slab_write(
-        self, slab_offset: int, size: int, dev_offset: int, buf_base: int
-    ) -> None:
+        self,
+        slab_offset: int,
+        size: int,
+        dev_offset: int,
+        buf_base: int,
+        stream_handle: int,
+    ) -> Submission:
         """Submit one async GDS write against the slab handle (stream-ordered)."""
         if self._slab_handle is None:
             raise RuntimeError("GDSContext._slab_write: slab handle not open")
-        stream_handle = torch_dev.current_stream().cuda_stream
-        sub = self._slab_handle.write_async(
+        return self._slab_handle.write_async(
             buf_base, size, slab_offset, dev_offset, stream_handle
         )
-        self._record_submission(sub)
 
-    def _record_submission(self, sub: "Submission") -> None:
+    def _record_submission(
+        self,
+        sub: "Submission",
+        device: object,
+        stream: object,
+        raw_stream: int,
+    ) -> None:
         """Track an in-flight submission so its ctypes storage outlives the DMA.
 
-        Accumulated per (current) stream; every ``_SUBMISSION_CHECKPOINT_EVERY``
-        ops a GPU event is recorded and completed batches are released.
+        Accumulated per stream; every ``_SUBMISSION_CHECKPOINT_EVERY`` ops a
+        platform completion event is recorded and completed batches are released.
         """
-        stream = torch_dev.current_stream()
-        raw_stream = stream.cuda_stream
         with self._submissions_lock:
             st = self._submissions.get(raw_stream)
             if st is None:
@@ -361,23 +389,22 @@ class GDSContext:
             st.uncommitted.append(sub)
             st.ops_since_checkpoint += 1
             if st.ops_since_checkpoint >= _SUBMISSION_CHECKPOINT_EVERY:
-                self._checkpoint_submissions_locked(st, stream)
+                self._checkpoint_submissions_locked(st, device, stream)
 
     def _checkpoint_submissions_locked(
-        self, st: _StreamSubmissions, stream: "torch.Stream"
+        self, st: _StreamSubmissions, device: object, stream: object
     ) -> None:
-        """Close ``st``'s current batch behind a GPU event on ``stream`` and
+        """Close ``st``'s current batch behind a platform event on ``stream`` and
         drop earlier batches whose event has completed. Hold
         ``self._submissions_lock``.
         """
         if st.uncommitted:
-            event = torch_dev.Event()
-            event.record(stream)
+            event = platform_stream.record_completion_event(device, stream)
             st.inflight.append((event, st.uncommitted))
             st.uncommitted = []
         st.ops_since_checkpoint = 0
         st.inflight = [
-            (event, subs) for (event, subs) in st.inflight if not event.query()
+            (event, subs) for (event, subs) in st.inflight if not event.is_complete()
         ]
 
 
