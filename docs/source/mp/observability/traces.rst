@@ -229,15 +229,16 @@ A length-prefixed `msgpack <https://msgpack.org/>`_ stream:
     ...
 
 The ``Header`` carries a magic prefix (``LMCT``), a format version,
-the trace level (``storage`` today), a trace schema version, start
-timestamps, and the StorageManagerConfig digest. Each ``Record``
+the trace level (``storage`` or ``events``), a trace schema version,
+start timestamps, and the StorageManagerConfig digest. Each ``Record``
 carries a relative timestamp, a wall-clock timestamp, the
 fully-qualified call site (``qualname``), and an argument dict.
 
-The format is deliberately extensible: future trace **levels**
-(``mq``, ``gpu``) will share this layout and use the ``level`` header
-field to discriminate. Additional captured ops add new ``qualname``
-strings without bumping the format version.
+The format is deliberately extensible: further trace **levels**
+(``mq``, ``gpu``) would share this layout and use the ``level`` header
+field to discriminate, exactly as ``events`` already does alongside
+``storage``. Additional captured ops add new ``qualname`` strings
+without bumping the format version.
 
 Transfer phase sub-spans
 ^^^^^^^^^^^^^^^^^^^^^^^^

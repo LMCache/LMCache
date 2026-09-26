@@ -632,4 +632,4 @@ Key Source Files
    * - ``lmcache/v1/mp_observability/subscribers/``
      - Metrics, logging, and tracing subscribers
    * - ``lmcache/v1/mp_observability/trace/``
-     - Trace recording (``--trace-level storage``) capture stack
+     - Trace recording (``--trace-level {storage,events}``) capture stack
