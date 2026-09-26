@@ -238,13 +238,15 @@ know `chunk_size`:
   cannot hit at chunk granularity.
 - `hit_tokens = found_count * chunk_size`.
 - `l1_hit_tokens` and `l2_hit_tokens` split `hit_tokens` by the tier that
-  served it.  `l1_hit_tokens` comes from `PrefetchHandle.l1_hit_chunks` —
-  the prefix L1 alone could serve under each object group's attention
-  window rule — so a chunk whose out-of-window keys were never fetched is
-  still an L1 hit.  `l2_hit_tokens` is the remainder: how much further
-  `found_count` reached once L2 completed.  **Invariant:
-  `l1_hit_tokens + l2_hit_tokens == hit_tokens`, exactly, on every path**,
-  so a dashboard summing the two can never exceed 100%.
+  served it.  Both are derived at the `query_prefetch_status` emit site
+  from the new `PrefetchResult.l1_hit_count` / `l2_hit_count` popcounts
+  (cells L1 already held vs cells this task loaded from L2): the emit
+  divides `l1_hit_count` by the row count to get `l1_chunks`, clamps it to
+  `found_count` under each object group's attention-window rule (so a
+  chunk whose out-of-window keys were never fetched is still an L1 hit),
+  and takes `l2_chunks = found_count - l1_chunks` for the remainder.
+  **Invariant: `l1_hit_tokens + l2_hit_tokens == hit_tokens`, exactly, on
+  every path**, so a dashboard summing the two can never exceed 100%.
 - `early_exit_reason` names the branch of `lookup()` that returned before a
   prefetch task was submitted.  Always present; `""` on the normal path.
   Vocabulary:
