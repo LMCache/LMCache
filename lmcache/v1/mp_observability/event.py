@@ -44,7 +44,6 @@ class EventType(Enum):
 
     # L2 Prefetch Controller events
     L2_PREFETCH_LOOKUP_SUBMITTED = "l2.prefetch.lookup.submitted"
-    L2_PREFETCH_LOOKUP_COMPLETED = "l2.prefetch.lookup.completed"
     L2_PREFETCH_LOAD_SUBMITTED = "l2.prefetch.load.submitted"
     L2_PREFETCH_LOAD_COMPLETED = "l2.prefetch.load.completed"
     # Per-adapter load task events, for throughput correlation.  Fire once

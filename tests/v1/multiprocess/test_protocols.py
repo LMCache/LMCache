@@ -28,7 +28,6 @@ FROZEN_LEGACY_OPERATION_IDS = {
     "lookup": 8,
     "query_prefetch_status": 9,
     "wait_prefetch_status": 10,
-    "query_prefetch_lookup_hits": 11,
     "free_lookup_locks": 12,
     "end_session": 13,
     "register_kv_cache_engine_driven_context": 14,
@@ -94,7 +93,7 @@ def test_rpc_types_come_from_request_client_annotations() -> None:
     assert lookup.payload_types[1] is int
     assert lookup.response_type is type(None)
 
-    query = get_rpc_spec("query_prefetch_lookup_hits")
+    query = get_rpc_spec("query_prefetch_status")
     assert query.payload_types == (str,)
     assert query.response_type == int | None
 

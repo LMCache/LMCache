@@ -32,14 +32,6 @@ message WaitPrefetchStatusResponse {
   optional int64 chunk_count = 1;
 }
 
-message QueryPrefetchLookupHitsRequest {
-  string request_id = 1;
-}
-
-message QueryPrefetchLookupHitsResponse {
-  optional int64 chunk_count = 1;
-}
-
 message FreeLookupLocksRequest {
   IpcCacheServerKey key = 1;
   int64 tp_size = 2;
@@ -59,8 +51,6 @@ service LookupService {
       returns (QueryPrefetchStatusResponse);
   rpc WaitPrefetchStatus(WaitPrefetchStatusRequest)
       returns (WaitPrefetchStatusResponse);
-  rpc QueryPrefetchLookupHits(QueryPrefetchLookupHitsRequest)
-      returns (QueryPrefetchLookupHitsResponse);
   rpc FreeLookupLocks(FreeLookupLocksRequest) returns (FreeLookupLocksResponse);
   rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
 }
