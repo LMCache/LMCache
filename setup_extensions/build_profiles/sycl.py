@@ -43,6 +43,7 @@ class SyclProfile(BuildProfile):
 
         sycl_sources = [
             "csrc/sycl/pybind_sycl.cpp",
+            "csrc/sycl/host_register.cpp",
             "csrc/sycl/mem_kernels_sycl.cpp",
             "csrc/sycl/cal_cdf_sycl.cpp",
             "csrc/sycl/pos_kernels_sycl.cpp",
