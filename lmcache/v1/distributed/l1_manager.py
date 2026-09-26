@@ -49,6 +49,10 @@ class L1ObjectState:
     is_temporary: bool
     """ Whether the object is temporary (need to be deleted after read). """
 
+    write_back_hold: TTLLock
+    """ Held until write-back listeners have seen the object; while held the
+    object is not evictable. Explicit deletes ignore it. """
+
 
 def l1_mgr_synchronized(func):
     """
@@ -204,6 +208,9 @@ class L1Manager:
         self._read_ttl_seconds = config.read_ttl_seconds
 
         self._registered_listeners: list[L1ManagerListener] = []
+        # Subset of ``_registered_listeners`` that get a write-back hold on
+        # every key reported through ``on_l1_keys_write_finished``.
+        self._write_back_listeners: list[L1ManagerListener] = []
 
         self._event_bus = get_event_bus()
 
@@ -241,6 +248,46 @@ class L1Manager:
         """
         with self._lock:
             self._registered_listeners.append(listener)
+
+    def register_write_back_listener(self, listener: L1ManagerListener) -> None:
+        """Register a listener that must see every written key while resident.
+
+        Behaves like :meth:`register_listener`, and additionally every key
+        reported to ``listener.on_l1_keys_write_finished`` carries one
+        write-back hold, taken atomically with admission. While any hold is
+        outstanding, :meth:`is_key_evictable` returns False, so the eviction
+        controller skips the key until the listener calls
+        :meth:`release_write_back_holds`. Explicit :meth:`delete` calls are
+        not affected. This closes the window between a write finishing and
+        an asynchronous consumer (the L2 store controller) reserving the
+        key, in which eviction would silently drop data that was never
+        written back.
+
+        Args:
+            listener: The listener to register. It must release the hold of
+                every key it is notified about, or the key stays unevictable
+                until the hold's TTL (the read-lock TTL) expires.
+        """
+        with self._lock:
+            self._registered_listeners.append(listener)
+            self._write_back_listeners.append(listener)
+
+    @l1_mgr_synchronized
+    def release_write_back_holds(self, keys: list[ObjectKey]) -> None:
+        """Release one write-back hold per key.
+
+        Pairs with :meth:`register_write_back_listener`. Publishes no
+        events: a hold is neither a read nor a lock readers can observe.
+
+        Args:
+            keys: Keys previously reported to a write-back listener. Keys
+                that are gone or whose hold already expired are skipped.
+        """
+        for key in keys:
+            entry = self._objects.get(key, None)
+            if entry is None or not entry.write_back_hold.is_locked():
+                continue
+            entry.write_back_hold.unlock()
 
     @l1_mgr_synchronized
     def reserve_read(
@@ -512,6 +559,7 @@ class L1Manager:
                     write_lock=TTLLock(self._write_ttl_seconds),
                     read_lock=TTLLock(self._read_ttl_seconds),
                     is_temporary=is_temp,
+                    write_back_hold=TTLLock(self._read_ttl_seconds),
                 )
                 entry.write_lock.lock()
                 self._put_staging(key, tag, entry)
@@ -560,6 +608,9 @@ class L1Manager:
             If the key became resident before admission, the staging object
             is discarded, the resident object is kept and ``SUCCESS`` is
             still reported: the data is in L1 either way.
+
+            Each admitted non-temporary key gets one write-back hold per
+            listener registered with :meth:`register_write_back_listener`.
         """
         ret: dict[ObjectKey, L1Error] = {}
         notification_keys: list[ObjectKey] = []
@@ -582,6 +633,8 @@ class L1Manager:
                 continue
             self._objects[key] = entry
             if not entry.is_temporary:
+                for _ in self._write_back_listeners:
+                    entry.write_back_hold.lock()
                 notification_keys.append(key)
                 notification_keys_meta.append(self._object_meta(entry.memory_obj))
 
@@ -902,11 +955,16 @@ class L1Manager:
             key: The object key to check.
 
         Returns:
-            True if the key has a resident object that is not read-locked,
-            or a staging object whose write lock expired; False otherwise.
+            True if the key has a resident object that is not read-locked
+            and has no outstanding write-back hold, or a staging object whose
+            write lock expired; False otherwise.
         """
         entry = self._objects.get(key, None)
-        if entry is not None and not entry.read_lock.is_locked():
+        if (
+            entry is not None
+            and not entry.read_lock.is_locked()
+            and not entry.write_back_hold.is_locked()
+        ):
             return True
         per_tag = self._staging.get(key, None)
         if per_tag is None:
