@@ -7,6 +7,10 @@
 #include <deque>
 #include <mutex>
 
+#if defined(USE_ROCM)
+#include <hip/hip_version.h>
+#endif
+
 namespace {
 
 /**
@@ -630,8 +634,12 @@ void execute_object_group_transfer(
 // Direct copy-engine transfer (cudaMemcpyBatchAsync)
 // ---------------------------------------------------------------------------
 
-// cudaMemcpyBatchAsync exists from CUDA 12.8; HIP has no equivalent.
+// cudaMemcpyBatchAsync exists from CUDA 12.8. HIP gained hipMemcpyBatchAsync
+// in ROCm 7.x (HIP 7.15) with the identical 9-arg (failIdx) signature, so the
+// same direct copy-engine path serves both once the sources are hipified.
 #if !defined(USE_ROCM) && defined(CUDART_VERSION) && CUDART_VERSION >= 12080
+  #define LMC_HAS_BATCH_MEMCPY 1
+#elif defined(USE_ROCM) && defined(HIP_VERSION) && HIP_VERSION >= 71500000
   #define LMC_HAS_BATCH_MEMCPY 1
 #else
   #define LMC_HAS_BATCH_MEMCPY 0
@@ -747,7 +755,15 @@ bool batch_memcpy_supported() {
     int driver = 0;
     if (cudaRuntimeGetVersion(&runtime) != cudaSuccess) return false;
     if (cudaDriverGetVersion(&driver) != cudaSuccess) return false;
+#if defined(USE_ROCM)
+    // HIP versions its runtime/driver on a different scale; the compile-time
+    // HIP_VERSION guard already ensures hipMemcpyBatchAsync is available.
+    (void)runtime;
+    (void)driver;
+    return true;
+#else
     return runtime >= 12080 && driver >= 12080;
+#endif
   }();
   return supported;
 #else
