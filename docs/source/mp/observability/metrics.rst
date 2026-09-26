@@ -295,6 +295,13 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Of ``lookup_hit``: tokens L2 added beyond the L1-servable prefix.
        ``l1 + l2 == lookup_hit`` per event.
+   * - ``lmcache_mp.lookup_hit_l1_keys``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Hit keys L1 already held. One key per object group, kv rank and
+       chunk, so the count is not divided by the TP world size.
+   * - ``lmcache_mp.lookup_hit_l2_keys``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Hit keys loaded from L2 into L1.
    * - ``lmcache_mp.lookups``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Completed lookups (denominator for ``lookup_early_exit``).
@@ -305,7 +312,8 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
 
 All lookup counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
 so they always advance together per completed lookup. Early-exit lookups
-contribute ``0`` tokens to all four token counters and ``+1`` to
+contribute ``0`` tokens to all four token counters, ``0`` keys to both
+key counters, and ``+1`` to
 ``lookups`` / ``lookup_early_exit``, and abandoned lookups contribute to neither.
 
 The ``model_name`` and ``cache_salt`` attributes are captured at lookup
@@ -333,6 +341,20 @@ per tenant or isolation domain); drop it at scrape time with
     # Fraction of lookups that early-exited, by reason:
     sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)
     / sum(rate(lmcache_mp_lookups_requests_total[5m]))
+
+    # Share of hit keys L1 already held:
+    rate(lmcache_mp_lookup_hit_l1_keys_total[5m])
+    / (rate(lmcache_mp_lookup_hit_l1_keys_total[5m])
+       + rate(lmcache_mp_lookup_hit_l2_keys_total[5m]))
+
+**Tokens vs. keys on hybrid models.** The token split credits L1 only with
+the prefix L1 could serve without L2. On a hybrid model (full attention plus
+sliding-window or linear-attention layers), L1 may hold every full-attention
+key while L2 supplies only the few sliding-window keys that complete the
+prefix. The token counters then report the whole hit as L2, while the key
+counters show that most of the data came from L1. Use the token counters for
+"how much of the hit depends on L2" and the key counters for "how much data
+L2 actually moved".
 
 L0 (GPU) Block Lifecycle Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
