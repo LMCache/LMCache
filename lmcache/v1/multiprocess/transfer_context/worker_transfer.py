@@ -488,6 +488,26 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._inflight_stores: list[MessagingFuture] = []
         self._inflight_lock = threading.Lock()
 
+    @staticmethod
+    def _store_settled(future: MessagingFuture) -> bool:
+        """Whether the server is done with this store's engine KV blocks.
+
+        ``query()`` raises when the store's RPC failed, so a failed store is
+        reported as settled: it is no longer reading the blocks, and its error
+        is surfaced by the request path that owns it rather than here.
+
+        Args:
+            future: A store future returned by ``submit_store``.
+
+        Returns:
+            True if the store completed or failed, False if still in flight.
+        """
+        try:
+            return future.query()
+        except Exception:
+            logger.debug("Treating a failed store as settled", exc_info=True)
+            return True
+
     def register(
         self,
         kv_caches: dict[str, torch.Tensor],
@@ -629,7 +649,9 @@ class LMCacheDrivenTransferContext(TransferContext):
             event_backend=self._event_backend,
         )
         with self._inflight_lock:
-            self._inflight_stores = [f for f in self._inflight_stores if not f.query()]
+            self._inflight_stores = [
+                f for f in self._inflight_stores if not self._store_settled(f)
+            ]
             self._inflight_stores.append(future)
         return future
 
@@ -723,7 +745,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         possibly stale store instead of a crashed engine.
         """
         with self._inflight_lock:
-            pending = [f for f in self._inflight_stores if not f.query()]
+            pending = [f for f in self._inflight_stores if not self._store_settled(f)]
             self._inflight_stores = []
         for future in pending:
             try:
