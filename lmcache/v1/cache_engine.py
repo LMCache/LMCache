@@ -490,6 +490,17 @@ class LMCacheEngine:
                 request_configs=request_configs,
             ):
                 assert isinstance(key, CacheEngineKey)
+                # A degenerate range carries no tokens (for example a separator
+                # at the very end of a blend input). Skip it: a zero-byte
+                # allocation is invalid, and the allocation stack reacts to a
+                # rejected request by evicting cached objects or spinning in a
+                # busy loop.
+                if end <= start:
+                    logger.debug(
+                        "Skipping empty token range [%d, %d) during store", start, end
+                    )
+                    continue
+
                 # Allocate the memory object
                 num_tokens = end - start
                 kv_shapes = self.metadata.get_shapes(num_tokens)
@@ -670,6 +681,16 @@ class LMCacheEngine:
             tokens=tokens, mask=mask, request_configs=request_configs
         ):
             assert isinstance(key, CacheEngineKey)
+
+            # See the comment in ``store``: a degenerate range carries no tokens
+            # and must not reach the allocator.
+            if end <= start:
+                logger.debug(
+                    "Skipping empty token range [%d, %d) during store_layer",
+                    start,
+                    end,
+                )
+                continue
 
             keys_multi_layer = key.split_layers(self.num_layers)
             # Only check the first layer

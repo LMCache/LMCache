@@ -27,7 +27,10 @@ results** — the lock pass observes L1 by locking it (`reserve_read`), so
 there is no separate observation that can go stale.
 
 Vocabulary: **lock** = take an L1 read lock; **unlock** = return the read
-lock; **loading** = L1 write reservation carrying an L2 lookup lock.
+lock; **loading** = L1 write reservation carrying an L2 lookup lock. A
+loading buffer is an L1 *staging object* tagged with the request id
+(`_get_prefetch_write_tag`): invisible to readers and to other requests until the
+load lands and `finish_write*` admits it (see `../l1_manager.md`).
 
 **LRU is decoupled from locking**: locking and unlocking never refresh
 eviction recency (`on_l1_keys_read_finished` is a no-op for the eviction
@@ -128,10 +131,14 @@ unlocked.
 ## Why all-or-nothing on reservation failure
 
 A reservation failure is either OOM (no L1 room for the load buffers) or
-KEY_NOT_WRITABLE — the key appeared in L1 after the lock pass (typically a
-concurrent request loading a shared prefix). Either way, the request
-abandons the entire L2 load and finishes with the L1 hit: no re-fold, no
-plan re-trim, no partial salvage. Promotion of a contended key
+KEY_NOT_WRITABLE — the key became *resident* in L1 after the lock pass (a
+concurrent request admitted its load, or the engine stored it). A concurrent
+request that is still loading the key does **not** contend: each request
+stages its buffers under its own write tag, both loads proceed, and the
+admission keeps whichever lands first while the other request read-locks the
+resident copy. So the contention window is the L2 lookup latency, not the
+L2 load time. Either way, the request abandons the entire L2 load and
+finishes with the L1 hit: no re-fold, no plan re-trim, no partial salvage. Promotion of a contended key
 (``reserve_read`` after the failure) would be *safe* (lock-then-count
 preserves the invariant) but reopens mid-flight mutation of the locked set;
 partial salvage kept three extra reconciliation steps alive for a marginal

@@ -1401,8 +1401,15 @@ class AddressManager:
             size of the allocated block.
 
         Raises:
+            ValueError: If size is not positive. This is a caller bug, not an
+                out-of-memory condition, and must not be signalled as one: the
+                allocation stack treats a failed request as memory pressure and
+                reacts by evicting cached objects or retrying in a busy loop.
             RuntimeError: If no memory is available to allocate.
         """
+        if size <= 0:
+            raise ValueError("size must be greater than 0")
+
         aligned_size = self.compute_aligned_size(size)
         for block in self._explicit_list:
             if block.size >= aligned_size:
@@ -1453,9 +1460,14 @@ class AddressManager:
             Note: the length of the return list is the same as the batch_size.
 
         Raises:
+            ValueError: If size is not positive. See ``allocate`` for why this is
+                not reported as ``RuntimeError``.
             RuntimeError: If batch_size is negative or no memory is available
                 to allocate.
         """
+        if size <= 0:
+            raise ValueError("size must be greater than 0")
+
         if batch_size < 0:
             raise RuntimeError("batch_size must be non-negative")
 

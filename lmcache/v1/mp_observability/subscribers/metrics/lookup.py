@@ -97,9 +97,8 @@ class LookupMetricsSubscriber(EventSubscriber):
         self._l1_hit_tokens = meter.create_counter(
             "lmcache_mp.lookup_hit_l1",
             description=(
-                "Of lookup_hit: tokens L1 could serve on its own under each "
-                "object group's attention-window rule (from "
-                "PrefetchHandle.l1_hit_chunks)."
+                "Of lookup_hit: tokens served from objects L1 already held "
+                "(from the storage manager's per-tier hit counts)."
             ),
             unit="tokens",
         )
