@@ -36,7 +36,7 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 | `PrefetchTaskSpec` | `key_groups` (one `GroupedObjectKeys` per `(object group, kv rank)`, in any order; all of the same `group_size`), `num_kv_readers`, `fetching_policy`, `lock_mode`. |
 | `FetchingPolicy` | `"prefix"`: only the longest prefix every object group can serve under its window; every object group has the same number of rows. `"full"`: every found object, gaps included. |
 | `PrefetchLockMode` | `LOCK`: the caller reads the objects and releases them with `finish_read_prefetched`. `NO_LOCK`: warm-up, nothing is locked. |
-| `PrefetchHandle` | Opaque; carries `num_key_groups` so the result can be reported per row. |
+| `PrefetchHandle` | Opaque request handle: `prefetch_request_id`, `external_request_id`, `total_requested_keys`, `submit_time`, and per-row `sliding_windows` (used to fold the result). |
 | `ipc_key_to_grouped_object_keys` | Builds the rows of a request from an `IPCCacheServerKey`, the chunk hashes, the object groups to read, the per-group layouts and the registration's `AttnWindowDesc`. |
 
 ### Contract
@@ -77,32 +77,20 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 fold the per-row result directly instead of interleaving it back into the flat
 layout. The flat kernels remain for the prefetch controller.
 
-## Transitional adapter
+## Internal types
 
-The storage manager's L1 probe and the prefetch controller still consume the
-flat, chunk-major `PrefetchRequestSpec`. Three private, **deprecated** shims in
-`storage_manager.py` bridge the two worlds and are removed by the
-prefetch-controller-v2 PR (`TODO(prefetch-v2)` markers):
-
-- `_to_controller_spec(spec)` builds the legacy payload: `group_layout_descs`
-  keyed by the groups' real object group ids (the controller allocates L1
-  buffers per `key.object_group_id`), an `AttnWindowDesc` with one window per
-  key group in `key_groups` order and `world_size = 1` (each key group is its
-  own fold unit, so the groups may appear in any order),
-  `"prefix" -> TrimPolicy.PREFIX`, `"full" -> TrimPolicy.SPARSE`,
-  `LOCK -> PrefetchMode.LOOKUP`, `NO_LOCK -> PrefetchMode.WARM`.
-- `_flatten_rows(spec)` (module-level): rows are interleaved chunk-major
-  (today's `chunk -> group -> rank` order, which the flat fold expects).
-- `_split_rows(found, num_key_groups)` (module-level): the exact inverse,
-  applied to the flat result bitmap in `query_prefetch_status`.
-
-All three carry `@lmcache_deprecate`.
+The prefetch controller now consumes `PrefetchTaskSpec` directly, so the
+transitional shims that once bridged the storage manager to the flat
+`PrefetchRequestSpec` are gone (removed with the prefetch-controller-v2 PR,
+#5346).
 
 `TrimPolicy`, `PrefetchMode` and `PrefetchRequestSpec` moved from `api.py` to
-`internal_api.py` and are deprecated: nothing outside the storage manager and
-the prefetch controller should build them. `TrimPolicy.SEGMENTED_PREFIX` has no
-public equivalent (the storage manager never dispatched it); blend's segmented
-retention is derived from the per-row result instead.
+`internal_api.py`; nothing outside the prefetch controller and the trace
+codecs (`lmcache/v1/mp_observability/trace/codecs.py`, which still
+encodes/decodes them for recorded traces) should build them.
+`TrimPolicy.SEGMENTED_PREFIX` has no public equivalent (the storage manager
+never dispatched it); blend's segmented retention is derived from the per-row
+result instead.
 
 ## Tests
 
@@ -116,4 +104,5 @@ retention is derived from the per-row result instead.
 - `tests/v1/multiprocess/test_query_lookup_hits.py`, `test_p2p_controller.py`,
   `test_warm_prefetch.py`, blend tests: the rows each caller submits.
 - `tests/v1/mp_observability/trace/test_codecs.py`: trace round-trips of the
-  new types and of `PrefetchHandle.num_key_groups`.
+  grouped types and of `PrefetchHandle` (including its optional
+  `sliding_windows` field).
