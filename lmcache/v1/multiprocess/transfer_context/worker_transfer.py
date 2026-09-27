@@ -484,6 +484,29 @@ class LMCacheDrivenTransferContext(TransferContext):
         super().__init__(instance_id, req_client)
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
+        self._mq_timeout: float = 0.0
+        self._inflight_stores: list[MessagingFuture] = []
+        self._inflight_lock = threading.Lock()
+
+    @staticmethod
+    def _store_settled(future: MessagingFuture) -> bool:
+        """Whether the server is done with this store's engine KV blocks.
+
+        ``query()`` raises when the store's RPC failed, so a failed store is
+        reported as settled: it is no longer reading the blocks, and its error
+        is surfaced by the request path that owns it rather than here.
+
+        Args:
+            future: A store future returned by ``submit_store``.
+
+        Returns:
+            True if the store completed or failed, False if still in flight.
+        """
+        try:
+            return future.query()
+        except Exception:
+            logger.debug("Treating a failed store as settled", exc_info=True)
+            return True
 
     def register(
         self,
@@ -532,6 +555,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             return
         self._device = device
         self._event_backend = event_backend
+        self._mq_timeout = mq_timeout
 
     def create_recorded_event(self) -> IPCEvent:
         """Create and record an exportable event for handle-based transfer.
@@ -618,12 +642,18 @@ class LMCacheDrivenTransferContext(TransferContext):
         if event is None:
             raise RuntimeError("LMCache-driven transfer requires an IPC event.")
         event_ipc_handle = self._event_backend.export_event(event, self._device)
-        return self._req_client.store(
+        future = self._req_client.store(
             key, self._instance_id, block_ids, event_ipc_handle
         ).to_device_future(
             device=self._device,
             event_backend=self._event_backend,
         )
+        with self._inflight_lock:
+            self._inflight_stores = [
+                f for f in self._inflight_stores if not self._store_settled(f)
+            ]
+            self._inflight_stores.append(future)
+        return future
 
     def submit_q_store(
         self,
@@ -702,7 +732,31 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._event_backend = None
 
     def flush_inflight_stores(self) -> None:
-        pass
+        """Block until the server has finished reading the engine KV blocks.
+
+        In this mode the server copies the blocks on its own stream after the
+        forward pass that produced them, and the engine never waits for that
+        copy.  When the scheduler preempts a request it frees those blocks
+        immediately and may hand them to another request in the same step,
+        whose forward pass would overwrite blocks the server is still reading
+        and commit the wrong KV under the preempted request's keys.
+
+        A timeout is logged rather than raised, so a slow server degrades to a
+        possibly stale store instead of a crashed engine.
+        """
+        with self._inflight_lock:
+            pending = [f for f in self._inflight_stores if not self._store_settled(f)]
+            self._inflight_stores = []
+        for future in pending:
+            try:
+                if not future.wait(timeout=self._mq_timeout):
+                    logger.warning(
+                        "A store did not finish within %.1fs; its KV blocks may "
+                        "be overwritten while the server is still reading them",
+                        self._mq_timeout,
+                    )
+            except Exception:
+                logger.exception("Failed waiting for an in-flight store")
 
 
 class EngineDrivenTransferContext(TransferContext):

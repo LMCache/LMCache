@@ -45,10 +45,12 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
   read-locks (under `LOCK`) the L1-resident objects the policy retains and
   loads the rest from L2 asynchronously. `skip_l2` restricts the prefetch to
   what is already in L1.
-- `query_prefetch_status(handle) -> list[Bitmap] | None` returns `None` while
-  loading, otherwise one bitmap per `spec.key_groups` row in row order:
-  bit `i` of `rows[k]` is set iff `key_groups[k].keys[i]` is resident (and
-  locked under `LOCK`). Callers fold the rows with
+- `query_prefetch_status(handle) -> PrefetchResult | None` returns `None`
+  while loading, otherwise the `api.PrefetchResult`: `hit_cells` (one bitmap
+  per `spec.key_groups` row in row order; bit `i` of `hit_cells[k]` is set
+  iff `key_groups[k].keys[i]` is resident, and locked under `LOCK`) split
+  into `l1_hit_cells` (already in L1) and `l2_hit_cells` (loaded from L2 by
+  this request). Each result is returned once. Callers fold `hit_cells` with
   `bitmap_ops.fold_unfold_grouped(rows, windows)`, passing each row's own
   `sliding_window_size`, to get the chunk hit count; no stride arithmetic is
   needed.

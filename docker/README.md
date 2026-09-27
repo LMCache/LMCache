@@ -214,6 +214,21 @@ docker pull lmcache/vllm-openai:latest
 docker pull lmcache/standalone:latest
 ```
 
+The default CUDA 13 `lmcache/vllm-openai`, `lmcache/standalone`, and
+`lmcache/lmcache-payload` release and nightly tags are multi-platform images
+for `linux/amd64` and `linux/arm64`. The `lmcache/vllm-openai:lightweight`
+release image supports both platforms as well. Docker selects the matching
+image automatically. The ARM64 variant targets NVIDIA Grace/SBSA systems; it
+is not a Jetson/L4T image. To select one explicitly:
+
+```bash
+docker pull --platform linux/arm64 lmcache/vllm-openai:latest
+docker pull --platform linux/arm64 lmcache/vllm-openai:lightweight
+docker pull --platform linux/arm64 lmcache/standalone:latest
+```
+
+The CUDA 12.9 image variants remain `linux/amd64` only.
+
 ---
 
 ## Additional Resources
