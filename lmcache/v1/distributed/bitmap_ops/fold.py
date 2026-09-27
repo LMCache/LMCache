@@ -42,10 +42,7 @@ from collections.abc import Callable, Iterable, Sequence
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import TrimPolicy
-
-# TODO(ApostaC): In next PR
-# from lmcache.v1.distributed.internal_api import TrimPolicy
+from lmcache.v1.distributed.internal_api import TrimPolicy
 
 # Lightweight installs (e.g. lmcache-cli) ship a lmcache_native without
 # the fold kernels; this module must stay importable there because CLI

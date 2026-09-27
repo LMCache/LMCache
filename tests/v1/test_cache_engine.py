@@ -2065,3 +2065,39 @@ def test_retrieve_cleanup_ref_count_and_unpin() -> None:
 
     mem_obj_not_pinned.ref_count_down.assert_called_once()
     mem_obj_not_pinned.unpin.assert_not_called()
+
+
+def test_store_skips_degenerate_token_ranges() -> None:
+    """store() must not ask the allocator for a zero-token chunk.
+
+    A degenerate range (``start == end``) carries no tokens, so the chunk has to
+    be skipped instead of allocating a zero-byte memory object. The address
+    manager rejects such a request, and the allocation stack reacts to a
+    rejected request as memory pressure: it evicts cached objects, or retries in
+    a busy loop until something frees up.
+    """
+    engine = MagicMock()
+    engine.is_healthy.return_value = True
+    engine.is_frozen.return_value = False
+    engine._is_passive.return_value = False
+    engine._get_req_id.return_value = "req_1"
+    engine.kv_events_enabled = False
+    engine.store_location = "LocalCPUBackend"
+    engine.config.get_extra_config_value.return_value = False
+    engine.metadata.get_shapes.return_value = [torch.Size([2, 16, 8, 128])]
+    engine.metadata.get_dtypes.return_value = [torch.bfloat16]
+    engine.stats_monitor.on_store_request.return_value.time_to_store.return_value = 1.0
+
+    empty_range_key = _make_key(0)
+    full_chunk_key = _make_key(1)
+    engine.token_database.process_tokens.return_value = [
+        (0, 0, empty_range_key),
+        (0, 4, full_chunk_key),
+    ]
+    engine.storage_manager.allocate.return_value = _make_mock_memory_obj()
+
+    LMCacheEngine.store(engine, tokens=torch.zeros(4, dtype=torch.long))
+
+    assert engine.storage_manager.allocate.call_count == 1
+    engine.gpu_connector.batched_from_gpu.assert_called_once()
+    assert engine.storage_manager.batched_put.call_args.args[0] == [full_chunk_key]

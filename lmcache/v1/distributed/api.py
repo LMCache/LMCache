@@ -7,7 +7,7 @@ Could be implemented by native code in the future
 """
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
@@ -19,9 +19,54 @@ from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.lmcache_native import Bitmap
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
+
+FetchingPolicy = Literal["prefix", "full"]
+"""Which found objects a prefetch loads and reports.
+
+``"prefix"`` -- only fetch the prefix hit and discard all non-prefix hits.
+
+``"full"`` -- fetch all of the hit chunks, no matter whether they are in the
+prefix or not.
+"""
+
+FULL_ATTENTION_WINDOW_CHUNKS = -1
+"""``GroupedObjectKeys.sliding_window_size`` value for a full-attention object
+group: serving a prefix needs every chunk of it present."""
+
+_VALID_FETCHING_POLICIES = frozenset(get_args(FetchingPolicy))
+
+
+def _lookup_kv_ranks(ipc_key: "IPCCacheServerKey") -> list[int]:
+    """The kv ranks an IPC key addresses, in rank order.
+
+    A key without a ``worker_id`` (a lookup) fans out to every worker of its
+    world size; a worker-specific key addresses that worker's shard only.
+    """
+    if ipc_key.worker_id is None:
+        # For look up request, we want to expand to all workers
+        # TODO (ApostaC): include local world size/rank info
+        # in the future once it's in IPCCacheServerKey
+        return [
+            ObjectKey.ComputeKVRank(
+                world_size=ipc_key.world_size,
+                global_rank=worker_id,
+                local_world_size=ipc_key.world_size,
+                local_rank=worker_id,
+            )
+            for worker_id in range(ipc_key.world_size)
+        ]
+    return [
+        ObjectKey.ComputeKVRank(
+            world_size=ipc_key.world_size,
+            global_rank=ipc_key.worker_id,
+            local_world_size=ipc_key.world_size,
+            local_rank=ipc_key.worker_id,
+        )
+    ]
 
 
 class Tier(str, enum.Enum):
@@ -48,35 +93,6 @@ class L1BackendType(str, enum.Enum):
     DRAM = "dram"
     DEVDAX = "devdax"
     GDS = "gds"
-
-
-class TrimPolicy(enum.Enum):
-    """How to pick the retained subset of found keys for a prefetch.
-
-    PREFIX retains the longest contiguous run from index 0; SEGMENTED_PREFIX
-    keeps the keys that loaded when an L2 hit failed to load into L1 mid-prefix
-    (gaps and all); SPARSE retains every found key for an intentional scatter.
-    """
-
-    PREFIX = enum.auto()
-    SEGMENTED_PREFIX = enum.auto()
-    SPARSE = enum.auto()
-
-
-class PrefetchMode(enum.Enum):
-    """The intent of a prefetch request.
-
-    ``LOOKUP`` -- prefetch for an imminent reader: loaded keys are read-locked
-    for the requesting workers, and whether they persist or are dropped after
-    use follows the configured prefetch policy.
-
-    ``WARM`` -- speculative pre-warm with no imminent reader: loaded keys are
-    retained and left unlocked (immediately resident and evictable), so a later
-    lookup can hit them.
-    """
-
-    LOOKUP = enum.auto()
-    WARM = enum.auto()
 
 
 @dataclass(frozen=True)
@@ -411,83 +427,171 @@ DEFAULT_ATTN_WINDOW_DESC = AttnWindowDesc(num_chunks_in_sw=[-1])
 windows are supplied."""
 
 
-@dataclass(frozen=True)
-class PrefetchRequestSpec:
-    """Immutable inputs of a single L2 prefetch request.
+class PrefetchLockMode(enum.Enum):
+    """Whether a prefetch read-locks the objects it makes resident.
 
-    Bundles the caller-supplied arguments that travel together into the
-    prefetch controller's submission queue. See
-    ``PrefetchController._start_lookup_phase`` for per-field semantics.
+    ``LOCK`` -- the prefetched objects are read-locked until the caller
+    releases them.
+
+    ``NO_LOCK`` -- the prefetched objects are left resident and unlocked
+    (immediately evictable).
+    """
+
+    LOCK = enum.auto()
+    NO_LOCK = enum.auto()
+
+
+@dataclass(frozen=True)
+class GroupedObjectKeys:
+    """The object keys of one ``(object group, kv rank)`` row of a prefetch.
 
     Attributes:
-        keys: Object keys to prefetch; order defines the prefix.
-        group_layout_descs: Maps object_group_id to that group's memory
-            layout for L1 write-buffer allocation; entries beyond
-            ``attn_desc``'s groups are harmless.
-        num_kv_readers: Total read locks to take per key -- one per
-            reader that will retrieve the object.
-        policy: Retained-subset policy (see :class:`TrimPolicy`).
-        attn_desc: Cross-chunk attention windows for the groups ``keys``
-            covers; a caller prefetching a subset of the registration's
-            groups must narrow it to that subset (it drives the fold
-            stride).
-        mode: Prefetch intent (see :class:`PrefetchMode`).
+        keys: Chunk-ordered object keys in this ``(object group, kv rank)``
+            group (one row of the request).
+        object_group_id: The object group these keys belong to.
+        layout_desc: Memory layout of this object group's objects.
+        sliding_window_size: Number of trailing prefix chunks this object group
+            needs present to serve a prefix: ``FULL_ATTENTION_WINDOW_CHUNKS``
+            (``-1``) for full attention, ``w >= 1`` for a sliding window of
+            ``w`` chunks (``1`` for recurrent state).
+
+    Note:
+        ``keys[i]`` is the object covering tokens
+        ``[i * chunk_size, (i + 1) * chunk_size)`` of the request for this
+        object group on this kv rank, so a key's index is its chunk index.
     """
 
     keys: list[ObjectKey]
-    group_layout_descs: dict[int, MemoryLayoutDesc]
-    num_kv_readers: int = 1
-    policy: TrimPolicy = TrimPolicy.PREFIX
-    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
-    mode: PrefetchMode = PrefetchMode.LOOKUP
+    object_group_id: int
+    layout_desc: MemoryLayoutDesc
+    sliding_window_size: int = FULL_ATTENTION_WINDOW_CHUNKS
 
     def __post_init__(self) -> None:
+        if self.sliding_window_size == 0 or self.sliding_window_size < -1:
+            raise ValueError(
+                "GroupedObjectKeys: sliding_window_size must be -1 (full attention) "
+                f"or >= 1 chunk, got {self.sliding_window_size}"
+            )
+
+
+@dataclass(frozen=True)
+class PrefetchTaskSpec:
+    """A prefetch request: which objects to make resident in L1, and how.
+
+    Attributes:
+        key_groups: One :class:`GroupedObjectKeys` row per ``(object group, kv
+            rank)``.
+        num_kv_readers: Read locks to take per prefetched object -- one per
+            reader that will retrieve it. Ignored under ``NO_LOCK``.
+        fetching_policy: See :data:`FetchingPolicy`.
+        lock_mode: See :class:`PrefetchLockMode`.
+
+    Note:
+        Every key group holds the same number of keys (``group_size``). The
+        groups may be listed in any order; the prefetch result is reported
+        per group, in the same order as ``key_groups``.
+    """
+
+    key_groups: list[GroupedObjectKeys]
+    num_kv_readers: int = 1
+    fetching_policy: FetchingPolicy = "prefix"
+    lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
+
+    def __post_init__(self) -> None:
+        if not self.key_groups:
+            raise ValueError("PrefetchTaskSpec: key_groups must not be empty")
+        if self.fetching_policy not in _VALID_FETCHING_POLICIES:
+            raise ValueError(
+                "PrefetchTaskSpec: fetching_policy must be one of "
+                f"{sorted(_VALID_FETCHING_POLICIES)}, got {self.fetching_policy!r}"
+            )
         if self.num_kv_readers < 1:
             raise ValueError(
-                f"PrefetchRequestSpec: num_kv_readers={self.num_kv_readers} "
+                f"PrefetchTaskSpec: num_kv_readers={self.num_kv_readers} "
                 "must be >= 1 (total read locks per key)"
             )
-        # A caller prefetching a SUBSET of the groups narrows attn_desc, so
-        # extra layout entries are harmless; too FEW is the real mistake.
-        expected = set(range(self.attn_desc.num_object_groups))
-        if not expected <= set(self.group_layout_descs):
+        sizes = {len(row.keys) for row in self.key_groups}
+        if len(sizes) > 1:
             raise ValueError(
-                "PrefetchRequestSpec: group_layout_descs must cover at least "
-                f"the object groups {sorted(expected)}, got "
-                f"{sorted(self.group_layout_descs)}"
+                "PrefetchTaskSpec: every key group must have the same number "
+                f"of keys, got {[len(row.keys) for row in self.key_groups]}"
             )
+
+    @property
+    def group_size(self) -> int:
+        """Number of keys in every key group (the request's chunk count)."""
+        return len(self.key_groups[0].keys)
+
+    @property
+    def group_layout_descs(self) -> dict[int, MemoryLayoutDesc]:
+        """Map each object group id to its memory layout."""
+        return {row.object_group_id: row.layout_desc for row in self.key_groups}
 
 
 @dataclass(frozen=True)
 class PrefetchHandle:
     """Opaque handle returned by ``StorageManager.submit_prefetch_task``.
 
-    Carries the bookkeeping needed to later query lookup / prefetch status
+    Carries the bookkeeping needed to later query the prefetch status
     without exposing controller internals.
     """
 
     prefetch_request_id: int
-    """Opaque ID for tracking L2 prefetch in the controller.
-    -1 if no L2 request was submitted."""
+    """Opaque ID for tracking the request in the prefetch controller; -1
+    marks an already-complete empty request."""
 
     external_request_id: str
     """Request ID from the caller for end-to-end tracing."""
 
-    l1_found_indices: tuple[int, ...]
-    """Original-key indices found (read-locked) in L1 at submission time."""
-
-    l1_hit_chunks: int
-    """Chunk-level prefix hit count from L1 (via fold_unfold_ranked)."""
-
     total_requested_keys: int
-    """Total number of keys originally requested (the result-bitmap size)."""
+    """Total number of keys originally requested."""
 
     submit_time: float
     """Monotonic timestamp when the prefetch task was submitted."""
 
-    l2_orig_indices: tuple[int, ...] = ()
-    """Original-key index of each key submitted to L2; maps the controller's
-    local result bitmap back to original positions."""
+    sliding_windows: tuple[int, ...] = ()
+    """Sliding-window size of every key group of the request, in group
+    order; ``FULL_ATTENTION_WINDOW_CHUNKS`` for a full-attention group."""
+
+
+@dataclass(frozen=True)
+class PrefetchResult:
+    """The outcome of a prefetch task, one bitmap per key group of the task.
+
+    Bit ``i`` of ``hit_cells[k]`` is set iff key ``i`` of key group ``k`` is
+    resident in L1 when the task finished (and read-locked under ``LOCK``).
+    ``l1_hit_cells`` marks the hit cells L1 already held, ``l2_hit_cells``
+    those the task loaded from L2.
+
+    Note:
+        ``l1_hit_cells`` and ``l2_hit_cells`` are disjoint and their union is
+        ``hit_cells``.
+    """
+
+    hit_cells: list["Bitmap"]
+    l1_hit_cells: list["Bitmap"]
+    l2_hit_cells: list["Bitmap"]
+    _l1_hit_count: int = field(init=False, repr=False, compare=False)
+    _l2_hit_count: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # Frozen dataclass: the cached counts are set through object.__setattr__.
+        object.__setattr__(
+            self, "_l1_hit_count", sum(row.popcount() for row in self.l1_hit_cells)
+        )
+        object.__setattr__(
+            self, "_l2_hit_count", sum(row.popcount() for row in self.l2_hit_cells)
+        )
+
+    @property
+    def l1_hit_count(self) -> int:
+        """Number of hit cells L1 already held."""
+        return self._l1_hit_count
+
+    @property
+    def l2_hit_count(self) -> int:
+        """Number of hit cells loaded from L2."""
+        return self._l2_hit_count
 
 
 def ipc_key_to_object_keys(
@@ -522,28 +626,7 @@ def ipc_key_to_object_keys(
 
     # The (chunk_hash, kv_rank) expansion is independent of the object group,
     # so compute it once and reuse it for every group.
-    if ipc_key.worker_id is None:
-        # For look up request, we want to expand to all workers
-        # TODO (ApostaC): include local world size/rank info
-        # in the future once it's in IPCCacheServerKey
-        kv_ranks = [
-            ObjectKey.ComputeKVRank(
-                world_size=ipc_key.world_size,
-                global_rank=worker_id,
-                local_world_size=ipc_key.world_size,
-                local_rank=worker_id,
-            )
-            for worker_id in range(ipc_key.world_size)
-        ]
-    else:
-        kv_ranks = [
-            ObjectKey.ComputeKVRank(
-                world_size=ipc_key.world_size,
-                global_rank=ipc_key.worker_id,
-                local_world_size=ipc_key.world_size,
-                local_rank=ipc_key.worker_id,
-            )
-        ]
+    kv_ranks = _lookup_kv_ranks(ipc_key)
 
     return [
         [
@@ -559,3 +642,75 @@ def ipc_key_to_object_keys(
         ]
         for object_group_id in object_group_ids
     ]
+
+
+def ipc_key_to_grouped_object_keys(
+    ipc_key: "IPCCacheServerKey",
+    chunk_hashes: list[bytes],
+    object_group_ids: list[int],
+    group_layout_descs: dict[int, MemoryLayoutDesc],
+    attn_desc: AttnWindowDesc,
+) -> list[GroupedObjectKeys]:
+    """Expand an IPC key and its chunk hashes into prefetch key rows.
+
+    Produces one :class:`GroupedObjectKeys` row per ``(object group, kv rank)``,
+    group-major and rank-minor (all ranks of ``object_group_ids[0]`` first, in
+    rank order, then the next group, ...). Every row is chunk-ordered over
+    ``chunk_hashes``.
+
+    Args:
+        ipc_key: The IPC key providing model_name, world_size, worker_id,
+            and cache_salt.
+        chunk_hashes: Chunk hash bytes, one per chunk, in token order.
+        object_group_ids: Object group ids to produce rows for, in the order
+            the rows should appear.
+        group_layout_descs: Maps each object group id to its memory layout.
+        attn_desc: Registration-wide attention windows; the window of object
+            group ``g`` is ``attn_desc.num_chunks_in_sw[g]``.
+
+    Returns:
+        ``len(object_group_ids) * num_ranks`` rows, group-major / rank-minor.
+
+    Raises:
+        ValueError: If an object group id has no layout in
+            ``group_layout_descs`` or no window in ``attn_desc``.
+
+    Note:
+        A key without ``worker_id`` fans out to every kv rank of its world
+        size; a worker-specific key yields that rank only. ``cache_salt`` is
+        taken from ``ipc_key``.
+    """
+    kv_ranks = _lookup_kv_ranks(ipc_key)
+    rows: list[GroupedObjectKeys] = []
+    for object_group_id in object_group_ids:
+        layout_desc = group_layout_descs.get(object_group_id)
+        if layout_desc is None:
+            raise ValueError(
+                f"ipc_key_to_grouped_object_keys: no layout for object group "
+                f"{object_group_id} (have {sorted(group_layout_descs)})"
+            )
+        if not 0 <= object_group_id < attn_desc.num_object_groups:
+            raise ValueError(
+                f"ipc_key_to_grouped_object_keys: object group {object_group_id} is "
+                f"outside attn_desc's {attn_desc.num_object_groups} groups"
+            )
+        window = attn_desc.num_chunks_in_sw[object_group_id]
+        for kv_rank in kv_ranks:
+            rows.append(
+                GroupedObjectKeys(
+                    keys=[
+                        ObjectKey(
+                            chunk_hash=chunk_hash,
+                            model_name=ipc_key.model_name,
+                            kv_rank=kv_rank,
+                            object_group_id=object_group_id,
+                            cache_salt=ipc_key.cache_salt,
+                        )
+                        for chunk_hash in chunk_hashes
+                    ],
+                    object_group_id=object_group_id,
+                    layout_desc=layout_desc,
+                    sliding_window_size=window,
+                )
+            )
+    return rows

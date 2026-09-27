@@ -22,10 +22,10 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
-    TrimPolicy,
+    PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -46,11 +46,15 @@ from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
 )
-from lmcache.v1.distributed.storage_controllers.store_policy import AdapterDescriptor
+from lmcache.v1.distributed.storage_controllers.utils import (
+    L1ManagerDescriptor,
+    L2AdapterDescriptor,
+)
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
-from tests.v1.distributed.utils import should_use_lazy_alloc
+from tests.v1.distributed.test_prefetch_controller import make_l1_config
+from tests.v1.distributed.utils import should_use_lazy_alloc, single_row_spec
 
 if not torch_dev.is_available():
     pytest.skip(
@@ -168,11 +172,11 @@ class GatedLoadMockAdapter(MockL2Adapter):
         self._signal_load_event()
 
 
-def make_object_key(chunk_id: int) -> ObjectKey:
+def make_object_key(chunk_id: int, kv_rank: int = 0) -> ObjectKey:
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name="test_model",
-        kv_rank=0,
+        kv_rank=kv_rank,
     )
 
 
@@ -186,8 +190,8 @@ def make_gated_adapter() -> GatedLoadMockAdapter:
     )
 
 
-def make_descriptor(index: int) -> AdapterDescriptor:
-    return AdapterDescriptor(
+def make_descriptor(index: int) -> L2AdapterDescriptor:
+    return L2AdapterDescriptor(
         index=index,
         config=MockL2AdapterConfig(max_size_gb=0.05, mock_bandwidth_gb=10.0),
     )
@@ -259,13 +263,8 @@ def result_ready(ctrl, req) -> bool:
     return ctrl.wait_prefetch_result(req, 0.0)
 
 
-def submit(ctrl, keys, layout, policy=TrimPolicy.PREFIX) -> int:
-    spec = PrefetchRequestSpec(
-        keys=keys,
-        group_layout_descs={0: layout},
-        num_kv_readers=1,
-        policy=policy,
-    )
+def submit(ctrl, keys, layout, policy="prefix") -> int:
+    spec = single_row_spec(keys, layout, num_kv_readers=1, fetching_policy=policy)
     return ctrl.submit_prefetch_request(spec)
 
 
@@ -299,7 +298,8 @@ def make_controller(l1_manager, adapter, clock, timeout, max_in_flight=8):
 
 def make_controller_multi(l1_manager, adapters, clock, timeout, max_in_flight=8):
     return PrefetchController(
-        l1_manager=l1_manager,
+        l1_managers=[l1_manager],
+        l1_manager_descriptors=[L1ManagerDescriptor(index=0, config=make_l1_config())],
         l2_adapters=list(adapters),
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
         policy=DefaultPrefetchPolicy(),
@@ -431,6 +431,96 @@ class TestConfigValidation:
 
 
 class TestLoadDeadline:
+    def test_drain_error_preserves_published_read_locks(self, l1_manager, monkeypatch):
+        """A late adapter error cannot release the timeout caller's cache hit."""
+        slow = make_gated_adapter()
+        fast = make_gated_adapter()
+        fast.release_loads()
+        clock = FakeClock()
+        ctrl = make_controller_multi(l1_manager, [slow, fast], clock, timeout=5.0)
+        keys = [make_object_key(i) for i in range(2)]
+        layout = make_layout()
+        ctrl.start()
+        try:
+            store_keys_in_l2(fast, keys[:1], layout)
+            store_keys_in_l2(slow, keys[1:], layout)
+            req = submit(ctrl, keys, layout)
+            assert slow.load_entered.wait(10.0)
+            assert fast.load_result_consumed.wait(10.0)
+            clock.advance(10.0)
+            assert wait_until(lambda: result_ready(ctrl, req))
+            result = ctrl.query_prefetch_result(req)
+            assert result is not None
+            assert result.hit_cells[0].get_indices_list() == [0]
+
+            original_query = slow.query_load_result
+
+            def fail_after_load(task_id):
+                result = original_query(task_id)
+                if result is not None:
+                    raise RuntimeError("late adapter result error")
+                return result
+
+            monkeypatch.setattr(slow, "query_load_result", fail_after_load)
+            slow.release_loads()
+            assert wait_until(lambda: in_flight_count(ctrl) == 0)
+            assert ctrl.query_prefetch_result(req) is None
+            assert l1_manager.unsafe_read(keys[:1])[keys[0]][0] == L1Error.SUCCESS
+            l1_manager.finish_read(keys[:1])
+        finally:
+            ctrl.stop()
+            slow.close()
+            fast.close()
+
+    @pytest.mark.parametrize(
+        "policy, expected",
+        [("prefix", [{0}, {0}]), ("full", [{0, 1, 2}, {0}])],
+    )
+    def test_grouped_deadline_preserves_rank_rows(self, l1_manager, policy, expected):
+        """A partially loaded rank must not borrow another rank's ready cells."""
+        slow = make_gated_adapter()
+        fast = make_gated_adapter()
+        fast.release_loads()
+        clock = FakeClock()
+        ctrl = make_controller_multi(l1_manager, [slow, fast], clock, timeout=5.0)
+        rows = [
+            [make_object_key(i, kv_rank=rank) for i in range(3)] for rank in range(2)
+        ]
+        layout = make_layout()
+        ctrl.start()
+        try:
+            store_keys_in_l2(fast, rows[0] + rows[1][:1], layout)
+            store_keys_in_l2(slow, rows[1][1:], layout)
+            req = ctrl.submit_prefetch_request(
+                PrefetchTaskSpec(
+                    key_groups=[
+                        GroupedObjectKeys(
+                            keys=row, object_group_id=0, layout_desc=layout
+                        )
+                        for row in rows
+                    ],
+                    fetching_policy=policy,
+                )
+            )
+            assert slow.load_entered.wait(10.0)
+            assert fast.load_result_consumed.wait(10.0)
+            clock.advance(10.0)
+            assert wait_until(lambda: result_ready(ctrl, req))
+            result = ctrl.query_prefetch_result(req)
+            assert result is not None
+            assert [set(row.get_indices_list()) for row in result.hit_cells] == expected
+            assert result.l1_hit_count == 0
+            assert result.l2_hit_count == sum(len(row) for row in expected)
+            for keys, kept in zip(rows, expected, strict=True):
+                l1_manager.finish_read([keys[i] for i in sorted(kept)])
+            slow.release_loads()
+            assert wait_until(lambda: in_flight_count(ctrl) == 0)
+            assert ctrl.query_prefetch_result(req) is None
+        finally:
+            ctrl.stop()
+            slow.close()
+            fast.close()
+
     def test_disabled_is_behavior_neutral(self, l1_manager):
         """With the feature off, a normal prefetch completes and retires as
         before, and no timeout is ever recorded."""
@@ -490,10 +580,8 @@ class TestLoadDeadline:
             ctrl.stop()
             adapter.close()
 
-    def test_hit_reported_at_submit_then_smaller_retained_on_timeout(self, l1_manager):
-        """The lookup hit reported at load-submit can exceed the retained set a
-        timeout publishes; the authoritative result the caller consumes is the
-        smaller retained bitmap (same shrink shape as a partial load failure)."""
+    def test_lookup_hits_are_not_served_before_load_completion(self, l1_manager):
+        """A successful L2 lookup cannot make an unfinished load a cache hit."""
         adapter = make_gated_adapter()  # load never completes before the deadline
         clock = FakeClock()
         ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0)
@@ -504,17 +592,15 @@ class TestLoadDeadline:
             store_keys_in_l2(adapter, keys, layout)
             req = submit(ctrl, keys, layout)
 
-            # The load-phase transition reports the union lookup hit (all 4
-            # chunks found in L2) before the load lands.
-            assert wait_until(lambda: ctrl.query_lookup_result(req) == 4)
+            # Finding keys in L2 is not enough to serve them before the load.
             assert adapter.load_entered.wait(10.0)  # load really started
             clock.advance(10.0)
             assert wait_until(lambda: result_ready(ctrl, req))
 
-            # Retained (nothing loaded) is strictly smaller than the reported 4.
+            # All four keys exist in L2, but none are ready to serve.
             retained = ctrl.query_prefetch_result(req)
             assert retained is not None
-            assert retained.count_leading_ones() == 0
+            assert retained.hit_cells[0].count_leading_ones() == 0
 
             adapter.release_loads()
             assert wait_until(lambda: in_flight_count(ctrl) == 0)
@@ -538,7 +624,7 @@ class TestLoadDeadline:
             assert wait_until(lambda: result_ready(ctrl, req))
             result = ctrl.query_prefetch_result(req)
             assert result is not None
-            assert result.count_leading_ones() == 4  # full hit, no timeout
+            assert result.hit_cells[0].count_leading_ones() == 4  # full hit, no timeout
             assert wait_until(lambda: in_flight_count(ctrl) == 0)
             assert ctrl.report_status()["deadline_timeout_count"] == 0
             clock.advance(100.0)  # no armed requests remain
@@ -645,7 +731,9 @@ class TestLoadDeadline:
             assert wait_until(lambda: draining_count(ctrl) == 1)
             # No L2 lock yet (lookup still gated), nothing loaded into L1.
             retained = ctrl.query_prefetch_result(req)
-            assert retained is not None and retained.count_leading_ones() == 0
+            assert (
+                retained is not None and retained.hit_cells[0].count_leading_ones() == 0
+            )
 
             # Late lookup completes, takes its L2 lock, then the drain releases it.
             adapter.release_lookups()
@@ -685,7 +773,7 @@ class TestLoadDeadline:
             # key 0 (in slow, pending) is a hole -> prefix hit 0, even though the
             # fast adapter finished keys 1 and 3.
             assert retained is not None
-            assert retained.count_leading_ones() == 0
+            assert retained.hit_cells[0].count_leading_ones() == 0
 
             slow.release_loads()
             assert wait_until(lambda: in_flight_count(ctrl) == 0)
@@ -823,9 +911,8 @@ class TestLoadDeadline:
     @pytest.mark.parametrize(
         "policy, retained_readlocked",
         [
-            (TrimPolicy.PREFIX, False),  # hole at key 0 -> nothing retained
-            (TrimPolicy.SEGMENTED_PREFIX, True),  # gaps kept -> 1,3 retained
-            (TrimPolicy.SPARSE, True),  # scattered -> 1,3 retained
+            ("prefix", False),  # hole at key 0 -> nothing retained
+            ("full", True),  # scattered -> 1,3 retained
         ],
     )
     def test_partial_completion_policy_lock_accounting(
@@ -833,9 +920,8 @@ class TestLoadDeadline:
     ):
         """Timeout with a hole (key 0 pending) before completed keys 1,3 drives
         the lock/reservation accounting per policy, not just the bitmap: under
-        PREFIX the completed keys become resident-but-unlocked (unsafe_read =>
-        NOT_READABLE); under SEGMENTED_PREFIX/SPARSE they are read-locked for the
-        caller (unsafe_read => SUCCESS)."""
+        prefix the completed temporary keys are deleted; under full they remain
+        read-locked for the caller (unsafe_read => SUCCESS)."""
         slow = make_gated_adapter()  # holds keys 0 and 2 (never released here)
         fast = make_gated_adapter()
         fast.release_loads()  # finishes keys 1 and 3
@@ -859,10 +945,10 @@ class TestLoadDeadline:
             assert wait_until(lambda: result_ready(ctrl, req))
             retained = ctrl.query_prefetch_result(req)
             assert retained is not None
-            retained_idx = set(retained.get_indices_list())
+            retained_idx = set(retained.hit_cells[0].get_indices_list())
 
-            # Probe the completed keys' L1 state (unsafe_read: SUCCESS = read
-            # locked, NOT_READABLE = resident-unlocked).
+            # Completed temporary keys are either handed to the caller or
+            # released and deleted, matching the upstream retention policy.
             probe = l1_manager.unsafe_read([keys[1], keys[3]])
             if retained_readlocked:
                 assert retained_idx == {1, 3}
@@ -871,8 +957,8 @@ class TestLoadDeadline:
                 l1_manager.finish_read([keys[1], keys[3]])  # caller consumes
             else:
                 assert retained_idx == set()  # hole at 0 truncates the prefix
-                assert probe[keys[1]][0] == L1Error.KEY_NOT_READABLE
-                assert probe[keys[3]][0] == L1Error.KEY_NOT_READABLE
+                assert probe[keys[1]][0] == L1Error.KEY_NOT_EXIST
+                assert probe[keys[3]][0] == L1Error.KEY_NOT_EXIST
 
             slow.release_loads()
             assert wait_until(lambda: in_flight_count(ctrl) == 0)
@@ -901,7 +987,7 @@ class TestLoadDeadline:
             clock.advance(10.0)
             assert wait_until(lambda: result_ready(ctrl, req))
             before = ctrl.query_prefetch_result(req)  # consume the fallback
-            assert before is not None and before.count_leading_ones() == 0
+            assert before is not None and before.hit_cells[0].count_leading_ones() == 0
 
             # Late failing load drains: buffers deleted, request retires, no
             # re-publish (result was already consumed and stays gone).
@@ -925,7 +1011,7 @@ class TestLoadDeadline:
             adapter.close()
 
     def test_fast_success_slow_failure_two_adapters(self, l1_manager):
-        """Fast adapter succeeds (keys 1,3 retained under SPARSE), slow adapter
+        """Fast adapter succeeds (keys 1,3 retained under full), slow adapter
         fails during the drain: the request retires cleanly, the failed keys are
         not published, and a same-key retry works."""
         slow = make_gated_adapter()
@@ -940,7 +1026,7 @@ class TestLoadDeadline:
             keys = [make_object_key(i) for i in range(4)]
             store_keys_in_l2(slow, [keys[0], keys[2]], layout)
             store_keys_in_l2(fast, [keys[1], keys[3]], layout)
-            req = submit(ctrl, keys, layout, policy=TrimPolicy.SPARSE)
+            req = submit(ctrl, keys, layout, policy="full")
             assert wait_until(lambda: in_flight_count(ctrl) == 1)
             # Not just 'admitted': the slow adapter is sitting on its gate with
             # the buffers still unwritten, and the controller has already
@@ -951,7 +1037,10 @@ class TestLoadDeadline:
             clock.advance(10.0)
             assert wait_until(lambda: result_ready(ctrl, req))
             retained = ctrl.query_prefetch_result(req)
-            assert set(retained.get_indices_list()) == {1, 3}  # only fast succeeded
+            assert set(retained.hit_cells[0].get_indices_list()) == {
+                1,
+                3,
+            }  # only fast succeeded
             l1_manager.finish_read([keys[1], keys[3]])
 
             slow.release_loads()  # slow load completes with failure
@@ -959,7 +1048,7 @@ class TestLoadDeadline:
             assert ctrl.query_prefetch_result(req) is None  # not re-published
 
             slow._fail_loads = False  # noqa: SLF001
-            req2 = submit(ctrl, keys, layout, policy=TrimPolicy.SPARSE)
+            req2 = submit(ctrl, keys, layout, policy="full")
             assert wait_until(lambda: result_ready(ctrl, req2))
             assert ctrl.query_prefetch_result(req2) is not None
             assert wait_until(lambda: in_flight_count(ctrl) == 0)

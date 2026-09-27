@@ -55,7 +55,8 @@ jobs:
         uses: ./.github/workflows/build_cu129_artifacts.yml
         # Fork PRs won't expose DOCKERHUB_TOKEN even with `inherit`; the login
         # step in build_cu129_artifacts.yml guards on the token being non-empty.
-        secrets: inherit
+        secrets:
+            dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
     build-rocm:
         name: Build ROCm

@@ -30,7 +30,7 @@ def make_controller_and_request(
         "_enter_drain_only",
         "_finish_drain",
         "_finish_request",
-        "_finalize_completed_load_tasks",
+        "_retire_request_once",
     ):
         setattr(
             ctrl,
@@ -74,7 +74,7 @@ def test_completed_load_still_wins_the_completion_wake():
         phase=PrefetchPhase.PLAN_AND_LOAD,
     )
     ctrl._advance_request(req, signaled)
-    assert calls == ["_poll_load_results", "_finish_request"]
+    assert calls == ["_poll_load_results", "_finish_request", "_retire_request_once"]
     ctrl._clock.assert_not_called()
 
 
@@ -101,7 +101,7 @@ def test_incomplete_lookup_leaves_expiry_to_the_loop():
     ctrl._clock.assert_not_called()
 
 
-def test_partial_late_load_still_finalizes_completed_tasks():
+def test_partial_late_load_polls_without_retiring():
     ctrl, req, signaled, calls = make_controller_and_request(
         deadline=0.2,
         now=1.0,
@@ -110,8 +110,10 @@ def test_partial_late_load_still_finalizes_completed_tasks():
         done=False,
     )
     ctrl._advance_request(req, signaled)
-    assert calls == ["_poll_load_results", "_finalize_completed_load_tasks"]
+    # Each completed adapter is finalized by _poll_load_results in controller v2.
+    assert calls == ["_poll_load_results"]
     ctrl._finish_drain.assert_not_called()
+    ctrl._retire_request_once.assert_not_called()
 
 
 def test_unsignaled_request_remains_untouched():

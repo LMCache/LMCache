@@ -32,7 +32,7 @@ import pytest
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.distributed.api import PrefetchMode, PrefetchRequestSpec, TrimPolicy
+from lmcache.v1.distributed.api import PrefetchLockMode
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.storage_controllers import prefetch_controller
 from tests.v1.distributed.test_prefetch_deadline import (
@@ -49,6 +49,7 @@ from tests.v1.distributed.test_prefetch_deadline import (
     submit,
     wait_until,
 )
+from tests.v1.distributed.utils import single_row_spec
 
 # ``l1_manager`` is a pytest fixture defined in the sibling module and reused
 # here; pytest resolves it by name, so the import is not "unused".
@@ -78,13 +79,9 @@ class ExplodingClock:
         raise AssertionError("the prefetch loop read the clock while disabled")
 
 
-def submit_mode(ctrl, keys, layout, mode, policy=TrimPolicy.PREFIX) -> int:
-    spec = PrefetchRequestSpec(
-        keys=keys,
-        group_layout_descs={0: layout},
-        num_kv_readers=1,
-        policy=policy,
-        mode=mode,
+def submit_mode(ctrl, keys, layout, mode, policy="prefix") -> int:
+    spec = single_row_spec(
+        keys, layout, num_kv_readers=1, fetching_policy=policy, lock_mode=mode
     )
     return ctrl.submit_prefetch_request(spec)
 
@@ -147,11 +144,11 @@ class TestPollBound:
 
             # WARM takes the single slot and is never armed, so _armed stays
             # empty and only the pending queue can bound the poll.
-            submit_mode(ctrl, occupant, layout, PrefetchMode.WARM)
+            submit_mode(ctrl, occupant, layout, PrefetchLockMode.NO_LOCK)
             assert adapter.load_entered.wait(10.0)
             assert wait_until(lambda: in_flight_count(ctrl) == 1)
             # A second WARM request parks unarmed at the head of the queue.
-            submit_mode(ctrl, warm, layout, PrefetchMode.WARM)
+            submit_mode(ctrl, warm, layout, PrefetchLockMode.NO_LOCK)
             assert wait_until(lambda: ctrl.report_status()["pending_queue_size"] == 1)
             assert ctrl._armed == {}  # noqa: SLF001 (white-box precondition)
 
@@ -191,9 +188,7 @@ class TestAdmissionAfterDeadline:
         try:
             layout = make_layout()
             keys = [make_object_key(830 + i) for i in range(2)]
-            spec = PrefetchRequestSpec(
-                keys=keys, group_layout_descs={0: layout}, num_kv_readers=1
-            )
+            spec = single_row_spec(keys, layout, num_kv_readers=1)
             started: list[int] = []
             ctrl._start_lookup_phase = (  # noqa: SLF001 (test shim)
                 lambda rid, sp, dl: started.append(rid)
@@ -201,12 +196,11 @@ class TestAdmissionAfterDeadline:
             # Queued with a deadline that has already passed when admission runs.
             deadline_at = clock() - 0.001
             ctrl._pending_queue.append((7, spec, deadline_at))  # noqa: SLF001
-            ctrl._status_pending_count += 1  # noqa: SLF001
 
             ctrl._start_pending_requests()  # noqa: SLF001
 
             assert started == [], "expired request was started on L2 anyway"
-            assert ctrl._pending_queue == []  # noqa: SLF001
+            assert not ctrl._pending_queue  # noqa: SLF001
             status = ctrl.report_status()
             assert status["deadline_timeout_count"] == 1
             assert status["pending_queue_size"] == 0
@@ -241,7 +235,7 @@ class TestCompletedTaskBuffers:
             keys = [make_object_key(840 + i) for i in range(4)]
             store_keys_in_l2(slow, [keys[0], keys[2]], layout)
             store_keys_in_l2(fast, [keys[1], keys[3]], layout)
-            req = submit(ctrl, keys, layout, policy=TrimPolicy.SPARSE)
+            req = submit(ctrl, keys, layout, policy="full")
             assert wait_until(lambda: in_flight_count(ctrl) == 1)
             assert slow.load_entered.wait(10.0)
             assert fast.load_result_consumed.wait(10.0)
@@ -250,18 +244,25 @@ class TestCompletedTaskBuffers:
             assert wait_until(lambda: result_ready(ctrl, req))
             retained = ctrl.query_prefetch_result(req)
             assert retained is not None
-            assert set(retained.get_indices_list()) == set()  # nothing loaded
+            assert (
+                set(retained.hit_cells[0].get_indices_list()) == set()
+            )  # nothing loaded
 
             probe = l1_manager.unsafe_read(keys)
             # Fast adapter has returned: its failed buffers are released now.
             assert probe[keys[1]][0] == L1Error.KEY_NOT_EXIST
             assert probe[keys[3]][0] == L1Error.KEY_NOT_EXIST
-            # Slow adapter may still be writing: its reservations are untouched.
-            assert probe[keys[0]][0] == L1Error.KEY_NOT_READABLE
-            assert probe[keys[2]][0] == L1Error.KEY_NOT_READABLE
+            # Staging is invisible to readers in controller v2. The two slow
+            # buffers must nevertheless stay allocated and write-locked.
+            assert probe[keys[0]][0] == L1Error.KEY_NOT_EXIST
+            assert probe[keys[2]][0] == L1Error.KEY_NOT_EXIST
+            status = l1_manager.report_status()
+            assert status["staging_object_count"] == 2
+            assert status["write_locked_count"] == 2
 
             slow.release_loads()
             assert wait_until(lambda: in_flight_count(ctrl) == 0)
+            assert l1_manager.report_status()["staging_object_count"] == 0
         finally:
             ctrl.stop()
             slow.close()
@@ -292,7 +293,7 @@ class TestQueuedFallbackTouchesRetained:
             warm = submit(ctrl, keys, layout)
             assert wait_until(lambda: result_ready(ctrl, warm))
             first = ctrl.query_prefetch_result(warm)
-            assert first is not None and first.popcount() == len(keys)
+            assert first is not None and first.hit_cells[0].popcount() == len(keys)
             assert wait_until(lambda: in_flight_count(ctrl) == 0)
             probe = l1_manager.unsafe_read(keys)
             assert all(v[0] == L1Error.SUCCESS for v in probe.values())
@@ -302,14 +303,14 @@ class TestQueuedFallbackTouchesRetained:
 
         try:
             touched: list[list] = []
-            ctrl._l1_manager = _TouchRecorder(l1_manager, touched)  # noqa: SLF001
-            spec = PrefetchRequestSpec(
-                keys=keys, group_layout_descs={0: layout}, num_kv_readers=1
-            )
+            ctrl._l1_managers[0] = _TouchRecorder(l1_manager, touched)  # noqa: SLF001
+            spec = single_row_spec(keys, layout, num_kv_readers=1)
             ctrl._expire_queued_request(9, spec, clock() - 0.001)  # noqa: SLF001
             published = ctrl.query_prefetch_result(9)
             assert published is not None
-            assert published.popcount() == len(keys)  # L1 hit is not discarded
+            assert published.hit_cells[0].popcount() == len(
+                keys
+            )  # L1 hit is not discarded
             assert touched == [keys], (
                 "queued fallback published keys without refreshing LRU recency"
             )

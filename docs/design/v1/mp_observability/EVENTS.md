@@ -14,11 +14,18 @@ these events see [METRICS.md](METRICS.md).
 |---|---|---|
 | `L1_READ_RESERVED` | `keys` | `list[ObjectKey]` |
 | `L1_READ_FINISHED` | `keys` | `list[ObjectKey]` |
-| `L1_WRITE_RESERVED` | `keys` | `list[ObjectKey]` |
+| `L1_WRITE_RESERVED` | `keys`, `tag` | `list[ObjectKey]`, `str` |
 | `L1_WRITE_FINISHED` | `keys` | `list[ObjectKey]` |
 | `L1_WRITE_FINISHED_AND_READ_RESERVED` | `keys` | `list[ObjectKey]` |
 | `L1_KEYS_EVICTED` | `keys` | `list[ObjectKey]` |
 | `L1_EVICTION_LOOP_TICK` | `usage`, `watermark`, `triggered` | `float`, `float`, `bool` |
+
+`L1_WRITE_RESERVED.tag` names the writer that staged the keys (e.g.
+`prefetch:<request_id>`, `storage_manager`); see
+`../../distributed/l1_manager.md`. A staging object that is discarded or
+reclaimed without becoming resident publishes **no** event (it is logged at
+debug level): `L1_KEYS_EVICTED` is reserved for admitted objects, which is
+what the coordinator cache-event reporter and the L1 byte metrics assume.
 
 `L1_EVICTION_LOOP_TICK` fires once per `L1EvictionController.eviction_loop`
 iteration (default ~1Hz).  `triggered` is `True` when `usage >= watermark`
@@ -59,7 +66,6 @@ Producers:
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `SM_READ_PREFETCHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
 | `SM_READ_PREFETCHED_FINISHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
 | `SM_WRITE_RESERVED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
 | `SM_WRITE_FINISHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
@@ -190,7 +196,7 @@ to correlate START/END pairs.
 | `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name`, `transfer_key` | `str`, `int`, `str`, `str` |
 | `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `str`, `int`, `int`, `str` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
-| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `str`, `str`, `str` |
+| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `l1_hit_keys`, `l2_hit_keys`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `int`, `int`, `str`, `str`, `str` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
@@ -232,13 +238,20 @@ know `chunk_size`:
   cannot hit at chunk granularity.
 - `hit_tokens = found_count * chunk_size`.
 - `l1_hit_tokens` and `l2_hit_tokens` split `hit_tokens` by the tier that
-  served it.  `l1_hit_tokens` comes from `PrefetchHandle.l1_hit_chunks` —
-  the prefix L1 alone could serve under each object group's attention
+  served it.  `l1_hit_tokens` is the fold of `PrefetchResult.l1_hit_cells`
+  — the prefix L1 alone could serve under each object group's attention
   window rule — so a chunk whose out-of-window keys were never fetched is
   still an L1 hit.  `l2_hit_tokens` is the remainder: how much further
   `found_count` reached once L2 completed.  **Invariant:
   `l1_hit_tokens + l2_hit_tokens == hit_tokens`, exactly, on every path**,
   so a dashboard summing the two can never exceed 100%.
+- `l1_hit_keys` and `l2_hit_keys` count the hit keys (one per object group,
+  kv rank and chunk) L1 already held and L2 loaded:
+  `PrefetchResult.l1_hit_count` and `l2_hit_count`.  They are not divided by
+  `world_size` and are `0` on the early-exit paths.  On hybrid models they
+  complement the token split: when L1 holds the full-attention keys but L2
+  serves the sliding-window keys, `l1_hit_tokens` is `0` while `l1_hit_keys`
+  is most of the hit.
 - `early_exit_reason` names the branch of `lookup()` that returned before a
   prefetch task was submitted.  Always present; `""` on the normal path.
   Vocabulary:

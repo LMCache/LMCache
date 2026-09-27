@@ -189,6 +189,10 @@ class Bitmap:
         """Number of bits in the bitmap (same as :meth:`size`)."""
         ...
 
+    def copy(self) -> Bitmap:
+        """Return an independent copy with the same size and bits."""
+        ...
+
     def popcount(self) -> int:
         """Return the number of bits set to 1."""
         ...

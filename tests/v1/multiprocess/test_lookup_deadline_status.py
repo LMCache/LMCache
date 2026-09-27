@@ -15,14 +15,22 @@ import threading
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import PrefetchHandle
+from lmcache.v1.distributed.api import PrefetchHandle, PrefetchResult
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 
 
 def _make_ctx(wait_result=True, found=None):
     storage_manager = mock.Mock()
     storage_manager.wait_prefetch_status.return_value = wait_result
-    storage_manager.query_prefetch_status.return_value = found
+    storage_manager.query_prefetch_status.return_value = (
+        PrefetchResult(
+            hit_cells=found,
+            l1_hit_cells=[Bitmap(len(row)) for row in found],
+            l2_hit_cells=[row.copy() for row in found],
+        )
+        if found is not None
+        else None
+    )
     ctx = mock.Mock()
     ctx.storage_manager = storage_manager
     ctx.event_bus = mock.Mock()
@@ -42,17 +50,16 @@ def _handle(num_keys):
     return PrefetchHandle(
         prefetch_request_id=0,
         external_request_id="req",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
         total_requested_keys=num_keys,
         submit_time=0.0,
+        sliding_windows=(-1, -1),
     )
 
 
 def _register(module, handle, world_size=2):
     module._prefetch_jobs["req"] = _PrefetchJob(
         handle=handle,
-        world_size=world_size,
+        row_windows=(-1,) * world_size,
         request_id="req",
         requested_tokens=world_size * 256,
     )
@@ -62,9 +69,7 @@ def test_deadline_fallback_returns_partial_count_and_removes_job():
     # 8 keys = 4 chunks (world_size=2, 1 group). A deadline fallback that
     # retained only the first 2 chunks sets the leading 4 bits.
     num_keys = 8
-    found = Bitmap(num_keys)
-    for i in range(4):
-        found.set(i)
+    found = [Bitmap(4, 2) for _ in range(2)]
     ctx = _make_ctx(wait_result=True, found=found)
     module = _make_module(ctx)
     _register(module, _handle(num_keys))
@@ -77,9 +82,7 @@ def test_deadline_fallback_returns_partial_count_and_removes_job():
 
 def test_deadline_fallback_via_wait_returns_count_and_removes_job():
     num_keys = 8
-    found = Bitmap(num_keys)
-    for i in range(4):
-        found.set(i)
+    found = [Bitmap(4, 2) for _ in range(2)]
     ctx = _make_ctx(wait_result=True, found=found)
     module = _make_module(ctx)
     _register(module, _handle(num_keys))
@@ -96,7 +99,7 @@ def test_zero_retained_fallback_returns_zero_and_removes_job():
     # still resolves to a normal final status of 0 chunks and removes the job,
     # so the engine recomputes everything -- it does not hang.
     num_keys = 8
-    ctx = _make_ctx(wait_result=True, found=Bitmap(num_keys))
+    ctx = _make_ctx(wait_result=True, found=[Bitmap(4), Bitmap(4)])
     module = _make_module(ctx)
     _register(module, _handle(num_keys))
 
