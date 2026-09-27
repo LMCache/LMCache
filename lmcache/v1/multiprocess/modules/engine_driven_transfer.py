@@ -219,7 +219,10 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         """Release resources for a popped entry (run outside the lock).
 
         Sweeps the instance's pending SHM transfers and unregisters its
-        layout descriptor.
+        layout descriptor. A pending write was prepared but never committed,
+        so its SHM slots may hold no KV at all: those reservations are
+        aborted, never admitted, so the cache can't serve unwritten data.
+        Pending reads only release their read locks.
 
         Args:
             instance_id: The popped instance ID.
@@ -233,7 +236,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
 
         for obj_keys in write_obj_keys:
             if obj_keys:
-                self._ctx.storage_manager.finish_write(obj_keys)
+                self._ctx.storage_manager.abort_write(obj_keys)
         for obj_keys in read_obj_keys:
             if obj_keys:
                 self._ctx.storage_manager.finish_read_prefetched(obj_keys)

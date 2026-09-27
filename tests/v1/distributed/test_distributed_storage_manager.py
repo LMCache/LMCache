@@ -898,6 +898,106 @@ class TestStorageManagerL2Prefetch:
         sm.close()
 
 
+class TestStorageManagerAbortWrite:
+    """Tests for StorageManager.abort_write."""
+
+    def test_aborted_keys_are_not_readable(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """Aborted reservations never become visible to readers."""
+        sm = StorageManager(basic_storage_manager_config)
+        try:
+            keys = [make_object_key(i) for i in range(3)]
+            assert len(sm.reserve_write(keys, basic_layout)) == len(keys)
+
+            sm.abort_write(keys)
+
+            handle = sm.submit_prefetch_task(single_row_spec(keys, basic_layout))
+            assert wait_for_prefetch_status(sm, handle) == 0
+        finally:
+            sm.close()
+
+    def test_abort_write_frees_reserved_memory(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """Aborting returns the reserved bytes to the L1 pool."""
+        sm = StorageManager(basic_storage_manager_config)
+        try:
+            used_before, _ = sm.get_l1_usage()
+            keys = [make_object_key(i) for i in range(3)]
+            sm.reserve_write(keys, basic_layout)
+            assert sm.get_l1_usage()[0] > used_before
+
+            sm.abort_write(keys)
+
+            assert sm.get_l1_usage()[0] == used_before
+        finally:
+            sm.close()
+
+    def test_aborted_keys_can_be_written_again(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """An aborted key can be reserved, written and read afterwards."""
+        sm = StorageManager(basic_storage_manager_config)
+        try:
+            keys = [make_object_key(i) for i in range(3)]
+            sm.reserve_write(keys, basic_layout)
+            sm.abort_write(keys)
+
+            assert len(sm.reserve_write(keys, basic_layout)) == len(keys)
+            sm.finish_write(keys)
+
+            handle = sm.submit_prefetch_task(single_row_spec(keys, basic_layout))
+            assert wait_for_prefetch_status(sm, handle) == len(keys)
+            sm.finish_read_prefetched(keys)
+        finally:
+            sm.close()
+
+    def test_abort_write_without_reservation_is_noop(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """Aborting a committed or never-reserved key leaves the cache as is."""
+        sm = StorageManager(basic_storage_manager_config)
+        try:
+            committed = make_object_key(1)
+            sm.reserve_write([committed], basic_layout)
+            sm.finish_write([committed])
+
+            sm.abort_write([committed, make_object_key(2)])
+
+            handle = sm.submit_prefetch_task(single_row_spec([committed], basic_layout))
+            assert wait_for_prefetch_status(sm, handle) == 1
+            sm.finish_read_prefetched([committed])
+        finally:
+            sm.close()
+
+    def test_abort_write_publishes_no_write_finished(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """Aborted keys must not be reported as finished writes."""
+        bus = init_event_bus(EventBusConfig(enabled=True, max_queue_size=10_000))
+        finished: list[Event] = []
+        bus.subscribe(EventType.SM_WRITE_FINISHED, finished.append)
+        bus.start()
+        sm = StorageManager(basic_storage_manager_config)
+        try:
+            aborted = [make_object_key(i) for i in range(2)]
+            sentinel = make_object_key(100)
+            sm.reserve_write(aborted + [sentinel], basic_layout)
+
+            sm.abort_write(aborted)
+            # Events are delivered in publish order, so the sentinel's event
+            # arriving first proves the abort published none before it.
+            sm.finish_write([sentinel])
+
+            assert wait_for_condition(lambda: len(finished) >= 1, timeout=2.0)
+            assert finished[0].metadata["succeeded_keys"] == [sentinel]
+        finally:
+            sm.close()
+            bus.stop()
+            init_event_bus(EventBusConfig(enabled=False))
+
+
 # =============================================================================
 # Tests for LM-291 failure event production
 # =============================================================================
