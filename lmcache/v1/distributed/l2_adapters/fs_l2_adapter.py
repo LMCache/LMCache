@@ -584,12 +584,13 @@ class FSL2Adapter(L2AdapterInterface):
         self,
         file_path: Path,
         dst_buf: Union[bytearray, memoryview, bytes],
-    ) -> tuple[int, bytes]:
+    ) -> tuple[int, bool]:
         """Synchronous O_DIRECT read into *dst_buf*.
 
-        Returns the number of payload bytes read and, when checksums are
-        enabled, the bytes that follow the payload (the trailer; empty when
-        disabled). Runs in an executor (not on the event loop).
+        Returns the number of payload bytes read and whether the payload
+        verified against its CRC32 trailer (always True when checksums are
+        disabled). Verifying here keeps the read and the hash in one
+        executor call. Runs in an executor (not on the event loop).
         """
         fd = -1
         size = len(dst_buf)
@@ -602,8 +603,10 @@ class FSL2Adapter(L2AdapterInterface):
                 )
                 with open(file_path, "rb") as f:
                     num_read = _readinto_full(f, dst_buf)
-                    trailer = f.read(_CRC32_TRAILER.size) if self._use_crc32 else b""
-                    return num_read, trailer
+                    if not self._use_crc32:
+                        return num_read, True
+                    trailer = f.read(_CRC32_TRAILER.size)
+                    return num_read, _crc32_trailer_matches(dst_buf, trailer)
 
             fd = os.open(
                 str(file_path),
@@ -612,19 +615,19 @@ class FSL2Adapter(L2AdapterInterface):
             with os.fdopen(fd, "rb", buffering=0) as fdo:
                 fd = -1  # now managed by fdopen
                 num_read = _readinto_full(fdo, dst_buf)
-                trailer = b""
-                if self._use_crc32 and num_read == size:
-                    # One aligned read; a buffered-written trailer is shorter.
-                    block = mmap.mmap(-1, self._os_disk_bs)
-                    try:
-                        got = fdo.readinto(block) or 0
-                        trailer = block[: min(got, _CRC32_TRAILER.size)]
-                    finally:
-                        block.close()
-                return num_read, trailer
+                if not self._use_crc32 or num_read != size:
+                    return num_read, not self._use_crc32
+                # One aligned read; a buffered-written trailer is shorter.
+                block = mmap.mmap(-1, self._os_disk_bs)
+                try:
+                    got = fdo.readinto(block) or 0
+                    trailer = block[: min(got, _CRC32_TRAILER.size)]
+                finally:
+                    block.close()
+                return num_read, _crc32_trailer_matches(dst_buf, trailer)
         except Exception:
             logger.exception("Failed to O_DIRECT read %s", file_path)
-            return 0, b""
+            return 0, False
         finally:
             if fd >= 0:
                 try:
@@ -824,11 +827,10 @@ class FSL2Adapter(L2AdapterInterface):
                 dst_buf = objects[i].byte_array
                 expected = len(dst_buf)
                 num_read: Optional[int] = None
-                trailer = b""
 
                 # O_DIRECT path (sync, via executor)
                 if self._use_odirect:
-                    num_read, trailer = await self._loop.run_in_executor(
+                    num_read, verified = await self._loop.run_in_executor(
                         None,
                         self._read_with_odirect,
                         file_path,
@@ -852,10 +854,11 @@ class FSL2Adapter(L2AdapterInterface):
                             num_read,
                         )
                         continue
+                    verified = not self._use_crc32 or await self._loop.run_in_executor(
+                        None, _crc32_trailer_matches, dst_buf, trailer
+                    )
 
-                if self._use_crc32 and not await self._loop.run_in_executor(
-                    None, _crc32_trailer_matches, dst_buf, trailer
-                ):
+                if not verified:
                     logger.warning(
                         "FSL2Adapter checksum mismatch for %s; discarding the file",
                         file_path.name,
