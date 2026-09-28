@@ -1666,3 +1666,26 @@ class TestDiskGuardedUsage:
             assert "disk_guard" in adp.report_status()
         finally:
             adp.close()
+
+
+class TestOnCloseHook:
+    def test_runs_once_after_the_client_is_closed(self):
+        order = []
+        client = MockNativeConnector()
+        original_close = client.close
+
+        def closing():
+            order.append("client")
+            original_close()
+
+        client.close = closing
+        adp = NativeConnectorL2Adapter(client, on_close=lambda: order.append("hook"))
+        adp.close()
+        assert order == ["client", "hook"]
+
+    def test_a_failing_hook_does_not_break_close(self):
+        def boom():
+            raise OSError("disk gone")
+
+        adp = NativeConnectorL2Adapter(MockNativeConnector(), on_close=boom)
+        adp.close()
