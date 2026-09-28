@@ -3,6 +3,7 @@
 
 # Standard
 from typing import Literal, Protocol, cast
+import asyncio
 
 # Third Party
 from fastapi import APIRouter, Request
@@ -241,7 +242,7 @@ async def reconfigure_status(backend: str, request: Request) -> dict | JSONRespo
         return sm
     try:
         normalized_backend = _normalize_backend(backend)
-        status = sm.get_l2_adapter_reconfigure_status()
+        status = await asyncio.to_thread(sm.get_l2_adapter_reconfigure_status)
         return _backend_status_response(status, normalized_backend)
     except L2ReconfigureError as exc:
         return reconfigure_error_response(exc)
@@ -265,15 +266,20 @@ async def reconfigure_backend(
         if isinstance(resolved, JSONResponse):
             return resolved
         adapter_index, operation_payload = resolved
-        generic_adapter_index = _resolve_backend_adapter_index(
-            sm,
-            normalized_backend,
-            adapter_index,
-        )
-        return sm.reconfigure_l2_adapter(
-            generic_adapter_index,
-            normalized_operation,
-            operation_payload,
-        )
+
+        def reconfigure() -> dict:
+            """Keep status-probe locks and the operation off the event loop."""
+            generic_adapter_index = _resolve_backend_adapter_index(
+                sm,
+                normalized_backend,
+                adapter_index,
+            )
+            return sm.reconfigure_l2_adapter(
+                generic_adapter_index,
+                normalized_operation,
+                operation_payload,
+            )
+
+        return await asyncio.to_thread(reconfigure)
     except L2ReconfigureError as exc:
         return reconfigure_error_response(exc)

@@ -4,6 +4,7 @@
 # Standard
 from dataclasses import asdict
 from typing import Protocol, cast
+import asyncio
 
 # Third Party
 from fastapi import APIRouter, Request
@@ -110,7 +111,7 @@ async def l1_dax_status(request: Request) -> JSONResponse:
     if isinstance(storage_manager, JSONResponse):
         return storage_manager
     try:
-        statuses = storage_manager.get_l1_devdax_arena_statuses()
+        statuses = await asyncio.to_thread(storage_manager.get_l1_devdax_arena_statuses)
     except L1ReconfigureError as exc:
         return reconfigure_error_response(exc)
     return JSONResponse(
@@ -141,7 +142,9 @@ async def l1_dax_add(
     except ValueError:
         return JSONResponse(status_code=400, content={"error": SIZE_ERROR})
     try:
-        status = storage_manager.add_l1_devdax_device(body.device_path, size_bytes)
+        status = await asyncio.to_thread(
+            storage_manager.add_l1_devdax_device, body.device_path, size_bytes
+        )
     except L1ReconfigureError as exc:
         logger.warning("l1 dax add failed for %s: %s", body.device_path, exc)
         return reconfigure_error_response(exc)
@@ -168,7 +171,11 @@ async def l1_dax_remove(
     if isinstance(storage_manager, JSONResponse):
         return storage_manager
     try:
-        status = storage_manager.remove_l1_devdax_device(body.device_path, body.mode)
+        status = await asyncio.to_thread(
+            storage_manager.remove_l1_devdax_device,
+            body.device_path,
+            body.mode,
+        )
     except L1ReconfigureError as exc:
         logger.warning("l1 dax remove failed for %s: %s", body.device_path, exc)
         return reconfigure_error_response(exc)

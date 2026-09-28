@@ -3,15 +3,26 @@
 
 # Standard
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Optional
+import asyncio
+import contextlib
+import threading
 
 # Third Party
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import httpx
 import pytest
 
 # First Party
 from lmcache.v1.distributed.l2_adapters.reconfiguration import L2ReconfigureError
+from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+    DevDaxArenaState,
+    DevDaxArenaStatus,
+)
+from lmcache.v1.mp_coordinator.registrar import keep_registered
+from lmcache.v1.multiprocess.http_apis.l1_reconfigure_api import router as l1_router
 from lmcache.v1.multiprocess.http_apis.reconfigure_api import router
 
 _DAX_OPS = ["status", "add", "remove", "resize"]
@@ -346,3 +357,154 @@ def test_reconfigure_post_rejects_missing_backend_adapter():
 def test_old_dax_routes_are_not_registered() -> None:
     resp = _client(_FakeStorageManager()).get("/reconfigure/dax/status")
     assert resp.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("tier", "operation"),
+    [("l1", "add"), ("l1", "remove"), ("l2", "add")],
+)
+def test_blocked_reconfigure_and_status_allow_http_and_heartbeats(
+    tier: str, operation: str
+) -> None:
+    """Exercise actual ASGI routes and registrar on the same asyncio loop."""
+    loop_thread = threading.get_ident()
+    lock = threading.Lock()
+    entered = threading.Event()
+    status_entered = threading.Event()
+    released = threading.Event()
+    lock.acquire()
+    release_lock = threading.Lock()
+
+    def release() -> None:
+        with release_lock:
+            if not released.is_set():
+                released.set()
+                lock.release()
+
+    # A regressed loop-blocking route cannot prevent test cleanup.
+    watchdog = threading.Timer(5, release)
+    watchdog.start()
+
+    def blocked(*args: object, **kwargs: object) -> object:
+        entered.set()
+        with lock:
+            arena = DevDaxArenaStatus(
+                device_path="/dev/dax-test",
+                size_in_bytes=4096,
+                used_bytes=4096,
+                free_bytes=0,
+                active_allocations=1,
+                state=DevDaxArenaState.DRAINING,
+                is_primary=False,
+            )
+            if tier == "l1":
+                return arena
+            return {"status": "ok"}
+
+    def status() -> object:
+        assert threading.get_ident() != loop_thread, "status probe ran on the loop"
+        l2_status = {"adapters": [{"backend": "dax", "adapter_index": 0}]}
+        if tier == "l2" and not entered.is_set():
+            # Let backend resolution finish so the mutation can hold the lock.
+            return l2_status
+        status_entered.set()
+        with lock:
+            return [] if tier == "l1" else l2_status
+
+    async def run() -> None:
+        heartbeat = asyncio.Event()
+
+        def coordinator(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                return httpx.Response(
+                    200, json={"instance_id": "test", "re_registered": False}
+                )
+            if request.method == "PUT":
+                heartbeat.set()
+            return httpx.Response(200)
+
+        app = FastAPI()
+        app.include_router(l1_router)
+        app.include_router(router)
+        app.state.engine = SimpleNamespace(
+            storage_manager=SimpleNamespace(
+                get_l1_devdax_arena_statuses=status,
+                add_l1_devdax_device=blocked,
+                remove_l1_devdax_device=blocked,
+                get_l2_adapter_reconfigure_status=status,
+                reconfigure_l2_adapter=blocked,
+            )
+        )
+
+        @app.get("/ping")
+        async def ping() -> dict:
+            return {"ok": True}
+
+        async with (
+            httpx.AsyncClient(transport=httpx.MockTransport(coordinator)) as coord,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client,
+        ):
+            registrar = asyncio.create_task(
+                keep_registered(
+                    coord,
+                    "http://coord",
+                    http_port=8080,
+                    advertise_ip="127.0.0.1",
+                    heartbeat_interval=0.01,
+                    on_registered=lambda: None,
+                )
+            )
+            url = f"/reconfigure/dax/{tier}/{operation}"
+            payload: dict[str, object] = {"device_path": "/dev/dax-test"}
+            if operation == "add":
+                payload["size"] = 4096
+            request = asyncio.create_task(client.post(url, json=payload))
+            status_request: asyncio.Task[httpx.Response] | None = None
+
+            async def check_progress() -> None:
+                nonlocal status_request
+                while not entered.is_set():
+                    await asyncio.sleep(0.001)
+                status_request = asyncio.create_task(
+                    client.get(f"/reconfigure/dax/{tier}/status")
+                )
+                while not status_entered.is_set():
+                    await asyncio.sleep(0.001)
+                heartbeat.clear()
+                assert (await client.get("/ping")).json() == {"ok": True}
+                await heartbeat.wait()
+                assert not released.is_set(), "blocking call stalled the event loop"
+                assert not request.done(), "response preceded operation completion"
+                if status_request is not None:
+                    assert not status_request.done()
+
+            try:
+                await asyncio.wait_for(check_progress(), timeout=2)
+                release()
+                response = await request
+                assert response.status_code == 200
+                if tier == "l1" and operation == "remove":
+                    assert (
+                        response.json()["removed"]["arenas"][0]["state"] == "draining"
+                    )
+                if status_request is not None:
+                    assert (await status_request).status_code == 200
+            finally:
+                release()
+                await asyncio.gather(
+                    request,
+                    *([status_request] if status_request else []),
+                    return_exceptions=True,
+                )
+                registrar.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await registrar
+
+    try:
+        asyncio.run(run())
+    finally:
+        release()
+        watchdog.cancel()
+        watchdog.join()
