@@ -34,6 +34,19 @@ uv pip install torch               # pre-requisite for CUDA extensions
 uv pip install -e . --no-build-isolation
 ```
 
+For tests in an already prepared Python 3.12 `.venv`, run:
+
+```bash
+uv run --no-sync --python 3.12 python -m pytest -q tests/v1/platform/test_stream.py
+```
+
+This avoids an implicit editable rebuild. If version detection selects an old
+tag such as `v1.2`,
+`setuptools-scm` can reject it because this repository requires `vX.Y.Z` tags.
+For local source-only validation, the build-time override
+`SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0` bypasses that lookup; do not
+use the override for release artifacts.
+
 ## Build & Install
 
 ```bash
