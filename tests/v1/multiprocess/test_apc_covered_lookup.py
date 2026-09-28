@@ -4,8 +4,9 @@
 Covers the correctness-critical pieces that do not require the native compute
 backend:
 
-- ``IPCCacheServerKey.covered_chunks`` default and round-trip through
-  ``no_worker_id_version``.
+- The covered count carried in ``request_configs`` under
+  ``COVERED_CHUNKS_CONFIG_KEY`` survives ``no_worker_id_version`` and does not
+  change cache identity.
 - ``resolve_prefetched_obj_keys`` clamping the release range to the covered
   prefix, so a release never touches a chunk the lookup did not lock (risk 1:
   over-release would drop a concurrent prefix-sharing request's read lock).
@@ -15,7 +16,10 @@ backend:
 from unittest.mock import MagicMock
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import (
+    COVERED_CHUNKS_CONFIG_KEY,
+    IPCCacheServerKey,
+)
 from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
 
 CHUNK_SIZE = 16
@@ -23,6 +27,9 @@ CHUNK_SIZE = 16
 
 def _make_key(n_chunks: int, covered_chunks: int = 0) -> IPCCacheServerKey:
     n_tokens = n_chunks * CHUNK_SIZE
+    request_configs = (
+        {COVERED_CHUNKS_CONFIG_KEY: covered_chunks} if covered_chunks else None
+    )
     return IPCCacheServerKey(
         model_name="m",
         world_size=1,
@@ -32,7 +39,7 @@ def _make_key(n_chunks: int, covered_chunks: int = 0) -> IPCCacheServerKey:
         end=n_tokens,
         request_id="r",
         num_kv_readers=1,
-        covered_chunks=covered_chunks,
+        request_configs=request_configs,
     )
 
 
@@ -45,19 +52,19 @@ def _ctx_with_hashes(n_chunks: int) -> MagicMock:
     return ctx
 
 
-def test_covered_chunks_default_zero():
+def test_covered_config_absent_by_default():
     key = _make_key(4)
-    assert key.covered_chunks == 0
+    assert (key.request_configs or {}).get(COVERED_CHUNKS_CONFIG_KEY, 0) == 0
 
 
-def test_covered_chunks_survives_no_worker_id_version():
+def test_covered_config_survives_no_worker_id_version():
     key = _make_key(4, covered_chunks=2).no_worker_id_version()
-    assert key.covered_chunks == 2
+    assert key.request_configs[COVERED_CHUNKS_CONFIG_KEY] == 2
     assert key.worker_id is None
 
 
-def test_covered_chunks_not_part_of_cache_identity():
-    # covered_chunks is compare=False, so two otherwise-equal keys are equal.
+def test_covered_config_not_part_of_cache_identity():
+    # request_configs is compare=False, so two otherwise-equal keys are equal.
     a = _make_key(4, covered_chunks=0)
     b = _make_key(4, covered_chunks=3)
     assert a == b
