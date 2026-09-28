@@ -237,7 +237,7 @@ class _LookupAck:
 
 
 @dataclass(frozen=True)
-class LookupResult:
+class LookupOutcome:
     """Result of an aggregated LMCache lookup across all servers.
 
     Attributes:
@@ -730,7 +730,7 @@ class LMCacheMPSchedulerAdapter:
         #   Per-server hit counts, used to detect disagreement and free tail locks.
         self._pending_lookups: set[str] = set()
         self._unacked_lookups: dict[str, _LookupAck] = {}
-        self._finished_lookup_results: dict[str, LookupResult] = {}
+        self._finished_lookup_results: dict[str, LookupOutcome] = {}
         self._per_server_hits: dict[str, dict[str, int]] = {}
         # request_id -> server URL -> (in-flight status future, submission time).
         self._lookup_status: dict[
@@ -968,7 +968,7 @@ class LMCacheMPSchedulerAdapter:
                 self.req_clients[url].free_lookup_locks(tail_key, self.tp_size)
 
     @_lmcache_nvtx_annotate
-    def check_lookup_result(self, request_id: str) -> "LookupResult | None":
+    def check_lookup_result(self, request_id: str) -> "LookupOutcome | None":
         """
         Check the result of a previously submitted lookup request.
 
@@ -978,10 +978,10 @@ class LMCacheMPSchedulerAdapter:
         outstanding QUERY_PREFETCH_STATUS future per unresolved server without
         waiting by default. Setting ``lmcache.mp.nonblocking_lookup_status`` to
         False instead waits for each reply in the current callback. Returns a
-        :class:`LookupResult` (hit + stored tokens) when the prefetch is
+        :class:`LookupOutcome` (hit + stored tokens) when the prefetch is
         complete, or None if still in progress.
 
-        ``LookupResult.stored_tokens`` currently equals the hit; the
+        ``LookupOutcome.stored_tokens`` currently equals the hit; the
         covered-present store-hole signal is a proto follow-up (see the design
         doc).
 
@@ -994,7 +994,7 @@ class LMCacheMPSchedulerAdapter:
                 `maybe_submit_lookup_request`
 
         Returns:
-            A :class:`LookupResult` with the total matched tokens and the
+            A :class:`LookupOutcome` with the total matched tokens and the
             contiguous stored-prefix tokens, or None if the lookup request is
             not finished yet.
         """
@@ -1002,12 +1002,12 @@ class LMCacheMPSchedulerAdapter:
             # No job — either unhealthy at submit time or already cleaned up.
             # Return the cached aggregate if any, otherwise empty.
             return self._finished_lookup_results.get(
-                request_id, LookupResult(hit_tokens=0, stored_tokens=0)
+                request_id, LookupOutcome(hit_tokens=0, stored_tokens=0)
             )
 
         if not self.is_healthy:
             # Server went down — give up on this lookup
-            return LookupResult(hit_tokens=0, stored_tokens=0)
+            return LookupOutcome(hit_tokens=0, stored_tokens=0)
 
         if request_id in self._finished_lookup_results:
             # Aggregation already done; return the cached value.
@@ -1028,7 +1028,7 @@ class LMCacheMPSchedulerAdapter:
                     for url in ack.futures:
                         self._mark_lookup_timed_out(url)
                     del self._unacked_lookups[request_id]
-                    return LookupResult(hit_tokens=0, stored_tokens=0)
+                    return LookupOutcome(hit_tokens=0, stored_tokens=0)
                 # Acknowledgement still in flight; poll again next step.
                 return None
             del self._unacked_lookups[request_id]
@@ -1052,7 +1052,7 @@ class LMCacheMPSchedulerAdapter:
             if self._nonblocking_lookup_status and not fut.query():
                 if time.monotonic() - submitted_at >= self._mq_timeout:
                     self._mark_lookup_timed_out(url)
-                    return LookupResult(hit_tokens=0, stored_tokens=0)
+                    return LookupOutcome(hit_tokens=0, stored_tokens=0)
                 continue
             del futures[url]
             try:
@@ -1065,7 +1065,7 @@ class LMCacheMPSchedulerAdapter:
                     url,
                 )
                 self._health_events[url].clear()
-                return LookupResult(hit_tokens=0, stored_tokens=0)
+                return LookupOutcome(hit_tokens=0, stored_tokens=0)
             if r is None:
                 continue
             per_server[url] = int(r)
@@ -1091,7 +1091,7 @@ class LMCacheMPSchedulerAdapter:
         # to carry a value (a proto field + regen), which is a follow-up. Until
         # then a covered chunk evicted while covered is re-stored via the normal
         # store path once a later request observes it as a miss.
-        result = LookupResult(hit_tokens=token_count, stored_tokens=token_count)
+        result = LookupOutcome(hit_tokens=token_count, stored_tokens=token_count)
         self._finished_lookup_results[request_id] = result
         return result
 
