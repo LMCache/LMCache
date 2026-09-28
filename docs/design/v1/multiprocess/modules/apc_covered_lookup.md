@@ -43,8 +43,11 @@ appears once the shrink race is actually triggered under memory pressure.)
 ## Workflow — module interactions
 
 Participants: **Scheduler** (vLLM), **Connector** (`LMCacheMPConnector`),
-**Adapter** (`LMCacheMPSchedulerAdapter`), **Lookup** (server `LookupModule`),
+**Adapter** (`LMCacheMPSchedulerAdapter`), **LookupModule** (server),
 **Storage** (`StorageManager`/`L1Manager`), **BlockPool** (vLLM GPU block pool).
+
+> Note: GitHub renders mermaid in the **file view**, not in the PR "Files
+> changed" diff — open the rendered file to see the diagrams.
 
 ### Pin
 
@@ -53,28 +56,27 @@ sequenceDiagram
     participant S as Scheduler
     participant C as Connector
     participant A as Adapter
-    participant L as Lookup (server)
-    participant SM as Storage (SM/L1)
+    participant L as LookupModule
+    participant SM as Storage
     participant BP as BlockPool
-
-    S->>C: get_num_new_matched_tokens(req, num_computed = APC hit)
-    C->>C: c0 = align(num_computed) → covered_chunks
-    C->>BP: get_cached_block + touch  [PIN covered blocks]
-    C->>A: maybe_submit_lookup_request(covered_chunks)
-    A->>L: LOOKUP(key, covered_chunks in request_configs)
-    L->>SM: peek + touch covered [0, c0)  (no lock, no prefetch)
-    L->>SM: reserve_read + L2-prefetch uncovered [c0, end)
+    S->>C: get_num_new_matched_tokens, num_computed = APC hit
+    Note over C: c0 = align num_computed to covered_chunks
+    C->>BP: PIN covered blocks - get_cached_block + touch
+    C->>A: maybe_submit_lookup_request covered_chunks
+    A->>L: LOOKUP key + covered_chunks
+    L->>SM: peek + touch covered 0..c0 - no lock no prefetch
+    L->>SM: reserve_read + prefetch uncovered c0..end
     C->>A: check_lookup_result
-    A-->>C: LookupOutcome(hit, stored)
-    alt APC shrank below c0 AND pin unavailable
+    A-->>C: LookupOutcome hit, stored
+    alt APC shrank below c0 and pin unavailable
         C->>A: free_lookup_locks
-        C->>BP: free_blocks (release pin)
-        C-->>S: (0, False) — bypass, recompute locally
+        C->>BP: free_blocks - release pin
+        C-->>S: return 0 - bypass and recompute
     else normal
         C-->>S: need_to_load = hit - num_computed
-        S->>C: update_state_after_alloc (admitted)
-        C->>BP: free_blocks (release pin, idempotent)
-        C->>A: free_lookup_locks([0, vllm_hit)) → server clamps to [c0, ret)
+        S->>C: update_state_after_alloc
+        C->>BP: free_blocks - release pin, idempotent
+        C->>A: free_lookup_locks - server clamps to c0..ret
     end
 ```
 
@@ -85,29 +87,28 @@ sequenceDiagram
     participant S as Scheduler
     participant C as Connector
     participant A as Adapter
-    participant L as Lookup (server)
-    participant SM as Storage (SM/L1)
-
-    S->>C: get_num_new_matched_tokens(req, num_computed = APC hit)
-    C->>C: c0 = align(num_computed) → covered_chunks  (no pin)
-    C->>A: maybe_submit_lookup_request(covered_chunks)
-    A->>L: LOOKUP(key, covered_chunks in request_configs)
-    L->>SM: peek + touch covered [0, c0)  (no lock, no prefetch)
-    L->>SM: reserve_read + L2-prefetch uncovered [c0, end)
+    participant L as LookupModule
+    participant SM as Storage
+    S->>C: get_num_new_matched_tokens, num_computed = APC hit
+    Note over C: c0 = align num_computed to covered_chunks - no pin
+    C->>A: maybe_submit_lookup_request covered_chunks
+    A->>L: LOOKUP key + covered_chunks
+    L->>SM: peek + touch covered 0..c0 - no lock no prefetch
+    L->>SM: reserve_read + prefetch uncovered c0..end
     C->>A: check_lookup_result
-    A-->>C: LookupOutcome(hit, stored)
-    alt APC shrank c0 → c0' (gap exposed)
-        C->>A: free stale [c0, ret) locks + cleanup_lookup_result
-        C->>C: reset per-lookup state (re-submit gap [c0', c0) next poll)
-        C-->>S: (None, True) — re-poll
+    A-->>C: LookupOutcome hit, stored
+    alt APC shrank c0 to c0prime - gap exposed
+        C->>A: free stale c0..ret locks + cleanup_lookup_result
+        Note over C: reset per-lookup state; re-submit gap c0prime..c0 next poll
+        C-->>S: return None - re-poll
     else normal
         C-->>S: need_to_load = hit - num_computed
-        S->>C: update_state_after_alloc (admitted)
-        C->>A: free_lookup_locks([0, vllm_hit)) → server clamps to [c0, ret)
+        S->>C: update_state_after_alloc
+        C->>A: free_lookup_locks - server clamps to c0..ret
     end
 ```
 
 Shared across both: the server touches (never locks/prefetches) the covered
-prefix and prefetches only `[c0, end)`; every lock-release resolves through the
+prefix and prefetches only `c0..end`; every lock-release resolves through the
 covered clamp so it never drops a lock the lookup did not take. The methods
 diverge only in the pin block-pool interactions and the shrink branch.
