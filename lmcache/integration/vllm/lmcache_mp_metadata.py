@@ -84,6 +84,12 @@ class LMCacheMPRequestTracker:
     # shrink. 0 when the feature is inactive for this request.
     lookup_covered_tokens: int = 0
 
+    # GPU block ids pinned for the APC-covered prefix during the lookup window
+    # (pin method). Released exactly once on every terminal path via the
+    # connector's idempotent release helper; cleared after release so a second
+    # call is a no-op.
+    pinned_apc_block_ids: list[int] = field(default_factory=list)
+
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
     def __init__(self, request: "Request"):
@@ -100,6 +106,7 @@ class LMCacheMPRequestTracker:
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.lookup_covered_tokens = 0
+        self.pinned_apc_block_ids = []
         self.state = LMCacheMPRequestState.PREFETCHING
         self.mm_adjusted_prompt_ids = []
         mm_hashes, mm_positions = extract_mm_features(request)

@@ -730,6 +730,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
+            # vLLM base (scheduler) block size in tokens; used to map the
+            # APC-covered token boundary onto ``request.block_hashes`` when
+            # pinning covered GPU blocks during the lookup window.
+            self._vllm_block_size = scheduler_block_size
+            # Upper bound on GPU blocks this connector pins for covered
+            # prefixes at any time. Beyond it, pinning is skipped and the
+            # shrink guard covers correctness. <=0 disables the cap.
+            self._max_pinned_apc_blocks = int(
+                vllm_config.kv_transfer_config.get_from_extra_config(
+                    "lmcache.mp.max_pinned_apc_blocks", 0
+                )
+            )
+            self._num_pinned_apc_blocks = 0
         elif self.role == KVConnectorRole.WORKER:
             # Node routing: a worker connects only to its local LMCache server.
             # Global ranks are assigned to nodes in contiguous blocks:
@@ -1197,37 +1210,153 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         tracker: "LMCacheMPRequestTracker",
         covered_chunks: int,
     ) -> None:
-        """Method hook run once at lookup submit (foundation: no-op).
+        """Pin the APC-covered GPU blocks for the lookup-polling window.
 
-        The pin method overrides this to pin the covered GPU blocks so the APC
-        hit cannot shrink while the lookup is in flight. The non-pin method
-        leaves it a no-op (it re-looks-up on shrink instead).
+        vLLM does not protect a WAITING request's matched blocks (they sit at
+        ``ref_cnt == 0`` in the free queue until ``allocate_slots`` touches
+        them), so a concurrent allocation could evict them and shrink the APC
+        hit below the covered boundary -- leaving the skipped covered range
+        backed by nothing. Pinning holds them until the request is admitted.
+
+        Best-effort: any missing precondition (feature off, pool unbound, no
+        block hashes, pin budget exhausted, cache miss on re-derivation) simply
+        skips pinning; the shrink guard then preserves correctness. Blocks are
+        re-derived from ``request.block_hashes`` via ``get_cached_block`` -- the
+        same lookup vLLM used this step, so it returns the exact matched blocks.
+
+        Args:
+            request: The request being looked up.
+            tracker: Its tracker (records the pinned block ids for release).
+            covered_chunks: Covered boundary in LMCache chunks (unused directly;
+                the token boundary is read from ``tracker.lookup_covered_tokens``).
         """
-        return None
+        tracker.pinned_apc_block_ids = []
+        if covered_chunks <= 0 or self._gpu_block_pool is None:
+            return
+        block_hashes = getattr(request, "block_hashes", None)
+        if not block_hashes:
+            return
+        num_blocks = min(
+            tracker.lookup_covered_tokens // self._vllm_block_size,
+            len(block_hashes),
+        )
+        if num_blocks <= 0:
+            return
+        if (
+            self._max_pinned_apc_blocks > 0
+            and self._num_pinned_apc_blocks + num_blocks > self._max_pinned_apc_blocks
+        ):
+            # Budget exhausted: skip pinning, let the shrink guard cover it.
+            logger.debug(
+                "APC pin budget reached (%d/%d); skipping pin for request %s.",
+                self._num_pinned_apc_blocks,
+                self._max_pinned_apc_blocks,
+                request.request_id,
+            )
+            return
+        pool = self._gpu_block_pool
+        pinned: list[int] = []
+        try:
+            # Pin the full-attention group (id 0, first by vLLM convention). For
+            # hybrid models the sliding-window / mamba groups return no cached
+            # block for the null-front positions, and the shrink guard covers
+            # their eviction; see the design doc.
+            for i in range(num_blocks):
+                blocks = pool.get_cached_block(block_hashes[i], [0])
+                if not blocks:
+                    continue
+                pool.touch(blocks)
+                pinned.extend(block.block_id for block in blocks)
+        except Exception:
+            logger.warning(
+                "Failed to pin APC-covered blocks for request %s; "
+                "relying on the shrink guard.",
+                request.request_id,
+                exc_info=True,
+            )
+            self._unpin_block_ids(pinned)
+            return
+        tracker.pinned_apc_block_ids = pinned
+        self._num_pinned_apc_blocks += len(pinned)
 
     def _release_covered_resources(
         self, tracker: "LMCacheMPRequestTracker"
     ) -> None:
-        """Method hook run on every terminal path (foundation: no-op).
+        """Release the covered-block pins exactly once (idempotent).
 
-        The pin method overrides this to release the covered-block pins exactly
-        once (idempotent). The non-pin method leaves it a no-op.
+        Called on every terminal path (admitted / bypass / abort). vLLM's
+        ``allocate_slots`` has re-touched the covered blocks by admission time,
+        so releasing our pin never drops an in-use block to zero. Clearing the
+        recorded ids makes a second call a no-op.
         """
-        return None
+        block_ids = tracker.pinned_apc_block_ids
+        if not block_ids:
+            return
+        tracker.pinned_apc_block_ids = []
+        self._num_pinned_apc_blocks = max(
+            0, self._num_pinned_apc_blocks - len(block_ids)
+        )
+        self._unpin_block_ids(block_ids)
+
+    def _unpin_block_ids(self, block_ids: list[int]) -> None:
+        """Free the given GPU blocks on the bound pool (best-effort)."""
+        pool = self._gpu_block_pool
+        if pool is None or not block_ids:
+            return
+        try:
+            pool.free_blocks([pool.blocks[block_id] for block_id in block_ids])
+        except Exception:
+            logger.warning(
+                "Failed to free %d pinned APC block(s); potential leak.",
+                len(block_ids),
+                exc_info=True,
+            )
 
     def _handle_covered_shrink(
         self,
         request: "Request",
         tracker: "LMCacheMPRequestTracker",
     ) -> "tuple[int | None, bool] | None":
-        """Method hook for an APC hit that shrank below the covered boundary.
+        """Bypass LMCache if the APC hit shrank below the covered boundary.
 
-        Returns a short-circuit ``(tokens, async)`` result for
-        ``get_num_new_matched_tokens`` or None to continue normally. Foundation:
-        always None. The pin method returns a bypass ``(0, False)``; the non-pin
-        method re-looks-up the gap and returns ``(None, True)``.
+        With pinning active this cannot happen; the guard only fires when
+        pinning was unavailable (pool unbound, cache miss, budget exhausted).
+        In that case the skipped covered range is no longer engine-backed, so
+        recompute locally: free locks (the server clamps to ``[c0, ret)``),
+        drop the pins, zero the tracker, and enter ``BYPASS_LMCACHE``.
         """
-        return None
+        if not self._skip_covered_lookup or tracker.lookup_covered_tokens <= 0:
+            return None
+        if tracker.num_vllm_hit_tokens >= tracker.lookup_covered_tokens:
+            return None
+        logger.warning(
+            "APC hit for request %s shrank below the covered boundary "
+            "(%d < %d) with no pin held; bypassing LMCache and recomputing.",
+            request.request_id,
+            tracker.num_vllm_hit_tokens,
+            tracker.lookup_covered_tokens,
+        )
+        # Read the completed lookup's hit (cached, idempotent) to free the locks
+        # it took on [c0, ret) before dropping the lookup state.
+        cached = self.scheduler_adapter.check_lookup_result(request.request_id)
+        hit_tokens = cached.hit_tokens if cached is not None else 0
+        if hit_tokens > 0:
+            self.scheduler_adapter.free_lookup_locks(
+                token_ids=tracker.get_token_ids(),
+                start=0,
+                end=hit_tokens,
+                request_id=request.request_id,
+                cache_salt=tracker.cache_salt,
+                request_configs=tracker.request_configs,
+            )
+        self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+        self._release_covered_resources(tracker)
+        tracker.num_stored_tokens = 0
+        tracker.num_vllm_hit_tokens = 0
+        tracker.num_lmcache_hit_tokens = 0
+        tracker.lookup_covered_tokens = 0
+        tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
+        return 0, False
 
     def get_num_new_matched_tokens(
         self,
