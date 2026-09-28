@@ -24,8 +24,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
-from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, unpack_token_ids
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -56,7 +55,6 @@ class StoreMixin:
         _pending_fp_lock: "threading.Lock"
 
     @request_handler(
-        RequestType.STORE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )

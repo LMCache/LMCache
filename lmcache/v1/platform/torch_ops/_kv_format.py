@@ -14,6 +14,7 @@ __all__ = [
     "_format_spec",
     "_is_hnd_format",
     "_is_fused_kv_format",
+    "_is_single_kv_format",
     "_is_two_major_format",
     "_is_pbs_fused_format",
     "_is_kv_second_tuple_format",
@@ -51,6 +52,11 @@ def _is_fused_kv_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True for formats whose K/V pair is packed in the trailing dim
     (kv_size == 1, shape_desc.hs == 2 * head_size)."""
     return _format_spec(engine_kv_format).is_fused_packed
+
+
+def _is_single_kv_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when every list entry is one independent component plane."""
+    return _format_spec(engine_kv_format).is_single_kv
 
 
 def _is_two_major_format(engine_kv_format: EngineKVFormat) -> bool:
