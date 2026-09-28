@@ -1190,17 +1190,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         tracker: "LMCacheMPRequestTracker",
     ) -> "tuple[int | None, bool] | None":
-        """Re-look-up the gap when the APC hit shrank below the covered boundary.
+        """Re-look-up the full prefix when the APC hit shrank below the covered
+        boundary.
 
         The non-pin method does not hold the covered blocks, so the APC hit can
         shrink while the lookup is in flight. When it drops below the frozen
-        covered boundary, the completed lookup skipped the now-uncovered gap
-        ``[new_hit, old_covered)``. Rather than bypass, drop the stale lookup
-        (freeing its ``[old_covered, ret)`` locks) and reset so the next
-        scheduler poll re-submits with the current, smaller covered boundary --
-        the fresh lookup then read-locks and fetches the gap from LMCache
-        (kept retrievable by the covered-range touch). Returns ``(None, True)``
-        so the scheduler re-polls.
+        covered boundary, the completed lookup skipped a now-uncovered gap in
+        ``[new_hit, old_covered)``. Rather than chase the moving boundary, drop
+        the stale lookup and fall back to a full lookup from token 0: free the
+        stale lookup's ``[old_covered, ret)`` read locks (the fresh full lookup
+        would otherwise re-lock that overlap and leak one refcount), mark the
+        request ``covered_skip_disabled`` so the next poll submits with
+        ``covered_chunks=0``, and reset the per-lookup state. LMCache then loads
+        full coverage ``[0, ret')`` from the beginning (the covered prefix is
+        kept retrievable by the covered-range touch), and its read locks release
+        through the normal ``update_state_after_alloc`` path because
+        ``lookup_covered_tokens`` is now 0 (no covered-skip elision). Returns
+        ``(None, True)`` so the scheduler re-polls.
         """
         if not self._skip_covered_lookup or tracker.lookup_covered_tokens <= 0:
             return None
@@ -1208,7 +1214,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             return None
         logger.info(
             "APC hit for request %s shrank below the covered boundary "
-            "(%d < %d); re-looking-up the gap.",
+            "(%d < %d); re-looking-up the full prefix from token 0.",
             request.request_id,
             tracker.num_vllm_hit_tokens,
             tracker.lookup_covered_tokens,
@@ -1227,9 +1233,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_configs=tracker.request_configs,
             )
         self.scheduler_adapter.cleanup_lookup_result(request.request_id)
-        # Reset the per-lookup state so the next poll re-submits with the new
-        # (smaller) covered boundary; keep the request out of BYPASS so LMCache
-        # still serves the (now larger) uncovered range.
+        # Disable the covered skip for the rest of this request and reset the
+        # per-lookup state so the next poll re-submits a full lookup from token
+        # 0; keep the request out of BYPASS so LMCache still serves the prefix.
+        tracker.covered_skip_disabled = True
         tracker.lookup_started_at = None
         tracker.lookup_covered_tokens = 0
         tracker.num_stored_tokens = 0
@@ -1306,9 +1313,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
             return 0, False
 
-        # Chunk-aligned APC-covered boundary for the server (0 = off).
+        # Chunk-aligned APC-covered boundary for the server (0 = off). A request
+        # whose APC hit already shrank once falls back to a full lookup from
+        # token 0 (covered_skip_disabled) so a second shrink cannot recur.
         covered_chunks = 0
-        if self._skip_covered_lookup:
+        if self._skip_covered_lookup and not tracker.covered_skip_disabled:
             aligned = (
                 num_computed_tokens
                 // self._hit_alignment_tokens

@@ -10,10 +10,10 @@ today).
 The APC hit can shrink while the async lookup is in flight (a WAITING request's
 matched blocks are unprotected until `allocate_slots`). **This branch handles that
 race without pinning**: leave the covered GPU blocks unpinned and, if the APC hit
-shrinks `c0 -> c0'`, re-look-up just the exposed gap `[c0', c0)`. This mirrors
-vLLM's native offloading connector. An alternative *pin* method is implemented in
-`core/skip-apc-pin`; the two are weighed in the standalone comparison doc
-(`apc_covered_lookup_comparison.md`).
+shrinks below the covered boundary `c0`, fall back to a full lookup from token 0 so
+LMCache owns the whole prefix `[0, ret)` — no covered skip for the rest of that
+request. An alternative *pin* method is implemented in `core/skip-apc-pin`; the two
+are weighed in the standalone comparison doc (`apc_covered_lookup_comparison.md`).
 
 ## Design
 
@@ -32,14 +32,21 @@ Non-pin-specific handling (this branch):
 
 - No GPU-block pinning: `_acquire_covered_resources` / `_release_covered_resources`
   are no-ops, so there is no block-pool pressure.
-- **Re-lookup on shrink** (`_handle_covered_shrink`): when the current aligned APC
-  hit drops below the frozen `c0`, the completed lookup skipped the now-uncovered
-  gap. Free the stale `[c0, ret)` locks, drop the lookup state, and reset the
-  per-lookup tracker fields so the next scheduler poll re-submits with the current
-  (smaller) covered boundary — the fresh lookup read-locks and fetches the gap
-  from LMCache (kept retrievable by the covered-range touch). Returns `(None,
-  True)` so the scheduler re-polls.
-- Trade-off: soft guarantee — a gap chunk evicted before the re-fetch just
+- **Full re-lookup on shrink** (`_handle_covered_shrink`): when the current aligned
+  APC hit drops below the frozen `c0`, the completed lookup skipped a now-uncovered
+  gap. Rather than chase the moving boundary, fall back to a full lookup from token
+  0: free the stale `[c0, ret)` locks (the fresh full lookup would otherwise re-lock
+  that overlap and leak one read-lock refcount — corrupting prefix-sharing
+  requests), set the sticky `covered_skip_disabled` flag, and reset the per-lookup
+  tracker fields. The next scheduler poll re-submits with `covered_chunks = 0`, so
+  LMCache loads full coverage `[0, ret')` from the beginning (the covered prefix is
+  kept retrievable by the covered-range touch). Because `lookup_covered_tokens` is
+  now 0, the covered-skip release elision no longer applies, so the fresh lookup's
+  read locks release through the normal `update_state_after_alloc` path. Returns
+  `(None, True)` so the scheduler re-polls.
+- Sticky by design: once a request has shrunk it stays on full lookups, so a second
+  shrink cannot recur (no re-lookup churn) even across preemption/resume.
+- Trade-off: soft guarantee — a prefix chunk evicted before the re-fetch just
   shortens the hit (partial local recompute) rather than corrupting; no
   availability risk from held blocks.
 
@@ -61,12 +68,12 @@ Legend: S=Scheduler  C=Connector  A=Adapter  L=LookupModule  SM=Storage
  C --check_lookup_result--------------------------------> A
  A --returns LookupOutcome(hit, stored)-----------------> C
 
- shrink c0 -> c0'  (gap exposed):
+ shrink (APC hit < c0):
    C --free stale [c0,ret) locks + cleanup_lookup_result-> A
-   C :  reset per-lookup state; re-submit gap [c0',c0) next poll
-   C --> S :  (None, True)  re-poll
+   C :  set covered_skip_disabled; reset per-lookup state
+   C --> S :  (None, True)  re-poll -> full lookup covered_chunks=0
  normal:
    C --> S :  need_to_load = hit - num_computed
    S --update_state_after_alloc-------------------------> C
-   C --free_lookup_locks([0, vllm_hit))----------------> A   [server clamps to [c0, ret)]
+   C --free_lookup_locks([0, vllm_hit))----------------> A   [clamp c0; c0=0 after shrink]
 ```
