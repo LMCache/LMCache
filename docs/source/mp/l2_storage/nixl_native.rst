@@ -42,6 +42,13 @@ in the ``plugins`` directory next to ``libnixl``. Set ``NIXL_PLUGIN_DIR`` when
 the plugins are installed elsewhere, and ensure the dynamic linker can find
 ``libnixl`` (for example with the system linker cache or ``LD_LIBRARY_PATH``).
 
+The ``lmcache/vllm-openai`` container images satisfy all of this out of the
+box: the nightly (``image-build``) and tagged (``image-release``,
+``image-release-cu129``) stages of ``docker/Dockerfile`` build LMCache with
+``BUILD_WITH_NIXL=1`` against the pinned NIXL release and preset
+``NIXL_PLUGIN_DIR`` and ``LD_LIBRARY_PATH`` to the ``nixl`` wheel's bundled
+``libnixl`` and plugins, so ``nixl_native`` needs no extra setup there.
+
 Configuration reference
 -----------------------
 

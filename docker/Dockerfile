@@ -112,9 +112,9 @@ WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release, cu13) #######################
-# Integrate vLLM and LMCache stable releases, and expose vLLM OpenAI API.
-# The default lmcache wheel on PyPI is built against cu13; the cu13 torch
-# index is hinted explicitly so vLLM also resolves to its cu13 build.
+# Integrate vLLM stable release and LMCache built from the checked-out source
+# (the tagged release in CI), and expose vLLM OpenAI API. The cu13 torch
+# index is hinted explicitly so vLLM resolves to its cu13 build.
 
 FROM base AS image-release
 
@@ -122,26 +122,48 @@ ARG CUDA_VERSION
 
 ARG LMCACHE_VERSION
 
+# Build and run the optional C++ NIXL storage connector against the NIXL SDK
+# headers from the validated source release and its matching packaged runtime
+# (as image-build does), using the nixl wheel's cu13 backend for this image.
+ARG NIXL_VERSION=1.3.1
+ENV BUILD_WITH_NIXL=1
+ENV NIXL_INCLUDE_DIR=/opt/nixl-source/src/api/cpp
+ENV NIXL_LIBRARY_DIR=/opt/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs
+ENV NIXL_PLUGIN_DIR=/opt/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/plugins
+ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs:${LD_LIBRARY_PATH}
+
+RUN git clone --depth 1 --branch "v${NIXL_VERSION}" \
+    https://github.com/ai-dynamo/nixl.git /opt/nixl-source
+
+# The connector is compiled into lmcache and the prebuilt release wheels are
+# made without the NIXL SDK, so lmcache is built from the checked-out source.
+COPY . /workspace/LMCache
+WORKDIR /workspace/LMCache
+
 RUN . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
-    CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
-    VER=$(echo "${LMCACHE_VERSION}" | sed 's/^v//') && \
+    export LMCACHE_CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
         vllm[runai,tensorizer,flashinfer] \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
-    uv pip install "lmcache${VER:+==${VER}}" \
-        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
-        --index-strategy unsafe-best-match --verbose && \
-  
-    uv pip install --reinstall-package nixl nixl
+    uv pip install --reinstall-package nixl "nixl==${NIXL_VERSION}" && \
+    test -f "${NIXL_INCLUDE_DIR}/nixl.h" && \
+    test -f "${NIXL_LIBRARY_DIR}/libnixl.so" && \
+    test -f "${NIXL_PLUGIN_DIR}/libplugin_POSIX.so" && \
+    test -f "${NIXL_PLUGIN_DIR}/libplugin_OBJ.so" && \
+    uv pip install -r requirements/build.txt && \
+    python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
+    uv pip install ./dist_lmcache/*.whl --verbose
 
 WORKDIR /workspace
+# Prove the release image can load the connector it was built for.
+RUN . /opt/venv/bin/activate && python3 -c 'import torch, lmcache.lmcache_nixl'
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release, cu129) ######################
-# Installs the stable cu129 vLLM release wheel and
-# lmcache from the v{tag}-cu129 GitHub Release.
+# Installs the stable cu129 vLLM release wheel and builds LMCache from the
+# checked-out source (the tagged release in CI) against CUDA 12.9.
 # The cu129 torch index is hinted explicitly so vLLM resolves to its cu129 build.
 
 FROM base AS image-release-cu129
@@ -149,21 +171,42 @@ FROM base AS image-release-cu129
 ARG CUDA_VERSION=12.9
 ARG LMCACHE_VERSION
 
+# Build and run the optional C++ NIXL storage connector against the NIXL SDK
+# headers from the validated source release and its matching packaged runtime
+# (as image-build does), using the nixl wheel's cu12 backend for this image.
+ARG NIXL_VERSION=1.3.1
+ENV BUILD_WITH_NIXL=1
+ENV NIXL_INCLUDE_DIR=/opt/nixl-source/src/api/cpp
+ENV NIXL_LIBRARY_DIR=/opt/venv/lib/python3.12/site-packages/.nixl_cu12.mesonpy.libs
+ENV NIXL_PLUGIN_DIR=/opt/venv/lib/python3.12/site-packages/.nixl_cu12.mesonpy.libs/plugins
+ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/.nixl_cu12.mesonpy.libs:${LD_LIBRARY_PATH}
+
+RUN git clone --depth 1 --branch "v${NIXL_VERSION}" \
+    https://github.com/ai-dynamo/nixl.git /opt/nixl-source
+
+# The connector is compiled into lmcache and the prebuilt release wheels are
+# made without the NIXL SDK, so lmcache is built from the checked-out source.
+COPY . /workspace/LMCache
+WORKDIR /workspace/LMCache
+
 RUN . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
-    CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
-    VER=$(echo ${LMCACHE_VERSION} | sed 's/^v//') && \
+    export LMCACHE_CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
         vllm[runai,tensorizer,flashinfer] \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
-    uv pip install lmcache==${VER} \
-        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
-        --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \
-        --index-strategy unsafe-best-match --verbose && \
-    
-    uv pip install --reinstall-package nixl nixl
+    uv pip install --reinstall-package nixl "nixl==${NIXL_VERSION}" && \
+    test -f "${NIXL_INCLUDE_DIR}/nixl.h" && \
+    test -f "${NIXL_LIBRARY_DIR}/libnixl.so" && \
+    test -f "${NIXL_PLUGIN_DIR}/libplugin_POSIX.so" && \
+    test -f "${NIXL_PLUGIN_DIR}/libplugin_OBJ.so" && \
+    uv pip install -r requirements/build.txt && \
+    python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
+    uv pip install ./dist_lmcache/*.whl --verbose
 
 WORKDIR /workspace
+# Prove the release image can load the connector it was built for.
+RUN . /opt/venv/bin/activate && python3 -c 'import torch, lmcache.lmcache_nixl'
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]

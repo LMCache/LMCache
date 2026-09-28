@@ -19,8 +19,8 @@ This directory contains Dockerfiles for building different LMCache images. Each 
 
 **Build Targets**:
 - `image-build`: Builds with vLLM nightly and LMCache from source
-- `image-release`: Uses stable vLLM release and LMCache from PyPI
-- `image-release-cu129`: Uses nightly cu12.9 vLLM and LMCache from the cu12.9 GitHub Release
+- `image-release`: Uses stable vLLM release and LMCache built from source (with the native NIXL connector)
+- `image-release-cu129`: Uses nightly cu12.9 vLLM and LMCache built from source against CUDA 12.9 (with the native NIXL connector)
 
 **Usage**:
 
