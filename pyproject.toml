@@ -210,7 +210,7 @@ ignore_errors = true
 follow_imports = "skip"
 
 [tool.codespell]
-ignore-words-list = "afterall,allready,notin,te,cann"
+ignore-words-list = "afterall,allready,notin,te,cann,wqs"
 skip = "operator/config/crd/bases/*,lmcache/integration/vllm/lmcache_mp_connector_*.py"
 # Base64 image payloads in executed notebooks are random-looking and will
 # eventually contain something that looks like a typo.
