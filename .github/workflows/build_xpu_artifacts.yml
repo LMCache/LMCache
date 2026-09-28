@@ -82,10 +82,9 @@ jobs:
               run: |
                 mkdir -p dist
                 docker run --rm \
-                  -v "${PWD}:/work/LMCache" \
-                  --entrypoint bash "${XPU_IMAGE}" -lc '
-                  python3 -c "import json, platform, torch, vllm; print(json.dumps({\"python\": platform.python_version(), \"torch\": torch.__version__, \"vllm\": getattr(vllm, \"__version__\", \"unknown\")}, indent=2, sort_keys=True))" > /work/LMCache/dist/xpu-runtime.json
-                '
+                  --entrypoint bash "${XPU_IMAGE}" -lc \
+                  'python3 -c "import json, platform, torch, vllm; print(json.dumps({\"python\": platform.python_version(), \"torch\": torch.__version__, \"vllm\": getattr(vllm, \"__version__\", \"unknown\")}, indent=2, sort_keys=True))"' \
+                  > dist/xpu-runtime.json
                 python3 - <<'PY'
                 import json
                 import os
