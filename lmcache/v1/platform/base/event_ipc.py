@@ -16,9 +16,9 @@ depend on any one of them. See
 from __future__ import annotations
 
 # Standard
-from collections import deque
 from typing import Protocol, runtime_checkable
 import inspect
+import threading
 
 # First Party
 from lmcache import torch_dev, torch_device_type
@@ -163,7 +163,8 @@ class EventIPCBackend(Protocol):
 
 # Persist the reference to the IPC events for a while so that the inference engine
 # won't access the dangling references to the events.
-_EXPORTED_EVENT_RING_SIZE = 2048
+# Amortised sweep interval for completion-based retention (see export_event).
+_EXPORTED_EVENT_SWEEP_INTERVAL = 4096
 
 
 class DefaultEventIPCBackend(EventIPCBackend):
@@ -189,7 +190,15 @@ class DefaultEventIPCBackend(EventIPCBackend):
     ) -> None:
         self._event_module = event_module if event_module is not None else torch_dev
         self.device_type = device_type if device_type is not None else torch_device_type
-        self._exported_events: deque[object] = deque(maxlen=_EXPORTED_EVENT_RING_SIZE)
+        # Completion-based retention: keep every exported event alive until it
+        # COMPLETES, so a backlogged peer can always import an in-flight
+        # handle. A fixed-size ring evicted by age can drop an in-flight
+        # event under a deep DCP/high-concurrency backlog -> peer import
+        # fails -> source freed mid-copy. Retention is bounded by the
+        # number of outstanding (incomplete) transfers.
+        self._exported_events: list[object] = []
+        self._exported_events_lock = threading.Lock()
+        self._exported_events_next_sweep = _EXPORTED_EVENT_SWEEP_INTERVAL
 
     def check_event_support(self, device: object) -> None:
         """Raise ``RuntimeError`` if interprocess events are unsupported.
@@ -234,8 +243,26 @@ class DefaultEventIPCBackend(EventIPCBackend):
             The IPC handle bytes for ``event``.
         """
         handle = event.ipc_handle()  # type: ignore[attr-defined]
-        self._exported_events.append(event)
+        with self._exported_events_lock:
+            self._exported_events.append(event)
+            if len(self._exported_events) >= self._exported_events_next_sweep:
+                self._exported_events = [
+                    e
+                    for e in self._exported_events
+                    if not self._is_event_completed(e)
+                ]
+                self._exported_events_next_sweep = (
+                    len(self._exported_events)
+                    + _EXPORTED_EVENT_SWEEP_INTERVAL
+                )
         return handle
+
+    def _is_event_completed(self, event: object) -> bool:
+        """True only if the event has completed; keep it otherwise."""
+        try:
+            return bool(event.query())  # type: ignore[attr-defined]
+        except Exception:
+            return False
 
     def import_event(self, handle: bytes, device: object) -> object:
         """Reconstruct an event from an IPC handle on ``device``."""
