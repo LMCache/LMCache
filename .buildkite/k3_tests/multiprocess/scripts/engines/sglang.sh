@@ -21,9 +21,6 @@ engine_setup_environment() {
     local repo_root="$1"
     local setup_script="${BK_SETUP_ENV_SCRIPT:-${repo_root}/.buildkite/k3_harness/setup-sglang-env.sh}"
 
-    # Remove this default once the SGLang integration lands upstream. Callers
-    # can pin a commit or wheel by overriding SGLANG_INSTALL_SPEC.
-    export SGLANG_INSTALL_SPEC="${SGLANG_INSTALL_SPEC:-git+https://github.com/chunxiaozheng/sglang.git@lmcache/lmcache-unified-radix-cache#subdirectory=python}"
     source "$setup_script"
 }
 
