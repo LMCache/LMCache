@@ -146,93 +146,35 @@ class DeviceSpec:
         # TODO(chunxiaozheng): implement on subclasses
         return True
 
-    # ------------------------------------------------------------------
-    # Stream execution
-    # ------------------------------------------------------------------
-
     def current_stream(self, device: object) -> object:
-        """Return the current stream for ``device``.
-
-        Args:
-            device: A torch device object owned by this specification.
-
-        Returns:
-            The platform's current stream object.
-
-        Raises:
-            RuntimeError: If this specification is not the active runtime
-                platform.
-        """
+        """Return the current stream for ``device`` on the active platform."""
         return self._get_torch_module().current_stream(device)
 
     def get_stream_handle(self, stream: object) -> int:
-        """Return the native handle consumed by stream-aware native libraries.
-
-        Native stream-handle layouts are platform-specific. Accelerator
-        specifications that support such libraries must override this method;
-        the base class deliberately fails instead of guessing an attribute on
-        an unknown stream implementation.
-
-        Args:
-            stream: A platform stream returned by :meth:`current_stream`.
-
-        Returns:
-            The native stream handle.
-
-        Raises:
-            NotImplementedError: If the platform has no native stream-handle
-                adapter.
-        """
+        """Return a native stream handle; platforms must override this method."""
         raise NotImplementedError(
             f"DeviceSpec for device_type={self.device_type!r} does not provide "
             "a native stream handle."
         )
 
     def synchronize_stream(self, stream: Any) -> None:
-        """Wait until work already enqueued on ``stream`` has completed.
-
-        Args:
-            stream: A platform stream returned by :meth:`current_stream`.
-        """
+        """Wait until work already enqueued on ``stream`` has completed."""
         stream.synchronize()
 
     def synchronize_device(self, device: object) -> None:
-        """Wait until work already enqueued on ``device`` has completed.
-
-        Args:
-            device: A torch device object owned by this specification.
-        """
+        """Wait until work already enqueued on ``device`` has completed."""
         self._get_torch_module().synchronize(device=device)
 
     def create_stream_event(self, device: object) -> object:
-        """Create an event used to observe completion on ``device``'s stream.
-
-        Args:
-            device: A torch device object owned by this specification.
-
-        Returns:
-            A platform event object.
-        """
+        """Create an event used to observe completion on ``device``'s stream."""
         return self._get_torch_module().Event()
 
     def record_stream_event(self, event: Any, stream: object) -> None:
-        """Record ``event`` after work already queued on ``stream``.
-
-        Args:
-            event: An event returned by :meth:`create_stream_event`.
-            stream: A platform stream returned by :meth:`current_stream`.
-        """
+        """Record ``event`` after work already queued on ``stream``."""
         event.record(stream)
 
     def is_stream_event_complete(self, event: object) -> bool:
-        """Return whether a previously recorded stream event has completed.
-
-        Args:
-            event: An event returned by :meth:`create_stream_event`.
-
-        Returns:
-            ``True`` when the event has completed.
-        """
+        """Return whether a previously recorded stream event has completed."""
         event_object: Any = event
         return event_object.query()
 
@@ -340,12 +282,7 @@ class DeviceSpec:
         )
 
     def _get_torch_module(self) -> Any:
-        """Return this specification's active torch device module.
-
-        Stream execution happens on the process's selected accelerator, so a
-        specification for another device type must not accidentally operate on
-        it through a similarly shaped torch module.
-        """
+        """Return the active torch device module, rejecting mismatched types."""
         # First Party
         from lmcache.v1.platform._device_detect import get_torch_device
 

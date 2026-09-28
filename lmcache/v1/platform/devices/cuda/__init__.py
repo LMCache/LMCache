@@ -111,17 +111,7 @@ class CudaDeviceSpec(DeviceSpec):
         return "cuda"
 
     def get_stream_handle(self, stream: object) -> int:
-        """Return CUDA's native handle for ``stream``.
-
-        Args:
-            stream: A CUDA stream object.
-
-        Returns:
-            The ``cudaStream_t`` handle consumed by CUDA-aware native libraries.
-
-        Raises:
-            RuntimeError: If ``stream`` is not a CUDA stream.
-        """
+        """Return CUDA's native handle for ``stream``."""
         stream_handle = getattr(stream, "cuda_stream", None)
         if not isinstance(stream_handle, int):
             raise RuntimeError("CUDA stream does not expose an integer cuda_stream.")

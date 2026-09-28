@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Platform-neutral stream execution helpers.
-
-Native GPU libraries commonly need a raw stream handle, while their Python
-callers need to synchronize streams and retain work until a completion event
-fires. This module keeps those operations behind :class:`DeviceSpec`, so
-generic call sites do not depend on CUDA, ROCm, or another runtime's stream
-and event object layouts.
-"""
+"""Platform-neutral stream and completion-event helpers backed by DeviceSpec."""
 
 # Future
 from __future__ import annotations
@@ -21,17 +14,7 @@ from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 
 def _get_spec(device: object) -> DeviceSpec:
-    """Return the registered device specification for ``device``.
-
-    Args:
-        device: A torch device object.
-
-    Returns:
-        The device's registered platform specification.
-
-    Raises:
-        RuntimeError: If the device does not expose a registered device type.
-    """
+    """Resolve a torch device's specification, raising on unknown device types."""
     device_type = getattr(device, "type", None)
     if not isinstance(device_type, str):
         raise RuntimeError(f"Cannot resolve a platform DeviceSpec for {device!r}.")
@@ -51,11 +34,7 @@ def _get_spec_for_type(device_type: str) -> DeviceSpec:
 
 @dataclass(frozen=True)
 class CompletionEvent:
-    """A platform-owned stream completion event.
-
-    The raw event is intentionally private: callers only need to ask whether
-    its stream-ordered work has completed.
-    """
+    """A pollable completion event wrapping a platform-specific event."""
 
     _spec: DeviceSpec
     _event: object
@@ -66,60 +45,27 @@ class CompletionEvent:
 
 
 def current_stream(device: object) -> object:
-    """Return the current stream for ``device`` through its DeviceSpec.
-
-    Args:
-        device: A torch device object.
-
-    Returns:
-        The platform's current stream object.
-    """
+    """Return the current stream for ``device`` through its DeviceSpec."""
     return _get_spec(device).current_stream(device)
 
 
 def stream_handle(device: object, stream: object) -> int:
-    """Return ``stream``'s native handle through the platform adapter.
-
-    Args:
-        device: A torch device object that owns ``stream``.
-        stream: A stream returned by :func:`current_stream`.
-
-    Returns:
-        The native stream handle required by a stream-aware library.
-    """
+    """Return the native handle for ``stream`` on ``device``."""
     return _get_spec(device).get_stream_handle(stream)
 
 
 def synchronize_stream(device: object, stream: object) -> None:
-    """Wait for work already queued on ``stream`` to complete.
-
-    Args:
-        device: A torch device object that owns ``stream``.
-        stream: A stream returned by :func:`current_stream`.
-    """
+    """Wait for queued work on ``stream`` owned by ``device`` to complete."""
     _get_spec(device).synchronize_stream(stream)
 
 
 def synchronize_device(device: object) -> None:
-    """Wait for work already queued on ``device`` to complete.
-
-    Args:
-        device: A torch device object.
-    """
+    """Wait for work already queued on ``device`` to complete."""
     _get_spec(device).synchronize_device(device)
 
 
 def record_completion_event(device: object, stream: object) -> CompletionEvent:
-    """Record a completion event after work already queued on ``stream``.
-
-    Args:
-        device: A torch device object that owns ``stream``.
-        stream: A stream returned by :func:`current_stream`.
-
-    Returns:
-        A completion event that can be polled with
-        :meth:`CompletionEvent.is_complete`.
-    """
+    """Record a pollable completion event after work queued on ``stream``."""
     spec = _get_spec(device)
     event = spec.create_stream_event(device)
     spec.record_stream_event(event, stream)

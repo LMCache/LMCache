@@ -38,17 +38,7 @@ class MusaDeviceSpec(DeviceSpec):
         return "musa"
 
     def get_stream_handle(self, stream: object) -> int:
-        """Return TorchMUSA's native handle for ``stream``.
-
-        Args:
-            stream: A TorchMUSA stream object.
-
-        Returns:
-            The MUSA stream handle consumed by MUSA-aware native libraries.
-
-        Raises:
-            RuntimeError: If ``stream`` is not a TorchMUSA stream.
-        """
+        """Return TorchMUSA's native handle for ``stream``."""
         stream_handle = getattr(stream, "musa_stream", None)
         if not isinstance(stream_handle, int):
             raise RuntimeError("MUSA stream does not expose an integer musa_stream.")
