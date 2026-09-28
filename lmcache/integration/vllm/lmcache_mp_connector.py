@@ -593,10 +593,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # skip_covered_lookup: when enabled, the lookup tells the server how
         # many leading chunks the serving engine's prefix cache already covers.
         # The server touches those chunks (keeps them warm) but skips
-        # read-locking / L2-prefetching them, and this connector pins the
-        # covered GPU blocks for the lookup window so the APC hit cannot shrink
-        # (the "pin" method). Default off => covered_chunks stays 0 and behavior
-        # is identical to before.
+        # read-locking / L2-prefetching them. This connector does NOT pin the
+        # covered GPU blocks (the "non-pin" method): if the APC hit shrinks
+        # while the lookup is in flight it re-looks-up the gap instead. Default
+        # off => covered_chunks stays 0 and behavior is identical to before.
         self._skip_covered_lookup: bool = bool(
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "lmcache.mp.skip_covered_lookup", False
@@ -1220,14 +1220,51 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         tracker: "LMCacheMPRequestTracker",
     ) -> "tuple[int | None, bool] | None":
-        """Method hook for an APC hit that shrank below the covered boundary.
+        """Re-look-up the gap when the APC hit shrank below the covered boundary.
 
-        Returns a short-circuit ``(tokens, async)`` result for
-        ``get_num_new_matched_tokens`` or None to continue normally. Foundation:
-        always None. The pin method returns a bypass ``(0, False)``; the non-pin
-        method re-looks-up the gap and returns ``(None, True)``.
+        The non-pin method does not hold the covered blocks, so the APC hit can
+        shrink while the lookup is in flight. When it drops below the frozen
+        covered boundary, the completed lookup skipped the now-uncovered gap
+        ``[new_hit, old_covered)``. Rather than bypass, drop the stale lookup
+        (freeing its ``[old_covered, ret)`` locks) and reset so the next
+        scheduler poll re-submits with the current, smaller covered boundary --
+        the fresh lookup then read-locks and fetches the gap from LMCache
+        (kept retrievable by the covered-range touch). Returns ``(None, True)``
+        so the scheduler re-polls.
         """
-        return None
+        if not self._skip_covered_lookup or tracker.lookup_covered_tokens <= 0:
+            return None
+        if tracker.num_vllm_hit_tokens >= tracker.lookup_covered_tokens:
+            return None
+        logger.info(
+            "APC hit for request %s shrank below the covered boundary "
+            "(%d < %d); re-looking-up the gap.",
+            request.request_id,
+            tracker.num_vllm_hit_tokens,
+            tracker.lookup_covered_tokens,
+        )
+        # Read the completed lookup's hit (cached, idempotent) to free the locks
+        # it took on [old_covered, ret) before dropping the lookup state.
+        cached = self.scheduler_adapter.check_lookup_result(request.request_id)
+        hit_tokens = cached.hit_tokens if cached is not None else 0
+        if hit_tokens > 0:
+            self.scheduler_adapter.free_lookup_locks(
+                token_ids=tracker.get_token_ids(),
+                start=0,
+                end=hit_tokens,
+                request_id=request.request_id,
+                cache_salt=tracker.cache_salt,
+                request_configs=tracker.request_configs,
+            )
+        self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+        # Reset the per-lookup state so the next poll re-submits with the new
+        # (smaller) covered boundary; keep the request out of BYPASS so LMCache
+        # still serves the (now larger) uncovered range.
+        tracker.lookup_started_at = None
+        tracker.lookup_covered_tokens = 0
+        tracker.num_stored_tokens = 0
+        tracker.num_lmcache_hit_tokens = 0
+        return None, True
 
     def get_num_new_matched_tokens(
         self,
