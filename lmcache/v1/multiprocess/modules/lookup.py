@@ -338,8 +338,6 @@ class LookupModule:
                     handle=PrefetchHandle(
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
-                        l1_found_indices=(),
-                        l1_hit_chunks=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
