@@ -46,7 +46,7 @@ def _row(n: int, gid: int = 0, kv_rank: int = 0, window: int = -1) -> GroupedObj
 
 
 def _ipc_key(world_size: int, worker_id: int | None = None) -> IPCCacheServerKey:
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name="m",
         world_size=world_size,
         worker_id=worker_id,

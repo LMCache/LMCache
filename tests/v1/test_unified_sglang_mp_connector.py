@@ -2,7 +2,6 @@
 """Small, server-free tests for the unified SGLang MP connector contracts."""
 
 # Standard
-from types import ModuleType
 from unittest.mock import Mock, patch
 import unittest
 
@@ -21,6 +20,7 @@ from lmcache.integration.sglang.unified_lmcache_mp_connector import (
 )
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import detect_format
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -64,11 +64,6 @@ class _TransferContext:
     def submit_retrieve(self, *args, **kwargs):
         self.retrieve_args = (args, kwargs)
         return _Future(True)
-
-
-class _IPCCacheServerKey:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
 
 
 class TestUnifiedLMCacheMPConnector(unittest.TestCase):
@@ -880,17 +875,11 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             local_hit_tokens=0,
             cache_salt="salt",
         )
-        custom_types = ModuleType("lmcache.v1.multiprocess.custom_types")
-        custom_types.IPCCacheServerKey = _IPCCacheServerKey
-
-        with patch.dict(
-            "sys.modules",
-            {"lmcache.v1.multiprocess.custom_types": custom_types},
-        ):
-            key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
+        key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
 
         self.assertEqual(key.num_kv_readers, 1)
         self.assertEqual(key.world_size, 2)
+        self.assertEqual(unpack_token_ids(key.token_bytes), [1, 2, 3, 4])
 
     def test_create_key_reserves_one_read_lock_per_tp_replica(self):
         self.connector.model_name = "model"
@@ -902,14 +891,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             local_hit_tokens=0,
             cache_salt="salt",
         )
-        custom_types = ModuleType("lmcache.v1.multiprocess.custom_types")
-        custom_types.IPCCacheServerKey = _IPCCacheServerKey
-
-        with patch.dict(
-            "sys.modules",
-            {"lmcache.v1.multiprocess.custom_types": custom_types},
-        ):
-            key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
+        key = self.connector._create_key(operation, start=0, end=4, worker_id=None)
 
         self.assertEqual(key.num_kv_readers, 4)
         self.assertEqual(key.world_size, 1)
