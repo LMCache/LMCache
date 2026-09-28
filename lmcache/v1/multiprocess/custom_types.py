@@ -69,6 +69,14 @@ class IPCCacheServerKey:
     # lookups reject it.
     num_kv_readers: int = field(default=0, compare=False)
 
+    # Number of leading LMCache chunks already covered by the serving engine's
+    # prefix cache (vLLM APC).  On LOOKUP the server touches these chunks to
+    # keep them warm but does not read-lock or L2-prefetch them (they will
+    # never be retrieved from LMCache).  0 (the default) reproduces the
+    # pre-feature behavior and keeps old payloads wire-compatible.  Not part
+    # of cache identity.
+    covered_chunks: int = field(default=0, compare=False)
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -145,6 +153,7 @@ class IPCCacheServerKey:
             request_id=self.request_id,
             cache_salt=self.cache_salt,
             request_configs=self.request_configs,
+            covered_chunks=self.covered_chunks,
         )
 
 
