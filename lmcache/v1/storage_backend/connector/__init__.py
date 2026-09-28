@@ -54,7 +54,7 @@ def parse_remote_url(url: str) -> ParsedRemoteURL:
         ValueError: If the URL is invalid
     """
 
-    logger.debug(f"Parsing remote URL: {url}")
+    logger.debug("Parsing remote URL: %s", url)
     parsed = urlparse(url)
 
     username = parsed.username
@@ -253,9 +253,11 @@ class ConnectorManager:
         ):
             try:
                 self.adapters.append(cls())
-                logger.info(f"Discovered adapter: {cls.__name__}")
+                logger.info("Discovered adapter: %s", cls.__name__)
             except Exception as e:
-                logger.error(f"Failed to instantiate adapter {cls.__name__}: {str(e)}")
+                logger.error(
+                    "Failed to instantiate adapter %s: %s", cls.__name__, str(e)
+                )
 
     def _remote_adapters_plugin_launcher(self, config: LMCacheEngineConfig) -> None:
         """Automatically load all plug and play remote connector adapters."""
@@ -336,19 +338,22 @@ class ConnectorManager:
                 )
             except (ImportError, AttributeError) as e:
                 logger.error(
-                    f"Failed to load remote connector {remote_storage_plugin} due to "
-                    f"import/attribute error: {e}"
+                    "Failed to load remote connector %s due to "
+                    "import/attribute error: %s",
+                    remote_storage_plugin,
+                    e,
                 )
             except Exception as e:
                 logger.error(
-                    f"Failed to create remote connector {remote_storage_plugin} "
-                    f"adapter: {str(e)}"
+                    "Failed to create remote connector %s adapter: %s",
+                    remote_storage_plugin,
+                    str(e),
                 )
 
     def create_connector(self) -> RemoteConnector:
         for adapter in self.adapters:
             if adapter.can_parse(self.context.url):
-                logger.info(f"Creating connector for URL: {self.context.url}")
+                logger.info("Creating connector for URL: %s", self.context.url)
                 connector = adapter.create_connector(self.context)
                 return connector
 
