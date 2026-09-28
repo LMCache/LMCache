@@ -63,9 +63,14 @@ engine_configure_workload() {
             # Clear SGLang's radix cache between runs so the second pass proves
             # that LMCache, rather than only the local radix tree, served KV.
             export VERIFY_LMCACHE_RETRIEVAL="${VERIFY_LMCACHE_RETRIEVAL:-true}"
-            # The samples check compares complete generated responses across
-            # the populate and retrieve runs. Make those runs batch-invariant
-            # so numerical differences do not look like KV corruption.
+            # SGLang does not guarantee byte-identical generations between a
+            # normal prefill and an external-KV restore, even in deterministic
+            # mode. Verify per-run accuracy and score drift instead of comparing
+            # the complete sample JSONL, which also contains generated wording.
+            export LM_EVAL_VERIFY_MODE="${LM_EVAL_VERIFY_MODE:-score}"
+            export SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.01}"
+            # Keep the runs batch-invariant to minimize numerical drift across
+            # the normal-prefill and external-KV-restore execution paths.
             export SGLANG_DETERMINISTIC_INFERENCE="${SGLANG_DETERMINISTIC_INFERENCE:-true}"
             # On the SM120 CI fleet, deterministic inference otherwise selects
             # FlashInfer and disables the radix cache required by LMCache.
