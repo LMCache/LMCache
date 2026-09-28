@@ -1118,6 +1118,23 @@ class StorageManager:
                 for key in keys:
                     backend.unpin(key)
 
+    def is_hot_cache_object(
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+    ) -> bool:
+        """
+        Check whether `memory_obj` is resident in the local CPU hot cache
+        under `key`. Returns False when there is no local CPU backend.
+
+        Used by the retrieve path to tell cache-resident objects (whose
+        pins are owned by `lookup(pin=True)` / the controller) apart from
+        transient staging buffers that the retrieve path must unpin itself.
+        """
+        if not isinstance(self.local_cpu_backend, LocalCPUBackend):
+            return False
+        return self.local_cpu_backend.is_hot_cache_object(key, memory_obj)
+
     def clear(
         self,
         locations: Optional[List[str]] = None,
