@@ -49,15 +49,19 @@ silently corrupts the model output.
 With ``"checksum": "crc32"`` each file ends with an 8-byte trailer (a
 4-byte format magic plus ``zlib.crc32`` of the payload). On load the payload
 is re-hashed and compared. A mismatch, a missing trailer, or an unknown magic
-is served as a **miss** (the engine recomputes the chunk) and the file is
-deleted so the key can be stored again.
+is served as a **miss** (the engine recomputes the chunk). Loads never modify
+files: a concurrent store may already have replaced the file that was read, so
+deleting it could remove a valid object. Instead the adapter remembers the key,
+and the next store of that key rewrites the file with an atomic rename rather
+than skipping it as already stored.
 
 - **Space:** 8 bytes per object. With ``use_odirect`` the trailer is padded to
   one file-system block (typically 4 KiB) to keep writes aligned.
 - **CPU:** one CRC32 pass per store and per load, run off the adapter's event
   loop. Throughput depends on the system zlib; zlib-ng hashes at tens of
   GB/s per core, the classic zlib is several times slower.
-- **Compatibility:** files written with ``"none"`` have no trailer, so enabling
-  ``"crc32"`` on an existing directory discards them on first access. Files
+- **Compatibility:** files written with ``"none"`` have no trailer, so after
+  enabling ``"crc32"`` on an existing directory each of them misses once and is
+  rewritten by its next store. Files
   written with ``"crc32"`` are still readable with ``"none"`` (the trailer is
   ignored). All writers sharing a directory should use the same setting.

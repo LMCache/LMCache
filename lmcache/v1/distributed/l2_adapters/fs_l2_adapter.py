@@ -197,7 +197,8 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
       temp files (same as fs_connector_relative_tmp_dir).
     - checksum: ``"none"`` (default) or ``"crc32"``. With ``"crc32"``
       every file carries a CRC32 trailer that is verified on load; a
-      mismatch is served as a miss and the file is deleted.
+      mismatch is served as a miss and the key's next store rewrites the
+      file. Loads never modify files.
     """
 
     def __init__(
@@ -326,6 +327,9 @@ class FSL2Adapter(L2AdapterInterface):
         self._read_ahead_size = config.read_ahead_size
         self._use_odirect = config.use_odirect
         self._use_crc32 = config.checksum == "crc32"
+        # Keys whose file failed verification; their next store rewrites it.
+        # Touched only on the adapter's event loop.
+        self._unverified_keys: set[ObjectKey] = set()
         self._os_disk_bs = 0
         if self._use_odirect:
             stat = os.statvfs(self._base_path)
@@ -650,7 +654,7 @@ class FSL2Adapter(L2AdapterInterface):
         try:
             fd = os.open(
                 str(file_path),
-                os.O_CREAT | os.O_WRONLY | getattr(os, "O_DIRECT", 0),
+                os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_DIRECT", 0),
                 0o644,
             )
             written = os.write(fd, buf)
@@ -691,12 +695,16 @@ class FSL2Adapter(L2AdapterInterface):
         bytes_written = 0
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
+        replaced_keys: list[ObjectKey] = []
+        replaced_sizes: list[int] = []
         try:
             for key, obj in zip(keys, objects, strict=True):
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
 
-                # Skip if already stored on disk
-                if await aiofiles.os.path.exists(file_path):
+                # Skip if already stored on disk, unless that file failed
+                # verification: then rewrite it.
+                rewrite = key in self._unverified_keys
+                if not rewrite and await aiofiles.os.path.exists(file_path):
                     continue
                 buf = obj.byte_array
                 size = len(buf)
@@ -737,7 +745,18 @@ class FSL2Adapter(L2AdapterInterface):
                                 await f.write(trailer)
                         file_size = size + len(trailer)
 
+                    replaced_size = 0
+                    if rewrite:
+                        try:
+                            replaced_size = (await aiofiles.os.stat(file_path)).st_size
+                        except FileNotFoundError:
+                            pass
+                    # Atomic: a concurrent reader keeps the inode it opened.
                     await aiofiles.os.replace(tmp_path, file_path)
+                    self._unverified_keys.discard(key)
+                    if replaced_size:
+                        replaced_keys.append(key)
+                        replaced_sizes.append(replaced_size)
                     # File length, so delete()'s st_size-based accounting matches.
                     bytes_written += file_size
                     stored_keys.append(key)
@@ -762,6 +781,8 @@ class FSL2Adapter(L2AdapterInterface):
             )
             success = False
 
+        if replaced_keys:
+            self._notify_keys_deleted(replaced_keys, replaced_sizes)
         if stored_keys:
             self._notify_keys_stored(stored_keys, stored_sizes)
 
@@ -859,15 +880,17 @@ class FSL2Adapter(L2AdapterInterface):
                     )
 
                 if not verified:
+                    # Never delete here: a concurrent store may already have
+                    # replaced the file we read. The next store rewrites it.
+                    self._unverified_keys.add(key)
                     logger.warning(
-                        "FSL2Adapter checksum mismatch for %s; discarding the file",
+                        "FSL2Adapter checksum mismatch for %s; serving a miss, "
+                        "the next store of this key rewrites it",
                         file_path.name,
                     )
-                    deleted_keys, deleted_sizes = await self._execute_delete([key])
-                    if deleted_keys:
-                        self._notify_keys_deleted(deleted_keys, deleted_sizes)
                     continue
 
+                self._unverified_keys.discard(key)
                 bitmap.set(i)
                 logger.debug(
                     "FSL2Adapter loaded key %s (%d bytes)",
@@ -901,6 +924,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         async def _delete_one(key: ObjectKey) -> tuple[ObjectKey, int] | None:
             file_path = self._key_to_path(key)
+            self._unverified_keys.discard(key)
             async with sem:
                 try:
                     size = (await aiofiles.os.stat(file_path)).st_size

@@ -2,9 +2,9 @@
 """Tests for the FS L2 adapter's opt-in CRC32 integrity check.
 
 With ``checksum="crc32"`` every stored file carries a trailer, and a load
-whose payload or trailer does not verify is served as a miss and the file
-is deleted so the key can be re-stored. ``checksum="none"`` (default) keeps
-the historical raw-bytes format.
+whose payload or trailer does not verify is served as a miss. Loads never
+modify files; the key's next store rewrites the file atomically.
+``checksum="none"`` (default) keeps the historical raw-bytes format.
 """
 
 # Standard
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import cast
 import os
 import time
+import zlib
 
 # Third Party
 import pytest
@@ -150,24 +151,26 @@ class TestCrc32:
         [0, 63, 64, 64 + _TRAILER_SIZE - 1],
         ids=["payload_first", "payload_last", "trailer_magic", "trailer_crc"],
     )
-    def test_single_bit_flip_is_miss_and_discarded(
+    def test_single_bit_flip_is_miss_and_file_untouched(
         self, crc_adapter, tmp_path: Path, offset: int
     ) -> None:
         adp, listener = crc_adapter
         _store(adp, os.urandom(64))
-        _flip_byte(_only_data_file(tmp_path), offset)
+        path = _only_data_file(tmp_path)
+        _flip_byte(path, offset)
+        corrupted = path.read_bytes()
 
         hit, _ = _load(adp, 64)
 
         assert not hit
         assert listener.accessed == []
-        assert listener.deleted == [_KEY]
-        assert list(tmp_path.glob("*.data")) == []
+        assert listener.deleted == []
+        assert path.read_bytes() == corrupted
 
-    def test_discarded_key_can_be_stored_again(
+    def test_failed_key_is_rewritten_by_next_store(
         self, crc_adapter, tmp_path: Path
     ) -> None:
-        adp, _ = crc_adapter
+        adp, listener = crc_adapter
         _store(adp, b"a" * 64)
         _flip_byte(_only_data_file(tmp_path), 0)
         assert not _load(adp, 64)[0]
@@ -175,6 +178,36 @@ class TestCrc32:
         _store(adp, b"b" * 64)
 
         assert _load(adp, 64) == (True, b"b" * 64)
+        # The rewrite replaces the old file's bytes rather than adding to them.
+        assert adp.get_usage().total_bytes_used == 64 + _TRAILER_SIZE
+        assert listener.deleted == [_KEY]
+
+    def test_replacement_during_verification_is_kept(
+        self, crc_adapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A writer replacing the file while its old bytes are being verified
+        must not have its newer, valid file removed or modified."""
+        adp, _ = crc_adapter
+        _store(adp, b"a" * 64)
+        path = _only_data_file(tmp_path)
+        valid = path.read_bytes()
+        _flip_byte(path, 0)
+
+        real_crc32 = zlib.crc32
+
+        def replace_then_crc32(data, value=0):
+            # The corrupt bytes are already read; a concurrent writer wins now.
+            staged = path.with_name(path.name + ".writer")
+            staged.write_bytes(valid)
+            os.replace(staged, path)
+            monkeypatch.setattr(zlib, "crc32", real_crc32)
+            return real_crc32(data, value)
+
+        monkeypatch.setattr(zlib, "crc32", replace_then_crc32)
+
+        assert not _load(adp, 64)[0]
+        assert path.read_bytes() == valid
+        assert _load(adp, 64) == (True, b"a" * 64)
 
     def test_usage_returns_to_zero_after_delete(self, crc_adapter) -> None:
         adp, listener = crc_adapter
@@ -195,7 +228,7 @@ class TestFormatCompatibility:
         finally:
             adp.close()
 
-    def test_crc32_discards_files_without_trailer(self, tmp_path: Path) -> None:
+    def test_crc32_rewrites_files_without_trailer(self, tmp_path: Path) -> None:
         old, _ = _make_adapter(tmp_path, checksum="none")
         try:
             _store(old, b"o" * 32)
@@ -205,7 +238,13 @@ class TestFormatCompatibility:
         adp, listener = _make_adapter(tmp_path)
         try:
             assert not _load(adp, 32)[0]
-            assert listener.deleted == [_KEY]
+            assert listener.deleted == []
+            assert _only_data_file(tmp_path).stat().st_size == 32
+
+            _store(adp, b"o" * 32)
+
+            assert _only_data_file(tmp_path).stat().st_size == 32 + _TRAILER_SIZE
+            assert _load(adp, 32) == (True, b"o" * 32)
         finally:
             adp.close()
 
@@ -234,6 +273,29 @@ class TestODirectLayout:
     def block_size(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> int:
         monkeypatch.delattr(os, "O_DIRECT", raising=False)
         return os.statvfs(tmp_path).f_bsize
+
+    @pytest.mark.parametrize("checksum", ["none", "crc32"])
+    def test_stale_larger_temp_file_is_truncated(
+        self, tmp_path: Path, block_size: int, checksum: str
+    ) -> None:
+        payload = os.urandom(block_size)
+        expected = block_size * (2 if checksum == "crc32" else 1)
+        adp, listener = _make_adapter(tmp_path, checksum=checksum, use_odirect=True)
+        try:
+            _store(adp, payload)
+            final = _only_data_file(tmp_path)
+            adp.delete([_KEY])
+            # Leftover from a crashed writer, longer than the new file.
+            final.with_suffix(".tmp").write_bytes(b"\xff" * (4 * block_size))
+            listener.stored.clear()
+
+            _store(adp, payload)
+
+            assert final.stat().st_size == expected
+            assert listener.stored == [(_KEY, expected)]
+            assert _load(adp, len(payload)) == (True, payload)
+        finally:
+            adp.close()
 
     def test_trailer_padded_to_block_and_verified(
         self, tmp_path: Path, block_size: int
