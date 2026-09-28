@@ -175,13 +175,13 @@ class RuntimePluginConfig:
 class P2PConfig:
     """Configuration for peer-to-peer KV transfer.
 
-    P2P is enabled when :attr:`advertise_url` is non-empty. It additionally
+    P2P is enabled by :attr:`advertise_url` or ``transfer_engine="cxl"``. It
     requires a coordinator URL for peer discovery (validated at startup).
     """
 
     advertise_url: str = ""
     """Transfer-channel server ``host:port`` this instance advertises to peers.
-    Empty disables P2P."""
+    CXL mode does not require this endpoint."""
 
     listen_url: str = ""
     """Transfer-channel server ``host:port`` to bind and listen on. Empty
@@ -198,8 +198,8 @@ class P2PConfig:
 
     @property
     def enabled(self) -> bool:
-        """Whether P2P is enabled (an advertise URL is configured)."""
-        return bool(self.advertise_url)
+        """Whether a transfer endpoint or shared-CXL mode enables P2P."""
+        return bool(self.advertise_url) or self.transfer_engine == "cxl"
 
     @property
     def effective_listen_url(self) -> str:
@@ -621,7 +621,7 @@ def add_p2p_args(
         "--p2p-transfer-engine",
         type=str,
         default="nixl",
-        help="Transfer-channel implementation to use. Default is nixl.",
+        help="Transfer engine: nixl, mooncake_te, or cxl (shared-pool shadows).",
     )
     return parser
 

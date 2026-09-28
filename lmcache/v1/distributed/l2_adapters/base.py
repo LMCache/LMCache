@@ -147,6 +147,44 @@ class L2AdapterInterface(ABC):
     # Event Fd Interface
     #####################
 
+    def supports_borrowing(self) -> bool:
+        """Return whether this adapter can supply borrowed L1 views."""
+        return False
+
+    def take_borrowed_objects(
+        self,
+        task_id: L2TaskId,
+        keys: list[ObjectKey],
+        layouts: dict[int, MemoryLayoutDesc],
+    ) -> dict[ObjectKey, MemoryObj]:
+        """Transfer selected lookup reservations into metadata-only views.
+
+        Args:
+            task_id: Completed lookup's local task identity.
+            keys: Selected keys whose views the caller will own.
+            layouts: Layout by object-group ID.
+
+        Returns:
+            Successfully borrowed views. Missing keys remain caller-releasable.
+
+        Raises:
+            NotImplementedError: If this adapter only supports copying.
+        """
+        raise NotImplementedError("This adapter does not support borrowing")
+
+    def release_lookup(self, task_id: L2TaskId, keys: list[ObjectKey]) -> None:
+        """Release unused reservations belonging to a lookup.
+
+        Args:
+            task_id: Local lookup identity; ordinary adapters release by key.
+            keys: Reservations to return.
+        """
+        self.submit_unlock(keys)
+
+    def get_active_borrow_count(self) -> int:
+        """Return live borrowed views which must drain before adapter removal."""
+        return 0
+
     # IMPORTANT: Each of the three event fd methods below MUST return a
     # distinct file descriptor.  The store controller and prefetch controller
     # build fd-to-adapter lookup maps; if any two methods return the same fd

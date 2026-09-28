@@ -41,6 +41,7 @@ async def register(
     instance_id: str = "",
     p2p_advertised_url: str = "",
     mq_port: int = 0,
+    metadata: dict[str, str] | None = None,
 ) -> str:
     """Register an MP server with the coordinator and return its id.
 
@@ -54,6 +55,7 @@ async def register(
             when P2P is disabled.
         mq_port: Port of this server's ZMQ message-queue server for P2P lookup
             RPCs. 0 when P2P is disabled.
+        metadata: Optional discovery metadata, such as shared CXL slab identity.
 
     Returns:
         The registered instance id (coordinator-assigned if ``instance_id`` was
@@ -68,6 +70,7 @@ async def register(
         http_port=http_port,
         p2p_advertised_url=p2p_advertised_url,
         mq_port=mq_port,
+        metadata=metadata or {},
     )
     response = await client.post(
         f"{base_url}/instances", json=body.model_dump(mode="json")
@@ -87,6 +90,7 @@ async def keep_registered(
     p2p_advertised_url: str = "",
     mq_port: int = 0,
     on_registered: Callable[[], None],
+    metadata: dict[str, str] | None = None,
 ) -> None:
     """Register, heartbeat on a timer, and deregister on cancellation.
 
@@ -115,6 +119,7 @@ async def keep_registered(
             some state only in memory -- capacity declarations above all --
             and a caller that republishes nothing has to say so. Pass
             ``lambda: None`` to mean it.
+        metadata: Discovery metadata forwarded on every registration.
     """
     base_url = coordinator_url.rstrip("/")
     ip = advertise_ip or get_ip()
@@ -131,6 +136,7 @@ async def keep_registered(
                         instance_id=instance_id,
                         p2p_advertised_url=p2p_advertised_url,
                         mq_port=mq_port,
+                        metadata=metadata,
                     )
                     logger.info("Registered with coordinator as %s", assigned_id)
                     on_registered()

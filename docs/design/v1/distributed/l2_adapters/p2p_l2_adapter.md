@@ -2,6 +2,9 @@
 
 `lmcache/v1/distributed/l2_adapters/p2p_l2_adapter.py`
 
+For the proposed shared-pool CXL path, see
+[Shared CXL KV sharing through L1 shadows](../../cxl-kv-sharing.md).
+
 An L2 adapter that treats a **single peer cache server** as a read-only L2
 tier. Instead of a storage backend, it looks up objects that are resident in
 the peer's L1 (CPU RAM) and pulls them directly over the transfer channel

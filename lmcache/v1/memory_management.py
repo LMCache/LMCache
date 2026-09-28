@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import cache, wraps
@@ -8,6 +9,7 @@ import abc
 import ctypes
 import os
 import threading
+import time
 
 # Third Party
 from sortedcontainers import SortedList
@@ -924,6 +926,64 @@ class TensorMemoryObj(MemoryObj):
 
     def parent(self) -> Optional["MemoryAllocatorInterface"]:
         return self.parent_allocator
+
+
+class CXLMemoryObj(TensorMemoryObj):
+    """A borrowed CXL tensor view with no locally owned payload allocation.
+
+    Args:
+        raw_data: Flat byte view of a mapped peer allocation.
+        metadata: Validated tensor layout and arena-relative address.
+        on_release: Nonblocking callback releasing one peer read reservation.
+        expires_at: Conservative owner expiry on the local monotonic clock.
+        is_current: Optional mapped-owner identity check before starting a read.
+
+    L1 owns this view until its final reader finishes. The callback also keeps
+    the peer mapping alive; releasing the view never frees allocator pages.
+    """
+
+    def __init__(
+        self,
+        raw_data: torch.Tensor,
+        metadata: MemoryObjMetadata,
+        on_release: Callable[[], None],
+        expires_at: float = float("inf"),
+        is_current: Callable[[], bool] | None = None,
+    ) -> None:
+        self.expires_at = expires_at
+        self._is_current = is_current
+        self._on_release: Callable[[], None] | None = None
+        super().__init__(raw_data, metadata, parent_allocator=None)
+        self._on_release = on_release
+
+    def is_valid(self) -> bool:
+        """Return whether the view is live and within its owner reservation TTL."""
+        return (
+            self.valid
+            and time.monotonic() < self.expires_at
+            and (self._is_current is None or self._is_current())
+        )
+
+    def release(self) -> None:
+        """Invalidate the view and release its reservation once.
+
+        Call only after all GPU readers have completed. Repeated calls are
+        harmless; the callback must enqueue work instead of blocking on RPCs.
+        """
+        with self.lock:
+            callback = self._on_release
+            if callback is None:
+                return
+            self._on_release = None
+            self.valid = False
+            self.raw_data = torch.empty(0, dtype=torch.uint8)
+        callback()
+
+    def __del__(self) -> None:
+        try:
+            self.release()
+        except Exception:
+            logger.exception("Failed to release a borrowed CXL view")
 
 
 class BytesBufferMemoryObj(MemoryObj):

@@ -128,7 +128,9 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
 class P2PL2Adapter(L2AdapterInterface):
     """L2 adapter that reads KV objects from a single peer cache server."""
 
-    def __init__(self, config: P2PL2AdapterConfig) -> None:
+    def __init__(
+        self, config: P2PL2AdapterConfig, *, use_transfer_channel: bool = True
+    ) -> None:
         super().__init__(max_capacity_bytes=0)
         self._config = config
 
@@ -136,9 +138,15 @@ class P2PL2Adapter(L2AdapterInterface):
             config.peer_mq_server_url,
             context=zmq.Context.instance(),
         )
-        self._tc_context = get_transfer_channel_context()
-        self._tc_client = self._tc_context.get_transfer_channel_client(
-            config.peer_transfer_channel_server_url
+        self._tc_context = (
+            get_transfer_channel_context() if use_transfer_channel else None
+        )
+        self._tc_client = (
+            self._tc_context.get_transfer_channel_client(
+                config.peer_transfer_channel_server_url
+            )
+            if self._tc_context is not None
+            else None
         )
 
         self._store_efd = create_event_notifier()
@@ -290,6 +298,7 @@ class P2PL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
+        assert self._tc_context is not None and self._tc_client is not None
         task_id = self._next_task_id
         self._next_task_id += 1
 
@@ -335,6 +344,7 @@ class P2PL2Adapter(L2AdapterInterface):
             logger.warning("P2P load task %d timed out; treating as a failure", task_id)
             return Bitmap(len(task.keys))
 
+        assert self._tc_client is not None
         result = self._tc_client.query_read_status(task.read_task_id)
         if not result.is_finished():
             return None
@@ -359,9 +369,10 @@ class P2PL2Adapter(L2AdapterInterface):
         self._notifier.unregister_fd(self._load_efd.fileno())
         # Release the peer's transfer-channel client now that this adapter no
         # longer reads from it.
-        self._tc_context.remove_transfer_channel_client(
-            self._config.peer_transfer_channel_server_url
-        )
+        if self._tc_context is not None:
+            self._tc_context.remove_transfer_channel_client(
+                self._config.peer_transfer_channel_server_url
+            )
         self._req_client.close()
         self._store_efd.close()
         self._lookup_efd.close()

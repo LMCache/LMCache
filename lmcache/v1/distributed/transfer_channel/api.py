@@ -6,6 +6,9 @@ Data types exposed by the transfer channel abstraction.
 # Standard
 from dataclasses import dataclass, field
 
+# First Party
+from lmcache.v1.distributed.cxl_types import CxlArenaDescriptor
+
 
 @dataclass(frozen=True)
 class TransferChannelAddress:
@@ -25,6 +28,12 @@ class TransferChannelAddress:
 
     size: int
     """ The size (in bytes) of the memory object. """
+
+    cxl_arena: CxlArenaDescriptor | None = None
+    """When present, offset is relative to this shared CXL slab's payload."""
+
+    cxl_ttl_seconds: int = 0
+    """Owner read-lock TTL; borrowers bound views from lookup submission time."""
 
     def is_valid(self) -> bool:
         """Whether the address is valid (non-negative offset and size)."""

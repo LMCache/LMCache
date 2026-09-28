@@ -22,6 +22,7 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     PrefetchTaskSpec,
 )
+from lmcache.v1.distributed.cxl_types import CXL_METADATA_KEY, CxlArenaDescriptor
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel import (
     delete_transfer_channel_context,
@@ -120,6 +121,7 @@ class _PeerInstance:
     ip: str
     p2p_advertised_url: str
     mq_port: int
+    cxl_arena: CxlArenaDescriptor | None = None
 
 
 @dataclass
@@ -131,6 +133,7 @@ class _PeerAdapter:
     p2p_advertised_url: str
     mq_port: int
     consecutive_misses: int = 0
+    cxl_arena: CxlArenaDescriptor | None = None
 
 
 @dataclass
@@ -149,13 +152,12 @@ class _P2PLookupJob:
 class P2PController:
     """Serves lookup requests from peers and maintains one L2 adapter per peer.
 
-    P2P is enabled when ``p2p_config`` carries an advertise URL; otherwise the
-    controller only answers lookup/unlock RPCs.
+    P2P is enabled by an advertise URL or the CXL transfer engine; otherwise
+    the controller only answers lookup/unlock RPCs.
 
     Args:
         ctx: Shared engine context providing the storage manager and friends.
-        p2p_config: Peer-to-peer configuration; inert when its advertise URL is
-            empty.
+        p2p_config: Peer discovery and transfer configuration.
         coordinator_config: Coordinator connection used for peer discovery.
         instance_id: Stable id of this instance, used to exclude itself from the
             discovered peer set.
@@ -200,12 +202,13 @@ class P2PController:
         Args:
             coordinator_config: Coordinator connection used for peer discovery.
         """
-        initialize_transfer_channel_context(
-            self._p2p_config.transfer_engine,
-            self._ctx.storage_manager.l1_memory_desc,
-            listen_url=self._p2p_config.effective_listen_url,
-            advertise_url=self._p2p_config.advertise_url,
-        )
+        if self._p2p_config.transfer_engine != "cxl":
+            initialize_transfer_channel_context(
+                self._p2p_config.transfer_engine,
+                self._ctx.storage_manager.l1_memory_desc,
+                listen_url=self._p2p_config.effective_listen_url,
+                advertise_url=self._p2p_config.advertise_url,
+            )
         self._instances_url = coordinator_config.url.rstrip("/") + "/instances"
         timeout = max(1.0, coordinator_config.heartbeat_interval)
         self._http_client = httpx.Client(timeout=timeout)
@@ -253,7 +256,7 @@ class P2PController:
             self._http_client.close()
             self._http_client = None
 
-        if self._p2p_config.enabled:
+        if self._p2p_config.enabled and self._p2p_config.transfer_engine != "cxl":
             delete_transfer_channel_context()
 
     # -----------------------------------------------------------------
@@ -410,10 +413,25 @@ class P2PController:
                 # Locked but unreadable (e.g. evicted under a race); leave it
                 # marked invalid so the peer skips it.
                 continue
-            address = TransferChannelAddress(
-                offset=obj.shm_offset,
-                size=obj.shm_byte_length,
-            )
+            if self._p2p_config.transfer_engine == "cxl":
+                address = self._ctx.storage_manager.get_cxl_address(obj)
+                layout = next(
+                    row.layout_desc
+                    for row in job.key_groups
+                    if row.object_group_id == key.object_group_id
+                )
+                if (
+                    address is None
+                    or obj.get_shapes() != layout.shapes
+                    or obj.get_dtypes() != layout.dtypes
+                ):
+                    self._ctx.storage_manager.finish_read_prefetched([key])
+                    continue
+            else:
+                address = TransferChannelAddress(
+                    offset=obj.shm_offset,
+                    size=obj.shm_byte_length,
+                )
             for i in positions.get(key, ()):
                 addresses[i] = address
         return addresses
@@ -446,7 +464,14 @@ class P2PController:
             inst.instance_id: inst
             for inst in instances
             if inst.instance_id != self._instance_id
-            and inst.p2p_advertised_url
+            and (
+                inst.cxl_arena is not None
+                and self._ctx.storage_manager.cxl_arena is not None
+                and inst.cxl_arena.pool_id
+                == self._ctx.storage_manager.cxl_arena.pool_id
+                if self._p2p_config.transfer_engine == "cxl"
+                else bool(inst.p2p_advertised_url) and inst.cxl_arena is None
+            )
             and inst.ip
             and inst.mq_port
         }
@@ -473,12 +498,21 @@ class P2PController:
             instance_id = raw.get("instance_id", "")
             if not instance_id:
                 continue
+            cxl_metadata = raw.get("metadata", {}).get(CXL_METADATA_KEY)
+            try:
+                arena = (
+                    CxlArenaDescriptor.from_json(cxl_metadata) if cxl_metadata else None
+                )
+            except (ValueError, TypeError):
+                logger.warning("Ignoring invalid CXL metadata from %s", instance_id)
+                continue
             instances.append(
                 _PeerInstance(
                     instance_id=instance_id,
                     ip=raw.get("ip", ""),
                     p2p_advertised_url=raw.get("p2p_advertised_url", ""),
                     mq_port=int(raw.get("mq_port", 0) or 0),
+                    cxl_arena=arena,
                 )
             )
         return instances
@@ -494,7 +528,11 @@ class P2PController:
         """
         return any(
             inst.instance_id == self._instance_id
-            and inst.p2p_advertised_url == self._p2p_config.advertise_url
+            and (
+                inst.cxl_arena == self._ctx.storage_manager.cxl_arena
+                if self._p2p_config.transfer_engine == "cxl"
+                else inst.p2p_advertised_url == self._p2p_config.advertise_url
+            )
             for inst in instances
         )
 
@@ -542,6 +580,8 @@ class P2PController:
                     added += 1
             elif self._peer_changed(current, inst):
                 self._remove_adapter(peer_id)
+                if peer_id in self._adapters:
+                    continue
                 removed += 1
                 if self._add_adapter(inst):
                     added += 1
@@ -573,6 +613,7 @@ class P2PController:
             adapter.p2p_advertised_url != inst.p2p_advertised_url
             or adapter.ip != inst.ip
             or adapter.mq_port != inst.mq_port
+            or adapter.cxl_arena != inst.cxl_arena
         )
 
     def _add_adapter(self, inst: _PeerInstance) -> bool:
@@ -591,7 +632,16 @@ class P2PController:
             load_timeout_s=self._p2p_config.load_timeout,
         )
         try:
-            adapter_id = self._ctx.storage_manager.add_l2_adapter(config)
+            if self._p2p_config.transfer_engine == "cxl":
+                if inst.cxl_arena is None:
+                    return False
+                adapter_id = self._ctx.storage_manager.add_cxl_peer(
+                    inst.cxl_arena,
+                    config.peer_mq_server_url,
+                    self._p2p_config.lookup_timeout,
+                )
+            else:
+                adapter_id = self._ctx.storage_manager.add_l2_adapter(config)
         except Exception:
             logger.exception("Failed to add P2P adapter for peer %s", inst.instance_id)
             return False
@@ -601,6 +651,7 @@ class P2PController:
                 ip=inst.ip,
                 p2p_advertised_url=inst.p2p_advertised_url,
                 mq_port=inst.mq_port,
+                cxl_arena=inst.cxl_arena,
             )
         logger.debug(
             "Added P2P adapter %d for peer %s (%s)",
@@ -617,7 +668,7 @@ class P2PController:
             peer_id: Instance id of the peer whose adapter to remove.
         """
         with self._orch_lock:
-            adapter = self._adapters.pop(peer_id, None)
+            adapter = self._adapters.get(peer_id)
         if adapter is None:
             return
         try:
@@ -625,6 +676,8 @@ class P2PController:
         except Exception:
             logger.exception("Failed to remove P2P adapter for peer %s", peer_id)
             return
+        with self._orch_lock:
+            self._adapters.pop(peer_id, None)
         logger.debug("Removed P2P adapter for peer %s", peer_id)
 
     def _active_job_count(self) -> int:
