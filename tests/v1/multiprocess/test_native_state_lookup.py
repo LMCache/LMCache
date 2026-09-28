@@ -154,7 +154,7 @@ def _groups() -> KVLayerGroupsManager:
 
 
 def _key(world_size: int = 1, tokens: tuple[int, ...] = TOKENS) -> IPCCacheServerKey:
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name="native-state",
         world_size=world_size,
         worker_id=None,

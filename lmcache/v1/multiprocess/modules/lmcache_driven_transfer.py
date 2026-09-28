@@ -39,6 +39,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.token_codec import unpack_token_ids
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -1046,7 +1047,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # imply a position without revealing it, so it is reported here. A
         # trailing partial chunk has no stored KV to bind to.
         chunk_size = self._ctx.chunk_size
-        token_ids = list(key.token_ids)
+        token_ids = unpack_token_ids(key.token_bytes)
         effective_len = min(len(token_ids), key.end)
         num_complete = effective_len - effective_len % chunk_size
         token_offsets = list(range(key.start, num_complete, chunk_size))

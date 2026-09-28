@@ -6,6 +6,7 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 
 def _key(num_kv_readers: int) -> IPCCacheServerKey:
@@ -14,7 +15,7 @@ def _key(num_kv_readers: int) -> IPCCacheServerKey:
         world_size=1,
         num_kv_readers=num_kv_readers,
         worker_id=0,
-        token_ids=(1, 2, 3),
+        token_bytes=pack_token_ids((1, 2, 3)),
         start=0,
         end=3,
         request_id="req",

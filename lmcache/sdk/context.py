@@ -532,12 +532,12 @@ class LMCacheSDKContext:
         Returns:
             IPCCacheServerKey: The constructed key.
         """
-        return IPCCacheServerKey(
+        return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._world_size,
             num_kv_readers=self._num_kv_readers,
             worker_id=worker_id,
-            token_ids=tuple(token_ids),
+            token_ids=token_ids,
             start=start,
             end=end,
             request_id=request_id,

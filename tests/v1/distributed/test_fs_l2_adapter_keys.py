@@ -289,12 +289,13 @@ class TestIPCCacheServerKeyCacheSalt:
 
         # First Party
         from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+        from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
         old_payload = {
             "model_name": "m",
             "world_size": 1,
             "worker_id": 0,
-            "token_ids": (1, 2),
+            "token_bytes": pack_token_ids([1, 2]),
             "start": 0,
             "end": 2,
             "request_id": "r1",
@@ -302,6 +303,30 @@ class TestIPCCacheServerKeyCacheSalt:
         wire = msgspec.msgpack.encode(old_payload)
         decoded = msgspec.msgpack.decode(wire, type=IPCCacheServerKey)
         assert decoded.cache_salt == ""
+
+    def test_wire_compat_token_ids_payload_is_rejected(self):
+        """A name-and-type change no default can bridge: msgspec requires
+        the field, so the payload is refused rather than decoding with no
+        tokens at all."""
+        # Third Party
+        import msgspec
+
+        # First Party
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+        wire = msgspec.msgpack.encode(
+            {
+                "model_name": "m",
+                "world_size": 1,
+                "worker_id": 0,
+                "token_ids": (1, 2),
+                "start": 0,
+                "end": 2,
+                "request_id": "r1",
+            }
+        )
+        with pytest.raises(msgspec.ValidationError, match="token_bytes"):
+            msgspec.msgpack.decode(wire, type=IPCCacheServerKey)
 
     def test_wire_compat_new_payload_roundtrip(self):
         # Third Party

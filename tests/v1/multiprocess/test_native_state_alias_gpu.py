@@ -37,6 +37,7 @@ from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.server import run_cache_server
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
@@ -205,7 +206,7 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
     ]
     instance_id = os.getpid()
     tokens = tuple(range(4 * CHUNK + 1))
-    key = IPCCacheServerKey(
+    key = IPCCacheServerKey.from_token_ids(
         model_name="native-alias-roundtrip",
         world_size=1,
         worker_id=0,
@@ -251,7 +252,7 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
             lookup_key = replace(
                 key,
                 worker_id=None,
-                token_ids=tokens[: limit_chunks * CHUNK],
+                token_bytes=pack_token_ids(tokens[: limit_chunks * CHUNK]),
                 end=limit_chunks * CHUNK,
                 request_id=f"native-load-{limit_chunks}",
             )
@@ -310,7 +311,7 @@ def test_state_ordinals_alias_the_page_allocation(native_client: RequestClient) 
         ),
     ]
     instance_id = os.getpid()
-    key = IPCCacheServerKey(
+    key = IPCCacheServerKey.from_token_ids(
         model_name="native-shared-page-pool",
         world_size=1,
         worker_id=0,
