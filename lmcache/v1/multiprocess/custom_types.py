@@ -22,6 +22,14 @@ Key Types:
   - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
 
+# request_configs key that carries the APC-covered chunk count on a LOOKUP.
+# Carried inside ``request_configs`` (an already-transmitted msgpack blob, not
+# part of cache identity) rather than as a first-class ``IPCCacheServerKey``
+# field so the gRPC ``IpcCacheServerKey`` proto needs no new field / regen. A
+# production version should promote this to a proto field; see
+# docs/design/v1/multiprocess/modules/apc_covered_lookup.md.
+COVERED_CHUNKS_CONFIG_KEY = "lmcache.mp._covered_chunks"
+
 
 @dataclass(order=True, frozen=True)
 class IPCCacheServerKey:
@@ -68,14 +76,6 @@ class IPCCacheServerKey:
     # that many read locks (see ``require_num_kv_readers``). 0 = not sent;
     # lookups reject it.
     num_kv_readers: int = field(default=0, compare=False)
-
-    # Number of leading LMCache chunks already covered by the serving engine's
-    # prefix cache (vLLM APC).  On LOOKUP the server touches these chunks to
-    # keep them warm but does not read-lock or L2-prefetch them (they will
-    # never be retrieved from LMCache).  0 (the default) reproduces the
-    # pre-feature behavior and keeps old payloads wire-compatible.  Not part
-    # of cache identity.
-    covered_chunks: int = field(default=0, compare=False)
 
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
@@ -153,7 +153,6 @@ class IPCCacheServerKey:
             request_id=self.request_id,
             cache_salt=self.cache_salt,
             request_configs=self.request_configs,
-            covered_chunks=self.covered_chunks,
         )
 
 

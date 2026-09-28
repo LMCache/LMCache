@@ -18,6 +18,34 @@ lmcache.mp.skip_covered_lookup: true   # default: false
 With the flag off (or against an older server), the wire carries
 `covered_chunks = 0` and behavior is bit-for-bit identical to today.
 
+## Implementation status (draft branches)
+
+This doc describes the target design. The `core/skip-apc-pin` and
+`core/skip-apc-nonpin` draft branches implement the shared foundation and one
+shrink-handling method each, with two deliberate interim simplifications that
+avoid a gRPC protobuf change (no `grpc_tools` in the authoring env to
+regenerate stubs):
+
+1. **`covered_chunks` is carried in `request_configs`** (key
+   `COVERED_CHUNKS_CONFIG_KEY`) rather than as a first-class
+   `IPCCacheServerKey` / `IpcCacheServerKey`-proto field. `request_configs` is
+   already transmitted (msgpack blob), is not part of cache identity, and is
+   only populated when the feature is on -- so the feature-off path is
+   byte-identical. A production version should promote it to a proto field.
+2. **The `covered_present` store-hole signal is not transmitted yet.** The
+   server computes it (for the LRU touch) but the LOOKUP reply stays `None`
+   (adding an int reply needs a `LookupResponse` proto field + regen), so
+   `LookupResult.stored_tokens` currently equals `hit_tokens`. Until the
+   follow-up lands, a covered chunk evicted while covered is re-stored by the
+   normal store path once a later request observes it as a miss, rather than
+   via the presence probe.
+
+Both simplifications are pure carriage/among-tiers concerns; the skip + touch +
+lock-clamp + shrink-handling logic is unaffected. The server realizes the skip
+by prefetching only the uncovered sub-range `chunk_hashes[covered_chunks:]` and
+offsetting hit counts by `covered_chunks` at status time -- equivalent to the
+fold-surgery described below but leaving `_submit_prefix_fold` untouched.
+
 ## Motivation
 
 Today the scheduler-side lookup always covers the full prompt from token 0

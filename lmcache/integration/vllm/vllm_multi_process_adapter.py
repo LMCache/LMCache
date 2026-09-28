@@ -33,6 +33,7 @@ from lmcache.utils import (
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
+    COVERED_CHUNKS_CONFIG_KEY,
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
@@ -893,6 +894,14 @@ class LMCacheMPSchedulerAdapter:
         covered_chunks = max(
             0, min(covered_chunks, aligned_end // self.lmcache_tokens_per_chunk)
         )
+        # Carry the covered count inside request_configs (only when non-zero, so
+        # the feature-off path is byte-identical to before). Copy so the caller's
+        # dict is never mutated.
+        if covered_chunks > 0:
+            request_configs = {
+                **(request_configs or {}),
+                COVERED_CHUNKS_CONFIG_KEY: covered_chunks,
+            }
 
         key = self._create_key(
             token_ids,
@@ -901,7 +910,6 @@ class LMCacheMPSchedulerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
-            covered_chunks=covered_chunks,
         ).no_worker_id_version()
 
         futures: dict[str, MessagingFuture[None]] = {
@@ -1270,7 +1278,6 @@ class LMCacheMPSchedulerAdapter:
         request_id: str,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
-        covered_chunks: int = 0,
     ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
 
@@ -1281,10 +1288,8 @@ class LMCacheMPSchedulerAdapter:
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
-                the IPC key.
-            covered_chunks: Leading chunks already covered by the serving
-                engine's prefix cache; the server touches them but skips
-                read-locking / L2-prefetching them.
+                the IPC key. The APC-covered chunk count (if any) is carried
+                here under ``COVERED_CHUNKS_CONFIG_KEY``.
 
         Returns:
             IPCCacheServerKey: The constructed key.
@@ -1302,7 +1307,6 @@ class LMCacheMPSchedulerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
-            covered_chunks=covered_chunks,
         )
 
     def update_pending_store_count(self, req_id: str, count: int) -> bool:
