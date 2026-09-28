@@ -2,7 +2,7 @@
 # SGLang adapter for the LMCache multiprocess integration-test harness.
 
 export ENGINE_NAME="SGLang"
-export ENGINE_DEFAULT_MODEL="Qwen/Qwen2.5-7B-Instruct"
+export ENGINE_DEFAULT_MODEL="Qwen/Qwen3-14B"
 
 ENGINE_SUPPORTED_TRANSFER_MODES=(lmcache_driven)
 ENGINE_SUPPORTED_REQUEST_TRANSPORTS=(zmq grpc)
@@ -20,12 +20,14 @@ ENGINE_COMMON_WORKLOAD_BLACKLIST=(
 engine_setup_environment() {
     local repo_root="$1"
     local setup_script="${BK_SETUP_ENV_SCRIPT:-${repo_root}/.buildkite/k3_harness/setup-sglang-env.sh}"
+    export GPU_MEMORY_PROBE_ENABLED="${GPU_MEMORY_PROBE_ENABLED:-1}"
 
     source "$setup_script"
 }
 
 engine_configure_defaults() {
     export DEVICE_AFFINITY_VAR="${DEVICE_AFFINITY_VAR:-CUDA_VISIBLE_DEVICES}"
+    export GPU_MEMORY_PROBE_ENABLED="${GPU_MEMORY_PROBE_ENABLED:-1}"
     export ENGINE_PORT="${ENGINE_PORT:-${SGLANG_PORT:-8000}}"
     export ENGINE_BASELINE_PORT="${ENGINE_BASELINE_PORT:-${SGLANG_BASELINE_PORT:-9000}}"
     export GPU_FOR_ENGINE="${GPU_FOR_ENGINE:-${GPU_FOR_SGLANG:-0}}"
@@ -74,13 +76,35 @@ engine_configure_workload() {
 
 engine_prepare_launch() {
     local device_index="$1"
-    : "$device_index"
+    local gpu_memory_gb=0
+
+    if [[ "$GPU_MEMORY_PROBE_ENABLED" == "1" \
+            || "$GPU_MEMORY_PROBE_ENABLED" == "true" ]]; then
+        local gpu_memory_mb
+        gpu_memory_mb=$(
+            env "${DEVICE_AFFINITY_VAR}=${device_index}" \
+                python3 - <<'PY'
+from lmcache import torch_dev
+
+print(torch_dev.get_device_properties(0).total_memory // (1024 * 1024))
+PY
+        )
+        gpu_memory_gb=$((gpu_memory_mb / 1024))
+        echo "Detected GPU memory: ${gpu_memory_gb}GB (${gpu_memory_mb}MB)"
+    else
+        echo "GPU memory probe disabled"
+    fi
 
     SGLANG_MEMORY_ARGS=()
     if [[ -n "${GPU_MEMORY_UTILIZATION:-}" ]]; then
+        echo "Using configured --mem-fraction-static ${GPU_MEMORY_UTILIZATION}"
         SGLANG_MEMORY_ARGS=(--mem-fraction-static "$GPU_MEMORY_UTILIZATION")
     elif [[ -n "${SGLANG_MEM_FRACTION_STATIC:-}" ]]; then
+        echo "Using configured --mem-fraction-static ${SGLANG_MEM_FRACTION_STATIC}"
         SGLANG_MEMORY_ARGS=(--mem-fraction-static "$SGLANG_MEM_FRACTION_STATIC")
+    elif ((gpu_memory_gb > 90)); then
+        echo "GPU memory > 90GB, adding --mem-fraction-static 0.5"
+        SGLANG_MEMORY_ARGS=(--mem-fraction-static 0.5)
     fi
 
     SGLANG_CONTEXT_ARGS=()
