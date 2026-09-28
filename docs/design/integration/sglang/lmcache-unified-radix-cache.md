@@ -16,7 +16,7 @@ The integration consists of two cooperating components:
   server, and synchronizes results across tensor-parallel (TP) and
   pipeline-parallel (PP) ranks.
 
-The corresponding LMCache implementation is tracked by
+The corresponding LMCache implementation landed in
 [LMCache PR #4828](https://github.com/LMCache/LMCache/pull/4828).
 
 ## Goals and non-goals
@@ -93,7 +93,9 @@ and node locks. It does not initialize a HiCache host pool.
 
 | Area | File |
 | --- | --- |
-| SGLang group mapping, MP RPC, event IPC, and rank synchronization | `lmcache/integration/sglang/unified_lmcache_mp_connector.py` |
+| Top-level connector: MP RPC, event IPC, and cross-rank synchronization (`UnifiedLMCacheMPConnector`) | `lmcache/integration/sglang/unified_lmcache_mp_connector.py` |
+| SGLang KV pool → LMCache engine-group mapping (`SGLangUnifiedKVAdapter`) | `lmcache/integration/sglang/unified_kv_adapter.py` |
+| Shared operation and component dataclasses (`LMCacheLookupOperation`, `LMCacheLoadOperation`, `LMCacheStoreOperation`, `SGLangKVComponentGroup`) | `lmcache/integration/sglang/lmcache_mp_metadata.py` |
 | Server lookup and prefetch | `lmcache/v1/multiprocess/modules/lookup.py` |
 | Registration, store, and retrieve | `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py` |
 | Engine-group registration contract | `lmcache/v1/multiprocess/group_view.py` |
