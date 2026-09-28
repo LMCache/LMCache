@@ -48,8 +48,9 @@ Server Configuration
      - Default
      - Description
    * - ``--http-host``
-     - ``0.0.0.0``
-     - Host to bind the HTTP server.
+     - ``127.0.0.1``
+     - Host to bind the HTTP server. The admin API has no authentication;
+       only bind a non-loopback address on a trusted network.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
@@ -249,6 +250,7 @@ compatibility with the vLLM-embedded API server.
    * - POST
      - ``/run_script``
      - Execute an uploaded Python script in a restricted sandbox.
+       Disabled by default; requires ``--run-script-api-enabled``.
 
 Liveness and Health
 -------------------
@@ -1618,6 +1620,11 @@ piped directly to a terminal.
 ``POST /run_script``
 ~~~~~~~~~~~~~~~~~~~~
 
+.. note::
+
+   This endpoint is **disabled by default** (requests return ``404``).
+   Start the server with ``--run-script-api-enabled`` to enable it.
+
 Execute an uploaded Python script inside the server process. The script is
 uploaded as multipart form data under the field name ``script`` and is
 ``exec``'d with a restricted ``__builtins__`` (only ``print``, ``str``,
@@ -1645,6 +1652,7 @@ the script assigns one, otherwise ``Script executed successfully``.
 
 - ``200``: script executed.
 - ``400``: no ``script`` file provided.
+- ``404``: the endpoint is disabled (``--run-script-api-enabled`` not set).
 - ``500``: an exception was raised during import setup or execution
   (body: ``"Error executing script: <reason>"``).
 

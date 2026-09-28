@@ -167,7 +167,7 @@ SELF_CONTAINED_TESTS=" mp_autostart_tp2 p2p kimi_linear_tp dsv4_flash_tp "
 # else runs on GPU 0 alone, so launch-processes.sh skips the baseline.
 # Respect an explicit environment override from a device-specific wrapper
 # before applying the default baseline heuristic below.
-BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 "
+BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 preemption_correctness "
 if [ -n "${LAUNCH_BASELINE:-}" ]; then
     export LAUNCH_BASELINE
 elif [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then

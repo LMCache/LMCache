@@ -7,7 +7,7 @@ Could be implemented by native code in the future
 """
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
@@ -19,6 +19,7 @@ from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.lmcache_native import Bitmap
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
@@ -521,44 +522,76 @@ class PrefetchTaskSpec:
         """Number of keys in every key group (the request's chunk count)."""
         return len(self.key_groups[0].keys)
 
+    @property
+    def group_layout_descs(self) -> dict[int, MemoryLayoutDesc]:
+        """Map each object group id to its memory layout."""
+        return {row.object_group_id: row.layout_desc for row in self.key_groups}
+
 
 @dataclass(frozen=True)
 class PrefetchHandle:
     """Opaque handle returned by ``StorageManager.submit_prefetch_task``.
 
-    Carries the bookkeeping needed to later query lookup / prefetch status
+    Carries the bookkeeping needed to later query the prefetch status
     without exposing controller internals.
     """
 
     prefetch_request_id: int
-    """Opaque ID for tracking L2 prefetch in the controller.
-    -1 if no L2 request was submitted."""
+    """Opaque ID for tracking the request in the prefetch controller; -1
+    marks an already-complete empty request."""
 
     external_request_id: str
     """Request ID from the caller for end-to-end tracing."""
 
-    l1_found_indices: tuple[int, ...]
-    """Original-key indices found (read-locked) in L1 at submission time."""
-
-    l1_hit_chunks: int
-    """Chunk-level prefix hit count from L1 (via fold_unfold_ranked)."""
-
     total_requested_keys: int
-    """Total number of keys originally requested (the result-bitmap size)."""
+    """Total number of keys originally requested."""
 
     submit_time: float
     """Monotonic timestamp when the prefetch task was submitted."""
 
-    l2_orig_indices: tuple[int, ...] = ()
-    """Original-key index of each key submitted to L2; maps the controller's
-    local result bitmap back to original positions."""
+    sliding_windows: tuple[int, ...] = ()
+    """Sliding-window size of every key group of the request, in group
+    order; ``FULL_ATTENTION_WINDOW_CHUNKS`` for a full-attention group."""
 
-    # TODO (ApostaC): remove once the prefetch controller refactor reports the
-    # result per key group natively instead of splitting a flat bitmap.
-    num_key_groups: int = 1
-    """Number of key groups (rows) in the request; the prefetch result is
-    reported per group, and every group holds
-    ``total_requested_keys // num_key_groups`` keys."""
+
+@dataclass(frozen=True)
+class PrefetchResult:
+    """The outcome of a prefetch task, one bitmap per key group of the task.
+
+    Bit ``i`` of ``hit_cells[k]`` is set iff key ``i`` of key group ``k`` is
+    resident in L1 when the task finished (and read-locked under ``LOCK``).
+    ``l1_hit_cells`` marks the hit cells L1 already held, ``l2_hit_cells``
+    those the task loaded from L2.
+
+    Note:
+        ``l1_hit_cells`` and ``l2_hit_cells`` are disjoint and their union is
+        ``hit_cells``.
+    """
+
+    hit_cells: list["Bitmap"]
+    l1_hit_cells: list["Bitmap"]
+    l2_hit_cells: list["Bitmap"]
+    _l1_hit_count: int = field(init=False, repr=False, compare=False)
+    _l2_hit_count: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # Frozen dataclass: the cached counts are set through object.__setattr__.
+        object.__setattr__(
+            self, "_l1_hit_count", sum(row.popcount() for row in self.l1_hit_cells)
+        )
+        object.__setattr__(
+            self, "_l2_hit_count", sum(row.popcount() for row in self.l2_hit_cells)
+        )
+
+    @property
+    def l1_hit_count(self) -> int:
+        """Number of hit cells L1 already held."""
+        return self._l1_hit_count
+
+    @property
+    def l2_hit_count(self) -> int:
+        """Number of hit cells loaded from L2."""
+        return self._l2_hit_count
 
 
 def ipc_key_to_object_keys(

@@ -36,7 +36,7 @@ class _FakeAdapterConfig:
 
 
 class _FakeDescriptor:
-    """Stands in for an ``AdapterDescriptor``."""
+    """Stands in for an ``L2AdapterDescriptor``."""
 
     def __init__(self, type_name: str, shared: bool) -> None:
         self.type_name = type_name
