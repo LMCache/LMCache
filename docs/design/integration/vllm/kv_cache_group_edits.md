@@ -110,19 +110,21 @@ layout (`get_kv_cache_stride_order`, `vllm/v1/worker/gpu/attn_utils.py`), so it
 is generally *not* contiguous in logical dim order — under NHD the 0.26.0
 rank-4 stride order `(0, 2, 1, 3)` is a transpose. Pages only tile by byte
 range in memory order, so the **rank-4** branch of `_SubpagedAttentionViewEdit`
-re-views in descending-stride order. That path is mainline vLLM only; the
-vLLM-Ascend `(K, V)` plane edits below do not use it.
+re-views in descending-stride order. It remains rank 4 after the edit:
+NHD emits `[NB, BS, 1, CS]`, while
+HND emits `[NB, 1, BS, CS]`. This preserves the layout identity needed by the
+fused-K/V detector to read the logical block size from the correct axis.
+That path is mainline vLLM only; the vLLM-Ascend `(K, V)` plane edits below
+do not use it.
 
 **Rank 5 deliberately keeps the stricter logical-order contiguity guard.** The
 edited view is NHD-shaped by construction, so under an HND hint the detector
 selects `NL_X_NB_TWO_NH_BS_HS`, whose `block_size()` reads the synthetic
-`num_heads` axis and resolves 1 — extending the rank-4 memory-order
-normalization to rank 5 would replace a loud startup failure with exactly that
-silent wrong block size. This is a **general limitation** of the edits, not a
-rank-5 one: under an explicit `VLLM_KV_CACHE_LAYOUT=HND` every edited group,
-Mamba included, resolves `block_size` to 1. Not reached by default
-(`get_required_kvcache_layout` returns `None`, so vLLM falls back to NHD);
-tracked separately.
+`num_heads` axis and resolves 1. Extending memory-order normalization to a
+permuted legacy rank-5 HND tensor would therefore replace a loud startup
+failure with silent wrong addressing. Rank-4 fused attention avoids that
+ambiguity by retaining rank and placing its token axis from the resolved
+layout hint; legacy rank-5 HND remains fail-loud rather than silently wrong.
 
 vLLM-Ascend registers the same scheduler-versus-kernel mismatch as a `(K, V)`
 pair of rank-4 planes at the kernel block size. Both releases use the same
@@ -150,8 +152,8 @@ padding absent from the K/V views. v0.30's
 from K, in the original dtype, as
 `(num_logical_blocks, 2, scheduler_block_size, 1, head_size)`
 (format 2, `NL_X_NB_TWO_BS_NH_HS`). That is the same opaque rank-5 page as
-`_SubpagedAttentionViewEdit`. Axis 1 is the first and second half of each
-logical page, not semantic K and V; physical heads are folded into
+the rank-5 branch of `_SubpagedAttentionViewEdit`. Axis 1 is the first and
+second half of each logical page, not semantic K and V; physical heads are folded into
 `head_size`. The fused rank-4/5 rule is registered before the plane rules; among
 those, the interleaved rule is registered first. A pair that matches neither
 layout is left unchanged. Matching uses strides and contiguity, not the
@@ -215,19 +217,22 @@ rather than being transferred wrongly.
 
 An edited view's dims are addressing metadata only (block id → byte range).
 The named dims are **not** semantic: a Mamba view's "K plane" is conv/ssm
-bytes, and a sub-paged attention view's "K plane" interleaves true K and V at
-kernel-page granularity (true K is not contiguous across kernel pages, so no
-logical-block view can have a pure-K plane). The synthetic head shape
-`(1, page_bytes / (2 * block_size * elem))` signals this deliberately.
+bytes, and a rank-5 sub-paged attention view's "K plane" interleaves true K
+and V at kernel-page granularity (true K is not contiguous across kernel
+pages, so no logical-block view can have a pure-K plane). Rank 4 keeps K/V
+fused in its trailing content axis. Its single synthetic head absorbs all
+physical heads while its token axis follows NHD/HND, preserving layout
+identity without changing byte order.
 
 vLLM-Ascend adds two sub-paged attention edits on top of that contract. A
 v0.30 interleaved `(K, V)` pair is re-paged as the same original-dtype rank-5
-opaque page as the fused edit (format 2, `NL_X_NB_TWO_BS_NH_HS`). Its axis 1
+opaque page as the rank-5 branch of `_SubpagedAttentionViewEdit`
+(format 2, `NL_X_NB_TWO_BS_NH_HS`). Its axis 1
 mixes true K and V at kernel-page granularity: each synthetic plane is one
 half of the logical page, not a pure K or V plane. The v0.29 contiguous
 reshape keeps K, V, dtype, and heads, and only changes the block axis
 (format 16). The synthetic output is NHD-shaped, like
-`_SubpagedAttentionViewEdit`, and is not an HND layout.
+the rank-5 branch of `_SubpagedAttentionViewEdit`, and is not an HND layout.
 
 Byte transport round-trips correctly because store and retrieve share the same
 bijective block-id → bytes mapping. Consequences:
