@@ -1169,28 +1169,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # APC-covered-lookup helpers and method hooks
     # -----------------------------------------------------------------
 
-    def _covered_chunks_for(self, num_computed_tokens: int) -> int:
-        """Chunk-aligned APC-covered boundary to send to the server.
-
-        Floors the engine-group-aligned vLLM hit to a whole LMCache chunk so
-        the covered prefix lands on a chunk boundary. Returns 0 when the
-        skip_covered_lookup feature is disabled.
-
-        Args:
-            num_computed_tokens: The serving engine's local prefix-cache hit.
-
-        Returns:
-            The number of leading LMCache chunks the engine already covers.
-        """
-        if not self._skip_covered_lookup:
-            return 0
-        aligned = (
-            num_computed_tokens
-            // self._hit_alignment_tokens
-            * self._hit_alignment_tokens
-        )
-        return aligned // self.scheduler_adapter.lmcache_tokens_per_chunk
-
     def _acquire_covered_resources(
         self,
         request: "Request",
@@ -1342,7 +1320,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Chunk-aligned APC-covered boundary to hand to the server (0 disables
         # the optimization). Floor the aligned vLLM hit to a whole chunk so the
         # covered prefix lands on an LMCache chunk boundary.
-        covered_chunks = self._covered_chunks_for(num_computed_tokens)
+        covered_chunks = 0
+        if self._skip_covered_lookup:
+            aligned = (
+                num_computed_tokens
+                // self._hit_alignment_tokens
+                * self._hit_alignment_tokens
+            )
+            covered_chunks = (
+                aligned // self.scheduler_adapter.lmcache_tokens_per_chunk
+            )
 
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
