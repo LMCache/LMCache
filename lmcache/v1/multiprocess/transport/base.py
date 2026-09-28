@@ -99,7 +99,14 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[tuple[bytes, bool]]: ...
 
     @rpc_method
-    def lookup(self, key: IPCCacheServerKey, tp_size: int) -> MessagingFuture[None]: ...
+    def lookup(self, key: IPCCacheServerKey, tp_size: int) -> MessagingFuture[int]:
+        """Submit a prefix lookup; resolves to the covered-present chunk count.
+
+        The reply is the number of leading APC-covered chunks resident in L1
+        (``covered_chunks`` on the key). 0 when the feature is unused. Old
+        payloads (no ``covered_chunks``) behave exactly as before.
+        """
+        ...
 
     @rpc_method
     def query_prefetch_status(self, request_id: str) -> MessagingFuture[int | None]: ...

@@ -590,6 +590,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
         )
 
+        # skip_covered_lookup: when enabled, the lookup tells the server how
+        # many leading chunks the serving engine's prefix cache already covers.
+        # The server touches those chunks (keeps them warm) but skips
+        # read-locking / L2-prefetching them, and this connector pins the
+        # covered GPU blocks for the lookup window so the APC hit cannot shrink
+        # (the "pin" method). Default off => covered_chunks stays 0 and behavior
+        # is identical to before.
+        self._skip_covered_lookup: bool = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.skip_covered_lookup", False
+            )
+        )
+
         # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
         # string) over the single-server lmcache.mp.host / lmcache.mp.port.
         server_urls_cfg = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -1152,6 +1165,70 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if self.lazy_offload:
                 self._lazy_offload_manager.bind_block_pool(gpu_block_pool)
 
+    # -----------------------------------------------------------------
+    # APC-covered-lookup helpers and method hooks
+    # -----------------------------------------------------------------
+
+    def _covered_chunks_for(self, num_computed_tokens: int) -> int:
+        """Chunk-aligned APC-covered boundary to send to the server.
+
+        Floors the engine-group-aligned vLLM hit to a whole LMCache chunk so
+        the covered prefix lands on a chunk boundary. Returns 0 when the
+        skip_covered_lookup feature is disabled.
+
+        Args:
+            num_computed_tokens: The serving engine's local prefix-cache hit.
+
+        Returns:
+            The number of leading LMCache chunks the engine already covers.
+        """
+        if not self._skip_covered_lookup:
+            return 0
+        aligned = (
+            num_computed_tokens
+            // self._hit_alignment_tokens
+            * self._hit_alignment_tokens
+        )
+        return aligned // self.scheduler_adapter.lmcache_tokens_per_chunk
+
+    def _acquire_covered_resources(
+        self,
+        request: "Request",
+        tracker: "LMCacheMPRequestTracker",
+        covered_chunks: int,
+    ) -> None:
+        """Method hook run once at lookup submit (foundation: no-op).
+
+        The pin method overrides this to pin the covered GPU blocks so the APC
+        hit cannot shrink while the lookup is in flight. The non-pin method
+        leaves it a no-op (it re-looks-up on shrink instead).
+        """
+        return None
+
+    def _release_covered_resources(
+        self, tracker: "LMCacheMPRequestTracker"
+    ) -> None:
+        """Method hook run on every terminal path (foundation: no-op).
+
+        The pin method overrides this to release the covered-block pins exactly
+        once (idempotent). The non-pin method leaves it a no-op.
+        """
+        return None
+
+    def _handle_covered_shrink(
+        self,
+        request: "Request",
+        tracker: "LMCacheMPRequestTracker",
+    ) -> "tuple[int | None, bool] | None":
+        """Method hook for an APC hit that shrank below the covered boundary.
+
+        Returns a short-circuit ``(tokens, async)`` result for
+        ``get_num_new_matched_tokens`` or None to continue normally. Foundation:
+        always None. The pin method returns a bypass ``(0, False)``; the non-pin
+        method re-looks-up the gap and returns ``(None, True)``.
+        """
+        return None
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -1216,31 +1293,52 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request.request_id,
             )
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+            self._release_covered_resources(tracker)
             tracker.allocated_block_ids.clear()
             tracker.num_stored_tokens = 0
             tracker.num_vllm_hit_tokens = 0
             tracker.num_lmcache_hit_tokens = 0
+            tracker.lookup_covered_tokens = 0
             tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
             return 0, False
 
+        # Chunk-aligned APC-covered boundary to hand to the server (0 disables
+        # the optimization). Floor the aligned vLLM hit to a whole chunk so the
+        # covered prefix lands on an LMCache chunk boundary.
+        covered_chunks = self._covered_chunks_for(num_computed_tokens)
+
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
+            # Freeze the covered boundary at submit time; method hooks
+            # (pin / re-lookup) key off this frozen value.
+            tracker.lookup_covered_tokens = (
+                covered_chunks * self.scheduler_adapter.lmcache_tokens_per_chunk
+            )
+            self._acquire_covered_resources(request, tracker, covered_chunks)
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
             reserve_last_token=self._reserve_last_token_for_lookup,
+            covered_chunks=covered_chunks,
         )
 
-        ret = self.scheduler_adapter.check_lookup_result(request.request_id)
-        if ret is None:
+        result = self.scheduler_adapter.check_lookup_result(request.request_id)
+        if result is None:
             return None, True
         assert tracker.lookup_started_at is not None
         self._connector_stats.record_lookup(
             time.monotonic() - tracker.lookup_started_at
         )
         tracker.lookup_started_at = None
+
+        # ``hit_tokens`` is the servable prefix (drives need_to_load and the
+        # lock-release range); ``stored_tokens`` is the contiguous LMCache-
+        # persisted prefix (drives store-skip, so a missing covered chunk is
+        # re-stored instead of left as a hole).
+        ret = result.hit_tokens
+        stored = result.stored_tokens
 
         # Save the vLLM hit count even when LMCache misses. It is rounded
         # down to a boundary aligned for every engine group (a full-prompt
@@ -1252,13 +1350,22 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             * self._hit_alignment_tokens
         )
 
+        # If the APC hit shrank below the frozen covered boundary while the
+        # lookup was in flight, the skipped covered range is no longer engine-
+        # backed. The method hook decides what to do (pin: bypass; non-pin:
+        # re-lookup the gap); a non-None result short-circuits this call.
+        shrink_result = self._handle_covered_shrink(request, tracker)
+        if shrink_result is not None:
+            return shrink_result
+
         if ret == 0:
             return 0, False
 
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
-        # Update num stored tokens for the tracker
-        tracker.increase_num_stored_tokens(ret)
+        # Update num stored tokens for the tracker (contiguous persisted prefix,
+        # not the servable hit, so covered-range holes are re-stored).
+        tracker.increase_num_stored_tokens(stored)
 
         tracker.num_lmcache_hit_tokens = ret
 
@@ -1343,6 +1450,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # Returning zero external tokens admitted this request for local
             # computation.  Once vLLM publishes that allocation, normal READY
             # tracking (including later stores) can resume.
+            self._release_covered_resources(tracker)
             tracker.state = LMCacheMPRequestState.READY
             return
 
@@ -1357,6 +1465,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             # Clean up lookup future in scheduler adapter
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+            # Release covered-block pins: vLLM's allocate_slots has re-touched
+            # the covered blocks by now, so releasing our pin never drops an
+            # in-use block to zero (method hook; no-op unless pinning).
+            self._release_covered_resources(tracker)
 
             # Free locks on chunks that vLLM already computed and won't
             # retrieve from LMCache.
@@ -1373,7 +1485,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     # be freed by vLLM's retrieve.
                     free_end = tracker.num_vllm_hit_tokens
 
-                if free_end > 0:
+                # Free-RPC elision: nothing is locked below the covered boundary
+                # (the server skipped read-locking it), so a release that ends
+                # at or before it is a no-op -- skip the round trip.
+                if free_end > tracker.lookup_covered_tokens:
                     self.scheduler_adapter.free_lookup_locks(
                         token_ids=tracker.get_token_ids(),
                         start=0,
@@ -1488,6 +1603,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_cached_tokens": num_lmcache,
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
+
+        # Release any covered-block pins still held (request aborted while its
+        # lookup was in flight, before update_state_after_alloc released them).
+        # Idempotent method hook; no-op unless pinning.
+        release_tracker = self.request_trackers.get(request.request_id)
+        if release_tracker is not None:
+            self._release_covered_resources(release_tracker)
 
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)

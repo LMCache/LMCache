@@ -45,6 +45,10 @@ class Session:
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
     prefetch_group_windows: tuple[int, ...] = ()
+    # Leading chunks the serving engine's prefix cache already covers; the
+    # lookup neither read-locked nor L2-prefetched them, so every lock-release
+    # path must clamp its range to start no earlier than this boundary.
+    prefetch_covered_chunks: int = 0
     extras: dict[str, Any] = field(default_factory=dict)
     _lookup_generation: int = field(default=0, repr=False)
     _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
@@ -145,13 +149,23 @@ class Session:
         self,
         key: IPCCacheServerKey,
         group_windows: tuple[int, ...],
+        covered_chunks: int = 0,
     ) -> None:
-        """Record a new lookup and reset its per-lookup release state."""
+        """Record a new lookup and reset its per-lookup release state.
+
+        Args:
+            key: The lookup IPC key.
+            group_windows: Per-object-group sliding-window sizes (in chunks).
+            covered_chunks: Leading chunks the serving engine already covers;
+                the lookup skips read-locking/prefetching them, so lock-release
+                ranges are clamped to start no earlier than this boundary.
+        """
         with self._lock:
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
             self.prefetch_group_windows = group_windows
+            self.prefetch_covered_chunks = covered_chunks
             self._lookup_generation += 1
             self._failed_retrieve_releases.clear()
 
@@ -168,8 +182,13 @@ class Session:
     def prepare_failed_retrieve_release(
         self,
         key: IPCCacheServerKey,
-    ) -> tuple[int, tuple[int, ...], tuple[int, ...], int] | None:
-        """Return a stable snapshot for a failed worker's lock release."""
+    ) -> tuple[int, tuple[int, ...], tuple[int, ...], int, int] | None:
+        """Return a stable snapshot for a failed worker's lock release.
+
+        The trailing element is ``prefetch_covered_chunks`` -- the APC-covered
+        prefix the lookup never locked -- so the release path can clamp its
+        range and avoid dropping a lock it never took.
+        """
         if key.worker_id is None:
             return None
 
@@ -195,6 +214,7 @@ class Session:
                 self.prefetch_locked_gids,
                 self.prefetch_group_windows,
                 self._lookup_generation,
+                self.prefetch_covered_chunks,
             )
 
     def claim_failed_retrieve_release(
