@@ -273,7 +273,7 @@ Length-prefixed frames keep the reader simple and let truncated tails
 | `magic` | `bytes` (`LMCT`) | Sanity check; reader rejects non-matching files |
 | `format_version` | `int` (1) | Bumped on incompatible **framing** layout changes (length prefix, struct shape). Reader rejects unknown versions |
 | `level` | `str` (`storage` or `events`) | Trace level discriminator; replay drivers dispatch on it. Future `mq` / `gpu` levels will share this format |
-| `trace_schema_version` | `int` (1) | Bumped on incompatible changes to the captured API surface (e.g. a traced method's args change, a codec wire form changes). Owned by the trace subsystem, not tied to `lmcache.__version__`; reader rejects mismatches |
+| `trace_schema_version` | `int` (2) | Bumped on changes that older readers would decode or replay incorrectly (e.g. a codec wire form changes). Owned by the trace subsystem, not tied to `lmcache.__version__`; readers reject unsupported versions |
 | `t_mono_start` | `float` | `time.monotonic()` at recorder construction; record `t_mono` is relative to this |
 | `t_wall_start` | `float` | `time.time()` at construction, for absolute correlation with external logs |
 | `sm_config_json` | `str` | JSON dump of `StorageManagerConfig` at record time, or empty string if attach was skipped |
@@ -318,6 +318,24 @@ exact type **before** the generic `isinstance(v, tuple)` branch.
 Unknown types fail loudly (`TypeError`) rather than silently dropping
 fields — silent drops would let bugs masquerade as test successes at
 replay time.
+
+### `ObjectKey` identity and compatibility
+
+The `ObjectKey` codec records `chunk_hash`, `model_name`, `kv_rank`,
+`object_group_id`, and `cache_salt`. The decoder defaults a missing
+`object_group_id` to `0` and a missing `cache_salt` to an empty string so
+legacy payloads remain readable.
+
+Both trace levels now write `trace_schema_version=2`; framing remains at
+version 1. `TraceReader` accepts trace schemas 1 and 2. Storage replay accepts
+only schema 2: schema-1 recorders could receive salted keys without recording
+their salt, so original key identity cannot be reconstructed. Storage replay
+checks the level, then the schema, before initializing the EventBus or
+StorageManager. Older readers reject schema-2 headers, preventing silent salt
+loss when reading new files.
+
+Events replay accepts trace schemas 1 and 2 through `TraceReader`, then checks
+the events level and `cache_event_schema_version` separately (see §12).
 
 ---
 
@@ -504,8 +522,10 @@ file format:
    likely, the same `TRACE_CALL` mapping with a different `level`
    passed to the base).
 4. **Codec registry** — new arg types slot in by calling
-   `register_codec`. No format bump. Keep newly-traced argument types
-   in `lmcache/v1/distributed/api.py` (or another leaf module) so
+   `register_codec`. No framing-format bump is needed; bump the trace schema
+   when an older reader would decode or replay the new value incorrectly.
+   Keep newly-traced argument types in `lmcache/v1/distributed/api.py`
+   (or another leaf module) so
    `codecs.py` can import them without pulling in modules that import
    the trace decorator.
 
@@ -599,12 +619,15 @@ attributable after the merge.
 ### Replay
 
 `lmcache/v1/mp_coordinator/events_replay.py`. `EventsTrace.load(paths)`
-reads each file with `TraceReader`, refuses any level but `events` or a
-`cache_event_schema_version` this build does not speak, and merges the
-records by `t_wall`. The sort is stable, so a server's own order (its
-`seq`) is never disturbed; across servers the merge carries each host's
+reads each file with `TraceReader` (trace schemas 1 and 2), refuses any level
+but `events` or a non-null `cache_event_schema_version` this build does not
+speak, and merges the records by `t_wall`. The sort is stable, so a server's
+own order (its `seq`) is never disturbed; across servers the merge carries each host's
 clock skew, which the coordinator tolerates because it orders per emitter
 only.
+
+Missing or null `cache_event_schema_version` metadata remains accepted.
+The storage replay restriction on schema-1 traces does not apply to events.
 
 `replay(trace, target, speed)` hands each record to a `CoordinatorTarget`:
 `start(identity)`, `batch(wire_batch)`, `stop(instance_id)`, and

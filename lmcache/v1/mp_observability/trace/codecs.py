@@ -156,6 +156,7 @@ def _enc_object_key(k: ObjectKey) -> dict[str, Any]:
         "model_name": k.model_name,
         "kv_rank": k.kv_rank,
         "object_group_id": k.object_group_id,
+        "cache_salt": k.cache_salt,
     }
 
 
@@ -165,6 +166,7 @@ def _dec_object_key(d: dict[str, Any]) -> ObjectKey:
         model_name=d["model_name"],
         kv_rank=d["kv_rank"],
         object_group_id=d.get("object_group_id", 0),
+        cache_salt=d.get("cache_salt", ""),
     )
 
 
