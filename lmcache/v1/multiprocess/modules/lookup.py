@@ -525,11 +525,7 @@ class LookupModule:
             # hit is the covered prefix itself (added by the offset below).
             sub_found = 0
 
-        # The prefetch ranged over the uncovered sub-range, so its fold result
-        # is relative to ``covered_chunks``. Offset it back to an absolute
-        # chunk count: the covered prefix is served by the engine's own cache
-        # and counts toward the hit the connector needs (need_to_load and the
-        # lock-release range are both computed from this absolute value).
+        # Offset sub-range fold to absolute chunks (covered prefix counts as hit).
         found_count = job.covered_chunks + sub_found
 
         # Record the model-wide hit length on the session so a later
