@@ -1422,7 +1422,7 @@ class TestUsageTracking:
 
 # =============================================================================
 # Pad-Buffers-To-Alignment Tests
-# =============================================================================
+# ======================================================================
 
 
 class RecordingNativeConnector(MockNativeConnector):
@@ -1615,3 +1615,54 @@ class TestPadBuffersToAlignment:
             assert adp_padded.get_usage().total_bytes_used == 4096
         finally:
             adp_padded.close()
+
+
+# =============================================================================
+# Disk guard
+# =============================================================================
+
+
+class _FixedGuard:
+    """Stands in for DiskGuard: allows ``headroom`` more bytes."""
+
+    def __init__(self, headroom: int) -> None:
+        self.headroom = headroom
+
+    def effective_capacity(self, used_bytes: int, max_capacity_bytes: int) -> int:
+        return max(1, min(max_capacity_bytes, used_bytes + self.headroom))
+
+    def status(self) -> dict:
+        return {"headroom_gb": self.headroom / (1 << 30)}
+
+
+class TestDiskGuardedUsage:
+    def _adapter(self, guard, used_bytes):
+        adp = NativeConnectorL2Adapter(
+            MockNativeConnector(), max_capacity_gb=10, disk_guard=guard
+        )
+        adp._total_bytes_used = used_bytes
+        return adp
+
+    def test_usage_is_against_the_configured_capacity_without_a_guard(self):
+        adp = self._adapter(None, 2 << 30)
+        try:
+            assert adp.get_usage().usage_fraction == 0.2
+        finally:
+            adp.close()
+
+    def test_usage_is_against_what_the_disk_allows(self):
+        adp = self._adapter(_FixedGuard(2 << 30), 2 << 30)
+        try:
+            usage = adp.get_usage()
+            assert usage.total_capacity_bytes == 4 << 30
+            assert usage.usage_fraction == 0.5
+        finally:
+            adp.close()
+
+    def test_full_disk_reads_as_over_capacity(self):
+        adp = self._adapter(_FixedGuard(-(1 << 30)), 2 << 30)
+        try:
+            assert adp.get_usage().usage_fraction >= 1.0
+            assert "disk_guard" in adp.report_status()
+        finally:
+            adp.close()
