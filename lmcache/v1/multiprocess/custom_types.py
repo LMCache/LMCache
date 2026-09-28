@@ -41,9 +41,8 @@ class IPCCacheServerKey:
 
     ``token_bytes`` is packed by :mod:`lmcache.v1.multiprocess.token_codec`
     (see there for the layout and why no chunk hash changes). It replaced a
-    ``token_ids`` tuple whose field number is now retired, so an older
-    client's payload arrives carrying no tokens at all: client and server
-    must be upgraded together.
+    ``token_ids`` tuple in place, so client and server must be upgraded
+    together.
 
     The request_id field is for session tracking and is NOT included
     in equality/hash comparisons (two keys with same content but different
