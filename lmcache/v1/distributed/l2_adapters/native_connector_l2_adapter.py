@@ -23,7 +23,7 @@ from __future__ import annotations
 # Standard
 from collections import defaultdict
 from functools import cache
-from typing import Any
+from typing import Any, Callable
 import ctypes
 import dataclasses
 import select
@@ -164,6 +164,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         extra_status: dict[str, Any] | None = None,
         pad_buffers_to_alignment: bool = False,
         disk_guard: "DiskGuard | None" = None,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         """Initialize the adapter over a native connector client.
 
@@ -186,6 +187,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         """
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
         self._disk_guard = disk_guard
+        self._on_close = on_close
         self._client = native_client
         self._client_fd: int = int(native_client.event_fd())
         self._type_name: str = type_name or type(native_client).__name__
@@ -476,6 +478,15 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._store_efd.close()
         self._lookup_efd.close()
         self._load_efd.close()
+
+        # After the client is closed nothing writes any more, so a hook that
+        # removes the backing data cannot race a store.
+        if self._on_close is not None:
+            on_close, self._on_close = self._on_close, None
+            try:
+                on_close()
+            except Exception:
+                logger.exception("L2 adapter on_close hook failed")
 
     # ---------------------------------------------------------------
     # Internal helpers

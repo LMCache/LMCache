@@ -11,6 +11,8 @@ from __future__ import annotations
 
 # Standard
 from typing import TYPE_CHECKING, Optional
+import os
+import time
 
 if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import (
@@ -58,6 +60,11 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
     - disk_min_free_gb: free space in GB this adapter must leave on the
       filesystem. ``0`` (default) disables it.
 
+    - purge_on_close: delete the adapter's files from ``base_path`` when
+      the adapter is closed. The adapter cannot use files written by an
+      earlier process (it has no record of them), so on a node-local disk
+      they are dead weight once the server stops. Default ``False``.
+
     The two disk limits shrink the adapter's capacity as the filesystem
     fills, whoever fills it, so they need ``max_capacity_gb`` and an
     ``eviction`` block to act on.
@@ -73,6 +80,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         max_capacity_gb: float = 0,
         disk_high_watermark: float = 0,
         disk_min_free_gb: float = 0,
+        purge_on_close: bool = False,
     ):
         self.base_path = base_path
         self.num_workers = num_workers
@@ -82,6 +90,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         self.max_capacity_gb = max_capacity_gb
         self.disk_high_watermark = disk_high_watermark
         self.disk_min_free_gb = disk_min_free_gb
+        self.purge_on_close = purge_on_close
 
     @classmethod
     def from_dict(cls, d: dict) -> "FSNativeL2AdapterConfig":
@@ -143,6 +152,10 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
                 "that eviction enforces"
             )
 
+        purge_on_close = d.get("purge_on_close", False)
+        if not isinstance(purge_on_close, bool):
+            raise ValueError("purge_on_close must be a boolean")
+
         return cls(
             base_path=base_path,
             num_workers=num_workers,
@@ -152,6 +165,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             max_capacity_gb=float(max_capacity_gb),
             disk_high_watermark=float(disk_high_watermark),
             disk_min_free_gb=float(disk_min_free_gb),
+            purge_on_close=purge_on_close,
         )
 
     @classmethod
@@ -177,8 +191,50 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "(0-1) the adapter must not push the disk past (default 0 = "
             "disabled)\n"
             "- disk_min_free_gb (float): free GB the adapter must leave on "
-            "the filesystem (default 0 = disabled)"
+            "the filesystem (default 0 = disabled)\n"
+            "- purge_on_close (bool): delete the adapter's files when it is "
+            "closed (default false)"
         )
+
+
+_DATA_SUFFIXES = (".data", ".tmp")
+
+
+def purge_adapter_files(base_path: str, relative_tmp_dir: str = "") -> tuple[int, int]:
+    """Delete the adapter's own files under ``base_path``.
+
+    Only regular files with the adapter's suffixes are removed, from
+    ``base_path`` itself and from its temp sub-directory. Sub-directories,
+    symlinks and anything else found there are left alone, so a mistaken
+    ``base_path`` cannot take unrelated data with it.
+
+    Returns:
+        ``(files_removed, bytes_removed)``.
+    """
+    removed = 0
+    freed = 0
+    dirs = [base_path]
+    if relative_tmp_dir:
+        dirs.append(os.path.join(base_path, relative_tmp_dir))
+    for directory in dirs:
+        try:
+            entries = os.scandir(directory)
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                if not entry.name.endswith(_DATA_SUFFIXES):
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    size = entry.stat(follow_symlinks=False).st_size
+                    os.unlink(entry.path)
+                except OSError:
+                    continue
+                removed += 1
+                freed += size
+    return removed, freed
 
 
 def _create_fs_native_l2_adapter(
@@ -232,10 +288,26 @@ def _create_fs_native_l2_adapter(
             config.disk_high_watermark or "off",
             config.disk_min_free_gb or "off",
         )
+    on_close = None
+    if config.purge_on_close:
+        base_path, tmp_dir = config.base_path, config.relative_tmp_dir
+
+        def on_close() -> None:
+            started = time.monotonic()
+            removed, freed = purge_adapter_files(base_path, tmp_dir)
+            logger.info(
+                "FS native L2 adapter %s: purged %d files (%.1f GB) in %.1f s",
+                base_path,
+                removed,
+                freed / (1 << 30),
+                time.monotonic() - started,
+            )
+
     return NativeConnectorL2Adapter(
         native_client,
         max_capacity_gb=config.max_capacity_gb,
         disk_guard=disk_guard,
+        on_close=on_close,
         type_name="FSNativeL2Adapter",
         pad_buffers_to_alignment=config.use_odirect,
         extra_status={
