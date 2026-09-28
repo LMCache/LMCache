@@ -77,11 +77,7 @@ class LMCacheMPRequestTracker:
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
-    # APC-covered boundary (in tokens) frozen at lookup-submit time for the
-    # skip_covered_lookup feature. Valid only while ``state`` is PREFETCHING;
-    # reset on every (re)submission. The pin method compares the current APC
-    # hit against it to detect a shrink; the non-pin method re-looks-up on
-    # shrink. 0 when the feature is inactive for this request.
+    # APC-covered boundary in tokens, frozen at lookup submit (valid while PREFETCHING).
     lookup_covered_tokens: int = 0
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)

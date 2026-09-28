@@ -22,12 +22,7 @@ Key Types:
   - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
 
-# request_configs key that carries the APC-covered chunk count on a LOOKUP.
-# Carried inside ``request_configs`` (an already-transmitted msgpack blob, not
-# part of cache identity) rather than as a first-class ``IPCCacheServerKey``
-# field so the gRPC ``IpcCacheServerKey`` proto needs no new field / regen. A
-# production version should promote this to a proto field; see
-# docs/design/v1/multiprocess/modules/apc_covered_lookup.md.
+# APC-covered chunk count for a LOOKUP, carried in request_configs (no proto change).
 COVERED_CHUNKS_CONFIG_KEY = "lmcache.mp._covered_chunks"
 
 

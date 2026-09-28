@@ -105,9 +105,7 @@ class _PrefetchJob:
     requested_tokens: int
     num_object_groups: int = 1
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
-    # APC-covered leading chunks, skipped from the submitted prefetch. The
-    # prefetch task ranges over ``chunk_hashes[covered_chunks:]``; hit counts
-    # are offset back to absolute by adding this at status time.
+    # APC-covered leading chunks skipped from the prefetch (offset applied at status).
     covered_chunks: int = 0
     # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
     # carry them as labels.  ``model_name`` lets dashboards slice hit rate
@@ -287,16 +285,12 @@ class LookupModule:
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.set_tokens(list(key.token_ids))
 
-        # APC-covered prefix: the serving engine already holds these chunks, so
-        # touch them (keep them warm in L1) but do not read-lock or L2-prefetch
-        # them -- they will never be retrieved from LMCache. ``covered_present``
-        # is the contiguous L1-resident prefix within the covered range.
+        # APC-covered prefix: touch it (keep warm), don't lock/prefetch.
         requested_covered = int(
             (key.request_configs or {}).get(COVERED_CHUNKS_CONFIG_KEY, 0)
         )
         covered_chunks = min(max(0, requested_covered), len(chunk_hashes))
-        # Touch the covered prefix (keep it warm); the returned covered-present
-        # count is not transmitted yet (proto follow-up).
+        # Touch the covered prefix (keep it warm); covered-present not transmitted yet.
         self._touch_covered_prefix(
             key, chunk_hashes, covered_chunks, attn_desc.num_object_groups
         )
@@ -334,11 +328,7 @@ class LookupModule:
             )
             return
 
-        # Only the uncovered sub-range is read-locked and L2-prefetched. The
-        # fold over this sub-range yields a servable prefix relative to
-        # ``covered_chunks``; ``query_prefetch_status`` offsets it back to an
-        # absolute chunk count. Object keys are content-addressed by chunk hash,
-        # so slicing the hashes produces exactly the sub-range's keys.
+        # Prefetch only the uncovered sub-range; status offsets hits back to absolute.
         sub_hashes = chunk_hashes[covered_chunks:]
         if not sub_hashes:
             # Fully covered by APC: nothing to look up. Report the covered
@@ -440,8 +430,7 @@ class LookupModule:
                 num_ranks = len(group_keys) // covered_chunks
                 base = chunk_idx * num_ranks
                 if any(
-                    group_keys[base + rank] not in present
-                    for rank in range(num_ranks)
+                    group_keys[base + rank] not in present for rank in range(num_ranks)
                 ):
                     chunk_present = False
                     break
@@ -483,9 +472,7 @@ class LookupModule:
         if result is None:
             return None
         if job.row_windows:
-            sub_found, _retain = fold_unfold_grouped(
-                result.hit_cells, job.row_windows
-            )
+            sub_found, _retain = fold_unfold_grouped(result.hit_cells, job.row_windows)
             sub_l1_found, _l1_retain = fold_unfold_grouped(
                 result.l1_hit_cells, job.row_windows
             )

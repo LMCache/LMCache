@@ -889,14 +889,11 @@ class LMCacheMPSchedulerAdapter:
             lookup_tokens // self.lmcache_tokens_per_chunk
         ) * self.lmcache_tokens_per_chunk
 
-        # Never claim more covered chunks than the aligned lookup range holds
-        # (a full-prompt APC hit can exceed it); the server also clamps.
+        # Clamp covered_chunks to the aligned lookup range (server clamps too).
         covered_chunks = max(
             0, min(covered_chunks, aligned_end // self.lmcache_tokens_per_chunk)
         )
-        # Carry the covered count inside request_configs (only when non-zero, so
-        # the feature-off path is byte-identical to before). Copy so the caller's
-        # dict is never mutated.
+        # Carry covered_chunks in request_configs only when non-zero (copied dict).
         if covered_chunks > 0:
             request_configs = {
                 **(request_configs or {}),
@@ -925,8 +922,7 @@ class LMCacheMPSchedulerAdapter:
         )
         self._pending_lookups.add(request_id)
         self._lookup_params[request_id] = (token_ids, cache_salt, request_configs)
-        # Remember the covered boundary (in chunks) so the ack's covered-present
-        # count can be turned into the contiguous stored prefix.
+        # Remember the covered boundary (chunks) for the stored-prefix computation.
         self._lookup_covered[request_id] = covered_chunks
 
     def _free_inconsistent_lookup_locks(
