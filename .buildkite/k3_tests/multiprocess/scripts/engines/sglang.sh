@@ -61,6 +61,13 @@ engine_configure_workload() {
             # Clear SGLang's radix cache between runs so the second pass proves
             # that LMCache, rather than only the local radix tree, served KV.
             export VERIFY_LMCACHE_RETRIEVAL="${VERIFY_LMCACHE_RETRIEVAL:-true}"
+            # The samples check compares complete generated responses across
+            # the populate and retrieve runs. Make those runs batch-invariant
+            # so numerical differences do not look like KV corruption.
+            export SGLANG_DETERMINISTIC_INFERENCE="${SGLANG_DETERMINISTIC_INFERENCE:-true}"
+            # On the SM120 CI fleet, deterministic inference otherwise selects
+            # FlashInfer and disables the radix cache required by LMCache.
+            export SGLANG_DETERMINISTIC_ATTENTION_BACKEND="${SGLANG_DETERMINISTIC_ATTENTION_BACKEND:-triton}"
             ;;
     esac
 }
@@ -79,6 +86,15 @@ engine_prepare_launch() {
     SGLANG_CONTEXT_ARGS=()
     if [[ -n "${MAX_MODEL_LEN:-}" && "${MAX_MODEL_LEN}" != "auto" ]]; then
         SGLANG_CONTEXT_ARGS=(--context-length "$MAX_MODEL_LEN")
+    fi
+
+    SGLANG_DETERMINISTIC_ARGS=()
+    if [[ "${SGLANG_DETERMINISTIC_INFERENCE:-false}" == "1" \
+            || "${SGLANG_DETERMINISTIC_INFERENCE:-false}" == "true" ]]; then
+        SGLANG_DETERMINISTIC_ARGS=(
+            --enable-deterministic-inference
+            --attention-backend "${SGLANG_DETERMINISTIC_ATTENTION_BACKEND:-triton}"
+        )
     fi
 }
 
@@ -125,6 +141,7 @@ engine_launch() {
             "${mode_args[@]}" \
             "${SGLANG_MEMORY_ARGS[@]}" \
             "${SGLANG_CONTEXT_ARGS[@]}" \
+            "${SGLANG_DETERMINISTIC_ARGS[@]}" \
             > "$log_file" 2>&1 &
     ENGINE_PID=$!
 }
