@@ -464,16 +464,28 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert device is not None
         return cls(metadata, device, use_gpu, layout_hints=layout_hints)
 
-    def _initialize_kv_cache_pointers(self):
+    def _initialize_kv_cache_pointers(
+        self, kvcaches: Optional[List[torch.Tensor]] = None
+    ) -> None:
         """Discover KV-cache layout, build the layer-groups manager, and
         capture per-group GPU pointer tensors.
 
         All layout-adjacent work lives here: the connector already owns
         ``layout_hints`` and the actual ``self.kvcaches`` tensors, so the
         serving-engine adapter stays agnostic to format.
+
+        Runs once per connector lifetime (guarded by ``self.init``): layout is
+        fixed after init, so ``kvcaches`` may be omitted on later calls.
+
+        Raises:
+            ValueError: If uninitialized and no ``kvcaches`` are available.
         """
         if self.init:
             return
+        if kvcaches is not None:
+            self.kvcaches = kvcaches
+        if self.kvcaches is None:
+            raise ValueError("kvcaches must be provided to initialize the connector")
 
         empty_layer_index_groups: list[list[int]] = []
         self.kvcaches, engine_kv_formats = normalize_and_discover_per_layer_formats(
@@ -556,10 +568,9 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             assert memory_obj.metadata.fmt == MemoryFormat.KV_2LTD
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
-        self.initialize_kvcaches_ptr(**kwargs)
+        self._initialize_kv_cache_pointers(kwargs.get("kvcaches"))
         assert self.kvcaches is not None
         assert self.kvcaches[0].device == self.device
-        self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
 
         # avoid read/write stream race condition for shared block
@@ -591,10 +602,9 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert "slot_mapping" in kwargs
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
-        self.initialize_kvcaches_ptr(**kwargs)
+        self._initialize_kv_cache_pointers(kwargs.get("kvcaches"))
         assert self.kvcaches is not None
         assert self.kvcaches[0].device == self.device
-        self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
         with torch.cuda.stream(self.store_stream):
             if not self.use_gpu or end - start != self.chunk_size:
