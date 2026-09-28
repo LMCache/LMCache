@@ -165,7 +165,7 @@ class LookupModule:
         self,
         key: IPCCacheServerKey,
         tp_size: int,
-    ) -> int:
+    ) -> None:
         """Submit a prefix lookup.
 
         Hashes the key, submits a prefetch task to the storage manager over the
@@ -175,16 +175,16 @@ class LookupModule:
         ``chunk_hashes[:key.covered_chunks]`` is touched (to keep it warm) but
         neither read-locked nor L2-prefetched.
 
+        The covered-present count (contiguous L1-resident covered prefix) is
+        computed for the touch side effect but not returned: transmitting it as
+        the store-hole signal needs a proto field + regen and is a follow-up
+        (see the design doc). Until then the connector treats the whole hit as
+        stored (a covered chunk evicted while covered is re-stored on the next
+        request via the normal store path once observed).
+
         Args:
             key: Cache key with request_id embedded.
             tp_size: Legacy wire field; ignored (kept for payload arity).
-
-        Returns:
-            ``covered_present``: the number of leading APC-covered chunks that
-            are resident in L1 across every object group and kv rank. The
-            connector uses it as the contiguous already-stored prefix (so a
-            gap in the covered range is re-stored rather than left as a hole).
-            0 on any early-exit path.
         """
         model_name, world_size = key.model_name, key.world_size
         self._ctx.event_bus.publish(
@@ -225,7 +225,7 @@ class LookupModule:
                     early_exit_reason="no_gpu_context",
                 )
             )
-            return 0
+            return
 
         num_kv_readers = key.require_num_kv_readers()
 
@@ -251,7 +251,7 @@ class LookupModule:
                     early_exit_reason="empty_chunk_hashes",
                 )
             )
-            return 0
+            return
 
         # Total chunk-aligned tokens submitted for lookup; surfaces as the
         # denominator of the L1+L2 token-level hit-rate via the
@@ -293,7 +293,9 @@ class LookupModule:
         # them -- they will never be retrieved from LMCache. ``covered_present``
         # is the contiguous L1-resident prefix within the covered range.
         covered_chunks = min(max(0, key.covered_chunks), len(chunk_hashes))
-        covered_present = self._touch_covered_prefix(
+        # Touch the covered prefix (keep it warm); the returned covered-present
+        # count is not transmitted yet (proto follow-up).
+        self._touch_covered_prefix(
             key, chunk_hashes, covered_chunks, attn_desc.num_object_groups
         )
         session.begin_lookup(
@@ -330,7 +332,7 @@ class LookupModule:
                     early_exit_reason="no_group_layout_descs",
                 )
             )
-            return 0
+            return
 
         # Only the uncovered sub-range is read-locked and L2-prefetched. The
         # fold over this sub-range yields a servable prefix relative to
@@ -362,7 +364,7 @@ class LookupModule:
                     early_exit_reason="fully_covered" if covered_chunks else "",
                 )
             )
-            return covered_present
+            return
 
         spec = PrefetchTaskSpec(
             key_groups=ipc_key_to_grouped_object_keys(
@@ -391,7 +393,7 @@ class LookupModule:
                 cache_salt=key.cache_salt,
             )
         )
-        return covered_present
+        return
 
     def _touch_covered_prefix(
         self,
