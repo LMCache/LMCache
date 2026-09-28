@@ -103,8 +103,9 @@ class KVFormatSpec(ABC):
     representative) and the format's **static layout facts** -- the structural
     shape (``is_cross_layer`` / ``is_kv_list`` / ``is_layer_list``, exactly one
     true) plus the ``is_mla`` / ``is_hnd`` / ``is_fused_packed`` /
-    ``is_two_major`` / ``is_pbs_fused`` modifiers. They default to ``False``, so
-    a spec only declares what applies to it, and every consumer reads them
+    ``is_two_major`` / ``is_pbs_fused`` / ``is_kv_second_tuple`` /
+    ``is_single_kv`` modifiers. They default to ``False``, so a spec
+    only declares what applies to it, and every consumer reads them
     through ``get_spec_class(fmt)`` -- no format lists at call sites. The device
     kernels keep their own copy in ``csrc/engine_kv_format.h``.
 
@@ -119,6 +120,9 @@ class KVFormatSpec(ABC):
       connectors, none of the MP transfer path): :meth:`page_buffer_size`,
       :meth:`tokens_per_layer`, :meth:`elements_per_layer`. The MP path derives
       these from a per-group :class:`PageBufferShapeDesc` instead.
+    * Used by pointer-backed paged-buffer reconstruction:
+      :meth:`paged_layer_shape`. It is a class method because it uses declared
+      format facts and caller-provided geometry, not borrowed KV tensors.
 
     Lifetime: a spec **borrows** ``kv_caches`` -- it does not own the GPU KV
     tensors. ``get_spec`` builds a fresh instance per call and callers use it
@@ -155,6 +159,50 @@ class KVFormatSpec(ABC):
     # Each per-layer list entry is a ``(K, V)`` tuple of paged tensors, rather
     # than a single stacked per-layer tensor.
     is_kv_second_tuple: ClassVar[bool] = False
+    # Each list entry is one independent K or V tensor rather than a K/V pair.
+    is_single_kv: ClassVar[bool] = False
+
+    @classmethod
+    def paged_layer_shape(cls, nb: int, bs: int, nh: int, hs: int) -> tuple[int, ...]:
+        """Return one pointer-addressable paged tensor's physical shape.
+
+        This applies only to per-layer formats whose list entry is one tensor.
+        Callers that handle cross-layer tensors, top-level K/V lists, or
+        per-layer K/V tuples must reconstruct those structures themselves.
+
+        Args:
+            nb: Number of paged blocks.
+            bs: Tokens in each block.
+            nh: Number of attention heads.
+            hs: Per-head content size (the packed K/V width when applicable).
+
+        Returns:
+            The physical tensor shape for one paged layer.
+
+        Raises:
+            ValueError: If this format does not use one tensor per layer.
+        """
+        if not cls.is_layer_list or cls.is_kv_second_tuple:
+            raise ValueError(
+                f"{cls.engine_kv_format!r} does not have one paged tensor per layer"
+            )
+        if cls.is_pbs_fused:
+            return (nb * bs, 1, hs)
+        if cls.is_mla:
+            return (nb, bs, hs)
+        if cls.is_fused_packed and cls.is_hnd:
+            return (nb, nh, bs, hs)
+        if cls.is_fused_packed:
+            return (nb, bs, nh, hs)
+        if cls.is_single_kv:
+            return (nb, bs, nh, hs)
+        if cls.is_two_major and cls.is_hnd:
+            return (2, nb, nh, bs, hs)
+        if cls.is_two_major:
+            return (2, nb, bs, nh, hs)
+        if cls.is_hnd:
+            return (nb, 2, nh, bs, hs)
+        return (nb, 2, bs, nh, hs)
 
     def __init__(self, kv_caches: DiscoverableKVCache) -> None:
         # Borrowed, not owned: see the class docstring's "Lifetime" note. The

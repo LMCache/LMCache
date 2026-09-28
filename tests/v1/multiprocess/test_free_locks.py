@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the FREE_LOOKUP_LOCKS protocol: enum registration, protocol definition,
-request-transport round-trip, server handler, and client-side adapter API.
+Tests for the FREE_LOOKUP_LOCKS RPC contract, request-transport round-trip,
+server handler, and client-side adapter API.
 """
 
 # Standard
@@ -14,14 +14,8 @@ import pytest
 # First Party
 from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-    get_handler_type,
-    get_payload_classes,
-    get_response_class,
-)
-from lmcache.v1.multiprocess.protocols.base import HandlerType
-from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.rpc import get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
@@ -41,15 +35,9 @@ from tests.v1.multiprocess.transport_test_utils import (
 # ============================================================================
 
 
-def test_free_locks_in_request_type():
-    """FREE_LOOKUP_LOCKS should be a member of RequestType."""
-    assert hasattr(RequestType, "FREE_LOOKUP_LOCKS")
-    assert isinstance(RequestType.FREE_LOOKUP_LOCKS, RequestType)
-
-
 def test_free_locks_payload_classes():
     """FREE_LOOKUP_LOCKS payload should be [IPCCacheServerKey, int]."""
-    payload_classes = get_payload_classes(RequestType.FREE_LOOKUP_LOCKS)
+    payload_classes = get_rpc_spec("free_lookup_locks").payload_types
     assert len(payload_classes) == 2
     assert payload_classes[0] is IPCCacheServerKey
     assert payload_classes[1] is int
@@ -57,14 +45,8 @@ def test_free_locks_payload_classes():
 
 def test_free_locks_response_class():
     """FREE_LOOKUP_LOCKS should have no response (None)."""
-    response_class = get_response_class(RequestType.FREE_LOOKUP_LOCKS)
-    assert response_class is None
-
-
-def test_free_locks_handler_type():
-    """FREE_LOOKUP_LOCKS should use BLOCKING handler type."""
-    handler_type = get_handler_type(RequestType.FREE_LOOKUP_LOCKS)
-    assert handler_type == HandlerType.BLOCKING
+    response_class = get_rpc_spec("free_lookup_locks").response_type
+    assert response_class is type(None)
 
 
 # ============================================================================
@@ -78,7 +60,7 @@ class _FreeLocksHandler:
     def __init__(self) -> None:
         self.call: tuple[IPCCacheServerKey, int] | None = None
 
-    @request_handler(RequestType.FREE_LOOKUP_LOCKS, HandlerType.BLOCKING)
+    @request_handler(HandlerType.BLOCKING)
     def free_lookup_locks(self, key: IPCCacheServerKey, tp_size: int) -> None:
         """Record the decoded request payload."""
         self.call = (key, tp_size)

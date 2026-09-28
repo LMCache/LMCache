@@ -14,6 +14,7 @@ import threading
 import time
 
 # Third Party
+import grpc
 import pytest
 import torch
 
@@ -42,9 +43,8 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
-from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import (
+    HandlerType,
     iter_request_handlers,
     request_handler,
 )
@@ -97,12 +97,11 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
     calls = _Calls()
 
     class FakeModules:
-        @request_handler(RequestType.LOOKUP, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def lookup(self, key: IPCCacheServerKey, tp_size: int) -> None:
             calls.lookup = (key, tp_size)
 
         @request_handler(
-            RequestType.STORE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
@@ -119,7 +118,6 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             return b"output-event", key.model_name == "model"
 
         @request_handler(
-            RequestType.PREPARE_STORE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
@@ -133,7 +131,6 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             )
 
         @request_handler(
-            RequestType.PREPARE_RETRIEVE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
@@ -148,26 +145,29 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
                 context={"slot": 3},
             )
 
-        @request_handler(RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
+        @request_handler()
         def register_kv_cache_engine_driven_context(
             self, payload: RegisterEngineDrivenContextPayload
         ) -> RegisterEngineDrivenContextResponse:
             assert payload.num_physical_slots == 32
             return RegisterEngineDrivenContextResponse("shared-memory", 4096)
 
-        @request_handler(RequestType.PING, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def ping(self, instance_id: int | None) -> bool:
             return instance_id == 7
 
-        @request_handler(RequestType.CLEAR, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def clear(self, force: bool = False) -> None:
             calls.clear_force = force
 
-        @request_handler(RequestType.NOOP)
+        @request_handler(operation="noop")
         def debug(self) -> str:
             return "ok"
 
-        @request_handler(RequestType.REPORT_BLOCK_ALLOCATION, HandlerType.BLOCKING)
+        @request_handler(
+            HandlerType.BLOCKING,
+            operation="report_block_allocation",
+        )
         def report_block_allocations(
             self,
             instance_id: int,
@@ -176,7 +176,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
         ) -> None:
             calls.allocation = (instance_id, model_name, records)
 
-        @request_handler(RequestType.CB_UNIFIED_LOOKUP, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def cb_unified_lookup(
             self, key: IPCCacheServerKey, tp_size: int
         ) -> CBUnifiedLookupResult | None:
@@ -187,7 +187,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
                 non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash")],
             )
 
-        @request_handler(RequestType.P2P_LOOKUP_AND_LOCK, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def p2p_lookup_and_lock(
             self,
             keys: list[ObjectKey],
@@ -198,7 +198,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             assert group_layout_descs[0].dtypes == [torch.float16]
             return 41
 
-        @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def p2p_query_lookup_results(
             self, task_id: int
         ) -> list[TransferChannelAddress] | None:
@@ -245,7 +245,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     assert set(registry.by_full_name) == generated_methods
 
     lookup_codec = registry.by_full_name["lmcache.mp.LookupService.Lookup"]
-    assert lookup_codec.request_type is RequestType.LOOKUP
+    assert lookup_codec.operation == "lookup"
     assert lookup_codec.payload_types == (IPCCacheServerKey, int)
     assert lookup_codec.response_type is type(None)
 
@@ -259,7 +259,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     assert store_codec.response_type == tuple[bytes, bool]
 
     clear_codec = registry.by_full_name["lmcache.mp.ControllerService.Clear"]
-    assert clear_codec.request_type is RequestType.CLEAR
+    assert clear_codec.operation == "clear"
     assert clear_codec.payload_types == (bool,)
     assert clear_codec.request_decoder(clear_codec.request_encoder((), {})) == (False,)
     assert clear_codec.request_decoder(
@@ -310,16 +310,16 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
         BlendModule,
     )
     handlers = {
-        registered.options.request_type: registered.handler
+        registered.operation: registered.handler
         for module_type in module_types
         for registered in iter_request_handlers(module_type)
     }
     registry = get_method_codec_registry()
     codecs = tuple(registry.by_full_name.values())
 
-    assert set(handlers) == {codec.request_type for codec in codecs}
+    assert set(handlers) == {codec.operation for codec in codecs}
     for codec in codecs:
-        codec.validate_handler(handlers[codec.request_type])
+        codec.validate_handler(handlers[codec.operation])
 
 
 def test_grpc_imports_do_not_load_zmq_runtime() -> None:
@@ -443,7 +443,7 @@ def test_grpc_normal_blocking_handlers_respect_max_cpu_workers() -> None:
     lock = threading.Lock()
 
     class SlowModule:
-        @request_handler(RequestType.PING, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def ping(self, instance_id: int | None) -> bool:
             nonlocal active, max_active
             with lock:
@@ -495,13 +495,12 @@ def test_grpc_future_query_caches_completed_response(
     assert future.result(timeout=0) is True
 
 
-def test_shared_grpc_stream_preserves_logical_client_affinity() -> None:
-    """Logical clients sharing one stream should keep distinct affinity keys."""
+def test_grpc_clients_preserve_affinity_and_independent_lifetimes() -> None:
+    """Clients retain separate affinity keys and can be closed independently."""
     thread_names: list[str] = []
 
     class AffinityModule:
         @request_handler(
-            RequestType.STORE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
@@ -515,7 +514,7 @@ def test_shared_grpc_stream_preserves_logical_client_affinity() -> None:
             thread_names.append(threading.current_thread().name)
             return event_ipc_handle, key.model_name == "model"
 
-        @request_handler(RequestType.PING, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def ping(self, instance_id: int | None) -> bool:
             return instance_id == 7
 
@@ -545,6 +544,7 @@ def test_shared_grpc_stream_preserves_logical_client_affinity() -> None:
     try:
         assert client_a.store(key, 7, [[1]], b"a").result(5) == (b"a", True)
         assert client_b.store(key, 7, [[2]], b"b").result(5) == (b"b", True)
+        assert client_a.store(key, 7, [[3]], b"c").result(5) == (b"c", True)
         client_a.close()
         assert client_b.ping(7).result(5) is True
     finally:
@@ -552,8 +552,9 @@ def test_shared_grpc_stream_preserves_logical_client_affinity() -> None:
         client_b.close()
         server.close()
 
-    assert len(thread_names) == 2
+    assert len(thread_names) == 3
     assert thread_names[0] != thread_names[1]
+    assert thread_names[0] == thread_names[2]
 
 
 def test_service_message_codec_registry_round_trips_custom_types() -> None:
@@ -653,3 +654,135 @@ def test_generated_grpc_services_communicate_end_to_end(
     assert client.p2p_query_lookup_results(task_id).result(5) == [
         TransferChannelAddress(offset=8, size=16)
     ]
+
+
+@pytest.mark.parametrize("separate_clients", [False, True])
+def test_grpc_blocking_requests_can_complete_out_of_order(
+    separate_clients: bool,
+) -> None:
+    """A blocked request must not stall another runnable blocking handler."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingModule:
+        @request_handler(HandlerType.BLOCKING)
+        def ping(self, instance_id: int | None) -> bool:
+            if instance_id == 0:
+                entered.set()
+                assert release.wait(10)
+            return True
+
+    server = GrpcMultiprocessServer(
+        "grpc://127.0.0.1:0",
+        max_cpu_workers=2,
+        max_gpu_workers=1,
+        grpc_server_workers=4,
+    )
+    server.add_modules([BlockingModule()])
+    server.start()
+    url = f"grpc://127.0.0.1:{server.bound_port}"
+    first = GrpcMultiprocessClient(url)  # type: ignore[abstract]
+    second = (
+        GrpcMultiprocessClient(url) if separate_clients else first  # type: ignore[abstract]
+    )
+    try:
+        slow = first.ping(0)
+        assert entered.wait(5)
+        assert second.ping(1).result(5) is True
+        assert not slow.query()
+        release.set()
+        assert slow.result(5) is True
+    finally:
+        release.set()
+        first.close()
+        second.close()
+        server.close()
+
+
+def test_grpc_client_recovers_after_server_restart() -> None:
+    """Existing clients can issue new requests after an in-flight RPC fails."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class RestartModule:
+        @request_handler(HandlerType.BLOCKING)
+        def ping(self, instance_id: int | None) -> bool:
+            if instance_id == 0:
+                entered.set()
+                assert release.wait(10)
+            return True
+
+    def start_server(url: str) -> GrpcMultiprocessServer:
+        server = GrpcMultiprocessServer(
+            url,
+            max_cpu_workers=2,
+            max_gpu_workers=1,
+            grpc_server_workers=4,
+        )
+        server.add_modules([RestartModule()])
+        server.start()
+        return server
+
+    server = start_server("grpc://127.0.0.1:0")
+    url = f"grpc://127.0.0.1:{server.bound_port}"
+    client = GrpcMultiprocessClient(url)  # type: ignore[abstract]
+    try:
+        pending = client.ping(0)
+        assert entered.wait(5)
+        server.close()
+        assert pending.wait(5)
+        with pytest.raises(grpc.RpcError):
+            pending.result(0)
+        release.set()
+        server = start_server(url)
+        assert client.ping(1).result(5) is True
+    finally:
+        release.set()
+        client.close()
+        server.close()
+
+
+@pytest.mark.parametrize("max_cpu_workers", [0, -1])
+def test_grpc_rejects_nonpositive_cpu_worker_limit(max_cpu_workers: int) -> None:
+    """Invalid limits must fail at construction instead of hanging requests."""
+    with pytest.raises(ValueError, match="max_cpu_workers"):
+        GrpcMultiprocessServer(
+            "grpc://127.0.0.1:0",
+            max_cpu_workers=max_cpu_workers,
+            max_gpu_workers=1,
+            grpc_server_workers=4,
+        )
+
+
+def test_grpc_handler_errors_release_cpu_capacity() -> None:
+    """Handler failures retain gRPC status codes and release the normal slot."""
+
+    class ErrorModule:
+        @request_handler(HandlerType.BLOCKING)
+        def ping(self, instance_id: int | None) -> bool:
+            if instance_id == 0:
+                raise NotImplementedError("instance disabled")
+            return True
+
+    server = GrpcMultiprocessServer(
+        "grpc://127.0.0.1:0",
+        max_cpu_workers=1,
+        max_gpu_workers=1,
+        grpc_server_workers=4,
+    )
+    server.add_modules([ErrorModule()])
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    try:
+        with pytest.raises(grpc.RpcError) as error:
+            client.ping(0).result(5)
+        assert error.value.code() == grpc.StatusCode.UNIMPLEMENTED
+        assert client.ping(1).result(5) is True
+        with pytest.raises(grpc.RpcError) as disabled:
+            client.noop().result(5)
+        assert disabled.value.code() == grpc.StatusCode.UNIMPLEMENTED
+    finally:
+        client.close()
+        server.close()

@@ -605,22 +605,31 @@ class _LockCountingStorageManager:
         self.locks: dict = {}
 
     def submit_prefetch_task(self, spec, external_request_id=None):
-        # First Party
-        from lmcache.v1.distributed.api import TrimPolicy
-
-        if spec.policy == TrimPolicy.SPARSE:
+        if spec.fetching_policy == "full":
             n = int(getattr(spec, "num_kv_readers", 1) or 1)
-            for key in spec.keys:
-                self.locks[key] = self.locks.get(key, 0) + n
+            for row in spec.key_groups:
+                for key in row.keys:
+                    self.locks[key] = self.locks.get(key, 0) + n
         handle = MagicMock()
-        handle.keys = list(spec.keys)
-        handle.l2_orig_indices = []
+        handle.key_groups = list(spec.key_groups)
+        handle.total_requested_keys = 0
         return handle
 
     def query_prefetch_status(self, handle):
-        bitmap = MagicMock()
-        bitmap.get_indices_list.return_value = list(range(len(handle.keys)))
-        return bitmap
+        # Every submitted key is found and was loaded from L2: one all-set
+        # bitmap per row.
+        # First Party
+        from lmcache.lmcache_native import Bitmap
+        from lmcache.v1.distributed.api import PrefetchResult
+
+        def rows():
+            return [Bitmap(len(row.keys), len(row.keys)) for row in handle.key_groups]
+
+        return PrefetchResult(
+            hit_cells=rows(),
+            l1_hit_cells=[Bitmap(len(row.keys)) for row in handle.key_groups],
+            l2_hit_cells=rows(),
+        )
 
     def finish_read_prefetched(self, keys, read_locks: int = 1) -> None:
         for key in keys:

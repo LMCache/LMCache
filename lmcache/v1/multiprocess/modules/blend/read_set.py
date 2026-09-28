@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 # First Party
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
     GroupKind,
     ipc_key_to_object_keys,
 )
@@ -74,26 +73,6 @@ def _classify_cb_read_groups(
         prefix_gids=tuple(sorted(attn + recurrent)),
         recurrent_gids=tuple(recurrent),
         attn_gid=attn[0],
-    )
-
-
-def _narrow_attn_desc(
-    attn_desc: AttnWindowDesc, gids: tuple[int, ...]
-) -> AttnWindowDesc:
-    """Narrow a registration descriptor to one leg's object groups (ascending
-    ``gids``).
-
-    The fold stride is ``num_object_groups * world_size``; a leg keying over
-    a subset must narrow the descriptor so the stride matches its keys.
-    """
-    return AttnWindowDesc(
-        num_chunks_in_sw=[attn_desc.num_chunks_in_sw[g] for g in gids],
-        world_size=attn_desc.world_size,
-        group_kinds=(
-            tuple(attn_desc.group_kinds[g] for g in gids)
-            if attn_desc.group_kinds
-            else ()
-        ),
     )
 
 
