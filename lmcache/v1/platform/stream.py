@@ -13,6 +13,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
+from functools import lru_cache
 
 # First Party
 from lmcache.v1.platform import get_device_spec
@@ -34,6 +35,12 @@ def _get_spec(device: object) -> DeviceSpec:
     device_type = getattr(device, "type", None)
     if not isinstance(device_type, str):
         raise RuntimeError(f"Cannot resolve a platform DeviceSpec for {device!r}.")
+    return _get_spec_for_type(device_type)
+
+
+@lru_cache(maxsize=None)
+def _get_spec_for_type(device_type: str) -> DeviceSpec:
+    """Resolve each device type once, with backend configuration set at startup."""
     spec = get_device_spec(device_type)
     if spec is None:
         raise RuntimeError(

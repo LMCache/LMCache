@@ -188,14 +188,13 @@ class DeviceSpec:
             "a native stream handle."
         )
 
-    def synchronize_stream(self, stream: object) -> None:
+    def synchronize_stream(self, stream: Any) -> None:
         """Wait until work already enqueued on ``stream`` has completed.
 
         Args:
             stream: A platform stream returned by :meth:`current_stream`.
         """
-        stream_object: Any = stream
-        stream_object.synchronize()
+        stream.synchronize()
 
     def synchronize_device(self, device: object) -> None:
         """Wait until work already enqueued on ``device`` has completed.
@@ -216,15 +215,14 @@ class DeviceSpec:
         """
         return self._get_torch_module().Event()
 
-    def record_stream_event(self, event: object, stream: object) -> None:
+    def record_stream_event(self, event: Any, stream: object) -> None:
         """Record ``event`` after work already queued on ``stream``.
 
         Args:
             event: An event returned by :meth:`create_stream_event`.
             stream: A platform stream returned by :meth:`current_stream`.
         """
-        event_object: Any = event
-        event_object.record(stream)
+        event.record(stream)
 
     def is_stream_event_complete(self, event: object) -> bool:
         """Return whether a previously recorded stream event has completed.
