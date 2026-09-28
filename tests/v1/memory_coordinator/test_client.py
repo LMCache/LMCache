@@ -15,7 +15,11 @@ import pytest
 import uvicorn
 
 # First Party
-from lmcache.v1.memory_coordinator.api import MemoryCoordinatorError, StaleEpochError
+from lmcache.v1.memory_coordinator.api import (
+    MemoryCoordinatorError,
+    OutOfSpaceError,
+    StaleEpochError,
+)
 from lmcache.v1.memory_coordinator.app import create_app
 from lmcache.v1.memory_coordinator.client import MemoryCoordinatorHttpClient
 from lmcache.v1.memory_coordinator.config import MemoryCoordinatorConfig
@@ -87,6 +91,32 @@ def test_client_roundtrip_and_usage(
         client.close()
         with pytest.raises(MemoryCoordinatorError, match="closed"):
             client.status()
+
+
+def test_full_pool_preserves_committed_hits_and_client_usability(
+    coordinator_config: MemoryCoordinatorConfig,
+    port: int,
+) -> None:
+    with (
+        _server(coordinator_config, port),
+        closing(
+            MemoryCoordinatorHttpClient(
+                f"http://127.0.0.1:{port}", coordinator_config.token_file
+            )
+        ) as client,
+    ):
+        full = _item(1, elements=coordinator_config.capacity_bytes // 2)
+        grant = client.reserve_writes([full])[0]
+        assert grant is not None
+        client.finish_writes([_ref(grant)])
+        before = client.status()
+        assert before.used_bytes == before.region.capacity_bytes
+        with pytest.raises(OutOfSpaceError, match="507"):
+            client.reserve_writes([_item(2)])
+        assert client.status() == before
+        hit, miss = client.lookup([_key(1), _key(2)])
+        assert hit is not None and hit.handle == grant.handle and miss is None
+        assert client.reserve_writes([full]) == [None]
 
 
 def test_client_latches_epoch_and_fails_closed_after_restart(

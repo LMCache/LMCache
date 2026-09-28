@@ -62,6 +62,9 @@ are required. Alignment must be a positive power of two. ``STATE_FILE`` must
 not exist on the first start and remains after shutdown. ``REGION_ID`` names
 the physical window; ``LAYOUT_ID`` identifies compatible model/cache layouts.
 
+This endpoint uses HTTP(S). Selecting gRPC for the MP server does not change
+the Memory Coordinator's transport.
+
 Attach each MP server
 ---------------------
 
@@ -162,7 +165,9 @@ Limits and troubleshooting
 * A contract mismatch means identity, capacity, alignment, or layout differs.
   Fix the configuration; never bypass the check to make a mapping attach.
 * HTTP 507 means the whole absent-key write batch did not fit. No partial
-  allocation is made for that batch.
+  allocation is made for that batch, and the client is not fenced. MP skips
+  those stores; committed entries remain readable while the coordinator is
+  available. Expiry and abort do not recover capacity.
 * A stale epoch or ambiguous write failure fences the client. Do not retry by
   silently adopting another epoch. Stop and investigate, then reset together.
   Lookup transport/server errors propagate without fencing or automatic retries;
@@ -171,6 +176,10 @@ Limits and troubleshooting
   library, device access, mapping geometry, and CUDA registration support.
 * An existing startup marker is a deliberate restart refusal, not a stale file
   to remove during a pod restart. The coordinator cannot recover its old index.
+* The coordinator is a single point of failure. During an outage, new shared
+  lookups and reservations cannot proceed, even if DAX still holds the bytes.
+  There is no automatic failover. Loss of its in-memory state requires the
+  coordinated reset below; a transient lookup failure alone does not.
 
 Shutdown and reset
 ------------------

@@ -99,6 +99,13 @@ allocation high-water mark, including alignment gaps and abandoned extents.
 full key listing. Shared capacity events prevent each mounting MP from reporting
 the same pool as private capacity.
 
+When a new batch does not fit, reservation fails atomically with `OutOfSpaceError`
+(HTTP 507). This does not fence the client. Existing committed objects remain
+readable while the coordinator is available. MP reports `OUT_OF_MEMORY` for
+ungranted keys and skips storing those chunks; cache misses must be computed by
+the serving engine. Safe eviction would need a lifetime protocol covering remote
+readers and in-flight GPU writes, not just a metadata-delete API.
+
 This version supports one shared pool per deployment. Its capacity accounting
 does not distinguish multiple independent shared Device-DAX pools.
 
@@ -141,6 +148,11 @@ without fencing the client or becoming cache misses. Later calls still use the
 original epoch; stale-epoch errors or mismatching response epochs still fence.
 The client does not automatically retry.
 
+The Memory Coordinator is a single point of failure. Its key index and allocation
+cursor are in memory only. If it is unavailable, new shared lookups and reservations
+cannot proceed even though the payload bytes remain in DAX. There is no automatic
+failover, replicated metadata, or reconstruction of the index from those bytes.
+
 An epoch cannot revoke a GPU's old mapping. Therefore, startup atomically creates
 a persistent marker with exclusive creation and fsyncs it and its parent. Every
 replacement coordinator must use the same marker on storage with reliable
@@ -157,6 +169,15 @@ For reset, stop every model worker and MP, stop the coordinator, and verify that
 no old mapping or GPU access remains. Only then may the operator remove the
 specific startup marker and start a new empty pool. Removing it while workers
 are alive defeats the safety barrier. A new epoch does not make that safe.
+
+## Metadata transport
+
+The current coordinator API uses HTTP/JSON with validated Pydantic schemas.
+The MP server's gRPC transport does not implement these coordinator operations.
+Reusing that infrastructure needs a dedicated protobuf service for the region
+contract, reserve/finish/abort, lookup, and status, preserving epochs, write tokens,
+and ambiguous-write fencing. A transport change alone would not add HA or eviction.
+KV payloads would still bypass the coordinator. No second transport is added here.
 
 ## Supported combinations and validation
 
@@ -181,7 +202,7 @@ code cleanup and documentation commits were not rebenchmarked.
 Both arms used the same image, full-attention Qwen2.5-7B-Instruct-1M checkpoint,
 bf16, vLLM model runner V2, and six TP1 RTX PRO 6000 Blackwell 96 GB GPUs.
 Each GPU had a 16 GiB KV budget, with GPU prefix caching disabled. Prefills ran
-on host 196 and decodes on host 197: two prefills/four decodes for 2P4D, and four
+on Host A and decodes on Host B: two prefills/four decodes for 2P4D, and four
 prefills/two decodes for 4P2D.
 
 The workload used four repeated, nested document prefixes, 256-token chunks,
