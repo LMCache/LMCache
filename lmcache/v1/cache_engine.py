@@ -1304,7 +1304,9 @@ class LMCacheEngine:
         )
         assert None not in memory_objs, "Failed to get memory objects to move"
         logger.debug(
-            f"Trying to send {len(memory_objs)} memory objects to {new_position}"
+            "Trying to send %d memory objects to %s",
+            len(memory_objs),
+            new_position,
         )
 
         # TODO: reduce loops
