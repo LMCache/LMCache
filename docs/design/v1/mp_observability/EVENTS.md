@@ -93,7 +93,6 @@ On the failure path of `L2_STORE_COMPLETED`, `key_count_per_salt` is absent
 | EventType | Metadata keys | Types |
 |---|---|---|
 | `L2_PREFETCH_LOOKUP_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
-| `L2_PREFETCH_LOOKUP_COMPLETED` | `request_id`, `prefix_hit_count` | `int`, `int` |
 | `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
 | `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
 | `L2_LOAD_TASK_SUBMITTED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `int`, `str`, `int`, `int` |
@@ -130,11 +129,12 @@ Health-monitoring event for the L2 prefetch path. See LM-291.
 
 | EventType | Metadata keys | Types | Vocabulary |
 |---|---|---|---|
-| `L2_PREFETCH_FAILED` | `reason`, `keys` | `str`, `list[ObjectKey]` | `reason` ∈ {`l1_oom`, `not_found`} |
+| `L2_PREFETCH_FAILED` | `reason`, `keys` | `str`, `list[ObjectKey]` | `reason` ∈ {`l1_oom`, `l1_contended`, `not_found`} |
 
-Producers (both in `PrefetchController`):
-- `reason=l1_oom` — emitted when `reserve_write` into L1 returns `OUT_OF_MEMORY` during the transition-to-load phase. Published in parallel with `L1_ALLOCATION_FAILED(during=l2_prefetch)`.
-- `reason=not_found` — emitted in `_finalize_load` for keys reserved in L1 but missing from the adapter's load bitmap (L2 reported the key present at lookup but produced no data).
+Producers (all in `PrefetchController`):
+- `reason=l1_oom` — emitted when `reserve_write` of a load's L1 staging buffer returns `OUT_OF_MEMORY`. The affected cells drop their L2 lock and the request is re-planned on what was reserved.
+- `reason=l1_contended` — emitted when `reserve_write` returns `KEY_NOT_WRITABLE` because the key became resident in L1 between the lookup and the reserve step. The cell is treated like an out-of-memory cell.
+- `reason=not_found` — emitted in `_poll_load_results` for keys reserved in L1 but missing from the adapter's load bitmap (L2 reported the key present at lookup but produced no data).
 
 The third reason `serde_failure` will be added as an additive, non-breaking
 extension once the serde PR lands and adapters can distinguish
