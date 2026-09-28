@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 # Standard
+import mmap
 import os
 import platform
 
@@ -133,3 +134,43 @@ def test_raw_block_device_odirect_optional_smoke(tmp_path):
     finally:
         if dev is not None:
             dev.close()
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="io_uring is Linux only")
+@pytest.mark.parametrize("batched", [False, True])
+def test_raw_block_device_iouring_uses_tail_bounce(tmp_path, batched: bool) -> None:
+    path = make_raw_block_file(tmp_path)
+    alignment = RAW_BLOCK_CI_BLOCK_ALIGN
+    total_len = alignment * 2
+    payload_len = total_len - 17
+    payload = bytes(index % 251 for index in range(payload_len))
+    with open(path, "r+b") as file:
+        file.write(payload)
+        file.write(bytes(total_len - payload_len))
+
+    dev = None
+    target = mmap.mmap(-1, payload_len)
+    try:
+        dev = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=True,
+            alignment=alignment,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+        if batched:
+            batch_id = dev.batched_read([0], [target], [total_len])
+            assert dev.wait_iouring(batch_id) == ([True], [])
+        else:
+            dev.read_uring(0, target, payload_len, total_len)
+
+        assert target[:] == payload
+    except Exception as error:
+        if is_skip_safe_io_error(error):
+            pytest.skip(f"io_uring O_DIRECT is unavailable on this runner: {error}")
+        raise
+    finally:
+        if dev is not None:
+            dev.close()
+        target.close()
