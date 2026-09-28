@@ -160,6 +160,15 @@ def test_transport_flag_is_parsed_without_starting_grpc():
     assert _parse_mp(["--transport", "grpc"]).transport == "grpc"
 
 
+def test_null_block_id_defaults_to_zero():
+    assert _parse_mp([]).null_block_id == 0
+    assert MPServerConfig().null_block_id == 0
+
+
+def test_null_block_id_flag_is_parsed():
+    assert _parse_mp(["--null-block-id", "-1"]).null_block_id == -1
+
+
 def test_grpc_server_workers_are_parsed():
     assert _parse_mp([]).grpc_server_workers == 32
     assert MPServerConfig().grpc_server_workers == 32

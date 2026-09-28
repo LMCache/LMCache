@@ -68,6 +68,12 @@ ABSENT --reserve--> WRITING --D2H complete, publish, finish--> VALID
 5. Local read references remain held until GPU completion. They prevent local
    unmapping; they are not distributed read pins.
 
+Shared L1 uses the common `PrefetchController` and configured `PrefetchPolicy`,
+not a separate lookup/retention path in `StorageManager`. Each hit's layout is
+checked against its request row before policy planning. Grouped hit results,
+prefix/window retention, and `NO_LOCK` release follow the common contract.
+L2 adapters remain unsupported for shared L1.
+
 Canonical object keys include the chunk hash, model, KV rank, object group, and
 cache salt. The coordinator stores immutable, validated keys directly in its
 index. A pending write has a token; a committed object has no write token.

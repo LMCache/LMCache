@@ -443,7 +443,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
     ) -> int:
-        """Return how many objects of the given shape fit in ``address_manager``."""
+        """Return an upper bound on how many objects fit in ``address_manager``."""
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
         unit_raw_size = get_size_bytes(shapes, dtypes)
         unit_aligned_size = address_manager.compute_aligned_size(unit_raw_size)
@@ -522,6 +522,15 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
                 objs = arena.allocator.batched_allocate(
                     shapes, dtypes, take, fmt, str(self)
                 )
+                if objs is None:
+                    # Fragmentation can make the free-byte estimate too large.
+                    # Use any slots that fit before moving to the next arena.
+                    objs = []
+                    for _ in range(take):
+                        obj = arena.allocator.allocate(shapes, dtypes, fmt, str(self))
+                        if obj is None:
+                            break
+                        objs.append(obj)
                 if not objs:
                     continue
                 for obj in objs:

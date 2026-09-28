@@ -14,7 +14,9 @@ emission thread or task. See
 # Standard
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING
 import math
 import time
@@ -35,9 +37,13 @@ from lmcache.v1.mp_coordinator.api import (
 from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+from lmcache.v1.mp_observability.trace.lifecycle import get_active_trace_recorder
+from lmcache.v1.mp_observability.trace.recorder import EventsTraceRecorder
 from lmcache.v1.multiprocess.config import (
     CoordinatorConfig,
+    HTTPFrontendConfig,
     KafkaCacheEventSinkConfig,
+    MPServerConfig,
 )
 
 if TYPE_CHECKING:
@@ -51,25 +57,6 @@ _DEFAULT_FLUSH_INTERVAL = 1.0
 # Token-binding cache bound: covers the window between a chunk's
 # token-binding event and its last (async L2) store event.
 _TOKEN_BINDING_CACHE_SIZE = 65536
-
-
-def create_cache_event_sink(config: CoordinatorConfig) -> "CacheEventSink":
-    """Create the configured MP-server cache-event transport.
-
-    Args:
-        config: Coordinator connection and event-sink configuration.
-
-    Returns:
-        The configured HTTP or Kafka sink.
-
-    Raises:
-        ValueError: If HTTP delivery is selected without a coordinator URL.
-    """
-    if isinstance(config.event_sink_config, KafkaCacheEventSinkConfig):
-        return KafkaCacheEventSink(config.event_sink_config)
-    if not config.url:
-        raise ValueError("HTTP cache-event reporting requires a coordinator URL")
-    return HttpCacheEventSink(config.url)
 
 
 class CacheEventPublishError(Exception):
@@ -250,6 +237,156 @@ class KafkaCacheEventSink(CacheEventSink):
                 "%d Kafka cache-event record(s) remained queued at shutdown",
                 remaining,
             )
+
+
+#: ``Record.qualname`` of one cache-event batch in an ``events``-level trace.
+#: ``args`` is the batch in wire form: one element of
+#: ``CacheEventsRequest.batches`` as ``POST /events`` would carry it.
+EVENTS_TRACE_BATCH = "events.batch"
+#: ``Record.qualname`` of a lifecycle mark in an ``events``-level trace.
+#: ``args`` carries ``phase`` (:class:`TraceLifecyclePhase`) and
+#: ``instance_id``; at start also the rest of the emitter's identity:
+#: ``incarnation``, ``ip``, ``http_port``, ``mq_port``.
+EVENTS_TRACE_LIFECYCLE = "events.lifecycle"
+
+
+class TraceLifecyclePhase(str, Enum):
+    """Where in the emitter's life an ``events.lifecycle`` record was written."""
+
+    START = "start"
+    """The subscriber began emitting; the record carries its identity."""
+    STOP = "stop"
+    """The sink closed at shutdown; no batch follows in this file."""
+
+
+class TraceCacheEventSink(CacheEventSink):
+    """Sink that appends every batch to an ``events``-level trace file.
+
+    Each batch becomes one :data:`EVENTS_TRACE_BATCH` record holding the
+    exact wire form ``HttpCacheEventSink`` would have posted, so a replayer
+    can hand the file's records to a coordinator's ``POST /events`` with no
+    conversion. Nothing is needed on the other end: a server with no
+    coordinator configured can record what it would have reported.
+
+    Runs on the bus's drain thread like every sink. The recorder's own lock
+    serializes the file, and its error handling counts a failed write
+    rather than raising, so a full disk never stalls event dispatch.
+
+    Args:
+        recorder: The open ``events``-level recorder to write into.
+    """
+
+    def __init__(self, recorder: EventsTraceRecorder) -> None:
+        self._recorder = recorder
+        self._instance_id = ""
+
+    def record_lifecycle(
+        self,
+        phase: TraceLifecyclePhase,
+        instance_id: str = "",
+        incarnation: int = 0,
+        ip: str = "",
+        http_port: int = 0,
+        mq_port: int = 0,
+    ) -> None:
+        """Write one :data:`EVENTS_TRACE_LIFECYCLE` record.
+
+        Every mark names the emitter, so a file's marks stay attributable
+        once its records are merged with other servers'. The ``STOP`` mark
+        takes the id from the ``START`` mark written before it.
+
+        Args:
+            phase: Which mark this is.
+            instance_id: The emitter's id (``START`` only).
+            incarnation: The emitter's incarnation (``START`` only).
+            ip: The IP the emitter advertises to a coordinator, or empty
+                when it defers to its outbound address (``START`` only).
+            http_port: The emitter's HTTP port (``START`` only).
+            mq_port: The emitter's message-queue port, ``0`` when P2P is
+                off (``START`` only).
+        """
+        if phase is TraceLifecyclePhase.START:
+            self._instance_id = instance_id
+        args: dict[str, object] = {
+            "phase": phase.value,
+            "instance_id": self._instance_id,
+        }
+        if phase is TraceLifecyclePhase.START:
+            args.update(
+                incarnation=incarnation,
+                ip=ip,
+                http_port=http_port,
+                mq_port=mq_port,
+            )
+        self._recorder.write_record(
+            EVENTS_TRACE_LIFECYCLE, args, t_wall=time.time(), t_mono=time.monotonic()
+        )
+
+    def publish(self, batches: list[CacheEventBatch]) -> None:
+        """Append ``batches`` to the trace, one record each, in list order.
+
+        Args:
+            batches: The batches to record.
+        """
+        t_wall = time.time()
+        t_mono = time.monotonic()
+        wire = CacheEventsRequest(batches=batches).model_dump(mode="json")
+        for batch in wire["batches"]:
+            self._recorder.write_record(
+                EVENTS_TRACE_BATCH, batch, t_wall=t_wall, t_mono=t_mono
+            )
+
+    def close(self) -> None:
+        """Mark the end of the stream. The recorder closes with the bus."""
+        self.record_lifecycle(TraceLifecyclePhase.STOP)
+
+
+class MultiCacheEventSink(CacheEventSink):
+    """Sink that delivers every batch list to several sinks in turn.
+
+    Used when a server both reports to a coordinator and records an
+    ``events`` trace. Every sink is attempted even if an earlier one
+    fails, so a coordinator outage does not stop the recording (or the
+    reverse); the failures are then raised together.
+
+    Args:
+        sinks: The sinks to deliver to, in order.
+
+    Raises:
+        ValueError: If ``sinks`` is empty.
+    """
+
+    def __init__(self, sinks: Sequence[CacheEventSink]) -> None:
+        if not sinks:
+            raise ValueError("MultiCacheEventSink needs at least one sink")
+        self._sinks = tuple(sinks)
+
+    def publish(self, batches: list[CacheEventBatch]) -> None:
+        """Deliver ``batches`` to every sink.
+
+        Args:
+            batches: The batches to deliver.
+
+        Raises:
+            CacheEventPublishError: If any sink failed, after every sink
+                was tried; the message names each failure.
+        """
+        failures: list[str] = []
+        for sink in self._sinks:
+            try:
+                sink.publish(batches)
+            except CacheEventPublishError as e:
+                failures.append(f"{type(sink).__name__}: {e}")
+        if failures:
+            raise CacheEventPublishError(
+                f"{len(failures)} of {len(self._sinks)} cache-event sinks failed: "
+                + "; ".join(failures)
+            )
+
+    def close(self) -> None:
+        """Close every sink, in order."""
+        for sink in self._sinks:
+            sink.close()
 
 
 @dataclass(frozen=True)
@@ -594,3 +731,76 @@ class CacheEventSubscriber(EventSubscriber):
         if now - self._last_flush >= self._flush_interval:
             self._last_flush = now
             self.flush()
+
+
+def create_cache_event_sink(config: CoordinatorConfig) -> CacheEventSink:
+    """Create the configured MP-server cache-event transport.
+
+    Args:
+        config: Coordinator connection and event-sink configuration.
+
+    Returns:
+        The configured HTTP or Kafka sink.
+
+    Raises:
+        ValueError: If HTTP delivery is selected without a coordinator URL.
+    """
+    if isinstance(config.event_sink_config, KafkaCacheEventSinkConfig):
+        return KafkaCacheEventSink(config.event_sink_config)
+    if not config.url:
+        raise ValueError("HTTP cache-event reporting requires a coordinator URL")
+    return HttpCacheEventSink(config.url)
+
+
+def maybe_create_cache_event_subscriber(
+    mp_config: MPServerConfig,
+    http_config: HTTPFrontendConfig | None,
+    coordinator_config: CoordinatorConfig,
+) -> CacheEventSubscriber | None:
+    """Create the cache-event subscriber, or ``None`` if nothing wants the stream.
+
+    Destinations, either or both: the coordinator (``--coordinator-url`` with
+    ``--coordinator-event-reporting``, when the HTTP frontend exists) and an
+    ``events``-level trace file (``--trace-level events``). The trace needs no
+    coordinator. The incarnation is the server start time; the trace opens
+    with a ``start`` mark carrying it and the server's identity.
+
+    Args:
+        mp_config: The server's identity and ports.
+        http_config: The HTTP frontend, or ``None`` when it is not running.
+        coordinator_config: Coordinator connection and event-sink settings.
+
+    Returns:
+        The subscriber to register on the event bus, or ``None``.
+    """
+    sinks: list[CacheEventSink] = []
+    if (
+        http_config is not None
+        and coordinator_config.url
+        and coordinator_config.event_reporting
+    ):
+        sinks.append(create_cache_event_sink(coordinator_config))
+    trace_sink: TraceCacheEventSink | None = None
+    recorder = get_active_trace_recorder()
+    if isinstance(recorder, EventsTraceRecorder):
+        trace_sink = TraceCacheEventSink(recorder)
+        sinks.append(trace_sink)
+    if not sinks:
+        return None
+
+    incarnation = int(time.time())
+    if trace_sink is not None:
+        trace_sink.record_lifecycle(
+            TraceLifecyclePhase.START,
+            instance_id=mp_config.instance_id,
+            incarnation=incarnation,
+            ip=coordinator_config.advertise_ip,
+            http_port=http_config.http_port if http_config is not None else 0,
+            mq_port=mp_config.port if mp_config.p2p_config.enabled else 0,
+        )
+    return CacheEventSubscriber(
+        sink=sinks[0] if len(sinks) == 1 else MultiCacheEventSink(sinks),
+        instance_id=mp_config.instance_id,
+        incarnation=incarnation,
+        flush_interval=coordinator_config.event_flush_interval,
+    )

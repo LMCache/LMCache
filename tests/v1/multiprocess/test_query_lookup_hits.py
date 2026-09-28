@@ -110,8 +110,6 @@ def _make_module_with_job(
     handle = PrefetchHandle(
         prefetch_request_id=0,
         external_request_id="req-0",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
         total_requested_keys=10,
         submit_time=time.monotonic(),
     )

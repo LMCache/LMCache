@@ -79,6 +79,11 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--chunk-size``
      - ``256``
      - Chunk size for KV cache operations (in tokens).
+   * - ``--null-block-id``
+     - ``0``
+     - Engine block ID that denotes absent KV data. Keep the default for
+       vLLM-compatible layouts. Engines where block ``0`` is valid, such as
+       ATOM native PAGE/STATE transfer, can use ``-1``.
    * - ``--max-workers``
      - ``1``
      - Base number of worker threads. Sets the default for both the GPU
@@ -147,6 +152,12 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Space-separated list of Python module names that scripts posted
        to the HTTP ``/run_script`` endpoint are allowed to import.
        Example: ``--script-allowed-imports numpy pandas``.
+   * - ``--run-script-api-enabled``
+     - ``false``
+     - Enable the ``POST /run_script`` HTTP endpoint, which executes
+       caller-supplied Python in-process. The restricted builtins are
+       **not** a security boundary — treat this as full remote code
+       execution and only enable it on a trusted network.
    * - ``--shm-name``
      - ``""``
      - SHM segment name for non-GPU KV transfer (only used when the
@@ -242,8 +253,10 @@ The HTTP frontend is included when running ``lmcache server``.
      - Default
      - Description
    * - ``--http-host``
-     - ``0.0.0.0``
-     - Host to bind the HTTP (FastAPI/uvicorn) server.
+     - ``127.0.0.1``
+     - Host to bind the HTTP (FastAPI/uvicorn) server. The admin API has
+       no authentication; only bind a non-loopback address on a trusted
+       network.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
@@ -597,10 +610,11 @@ logging, tracing).
        setting.
    * - ``--trace-level``
      - *(none)*
-     - Enable trace recording at the given level. Currently only
-       ``storage`` is supported (records ``StorageManager`` public-API
-       calls for offline replay via ``lmcache trace``). See
-       :doc:`tracing_and_debugging`.
+     - Enable trace recording at the given level. ``storage`` records
+       ``StorageManager`` public-API calls for offline replay via
+       ``lmcache trace``. ``events`` records the cache-event stream this
+       server emits for the MP coordinator, with or without one
+       configured. See :doc:`tracing_and_debugging`.
    * - ``--trace-output``
      - *(none)*
      - Path to write the trace file. If omitted while ``--trace-level``

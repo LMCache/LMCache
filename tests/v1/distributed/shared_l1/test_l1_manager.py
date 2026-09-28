@@ -7,6 +7,7 @@ from contextlib import closing
 from typing import Any
 from unittest.mock import MagicMock
 import threading
+import uuid
 
 # Third Party
 import pytest
@@ -14,19 +15,30 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import (
+    FetchingPolicy,
     GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
+    PrefetchLockMode,
     PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.config import (
+    EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
     SharedL1Config,
+    StorageManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
+    DefaultPrefetchPolicy,
+    PrefetchPlan,
+    register_prefetch_policy,
+)
+from lmcache.v1.distributed.storage_controllers.utils import MapState
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 import lmcache.v1.distributed.l1_manager as l1_manager_module
 
 
@@ -59,9 +71,9 @@ def _config() -> L1ManagerConfig:
 
 
 @pytest.fixture
-def manager_backend(
+def shared_backend(
     monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[tuple[L1Manager, MagicMock]]:
+) -> MagicMock:
     backend = MagicMock()
     backend.get_memory_usage.return_value = (128, 4096)
     monkeypatch.setattr(
@@ -69,8 +81,56 @@ def manager_backend(
         "SharedDevDaxL1Backend",
         lambda *_args, **_kwargs: backend,
     )
+    return backend
+
+
+@pytest.fixture
+def manager_backend(
+    shared_backend: MagicMock,
+) -> Iterator[tuple[L1Manager, MagicMock]]:
     with closing(L1Manager(_config())) as manager:
-        yield manager, backend
+        yield manager, shared_backend
+
+
+@pytest.fixture
+def storage_manager(shared_backend: MagicMock) -> Iterator[StorageManager]:
+    config = StorageManagerConfig(_config(), EvictionConfig(eviction_policy="noop"))
+    with closing(StorageManager(config)) as manager:
+        yield manager
+
+
+def _rows(window: int = -1, count: int = 4) -> list[GroupedObjectKeys]:
+    # Non-contiguous, reversed group IDs and different layouts catch stride
+    # arithmetic or assumptions that all rows share a layout.
+    return [
+        GroupedObjectKeys(
+            [ObjectKey(bytes([i]), "model", 0, gid) for i in range(count)],
+            gid,
+            layout,
+            sliding_window_size=window if gid == 7 else -1,
+        )
+        for gid, layout in (
+            (7, _layout()),
+            (2, MemoryLayoutDesc([torch.Size([2, 4])], [torch.float32])),
+        )
+    ]
+
+
+def _memory_object(layout: MemoryLayoutDesc) -> TensorMemoryObj:
+    tensor = torch.empty(layout.shapes[0], dtype=layout.dtypes[0])
+    return TensorMemoryObj(
+        tensor,
+        MemoryObjMetadata(
+            shape=layout.shapes[0],
+            dtype=layout.dtypes[0],
+            shapes=layout.shapes,
+            dtypes=layout.dtypes,
+            address=0,
+            phy_size=tensor.numel() * tensor.element_size(),
+            ref_count=0,
+        ),
+        parent_allocator=None,
+    )
 
 
 @pytest.mark.parametrize("tag", ["", "writer"])
@@ -276,27 +336,169 @@ def test_shared_finish_failure_keeps_entire_batch_locked(
     assert manager.report_status()["write_locked_count"] == len(keys)
 
 
-@pytest.mark.parametrize("object_group_id", [0, 1])
+@pytest.mark.parametrize("mismatch", ["shape", "dtype"])
+@pytest.mark.parametrize("lock_mode", list(PrefetchLockMode))
 def test_shared_reader_rejects_mismatched_layout(
-    object_group_id: int,
+    storage_manager: StorageManager,
+    shared_backend: MagicMock,
+    mismatch: str,
+    lock_mode: PrefetchLockMode,
 ) -> None:
-    manager = StorageManager.__new__(StorageManager)
-    l1_manager = MagicMock(uses_shared_l1=True)
-    manager._l1_manager = l1_manager
-    key = ObjectKey(b"key", "model", 0, object_group_id=object_group_id)
-    memory_obj = MagicMock()
-    memory_obj.get_shapes.return_value = [torch.Size([8, 2])]
-    memory_obj.get_dtypes.return_value = [torch.float16]
-    l1_manager.reserve_read.return_value = {
-        key: (L1Error.SUCCESS, memory_obj),
-    }
+    groups = _rows(count=2)
+    objects = [_memory_object(row.layout_desc) for row in groups for _ in row.keys]
+    expected = groups[1].layout_desc
+    wrong = MemoryLayoutDesc(
+        [torch.Size([4, 2])] if mismatch == "shape" else expected.shapes,
+        [torch.float16] if mismatch == "dtype" else expected.dtypes,
+    )
+    objects[-1] = _memory_object(wrong)
+    shared_backend.reserve_read.return_value = objects
 
     with pytest.raises(RuntimeError, match="layout does not match"):
-        manager.submit_prefetch_task(
-            PrefetchTaskSpec([GroupedObjectKeys([key], object_group_id, _layout())])
+        storage_manager.submit_prefetch_task(
+            PrefetchTaskSpec(groups, lock_mode=lock_mode)
         )
 
-    l1_manager.finish_read.assert_called_once_with([key], read_locks=1)
+    keys = [key for row in groups for key in row.keys]
+    assert storage_manager.unsafe_read(keys) == ([], [])
+    assert storage_manager.report_status()["l1_manager"]["read_locked_count"] == 0
+
+
+@pytest.mark.parametrize("skip_l2", [False, True])
+@pytest.mark.parametrize("lock_mode", list(PrefetchLockMode))
+@pytest.mark.parametrize(
+    "policy,window,present,retained",
+    [
+        ("prefix", -1, [[0, 1, 2, 3], [0, 1, 3]], [[0, 1], [0, 1]]),
+        ("prefix", 2, [[0, 1, 2, 3], [0, 1, 2, 3]], [[2, 3], [0, 1, 2, 3]]),
+        ("full", -1, [[0, 2], [1, 3]], [[0, 2], [1, 3]]),
+        ("full", 2, [[0, 1, 2, 3], [0, 1, 2, 3]], [[], []]),
+    ],
+    ids=["prefix-gap", "prefix-window", "full-sparse", "full-window-rejected"],
+)
+def test_shared_prefetch_uses_grouped_policy_contract(
+    storage_manager: StorageManager,
+    shared_backend: MagicMock,
+    policy: FetchingPolicy,
+    window: int,
+    present: list[list[int]],
+    retained: list[list[int]],
+    lock_mode: PrefetchLockMode,
+    skip_l2: bool,
+) -> None:
+    groups = _rows(window)
+    objects = {
+        row.keys[i]: _memory_object(row.layout_desc)
+        for row, indices in zip(groups, present, strict=True)
+        for i in indices
+    }
+    shared_backend.reserve_read.side_effect = lambda keys: [
+        objects.get(key) for key in keys
+    ]
+    handle = storage_manager.submit_prefetch_task(
+        PrefetchTaskSpec(groups, fetching_policy=policy, lock_mode=lock_mode),
+        skip_l2=skip_l2,
+    )
+    assert handle.total_requested_keys == 8
+    assert handle.sliding_windows == (window, -1)
+    assert storage_manager.wait_prefetch_status(handle, timeout=0)
+    result = storage_manager.query_prefetch_status(handle)
+    assert result is not None
+    assert [row.get_indices_list() for row in result.hit_cells] == retained
+    assert [row.get_indices_list() for row in result.l1_hit_cells] == retained
+    assert [len(row) for row in result.l2_hit_cells] == [4, 4]
+    assert result.l1_hit_count == sum(map(len, retained))
+    assert result.l2_hit_count == 0
+    assert storage_manager.query_prefetch_status(handle) is None
+
+    retained_keys = [
+        row.keys[i]
+        for row, indices in zip(groups, retained, strict=True)
+        for i in indices
+    ]
+    locked = retained_keys if lock_mode is PrefetchLockMode.LOCK else []
+    assert storage_manager.unsafe_read(list(objects))[0] == locked
+    storage_manager.finish_read_prefetched(locked)
+    assert storage_manager.unsafe_read(list(objects)) == ([], [])
+
+
+def test_shared_prefetch_lookup_hits_consumes_grouped_result(
+    storage_manager: StorageManager, shared_backend: MagicMock
+) -> None:
+    groups = _rows(window=2)
+    shared_backend.reserve_read.return_value = [
+        _memory_object(row.layout_desc) for row in groups for _ in row.keys
+    ]
+    handle = storage_manager.submit_prefetch_task(PrefetchTaskSpec(groups))
+    # Six retained objects serve four chunks, not six chunks.
+    assert storage_manager.query_prefetch_lookup_hits(handle) == 4
+    assert storage_manager.query_prefetch_status(handle) is None
+    assert storage_manager.query_prefetch_lookup_hits(handle) is None
+    storage_manager.finish_read_prefetched(groups[0].keys[2:] + groups[1].keys)
+
+
+def test_shared_prefetch_empty_rows(
+    storage_manager: StorageManager, shared_backend: MagicMock
+) -> None:
+    shared_backend.reserve_read.return_value = []
+    handle = storage_manager.submit_prefetch_task(PrefetchTaskSpec(_rows(count=0)))
+    assert handle.total_requested_keys == 0
+    assert storage_manager.wait_prefetch_status(handle, timeout=0)
+    result = storage_manager.query_prefetch_status(handle)
+    assert result is not None
+    assert [len(row) for row in result.hit_cells] == [0, 0]
+    assert [len(row) for row in result.l1_hit_cells] == [0, 0]
+    assert [len(row) for row in result.l2_hit_cells] == [0, 0]
+    assert result.l1_hit_count == result.l2_hit_count == 0
+    assert storage_manager.query_prefetch_status(handle) is None
+
+
+def test_shared_prefetch_honors_configured_policy(shared_backend: MagicMock) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class RejectPolicy(DefaultPrefetchPolicy):
+        def plan_load(self, *args: Any, **kwargs: Any) -> PrefetchPlan:
+            calls.append(kwargs)
+            return PrefetchPlan(MapState(), MapState())
+
+    policy_name = f"shared-test-{uuid.uuid4().hex}"
+    register_prefetch_policy(policy_name, RejectPolicy)
+    groups = _rows(count=1)
+    shared_backend.reserve_read.return_value = [
+        _memory_object(row.layout_desc) for row in groups
+    ]
+    config = StorageManagerConfig(
+        _config(), EvictionConfig(eviction_policy="noop"), prefetch_policy=policy_name
+    )
+    with closing(StorageManager(config)) as manager:
+        handle = manager.submit_prefetch_task(PrefetchTaskSpec(groups))
+        result = manager.query_prefetch_status(handle)
+        assert result is not None
+        assert [row.popcount() for row in result.hit_cells] == [0, 0]
+        assert len(calls) == 1
+        assert calls[0]["key_groups"] == groups
+        assert calls[0]["l1_locked_keys"].merge().popcount() == 2
+        assert manager.unsafe_read([row.keys[0] for row in groups]) == ([], [])
+
+
+@pytest.mark.parametrize("failure", ["backend", "reader-count"])
+def test_shared_prefetch_propagates_safety_failures(
+    storage_manager: StorageManager,
+    shared_backend: MagicMock,
+    failure: str,
+) -> None:
+    shared_backend.reserve_read.side_effect = RuntimeError("visibility failure")
+    spec = PrefetchTaskSpec(
+        _rows(count=1), num_kv_readers=2 if failure == "reader-count" else 1
+    )
+    error = ValueError if failure == "reader-count" else RuntimeError
+    with pytest.raises(
+        error, match="TP=1" if failure == "reader-count" else "visibility"
+    ):
+        storage_manager.submit_prefetch_task(spec)
+    if failure == "reader-count":
+        shared_backend.reserve_read.assert_not_called()
+    assert storage_manager.report_status()["l1_manager"]["read_locked_count"] == 0
 
 
 def test_shared_manager_rejects_runtime_l2_adapter() -> None:
