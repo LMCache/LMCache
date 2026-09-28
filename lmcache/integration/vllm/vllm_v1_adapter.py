@@ -750,6 +750,16 @@ class LMCacheConnectorV1Impl:
         #  not called, we should consider removing it.
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
         self.kv_caches = kv_caches
+        # Build the GPU connector's KV layer groups before post_init creates
+        # the storage backends: LMCacheMetadata.get_shapes() then returns the
+        # per-kernel-group shapes for every memory object, including the first
+        # stored chunks (models whose layers have different KV layouts).
+        engine = self.lmcache_engine
+        gpu_connector = getattr(engine, "gpu_connector", None)
+        if gpu_connector is not None and hasattr(
+            gpu_connector, "build_kv_layer_groups"
+        ):
+            gpu_connector.build_kv_layer_groups(list(kv_caches.values()))
         self._manager.post_init()
 
     @_lmcache_nvtx_annotate
