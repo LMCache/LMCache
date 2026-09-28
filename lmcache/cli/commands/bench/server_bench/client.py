@@ -23,6 +23,9 @@ if TYPE_CHECKING:
     import torch
 
     # First Party
+    from lmcache.cli.commands.bench.server_bench.model_layout import ModelCache
+    from lmcache.utils import EngineType
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
     from lmcache.v1.multiprocess.transfer_context import TransferContext
     from lmcache.v1.multiprocess.transport.base import RequestClient
 
@@ -138,6 +141,7 @@ class WorkerContext:
     spec: WorkerSpec
     kv_caches: "dict[str, torch.Tensor]"
     transfer_context: "TransferContext"
+    layout: ModelCache | None = None
 
 
 class ServerBenchClient:
@@ -167,6 +171,7 @@ class ServerBenchClient:
         self._num_blocks = 0
         self._num_engine_group_infos = 0
         self._kv_world_size = 0
+        self._key_options: dict[str, Any] = {}
 
     def start(self) -> None:
         """Connect, allocate KV resources, and register Workers.
@@ -219,6 +224,15 @@ class ServerBenchClient:
             )
             return None
 
+        for worker in self._workers:
+            if worker.layout is None:
+                continue
+            worker.layout.block_ids(num_full_tokens, sequence_id, 0, num_full_tokens)
+            if request_kind == "cold":
+                worker.layout.fill(
+                    num_full_tokens, sequence_id, worker.spec.kv_worker_id
+                )
+
         num_blocks = num_full_tokens // self._block_size
         usable_blocks = max(self._num_blocks - num_blocks, 1)
         return RequestContext(
@@ -260,6 +274,7 @@ class ServerBenchClient:
             start=0,
             end=request.num_full_tokens,
             world_size=self._kv_world_size,
+            **self._key_options,
         )
         started_at = time.monotonic()
         if not _send_lookup(req_client, lookup_key, tp_size=len(self._workers)):
@@ -346,10 +361,18 @@ class ServerBenchClient:
                 end=start_token + token_count,
                 worker_id=worker.spec.kv_worker_id,
                 world_size=self._kv_world_size,
+                **self._key_options,
             )
             block_ids_per_group = [
                 block_ids.copy() for _ in range(self._num_engine_group_infos)
             ]
+            if worker.layout is not None:
+                block_ids_per_group = worker.layout.block_ids(
+                    request.num_full_tokens,
+                    request.sequence_id,
+                    start_token,
+                    start_token + token_count,
+                )
             event = worker.transfer_context.create_recorded_event()
             future = worker.transfer_context.submit_store(
                 request.request_id,
@@ -445,10 +468,18 @@ class ServerBenchClient:
                 end=start_token + token_count,
                 worker_id=worker.spec.kv_worker_id,
                 world_size=self._kv_world_size,
+                **self._key_options,
             )
             block_ids_per_group = [
                 block_ids.copy() for _ in range(self._num_engine_group_infos)
             ]
+            if worker.layout is not None:
+                block_ids_per_group = worker.layout.block_ids(
+                    request.num_full_tokens,
+                    request.sequence_id,
+                    start_token,
+                    start_token + token_count,
+                )
             event = worker.transfer_context.create_recorded_event()
             future = worker.transfer_context.submit_retrieve(
                 request.request_id,
@@ -502,7 +533,7 @@ class ServerBenchClient:
     ) -> None:
         """Clear an engine-driven destination range before RETRIEVE.
 
-        This is a no-op in handle mode.
+        Model layouts clear retained windows; legacy handle mode is a no-op.
 
         Args:
             request: Request to clear.
@@ -514,6 +545,19 @@ class ServerBenchClient:
             ValueError: If a non-empty data-mode range is invalid.
         """
         self._require_started()
+        if self._config.model_layout is not None:
+            self._validate_token_range(request, start_token, token_count)
+            for worker in self._workers:
+                if worker.layout is not None and worker.spec.retrieve_enabled:
+                    for view in worker.layout.restore_views(
+                        request.num_full_tokens,
+                        request.sequence_id,
+                        start_token,
+                        start_token + token_count,
+                        self._chunk_size,
+                    ):
+                        view.zero_()
+            return
         if token_count == 0 or self._config.uses_handle_transfer:
             return
         self._validate_token_range(request, start_token, token_count)
@@ -549,7 +593,8 @@ class ServerBenchClient:
             token_count: Number of tokens.
 
         Returns:
-            One digest per chunk, or ``None`` if unavailable.
+            One digest per receiving rank for model layouts, otherwise per chunk;
+            ``None`` if unavailable.
 
         Raises:
             RuntimeError: If the client is not started.
@@ -559,6 +604,13 @@ class ServerBenchClient:
         if token_count == 0:
             return None
         self._validate_token_range(request, start_token, token_count)
+
+        if self._config.model_layout is not None:
+            return [
+                worker.layout.checksum()
+                for worker in self._workers
+                if worker.layout is not None and worker.spec.retrieve_enabled
+            ]
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
@@ -618,6 +670,67 @@ class ServerBenchClient:
 
         _send_end_session(req_client, request.request_id)
 
+    def wait_store_visible(self, request: RequestContext) -> None:
+        """Wait until every stored chunk is visible in the server's L1 cache."""
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _DEFAULT_RPC_TIMEOUT_S,
+            _make_key,
+        )
+        from lmcache.v1.multiprocess.custom_types import (
+            SKIP_L2_REQUEST_CONFIG_KEY,
+        )
+
+        client = self._require_started()
+        deadline = time.monotonic() + _DEFAULT_RPC_TIMEOUT_S
+        attempt = 0
+        while time.monotonic() < deadline:
+            key = _make_key(
+                request.token_ids[: request.num_full_tokens],
+                f"{request.request_id}:visible:{attempt}",
+                world_size=self._kv_world_size,
+                request_configs={SKIP_L2_REQUEST_CONFIG_KEY: True},
+                **self._key_options,
+            )
+            hits: int | None = None
+            lookup_completed = False
+            try:
+                remaining = max(0.001, deadline - time.monotonic())
+                client.lookup(key, len(self._workers)).result(timeout=remaining)
+                lookup_completed = True
+                remaining = max(0.001, deadline - time.monotonic())
+                result = client.query_prefetch_status(key.request_id).result(
+                    timeout=remaining
+                )
+                if not isinstance(result, int):
+                    raise RuntimeError(
+                        "L1-only STORE visibility probe did not complete"
+                    )
+                hits = result
+            except TimeoutError:
+                raise RuntimeError("STORE visibility timed out") from None
+            finally:
+                if lookup_completed:
+                    # The L1-only status query is terminal, so its exact hit
+                    # count is sufficient to release every retained read lock.
+                    try:
+                        if hits is not None:
+                            client.free_lookup_locks(key, len(self._workers)).result(
+                                timeout=_DEFAULT_RPC_TIMEOUT_S
+                            )
+                    finally:
+                        client.end_session(key.request_id).result(
+                            timeout=_DEFAULT_RPC_TIMEOUT_S
+                        )
+
+            if hits == request.total_chunks:
+                return
+            attempt += 1
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.01, remaining))
+        raise RuntimeError("STORE visibility timed out")
+
     def close(self) -> None:
         """Idempotently release resources, including after partial startup."""
         # First Party
@@ -657,6 +770,7 @@ class ServerBenchClient:
         # Drop tensors after contexts release their local transfer resources.
         for worker in self._workers:
             worker.kv_caches.clear()
+            worker.layout = None
 
         if self._req_client is not None:
             try:
@@ -685,7 +799,6 @@ class ServerBenchClient:
 
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
-            _DEFAULT_RPC_TIMEOUT_S,
             _INSTANCE_ID_BASE,
             _MODEL_NAME,
             DTYPE_MAP,
@@ -694,7 +807,6 @@ class ServerBenchClient:
             _is_mla_kv_size,
         )
         from lmcache.utils import EngineType
-        from lmcache.v1.gpu_connector.utils import LayoutHints
         from lmcache.v1.kv_layer_groups import (
             format_kvcache_shape_spec,
             parse_kvcache_shape_spec,
@@ -730,6 +842,10 @@ class ServerBenchClient:
 
         self._chunk_size = _get_chunk_size(self._req_client)
         self._log("Server chunk_size = %d" % self._chunk_size)
+
+        if config.model_layout is not None:
+            self._initialize_layout()
+            return
 
         layer_groups = parse_kvcache_shape_spec(config.kvcache_shape_spec)
         self._num_engine_group_infos = len(layer_groups) or 1
@@ -789,7 +905,6 @@ class ServerBenchClient:
         else:
             dtype_string = "mixed"
 
-        layout_hints: LayoutHints = {"kv_layout": "NHD"}
         engine_group_infos = [
             EngineGroupInfo(
                 engine_group_id=group_index,
@@ -833,6 +948,7 @@ class ServerBenchClient:
                 "(single-plane MLA group), got kv_size=%s" % kv_size_display
             )
         self._kv_world_size = 1 if use_mla else config.tp_size
+        self._key_options["num_kv_readers"] = config.tp_size if use_mla else 1
 
         for rank in range(config.tp_size):
             instance_id = _INSTANCE_ID_BASE + rank
@@ -888,25 +1004,102 @@ class ServerBenchClient:
                     "use --transfer-mode lmcache_driven for multiple groups"
                 )
 
-            try:
-                transfer_context.register(
-                    kv_caches,
-                    _MODEL_NAME,
-                    self._kv_world_size,
-                    self._blocks_in_chunk,
-                    _DEFAULT_RPC_TIMEOUT_S,
-                    layout_hints=layout_hints,
-                    engine_group_infos=engine_group_infos,
-                    engine_type=EngineType.VLLM,
-                )
-            except TimeoutError:
-                raise RuntimeError(
-                    "REGISTER_KV_CACHE failed for rank %d (instance_id=%d)"
-                    % (rank, instance_id)
-                ) from None
-            self._log("[rank %d] REGISTER_KV_CACHE: OK" % rank)
+            self._register_worker(
+                worker, engine_group_infos, EngineType.VLLM, _MODEL_NAME
+            )
 
         self._log("")
+
+    def _initialize_layout(self) -> None:
+        """Allocate and register a configured model-aware cache layout."""
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import _INSTANCE_ID_BASE
+        from lmcache.cli.commands.bench.server_bench.model_layout import (
+            allocate_layout,
+            resolve_rank_local_tensor_specs,
+        )
+        from lmcache.v1.multiprocess.transfer_context import create_transfer_context
+
+        spec = self._config.model_layout
+        assert spec is not None
+        assert self._req_client is not None
+
+        tensor_specs, engine = resolve_rank_local_tensor_specs(spec)
+        replicated = not any(tensor.sharded for tensor in tensor_specs)
+        self._kv_world_size = 1 if replicated else spec.parallel.tp_size
+        self._key_options = {
+            "model_name": spec.cache_name,
+            "num_kv_readers": spec.parallel.tp_size if replicated else 1,
+        }
+        self._block_size = self._chunk_size
+        self._blocks_in_chunk = 1
+        self._num_blocks = spec.allocation.num_blocks
+        full_tokens = (
+            (self._config.num_tokens + 1) // self._chunk_size * self._chunk_size
+        )
+        if not full_tokens:
+            raise ValueError("--num-tokens must provide a complete server chunk")
+
+        for rank in range(spec.parallel.tp_size):
+            cache = allocate_layout(
+                tensor_specs, self._num_blocks, self._chunk_size, "cuda", engine
+            )
+            cache.block_ids(full_tokens, 0, 0, full_tokens)
+            self._num_engine_group_infos = len(cache.groups)
+            instance_id = _INSTANCE_ID_BASE + rank
+            transfer_context = create_transfer_context(
+                cache.caches,
+                mode="lmcache_driven",
+                instance_id=instance_id,
+                req_client=self._req_client,
+            )
+            worker = WorkerContext(
+                spec=WorkerSpec(
+                    rank=rank,
+                    instance_id=instance_id,
+                    kv_worker_id=0 if replicated else rank,
+                    kv_world_size=self._kv_world_size,
+                    store_enabled=(rank == 0) if replicated else True,
+                ),
+                kv_caches=cache.caches,
+                transfer_context=transfer_context,
+                layout=cache,
+            )
+            self._workers.append(worker)
+            self._register_worker(worker, cache.groups, engine, spec.cache_name)
+
+        self._log("")
+
+    def _register_worker(
+        self,
+        worker: WorkerContext,
+        groups: list[EngineGroupInfo],
+        engine: EngineType,
+        name: str,
+    ) -> None:
+        """Register one allocated Worker and retain it for cleanup."""
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _DEFAULT_RPC_TIMEOUT_S,
+        )
+
+        try:
+            worker.transfer_context.register(
+                worker.kv_caches,
+                name,
+                self._kv_world_size,
+                self._blocks_in_chunk,
+                _DEFAULT_RPC_TIMEOUT_S,
+                layout_hints={"kv_layout": "NHD"},
+                engine_group_infos=groups,
+                engine_type=engine,
+            )
+        except TimeoutError:
+            raise RuntimeError(
+                "REGISTER_KV_CACHE failed for rank %d (instance_id=%d)"
+                % (worker.spec.rank, worker.spec.instance_id)
+            ) from None
+        self._log("[rank %d] REGISTER_KV_CACHE: OK" % worker.spec.rank)
 
     def _require_started(self) -> "RequestClient":
         """Return the live multiprocess client or raise before startup."""

@@ -183,7 +183,7 @@ class BaselineBenchCase:
             zip(cold_checksums, warm_checksums, strict=False)
         ):
             log(
-                "    chunk %d: cold=%s warm=%s %s"
+                "    checksum %d: cold=%s warm=%s %s"
                 % (
                     index,
                     cold_checksum[:12],
@@ -245,6 +245,8 @@ class BaselineBenchCase:
                 token_count=hit_tokens,
             )
 
+        if _transfer_succeeded(store):
+            client.wait_store_visible(request)
         client.end_session(request)
         return _RequestOutcome(
             lookup=lookup,

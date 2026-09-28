@@ -23,6 +23,9 @@ Key Types:
 """
 
 
+SKIP_L2_REQUEST_CONFIG_KEY = "lmcache.skip_l2"
+
+
 @dataclass(order=True, frozen=True)
 class IPCCacheServerKey:
     """Cache key for the IPC (multiprocess) protocol.

@@ -1,0 +1,5 @@
+model: {preset: kimi_k3}
+parallel: {tp_size: 8}
+allocation: {num_blocks: 9}
+layout: {mode: vllm, kv_cache_dtype: bfloat16}
+# This recipe requires a server chunk size divisible by 768 at TP8.

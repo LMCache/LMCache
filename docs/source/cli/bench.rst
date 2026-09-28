@@ -948,6 +948,26 @@ By default the tool runs forever (``--end`` unset); stop it with
 ``Ctrl-C`` at any time. Pass ``--end N`` for a bounded run.
 
 
+Model layouts
+~~~~~~~~~~~~~
+
+``--model-layout FILE`` builds synthetic GPU caches from a YAML model layout.
+It supports ``mha``, ``kda``, ``mla`` and ``dsv4_attention`` layers and does
+not run model inference. The server must enable ``lmcache_driven`` transfer
+and separate object groups. A minimal example is:
+
+.. code-block:: bash
+
+   lmcache server --chunk-size 256 --separate-object-groups \
+       --supported-transfer-mode lmcache_driven
+
+   lmcache bench server --model-layout examples/server_bench/basic.yaml \
+       --mode gpu --num-tokens 511 --start 0 --end 1 --interval 0
+
+``basic.yaml`` uses the engine-independent layout. The other files in
+``examples/server_bench`` are restricted vLLM layout simulations.
+
+
 Options
 ~~~~~~~
 

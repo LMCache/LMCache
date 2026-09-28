@@ -80,6 +80,7 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
         call.lookup(cold),
         call.compute_checksums(cold, start_token=0, token_count=2),
         call.store(cold, start_token=0, token_count=2),
+        call.wait_store_visible(cold),
         call.end_session(cold),
         call.create_request(0, request_id="req-0-warm", request_kind="warm"),
         call.lookup(warm),
