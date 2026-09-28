@@ -7,6 +7,7 @@ from __future__ import annotations
 # Standard
 import argparse
 import asyncio
+import json
 
 # Third Party
 import httpx
@@ -130,7 +131,9 @@ def test_a_storage_trace_is_refused(tmp_path):
     StorageTraceRecorder(path).close()
 
     with pytest.raises(SystemExit) as exit_info:
-        run_events_replay(_parse([path, "--coordinator-url", "http://c"]))
+        run_events_replay(
+            ReplayEventsCommand(), _parse([path, "--coordinator-url", "http://c"])
+        )
 
     assert exit_info.value.code == 2
 
@@ -141,7 +144,10 @@ def test_an_unreachable_coordinator_stops_the_replay_with_a_clean_exit(tmp_path)
     path = _events_file(str(tmp_path / "events.lct"))
 
     with pytest.raises(SystemExit) as exit_info:
-        run_events_replay(_parse([path, "--coordinator-url", "http://127.0.0.1:1"]))
+        run_events_replay(
+            ReplayEventsCommand(),
+            _parse([path, "--coordinator-url", "http://127.0.0.1:1"]),
+        )
 
     assert exit_info.value.code == 1
 
@@ -158,7 +164,9 @@ def test_the_stream_is_delivered_to_the_coordinator(tmp_path, monkeypatch):
         lambda **_kw: real_client(transport=httpx.ASGITransport(app=app)),
     )
 
-    run_events_replay(_parse([path, "--coordinator-url", "http://coordinator"]))
+    run_events_replay(
+        ReplayEventsCommand(), _parse([path, "--coordinator-url", "http://coordinator"])
+    )
 
     async def inspect() -> tuple[list, int]:
         async with real_client(
@@ -171,3 +179,41 @@ def test_the_stream_is_delivered_to_the_coordinator(tmp_path, monkeypatch):
     instances, placements = asyncio.run(inspect())
     assert [i["instance_id"] for i in instances] == ["node-a"]
     assert placements == 1
+
+
+def test_the_summary_honours_format_and_output(tmp_path, monkeypatch):
+    """``--format`` / ``--output`` are registered for every command: with
+    ``--quiet`` the summary is still saved to ``--output`` in ``--format``."""
+    path = _events_file(str(tmp_path / "events.lct"))
+    out = tmp_path / "summary.json"
+    app = create_app(
+        MPCoordinatorConfig(health_check_interval=0.0, eviction_check_interval=0.0)
+    )
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **_kw: real_client(transport=httpx.ASGITransport(app=app)),
+    )
+    command = ReplayEventsCommand()
+    parser = argparse.ArgumentParser()
+    command.register(parser.add_subparsers())
+    args = parser.parse_args(
+        [
+            "replay-events",
+            path,
+            "--coordinator-url",
+            "http://coordinator",
+            "--quiet",
+            "--format",
+            "json",
+            "--output",
+            str(out),
+        ]
+    )
+
+    command.execute(args)
+
+    summary = json.loads(out.read_text())
+    assert summary["title"] == "Events Replay Result"
+    assert summary["metrics"]["overall"]["records"] == 2
