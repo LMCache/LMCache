@@ -203,7 +203,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
               with:
                 disable-sudo-and-containers: false
                 egress-policy: audit
@@ -243,7 +243,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
               with:
                 disable-sudo-and-containers: false
                 egress-policy: audit
@@ -282,7 +282,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
               with:
                   disable-sudo-and-containers: false
                   egress-policy: audit
@@ -326,7 +326,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
               with:
                   disable-sudo-and-containers: false
                   egress-policy: audit
@@ -364,7 +364,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
               with:
                   disable-sudo-and-containers: false
                   egress-policy: audit
@@ -414,7 +414,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
               with:
                   disable-sudo-and-containers: false
                   egress-policy: audit
@@ -631,7 +631,7 @@ jobs:
 
         steps:
             - name: "Harden Runner"
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
               with:
                 disable-sudo-and-containers: false
                 egress-policy: audit
@@ -955,7 +955,7 @@ jobs:
 
         steps:
             - name: "Harden Runner"
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
               with:
                 disable-sudo-and-containers: false
                 egress-policy: audit
