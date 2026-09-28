@@ -129,17 +129,17 @@ def edits():
             parent.kv_cache_group_edits = previous
 
 
-def _attention_page_bytes() -> int:
+def _attention_page_bytes(num_kv_heads: int = NUM_KV_HEADS) -> int:
     """Bytes in one *logical* attention page, for either layout."""
-    elems = 2 * LOGICAL_BLOCK_SIZE * NUM_KV_HEADS * HEAD_SIZE
+    elems = 2 * LOGICAL_BLOCK_SIZE * num_kv_heads * HEAD_SIZE
     return elems * torch.finfo(torch.bfloat16).bits // 8
 
 
-def _attention_spec() -> _Spec:
+def _attention_spec(num_kv_heads: int = NUM_KV_HEADS) -> _Spec:
     return _Spec(
         kind=_SpecKind.FULL_ATTENTION,
         block_size=LOGICAL_BLOCK_SIZE,
-        page_size_bytes=_attention_page_bytes(),
+        page_size_bytes=_attention_page_bytes(num_kv_heads),
     )
 
 
@@ -154,6 +154,31 @@ def _fused_kv_cache(kernel_block_size: int = KERNEL_BLOCK_SIZE) -> torch.Tensor:
         pages * NUM_KV_HEADS * kernel_block_size * 2 * HEAD_SIZE,
         dtype=torch.bfloat16,
     ).view(pages, NUM_KV_HEADS, kernel_block_size, 2 * HEAD_SIZE)
+
+
+def _layout_aware_fused_kv_cache(
+    kv_layout: str, num_kv_heads: int = NUM_KV_HEADS
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return vLLM's registered rank-4 view and its dense physical view."""
+    numel = NUM_KERNEL_PAGES * num_kv_heads * KERNEL_BLOCK_SIZE * 2 * HEAD_SIZE
+    flat = torch.arange(numel, dtype=torch.bfloat16)
+    if kv_layout == "NHD":
+        physical = flat.view(
+            NUM_KERNEL_PAGES,
+            KERNEL_BLOCK_SIZE,
+            num_kv_heads,
+            2 * HEAD_SIZE,
+        )
+        return physical.permute(0, 2, 1, 3), physical
+    if kv_layout == "HND":
+        physical = flat.view(
+            NUM_KERNEL_PAGES,
+            num_kv_heads,
+            KERNEL_BLOCK_SIZE,
+            2 * HEAD_SIZE,
+        )
+        return physical, physical
+    raise ValueError(kv_layout)
 
 
 def _split_kv_cache(kernel_block_size: int = KERNEL_BLOCK_SIZE) -> torch.Tensor:
@@ -233,7 +258,10 @@ def _hybrid_config(
 
 
 def _edit_attention(
-    edits, attention_cache: torch.Tensor, attention_spec: _Spec | None = None
+    edits,
+    attention_cache: torch.Tensor,
+    attention_spec: _Spec | None = None,
+    kv_layout: str = "NHD",
 ) -> torch.Tensor:
     """Run the public entry point and return the edited attention tensor.
 
@@ -241,14 +269,24 @@ def _edit_attention(
         edits: The module under test.
         attention_cache: Registered tensor for the attention layer.
         attention_spec: Optional attention spec override.
+        kv_layout: vLLM's resolved physical KV layout.
 
     Returns:
         The attention layer's entry in the edited mapping. It is the *same
         object* as ``attention_cache`` when no rule matched.
     """
     config, kv_caches = _hybrid_config(attention_cache, attention_spec)
-    edited = edits.apply_kv_cache_group_edits(config, kv_caches, layout_hints={})
+    edited = edits.apply_kv_cache_group_edits(
+        config, kv_caches, layout_hints={"kv_layout": kv_layout}
+    )
     return edited["attn.0"]
+
+
+def _edited_block_size(viewed: torch.Tensor, kv_layout: str = "NHD") -> int:
+    """Read the logical block axis from an edited rank-4 or rank-5 view."""
+    if viewed.ndim == 4:
+        return viewed.shape[2 if kv_layout == "HND" else 1]
+    return viewed.shape[2]
 
 
 # --------------------------------------------------------------------------
@@ -263,7 +301,7 @@ def test_subpaged_edit_fires_on_fused_kv_layout(edits):
     this layout and left the group at the kernel block size.
     """
     cache = _fused_kv_cache()
-    assert _edit_attention(edits, cache).shape[2] == LOGICAL_BLOCK_SIZE
+    assert _edited_block_size(_edit_attention(edits, cache)) == LOGICAL_BLOCK_SIZE
 
 
 def test_subpaged_edit_fires_on_split_kv_layout(edits):
@@ -308,9 +346,9 @@ def test_subpaged_edit_restores_block_granularity(edits, make_cache):
     cache = make_cache()
     viewed = _edit_attention(edits, cache)
 
-    assert viewed.ndim == 5
+    assert viewed.ndim == cache.ndim
     assert viewed.shape[0] == NUM_LOGICAL_BLOCKS
-    assert viewed.shape[2] == LOGICAL_BLOCK_SIZE
+    assert _edited_block_size(viewed) == LOGICAL_BLOCK_SIZE
     # Same storage, never a copy.
     assert viewed.untyped_storage().data_ptr() == cache.untyped_storage().data_ptr()
     assert viewed.numel() == cache.numel()
@@ -364,8 +402,68 @@ def test_subpaged_edit_handles_permuted_fused_registration(edits):
 
     viewed = _edit_attention(edits, registered)
     assert viewed.shape[0] == NUM_LOGICAL_BLOCKS
-    assert viewed.shape[2] == LOGICAL_BLOCK_SIZE
+    assert _edited_block_size(viewed) == LOGICAL_BLOCK_SIZE
     torch.testing.assert_close(viewed.reshape(-1), physical.reshape(-1))
+
+
+@pytest.mark.parametrize("kv_layout", ["NHD", "HND"])
+@pytest.mark.parametrize("num_kv_heads", [1, 2, 32])
+def test_subpaged_fused_view_preserves_layout_identity(edits, kv_layout, num_kv_heads):
+    """Rank-4 edits must retain the layout identity used by detection."""
+    registered, physical = _layout_aware_fused_kv_cache(kv_layout, num_kv_heads)
+    viewed = _edit_attention(
+        edits,
+        registered,
+        attention_spec=_attention_spec(num_kv_heads),
+        kv_layout=kv_layout,
+    )
+
+    expected_shape = (
+        (NUM_LOGICAL_BLOCKS, LOGICAL_BLOCK_SIZE, 1, 2 * num_kv_heads * HEAD_SIZE)
+        if kv_layout == "NHD"
+        else (
+            NUM_LOGICAL_BLOCKS,
+            1,
+            LOGICAL_BLOCK_SIZE,
+            2 * num_kv_heads * HEAD_SIZE,
+        )
+    )
+    assert tuple(viewed.shape) == expected_shape
+    assert (
+        viewed.untyped_storage().data_ptr() == registered.untyped_storage().data_ptr()
+    )
+    torch.testing.assert_close(viewed.reshape(-1), physical.reshape(-1))
+
+    from lmcache.utils import EngineType
+    from lmcache.v1.gpu_connector.kv_format import detect_format, get_spec
+
+    detected_format, normalized = detect_format(
+        [viewed], EngineType.VLLM, {"kv_layout": kv_layout}
+    )
+    assert get_spec(normalized, detected_format).block_size() == LOGICAL_BLOCK_SIZE
+
+
+def test_subpaged_fused_view_rejects_unknown_layout_hint(edits):
+    """An unknown rank-4 layout must fail instead of guessing."""
+    config, kv_caches = _hybrid_config(_fused_kv_cache())
+    with pytest.raises(ValueError, match="kv_layout"):
+        edits.apply_kv_cache_group_edits(
+            config, kv_caches, {"kv_layout": "unsupported"}
+        )
+
+
+@pytest.mark.parametrize(
+    ("device_type", "default_layout"), [("cuda", "NHD"), ("cpu", "HND")]
+)
+def test_subpaged_fused_view_uses_detector_default_without_hint(
+    edits, device_type, default_layout
+):
+    """Legacy registrations without hints follow the detector's default."""
+    registered, _ = _layout_aware_fused_kv_cache(default_layout)
+    config, kv_caches = _hybrid_config(registered)
+    with patch.object(edits, "torch_device_type", device_type):
+        viewed = edits.apply_kv_cache_group_edits(config, kv_caches, {})["attn.0"]
+    assert _edited_block_size(viewed, default_layout) == LOGICAL_BLOCK_SIZE
 
 
 def test_subpaged_edit_rejects_permuted_split_registration(edits):
@@ -431,10 +529,12 @@ def test_both_edits_fire_on_fused_kv_hybrid(edits):
     Both rules must now fire.
     """
     config, kv_caches = _hybrid_config(_fused_kv_cache())
-    edited = edits.apply_kv_cache_group_edits(config, kv_caches, layout_hints={})
+    edited = edits.apply_kv_cache_group_edits(
+        config, kv_caches, layout_hints={"kv_layout": "NHD"}
+    )
 
     attention = edited["attn.0"]
-    assert attention.shape[2] == LOGICAL_BLOCK_SIZE, (
+    assert _edited_block_size(attention) == LOGICAL_BLOCK_SIZE, (
         "attention group still paged at the kernel block size; LMCache would "
         "misread it as slot-compressed"
     )
@@ -453,7 +553,9 @@ def test_edit_counts_include_both_rules(edits):
     """
     config, kv_caches = _hybrid_config(_fused_kv_cache())
     with patch.object(edits.logger, "info") as mock_info:
-        edits.apply_kv_cache_group_edits(config, kv_caches, layout_hints={})
+        edits.apply_kv_cache_group_edits(
+            config, kv_caches, layout_hints={"kv_layout": "NHD"}
+        )
 
     counts = mock_info.call_args.args[1]
     assert counts == {
@@ -470,11 +572,13 @@ def test_every_group_reaches_block_id_granularity(edits):
     == 1 for these groups."
     """
     config, kv_caches = _hybrid_config(_fused_kv_cache())
-    edited = edits.apply_kv_cache_group_edits(config, kv_caches, layout_hints={})
+    edited = edits.apply_kv_cache_group_edits(
+        config, kv_caches, layout_hints={"kv_layout": "NHD"}
+    )
 
     for group in config.kv_cache_groups:
         for name in group.layer_names:
-            assert edited[name].shape[2] == group.kv_cache_spec.block_size
+            assert _edited_block_size(edited[name]) == group.kv_cache_spec.block_size
 
 
 def test_flash_attention_hybrid_needs_no_attention_edit(edits):
@@ -487,7 +591,9 @@ def test_flash_attention_hybrid_needs_no_attention_edit(edits):
     config, kv_caches = _hybrid_config(
         _fused_kv_cache(kernel_block_size=LOGICAL_BLOCK_SIZE)
     )
-    edited = edits.apply_kv_cache_group_edits(config, kv_caches, layout_hints={})
+    edited = edits.apply_kv_cache_group_edits(
+        config, kv_caches, layout_hints={"kv_layout": "NHD"}
+    )
 
     # Passed through untouched, and already at block-id granularity.
     assert edited["attn.0"] is kv_caches["attn.0"]
