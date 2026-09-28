@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -81,7 +81,9 @@ msgid ""
 " to lookup and inject cached KV chunks for any reused input content. The "
 "sequence diagram below shows how a prompt request flows through vLLM with"
 " LMCache:"
-msgstr "当 LMCache 与 vLLM 集成时，推理管道会增强以查找并注入缓存的 KV 块，以便处理任何重复使用的输入内容。下面的序列图展示了提示请求如何通过 vLLM 和 LMCache 流动："
+msgstr ""
+"当 LMCache 与 vLLM 集成时，推理管道会增强以查找并注入缓存的 KV "
+"块，以便处理任何重复使用的输入内容。下面的序列图展示了提示请求如何通过 vLLM 和 LMCache 流动："
 
 #: ../../source/developer_guide/integration.rst:44
 msgid ""
@@ -91,7 +93,10 @@ msgid ""
 "LMCache retrieves the KV chunk (potentially from CPU or disk) and returns"
 " it to vLLM. vLLM then injects these KV tensors into the model's "
 "attention cache instead of recomputing them from scratch."
-msgstr "**缓存查找**\\ ：在接收到新的提示后，vLLM（通过 LMCache 连接器）计算标识符（例如，令牌序列的哈希值）并查询 LMCache 以获取匹配的 KV 缓存块。如果发生缓存命中，LMCache 将检索 KV 块（可能来自 CPU 或磁盘）并将其返回给 vLLM。然后，vLLM 将这些 KV 张量注入到模型的注意力缓存中，而不是从头开始重新计算它们。"
+msgstr ""
+"**缓存查找**\\ ：在接收到新的提示后，vLLM（通过 LMCache 连接器）计算标识符（例如，令牌序列的哈希值）并查询 LMCache "
+"以获取匹配的 KV 缓存块。如果发生缓存命中，LMCache 将检索 KV 块（可能来自 CPU 或磁盘）并将其返回给 vLLM。然后，vLLM "
+"将这些 KV 张量注入到模型的注意力缓存中，而不是从头开始重新计算它们。"
 
 #: ../../source/developer_guide/integration.rst:46
 msgid ""
@@ -100,7 +105,9 @@ msgid ""
 "new KV values as usual. Cached segments (e.g. previously seen text) are "
 "skipped in computation, significantly reducing the time-to-first-token "
 "(TTFT) and saving GPU cycles."
-msgstr "**使用缓存的推理**\\ ：vLLM 继续进行推理。对于没有可用缓存的提示部分（缓存未命中），模型会像往常一样计算新的 KV 值。缓存的片段（例如，之前见过的文本）在计算中被跳过，显著减少了首次令牌时间（TTFT），并节省了显存周期。"
+msgstr ""
+"**使用缓存的推理**\\ ：vLLM 继续进行推理。对于没有可用缓存的提示部分（缓存未命中），模型会像往常一样计算新的 KV "
+"值。缓存的片段（例如，之前见过的文本）在计算中被跳过，显著减少了首次令牌时间（TTFT），并节省了显存周期。"
 
 #: ../../source/developer_guide/integration.rst:48
 msgid ""
@@ -110,5 +117,61 @@ msgid ""
 " background) so it doesn't delay the response. The response is returned "
 "to the user promptly, and LMCache's background tasks will offload the new"
 " KV data to CPU, disk, or other backends for future reuse."
-msgstr "**异步缓存写入**\\ ：在处理完提示后，任何新生成的 KV 缓存块（对应于该提示的内容）都被交给 LMCache 进行存储。此放置操作是异步进行的（在后台），因此不会延迟响应。响应会及时返回给用户，而 LMCache 的后台任务将把新的 KV 数据卸载到 CPU、磁盘或其他后端以供将来重用。"
+msgstr ""
+"**异步缓存写入**\\ ：在处理完提示后，任何新生成的 KV 缓存块（对应于该提示的内容）都被交给 LMCache "
+"进行存储。此放置操作是异步进行的（在后台），因此不会延迟响应。响应会及时返回给用户，而 LMCache 的后台任务将把新的 KV 数据卸载到 "
+"CPU、磁盘或其他后端以供将来重用。"
+
+#: ../../source/developer_guide/integration.rst:51
+msgid "SGLang on MUSA"
+msgstr "SGLang 在 MUSA 上"
+
+#: ../../source/developer_guide/integration.rst:53
+msgid ""
+"LMCache supports SGLang on Moore Threads MUSA devices. In-process "
+"transfers use TorchMUSA ``index_select`` and ``index_copy_`` and support:"
+msgstr "LMCache 支持在 Moore Threads MUSA 设备上使用 SGLang。进程内传输使用 TorchMUSA ``index_select`` 和 ``index_copy_``，并支持："
+
+#: ../../source/developer_guide/integration.rst:56
+msgid "non-layerwise MHA with separate K/V layer pools;"
+msgstr "非逐层的 MHA，具有独立的 K/V 层池；"
+
+#: ../../source/developer_guide/integration.rst:57
+msgid "non-layerwise MLA; and"
+msgstr "非逐层 MLA; 和"
+
+#: ../../source/developer_guide/integration.rst:58
+msgid "layerwise MHA."
+msgstr "逐层 MHA。"
+
+#: ../../source/developer_guide/integration.rst:60
+msgid ""
+"Layerwise MLA and multiprocess MLA are not supported. For in-process "
+"mode, configure LMCache without ``mp_host``/``mp_port``:"
+msgstr "不支持逐层 MLA 和多进程 MLA。在进程内模式下，配置 LMCache 时不使用 ``mp_host``/``mp_port``："
+
+#: ../../source/developer_guide/integration.rst:70
+msgid ""
+"When SGLang passes a slot mapping for only the uncached suffix, LMCache "
+"applies the prefix offset before gathering or scattering rows."
+msgstr "当 SGLang 仅为未缓存后缀传递槽映射时，LMCache 在收集或散布行之前应用前缀偏移。"
+
+#: ../../source/developer_guide/integration.rst:73
+msgid ""
+"The multiprocess MUSA path supports MHA with separate K and V pools. It "
+"uses TorchMUSA memory/event IPC and the Torch block-transfer fallback. "
+"The handle path is opt-in and fail-closed; set this variable in both the "
+"SGLang worker and LMCache server environments:"
+msgstr "多进程 MUSA 路径支持具有独立 K 和 V 池的 MHA。它使用 TorchMUSA 内存/事件 IPC 和 Torch 块传输回退。句柄路径是可选的，并且在失败时关闭；在 SGLang 工作器和 LMCache 服务器环境中设置此变量："
+
+#: ../../source/developer_guide/integration.rst:82
+msgid "Then configure the standalone server address as usual:"
+msgstr "然后像往常一样配置独立服务器地址："
+
+#: ../../source/developer_guide/integration.rst:89
+msgid ""
+"Startup fails with a capability error when the installed TorchMUSA does "
+"not provide compatible tensor IPC and event IPC APIs. LMCache does not "
+"substitute CUDA IPC wrappers for MUSA tensors."
+msgstr "启动时出现能力错误，原因是安装的 TorchMUSA 未提供兼容的张量 IPC 和事件 IPC API。LMCache 不会为 MUSA 张量替代 CUDA IPC 包装器。"
 

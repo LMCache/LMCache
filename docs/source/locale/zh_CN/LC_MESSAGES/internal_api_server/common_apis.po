@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"POT-Creation-Date: 2026-09-28 09:40+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -29,7 +29,9 @@ msgid ""
 "(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
 "for better feature support and performance. For the MP mode equivalent of"
 " this page, see :doc:`/mp/http_api`."
-msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP mode </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/http_api`。"
+msgstr ""
+"本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP mode </mp/index>` "
+"以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/http_api`。"
 
 #: ../../source/internal_api_server/common_apis.rst:11
 msgid ""
@@ -78,7 +80,7 @@ msgstr "**响应**: ``application/json`` — 所有环境变量的 JSON 对象�
 
 #: ../../source/internal_api_server/common_apis.rst:32
 #: ../../source/internal_api_server/common_apis.rst:193
-#: ../../source/internal_api_server/common_apis.rst:339
+#: ../../source/internal_api_server/common_apis.rst:350
 msgid "**Example Response**:"
 msgstr "**示例响应**:"
 
@@ -113,7 +115,7 @@ msgstr "**路径**: ``/loglevel``"
 #: ../../source/internal_api_server/common_apis.rst:54
 #: ../../source/internal_api_server/common_apis.rst:140
 #: ../../source/internal_api_server/common_apis.rst:170
-#: ../../source/internal_api_server/common_apis.rst:312
+#: ../../source/internal_api_server/common_apis.rst:323
 msgid "**Parameters**:"
 msgstr "**参数**:"
 
@@ -121,7 +123,7 @@ msgstr "**参数**:"
 #: ../../source/internal_api_server/common_apis.rst:143
 #: ../../source/internal_api_server/common_apis.rst:173
 #: ../../source/internal_api_server/common_apis.rst:238
-#: ../../source/internal_api_server/common_apis.rst:315
+#: ../../source/internal_api_server/common_apis.rst:326
 msgid "Name"
 msgstr "名称"
 
@@ -129,7 +131,7 @@ msgstr "名称"
 #: ../../source/internal_api_server/common_apis.rst:143
 #: ../../source/internal_api_server/common_apis.rst:173
 #: ../../source/internal_api_server/common_apis.rst:238
-#: ../../source/internal_api_server/common_apis.rst:315
+#: ../../source/internal_api_server/common_apis.rst:326
 msgid "Type"
 msgstr "类型"
 
@@ -137,7 +139,7 @@ msgstr "类型"
 #: ../../source/internal_api_server/common_apis.rst:143
 #: ../../source/internal_api_server/common_apis.rst:173
 #: ../../source/internal_api_server/common_apis.rst:238
-#: ../../source/internal_api_server/common_apis.rst:315
+#: ../../source/internal_api_server/common_apis.rst:326
 msgid "Description"
 msgstr "描述"
 
@@ -214,7 +216,7 @@ msgid "Reset all Prometheus metrics to their initial state."
 msgstr "重置所有 Prometheus 指标为其初始状态。"
 
 #: ../../source/internal_api_server/common_apis.rst:123
-#: ../../source/internal_api_server/common_apis.rst:309
+#: ../../source/internal_api_server/common_apis.rst:320
 msgid "**Method**: ``POST``"
 msgstr "**方法**: ``POST``"
 
@@ -363,7 +365,18 @@ msgstr "**示例响应**\\ （不健康）："
 msgid "``POST /run_script`` — Run Script"
 msgstr "``POST /run_script`` — 运行脚本"
 
-#: ../../source/internal_api_server/common_apis.rst:304
+#: ../../source/internal_api_server/common_apis.rst:306
+msgid ""
+"This endpoint runs caller-supplied code in-process. The restricted "
+"builtins are **not** a security sandbox — combined with the injected "
+"``app`` object and any allowed imports, treat it as full remote code "
+"execution. It is therefore **disabled by default** (requests return "
+"``404``); enable it explicitly with ``run_script_api_enabled`` "
+"(``LMCACHE_RUN_SCRIPT_API_ENABLED=true``, or ``--run-script-api-enabled``"
+" on the standalone server) and only on a trusted network."
+msgstr "此端点在进程中运行调用者提供的代码。受限的内置函数**不是**安全沙箱——结合注入的``app``对象和任何允许的导入，将其视为完全的远程代码执行。因此，默认情况下**禁用**（请求返回``404``）；通过``run_script_api_enabled``显式启用它（``LMCACHE_RUN_SCRIPT_API_ENABLED=true``，或在独立服务器上使用``--run-script-api-enabled``），并仅在受信任的网络上使用。"
+
+#: ../../source/internal_api_server/common_apis.rst:315
 msgid ""
 "Upload and execute a Python script in a restricted sandbox environment. "
 "The script has access to ``app`` (the FastAPI application instance) and a"
@@ -373,27 +386,27 @@ msgstr ""
 "在受限的沙箱环境中上传并执行 Python 脚本。该脚本可以访问 ``app``\\ （FastAPI 应用实例）和有限的内置函数。导入仅限于在 "
 "``script_allowed_imports`` 中配置的模块。"
 
-#: ../../source/internal_api_server/common_apis.rst:310
+#: ../../source/internal_api_server/common_apis.rst:321
 msgid "**Path**: ``/run_script``"
 msgstr "**路径**: ``/run_script``"
 
-#: ../../source/internal_api_server/common_apis.rst:311
+#: ../../source/internal_api_server/common_apis.rst:322
 msgid "**Content-Type**: ``multipart/form-data``"
 msgstr "**内容类型**: ``multipart/form-data``"
 
-#: ../../source/internal_api_server/common_apis.rst:317
+#: ../../source/internal_api_server/common_apis.rst:328
 msgid "``script``"
 msgstr "``script``"
 
-#: ../../source/internal_api_server/common_apis.rst:317
+#: ../../source/internal_api_server/common_apis.rst:328
 msgid "file"
 msgstr "文件"
 
-#: ../../source/internal_api_server/common_apis.rst:317
+#: ../../source/internal_api_server/common_apis.rst:328
 msgid "Python script file to execute"
 msgstr "要执行的 Python 脚本文件"
 
-#: ../../source/internal_api_server/common_apis.rst:320
+#: ../../source/internal_api_server/common_apis.rst:331
 msgid ""
 "**Response**: ``text/plain`` — The ``result`` variable from the script, "
 "or ``\"Script executed successfully\"`` if no ``result`` is set."
@@ -401,15 +414,15 @@ msgstr ""
 "**响应**: ``text/plain`` — 脚本中的 ``result`` 变量，或者如果没有设置 ``result`` 则为 "
 "``\"脚本执行成功\"``\\ 。"
 
-#: ../../source/internal_api_server/common_apis.rst:328
+#: ../../source/internal_api_server/common_apis.rst:339
 msgid "**Example Script** (``scratch.py``):"
 msgstr "**示例脚本** (``scratch.py``):"
 
-#: ../../source/internal_api_server/common_apis.rst:345
+#: ../../source/internal_api_server/common_apis.rst:356
 msgid "**Error Response** (no script, HTTP 400):"
 msgstr "**错误响应**\\ （无脚本，HTTP 400）："
 
-#: ../../source/internal_api_server/common_apis.rst:351
+#: ../../source/internal_api_server/common_apis.rst:362
 msgid "**Error Response** (execution error, HTTP 500):"
 msgstr "**错误响应**\\ （执行错误，HTTP 500）："
 

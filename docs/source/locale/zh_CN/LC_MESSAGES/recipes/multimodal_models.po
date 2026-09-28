@@ -1,0 +1,186 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/recipes/multimodal_models.rst:4
+msgid "Multimodal Models"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:6
+msgid ""
+"Recipes for multimodal (vision-language) architectures validated end-to-"
+"end with LMCache, with a recipe page per architecture covering only the "
+"LMCache-specific configuration that diverges from defaults."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:10
+msgid ""
+"Multimodal models run a separate encoder (vision/audio) whose output "
+"embeddings are injected into the decoder at placeholder token positions; "
+"the decoder itself uses the ordinary paged KV cache, so LMCache caches "
+"multimodal requests through the same KV pathway as text-only models."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:15
+msgid ""
+"The one multimodal-specific concern is **cache keying**: vLLM emits "
+"identical placeholder token ids for every image, so raw token ids cannot "
+"distinguish images. LMCache handles this automatically by overwriting "
+"each placeholder span with a per-position value sequence derived from the"
+" image's full content hash (``mm_hash``) before key hashing -- same text "
+"with different images gets distinct cache entries, and no configuration "
+"is required. This applies to both the in-process connector and MP mode."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:23
+msgid ""
+"Vision-encoder outputs are a separate, optional cache -- see "
+":doc:`../non_kv_cache/encoder_cache` (in-process mode only; not yet "
+"available in MP mode)."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:28
+msgid "Recipe page contents"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:30
+msgid "Each recipe page is intentionally minimal:"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:32
+msgid "**Validated models** -- exact HF repo IDs that have been tested."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:33
+msgid ""
+"**Engine tabs** -- one tab per serving engine (vLLM, SGLang, TRT-LLM). "
+"Each tab links to the engine's own documentation for the model and shows "
+"the exact ``lmcache server`` and engine launch commands. Tabs for engines"
+" that are not yet validated state so explicitly."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:37
+msgid "**CacheBlend support** -- validation status (may be empty)."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:38
+msgid ""
+"**Compression support** -- table of compression methods (CacheGen, etc.) "
+"with per-method validation status. Extensible: new methods get a row."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:40
+msgid "**Caveats** -- known limitations, if any."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:42
+msgid ""
+"For the generic LMCache + engine wiring (ports, remote hosts, sending a "
+"first request), see :doc:`../getting_started/quickstart`. Recipes assume "
+"that page as a prerequisite."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:47
+msgid "Supported architectures"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:53
+msgid "Model"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:54
+msgid "Example HF model"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:55
+msgid "vLLM"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:56
+msgid "SGLang"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:57
+msgid "TRT-LLM"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:58
+msgid "Recipe"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:60
+msgid "Qwen2.5-VL"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:61
+msgid "``Qwen/Qwen2.5-VL-3B-Instruct``"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:62
+msgid "✓"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:63
+#: ../../source/recipes/multimodal_models.rst:64
+msgid "—"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:65
+msgid ":doc:`qwen2_5_vl`"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:67
+msgid ""
+"Legend: ``✓`` validated, ``—`` not validated. The **Model** column is the"
+" model family; each recipe page lists the exact vLLM architecture class "
+"it covers."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:70
+msgid ""
+"Multimodal models whose decoder interleaves attention types keep their "
+"recipe under :doc:`/mp/hybrid_models` -- e.g. Gemma 3 (:doc:`gemma3`)."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:74
+msgid "Contributing a recipe"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:76
+msgid "To add a new multimodal architecture:"
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:78
+msgid ""
+"Copy an existing page (e.g. ``qwen2_5_vl.rst``) to "
+"``recipes/<architecture_snake_case>.rst``."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:80
+msgid ""
+"Fill in **Validated models**, **Engines**, **LMCache configuration**, and"
+" **Caveats**. Keep each section terse -- if a field has nothing to say, "
+"say so in one line rather than padding it."
+msgstr ""
+
+#: ../../source/recipes/multimodal_models.rst:83
+msgid "Add a row to the table above and an entry to the hidden toctree below."
+msgstr ""
+
