@@ -99,12 +99,14 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[tuple[bytes, bool]]: ...
 
     @rpc_method
-    def lookup(self, key: IPCCacheServerKey, tp_size: int) -> MessagingFuture[int]:
-        """Submit a prefix lookup; resolves to the covered-present chunk count.
+    def lookup(self, key: IPCCacheServerKey, tp_size: int) -> MessagingFuture[None]:
+        """Submit a prefix lookup.
 
-        The reply is the number of leading APC-covered chunks resident in L1
-        (``covered_chunks`` on the key). 0 when the feature is unused. Old
-        payloads (no ``covered_chunks``) behave exactly as before.
+        The key's ``covered_chunks`` tells the server how many leading chunks
+        the serving engine's prefix cache already covers; the server touches
+        them but skips read-locking / L2-prefetching them. The reply carries no
+        value (the ``covered_present`` store-hole signal is a proto follow-up;
+        see docs/design/v1/multiprocess/modules/apc_covered_lookup.md).
         """
         ...
 
