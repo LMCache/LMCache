@@ -34,7 +34,6 @@ class EventType(Enum):
     L1_READ_FAILED = "l1.read.failed"
 
     # StorageManager events
-    SM_READ_PREFETCHED = "sm.read.prefetched"
     SM_READ_PREFETCHED_FINISHED = "sm.read.prefetched_finished"
     SM_WRITE_RESERVED = "sm.write.reserved"
     SM_WRITE_FINISHED = "sm.write.finished"
@@ -45,7 +44,6 @@ class EventType(Enum):
 
     # L2 Prefetch Controller events
     L2_PREFETCH_LOOKUP_SUBMITTED = "l2.prefetch.lookup.submitted"
-    L2_PREFETCH_LOOKUP_COMPLETED = "l2.prefetch.lookup.completed"
     L2_PREFETCH_LOAD_SUBMITTED = "l2.prefetch.load.submitted"
     L2_PREFETCH_LOAD_COMPLETED = "l2.prefetch.load.completed"
     # Per-adapter load task events, for throughput correlation.  Fire once

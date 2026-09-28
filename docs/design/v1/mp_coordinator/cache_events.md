@@ -34,6 +34,11 @@ storage layer ──► EventBus ──► CacheEventSubscriber ──► CacheE
   raise `CacheEventPublishError`. Retrying is safe; the current subscriber
   drops a failed drained list, consumes its sequence numbers, and leaves a
   gap that marks the coordinator view stale.
+- **`TraceCacheEventSink`** appends each batch, in wire form, to an
+  `events`-level trace file (`lmcache server --trace-level events`); it
+  needs no coordinator. **`MultiCacheEventSink`** fans one flush out to
+  several sinks and raises only after every sink was tried. See
+  `docs/design/v1/mp_observability/trace.md` §12.
 - **`KafkaCacheEventSink`** produces one JSON record per batch with the
   message key set to `instance_id`, so Kafka assigns one instance's
   records to one partition. The producer enables idempotence, requires

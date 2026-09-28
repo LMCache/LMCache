@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# NATS and etcd for the local Dynamo + LMCache demo.
+
+name: dynamo-lmcache
+
+networks:
+  server:
+    driver: bridge
+
+services:
+  nats-server:
+    image: nats:2.11.4
+    command: [ "-c", "/etc/nats/nats-server.conf" ]
+    volumes:
+      # max_payload set to 15MB to accommodate 10MB decoded embeddings
+      # Base64 encoding: 10MB → ~13.3MB, 15MB provides ~1.7MB buffer for metadata
+      # max_payload must be configured via configuration file (does not exist as a CLI flag)
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+    ports:
+      - 4222:4222
+      - 6222:6222
+      - 8222:8222  # the endpoints include /varz, /healthz, ...
+    networks:
+      - server
+
+  etcd-server:
+    image: bitnamilegacy/etcd:3.6.1
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+    ports:
+      - 2379:2379  # this port exposes the /metrics endpoint
+      - 2380:2380
+    networks:
+      - server
