@@ -121,6 +121,7 @@ class TestEventsTraceRecorder:
         with TraceReader(trace_path) as reader:
             header = reader.header
         assert header.level == "events"
+        assert header.trace_schema_version == 2
         assert header.level_meta == {"instance_id": "node-a", "x": 1}
         assert header.sm_config_digest
 
