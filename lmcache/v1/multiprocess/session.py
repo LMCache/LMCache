@@ -45,9 +45,7 @@ class Session:
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
     prefetch_group_windows: tuple[int, ...] = ()
-    # Leading chunks the serving engine's prefix cache already covers; the
-    # lookup neither read-locked nor L2-prefetched them, so every lock-release
-    # path must clamp its range to start no earlier than this boundary.
+    # Leading APC-covered chunks the lookup skipped; lock-release clamps to it.
     prefetch_covered_chunks: int = 0
     extras: dict[str, Any] = field(default_factory=dict)
     _lookup_generation: int = field(default=0, repr=False)
