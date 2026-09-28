@@ -36,16 +36,25 @@ MAGIC: bytes = b"LMCT"
 FORMAT_VERSION: int = 1
 
 #: Bumped whenever the captured storage API surface changes in a way that makes
-#: older traces undecodable or incorrect to replay — e.g. a traced
-#: StorageManager method gains/loses an argument, an argument type's
-#: codec wire form changes, or a new codec tag is introduced.  Owned by
-#: the trace subsystem, independent of the LMCache package version,
-#: because ``lmcache.__version__`` bumps cover many changes irrelevant
-#: to the trace contract.
+#: older readers misread new traces, or makes older traces unsafe to
+#: replay — e.g. a traced StorageManager method gains/loses an argument,
+#: an argument type's codec wire form changes, or a new codec tag is
+#: introduced. Owned by the trace subsystem, independent of the LMCache
+#: package version.
 #:
 #: Version 2: ``StorageManager.submit_prefetch_task`` no longer takes
 #: ``skip_l2``, and ``PrefetchTaskSpec`` carries memory-tag filters.
-TRACE_SCHEMA_VERSION: int = 2
+#: Version 3: ``ObjectKey`` records ``cache_salt``; both storage and
+#: events recorders write this version.
+TRACE_SCHEMA_VERSION: int = 3
+
+#: Storage trace schema versions readable by this build. Event traces are
+#: checked against ``level_meta.cache_event_schema_version`` instead.
+READABLE_TRACE_SCHEMA_VERSIONS: frozenset[int] = frozenset({2, 3})
+
+#: Storage replay requires preserved key identity. Version 2 recorders
+#: could omit ``ObjectKey.cache_salt``, which cannot be reconstructed.
+STORAGE_REPLAYABLE_TRACE_SCHEMA_VERSIONS: frozenset[int] = frozenset({3})
 
 
 class Header(msgspec.Struct, tag="header", omit_defaults=True):
@@ -64,8 +73,10 @@ class Header(msgspec.Struct, tag="header", omit_defaults=True):
 
     trace_schema_version: int
     """:data:`TRACE_SCHEMA_VERSION` at record time, enforced for storage
-    traces only. Event traces use ``level_meta.cache_event_schema_version``
-    for payload compatibility, independently of storage API changes."""
+    traces only: readers accept explicitly supported versions, and storage
+    replay additionally checks key-identity compatibility. Event traces use
+    ``level_meta.cache_event_schema_version`` for payload compatibility,
+    independently of storage API changes."""
 
     t_mono_start: float
     """``time.monotonic()`` at recorder construction.  Record

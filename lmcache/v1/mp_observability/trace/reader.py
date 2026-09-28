@@ -22,7 +22,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.trace.format import (
     FORMAT_VERSION,
     MAGIC,
-    TRACE_SCHEMA_VERSION,
+    READABLE_TRACE_SCHEMA_VERSIONS,
     Header,
     Record,
     decode_header,
@@ -48,7 +48,8 @@ class TraceReader:
     Closing the reader closes the underlying file handle.
 
     File-format validation applies to every level. Storage traces must also
-    match ``TRACE_SCHEMA_VERSION``; event payload compatibility is checked
+    use a version in ``READABLE_TRACE_SCHEMA_VERSIONS``; storage replay
+    applies its own stricter check. Event payload compatibility is checked
     by ``EventsTrace.load`` against ``cache_event_schema_version`` instead.
     """
 
@@ -128,12 +129,15 @@ class TraceReader:
             )
         if (
             header.level == "storage"
-            and header.trace_schema_version != TRACE_SCHEMA_VERSION
+            and header.trace_schema_version not in READABLE_TRACE_SCHEMA_VERSIONS
         ):
+            supported_versions = ", ".join(
+                str(version) for version in sorted(READABLE_TRACE_SCHEMA_VERSIONS)
+            )
             raise ValueError(
                 f"trace file {self._path!r}: unsupported trace_schema_version "
                 f"{header.trace_schema_version} "
-                f"(this build expects {TRACE_SCHEMA_VERSION})"
+                f"(this build supports {supported_versions})"
             )
         return header
 
