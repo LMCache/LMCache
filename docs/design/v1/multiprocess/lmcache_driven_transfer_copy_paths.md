@@ -24,7 +24,15 @@ staging copy's line rate, so the kernel dominates the transfer.
 | GPU resources | temp buffer (4 slots), SMs | copy engine only |
 | CPU cost | ~1 launch + 1 copy per chunk | ~0.6 us per (kv, layer, block) entry |
 | Layouts | all `EngineKVFormat`s | token-major, contiguous block: formats 0, 1, 2, 3, 4, 5, 9, 11, 13 |
-| Requirements | any CUDA / HIP | CUDA runtime and driver >= 12.8, or ROCm/HIP >= 7.15 |
+| Requirements | any CUDA / HIP | CUDA runtime and driver >= 12.8, or ROCm/HIP >= 7.15 (opt-in) |
+
+On ROCm the direct path is **opt-in**: it is built when HIP >= 7.15 but stays
+disabled at runtime unless `LMCACHE_ROCM_ENABLE_BATCH_MEMCPY` is set to a
+non-zero value. The compile-time `HIP_VERSION` guard cannot prove the op is
+functional -- some HIP builds link `hipMemcpyBatchAsync` but return
+`hipErrorNotSupported` at runtime -- so `batch_memcpy_supported()` requires the
+explicit opt-in before selecting the copy-engine path. CUDA behaviour is
+unchanged (gated purely on the 12.8 runtime/driver check).
 
 Every eligible format is affine in (kv plane, layer, block):
 `address = base(kv, layer) + kv * kv_stride + layer * layer_stride +

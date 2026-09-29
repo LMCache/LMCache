@@ -4,6 +4,7 @@
 
 #include "phase_timing_recorder.cuh"
 
+#include <cstdlib>
 #include <deque>
 #include <mutex>
 
@@ -761,11 +762,15 @@ bool batch_memcpy_supported() {
     if (cudaRuntimeGetVersion(&runtime) != cudaSuccess) return false;
     if (cudaDriverGetVersion(&driver) != cudaSuccess) return false;
 #if defined(USE_ROCM)
-    // HIP versions its runtime/driver on a different scale; the compile-time
-    // HIP_VERSION guard already ensures hipMemcpyBatchAsync is available.
+    // HIP versions its runtime/driver on a different scale, so the compile-time
+    // HIP_VERSION guard cannot by itself prove the op is functional: some HIP
+    // builds link hipMemcpyBatchAsync but return hipErrorNotSupported at
+    // runtime. Keep the ROCm direct copy-engine path opt-in -- it is enabled
+    // only when LMCACHE_ROCM_ENABLE_BATCH_MEMCPY is set to a non-zero value.
     (void)runtime;
     (void)driver;
-    return true;
+    const char* enable = std::getenv("LMCACHE_ROCM_ENABLE_BATCH_MEMCPY");
+    return enable != nullptr && enable[0] != '\0' && enable[0] != '0';
 #else
     return runtime >= 12080 && driver >= 12080;
 #endif
