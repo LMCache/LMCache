@@ -12,7 +12,6 @@ import time
 # First Party
 from lmcache.lmcache_native import PeriodicEventNotifier
 from lmcache.logging import init_logger
-from lmcache.utils import lmcache_deprecate
 from lmcache.v1.distributed.api import (
     CapacitySnapshot,
     MemoryLayoutDesc,
@@ -23,7 +22,6 @@ from lmcache.v1.distributed.api import (
     PrefetchTaskSpec,
     Tier,
 )
-from lmcache.v1.distributed.bitmap_ops import fold_unfold_grouped
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     StorageManagerConfig,
@@ -489,37 +487,6 @@ class StorageManager:
                 handle.prefetch_request_id,
             )
         return result
-
-    @lmcache_deprecate(
-        "the lookup hit is no longer reported before the prefetch finishes; "
-        "use query_prefetch_status"
-    )
-    def query_prefetch_lookup_hits(
-        self,
-        handle: PrefetchHandle,
-    ) -> int | None:
-        """
-        Query the number of prefix-hit chunks of a finished prefetch task.
-
-        Args:
-            handle (PrefetchHandle): The handle of the prefetch task.
-
-        Returns:
-            The number of prefix-hit chunks once the prefetch has finished,
-            None while it is still in progress.
-
-        Note:
-            Consumes the result like ``query_prefetch_status``.
-        """
-        result = self.query_prefetch_status(handle)
-        if result is None:
-            return None
-        if not result.hit_cells:
-            return 0
-        hit_length, _retain = fold_unfold_grouped(
-            result.hit_cells, list(handle.sliding_windows)
-        )
-        return hit_length
 
     def wait_prefetch_status(
         self,
