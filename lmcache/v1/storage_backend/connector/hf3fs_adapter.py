@@ -239,8 +239,7 @@ class HF3fsConnectorAdapter(ConnectorAdapter):
                 resolved = path.resolve()
                 if not resolved.is_relative_to(parent_path):
                     logger.error(
-                        "Invalid path:%s, is not subdirectory of "
-                        "mount point:%s",
+                        "Invalid path:%s, is not subdirectory of mount point:%s",
                         str(path),
                         mount_point_path_str,
                     )
