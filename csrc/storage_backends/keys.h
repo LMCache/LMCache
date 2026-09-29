@@ -112,7 +112,7 @@ std::string filename_to_key(const std::string& filename) {
     return {};
   }
 
-  //Strip the ".data" suffix 
+  // Strip the ".data" suffix
   const std::string body = filename.substr(0, filename.size() - ext.size());
 
   std::vector<std::string> parts;
@@ -159,7 +159,7 @@ std::string filename_to_key(const std::string& filename) {
 // Wire key format:
 //   <model>@<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>]
 //
-// The chunk_hash is always the 4th '@'-separated field (index 3). 
+// The chunk_hash is always the 4th '@'-separated field (index 3).
 std::string get_chunk_hash_from_key(const std::string& key) {
   std::vector<std::string> parts;
   size_t start = 0;
@@ -171,12 +171,12 @@ std::string get_chunk_hash_from_key(const std::string& key) {
   }
   if (parts.size() != 4 && parts.size() != 5) {
     throw std::runtime_error(
-        "Malformed key (expected 4 or 5 '@'-separated fields): " +
-        key);
+        "Malformed key (expected 4 or 5 '@'-separated fields): " + key);
   }
   if (parts[3].empty()) {
     throw std::runtime_error(
-        "Malformed key (chunk hash field which behind the thrird '@' is empty): " +
+        "Malformed key (chunk hash field which behind the thrird '@' is "
+        "empty): " +
         key);
   }
   return parts[3];

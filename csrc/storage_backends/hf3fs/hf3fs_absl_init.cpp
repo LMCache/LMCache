@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (c) 2026 Samsung Electronics Co., Ltd.All Rights Reserved
-// Authors: Wenwen Chen <wenwen.chen@samsung.com>
+// SPDX-FileCopyrightText:Copyright (c) 2026 Samsung Electronics Co., Ltd.
 //
 // Compilation unit for vendored Abseil headers.
 // Abseil's header-only inline symbols need to be emitted in exactly one

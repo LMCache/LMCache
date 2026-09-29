@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 Samsung Electronics Co., Ltd.All Rights Reserved
-# Authors: Wenwen Chen <wenwen.chen@samsung.com>
+# SPDX-FileCopyrightText:Copyright (c) 2026 Samsung Electronics Co., Ltd.
 
 """Tests for Hf3fsL2AdapterConfig and Hf3fs native connector.
 
@@ -34,10 +33,10 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.l2_adapters.hf3fs_l2_adapter import Hf3fsL2AdapterConfig
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
     _object_key_to_filename,
 )
+from lmcache.v1.distributed.l2_adapters.hf3fs_l2_adapter import Hf3fsL2AdapterConfig
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     _object_key_to_string,
 )
@@ -927,7 +926,7 @@ class TestHf3fsNativeConnector:
 
         def _seed_file(directory: Path, key: ObjectKey) -> None:
             """Write a key's .data file directly using the shared canonical
-            filename encoding. Files are written straight into each path 
+            filename encoding. Files are written straight into each path
             (bypassing hash-based placement) so the constructor scan must
             discover them in every base_path."""
             (directory / _object_key_to_filename(key)).write_bytes(b"\x00")

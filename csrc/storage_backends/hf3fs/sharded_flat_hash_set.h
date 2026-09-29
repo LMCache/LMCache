@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//
+// SPDX-FileCopyrightText:Copyright (c) 2026 Samsung Electronics Co., Ltd.
 // sharded_flat_hash_set.h - A concurrent hash set using sharded locks
 //
 // This implementation wraps absl::flat_hash_set with per-shard locking to
 // provide thread-safe concurrent access for write-heavy / read-light workloads.
-//
 // Dependencies: absl::flat_hash_set (header-only)
-// License: Apache-2.0
-//
-// Authors: Wenwen Chen <wenwen.chen@samsung.com>
+
 // Usage:
 //   #include "sharded_flat_hash_set.h"
 //

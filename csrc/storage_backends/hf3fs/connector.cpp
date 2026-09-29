@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (c) 2026 Samsung Electronics Co., Ltd.All Rights Reserved
-// Authors: Wenwen Chen <wenwen.chen@samsung.com>
+// SPDX-FileCopyrightText:Copyright (c) 2026 Samsung Electronics Co., Ltd.
 
 #include "connector.h"
 #include <algorithm>
@@ -403,7 +402,8 @@ void Hf3fsConnector::write_file(WorkerHf3fsConn& conn, hf3fs_ior& ior,
  *   <model>@<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>]
  *
  * Algorithm:
- * 1. Extract the ``chunk_hash_hex`` field via ``keys.h::get_chunk_hash_from_key``.
+ * 1. Extract the ``chunk_hash_hex`` field via
+ * ``keys.h::get_chunk_hash_from_key``.
  * 2. Use the LAST 16 hex chars (64 bits) of that hash: sequential keys
  *    like ``...00000000``, ``...00000001`` share leading zeros but differ
  *    in their low bits, so the tail carries the entropy.
@@ -412,7 +412,8 @@ void Hf3fsConnector::write_file(WorkerHf3fsConn& conn, hf3fs_ior& ior,
  * @param key Key string
  * @return Selected base path
  */
-const std::string& Hf3fsConnector::select_base_path(const std::string& key) const {
+const std::string& Hf3fsConnector::select_base_path(
+    const std::string& key) const {
   if (base_paths_.size() == 1) {
     return base_paths_[0];
   }
@@ -421,7 +422,7 @@ const std::string& Hf3fsConnector::select_base_path(const std::string& key) cons
   try {
     hash_str = get_chunk_hash_from_key(key);
   } catch (const std::exception& e) {
-    fprintf(stderr, "[LMCache HF3FS] get_chunk_hash_from_key failed: %s\n", e.what());
+    fprintf(stderr, "[LMCache HF3FS] get chunk hash failed: %s\n", e.what());
     return base_paths_[0];
   }
 
@@ -439,8 +440,8 @@ const std::string& Hf3fsConnector::select_base_path(const std::string& key) cons
 /**
  * Convert a key to a full file path.
  *
- * The filename is produced by  ``keys.h::key_to_filename`` The base path is selected by
- * hashing the key's ``chunk_hash`` across ``base_paths_``.
+ * The filename is produced by  ``keys.h::key_to_filename`` The base path is
+ * selected by hashing the key's ``chunk_hash`` across ``base_paths_``.
  *
  * @param key Key string (wire format ``model@kv_rank@ogid@chunk_hash[@salt]``)
  * @return Full file path (base_path + filename)

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (c) 2026 Samsung Electronics Co., Ltd.All Rights Reserved
-// Authors: Wenwen Chen <wenwen.chen@samsung.com>
+// SPDX-FileCopyrightText:Copyright (c) 2026 Samsung Electronics Co., Ltd.
 
 #include <pybind11/pybind11.h>
 #include "../connector_pybind_utils.h"
