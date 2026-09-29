@@ -16,6 +16,7 @@ message GroupLayout {
   string dtype_str = 3;
   int64 tokens_per_block = 4;
   int64 window_tokens = 5;
+  int64 kv_size = 6;
 }
 
 message RegisterKvCacheEngineDrivenContextRequest {
