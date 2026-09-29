@@ -18,7 +18,9 @@ from lmcache.v1.multiprocess.cache_control.errors import (
     NotFound,
     Unavailable,
 )
-from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
+from lmcache.v1.multiprocess.cache_control.key_resolver import (
+    resolve_grouped_object_keys,
+)
 from lmcache.v1.multiprocess.warm_prefetch import (
     COMPLETED,
     UNKNOWN,
@@ -76,16 +78,19 @@ class PrefetchService:
                 f"KV cache on this node yet"
             )
         try:
-            obj_keys, chunks = resolve_object_keys(
-                ctx.token_hasher, model_name, world_size, token_ids, cache_salt
+            key_groups, chunks = resolve_grouped_object_keys(
+                ctx.token_hasher,
+                model_name,
+                world_size,
+                token_ids,
+                cache_salt,
+                layout_desc,
             )
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None
         if not chunks:
             return {"chunks": 0, "status": "noop"}
-        request_id = self._jobs.submit(
-            self._engine.storage_manager, obj_keys, layout_desc
-        )
+        request_id = self._jobs.submit(self._engine.storage_manager, key_groups)
         return {"request_id": request_id, "chunks": chunks, "status": "submitted"}
 
     def status(self, request_id: str) -> dict[str, object]:

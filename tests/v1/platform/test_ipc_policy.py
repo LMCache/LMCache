@@ -66,8 +66,8 @@ def test_policy_can_be_chained_in_place() -> None:
 
 def test_vmm_wrapper_selection_follows_policy_only() -> None:
     # First Party
-    from lmcache.v1.platform.cuda.ipc_wrapper import VmmCudaIPCWrapper
-    from lmcache.v1.platform.rocm import RocmDeviceSpec
+    from lmcache.v1.platform.devices.cuda.ipc_wrapper import VmmCudaIPCWrapper
+    from lmcache.v1.platform.devices.rocm import RocmDeviceSpec
 
     set_ipc_policy(use_vmm_api=True)
 

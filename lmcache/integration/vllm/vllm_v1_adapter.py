@@ -1254,9 +1254,9 @@ class LMCacheConnectorV1Impl:
         """Query the decoder's cache to check which blocks are already cached.
 
         This is the bidirectional NIXL cache probe: the prefiller queries the
-        decoder via ZMQ to find out which KV blocks are already in the
-        decoder's GPU memory. This validates the cache query channel works
-        E2E through the real inference path.
+        decoder through the configured request transport to find out which KV
+        blocks are already in the decoder's GPU memory. This validates the
+        cache query channel works E2E through the real inference path.
 
         In the future, this information can be used to skip prefill
         computation for cached blocks.

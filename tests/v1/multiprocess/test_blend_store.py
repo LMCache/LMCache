@@ -26,7 +26,6 @@ from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _cb_chunk_major_object_keys,
     _classify_cb_read_groups,
-    _narrow_attn_desc,
 )
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
 
@@ -513,26 +512,6 @@ def test_classify_read_groups_rejects_two_aux_groups():
 
     with pytest.raises(RuntimeError):
         _classify_cb_read_groups(3, ("attention", "aux", "aux"))
-
-
-def test_narrow_attn_desc_selects_the_leg_gids():
-    """The fold stride is groups x ranks, so each leg's descriptor must cover
-    exactly its own gids."""
-    # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
-
-    full = AttnWindowDesc(
-        num_chunks_in_sw=[1, -1, -1],
-        world_size=2,
-        group_kinds=("recurrent", "attention", "aux"),
-    )
-    prefix = _narrow_attn_desc(full, (0, 1))
-    assert prefix.num_chunks_in_sw == [1, -1]
-    assert prefix.group_kinds == ("recurrent", "attention")
-    assert prefix.world_size == 2
-    blend = _narrow_attn_desc(full, (1, 2))
-    assert blend.num_chunks_in_sw == [-1, -1]
-    assert blend.group_kinds == ("attention", "aux")
 
 
 def test_classify_read_groups_rejects_unresolvable_layouts():

@@ -86,7 +86,7 @@ Lookup and load:
 
 The DAX facade keeps the event fds and worker pools stable. Runtime hotplug only
 mutates the device pool behind the facade, so `StoreController`,
-`PrefetchController`, and the vLLM MP connector do not need ZMQ protocol changes
+`PrefetchController`, and the vLLM MP connector do not need request-protocol changes
 or poll-set re-registration.
 
 Add:

@@ -759,10 +759,12 @@ class TensorMemoryObj(MemoryObj):
             self.meta.ref_count -= 1
             if self.meta.ref_count < 0:
                 logger.warning(
-                    f"Ref count of MemoryObj {self.meta.address}"
-                    f"is negative: {self.meta.ref_count}."
+                    "Ref count of MemoryObj %s"
+                    "is negative: %s."
                     "Double free occurred somewhere."
-                    "Setting ref count back to 0 as a hack but please find the bug."
+                    "Setting ref count back to 0 as a hack but please find the bug.",
+                    self.meta.address,
+                    self.meta.ref_count,
                 )
                 self.meta.ref_count = 0
             if (
@@ -816,10 +818,12 @@ class TensorMemoryObj(MemoryObj):
 
             if self.meta.pin_count < 0:
                 logger.warning(
-                    f"Pin count of MemoryObj {self.meta.address}"
-                    f"is negative: {self.meta.pin_count}."
+                    "Pin count of MemoryObj %s"
+                    "is negative: %s."
                     "Double unpin occurred somewhere."
-                    "Setting pin count back to 0 as a hack but please find the bug."
+                    "Setting pin count back to 0 as a hack but please find the bug.",
+                    self.meta.address,
+                    self.meta.pin_count,
                 )
                 self.meta.pin_count = 0
             return True
@@ -978,10 +982,12 @@ class BytesBufferMemoryObj(MemoryObj):
         self.metadata.pin_count -= 1
         if self.metadata.pin_count < 0:
             logger.warning(
-                f"Pin count of MemoryObj {self.meta.address}"
-                f"is negative: {self.meta.pin_count}."
+                "Pin count of MemoryObj %s"
+                "is negative: %s."
                 "Double unpin occurred somewhere."
-                "Setting pin count back to 0 as a hack but please find the bug."
+                "Setting pin count back to 0 as a hack but please find the bug.",
+                self.meta.address,
+                self.meta.pin_count,
             )
             self.metadata.pin_count = 0
         return True
@@ -1401,8 +1407,15 @@ class AddressManager:
             size of the allocated block.
 
         Raises:
+            ValueError: If size is not positive. This is a caller bug, not an
+                out-of-memory condition, and must not be signalled as one: the
+                allocation stack treats a failed request as memory pressure and
+                reacts by evicting cached objects or retrying in a busy loop.
             RuntimeError: If no memory is available to allocate.
         """
+        if size <= 0:
+            raise ValueError("size must be greater than 0")
+
         aligned_size = self.compute_aligned_size(size)
         for block in self._explicit_list:
             if block.size >= aligned_size:
@@ -1453,9 +1466,14 @@ class AddressManager:
             Note: the length of the return list is the same as the batch_size.
 
         Raises:
+            ValueError: If size is not positive. See ``allocate`` for why this is
+                not reported as ``RuntimeError``.
             RuntimeError: If batch_size is negative or no memory is available
                 to allocate.
         """
+        if size <= 0:
+            raise ValueError("size must be greater than 0")
+
         if batch_size < 0:
             raise RuntimeError("batch_size must be non-negative")
 
