@@ -529,9 +529,6 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         kind: str = ""
         payload: object = None
         with torch.cuda.device(device_index):
-            # torch.cuda.device alone does not bind a context on a thread
-            # that has never touched CUDA, and everything below is driver
-            # API. Same failure mode as RawCudaIPCWrapper above.
             _bind_primary_context(device_index)
             # Recover the allocation handle from the bare pointer (works
             # for interior pointers; adds one driver reference we must
