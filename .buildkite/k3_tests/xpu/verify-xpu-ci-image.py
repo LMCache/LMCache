@@ -70,8 +70,9 @@ def main() -> None:
     token = os.environ["BUILDKITE_API_TOKEN"]
     image = os.environ["CANDIDATE_IMAGE"]
     commit = os.environ["SOURCE_COMMIT"]
-    if not all((token, image, commit)):
-        raise RuntimeError("Buildkite token, image, and commit are required")
+    branch = os.environ["SOURCE_BRANCH"]
+    if not all((token, image, commit, branch)):
+        raise RuntimeError("Buildkite token, image, commit, and branch are required")
 
     builds: dict[str, tuple[str, str, int]] = {}
     for name, slug in (("unit", "unit-tests-xpu"), ("multiprocess", "xpu-mp-test")):
@@ -81,7 +82,7 @@ def main() -> None:
             token,
             {
                 "commit": commit,
-                "branch": "dev",
+                "branch": branch,
                 "message": f"XPU nightly candidate {image}",
                 "env": {
                     "PINNED_XPU_IMAGE": image,
