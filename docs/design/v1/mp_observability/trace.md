@@ -339,7 +339,8 @@ recorder is registered — true zero overhead.
 
 `lmcache trace info|replay|record` reads the format defined here;
 see §9 for details. `replay` accepts `storage` traces only and refuses an
-`events` file with a message saying so.
+`events` file with a message saying so; `replay-events` delivers an
+`events` file to a coordinator (§12).
 
 ---
 
@@ -481,10 +482,10 @@ those layers are intentionally out of scope.
 ### 9.8 Forward compatibility
 
 `Header.level` is checked by the replay driver via `header_level`
-on the result; unknown levels simply pass through with every record
-"skipped" (no handler registered).  A future `lmcache trace replay
---level mq …` would register a different dispatcher; the file
-format itself does not change.
+on the result; the driver refuses a file of another level. Each level
+has its own replayer and command: `lmcache trace replay` for `storage`,
+`lmcache trace replay-events` for `events` (§12). A future `mq` level
+would add a third; the file format itself does not change.
 
 ---
 
@@ -579,7 +580,7 @@ Same `Record` shape as every level; `qualname` discriminates.
 
 | `qualname` | When | `args` |
 |---|---|---|
-| `events.lifecycle` | subscriber start; sink close | `phase` (`start` / `stop`); at `start` also `instance_id`, `incarnation`, `ip`, `http_port`, `mq_port` |
+| `events.lifecycle` | subscriber start; sink close | `phase` (`start` / `stop`) and `instance_id`; at `start` also `incarnation`, `ip`, `http_port`, `mq_port` |
 | `events.batch` | each batch the subscriber flushes | the batch in **wire form**: one element of `CacheEventsRequest.batches`, byte-for-byte what `POST /events` carries |
 
 Wire form is the point. A replayer posts `args` to a coordinator with no
@@ -591,7 +592,37 @@ batch field is added, removed or changes meaning.
 Heartbeats are not recorded: they carry nothing, and a replayer heartbeats
 on its own schedule. One file is written per server process; a fleet
 capture is a set of files, one per instance, which `lmcache trace info`
-summarizes one at a time.
+summarizes one at a time and `lmcache trace replay-events` merges into one
+fleet. Every lifecycle mark names its instance, so the marks stay
+attributable after the merge.
+
+### Replay
+
+`lmcache/v1/mp_coordinator/events_replay.py`. `EventsTrace.load(paths)`
+reads each file with `TraceReader`, refuses any level but `events` or a
+`cache_event_schema_version` this build does not speak, and merges the
+records by `t_wall`. The sort is stable, so a server's own order (its
+`seq`) is never disturbed; across servers the merge carries each host's
+clock skew, which the coordinator tolerates because it orders per emitter
+only.
+
+`replay(trace, target, speed)` hands each record to a `CoordinatorTarget`:
+`start(identity)`, `batch(wire_batch)`, `stop(instance_id)`, and
+`end(instance_id)` once an instance's last record went by with no `stop`
+after it, which is what a killed server or a cut recording leaves. Batches
+are passed exactly as recorded. The target does what a live server would:
+`POST /instances` at a `start` mark (through `registrar.register`, at the
+recorded address or loopback) and a heartbeat task per registered server,
+one `POST /events` per batch, `DELETE /instances/{id}` at `stop`. `end`
+only cancels the heartbeat, so the coordinator's health loop retires the
+server by its own `instance_timeout`, the way it learns of a real crash;
+the CLI's `--heartbeat-interval` must stay below that timeout, and `0`
+turns heartbeats off. A test double of a fleet overrides those four
+methods; one that applies each batch to a placement table and serves the
+coordinator's callbacks is how the coordinator's controllers are tested
+against a recorded workload without running servers. `speed` paces by the
+recorded wall clock (`1.0` real time); `0` delivers as fast as the target
+takes, which is safe because the coordinator orders by `seq`.
 
 ### Size and privacy
 

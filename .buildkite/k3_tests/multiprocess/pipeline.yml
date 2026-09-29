@@ -28,6 +28,7 @@ x-vllm-bench-retry: &vllm-bench-retry
 # installation, so adding a shared-workload engine requires only one entry.
 x-common-inference-engines: &common-inference-engines
   - "vllm"
+  - "sglang"
 
 # Most scenarios exercise transport-independent behavior, so keep their PR
 # coverage on the default ZMQ transport.
@@ -61,6 +62,14 @@ x-vllm-smoke-matrix: &vllm-smoke-matrix
       - "zmq"
       - "grpc"
 
+x-sglang-smoke-matrix: &sglang-smoke-matrix
+  setup:
+    inference_engine:
+      - "sglang"
+    request_transport:
+      - "zmq"
+      - "grpc"
+
 # Keep the regular 1-GPU pod anchor available after the two lm_eval steps are
 # merged; engine_driven still needs its separate /dev/shm pod below.
 # Every pod mounts a 1Gi /dev/shm: the container runtime default is 64MB and
@@ -90,7 +99,7 @@ steps:
   # chain and no-ops the build on SM90/SM100. The build measures ~1-2 min in
   # CI, well inside the timeout below.
   - group: ":compression: Multiprocess (4-GPU)"
-    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
     steps:
       # L1 + slot-compression KV correctness for DeepSeek-V4-Flash (sparse-MLA
       # + fp8, TP=4). The model's KV cache groups mix block geometries
@@ -130,7 +139,7 @@ steps:
         artifact_paths: ["*.log"]
 
   - group: ":compression: Multiprocess (2-GPU)"
-    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
     steps:
       - label: ":compression: {{matrix.inference_engine}} / vllm_bench / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
@@ -238,7 +247,7 @@ steps:
         artifact_paths: ["*.log"]
 
   - group: ":compression: Multiprocess (1-GPU)"
-    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
     steps:
       # Correctness coverage for both transfer modes. engine_driven requires
       # SHM transport, so both matrix jobs use the existing dshm pod spec.
@@ -317,6 +326,38 @@ steps:
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu-dshm } }]
         artifact_paths: ["*.log"]
+
+      # ShareGPT differential correctness under preemption. Both servers are
+      # pinned to a 1024-block KV pool (16k tokens) so the 40-way rung preempts
+      # and the 3-way reference provably cannot, independent of the GPU. The
+      # LMCache rung must reproduce the reference's answers exactly and must
+      # show requests resuming with a KV load. Set PREEMPT_FULL_LADDER=1 to add
+      # the rungs that isolate a failure (see the workload script's header).
+      # lmcache-driven only: that is the transfer path this covers.
+      - label: ":compression: preemption_correctness / async={{matrix.async_scheduling}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh preemption_correctness
+        matrix:
+          setup:
+            async_scheduling:
+              - "0"
+              - "1"
+        # Two rungs (~15 min of client time) plus two model loads.
+        timeout_in_minutes: 45
+        env:
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          ASYNC_SCHEDULING: "{{matrix.async_scheduling}}"
+          NUM_GPU_BLOCKS_OVERRIDE: "1024"
+          MAX_MODEL_LEN: "8192"
+          CHUNK_SIZE: "256"
+          # Exact cross-concurrency comparison was qualified with eager mode
+          # and the default FLASH_ATTN backend.
+          ENFORCE_EAGER: "1"
+          MAX_WAIT_SECONDS: "600"
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        # The answer files are the evidence this test produces, not just the
+        # logs; cleanup.sh stages RESULTS_DIR as ci_results_<build>.
+        artifact_paths: ["*.log", "ci_results_*/preemption_correctness/*.txt"]
 
       # Temporarily disabled: hma_lm_eval_gemma4.
 
@@ -407,7 +448,7 @@ steps:
         artifact_paths: ["*.log"]
 
   - group: ":compression: Multiprocess (CPU-only)"
-    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
     steps:
       # Note: LMCACHE_SHM_NAME uses `${VAR-default}` (not `:-`) in the
       # runner script, so an empty string ("") is meaningful and differs
@@ -489,6 +530,34 @@ steps:
               - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
     artifact_paths: ["*.log", "verified_vllm_*.txt"]
 
+  # The SGLang canary discovers the newest official nightly, installs its
+  # exact source revision, and verifies LMCache retrieval through both request
+  # transports. The pin job below runs only after both matrix jobs pass.
+  - label: ":test_tube: Verify SGLang nightly / {{matrix.request_transport}}"
+    if: build.env("VERIFY_AND_PIN_SGLANG") =~ /true/
+    command: |
+      unset SGLANG_INSTALL_SPEC PINNED_SGLANG_VERSION PINNED_SGLANG_SHA
+      export USE_PINNED_SGLANG=false
+      source .buildkite/k3_harness/resolve-pinned-sglang.sh
+      .buildkite/k3_tests/multiprocess/run.sh lm_eval
+      {
+        printf '%s\n' "${PINNED_SGLANG_VERSION}"
+        printf 'short_sha=%s\n' "${PINNED_SGLANG_SHA}"
+        printf 'index_url=%s\n' "${PINNED_SGLANG_INDEX_URL}"
+      } > "verified_sglang_{{matrix.request_transport}}.txt"
+    matrix: *sglang-smoke-matrix
+    env:
+      INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+      LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+      LIMIT: "20"
+    timeout_in_minutes: 30
+    retry: *flaky-retry
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec: *pod-1gpu
+    artifact_paths: ["*.log", "verified_sglang_*.txt"]
+
   - wait
 
   - label: ":pushpin: Pin verified vLLM nightly"
@@ -498,6 +567,31 @@ steps:
       diff -u verified_vllm_zmq.txt verified_vllm_grpc.txt
       VLLM_VERSION="$(cat verified_vllm_grpc.txt)" \
         bash .github/scripts/pin-tested-vllm.sh
+    timeout_in_minutes: 10
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                env:
+                  - name: GITHUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-git-creds
+                        key: GITHUB_TOKEN
+
+  - label: ":pushpin: Pin verified SGLang nightly"
+    if: build.env("VERIFY_AND_PIN_SGLANG") =~ /true/
+    command: |
+      buildkite-agent artifact download "verified_sglang_*.txt" .
+      diff -u verified_sglang_zmq.txt verified_sglang_grpc.txt
+      SGLANG_VERSION="$(sed -n '1p' verified_sglang_grpc.txt)" \
+      SGLANG_SHORT_SHA="$(sed -n 's/^short_sha=//p' verified_sglang_grpc.txt)" \
+      SGLANG_INDEX_URL="$(sed -n 's/^index_url=//p' verified_sglang_grpc.txt)" \
+        bash .github/scripts/pin-tested-sglang.sh
     timeout_in_minutes: 10
     agents: { queue: "k8s" }
     plugins:

@@ -99,6 +99,24 @@ PY
     if [[ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]]; then
         VLLM_BATCH_ARGS=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
     fi
+
+    # Pin the KV block pool (in blocks) on both servers. The preemption test
+    # needs the pool size to be independent of the GPU model: a workload whose
+    # KV demand exceeds NUM_GPU_BLOCKS_OVERRIDE * block_size preempts by
+    # arithmetic. Empty -> vLLM sizes the pool from --gpu-memory-utilization.
+    VLLM_POOL_ARGS=()
+    if [[ -n "${NUM_GPU_BLOCKS_OVERRIDE:-}" ]]; then
+        VLLM_POOL_ARGS=(--num-gpu-blocks-override "$NUM_GPU_BLOCKS_OVERRIDE")
+    fi
+
+    # Async scheduling on both servers. Off by default: the determinism tests
+    # were qualified with it off. With a consumer-role connector vLLM then
+    # defers block frees to the end of the in-flight step, which is a
+    # different preemption path, so the preemption matrix runs both.
+    VLLM_SCHEDULING_ARGS=(--no-async-scheduling)
+    if [[ "${ASYNC_SCHEDULING:-0}" == "1" || "${ASYNC_SCHEDULING:-0}" == "true" ]]; then
+        VLLM_SCHEDULING_ARGS=(--async-scheduling)
+    fi
 }
 
 engine_add_lmcache_server_environment() {
@@ -184,10 +202,11 @@ engine_launch() {
             "${mode_args[@]}" \
             "${VLLM_ATTENTION_ARGS[@]}" \
             --port "$port" \
-            --no-async-scheduling \
+            "${VLLM_SCHEDULING_ARGS[@]}" \
             --max-model-len "${MAX_MODEL_LEN:-auto}" \
             "${VLLM_EAGER_ARGS[@]}" \
             "${VLLM_GPU_MEMORY_ARGS[@]}" \
+            "${VLLM_POOL_ARGS[@]}" \
             "${VLLM_PREFIX_ARGS[@]}" \
             > "$log_file" 2>&1 &
     ENGINE_PID=$!
