@@ -620,3 +620,80 @@ def test_register_payload_carries_group_layouts() -> None:
     assert payload.group_layouts[1].window_tokens == chunk_tokens
     assert len(ctx._group_states) == 2
     assert ctx._group_states[1].layer_names == ["layer_2"]
+
+
+def _register_capturing_payload(
+    kv: dict[str, torch.Tensor], engine_group_infos: list[EngineGroupInfo]
+) -> tuple[RegisterEngineDrivenContextPayload, EngineDrivenTransferContext]:
+    """Register ``kv`` and return the payload sent to the server."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import (
+        RegisterEngineDrivenContextResponse,
+    )
+
+    sent: list[Any] = []
+
+    def _register(payload):
+        sent.append(payload)
+        future = MagicMock()
+        future.result.return_value = RegisterEngineDrivenContextResponse(
+            shm_name="lmcache_l1_pool_x", pool_size=4096
+        )
+        return future
+
+    req_client = MagicMock()
+    req_client.register_kv_cache_engine_driven_context.side_effect = _register
+
+    ctx = EngineDrivenTransferContext(1, req_client)
+    ctx.register(
+        kv_caches=kv,
+        model_name="m",
+        world_size=1,
+        blocks_in_chunk=2,
+        mq_timeout=1.0,
+        engine_group_infos=engine_group_infos,
+    )
+    return sent[0], ctx
+
+
+def test_register_payload_carries_per_group_kv_size() -> None:
+    """A two-plane K/V group beside a one-plane (index-cache style) group must
+    report each group's own plane count. The top-level ``use_mla`` describes
+    only the first layer, so a server sizing every group from it reserves the
+    one-plane group with two planes and pickle store fails on the shape."""
+    kv = {
+        "layer_0": torch.zeros(2, 4, 4, 2, 8),  # separate K/V planes
+        "layer_1": torch.zeros(4, 4, 16),  # single plane
+    }
+    payload, ctx = _register_capturing_payload(
+        kv,
+        [
+            EngineGroupInfo(engine_group_id=0, layer_indices=(0,)),
+            EngineGroupInfo(engine_group_id=1, layer_indices=(1,)),
+        ],
+    )
+
+    assert payload.use_mla is False
+    assert [gl.kv_size for gl in payload.group_layouts] == [2, 1]
+    # The plane count the worker reports matches the layout it gathers with.
+    assert [len(s.layout_desc.shapes[0]) for s in ctx._group_states] == [4, 3]
+
+
+def test_register_rejects_compressed_group() -> None:
+    """A group whose block covers more tokens than it has slots (compressed
+    paging, e.g. DeepSeek V4 indexer pages) must fail at registration: its
+    layout would be sized in tokens while gather produces fewer slots, so
+    registration would succeed and every store would then fail."""
+    kv = {f"layer_{i}": torch.zeros(2, 4, 4, 2, 8) for i in range(2)}
+    slots = _detected_block_size(kv)
+
+    with pytest.raises(NotImplementedError, match="compressed"):
+        _register_capturing_payload(
+            kv,
+            [
+                EngineGroupInfo(engine_group_id=0, layer_indices=(0,)),
+                EngineGroupInfo(
+                    engine_group_id=1, layer_indices=(1,), tokens_per_block=4 * slots
+                ),
+            ],
+        )

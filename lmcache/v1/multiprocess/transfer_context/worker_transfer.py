@@ -846,6 +846,17 @@ class EngineDrivenTransferContext(TransferContext):
             for gid in range(manager.num_kernel_groups):
                 kernel_group = manager.kernel_groups[gid]
                 assert kernel_group.engine_kv_format is not None
+                # Compressed groups (see the TODO above) would register a
+                # layout sized in tokens while gather produces fewer slots, so
+                # every store would fail on a shape mismatch. Refuse them here.
+                group_tokens = kernel_group.tokens_per_block
+                group_slots = kernel_group.slots_per_block
+                if group_tokens > group_slots:
+                    raise NotImplementedError(
+                        f"KV group {gid} is compressed ({group_tokens} tokens per "
+                        f"block over {group_slots} slots); engine-driven transfer "
+                        "does not support compressed groups yet"
+                    )
                 tokens_per_block = (
                     kernel_group.tokens_per_block or kernel_group.slots_per_block
                 )
@@ -879,6 +890,7 @@ class EngineDrivenTransferContext(TransferContext):
                         dtype_str=group_dtype_str,
                         tokens_per_block=tokens_per_block,
                         window_tokens=window_tokens,
+                        kv_size=kernel_group.shape_desc.kv_size,
                     )
                 )
                 group_states.append(

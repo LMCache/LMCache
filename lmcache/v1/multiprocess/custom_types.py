@@ -167,6 +167,11 @@ class GroupLayout(msgspec.Struct):
             sliding-window group it is ``min(chunk_tokens, sw_size_tokens)`` so
             the server sizes each per-chunk object to the window. ``0`` means
             "full chunk" (legacy workers that predate SW support).
+        kv_size: Object planes for this group: ``2`` for separate K/V, ``1``
+            for single-plane formats (MLA, fused K/V, indexer caches). Groups
+            of one model can differ, so the server must not size them from the
+            top-level ``use_mla``. ``0`` means "unreported" (legacy workers)
+            and falls back to the top-level ``use_mla``.
     """
 
     num_layers: int
@@ -174,6 +179,7 @@ class GroupLayout(msgspec.Struct):
     dtype_str: str
     tokens_per_block: int
     window_tokens: int = 0
+    kv_size: int = 0
 
 
 class RegisterEngineDrivenContextPayload(msgspec.Struct):

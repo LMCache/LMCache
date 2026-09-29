@@ -1552,6 +1552,67 @@ def test_register_multigroup_sizes_object_group_count(
     assert set(group_descs) == {0, 1}
 
 
+@pytest.mark.parametrize(
+    ("use_mla", "kv_sizes", "expected_planes"),
+    [
+        # A two-plane K/V group beside a one-plane index cache: each group
+        # keeps its own plane count whatever the top-level flag says.
+        (False, [2, 1], [2, 1]),
+        (True, [2, 1], [2, 1]),
+        # Legacy workers report 0 and keep the top-level flag's sizing.
+        (False, [0, 0], [2, 2]),
+        (True, [0, 0], [1, 1]),
+    ],
+)
+def test_register_multigroup_sizes_each_group_by_its_kv_size(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+    use_mla: bool,
+    kv_sizes: list[int],
+    expected_planes: list[int],
+) -> None:
+    """The server must size each group from its own ``kv_size``, not from the
+    top-level ``use_mla``, or a mixed-plane model reserves one group with the
+    wrong shape and every pickle store for it fails on the shape check."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import (
+        GroupLayout,
+        RegisterEngineDrivenContextPayload,
+    )
+
+    module, _, _, ctx = server_module_factory(chunk_size=16)
+    module.register_kv_cache_engine_driven_context(
+        RegisterEngineDrivenContextPayload(
+            instance_id=1,
+            model_name="m",
+            world_size=1,
+            block_size=4,
+            num_layers=2,
+            hidden_dim_size=16,
+            dtype_str="float32",
+            use_mla=use_mla,
+            group_layouts=[
+                GroupLayout(
+                    num_layers=1,
+                    hidden_dim_size=16,
+                    dtype_str="float32",
+                    tokens_per_block=4,
+                    kv_size=kv_size,
+                )
+                for kv_size in kv_sizes
+            ],
+        )
+    )
+
+    group_descs = ctx.layout_desc_registry.find_group_layout_descs("m", 1)
+    assert group_descs is not None
+    expected = {
+        gid: torch.Size([1, 16, 16]) if planes == 1 else torch.Size([2, 1, 16, 16])
+        for gid, planes in enumerate(expected_planes)
+    }
+    assert {gid: desc.shapes[0] for gid, desc in group_descs.items()} == expected
+
+
 def test_server_store_and_retrieve_cpu_chunks(
     stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,

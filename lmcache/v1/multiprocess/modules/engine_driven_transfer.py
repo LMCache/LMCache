@@ -350,9 +350,13 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 # size the per-chunk object to that window (fall back to the full
                 # chunk when the worker didn't report one, e.g. legacy payloads).
                 g_tokens = gl.window_tokens or self._ctx.chunk_size
+                # Plane count is per group: a two-plane K/V group can sit
+                # beside a one-plane index cache. Legacy workers report 0, so
+                # fall back to the top-level flag they were sized by.
+                g_single_plane = gl.kv_size == 1 if gl.kv_size else payload.use_mla
                 g_shape = (
                     torch.Size([gl.num_layers, g_tokens, gl.hidden_dim_size])
-                    if payload.use_mla
+                    if g_single_plane
                     else torch.Size([2, gl.num_layers, g_tokens, gl.hidden_dim_size])
                 )
                 group_layouts.append(
