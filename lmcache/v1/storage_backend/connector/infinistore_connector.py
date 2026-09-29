@@ -97,7 +97,7 @@ class InfinistoreConnector(RemoteConnector):
                 [(key_str, 0)], self.buffer_size, _get_ptr(buffer)
             )
         except Exception as e:
-            logger.warning(f"get failed: {e}")
+            logger.warning("get failed: %s", e)
             self.recv_queue.put_nowait(buf_idx)
             return None
 
@@ -125,7 +125,7 @@ class InfinistoreConnector(RemoteConnector):
         # and hot cache will reference this memory obj
         memory_obj.tensor.copy_(temp_tensor)
 
-        logger.debug(f"get key: {key_str} done, {memory_obj.get_shape()}")
+        logger.debug("get key: %s done, %s", key_str, memory_obj.get_shape())
         self.recv_queue.put_nowait(buf_idx)
 
         return memory_obj
@@ -160,12 +160,12 @@ class InfinistoreConnector(RemoteConnector):
                 [(key_str, 0)], METADATA_BYTES_LEN + size, _get_ptr(buffer)
             )
         except Exception as e:
-            logger.warning(f"exception happens in rdma_write_cache_async kv_bytes {e}")
+            logger.warning("exception happens in rdma_write_cache_async kv_bytes %s", e)
             return
         finally:
             self.send_queue.put_nowait(buf_idx)
 
-        logger.debug(f"put key: {key.to_string()}, {memory_obj.get_shape()}")
+        logger.debug("put key: %s, %s", key.to_string(), memory_obj.get_shape())
 
     # TODO
     @no_type_check

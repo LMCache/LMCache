@@ -174,7 +174,7 @@ def wait_for_prefetch_status(
     while time.monotonic() < deadline:
         result = sm.query_prefetch_status(handle)
         if result is not None:
-            return result[0].count_leading_ones()
+            return result.hit_cells[0].count_leading_ones()
         time.sleep(poll_interval)
     return None
 
@@ -194,7 +194,7 @@ def wait_for_sparse_found(
     while time.monotonic() < deadline:
         result = sm.query_prefetch_status(handle)
         if result is not None:
-            return set(result[0].get_indices_list())
+            return set(result.hit_cells[0].get_indices_list())
         time.sleep(poll_interval)
     return None
 
@@ -276,9 +276,11 @@ class TestStorageManagerBasic:
             single_row_spec(object_keys, basic_layout)
         )
 
-        hit_count = storage_manager.query_prefetch_status(handle)[
-            0
-        ].count_leading_ones()
+        hit_count = (
+            storage_manager.query_prefetch_status(handle)
+            .hit_cells[0]
+            .count_leading_ones()
+        )
         assert hit_count is not None
         assert hit_count == len(object_keys)
 
@@ -306,9 +308,11 @@ class TestStorageManagerBasic:
             single_row_spec(object_keys, basic_layout)
         )
 
-        hit_count = storage_manager.query_prefetch_status(handle)[
-            0
-        ].count_leading_ones()
+        hit_count = (
+            storage_manager.query_prefetch_status(handle)
+            .hit_cells[0]
+            .count_leading_ones()
+        )
         assert hit_count is not None
         assert hit_count == 2  # Only 2 keys were written
 
@@ -335,9 +339,11 @@ class TestStorageManagerBasic:
             single_row_spec(object_keys, basic_layout)
         )
 
-        hit_count = storage_manager.query_prefetch_status(handle)[
-            0
-        ].count_leading_ones()
+        hit_count = (
+            storage_manager.query_prefetch_status(handle)
+            .hit_cells[0]
+            .count_leading_ones()
+        )
         assert hit_count is not None
         assert hit_count == len(object_keys)
 
@@ -373,9 +379,11 @@ class TestStorageManagerBasic:
         handle = storage_manager.submit_prefetch_task(
             single_row_spec(object_keys[1:], basic_layout)
         )
-        hit_count = storage_manager.query_prefetch_status(handle)[
-            0
-        ].count_leading_ones()
+        hit_count = (
+            storage_manager.query_prefetch_status(handle)
+            .hit_cells[0]
+            .count_leading_ones()
+        )
         assert hit_count is not None
         assert hit_count == len(object_keys) - 1
 
@@ -417,7 +425,7 @@ class TestStorageManagerMultiReader:
         handle = sm.submit_prefetch_task(
             single_row_spec(keys, basic_layout, num_kv_readers=num_kv_readers)
         )
-        hit = sm.query_prefetch_status(handle)[0].count_leading_ones()
+        hit = sm.query_prefetch_status(handle).hit_cells[0].count_leading_ones()
         assert hit == len(keys)
 
         # Release the whole reservation
@@ -442,7 +450,7 @@ class TestStorageManagerMultiReader:
         handle = sm.submit_prefetch_task(
             single_row_spec(keys, basic_layout, num_kv_readers=num_kv_readers)
         )
-        hit = sm.query_prefetch_status(handle)[0].count_leading_ones()
+        hit = sm.query_prefetch_status(handle).hit_cells[0].count_leading_ones()
         assert hit == len(keys)
 
         # Release 2 of 4 read locks
@@ -479,7 +487,7 @@ class TestStorageManagerMultiReader:
         handle = sm.submit_prefetch_task(
             single_row_spec(all_keys, basic_layout, num_kv_readers=num_kv_readers)
         )
-        hit = sm.query_prefetch_status(handle)[0].count_leading_ones()
+        hit = sm.query_prefetch_status(handle).hit_cells[0].count_leading_ones()
         # Only prefix {0,1} count as hits
         assert hit is not None
         assert hit == 2
@@ -503,7 +511,7 @@ class TestStorageManagerMultiReader:
         sm.finish_write(list(ret.keys()))
 
         handle = sm.submit_prefetch_task(single_row_spec(keys, basic_layout))
-        hit = sm.query_prefetch_status(handle)[0].count_leading_ones()
+        hit = sm.query_prefetch_status(handle).hit_cells[0].count_leading_ones()
         assert hit == len(keys)
 
         # Single finish is enough
@@ -655,10 +663,12 @@ class TestStorageManagerL2Prefetch:
             skip_l2=True,
         )
 
-        # skip_l2 honored: the controller was never asked.
-        assert handle.prefetch_request_id == -1
-        assert handle.l2_orig_indices == ()
+        # skip_l2 honored: nothing was loaded from L2, and the L1-only result
+        # is available as soon as the submit returns.
         assert handle.total_requested_keys == len(keys)
+        found = sm.query_prefetch_status(handle)
+        assert found is not None
+        assert [row.get_indices_list() for row in found.hit_cells] == [[]]
 
         sm.close()
 
@@ -683,16 +693,38 @@ class TestStorageManagerL2Prefetch:
             skip_l2=True,
         )
 
-        # skip_l2 honored: the controller was never asked.
-        assert handle.prefetch_request_id == -1
-        assert handle.l2_orig_indices == ()
-        assert handle.l1_found_indices == (0, 2)
-
+        # skip_l2 honored: the L2-only key is a miss.
         found = sm.query_prefetch_status(handle)
         assert found is not None
-        assert [row.get_indices_list() for row in found] == [[0, 2]]
+        assert [row.get_indices_list() for row in found.hit_cells] == [[0, 2]]
 
         sm.finish_read_prefetched([all_keys[0], all_keys[2]])
+        sm.close()
+
+    def test_query_prefetch_status_splits_cells_by_tier(
+        self, l2_storage_manager_config, basic_layout
+    ):
+        """Hit cells L1 already held and cells loaded from L2 are reported
+        separately, and the result is consumed by the first query."""
+        sm = StorageManager(l2_storage_manager_config)
+        keys = [make_object_key(i) for i in range(5)]
+
+        # All keys reach L2; keys 2..4 are then L2-only.
+        self._write_keys_and_wait_for_l2(sm, keys, basic_layout)
+        deleted, skipped = sm.delete_l1_keys(keys[2:])
+        assert (deleted, skipped) == (3, 0)
+
+        handle = sm.submit_prefetch_task(single_row_spec(keys, basic_layout))
+        assert sm.wait_prefetch_status(handle, timeout=10.0)
+        result = sm.query_prefetch_status(handle)
+
+        assert result is not None
+        assert [r.get_indices_list() for r in result.hit_cells] == [[0, 1, 2, 3, 4]]
+        assert [r.get_indices_list() for r in result.l1_hit_cells] == [[0, 1]]
+        assert [r.get_indices_list() for r in result.l2_hit_cells] == [[2, 3, 4]]
+        assert sm.query_prefetch_status(handle) is None
+
+        sm.finish_read_prefetched(keys)
         sm.close()
 
     def test_prefetch_l2_partial_prefix(self, l2_storage_manager_config, basic_layout):
@@ -797,7 +829,7 @@ class TestStorageManagerL2Prefetch:
             time.sleep(0.05)
         assert result is not None, "L2 prefetch should complete"
 
-        full_row, sw_row = result
+        full_row, sw_row = result.hit_cells
         # full-attn group: all chunks retained
         assert full_row.get_indices_list() == list(range(num_chunks))
         # SW group (w=2): only the last 2 chunks are in the window
@@ -852,18 +884,14 @@ class TestStorageManagerL2Prefetch:
             time.sleep(0.05)
         assert result is not None, "L1+L2 SW prefetch should complete"
 
-        full_row, sw_row = result
+        full_row, sw_row = result.hit_cells
         # All full-attn chunks should be retained
         assert full_row.get_indices_list() == list(range(num_chunks))
-        # L1 retain: fold over L1 presence (chunks 0-1) → hit=2
-        # SW w=2: both chunks 0-1 in window → retained
-        # L2: provides chunks 2-3, fold there → SW retains chunks 2-3
-        # Combined: all SW keys retained (w=2 and hit=4 means last 2 chunks)
-        # But L1's fold was done with hit=2, retaining SW chunks 0-1.
-        # After L2 extends to hit=4, the caller folds the combined rows
-        # and would trim SW to chunks 2-3 only. But here we're testing
-        # the raw combined rows before the caller's fold.
-        assert sw_row.get_indices_list() == [0, 1, 2, 3]
+        # The union of L1 (chunks 0-1) and L2 (chunks 2-3) serves a 4-chunk
+        # prefix; a window-2 row retains only its trailing two chunks, so
+        # the L1-resident SW chunks 0-1 are released.
+        assert sw_row.get_indices_list() == [2, 3]
+        assert sm.delete_l1_keys(sw_keys[:2]) == (2, 0)
 
         retained_keys = full_row.gather(full_keys) + sw_row.gather(sw_keys)
         sm.finish_read_prefetched(retained_keys)
@@ -1031,14 +1059,12 @@ class TestStorageManagerGroupedRows:
             ]
         )
         handle = sm.submit_prefetch_task(spec)
-        assert handle.prefetch_request_id == -1
-        assert handle.l1_hit_chunks == 2
-        assert handle.num_key_groups == 4
+        assert handle.total_requested_keys == 12
 
         found = sm.query_prefetch_status(handle)
         assert found is not None
-        assert len(found) == 4
-        assert [row.get_indices_list() for row in found] == [[0, 1]] * 4
+        assert len(found.hit_cells) == 4
+        assert [row.get_indices_list() for row in found.hit_cells] == [[0, 1]] * 4
 
         # Chunk 2 of the complete rows was L1-resident but lies past the
         # model-wide hit: its read lock was released, so it is deletable.
@@ -1079,10 +1105,9 @@ class TestStorageManagerGroupedRows:
                 fetching_policy="full",
             )
         )
-        assert handle.num_key_groups == 2
         found = sm.query_prefetch_status(handle)
         assert found is not None
-        assert [row.get_indices_list() for row in found] == [[1], [0, 2]]
+        assert [row.get_indices_list() for row in found.hit_cells] == [[1], [0, 2]]
 
         sm.finish_read_prefetched(resident)
         sm.close()
