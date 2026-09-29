@@ -27,6 +27,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.memory_manager import GDSL1MemoryManager
+from lmcache.v1.gpu_connector import gds_context
 from lmcache.v1.gpu_connector._gds_backends import create_backend
 from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend
 from lmcache.v1.gpu_connector.gds_context import (
@@ -39,8 +40,22 @@ from lmcache.v1.memory_management import GDSMemoryObject
 
 
 def _fake_stream(handle: int):
-    """A stand-in for ``torch_dev.current_stream()`` (no CUDA needed)."""
+    """A stand-in for a platform stream (no accelerator needed)."""
     return SimpleNamespace(cuda_stream=handle, synchronize=lambda: None)
+
+
+def _use_fake_stream(monkeypatch: pytest.MonkeyPatch, handle: int) -> None:
+    """Route GDSContext's platform stream operations to a fake stream."""
+    monkeypatch.setattr(
+        gds_context.platform_stream,
+        "current_stream",
+        lambda device: _fake_stream(handle),
+    )
+    monkeypatch.setattr(
+        gds_context.platform_stream,
+        "stream_handle",
+        lambda device, stream: stream.cuda_stream,
+    )
 
 
 def _gds_available() -> bool:
@@ -220,7 +235,7 @@ class TestRegisterGpuBuffer:
             lambda buf: sizes.append(buf.numel() * buf.element_size()),
         )
         monkeypatch.setattr(backend, "register_stream", lambda raw: None)
-        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(0))
+        _use_fake_stream(monkeypatch, 0)
 
         # The whole buffer is registered in <=16 MiB regions, irrespective of
         # any chunk/slot layout. A 40 MiB buffer -> 16 + 16 + 8 MiB.
@@ -254,10 +269,7 @@ class TestRegisterGpuBuffer:
         )
         monkeypatch.setattr(backend, "register_stream", stream_registrations.append)
         monkeypatch.setattr(backend, "deregister_stream", stream_deregistrations.append)
-        monkeypatch.setattr(
-            backend, "get_raw_stream_handle", lambda stream: stream.cuda_stream
-        )
-        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(7))
+        _use_fake_stream(monkeypatch, 7)
 
         with pytest.raises(RuntimeError, match="registration failed"):
             ctx.register_gpu_buffer(torch.empty(40 << 20, dtype=torch.uint8))
@@ -280,15 +292,24 @@ class TestResolveBuffer:
         ctx.initialized = True
         monkeypatch.setattr(backend, "register_buffer", lambda b: None)
         monkeypatch.setattr(backend, "register_stream", lambda raw: None)
-        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(0))
+        _use_fake_stream(monkeypatch, 0)
         ctx.register_gpu_buffer(buf)
         resolved: list[tuple[int, int]] = []
+
+        def record_resolved(
+            slab_offset: int,
+            size: int,
+            dev_offset: int,
+            buf_base: int,
+            stream_handle: int,
+        ) -> object:
+            resolved.append((buf_base, dev_offset))
+            return object()
+
         monkeypatch.setattr(
             ctx,
             "_slab_write",
-            lambda slab_offset, size, dev_offset, buf_base: resolved.append(
-                (buf_base, dev_offset)
-            ),
+            record_resolved,
         )
         return ctx, resolved
 
@@ -317,14 +338,9 @@ class TestPerStreamRegistration:
         )
         monkeypatch.setattr(backend, "register_stream", reg_str.append)
         monkeypatch.setattr(backend, "deregister_stream", dereg_str.append)
-        monkeypatch.setattr(
-            backend, "get_raw_stream_handle", lambda stream: stream.cuda_stream
-        )
 
         def use_stream(handle: int):
-            monkeypatch.setattr(
-                torch_dev, "current_stream", lambda: _fake_stream(handle)
-            )
+            _use_fake_stream(monkeypatch, handle)
 
         buf_a = torch.empty(24 << 20, dtype=torch.uint8)  # 2 regions on stream 11
         buf_b = torch.empty(4096, dtype=torch.uint8)  # 1 region on stream 22

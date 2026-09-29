@@ -60,21 +60,6 @@ class GDSBackend(ABC):
         """Raise ValueError for an unsupported runtime; the default accepts all."""
         return None
 
-    def get_raw_stream_handle(self, stream: object) -> int:
-        """Return the native stream handle consumed by this backend.
-
-        CUDA and ROCm stream objects expose ``cuda_stream``. Backends for
-        other device runtimes can override this method without making the
-        common GDS context know about their stream attribute names.
-        """
-        for attr in ("cuda_stream", "ptr"):
-            value = getattr(stream, attr, None)
-            if value is not None:
-                return int(value)
-        raise RuntimeError(
-            f"stream of type {type(stream).__name__} does not expose a handle"
-        )
-
     @abstractmethod
     def open_slab(self, location: str, size: int, direct_io: bool) -> "GDSHandle":
         """Prepare size bytes at location for IO; release resources on failure."""

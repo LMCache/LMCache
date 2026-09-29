@@ -230,180 +230,112 @@ time and are auto-discovered by `storage_controllers/__init__.py`.
 
 ## PrefetchController
 
-**Purpose:** Asynchronously load KV cache data from L2 into L1 ahead of a
-serving request. Called by `StorageManager.submit_prefetch_task()` for keys
-not already in L1.
+**Purpose:** Make the objects of a request resident in L1 ahead of a serving
+request: read-lock what L1 already holds and load the rest from L2. Called by
+`StorageManager.submit_prefetch_task()`.
 
-**Source:** `storage_controllers/prefetch_controller.py`
+**Source:** `storage_controllers/prefetch_controller.py`. The full design
+(request grid, lock maps, invariants, per-step lock table) is in
+[`../storage_controllers/prefetch_controller.md`](../storage_controllers/prefetch_controller.md);
+this section covers only what an adapter implementer needs.
 
 ### Lifecycle
 
 ```
 StorageManager.__init__
-  → PrefetchController(l1_manager, l2_adapters, descriptors, policy)
+  → PrefetchController(l1_managers, l1_manager_descriptors,
+                       l2_adapters, adapter_descriptors, policy)
   → controller.start()        # spawns background thread
   ...
 StorageManager.close()
   → controller.stop()         # joins thread, releases all locks
 ```
 
+Adapters can be attached and detached at runtime with `add_adapter` and
+`request_remove_adapter`; a draining adapter receives no new lookups and is
+detached once no in-flight request references it.
+
 ### External API (Thread-Safe)
 
 ```python
 # Called from the serving thread
-request_id = controller.submit_prefetch_request(keys, layout_desc)
+request_id = controller.submit_prefetch_request(spec, skip_l2=False)
 
-# Polled by the serving thread
-result = controller.query_prefetch_result(request_id)  # int | None
+# Polled (or waited on) by the serving thread
+result = controller.query_prefetch_result(request_id)  # PrefetchResult | None
+controller.wait_prefetch_result(request_id, timeout)   # bool, does not consume
 ```
 
-- `submit_prefetch_request` enqueues the request and signals the background thread
-  via an eventfd. Returns immediately.
-- `query_prefetch_result` returns `None` while in-progress, then the **prefix hit
-  count** exactly once (pop semantics).
-
-### Prefix-Only Loading
-
-**Key invariant:** Only the **contiguous prefix** of found keys is loaded.
-
-If L2 has keys `{0, 1, 3, 4}` but not key `2`, only keys `{0, 1}` are loaded.
-The gap at index 2 means the vLLM engine cannot use keys 3 and 4 (it needs a
-contiguous prefix of computed KV cache). Loading them would waste I/O bandwidth
-and L1 memory.
-
-This is enforced by `trim_load_plan_to_prefix()` after the policy computes the
-raw load plan.
+- `submit_prefetch_request` enqueues the request and signals the background
+  thread via an eventfd. With `skip_l2`, or no attached adapter, the request
+  is served from L1 on the calling thread instead.
+- `query_prefetch_result` returns `None` while in progress, then the result
+  exactly once (pop semantics): one hit bitmap per key group, split into the
+  cells L1 already held and the cells loaded from L2.
 
 ### Event-Driven Loop
 
 The PrefetchController's background thread polls on:
 
 1. **Submission eventfd** — signaled by `submit_prefetch_request()`.
-2. **Per-adapter lookup eventfds** — signaled when lookup tasks complete.
-3. **Per-adapter load eventfds** — signaled when load tasks complete.
+2. **Adapter-control eventfd** — signaled by `add_adapter` / `request_remove_adapter`.
+3. **Per-adapter lookup eventfds** — signaled when lookup tasks complete.
+4. **Per-adapter load eventfds** — signaled when load tasks complete.
 
-### Request State Machine
-
-Each request goes through two phases:
-
-```
-LOOKUP ──────────────────────────► PLAN_AND_LOAD ──────────► COMPLETED
-  │                                    │
-  │ submit lookup_and_lock             │ compute load plan
-  │ to ALL adapters                    │ reserve L1 write buffers
-  │                                    │ submit load tasks
-  │ wait for all lookups               │ wait for all loads
-  │ to complete                        │ finalize
-  ▼                                    ▼
-```
-
-### Data Flow
+### What the controller asks of an adapter
 
 ```
-submit_prefetch_request(keys, layout_desc)
-  │
-  ▼ (cross-thread: submission queue + eventfd signal)
-_drain_submission_queue → _pending_queue
-  │
-  ▼ (if below max_in_flight)
-_start_lookup_phase(request_id, keys, layout_desc)
-  │
-  ├─ Submit lookup_and_lock_task(keys) to EVERY adapter
-  │
-  ▼ (wait for all adapter lookups to complete)
-_advance_request(request, signaled_adapters)  [LOOKUP branch]
-  │  _poll_lookup_results(request, signaled_adapters[LOOKUP])
-  │  when all_lookups_done():
-  │
-  ▼
-_transition_to_load_phase(request)
-  │
-  ├─ 1. PrefetchPolicy.select_load_plan(keys, lookup_results, adapters)
-  │     → dict[adapter_index, Bitmap]
-  │
-  ├─ 2. trim_load_plan_to_prefix()
-  │     → only keep contiguous prefix keys
-  │
-  ├─ 3. L1Manager.reserve_write(keys, is_temporary=True, mode="new")
-  │     → allocate L1 write buffers
-  │
-  ├─ 4. Re-trim plan to only successfully reserved keys
-  │
-  ├─ 5. Phase 1 unlock: unlock L2 keys locked in lookup but NOT in load plan
-  │
-  ├─ 6. Submit load_task(keys, objs) per adapter
-  │
-  ▼ (wait for all adapter loads to complete)
-_advance_request(request, signaled_adapters)  [PLAN_AND_LOAD branch]
-  │  _poll_load_results(request, signaled_adapters[PLAN_AND_LOAD])
-  │  when all_loads_done():
-  │
-  ▼
-_finalize_load(request)
-  │
-  ├─ 7. Phase 2 unlock: unlock all L2 keys in the load plan
-  │
-  ├─ 8. L1Manager.finish_write_and_reserve_read(loaded_keys)
-  │     → atomically: write unlock + read lock
-  │
-  ├─ 9. L1Manager.finish_write(failed_keys) + delete(failed_keys)
-  │     → clean up partial failures
-  │
-  ├─ 10. Release read locks for loaded keys beyond the prefix
-  │      (partial load failures can create gaps)
-  │
-  ▼
-_complete_request(request_id, prefix_hits)
-  │  store result, remove from in-flight tracking
+_start_lookup_phase
+  ├─ submit_lookup_and_lock_task(keys, group_layout_descs) to every
+  │  non-draining adapter, with the request's full key list
+  ▼ (lookup eventfd)
+_poll_lookup_results
+  ├─ query_lookup_and_lock_result(task_id) -> found bitmap over ``keys``
+  ▼ (all lookups done)
+_transition_to_load_phase
+  ├─ policy plans over L1 hits and every adapter's found bitmap
+  ├─ submit_unlock(keys) for every locked key outside the plan
+  ├─ L1 staging buffers reserved; on failure, submit_unlock for the
+  │  affected keys and replan
+  ├─ submit_load_task(keys, objs) per adapter in the plan
+  ▼ (load eventfd, per adapter)
+_poll_load_results
+  ├─ query_load_result(task_id) -> loaded bitmap over the task's keys
+  ├─ submit_unlock(keys) for every key of that adapter's plan
+  ▼ (all loads done)
+_finish_request
 ```
-
-### Lock Invariants
-
-| Phase             | L1 Lock State                    | L2 Lock State               |
-|-------------------|----------------------------------|-----------------------------|
-| Lookup            | None                             | Found keys are locked       |
-| After plan        | Write-locked (reserved buffers)  | Plan keys locked; others unlocked (phase 1) |
-| During load       | Write-locked                     | Plan keys locked            |
-| After load        | **Read-locked** (prefix keys)    | All unlocked (phase 2)      |
-| After finalize    | Read-locked (prefix only)        | All unlocked                |
-
-- **L1 write buffers are temporary:** `is_temporary=True` allows the eviction
-  controller to reclaim them if needed, although normally they are short-lived.
-- **Atomic write→read transition:** `finish_write_and_reserve_read()` ensures no
-  eviction window between write completion and read lock acquisition.
-- **Post-finalize read locks:** The prefix keys remain read-locked in L1 so the
-  serving engine can consume them. The caller (`StorageManager`) releases these
-  via `finish_read_prefetched()` after use.
 
 ### L2 Lock Management
 
-L2 locks prevent adapter-side eviction between lookup and load. They must be
-released in all cases — success, failure, and shutdown.
+L2 locks prevent adapter-side eviction between lookup and load. They are
+released in all cases — success, failure, and shutdown:
 
-**Phase 1 unlock** (`_unlock_unneeded_keys`): After the load plan is computed,
-keys that were locked during lookup but are NOT in the final load plan are
-unlocked immediately. This happens when:
-- The policy assigned a key to a different adapter.
-- The key was trimmed by prefix trimming.
-- L1 write reservation failed.
+- after planning, for every key locked in lookup but not in the plan;
+- after a failed L1 reservation, for the affected keys;
+- after each adapter's load result is admitted, for that adapter's plan;
+- on abort and on `stop()`, for everything the request still holds.
 
-**Phase 2 unlock** (`_unlock_all_plan_keys`): After load completes (regardless
-of success or failure), all keys in the load plan are unlocked.
-
-**Shutdown cleanup** (`_cleanup_in_flight_requests`): Releases all held L1 and
-L2 locks for any in-flight requests.
+The controller never retries `submit_unlock`; the adapter must make it
+eventually succeed.
 
 ### PrefetchPolicy
 
 ```python
-select_load_plan(keys, lookup_results, adapters) → dict[int, Bitmap]
+plan_load(key_groups, l1_locked_keys, l2_locked_keys,
+          l1_manager_descs, l2_adapter_descs, fetching_policy) -> PrefetchPlan
+plan_l1_retention(keys, l1_manager_desc, l2_adapter_desc) -> list[bool]
 ```
 
-Receives lookup bitmaps from all adapters and produces a non-overlapping
-assignment of keys to adapters. Each key appears in at most one adapter's bitmap.
+`plan_load` sees the L1 hits and every adapter's found bitmap at once and
+returns which cells to serve from which L1 manager and which to load from
+which adapter; no cell is planned twice, and every planned cell is locked in
+the tier it is planned from. `plan_l1_retention` decides, per key loaded from
+an adapter into an L1 manager, whether it stays resident after the retrieve.
 
-`DefaultPrefetchPolicy`: For each key, assign it to the first (lowest-indexed)
-adapter that has it. This is a simple greedy approach.
+`DefaultPrefetchPolicy` (`"default"`) serves each needed cell from the
+lowest-indexed tier that holds it and retains nothing loaded from L2;
+`RetainPrefetchPolicy` (`"retain"`) plans the same way and retains everything.
 
 Policies are selected by name via `--l2-prefetch-policy` (default: `"default"`).
 New policies self-register with `register_prefetch_policy(name, cls)` at import
@@ -426,20 +358,18 @@ everything together.
 ### Prefetch Flow (from the serving engine's perspective)
 
 ```python
-# 1. Submit: one key row per (object group, kv rank); L1 is checked first,
-#    the remainder is delegated to L2. See ../storage_manager.md.
+# 1. Submit: one key row per (object group, kv rank). L1 hits and every
+#    adapter's hits are planned together. See ../storage_manager.md.
 handle = sm.submit_prefetch_task(
     PrefetchTaskSpec(
         key_groups=[GroupedObjectKeys(keys=keys, object_group_id=0, layout_desc=layout_desc)]
     )
 )
 
-# 2. Poll: busy-wait for completion (one found bitmap per key row)
-while True:
-    rows = sm.query_prefetch_status(handle)
-    if rows is not None:
-        break
-hit_chunks, retain = fold_unfold_grouped(rows, windows=[-1])
+# 2. Wait, then fetch the result (one hit bitmap per key row)
+sm.wait_prefetch_status(handle, timeout=1.0)
+result = sm.query_prefetch_status(handle)
+hit_chunks, retain = fold_unfold_grouped(result.hit_cells, windows=[-1])
 
 # 3. Read: access the prefetched data (holds read locks)
 with sm.read_prefetched_results(retain[0].gather(keys)) as objs:
@@ -455,23 +385,15 @@ sm.finish_read_prefetched(retain[0].gather(keys))
 ```python
 @dataclass(frozen=True)
 class PrefetchHandle:
-    prefetch_request_id: int        # -1 if no L2 request needed
+    prefetch_request_id: int        # -1 for an already-complete empty request
     external_request_id: str
-    l1_found_indices: tuple[int, ...]
-    l1_hit_chunks: int
     total_requested_keys: int
     submit_time: float              # for latency logging
-    l2_orig_indices: tuple[int, ...]
-    num_key_groups: int             # key-group count, for per-group status
+    sliding_windows: tuple[int, ...]  # per key row, for folding the result
 ```
 
-`submit_prefetch_task` first checks L1 for the prefix every object group can
-serve:
-- If all keys hit L1: returns handle with `prefetch_request_id=-1` (no L2 work).
-- If some keys miss: submits the **remaining** keys to PrefetchController.
-
-`query_prefetch_status` combines the L1 hits with the L2 result and reports
-them per key row.
+`query_prefetch_status` returns the controller's `PrefetchResult` once, with
+the hit cells split into those L1 already held and those loaded from L2.
 
 ## Assumptions and Invariants Summary
 
@@ -487,15 +409,18 @@ them per key row.
 4. **`submit_unlock` must eventually succeed.** The controllers will never
    retry. The adapter must handle retries internally.
 
-5. **Prefix-only loading.** Only the contiguous prefix of found keys is loaded
-   from L2. Gaps break the prefix.
+5. **The policy decides what is loaded.** Under `"prefix"` fetching only the
+   cells of the longest prefix every key row can serve are loaded from L2;
+   under `"full"` every found cell is.
 
 6. **Listener callbacks run inside L1Manager's lock.** `StoreListener` must be
    non-blocking (append + eventfd signal only). It must never call L1Manager
    methods (deadlock).
 
-7. **L1 write buffers for prefetch are temporary.** Allocated with
-   `is_temporary=True` to allow eviction if needed.
+7. **L1 write buffers for prefetch are staged per request.** They are
+   reserved under a per-request write tag, invisible to readers until the
+   load lands; the prefetch policy decides per key whether the loaded object
+   is retained or deleted after the retrieve.
 
 8. **Atomic write→read transition.** `finish_write_and_reserve_read()` prevents
    eviction between completing a prefetch write and acquiring the read lock
@@ -598,8 +523,8 @@ The policy is now available via `--l2-store-policy tiered`.
 
 ### Prefetch Policy
 
-Same pattern: subclass `PrefetchPolicy`, implement `select_load_plan()`,
-and call `register_prefetch_policy("name", cls)`.
+Same pattern: subclass `PrefetchPolicy`, implement `plan_load()` and
+`plan_l1_retention()`, and call `register_prefetch_policy("name", cls)`.
 
 ### How Discovery Works
 

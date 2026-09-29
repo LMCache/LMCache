@@ -175,16 +175,6 @@ class Backend(FileGDSBackend):
             raise ValueError("mufile requires --gds-l1-use-direct-io")
         return cast("AsyncHandle", super().open_slab(location, size, direct_io=True))
 
-    def get_raw_stream_handle(self, stream: object) -> int:
-        """Extract the native MUSA stream pointer for muFile."""
-        for attr in ("musa_stream", "ptr"):
-            value = getattr(stream, attr, None)
-            if value is not None:
-                return int(value)
-        raise RuntimeError(
-            f"stream of type {type(stream).__name__} does not expose a MUSA handle"
-        )
-
     def open_handle(self, fd: int, path: str) -> "AsyncHandle":
         """Register an owned descriptor and wrap it in an async handle."""
         try:

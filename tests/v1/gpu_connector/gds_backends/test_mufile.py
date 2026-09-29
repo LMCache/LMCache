@@ -160,11 +160,3 @@ def test_mufile_struct_layout() -> None:
     assert ctypes.sizeof(mufile._MUFileDescr) == 16
     assert mufile._MUFileDescr.type.offset == 0
     assert mufile._MUFileDescr.handle.offset == 8
-
-
-def test_musa_stream_handle_is_backend_specific() -> None:
-    backend = mufile.Backend()
-    assert backend.get_raw_stream_handle(SimpleNamespace(musa_stream=0xA1)) == 0xA1
-    assert backend.get_raw_stream_handle(SimpleNamespace(ptr=0xB2)) == 0xB2
-    with pytest.raises(RuntimeError, match="MUSA handle"):
-        backend.get_raw_stream_handle(SimpleNamespace())
