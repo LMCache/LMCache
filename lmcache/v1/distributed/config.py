@@ -185,7 +185,7 @@ class GdsL1Config:
     use_direct_io: bool = True
     """Use ``O_DIRECT`` for cuFile/hipFile. Ignored by uGDS."""
 
-    backend: Literal["auto", "cufile", "hipfile", "ugds", "phx"] = "auto"
+    backend: str = "auto"
     """GPU storage backend. ``auto`` selects cuFile on CUDA and hipFile on
     ROCm; ``ugds`` can be used on either platform with a matching
     ``libugds.so`` and treats ``file_location`` as a character-device path;
@@ -268,7 +268,7 @@ class EvictionConfig:
     The configuration for eviction policies (L1 and optionally L2).
     """
 
-    eviction_policy: Literal["LRU", "IsolatedLRU", "noop"]
+    eviction_policy: Literal["LRU", "ARC", "IsolatedLRU", "noop"]
     """ The eviction policy to use. """
 
     trigger_watermark: float = field(default=0.8)
@@ -420,6 +420,9 @@ def add_storage_manager_args(
         >>> args = parser.parse_args()
         >>> config = parse_args_to_config(args)
     """
+    # First Party
+    from lmcache.v1.gpu_connector._gds_backends import available_backends
+
     # L1 Memory Manager Config
     memory_group = parser.add_argument_group(
         "L1 Memory Manager", "Configuration for L1 memory manager"
@@ -487,12 +490,9 @@ def add_storage_manager_args(
     )
     gds_group.add_argument(
         "--gds-l1-backend",
-        choices=("auto", "cufile", "hipfile", "ugds", "phx"),
         default="auto",
-        help="GDS implementation. auto selects cuFile on CUDA or hipFile on ROCm; "
-        "ugds can be used on either platform with a matching libugds.so and "
-        "treats --gds-l1-path as /dev/ugds_drvX; phx uses the Phoenix phxfs "
-        "DMA path with a matching libphoenix.so.",
+        choices=("auto", *available_backends()),
+        help="GDS backend. auto selects the default for this environment.",
     )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
@@ -518,9 +518,10 @@ def add_storage_manager_args(
     eviction_group.add_argument(
         "--eviction-policy",
         type=str,
-        choices=["LRU", "IsolatedLRU", "noop"],
+        choices=["LRU", "ARC", "IsolatedLRU", "noop"],
         required=True,
-        help="The eviction policy to use ('LRU', 'IsolatedLRU', or 'noop'). "
+        help="The eviction policy to use ('LRU', 'ARC', 'IsolatedLRU', or 'noop'). "
+        "'ARC' balances recent and frequently reused keys adaptively. "
         "'IsolatedLRU' maintains one LRU list per cache_salt and requires "
         "quotas keyed by cache_salt to be configured via the HTTP API.",
     )

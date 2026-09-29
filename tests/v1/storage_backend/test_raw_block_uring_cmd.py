@@ -261,12 +261,12 @@ def test_uring_cmd_get_nvme_info(loop_in_thread):
         # Test getting namespace ID
         nsid = raw_device.nvme_nsid()
         assert nsid > 0, f"Expected positive nsid, got {nsid}"
-        logger.info(f"NVMe namespace ID: {nsid}")
+        logger.info("NVMe namespace ID: %s", nsid)
 
         # Test getting LBA size
         lba_size = raw_device.nvme_lba_size()
         assert lba_size > 0, f"Expected positive lba_size, got {lba_size}"
-        logger.info(f"NVMe LBA size: {lba_size} bytes")
+        logger.info("NVMe LBA size: %s bytes", lba_size)
 
     except Exception as e:
         pytest.fail(f"Failed to get NVMe info: {e}")

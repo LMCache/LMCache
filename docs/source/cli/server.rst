@@ -58,7 +58,7 @@ Commonly used flags include:
    * - ``--l1-size-gb GB``
      - L1 (CPU/DRAM) cache capacity in GB.
    * - ``--eviction-policy POLICY``
-     - L1 eviction policy (e.g. ``LRU``).
+     - L1 eviction policy (``LRU``, ``ARC``, ``IsolatedLRU``, or ``noop``).
    * - ``--eviction-trigger-watermark RATIO``
      - L1 fill ratio at which eviction begins.
    * - ``--eviction-ratio RATIO``
@@ -83,6 +83,18 @@ Commonly used flags include:
        and eviction, and the blend index behind fleet CacheBlend matching.
    * - ``--coordinator-event-flush-interval SECONDS``
      - Seconds between cache-event batch flushes (``> 0``, default ``1``).
+   * - ``--coordinator-event-transport {http,kafka}``
+     - Cache-event transport (default ``http``). ``kafka`` publishes each
+       batch to a Kafka topic instead of ``POST /events``; it needs the
+       optional ``lmcache[kafka]`` extra. See :doc:`/mp/coordinator`.
+   * - ``--coordinator-kafka-bootstrap-servers SERVERS``
+     - Comma-separated Kafka bootstrap servers. Required with
+       ``--coordinator-event-transport kafka``.
+   * - ``--coordinator-kafka-topic TOPIC``
+     - Kafka topic receiving cache events (default ``lmcache-cache-events``).
+   * - ``--coordinator-kafka-delivery-timeout SECONDS``
+     - Seconds one flush waits for broker acknowledgement (``> 0``, default
+       ``10``).
    * - ``--p2p-advertise-url HOST:PORT``
      - Enable P2P KV cache sharing and advertise this server's
        transfer-channel endpoint to peers (e.g. ``10.0.0.1:8500``). Setting it
@@ -99,8 +111,10 @@ Commonly used flags include:
        (default ``30``).
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation for P2P reads (default ``nixl``).
-   * - ``--trace-level {storage}``
-     - Enable storage-level trace recording (see :doc:`trace`).
+   * - ``--trace-level {storage,events}``
+     - Enable trace recording: ``storage`` records StorageManager calls for
+       replay, ``events`` records the cache-event stream emitted for the
+       coordinator, with or without one configured (see :doc:`trace`).
    * - ``--trace-output PATH``
      - Destination for recorded ``.lct`` trace files.
 
