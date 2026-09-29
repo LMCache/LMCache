@@ -84,19 +84,6 @@ pytest -xvs tests/v1/test_cache_engine.py::test_function_name
 
 Test dependencies: `uv pip install -r requirements/test.txt`
 
-For CPU gRPC transport tests, build the common native extensions with
-`NO_GPU_EXT=1 uv pip install -e . --no-build-isolation` after installing torch.
-`NO_NATIVE_EXT=1` alone cannot run these tests: the shared test setup imports
-`device_ops`, which requires `lmcache_native` on CPU. Rebuild after upstream
-changes to native types; an old extension can import successfully but lack
-new enum members. Install `requirements/proto.txt` and run
-`python lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py`
-after changing revisions or protobuf schemas; generated bindings are ignored
-by Git and can otherwise be missing or stale in a worktree.
-For `.github/scripts/cpu_server_bench_test.sh`, also install
-`requirements/cli.txt`; CLI command registration imports the OpenAI client
-even when running only the CPU server benchmark.
-
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 
 ### Testing Practices

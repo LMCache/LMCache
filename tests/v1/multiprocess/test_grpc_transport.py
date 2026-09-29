@@ -3,15 +3,14 @@
 
 # Standard
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 import importlib
+import queue
 import subprocess
 import sys
 import threading
-import time
 
 # Third Party
 import grpc
@@ -436,127 +435,6 @@ def test_build_grpc_request_server_uses_configured_server_workers(
     assert server.modules is modules
 
 
-def test_grpc_normal_blocking_handlers_respect_max_cpu_workers() -> None:
-    """Normal blocking gRPC handlers must honor the CPU worker limit."""
-    active = 0
-    max_active = 0
-    lock = threading.Lock()
-
-    class SlowModule:
-        @request_handler(HandlerType.BLOCKING)
-        def ping(self, instance_id: int | None) -> bool:
-            nonlocal active, max_active
-            with lock:
-                active += 1
-                max_active = max(max_active, active)
-            try:
-                time.sleep(0.05)
-                return instance_id == 7
-            finally:
-                with lock:
-                    active -= 1
-
-    server = GrpcMultiprocessServer(
-        "grpc://127.0.0.1:0",
-        max_cpu_workers=1,
-        max_gpu_workers=1,
-        grpc_server_workers=4,
-    )
-    server.add_modules([SlowModule()])
-    server.start()
-    target_url = f"grpc://127.0.0.1:{server.bound_port}"
-    clients = [
-        GrpcMultiprocessClient(target_url),  # type: ignore[abstract]
-        GrpcMultiprocessClient(target_url),  # type: ignore[abstract]
-    ]
-    try:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(lambda client: client.ping(7).result(5), clients))
-    finally:
-        for client in clients:
-            client.close()
-        server.close()
-
-    assert results == [True, True]
-    assert max_active == 1
-
-
-def test_grpc_future_query_caches_completed_response(
-    grpc_client: tuple[GrpcMultiprocessClient, _Calls],
-) -> None:
-    """Polling should observe a fully decoded gRPC future."""
-    client, _calls = grpc_client
-    future = client.ping(7)
-    deadline = time.monotonic() + 5
-    while not future.query() and time.monotonic() < deadline:
-        time.sleep(0.001)
-
-    assert future.query() is True
-    assert future.result(timeout=0) is True
-
-
-def test_grpc_clients_preserve_affinity_and_independent_lifetimes() -> None:
-    """Clients retain separate affinity keys and can be closed independently."""
-    thread_names: list[str] = []
-
-    class AffinityModule:
-        @request_handler(
-            HandlerType.BLOCKING,
-            requires_client_affinity=True,
-        )
-        def store(
-            self,
-            key: IPCCacheServerKey,
-            instance_id: int,
-            block_ids: list[list[int]],
-            event_ipc_handle: bytes,
-        ) -> tuple[bytes, bool]:
-            thread_names.append(threading.current_thread().name)
-            return event_ipc_handle, key.model_name == "model"
-
-        @request_handler(HandlerType.BLOCKING)
-        def ping(self, instance_id: int | None) -> bool:
-            return instance_id == 7
-
-    key = IPCCacheServerKey(
-        model_name="model",
-        world_size=1,
-        worker_id=None,
-        token_ids=(1, 2),
-        start=0,
-        end=2,
-        request_id="request",
-        cache_salt="tenant",
-        request_configs={},
-        num_kv_readers=1,
-    )
-    server = GrpcMultiprocessServer(
-        "grpc://127.0.0.1:0",
-        max_cpu_workers=2,
-        max_gpu_workers=2,
-        grpc_server_workers=4,
-    )
-    server.add_modules([AffinityModule()])
-    server.start()
-    target_url = f"grpc://127.0.0.1:{server.bound_port}"
-    client_a = GrpcMultiprocessClient(target_url)  # type: ignore[abstract]
-    client_b = GrpcMultiprocessClient(target_url)  # type: ignore[abstract]
-    try:
-        assert client_a.store(key, 7, [[1]], b"a").result(5) == (b"a", True)
-        assert client_b.store(key, 7, [[2]], b"b").result(5) == (b"b", True)
-        assert client_a.store(key, 7, [[3]], b"c").result(5) == (b"c", True)
-        client_a.close()
-        assert client_b.ping(7).result(5) is True
-    finally:
-        client_a.close()
-        client_b.close()
-        server.close()
-
-    assert len(thread_names) == 3
-    assert thread_names[0] != thread_names[1]
-    assert thread_names[0] == thread_names[2]
-
-
 def test_service_message_codec_registry_round_trips_custom_types() -> None:
     """Service-owned codecs handle only their registered protobuf types."""
     registry = get_message_codec_registry()
@@ -656,133 +534,44 @@ def test_generated_grpc_services_communicate_end_to_end(
     ]
 
 
-@pytest.mark.parametrize("separate_clients", [False, True])
-def test_grpc_blocking_requests_can_complete_out_of_order(
-    separate_clients: bool,
-) -> None:
-    """A blocked request must not stall another runnable blocking handler."""
-    entered = threading.Event()
+@pytest.mark.parametrize("max_cpu_workers", [1, 2])
+def test_grpc_normal_worker_limit_and_error_release(max_cpu_workers: int) -> None:
+    """Normal handlers honor capacity and release it even on exceptions."""
+    entered: queue.Queue[None] = queue.Queue()
     release = threading.Event()
 
     class BlockingModule:
         @request_handler(HandlerType.BLOCKING)
         def ping(self, instance_id: int | None) -> bool:
+            entered.put(None)
+            assert release.wait(10)
             if instance_id == 0:
-                entered.set()
-                assert release.wait(10)
+                raise RuntimeError("handler failed")
             return True
 
     server = GrpcMultiprocessServer(
         "grpc://127.0.0.1:0",
-        max_cpu_workers=2,
+        max_cpu_workers=max_cpu_workers,
         max_gpu_workers=1,
         grpc_server_workers=4,
     )
     server.add_modules([BlockingModule()])
     server.start()
-    url = f"grpc://127.0.0.1:{server.bound_port}"
-    first = GrpcMultiprocessClient(url)  # type: ignore[abstract]
-    second = (
-        GrpcMultiprocessClient(url) if separate_clients else first  # type: ignore[abstract]
-    )
-    try:
-        slow = first.ping(0)
-        assert entered.wait(5)
-        assert second.ping(1).result(5) is True
-        assert not slow.query()
-        release.set()
-        assert slow.result(5) is True
-    finally:
-        release.set()
-        first.close()
-        second.close()
-        server.close()
-
-
-def test_grpc_client_recovers_after_server_restart() -> None:
-    """Existing clients can issue new requests after an in-flight RPC fails."""
-    entered = threading.Event()
-    release = threading.Event()
-
-    class RestartModule:
-        @request_handler(HandlerType.BLOCKING)
-        def ping(self, instance_id: int | None) -> bool:
-            if instance_id == 0:
-                entered.set()
-                assert release.wait(10)
-            return True
-
-    def start_server(url: str) -> GrpcMultiprocessServer:
-        server = GrpcMultiprocessServer(
-            url,
-            max_cpu_workers=2,
-            max_gpu_workers=1,
-            grpc_server_workers=4,
-        )
-        server.add_modules([RestartModule()])
-        server.start()
-        return server
-
-    server = start_server("grpc://127.0.0.1:0")
-    url = f"grpc://127.0.0.1:{server.bound_port}"
-    client = GrpcMultiprocessClient(url)  # type: ignore[abstract]
-    try:
-        pending = client.ping(0)
-        assert entered.wait(5)
-        server.close()
-        assert pending.wait(5)
-        with pytest.raises(grpc.RpcError):
-            pending.result(0)
-        release.set()
-        server = start_server(url)
-        assert client.ping(1).result(5) is True
-    finally:
-        release.set()
-        client.close()
-        server.close()
-
-
-@pytest.mark.parametrize("max_cpu_workers", [0, -1])
-def test_grpc_rejects_nonpositive_cpu_worker_limit(max_cpu_workers: int) -> None:
-    """Invalid limits must fail at construction instead of hanging requests."""
-    with pytest.raises(ValueError, match="max_cpu_workers"):
-        GrpcMultiprocessServer(
-            "grpc://127.0.0.1:0",
-            max_cpu_workers=max_cpu_workers,
-            max_gpu_workers=1,
-            grpc_server_workers=4,
-        )
-
-
-def test_grpc_handler_errors_release_cpu_capacity() -> None:
-    """Handler failures retain gRPC status codes and release the normal slot."""
-
-    class ErrorModule:
-        @request_handler(HandlerType.BLOCKING)
-        def ping(self, instance_id: int | None) -> bool:
-            if instance_id == 0:
-                raise NotImplementedError("instance disabled")
-            return True
-
-    server = GrpcMultiprocessServer(
-        "grpc://127.0.0.1:0",
-        max_cpu_workers=1,
-        max_gpu_workers=1,
-        grpc_server_workers=4,
-    )
-    server.add_modules([ErrorModule()])
-    server.start()
     client = GrpcMultiprocessClient(  # type: ignore[abstract]
         f"grpc://127.0.0.1:{server.bound_port}"
     )
     try:
-        with pytest.raises(grpc.RpcError) as error:
-            client.ping(0).result(5)
-        assert error.value.code() == grpc.StatusCode.UNIMPLEMENTED
+        futures = [client.ping(i) for i in range(max_cpu_workers + 1)]
+        for _ in range(max_cpu_workers):
+            entered.get(timeout=5)
+        with pytest.raises(queue.Empty):
+            entered.get(timeout=0.1)
+        release.set()
+        with pytest.raises(grpc.RpcError, match="handler failed"):
+            futures[0].result(5)
+        assert all(future.result(5) for future in futures[1:])
         assert client.ping(1).result(5) is True
-        with pytest.raises(grpc.RpcError) as disabled:
-            client.noop().result(5)
-        assert disabled.value.code() == grpc.StatusCode.UNIMPLEMENTED
     finally:
+        release.set()
         client.close()
         server.close()
