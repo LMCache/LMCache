@@ -1220,11 +1220,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.lookup_covered_tokens,
         )
         # Read the completed lookup's hit (cached, idempotent) to free the locks
-        # it took on [old_covered, ret) before dropping the lookup state.
+        # it took on [old_covered, ret). This blocks until the server processes
+        # the release so the covered=0 re-lookup's begin_lookup (next poll)
+        # cannot reset the session state the release reads (which would
+        # over-release the covered prefix under max_cpu_workers > 1).
         cached = self.scheduler_adapter.check_lookup_result(request.request_id)
         hit_tokens = cached.hit_tokens if cached is not None else 0
         if hit_tokens > 0:
-            self.scheduler_adapter.free_lookup_locks(
+            self.scheduler_adapter.free_lookup_locks_blocking(
                 token_ids=tracker.get_token_ids(),
                 start=0,
                 end=hit_tokens,

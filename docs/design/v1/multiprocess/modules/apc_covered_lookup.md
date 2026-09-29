@@ -44,6 +44,16 @@ Non-pin-specific handling (this branch):
   now 0, the covered-skip release elision no longer applies, so the fresh lookup's
   read locks release through the normal `update_state_after_alloc` path. Returns
   `(None, True)` so the scheduler re-polls.
+- **Blocking stale-lock release**: the stale-lock free uses
+  `free_lookup_locks_blocking` (waits for every server to ack) rather than the
+  fire-and-forget `free_lookup_locks`. The server's release reads live session
+  state (`prefetch_hit_chunks` / `prefetch_covered_chunks`), which the fresh
+  lookup's `begin_lookup` resets. Since `LOOKUP` and `FREE_LOOKUP_LOCKS` share the
+  normal thread pool, a fire-and-forget release could be reordered after the next
+  poll's `begin_lookup` when `max_cpu_workers > 1` — reading the reset state,
+  over-releasing the covered prefix and leaking the stale locks. Blocking until the
+  release is acked serializes the two, making the recovery correct for any worker
+  count (not just the default `max_cpu_workers = 1`).
 - Sticky by design: once a request has shrunk it stays on full lookups, so a second
   shrink cannot recur (no re-lookup churn) even across preemption/resume.
 - Trade-off: soft guarantee — a prefix chunk evicted before the re-fetch just
@@ -69,7 +79,7 @@ Legend: S=Scheduler  C=Connector  A=Adapter  L=LookupModule  SM=Storage
  A --returns LookupOutcome(hit, stored)-----------------> C
 
  shrink (APC hit < c0):
-   C --free stale [c0,ret) locks + cleanup_lookup_result-> A
+   C --free stale [c0,ret) locks (BLOCKING ack) + cleanup--> A
    C :  set covered_skip_disabled; reset per-lookup state
    C --> S :  (None, True)  re-poll -> full lookup covered_chunks=0
  normal:

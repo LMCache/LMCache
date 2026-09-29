@@ -1205,6 +1205,56 @@ class LMCacheMPSchedulerAdapter:
         for url in self._server_urls:
             self.req_clients[url].free_lookup_locks(base_key, self.tp_size)
 
+    def free_lookup_locks_blocking(
+        self,
+        token_ids: list[int],
+        start: int,
+        end: int,
+        request_id: str,
+        cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
+    ) -> None:
+        """Release read locks like ``free_lookup_locks`` but block until every
+        server has processed the release.
+
+        The covered-lookup shrink path must guarantee the stale lookup's locks
+        are released before it submits the replacement full lookup for the same
+        request. On a server with ``max_cpu_workers > 1``, ``LOOKUP`` and
+        ``FREE_LOOKUP_LOCKS`` share the normal thread pool, so a fire-and-forget
+        release could be reordered after the replacement's ``begin_lookup``,
+        which resets the session state the release reads -- over-releasing the
+        covered prefix and leaking the stale locks. Blocking here serializes the
+        two. Args mirror ``free_lookup_locks``.
+        """
+        if not self.is_healthy:
+            return
+
+        base_key = self._create_key(
+            token_ids,
+            start=start,
+            end=end,
+            request_id=request_id,
+            cache_salt=cache_salt,
+            request_configs=request_configs,
+        ).no_worker_id_version()
+        deadline = time.monotonic() + self._mq_timeout
+        futures = {
+            url: self.req_clients[url].free_lookup_locks(base_key, self.tp_size)
+            for url in self._server_urls
+        }
+        for url, future in futures.items():
+            try:
+                future.result(timeout=max(0.0, deadline - time.monotonic()))
+            except TimeoutError:
+                logger.warning(
+                    "FREE_LOOKUP_LOCKS to %s did not complete within %ss; the "
+                    "covered-lookup re-lookup may race it.",
+                    url,
+                    self._mq_timeout,
+                )
+            except Exception:
+                logger.warning("FREE_LOOKUP_LOCKS to %s failed.", url, exc_info=True)
+
     def end_session(self, request_id: str) -> None:
         """
         Notify LMCache server to remove the session for a finished request.
