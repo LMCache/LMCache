@@ -32,7 +32,10 @@ BlockLayout resolve_layout(PageBufferShapeDesc d, EngineKVFormat format) {
   const auto facts = format_facts(format);
   TORCH_CHECK(format != EngineKVFormat::NL_X_NP_X_NB_BS_ONE_HS,
               "Variable-width plane tuples require tensor-form transfer");
-  const int expected_kv = (facts.is_mla || facts.is_fused_packed) ? 1 : 2;
+  const int expected_kv = (facts.is_mla || facts.is_fused_packed ||
+                           format == EngineKVFormat::NL_X_NB_BS_NH_HS)
+                              ? 1
+                              : 2;
   TORCH_CHECK(d.kv_size == expected_kv, "kv_size does not match format");
   TORCH_CHECK(!facts.is_mla || d.nh == 1, "MLA requires nh == 1");
   const size_t block_bytes =
