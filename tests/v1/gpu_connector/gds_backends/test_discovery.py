@@ -4,6 +4,7 @@
 # Standard
 from pathlib import Path
 import argparse
+import json
 import subprocess
 import sys
 import textwrap
@@ -12,7 +13,7 @@ import textwrap
 import pytest
 
 # First Party
-from lmcache.v1.distributed.config import add_storage_manager_args
+from lmcache.v1.distributed.config import add_storage_manager_args, parse_args_to_config
 from lmcache.v1.gpu_connector import gds_backends
 from lmcache.v1.gpu_connector._gds_backends import available_backends, create_backend
 
@@ -38,11 +39,14 @@ def test_lazy_imports_in_fresh_interpreter(
         from unittest.mock import Mock, patch
         import argparse
         import ctypes
+        import json
         import sys
         import torch
         import lmcache.v1.gpu_connector
         ctypes.CDLL = Mock(side_effect=AssertionError("native library loaded"))
-        from lmcache.v1.distributed.config import add_storage_manager_args
+        from lmcache.v1.distributed.config import (
+            add_storage_manager_args, parse_args_to_config,
+        )
         from lmcache.v1.gpu_connector import _gds_backends as factory
 
         prefix = "lmcache.v1.gpu_connector.gds_backends."
@@ -63,10 +67,14 @@ def test_lazy_imports_in_fresh_interpreter(
         with patch("lmcache.v1.distributed.config.add_l2_adapters_args"):
             parser = add_storage_manager_args(argparse.ArgumentParser())
         args = parser.parse_args([
-            "--l1-size-gb", "1", "--eviction-policy", "LRU",
-            "--gds-l1-backend", selection,
+            "--eviction-policy", "LRU",
+            "--l1-manager", json.dumps({
+                "type": "GDS", "tag": "gds", "size_gb": 1,
+                "path": "/unused", "backend": selection,
+            }),
         ])
-        assert args.gds_l1_backend == selection
+        config = parse_args_to_config(args)
+        assert config.l1_manager_configs[0].gds_l1_config.backend == selection
         assert loaded() == set(), loaded()
         backend = factory.create_backend(selection)
         assert backend.name == expected
@@ -100,12 +108,20 @@ def test_discovery_does_not_execute_modules(
     )
     assert available_backends() == ("unavailable",)
     parser = add_storage_manager_args(argparse.ArgumentParser(exit_on_error=False))
-    assert "{auto,unavailable}" in parser.format_help()
-    required_args = ["--l1-size-gb", "1", "--eviction-policy", "LRU"]
-    args = parser.parse_args([*required_args, "--gds-l1-backend", "unavailable"])
-    assert args.gds_l1_backend == "unavailable"
-    with pytest.raises(argparse.ArgumentError, match="choose from .*auto.*unavailable"):
-        parser.parse_args([*required_args, "--gds-l1-backend", "missing"])
+    spec = {
+        "type": "GDS",
+        "tag": "gds",
+        "size_gb": 1,
+        "path": "/unused",
+        "backend": "unavailable",
+    }
+    required_args = ["--eviction-policy", "LRU", "--l1-manager"]
+    config = parse_args_to_config(parser.parse_args([*required_args, json.dumps(spec)]))
+    gds = config.l1_manager_configs[0].gds_l1_config
+    assert gds is not None and gds.backend == "unavailable"
+    spec["backend"] = "missing"
+    with pytest.raises(ValueError, match="Unknown GDS backend"):
+        parse_args_to_config(parser.parse_args([*required_args, json.dumps(spec)]))
     with pytest.raises(ValueError, match="Choose from: auto, unavailable"):
         create_backend("missing")
     assert f"{gds_backends.__name__}.unavailable" not in sys.modules
