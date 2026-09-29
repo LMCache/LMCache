@@ -336,7 +336,9 @@ def run_cache_server(
 
     init_gc_monitor(obs_config.gc_monitor)
 
-    maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
+    maybe_initialize_trace_recorder(
+        event_bus, obs_config, storage_manager_config, instance_id=mp_config.instance_id
+    )
 
     # When the engine-driven path is loaded (auto or engine_driven):
     # apply shm_name from mp_config and verify capacity.

@@ -108,9 +108,8 @@ class LookupModule:
     """Handles lookup, prefetch polling, lock release, and session lifecycle.
 
     Owns the prefetch-job bookkeeping (``_prefetch_jobs``) and exposes
-    handlers for the LOOKUP, QUERY_PREFETCH_STATUS,
-    QUERY_PREFETCH_LOOKUP_HITS, FREE_LOOKUP_LOCKS, and END_SESSION
-    request types.
+    handlers for the LOOKUP, QUERY_PREFETCH_STATUS, FREE_LOOKUP_LOCKS, and
+    END_SESSION request types.
 
     Args:
         ctx: Shared engine context providing storage manager, token hasher,
@@ -189,8 +188,6 @@ class LookupModule:
                     handle=PrefetchHandle(
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
-                        l1_found_indices=(),
-                        l1_hit_chunks=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -215,8 +212,6 @@ class LookupModule:
                     handle=PrefetchHandle(
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
-                        l1_found_indices=(),
-                        l1_hit_chunks=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -281,8 +276,6 @@ class LookupModule:
                     handle=PrefetchHandle(
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
-                        l1_found_indices=(),
-                        l1_hit_chunks=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -324,34 +317,6 @@ class LookupModule:
         )
 
     @request_handler(HandlerType.BLOCKING)
-    def query_prefetch_lookup_hits(
-        self,
-        request_id: str,
-    ) -> int | None:
-        """Query the number of hits for a prefetch request before it's finished.
-
-        Args:
-            request_id: The external request ID passed in the lookup key.
-
-        Returns:
-            The number of hits for the prefetched keys if the lookup phase is
-            done. None if the lookup phase is still in progress. 0 if the
-            request_id is unknown (already completed and consumed, or invalid).
-        """
-        with self._prefetch_job_lock:
-            job = self._prefetch_jobs.get(request_id)
-
-        if job is None:
-            logger.warning(
-                "Prefetch job for request %s not found (already completed or invalid)",
-                request_id,
-            )
-            return 0
-
-        # Result is already in chunk-level units (l1_hit_chunks + l2_hit_chunks).
-        return self._ctx.storage_manager.query_prefetch_lookup_hits(job.handle)
-
-    @request_handler(HandlerType.BLOCKING)
     def query_prefetch_status(
         self,
         request_id: str,
@@ -380,15 +345,20 @@ class LookupModule:
             )
             return 0
 
-        found_rows = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if found_rows is None:
+        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        if result is None:
             return None
-
         if job.row_windows:
-            found_count, _retain = fold_unfold_grouped(found_rows, job.row_windows)
+            found_count, _retain = fold_unfold_grouped(
+                result.hit_cells, job.row_windows
+            )
+            l1_found_count, _l1_retain = fold_unfold_grouped(
+                result.l1_hit_cells, job.row_windows
+            )
         else:
             # Nothing was submitted (early exit), so nothing can be hit.
             found_count = 0
+            l1_found_count = 0
 
         # Record the model-wide hit length on the session so a later
         # free_lookup_locks can reconstruct which keys the prefetch
@@ -400,24 +370,10 @@ class LookupModule:
             tuple(range(job.attn_desc.num_object_groups)),
         )
 
-        # ``l1_hit_chunks`` is the prefix L1 could serve on its own under each
-        # object group's window rule, so L2's contribution is however much
-        # further ``found_count`` reaches -- not a count of L1-resident keys.
-        l1_chunks = job.handle.l1_hit_chunks
-        if l1_chunks > found_count:
-            logger.error(
-                "L1 hit chunks exceed total hit chunks: l1=%d total=%d request=%s",
-                l1_chunks,
-                found_count,
-                request_id,
-            )
-            l1_chunks = found_count
+        # L1 is credited with the prefix its own cells serve under the same
+        # window rule; L2 with however far it extended that prefix.
+        l1_chunks = min(l1_found_count, found_count)
         l2_chunks = found_count - l1_chunks
-
-        # TODO(ApostaC): there are something wrong with the current
-        # l1_hit_tokens and l2_hit_tokens calculations for hybrid models.
-        # The found count is not directly the same as the number of chunks
-        # hit for hybrid models.
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,
@@ -428,6 +384,8 @@ class LookupModule:
                     "hit_tokens": found_count * self._ctx.chunk_size,
                     "l1_hit_tokens": l1_chunks * self._ctx.chunk_size,
                     "l2_hit_tokens": l2_chunks * self._ctx.chunk_size,
+                    "l1_hit_keys": result.l1_hit_count,
+                    "l2_hit_keys": result.l2_hit_count,
                     "early_exit_reason": job.early_exit_reason,
                     "model_name": job.model_name,
                     "cache_salt": job.cache_salt,

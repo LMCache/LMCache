@@ -16,3 +16,4 @@ sharing cache across nodes.
    valkey
    aerospike
    hf3fs
+   wqs

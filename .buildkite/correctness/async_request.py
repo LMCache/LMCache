@@ -42,7 +42,7 @@ async def make_request(session, payload: tuple, args):
                         f.write(f"{json_data.get('id')}:\n{content}\n")
             return True, json_data
     except Exception:
-        logger.error(f"Request failed (Object name: {obj_name})")
+        logger.error("Request failed (Object name: %s)", obj_name)
         traceback.print_exc()
         return False, None
 
@@ -69,8 +69,8 @@ async def process_requests(payloads: dict, args):
                     content.get("usage", {}).get("completion_tokens", 0)
                 )
             else:
-                logger.error(f"Error: {content}")
-        logger.info(f"Total generated tokens: {sum(generated_token)}")
+                logger.error("Error: %s", content)
+        logger.info("Total generated tokens: %s", sum(generated_token))
 
 
 def request_concurrency(requests: dict, args):
@@ -103,7 +103,7 @@ def request_concurrency(requests: dict, args):
     start = time.time()
     asyncio.run(process_requests(payloads, args))
     end = time.time()
-    logger.info(f"Total time: {end - start:.2f} seconds")
+    logger.info("Total time: %.2f seconds", end - start)
 
 
 def main():
