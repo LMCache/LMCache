@@ -31,6 +31,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
 from lmcache.v1.multiprocess.modules.blend import BlendModule
+from lmcache.v1.multiprocess.modules.chunk_store import ChunkStoreModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
@@ -327,6 +328,7 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
         QStoreModule,
         BlendModule,
         ExtServerModuleRouter,
+        ChunkStoreModule,
     )
     handlers = {
         registered.operation: registered.handler
