@@ -32,7 +32,7 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.event_manager import EventManager, EventType
+from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
@@ -428,3 +428,111 @@ class TestStorageManagerPrefetchCallback:
             assert not obj.ref_count_down_called
         for obj in tier0_objs[4:]:
             assert obj.ref_count_down_called
+
+    def test_event_not_marked_done_when_result_raises(self, storage_manager):
+        """The LOADING event must not be DONE before ``task.result()`` succeeds.
+
+        Otherwise a later ``cleanup_memory_objs`` pops a future that re-raises
+        when awaited, hiding the original failure (#5391).
+        """
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        future = loop.create_future()
+        future.set_exception(RuntimeError("gather failed"))
+
+        storage_manager.event_manager.add_event(
+            EventType.LOADING, "test_lookup_raise", future
+        )
+
+        with pytest.raises(RuntimeError):
+            storage_manager.prefetch_all_done_callback(
+                future, "test_lookup_raise", [0, 256], [1]
+            )
+        loop.close()
+
+        assert (
+            storage_manager.event_manager.get_event_status(
+                EventType.LOADING, "test_lookup_raise"
+            )
+            != EventStatus.DONE
+        )
+        assert storage_manager.async_lookup_server.responses == []
+
+    def test_failed_loading_tier_still_sends_response(self, storage_manager):
+        """A failing loading task must not suppress the scheduler response.
+
+        When one tier's loading task raises, the other tiers are still
+        processed: the contiguous prefix before the failure is returned and the
+        subsequent tier's memory objects are released (#5391, lane 2).
+        """
+        # Standard
+        from collections import OrderedDict
+
+        tier0_objs = [MockMemoryObj(i) for i in range(3)]
+        tier2_objs = [MockMemoryObj(i + 5) for i in range(2)]
+
+        class FakeBackend:
+            def __init__(self, num_hits, objs=None, fail=False):
+                self._num_hits = num_hits
+                self._objs = objs if objs is not None else []
+                self._fail = fail
+
+            async def batched_async_contains(self, lookup_id, keys, pin):
+                return self._num_hits
+
+            async def batched_get_non_blocking(self, lookup_id, keys, kwargs):
+                if self._fail:
+                    raise RuntimeError("simulated tier failure")
+                return self._objs
+
+            def unpin(self, key):
+                pass
+
+            def close(self):
+                pass
+
+        class PassthroughSerializer:
+            async def run(self, coro, *args, **kwargs):
+                return await coro
+
+        storage_manager.storage_backends = OrderedDict(
+            [
+                ("tier0", FakeBackend(3, tier0_objs)),
+                ("tier1", FakeBackend(2, fail=True)),
+                ("tier2", FakeBackend(2, tier2_objs)),
+            ]
+        )
+        storage_manager.async_serializer = PassthroughSerializer()
+
+        keys = [
+            CacheEngineKey("test_model", 1, 0, chunk_hash, torch.float32)
+            for chunk_hash in range(7)
+        ]
+        cum_chunk_lengths = [0, 256, 512, 768, 1024, 1280, 1536, 1792]
+
+        async def run() -> None:
+            await storage_manager.async_lookup_and_prefetch(
+                "test_failed_tier", keys, cum_chunk_lengths
+            )
+            for _ in range(100):
+                if storage_manager.async_lookup_server.responses:
+                    break
+                await asyncio.sleep(0.01)
+
+        asyncio.run(run())
+
+        # The contiguous prefix from tier 0 (3 chunks = 768 tokens) is returned
+        # even though tier 1 failed.
+        assert storage_manager.async_lookup_server.responses == [
+            ("test_failed_tier", 768)
+        ]
+        for obj in tier0_objs:
+            assert not obj.ref_count_down_called
+        for obj in tier2_objs:
+            assert obj.ref_count_down_called
+        assert (
+            storage_manager.event_manager.get_event_status(
+                EventType.LOADING, "test_failed_tier"
+            )
+            == EventStatus.DONE
+        )
