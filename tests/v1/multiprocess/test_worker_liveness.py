@@ -40,6 +40,7 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._ctx = MagicMock(name="ctx")
     module._cache_contexts = {}
+    module._unregister_listeners = []
     module._lock = threading.Lock()
     return module
 
@@ -147,6 +148,8 @@ def test_gpu_unregister_cleans_up() -> None:
     module = _bare_gpu_module()
     module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, time.monotonic())
 
+    retired: list[int] = []
+    module.add_unregister_listener(retired.append)
     module.unregister_kv_cache(1)
     assert module.tracked_instance_count() == 0
     cast(
@@ -154,6 +157,9 @@ def test_gpu_unregister_cleans_up() -> None:
     ).assert_called_once_with("m", 1)
 
     module.unregister_kv_cache(1)  # already gone -> no exception
+
+    assert retired == [1]
+    module.remove_unregister_listener(retired.append)
 
 
 def test_non_gpu_reap_pops_strategy_as_pair() -> None:

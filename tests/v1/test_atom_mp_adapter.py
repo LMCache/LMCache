@@ -219,6 +219,7 @@ def test_atom_worker_registers_native_engine_type(
     ("method_name", "submit_name"),
     [
         ("submit_store_request", "submit_store"),
+        ("submit_store_request_with_chunk_events", "submit_store_with_chunk_events"),
         ("submit_retrieve_request", "submit_retrieve"),
     ],
 )

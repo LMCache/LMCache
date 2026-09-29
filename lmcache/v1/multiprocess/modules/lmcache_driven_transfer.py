@@ -2,6 +2,7 @@
 """LMCache-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Sequence
 import threading
@@ -178,6 +179,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # ops -- never across context creation, layout-registry calls, or
         # empty_cache (leaf-lock invariant: no thread holds two locks).
         self._lock = threading.Lock()
+        self._unregister_listeners: list[Callable[[int], None]] = []
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
@@ -205,6 +207,24 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
+    def add_unregister_listener(self, listener: Callable[[int], None]) -> None:
+        """Register cleanup of module state when a worker explicitly unregisters.
+
+        Args:
+            listener: Callback receiving the retired worker ID, outside our lock.
+        """
+        with self._lock:
+            self._unregister_listeners.append(listener)
+
+    def remove_unregister_listener(self, listener: Callable[[int], None]) -> None:
+        """Detach a previously registered worker-cleanup callback.
+
+        Args:
+            listener: Callback previously passed to add_unregister_listener.
+        """
+        with self._lock:
+            self._unregister_listeners.remove(listener)
+
     def get_and_touch_context_entry(self, instance_id: int) -> ContextEntry | None:
         """Return the entry for ``instance_id``, refreshing its last-seen time.
 
@@ -224,6 +244,58 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
             return entry
+
+    def publish_token_bindings(
+        self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
+    ) -> None:
+        """Publish one ``MP_TOKENS`` event for ``key``'s chunks.
+
+        Pairs each complete chunk in ``[key.start, key.end)`` with its
+        ObjectKey chunk hash and token position. Must be called at store
+        submission, before the write-finished events reach the bus, so the
+        cache-event subscriber can stamp them onto the STORE entries. A
+        store that later fails leaves only unused cache entries.
+
+        Args:
+            key: The IPC key of the store being submitted.
+            obj_keys: One ObjectKey per complete chunk, in chunk order.
+        """
+        # Complete chunks in [key.start, key.end) paired with the absolute
+        # position of each chunk's first token. Prefix-chained chunk hashes
+        # imply a position without revealing it, so it is reported here. A
+        # trailing partial chunk has no stored KV to bind to.
+        chunk_size = self._ctx.chunk_size
+        token_ids = list(key.token_ids)
+        effective_len = min(len(token_ids), key.end)
+        num_complete = effective_len - effective_len % chunk_size
+        token_offsets = list(range(key.start, num_complete, chunk_size))
+        token_chunks = [
+            token_ids[offset : offset + chunk_size] for offset in token_offsets
+        ]
+        if not token_chunks:
+            return
+        if len(obj_keys) != len(token_chunks):
+            logger.warning(
+                "Skipping token bindings for request %s: %d resolved keys "
+                "vs %d complete chunks in [%d, %d)",
+                key.request_id,
+                len(obj_keys),
+                len(token_chunks),
+                key.start,
+                key.end,
+            )
+            return
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=EventType.MP_TOKENS,
+                session_id=key.request_id,
+                metadata={
+                    "chunk_hashes": [obj_key.chunk_hash for obj_key in obj_keys],
+                    "token_chunks": token_chunks,
+                    "token_offsets": token_offsets,
+                },
+            )
+        )
 
     def _release_failed_retrieve_locks(
         self,
@@ -518,6 +590,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
         # No scalar binding: `popped` must stay the only reference so
         # _release_entries' reclaim actually unmaps the IPC segments.
+        with self._lock:
+            listeners = tuple(self._unregister_listeners)
+        for listener in listeners:
+            listener(instance_id)
         self._release_entries(popped)
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
 
@@ -668,7 +744,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             if key.worker_id == 0 and self._ctx.event_bus.has_subscribers(
                 EventType.MP_TOKENS
             ):
-                self._publish_token_bindings(key, obj_keys_per_obj_group[0])
+                self.publish_token_bindings(key, obj_keys_per_obj_group[0])
 
             transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
@@ -1024,56 +1100,4 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         return (
             event_backend.export_event(event, cache_context.device),
             retrieve_succeeded,
-        )
-
-    def _publish_token_bindings(
-        self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
-    ) -> None:
-        """Publish one ``MP_TOKENS`` event for ``key``'s chunks.
-
-        Pairs each complete chunk in ``[key.start, key.end)`` with its
-        ObjectKey chunk hash and token position. Must be called at store
-        submission, before the write-finished events reach the bus, so the
-        cache-event subscriber can stamp them onto the STORE entries. A
-        store that later fails leaves only unused cache entries.
-
-        Args:
-            key: The IPC key of the store being submitted.
-            obj_keys: One ObjectKey per complete chunk, in chunk order.
-        """
-        # Complete chunks in [key.start, key.end) paired with the absolute
-        # position of each chunk's first token. Prefix-chained chunk hashes
-        # imply a position without revealing it, so it is reported here. A
-        # trailing partial chunk has no stored KV to bind to.
-        chunk_size = self._ctx.chunk_size
-        token_ids = list(key.token_ids)
-        effective_len = min(len(token_ids), key.end)
-        num_complete = effective_len - effective_len % chunk_size
-        token_offsets = list(range(key.start, num_complete, chunk_size))
-        token_chunks = [
-            token_ids[offset : offset + chunk_size] for offset in token_offsets
-        ]
-        if not token_chunks:
-            return
-        if len(obj_keys) != len(token_chunks):
-            logger.warning(
-                "Skipping token bindings for request %s: %d resolved keys "
-                "vs %d complete chunks in [%d, %d)",
-                key.request_id,
-                len(obj_keys),
-                len(token_chunks),
-                key.start,
-                key.end,
-            )
-            return
-        self._ctx.event_bus.publish(
-            Event(
-                event_type=EventType.MP_TOKENS,
-                session_id=key.request_id,
-                metadata={
-                    "chunk_hashes": [obj_key.chunk_hash for obj_key in obj_keys],
-                    "token_chunks": token_chunks,
-                    "token_offsets": token_offsets,
-                },
-            )
         )

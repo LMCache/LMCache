@@ -9,6 +9,7 @@ from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
+from lmcache.v1.multiprocess.chunk_event_future import ChunkStoreResponse
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
@@ -87,6 +88,43 @@ class RequestClient(Protocol):
         block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
+    def store_with_chunk_events(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[ChunkStoreResponse]:
+        """Store with source-safe chunk events leased until explicit release.
+
+        Args:
+            key: Token range and cache identity.
+            instance_id: Registered worker ID.
+            block_ids: Source block IDs in kernel-group order.
+            event_ipc_handle: Producer event ordering reads of source KV.
+
+        Returns:
+            Future carrying the terminal handle, chunk handles and token
+            ranges, success flag, and event lease ID.
+        """
+        ...
+
+    @rpc_method
+    def release_chunk_store_events(
+        self, instance_id: int, lease_id: str
+    ) -> MessagingFuture[None]:
+        """Acknowledge that no imported events from this lease will be used again.
+
+        Args:
+            instance_id: Worker owning the lease.
+            lease_id: ID returned by store_with_chunk_events.
+
+        Returns:
+            Future acknowledging idempotent lease release.
+        """
+        ...
 
     @rpc_method
     def retrieve(
