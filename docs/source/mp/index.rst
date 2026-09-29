@@ -222,11 +222,6 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - (SGLang only) Block until a prefetch job completes, then return its
        loaded chunk count, or ``None`` on timeout. The blocking alternative
        to polling ``QUERY_PREFETCH_STATUS``.
-   * - ``QUERY_PREFETCH_LOOKUP_HITS``
-     - BLOCKING
-     - Query the lookup-phase hit chunk count by request_id, before the
-       prefetch finishes. Returns ``None`` while the lookup is still
-       running.
    * - ``FREE_LOOKUP_LOCKS``
      - BLOCKING
      - Release read locks from a cancelled lookup without doing a full
@@ -380,7 +375,7 @@ tiers selected at startup (all satisfy ``L1ManagerProtocol``):
   The bytes live on disk; reads/writes DMA directly between the GPU staging
   buffer and the slab, driven by the process-global ``GDSContext``
   (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The DMA
-  backend is selected by platform via ``gpu_connector/_gds_async.py`` --
+  backend is selected by platform via ``gpu_connector/_gds_backends.py`` --
   cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on AMD
   ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the
   vendor-specific requirements. The CPU tier is disabled in this mode.

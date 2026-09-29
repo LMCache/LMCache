@@ -222,6 +222,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     storage_manager = _FakeStorageManager()
     server_context = SimpleNamespace(
         chunk_size=1,
+        null_block_id=0,
         storage_manager=storage_manager,
         event_bus=SimpleNamespace(
             publish=lambda event: None,

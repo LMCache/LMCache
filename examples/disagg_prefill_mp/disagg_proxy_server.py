@@ -257,7 +257,7 @@ async def _handle_disagg_request(request: Request, endpoint: str):
 
         # Generate a random request ID
         request_id = generate_request_id()
-        logger.info(f"Received {endpoint} request with generated ID: {request_id}")
+        logger.info("Received %s request with generated ID: %s", endpoint, request_id)
 
         # Pick prefill and decode clients
         prefill_client, decode_client = round_robin_pick_clients()
@@ -285,8 +285,9 @@ async def _handle_disagg_request(request: Request, endpoint: str):
             prefill_first_response_time = time.monotonic()
             prefill_duration = prefill_first_response_time - prefill_send_time
             logger.info(
-                f"Request {request_id}: prefill request"
-                f" duration = {prefill_duration:.4f}s"
+                "Request %s: prefill request duration = %.4fs",
+                request_id,
+                prefill_duration,
             )
 
             # Wait for the event to be signaled (KV store finished)
@@ -294,10 +295,11 @@ async def _handle_disagg_request(request: Request, endpoint: str):
             notify_time = time.monotonic()
             notify_wait_duration = notify_time - prefill_first_response_time
             logger.info(
-                f"Request {request_id}: finished saving KV caches after prefill"
-                f" response = {notify_wait_duration * 1000:.2f}ms"
+                "Request %s: finished saving KV caches after prefill response = %.2fms",
+                request_id,
+                notify_wait_duration * 1000,
             )
-            logger.debug(f"Event signaled for {request_id}, forwarding to decoder")
+            logger.debug("Event signaled for %s, forwarding to decoder", request_id)
 
         finally:
             # Clean up the pending request
@@ -319,9 +321,10 @@ async def _handle_disagg_request(request: Request, endpoint: str):
                             decode_first_response_time - prefill_first_response_time
                         )
                         logger.info(
-                            f"Request {request_id}: latency between prefill first "
-                            f"response and decode first response = "
-                            f"{latency * 1000:.2f}ms"
+                            "Request %s: latency between prefill first "
+                            "response and decode first response = %.2fms",
+                            request_id,
+                            latency * 1000,
                         )
                         first_chunk = False
                     yield chunk
@@ -339,7 +342,7 @@ async def _handle_disagg_request(request: Request, endpoint: str):
         import traceback
 
         exc_info = sys.exc_info()
-        logger.error(f"Error in {endpoint} endpoint")
+        logger.error("Error in %s endpoint", endpoint)
         logger.error(str(e))
         logger.error("".join(traceback.format_exception(*exc_info)))
         raise
@@ -367,7 +370,7 @@ async def handle_models():
         response.raise_for_status()
         return JSONResponse(content=response.json())
     except Exception as e:
-        logger.error(f"Error in /v1/models endpoint: {e}")
+        logger.error("Error in /v1/models endpoint: %s", e)
         return JSONResponse(
             content={"error": str(e)},
             status_code=500,
@@ -406,14 +409,14 @@ async def handle_telemetry(request: Request):
 
         for request_id in request_ids:
             logger.info(
-                f"Received telemetry event: {event_type} for request: {request_id}"
+                "Received telemetry event: %s for request: %s", event_type, request_id
             )
 
         notified_count = 0
         for request_id in request_ids:
             if notify_request(request_id):
                 notified_count += 1
-                logger.info(f"Notified request: {request_id}")
+                logger.info("Notified request: %s", request_id)
 
         return JSONResponse(
             content={
@@ -424,7 +427,7 @@ async def handle_telemetry(request: Request):
         )
 
     except Exception as e:
-        logger.error(f"Error processing telemetry: {e}")
+        logger.error("Error processing telemetry: %s", e)
         return JSONResponse(
             content={"status": "error", "message": str(e)},
             status_code=500,
@@ -454,7 +457,9 @@ if __name__ == "__main__":
     )
     telemetry_thread.start()
     logger.info(
-        f"Telemetry server started on {global_args.host}:{global_args.telemetry_port}"
+        "Telemetry server started on %s:%d",
+        global_args.host,
+        global_args.telemetry_port,
     )
 
     # Run main proxy server

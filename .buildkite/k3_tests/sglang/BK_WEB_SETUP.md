@@ -9,6 +9,9 @@
 - Skip queued / cancel running branch builds: Yes
 
 Two GPU jobs (correctness + performance), ~5 min each — lightweight enough for a required PR status check on changes that touch the MP integration.
+PRs labeled `"good first issue"` still trigger the upload step when this lane is
+selected, but the repo wrapper exits green before uploading SGLang jobs. Add
+`force-ci` to run the full suite anyway.
 
 > Builds whose only changes are docs/`*.md`/`LICENSE`/`.github/**` auto-pass
 > via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).

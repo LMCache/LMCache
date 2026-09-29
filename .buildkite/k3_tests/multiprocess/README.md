@@ -46,6 +46,7 @@ multiprocess/
 └── scripts/
     ├── engines/
     │   ├── README.md            # Adapter API details
+    │   ├── sglang.sh            # SGLang implementation
     │   └── vllm.sh              # vLLM implementation
     ├── workloads/
     │   ├── README.md            # Workload classification
@@ -165,6 +166,12 @@ authoritative by assigning defaults with `${VAR:-default}`. A workload that
 must distinguish an LMCache retrieval from an engine-local hit can opt in with
 `VERIFY_LMCACHE_RETRIEVAL=true`; its adapter implements
 `engine_clear_local_cache <port>` without clearing LMCache itself.
+
+The SGLang adapter currently exercises the unified radix-cache integration in
+`lmcache_driven` mode. Its CI coverage reuses the common long-document,
+accuracy, and HTTP API workloads. Server restart recovery,
+`engine_driven`, and special deadlock launch profiles remain excluded until the
+unified connector implements those contracts.
 
 Workload support requires no adapter allowlist. A common workload is available
 to every adapter; an engine-specific workload is available when its script
