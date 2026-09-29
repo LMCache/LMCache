@@ -20,7 +20,7 @@ non-Bash command must source `/opt/intel/oneapi/setvars.sh` separately if it
 needs the compiler environment.
 
 The verifier triggers the existing `unit-tests-xpu` and `xpu-mp-test` Buildkite
-pipelines. Configure `BUILDKITE_API_TOKEN` as a secret with `read_builds` and
+pipelines. Configure `BUILD_KITE_API_TOKEN` as a secret with `read_builds` and
 `write_builds` scopes. The existing
 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` must be able to push to the public
 `lmcache/vllm-openai-xpu-ci` repository; XPU nodes must be able to pull it.
