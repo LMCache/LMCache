@@ -1870,11 +1870,11 @@ def scenario_multi_layer_block_kv_transfer(
     # paged_buffer_ptrs_tensor and list[int] for lmcache_objects_ptrs.
     # The Python fallback also supports both modes on cpu/cuda (pointer inputs
     # are reconstructed internally via _tensor_from_ptr).
-    use_tensor_list = device not in ("cpu", "cuda")
+    use_tensor_list = device not in ("cpu", "cuda", "xpu")
 
     def _alloc_chunks(shape: tuple[int, ...], count: int) -> list[torch.Tensor]:
         chunks = [torch.zeros(shape, dtype=dtype) for _ in range(count)]
-        if device in ("cuda"):
+        if device in ("cuda", "xpu"):
             chunks = [chunk.pin_memory() for chunk in chunks]
         return chunks
 
