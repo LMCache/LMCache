@@ -770,7 +770,26 @@ bool batch_memcpy_supported() {
     (void)runtime;
     (void)driver;
     const char* enable = std::getenv("LMCACHE_ROCM_ENABLE_BATCH_MEMCPY");
-    return enable != nullptr && enable[0] != '\0' && enable[0] != '0';
+    if (enable == nullptr || enable[0] == '\0' || enable[0] == '0') {
+      return false;
+    }
+    // hipMemcpyBatchAsync's copy engine dereferences the host operand directly,
+    // so the hipHostRegister'd pinned host pool must be device-addressable.
+    // Where hipDeviceAttributeCanUseHostPointerForRegisteredMem == 0 (observed
+    // on MI300/MI355 ROCm configs) the registered host VA is not device-usable
+    // and the batched D2H/H2D copy faults asynchronously, so require the
+    // attribute before selecting the copy-engine path.
+    int device = 0;
+    if (hipGetDevice(&device) != hipSuccess) {
+      return false;
+    }
+    int can_use_host_ptr = 0;
+    if (hipDeviceGetAttribute(&can_use_host_ptr,
+                              hipDeviceAttributeCanUseHostPointerForRegisteredMem,
+                              device) != hipSuccess) {
+      return false;
+    }
+    return can_use_host_ptr != 0;
 #else
     return runtime >= 12080 && driver >= 12080;
 #endif

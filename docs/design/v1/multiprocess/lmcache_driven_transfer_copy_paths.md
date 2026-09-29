@@ -31,8 +31,14 @@ disabled at runtime unless `LMCACHE_ROCM_ENABLE_BATCH_MEMCPY` is set to a
 non-zero value. The compile-time `HIP_VERSION` guard cannot prove the op is
 functional -- some HIP builds link `hipMemcpyBatchAsync` but return
 `hipErrorNotSupported` at runtime -- so `batch_memcpy_supported()` requires the
-explicit opt-in before selecting the copy-engine path. CUDA behaviour is
-unchanged (gated purely on the 12.8 runtime/driver check).
+explicit opt-in before selecting the copy-engine path. Even when opted in, the
+probe additionally requires
+`hipDeviceAttributeCanUseHostPointerForRegisteredMem == 1`: the batched copy
+engine dereferences the `hipHostRegister`'d host operand directly, so on
+configs where a registered host VA is not device-addressable (attribute `0`,
+observed on some MI300/MI355 ROCm builds) the batched D2H/H2D copy faults with a
+GPU memory access fault, and the connector must fall back to the staging kernel.
+CUDA behaviour is unchanged (gated purely on the 12.8 runtime/driver check).
 
 Every eligible format is affine in (kv plane, layer, block):
 `address = base(kv, layer) + kv * kv_stride + layer * layer_stride +
