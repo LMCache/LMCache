@@ -76,27 +76,6 @@ jobs:
                 version_environment_variable: XPU_VERSION
                 dev_version: ${{ inputs.dev_version }}
 
-            - name: Record XPU runtime metadata
-              env:
-                XPU_IMAGE: ${{ inputs.xpu_image }}
-              run: |
-                mkdir -p dist
-                docker run --rm \
-                  --entrypoint bash "${XPU_IMAGE}" -lc \
-                  'python3 -c "import json, platform, torch, vllm; print(json.dumps({\"python\": platform.python_version(), \"torch\": torch.__version__, \"vllm\": getattr(vllm, \"__version__\", \"unknown\")}, indent=2, sort_keys=True))"' \
-                  > dist/xpu-runtime.json
-                python3 - <<'PY'
-                import json
-                import os
-                from pathlib import Path
-
-                metadata_path = Path("dist/xpu-runtime.json")
-                metadata = json.loads(metadata_path.read_text())
-                metadata["image"] = os.environ["XPU_IMAGE"]
-                metadata["lmcache_version"] = os.environ["XPU_VERSION"]
-                metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
-                PY
-
             # Build inside oneAPI image. No GPU required for compiling the
             # extension itself.
             - name: Build XPU wheel
@@ -126,9 +105,7 @@ jobs:
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
               with:
                 name: release-xpu-artifacts
-                path: |
-                  dist/*.whl
-                  dist/xpu-runtime.json
+                path: dist/*.whl
 
 # On-device validation requires Intel GPU hardware and is not available on
 # GitHub-hosted runners. Run manual validation by installing this wheel in an
