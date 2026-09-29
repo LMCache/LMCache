@@ -180,7 +180,10 @@ steps:
         retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
-        artifact_paths: ["*.log"]
+        # The /metrics snapshot and per-check summary are the evidence a flaky
+        # threshold verdict needs; cleanup.sh stages RESULTS_DIR as
+        # ci_results_<build>.
+        artifact_paths: ["*.log", "ci_results_*/long_doc_qa_l2/*.txt"]
 
       - label: ":compression: {{matrix.inference_engine}} / deadlock / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh deadlock
