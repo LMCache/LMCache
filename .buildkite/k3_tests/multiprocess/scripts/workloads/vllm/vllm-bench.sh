@@ -26,8 +26,10 @@ EXPECTED_TOTAL_INPUT_TOKENS=$((NUM_PROMPTS * RANDOM_INPUT_LEN))
 EXPECTED_COMPLETED=$NUM_PROMPTS
 MAX_SLOWDOWN_PERCENT="${MAX_SLOWDOWN_PERCENT:-5}"
 
-# Reproducible seed
-RANDOM_SEED="${RANDOM_SEED:-$(date +%s)}"
+# Reproducible seed — stable default so retries use identical inputs.
+# Override with RANDOM_SEED=<int> to change the benchmark inputs.
+DEFAULT_RANDOM_SEED=42
+RANDOM_SEED="${RANDOM_SEED:-$DEFAULT_RANDOM_SEED}"
 
 # Output directory
 VLLM_BENCH_DIR="$RESULTS_DIR/vllm_bench"
@@ -435,6 +437,86 @@ verify_cache_hit_replay() {
 echo "Using random seed: $RANDOM_SEED"
 echo ""
 
+# Write a comparison manifest so a reviewer can recover the effective inputs,
+# versions, and verdict from the job log or Buildkite artifacts.
+write_manifest() {
+    local manifest_file="$VLLM_BENCH_DIR/comparison_manifest.json"
+    local git_sha="unknown"
+    local vllm_version="unknown"
+    local torch_version="unknown"
+    local baseline_throughput="null"
+    local lmcache_throughput="null"
+    local verdict="unknown"
+
+    if git -C "$REPO_ROOT" rev-parse HEAD >/dev/null 2>&1; then
+        git_sha=$(git -C "$REPO_ROOT" rev-parse HEAD)
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        vllm_version=$(python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "unknown")
+        torch_version=$(python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "unknown")
+    fi
+    if [ -f "$VLLM_BENCH_DIR/baseline.json" ]; then
+        baseline_throughput=$(extract_json_field "$VLLM_BENCH_DIR/baseline.json" "total_token_throughput")
+    fi
+    if [ -f "$VLLM_BENCH_DIR/lmcache.json" ]; then
+        lmcache_throughput=$(extract_json_field "$VLLM_BENCH_DIR/lmcache.json" "total_token_throughput")
+    fi
+    if [ "${LAUNCH_BASELINE:-true}" = "true" ]; then
+        local throughput_check
+        throughput_check=$(python3 -c "
+lmcache_tp = $lmcache_throughput
+baseline_tp = $baseline_throughput
+max_slowdown = $MAX_SLOWDOWN_PERCENT
+if baseline_tp > 0:
+    slowdown_pct = ((baseline_tp - lmcache_tp) / baseline_tp) * 100
+    min_acceptable = baseline_tp * (1 - max_slowdown / 100.0)
+    if lmcache_tp >= min_acceptable:
+        print(f'PASS|{slowdown_pct:.2f}')
+    else:
+        print(f'FAIL|{slowdown_pct:.2f}')
+else:
+    print('PASS|0.00')
+" 2>/dev/null || echo "ERROR|0")
+        verdict=$(echo "$throughput_check" | cut -d'|' -f1)
+    fi
+
+    python3 - "$manifest_file" "$RANDOM_SEED" "$MODEL" "$NUM_PROMPTS" \
+        "$RANDOM_INPUT_LEN" "$RANDOM_OUTPUT_LEN" "$git_sha" \
+        "$vllm_version" "$torch_version" "$baseline_throughput" \
+        "$lmcache_throughput" "$verdict" "$MAX_SLOWDOWN_PERCENT" <<'PYEOF'
+import json
+import sys
+
+(
+    manifest_file, seed, model, num_prompts, input_len, output_len,
+    git_sha, vllm_version, torch_version, baseline_tp, lmcache_tp,
+    verdict, max_slowdown,
+) = sys.argv[1:]
+
+manifest = {
+    "seed": int(seed),
+    "model": model,
+    "num_prompts": int(num_prompts),
+    "random_input_len": int(input_len),
+    "random_output_len": int(output_len),
+    "git_sha": git_sha,
+    "vllm_version": vllm_version,
+    "torch_version": torch_version,
+    "baseline_throughput": float(baseline_tp) if baseline_tp != "null" else None,
+    "lmcache_throughput": float(lmcache_tp) if lmcache_tp != "null" else None,
+    "verdict": verdict,
+    "max_slowdown_percent": float(max_slowdown),
+}
+
+with open(manifest_file, "w") as f:
+    json.dump(manifest, f, indent=2)
+    f.write("\n")
+PYEOF
+
+    echo "Comparison manifest written to: $manifest_file"
+    cat "$manifest_file"
+}
+
 # Warm up the active benchmark server(s). In single-instance mode the baseline
 # server is intentionally disabled, so skip the warmup/benchmark phases that
 # require it.
@@ -467,15 +549,20 @@ echo "============================================"
 if [ "${LAUNCH_BASELINE:-true}" = "true" ]; then
     if ! verify_results; then
         echo "Verification failed"
+        write_manifest
         exit 1
     fi
 else
     echo "Single-instance benchmark mode: skipping baseline-vs-LMCache comparison"
     if ! verify_single_instance_result; then
         echo "Single-instance benchmark result verification failed"
+        write_manifest
         exit 1
     fi
 fi
+
+# Write the comparison manifest after successful verification
+write_manifest
 
 if [ "${LMCACHE_MP_LAZY_OFFLOAD:-false}" = "true" ]; then
     echo "Lazy-offload benchmark mode: skipping two-request cache-hit replay validation"

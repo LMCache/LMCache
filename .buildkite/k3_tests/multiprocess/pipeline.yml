@@ -164,7 +164,7 @@ steps:
                 volumes: &vols
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
-        artifact_paths: ["*.log"]
+        artifact_paths: ["*.log", "ci_results_*/vllm_bench/comparison_manifest.json"]
 
       - label: ":compression: {{matrix.inference_engine}} / long_doc_qa / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
