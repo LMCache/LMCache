@@ -22,6 +22,13 @@ checks those capabilities when it starts and rejects ambiguous plugins.
 Build and runtime requirements
 ------------------------------
 
+The published ``lmcache`` wheels and the ``lmcache/vllm-openai`` images ship the
+extension, compiled against NIXL 1.3.1. Install the runtime with
+``pip install lmcache[nixl]``: the ``nixl`` wheel bundles ``libnixl`` and its
+plugins, and the adapter loads them from there, so no build flags or
+environment variables are needed. The rest of this section is for source
+installations.
+
 The minimum supported NIXL version is 1.3.0. A source installation must install
 the public C++ headers as well as ``libnixl``. Build LMCache with:
 

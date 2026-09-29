@@ -11,7 +11,11 @@ The probed name must keep ``cuda_ops`` as its last component -- CPython derives 
 ``PyInit_`` symbol from it.  No GPU needed: symbols resolve when the extension
 loads, not when a kernel launches.
 
-Usage: ``assert_native_ops.py [module]``  (default ``lmcache.cuda_ops``)
+Usage: ``assert_native_ops.py [module] [preload ...]``  (default ``lmcache.cuda_ops``)
+
+``preload`` names modules to import first, for extensions that link libraries
+another package loads -- ``lmcache.lmcache_nixl nixl`` resolves ``libnixl`` from
+the nixl wheel the same way the adapter does at runtime.
 """
 
 # Future
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 # Standard
 from pathlib import Path
+import importlib
 import importlib.util
 import sys
 
@@ -31,6 +36,8 @@ import torch
 def main() -> int:
     """Load the extension and report whether it resolved. Returns 0 on success."""
     module = sys.argv[1] if len(sys.argv) > 1 else "lmcache.cuda_ops"
+    for name in sys.argv[2:]:
+        importlib.import_module(name)
     package, _, stem = module.rpartition(".")
 
     spec = importlib.util.find_spec(package)
