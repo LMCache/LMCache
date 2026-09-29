@@ -7,6 +7,7 @@ existing MP request transport. Enable it on an LMCache-driven server:
 .. code-block:: bash
 
    python -m lmcache.v1.multiprocess.server \
+     --l1-size-gb 1 --l1-init-size-gb 1 --eviction-policy LRU \
      --server-module '{"module_path":"lmcache.v1.multiprocess.modules.chunk_store"}'
 
 Add ``--transport grpc`` to use gRPC. The module lives in the LMCache package and
