@@ -17,17 +17,25 @@ import threading
 import time
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc, TrimPolicy
+from lmcache.v1.distributed.api import AttnWindowDesc
+from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import CBMatchResult
-from lmcache.v1.multiprocess.modules import blend as blend_mod
+from lmcache.v1.multiprocess.modules.blend.lookup import _CBUnifiedJob
+from lmcache.v1.multiprocess.modules.blend.matcher import (
+    BlendTokenRangeMatcher,
+)
+from lmcache.v1.multiprocess.modules.blend.module import BlendModule
+from lmcache.v1.multiprocess.modules.blend.read_set import (
+    _classify_cb_read_groups,
+)
 
 _CHUNK = 256
 
 
 def _make_engine():
     """A BlendModule mock with only the attributes these paths touch."""
-    eng = MagicMock(spec=blend_mod.BlendModule)
+    eng = MagicMock(spec=BlendModule)
     # Instance attrs (set in __init__) are omitted by spec=; add the ones used.
     eng._event_bus = MagicMock()
     eng._token_range_matcher = MagicMock()
@@ -37,7 +45,7 @@ def _make_engine():
 
 def _bind(eng, name):
     """Bind a real BlendModule method to the mock engine."""
-    return getattr(blend_mod.BlendModule, name).__get__(eng)
+    return getattr(BlendModule, name).__get__(eng)
 
 
 def _published(eng):
@@ -143,7 +151,7 @@ class TestMatcherRegistrationCount:
     number the registration event reports."""
 
     def test_first_store_counts_indexed_chunks_and_restore_counts_zero(self):
-        matcher = blend_mod.BlendTokenRangeMatcher(chunk_size=4)
+        matcher = BlendTokenRangeMatcher(chunk_size=4)
         tokens = list(range(16))
         hashes = [b"h0", b"h1", b"h2", b"h3"]
 
@@ -157,7 +165,7 @@ class TestMatcherRegistrationCount:
         )
 
     def test_no_full_chunk_counts_zero(self):
-        matcher = blend_mod.BlendTokenRangeMatcher(chunk_size=4)
+        matcher = BlendTokenRangeMatcher(chunk_size=4)
 
         assert matcher.on_new_token_hashes([1, 2, 3], [], 0, 0) == 0
         assert matcher.on_new_token_hashes(list(range(4)), [b"h0"], 1, 0) == 0
@@ -180,12 +188,11 @@ class TestPrefixLegNoGpuContext:
         eng = _make_engine()
         eng._resolve_cb_read_layouts = MagicMock(return_value=None)
 
-        handle, world_size, gids, windows, n_chunks, no_gpu_context = _bind(
+        handle, gids, windows, n_chunks, no_gpu_context = _bind(
             eng, "_submit_prefix_leg"
-        )(self._key(), 2, TrimPolicy.PREFIX)
+        )(self._key(), 2)
 
         assert handle is None
-        assert world_size == 2
         assert (gids, windows, n_chunks) == ((), (), 0)
         assert no_gpu_context is True
         # The prefix span still opens, so the poll's END has a partner.
@@ -198,7 +205,7 @@ class TestPrefixLegNoGpuContext:
         # Legacy fused layout: one object group, full attention.
         eng._resolve_cb_read_layouts = MagicMock(
             return_value=(
-                blend_mod._classify_cb_read_groups(1, ()),
+                _classify_cb_read_groups(1, ()),
                 {0: MagicMock()},
                 AttnWindowDesc(num_chunks_in_sw=[-1], world_size=2),
             )
@@ -206,8 +213,8 @@ class TestPrefixLegNoGpuContext:
         eng._ctx = MagicMock()
         eng._ctx.token_hasher.compute_chunk_hashes.return_value = []
 
-        handle, _, _, _, _, no_gpu_context = _bind(eng, "_submit_prefix_leg")(
-            self._key(), 2, TrimPolicy.PREFIX
+        handle, _, _, _, no_gpu_context = _bind(eng, "_submit_prefix_leg")(
+            self._key(), 2
         )
 
         assert handle is None
@@ -218,9 +225,7 @@ class TestPollPrefixLegEvent:
     def test_prefix_end_reports_zero_coverage_without_handle(self):
         eng = _make_engine()
         eng._ctx = MagicMock()
-        job = SimpleNamespace(
-            prefix_handle=None, prefix_world_size=1, prefix_lock_gids=()
-        )
+        job = SimpleNamespace(prefix_handle=None, prefix_lock_gids=())
 
         leading, retained = _bind(eng, "_poll_prefix_leg")(job, "req-p", False)
 
@@ -235,7 +240,7 @@ class TestCoordinatorMatchTimeoutEvent:
     def test_deadline_publishes_timed_out_end(self):
         eng = _make_engine()
         coordinator = MagicMock()
-        coordinator.poll_match.return_value = blend_mod.PENDING
+        coordinator.poll_match.return_value = PENDING
         eng._coordinator = coordinator
         job = SimpleNamespace(
             coord_submitted=True,
@@ -252,7 +257,7 @@ class TestCoordinatorMatchTimeoutEvent:
     def test_pending_within_deadline_defers_without_event(self):
         eng = _make_engine()
         coordinator = MagicMock()
-        coordinator.poll_match.return_value = blend_mod.PENDING
+        coordinator.poll_match.return_value = PENDING
         eng._coordinator = coordinator
         job = SimpleNamespace(
             coord_submitted=True,
@@ -315,7 +320,12 @@ class TestRetrieveEventsCarryWorkerId:
     }
 
     def test_every_retrieve_and_scatter_publish_stamps_worker_id(self):
-        tree = ast.parse(inspect.getsource(blend_mod))
+        # The publish sites all live in the retrieve handler; parse that
+        # submodule (getsource on the package would only see __init__.py).
+        # First Party
+        from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
+
+        tree = ast.parse(inspect.getsource(retrieve_mod))
         sites: list[tuple[str, int, bool]] = []
         for node in ast.walk(tree):
             if not (
@@ -367,7 +377,7 @@ class TestLookupOnlyRequestEnds:
     def test_prefix_only_lookup_ends_the_request(self):
         rid = "req-prefix-only"
         # Both legs done: prefix landed 4 chunks, sparse leg had nothing to fetch.
-        job = blend_mod._CBUnifiedJob(
+        job = _CBUnifiedJob(
             matches=[],
             num_tokens=4 * _CHUNK,
             prefix_chunks=4,
@@ -391,7 +401,7 @@ class TestLookupOnlyRequestEnds:
 
     def test_miss_ends_the_request(self):
         rid = "req-miss"
-        job = blend_mod._CBUnifiedJob(
+        job = _CBUnifiedJob(
             matches=[],
             num_tokens=2 * _CHUNK,
             prefix_chunks=0,
@@ -413,14 +423,14 @@ class TestLookupOnlyRequestEnds:
         match = CBMatchResult(
             old_st=0, old_ed=_CHUNK, cur_st=_CHUNK, cur_ed=2 * _CHUNK, hash=b"h"
         )
-        job = blend_mod._CBUnifiedJob(
+        job = _CBUnifiedJob(
             matches=[match],
             num_tokens=3 * _CHUNK,
             prefix_chunks=1,
             sparse_started=True,
             non_prefix=[match],
             handle=MagicMock(),
-            found_uidx={0, 1},
+            found_rows=[MagicMock()],
         )
         eng = self._engine_with_finished_job(rid, job)
         eng._sparse_classify.return_value = [match]

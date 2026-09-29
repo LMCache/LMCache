@@ -77,8 +77,10 @@ class ObservabilityConfig:
     """Seconds between extra-stats log flushes."""
 
     trace_level: str | None = None
-    """If set, enables trace recording at the given level.  Currently
-    only ``"storage"`` is supported.  See
+    """If set, enables trace recording at the given level: ``"storage"``
+    records StorageManager calls for replay; ``"events"`` records the
+    cache-event stream the server emits for the coordinator, with or
+    without a coordinator configured.  See
     :mod:`lmcache.v1.mp_observability.trace` for details."""
 
     trace_output: str | None = None
@@ -270,10 +272,12 @@ def add_observability_args(
     trace_group.add_argument(
         "--trace-level",
         type=str,
-        choices=["storage"],
+        choices=["storage", "events"],
         default=None,
-        help="Enable trace recording at the given level. Currently only "
-        "'storage' is supported (records StorageManager public-API calls).",
+        help="Enable trace recording at the given level. 'storage' records "
+        "StorageManager public-API calls for replay. 'events' records the "
+        "cache-event stream this server emits for the coordinator, with or "
+        "without --coordinator-url, so a fleet can be captured for replay.",
     )
     trace_group.add_argument(
         "--trace-output",
@@ -400,6 +404,14 @@ def init_observability(
         )
     )
 
+    if obs_config.metrics_enabled or obs_config.tracing_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.transfer_phase_sampler import (
+            TransferPhaseSampler,
+        )
+
+        bus.register_subscriber(TransferPhaseSampler(bus))
+
     if obs_config.metrics_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.metrics import (
@@ -419,6 +431,7 @@ def init_observability(
             MPTransferCountersSubscriber,
             SMLifecycleSubscriber,
             TimeoutMetricsSubscriber,
+            TransferPhaseMetricsSubscriber,
         )
 
         sample_rate = obs_config.metrics_sample_rate
@@ -438,6 +451,7 @@ def init_observability(
         bus.register_subscriber(EngineMetricsSubscriber())
         bus.register_subscriber(EventBusSelfMetricsSubscriber(bus))
         bus.register_subscriber(TimeoutMetricsSubscriber())
+        bus.register_subscriber(TransferPhaseMetricsSubscriber())
 
     if obs_config.logging_enabled:
         # First Party
@@ -463,13 +477,17 @@ def init_observability(
             BlendTracingSubscriber,
             MPServerTracingSubscriber,
             TimeoutTracingSubscriber,
+            TransferPhaseTracingSubscriber,
             get_span_registry,
         )
 
         registry = get_span_registry()
+        # MPServerTracingSubscriber must register first: the transfer-phase
+        # subscriber reads the store/retrieve span it opens on the same event.
         bus.register_subscriber(MPServerTracingSubscriber(registry))
         bus.register_subscriber(BlendTracingSubscriber(registry))
         bus.register_subscriber(TimeoutTracingSubscriber(registry))
+        bus.register_subscriber(TransferPhaseTracingSubscriber(registry))
 
     # Lookup hash file logging (independent of the logging_enabled flag —
     # it has its own enable gate via output_dir).

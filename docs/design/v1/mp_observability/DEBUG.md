@@ -25,31 +25,23 @@ lmcache_mp_lookup_hit_tokens_total / lmcache_mp_lookup_requested_tokens_total
 Fraction of chunk-aligned tokens that came back from cache anywhere.
 Reported per `(model_name, cache_salt)`.
 
-## L2-only hit rate
+## L1-only / L2-only hit rate
 
-L2's prefetch lookups carry per-key counts, not per-token:
-
-```
-L2_hit_tokens_total = increase(lmcache_mp_l2_prefetch_hit_chunks_total) * chunk_size
-L2_hit_rate         = L2_hit_tokens_total
-                    / increase(lmcache_mp_lookup_requested_tokens_total)
-```
-
-The keys-to-tokens conversion is exact — every L2 hit is a full chunk.
-
-## L1-only hit rate (derived)
-
-Total minus L2:
+`MP_LOOKUP_PREFETCH_END` attributes each lookup's hit prefix by tier
+(`l1_hit_tokens + l2_hit_tokens == hit_tokens`, following each object
+group's attention-window rule), so the split is a direct read:
 
 ```
-L1_hit_tokens_total = increase(lmcache_mp_lookup_hit_tokens_total)
-                    - increase(lmcache_mp_l2_prefetch_hit_chunks_total) * chunk_size
+L1_hit_tokens_total = increase(lmcache_mp_lookup_hit_l1_tokens_total)
+L2_hit_tokens_total = increase(lmcache_mp_lookup_hit_l2_tokens_total)
 L1_hit_rate         = L1_hit_tokens_total
                     / increase(lmcache_mp_lookup_requested_tokens_total)
 ```
 
-Sanity check: `L1_hit_tokens_total >= 0`.  A sustained negative value
-indicates a metric-emission bug.
+On hybrid models the token split can credit L2 with a whole prefix whose
+full-attention keys all came from L1 (L2 served only the sliding-window
+keys). `lmcache_mp_lookup_hit_{l1,l2}_keys_total` count hit keys per tier
+and show that case directly.
 
 ## Blend total hit rate
 

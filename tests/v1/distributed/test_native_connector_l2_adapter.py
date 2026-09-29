@@ -7,8 +7,11 @@ C++ IStorageConnector interface, so no Redis or C++ build is needed.
 """
 
 # Standard
+from types import ModuleType
 import ctypes
+import os
 import select
+import sys
 import threading
 
 # Third Party
@@ -19,9 +22,11 @@ import torch
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
+    _obj_to_memoryview,
     _object_key_to_string,
 )
 from lmcache.v1.memory_management import (
+    BytesBufferMemoryObj,
     MemoryFormat,
     MemoryObjMetadata,
     TensorMemoryObj,
@@ -1141,6 +1146,61 @@ class TestFSNativeL2AdapterConfig:
         )
         assert get_type_name_for_config(cfg) == "fs_native"
 
+    def test_pad_buffers_to_alignment_field_is_gone(self):
+        """pad_buffers_to_alignment is not a config field; padding is
+        derived from use_odirect. Unknown fields are ignored by from_dict."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        config = FSNativeL2AdapterConfig.from_dict(
+            {
+                "type": "fs_native",
+                "base_path": "/tmp/lmcache_test",
+                "pad_buffers_to_alignment": True,
+            }
+        )
+        assert not hasattr(config, "pad_buffers_to_alignment")
+
+    @pytest.mark.parametrize("use_odirect", [True, False])
+    def test_factory_derives_padding_from_use_odirect(self, monkeypatch, use_odirect):
+        """The real fs_native factory pads exactly when O_DIRECT is on."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import create_l2_adapter
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        class _FakeFSClient:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+                self.read_fd, self.write_fd = os.pipe()
+
+            def event_fd(self) -> int:
+                return self.read_fd
+
+            def close(self) -> None:
+                os.close(self.read_fd)
+                os.close(self.write_fd)
+
+        fake_module = ModuleType("lmcache.lmcache_fs")
+        fake_module.LMCacheFSClient = _FakeFSClient
+        monkeypatch.setitem(sys.modules, "lmcache.lmcache_fs", fake_module)
+
+        config = FSNativeL2AdapterConfig.from_dict(
+            {
+                "type": "fs_native",
+                "base_path": "/tmp/lmcache_test",
+                "use_odirect": use_odirect,
+            }
+        )
+        adapter = create_l2_adapter(config)
+        try:
+            assert adapter.report_status()["pad_buffers_to_alignment"] is use_odirect
+        finally:
+            adapter.close()
+
 
 # =============================================================================
 # Delete Interface Tests
@@ -1358,3 +1418,200 @@ class TestUsageTracking:
         usage = adp.get_usage()
         assert usage.usage_fraction == pytest.approx(0.2)
         assert usage.total_bytes_used == 400
+
+
+# =============================================================================
+# Pad-Buffers-To-Alignment Tests
+# =============================================================================
+
+
+class RecordingNativeConnector(MockNativeConnector):
+    """MockNativeConnector that records submitted buffer lengths.
+
+    Asserting on the lengths observed by the native client exercises the
+    adapter's public contract (what it hands to ``submit_batch_*``) without
+    touching adapter internals.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.set_lengths: list[int] = []
+        self.get_lengths: list[int] = []
+
+    def submit_batch_set(self, keys: list[str], memoryviews: list) -> int:
+        self.set_lengths.extend(len(mv) for mv in memoryviews)
+        return super().submit_batch_set(keys, memoryviews)
+
+    def submit_batch_get(self, keys: list[str], memoryviews: list) -> int:
+        self.get_lengths.extend(len(mv) for mv in memoryviews)
+        return super().submit_batch_get(keys, memoryviews)
+
+
+def create_unaligned_memory_obj(
+    logical_size: int = 4000, phy_size: int = 4096, fill: int = 7
+) -> tuple[TensorMemoryObj, torch.Tensor]:
+    """Build an arena-backed TensorMemoryObj with alignment padding.
+
+    Mimics what the L1 allocator produces for a KV chunk whose byte size is
+    not a multiple of the alignment: a logical view of ``logical_size`` bytes
+    at the start of a ``phy_size``-byte physical slot. Returns the object and
+    the backing arena (kept alive and inspected by round-trip tests).
+    """
+    arena = torch.full((phy_size,), fill, dtype=torch.uint8)
+    raw_data = arena[:logical_size]
+    metadata = MemoryObjMetadata(
+        shape=torch.Size([logical_size]),
+        dtype=torch.uint8,
+        address=0,
+        phy_size=phy_size,
+        fmt=MemoryFormat.KV_2LTD,
+        ref_count=1,
+    )
+    return TensorMemoryObj(raw_data, metadata, parent_allocator=None), arena
+
+
+@pytest.fixture
+def recording_adapter():
+    """Adapter with padding disabled (the default) over a recording mock."""
+    mock_client = RecordingNativeConnector()
+    adp = NativeConnectorL2Adapter(mock_client)
+    yield adp, mock_client
+    adp.close()
+
+
+@pytest.fixture
+def padded_adapter():
+    """Adapter with pad_buffers_to_alignment enabled over a recording mock."""
+    mock_client = RecordingNativeConnector()
+    adp = NativeConnectorL2Adapter(mock_client, pad_buffers_to_alignment=True)
+    yield adp, mock_client
+    adp.close()
+
+
+class TestPadBuffersToAlignment:
+    """Tests for the pad_buffers_to_alignment mode of submit_store/load."""
+
+    def test_padded_view_covers_physical_size_and_is_zero_copy(self):
+        """The padded view spans phy_size and shares the logical prefix."""
+        obj, arena = create_unaligned_memory_obj()
+
+        mv = _obj_to_memoryview(obj, pad_to_physical=True)
+        assert len(mv) == 4096
+        # Zero-copy: the view exposes the arena itself, not a copy.
+        assert bytes(mv[:4]) == b"\x07" * 4
+        arena[0] = 42
+        assert bytes(mv[:1]) == b"\x2a"
+        # The logical prefix matches byte_array.
+        assert bytes(mv[: obj.get_size()]) == bytes(obj.byte_array)
+
+    def test_padded_views_share_cached_ctypes_type(self):
+        """Padded views of the same size reuse one cached ctypes array type."""
+        obj1, _ = create_unaligned_memory_obj()
+        obj2, _ = create_unaligned_memory_obj()
+
+        mv1 = _obj_to_memoryview(obj1, pad_to_physical=True)
+        mv2 = _obj_to_memoryview(obj2, pad_to_physical=True)
+        assert type(mv1.obj) is type(mv2.obj)
+
+    def test_store_default_uses_logical_size(self, recording_adapter):
+        """Flag off (default): the client receives the logical length."""
+        adp, mock_client = recording_adapter
+        obj, _ = create_unaligned_memory_obj()
+
+        adp.submit_store_task([create_object_key(1)], [obj])
+        assert mock_client.set_lengths == [4000]
+
+    def test_store_padded_submits_physical_size(self, padded_adapter):
+        """Flag on: the client receives the aligned physical length."""
+        adp, mock_client = padded_adapter
+        obj, _ = create_unaligned_memory_obj()
+
+        adp.submit_store_task([create_object_key(1)], [obj])
+        assert mock_client.set_lengths == [4096]
+
+    def test_load_padded_submits_physical_size(self, padded_adapter):
+        """Flag on: loads submit the same padded length as stores."""
+        adp, mock_client = padded_adapter
+        obj, _ = create_unaligned_memory_obj()
+
+        adp.submit_load_task([create_object_key(1)], [obj])
+        assert mock_client.get_lengths == [4096]
+
+    def test_aligned_object_not_padded(self, padded_adapter):
+        """An object whose phy_size == logical size stays on byte_array."""
+        adp, mock_client = padded_adapter
+        obj = create_memory_obj(size=1024)  # 1024 floats == 4096 == phy_size
+        assert obj.get_physical_size() == obj.get_size()
+
+        adp.submit_store_task([create_object_key(1)], [obj])
+        assert mock_client.set_lengths == [4096]
+
+    def test_non_tensor_object_falls_back_to_byte_array(self, padded_adapter):
+        """BytesBufferMemoryObj (phy_size 0) is never padded."""
+        adp, mock_client = padded_adapter
+        obj = BytesBufferMemoryObj(b"x" * 1000)
+
+        adp.submit_store_task([create_object_key(1)], [obj])
+        assert mock_client.set_lengths == [1000]
+
+    def test_set_used_size_interplay(self, recording_adapter, padded_adapter):
+        """Padding spans phy_size even after the logical size is narrowed."""
+        obj_plain, _ = create_unaligned_memory_obj()
+        obj_plain.set_used_size(2000)
+        adp_plain, mock_plain = recording_adapter
+        adp_plain.submit_store_task([create_object_key(1)], [obj_plain])
+        assert mock_plain.set_lengths == [2000]
+
+        obj_padded, _ = create_unaligned_memory_obj()
+        obj_padded.set_used_size(2000)
+        adp_padded, mock_padded = padded_adapter
+        adp_padded.submit_store_task([create_object_key(1)], [obj_padded])
+        assert mock_padded.set_lengths == [4096]
+
+    def test_padded_round_trip_preserves_logical_bytes(self, padded_adapter):
+        """Store+load with padding: logical bytes survive, bitmap is set."""
+        adp, _ = padded_adapter
+        key = create_object_key(1)
+        store_obj, store_arena = create_unaligned_memory_obj(fill=7)
+        load_obj, load_arena = create_unaligned_memory_obj(fill=0)
+        store_fd = adp.get_store_event_fd()
+        load_fd = adp.get_load_event_fd()
+
+        adp.submit_store_task([key], [store_obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        adp.pop_completed_store_tasks()
+
+        task_id = adp.submit_load_task([key], [load_obj])
+        assert wait_for_event_fd(load_fd, timeout=5.0)
+
+        bitmap = adp.query_load_result(task_id)
+        assert bitmap is not None
+        assert bitmap.test(0) is True
+        assert torch.equal(load_arena[:4000], store_arena[:4000])
+
+    def test_usage_reflects_submitted_bytes(self, recording_adapter):
+        """Accounting charges the submitted (padded) byte count."""
+        # Default (flag off): logical size is charged. total_bytes_used is
+        # tracked by the base class regardless of capacity configuration.
+        adp_plain, _ = recording_adapter
+        obj, _ = create_unaligned_memory_obj()
+        store_fd = adp_plain.get_store_event_fd()
+        adp_plain.submit_store_task([create_object_key(1)], [obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        adp_plain.pop_completed_store_tasks()
+        assert adp_plain.get_usage().total_bytes_used == 4000
+
+        # Flag on: the padded physical size is charged.
+        mock_client = RecordingNativeConnector()
+        adp_padded = NativeConnectorL2Adapter(
+            mock_client, pad_buffers_to_alignment=True
+        )
+        try:
+            obj2, _ = create_unaligned_memory_obj()
+            store_fd2 = adp_padded.get_store_event_fd()
+            adp_padded.submit_store_task([create_object_key(2)], [obj2])
+            assert wait_for_event_fd(store_fd2, timeout=5.0)
+            adp_padded.pop_completed_store_tasks()
+            assert adp_padded.get_usage().total_bytes_used == 4096
+        finally:
+            adp_padded.close()

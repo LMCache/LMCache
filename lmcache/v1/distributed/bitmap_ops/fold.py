@@ -22,12 +22,19 @@ the per-group presence bitmaps into that single answer in three steps:
 
 When every group is full attention the servable set is a downward-closed prefix,
 so the hit length equals the leading-ones count of the AND of the per-group
-presences -- i.e. the plain ``TrimPolicy.PREFIX`` / require-all intersection.
+presences -- i.e. the plain longest-prefix / require-all intersection.
 Fold/unfold is a strict generalization of that behavior.
 
-Bitmaps here are laid out **chunk-major**: bit ``j * num_groups + g`` is set iff
-chunk ``j`` is available for object group ``g`` (single-rank), or
-``j * (num_groups * num_ranks) + g * num_ranks + r`` in the ranked layout.
+Two input layouts are supported:
+
+- **flat / chunk-major** (:func:`fold`, :func:`unfold`):
+  bit ``j * num_groups + g`` is set iff chunk ``j`` is available for object
+  group ``g`` (single-rank), or ``j * (num_groups * num_ranks) + g * num_ranks
+  + r`` in the ranked layout;
+- **grouped** (:func:`fold_grouped`, :func:`unfold_grouped`,
+  :func:`fold_unfold_grouped`): one bitmap per row paired with that row's own
+  window size, each of length ``num_chunks`` with bit ``j`` set iff chunk
+  ``j`` is available. No ordering of the rows is assumed.
 """
 
 # Standard
@@ -35,7 +42,6 @@ from collections.abc import Callable, Iterable, Sequence
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import TrimPolicy
 
 # Lightweight installs (e.g. lmcache-cli) ship a lmcache_native without
 # the fold kernels; this module must stay importable there because CLI
@@ -43,13 +49,19 @@ from lmcache.v1.distributed.api import TrimPolicy
 # Calling fold()/unfold() without the kernels raises ImportError.
 _native_fold: "Callable[..., Bitmap] | None"
 _native_unfold: "Callable[..., Bitmap] | None"
+_native_fold_grouped: "Callable[..., Bitmap] | None"
+_native_unfold_grouped: "Callable[..., list[Bitmap]] | None"
 try:
     # First Party
     from lmcache.lmcache_native import fold as _native_fold
+    from lmcache.lmcache_native import fold_grouped as _native_fold_grouped
     from lmcache.lmcache_native import unfold as _native_unfold
+    from lmcache.lmcache_native import unfold_grouped as _native_unfold_grouped
 except ImportError:
     _native_fold = None
     _native_unfold = None
+    _native_fold_grouped = None
+    _native_unfold_grouped = None
 
 FULL_ATTENTION_WINDOW = -1
 """Sentinel ``group_windows`` value marking a full-attention object group
@@ -190,52 +202,120 @@ def unfold(
     return _native_unfold(hit_length, num_chunks, num_ranks, list(group_windows))
 
 
-def fold_unfold_ranked(
-    found: Bitmap,
-    num_chunks: int,
-    num_ranks: int,
-    group_windows: Sequence[int],
-) -> tuple[int, Bitmap]:
-    """Compose :func:`fold` -> :func:`highest_set_bit` -> :func:`unfold`.
+def fold_grouped(
+    rows: Sequence[Bitmap],
+    windows: Sequence[int],
+) -> Bitmap:
+    """Fold per-row presence bitmaps into servable prefix lengths.
 
-    Convenience for the full pipeline over the ``chunk x group x kv_rank``
-    lookup key layout: the model-wide hit length and the keys each group must
-    retain to serve it.
+    ``rows[i]`` and ``windows[i]`` describe one object: bit ``j`` of
+    ``rows[i]`` is set iff chunk ``j`` is present, and ``windows[i]`` is its
+    cross-chunk sliding-window size. A prefix of length ``L`` is servable iff
+    every row can serve it under its own window, i.e. its last
+    ``min(window, L)`` chunks are present.
 
     Args:
-        found: presence bitmap (see :func:`fold`).
-        num_chunks: number of LMCache chunks in the request.
-        num_ranks: number of kv_rank shards per chunk.
-        group_windows: per-object-group cross-chunk window sizes.
+        rows: presence bitmaps, all of the same length (the number of chunks).
+        windows: per-row cross-chunk sliding-window size in chunks, parallel
+            to ``rows``; ``<= 0`` means full attention.
 
     Returns:
-        ``(hit_length, retain_mask)`` over the same ranked layout as ``found``.
+        A bitmap of size ``num_chunks``; bit ``j`` set iff every row can serve
+        a length-``j + 1`` prefix.
+
+    Raises:
+        ValueError: If ``windows`` is empty, ``rows`` and ``windows`` differ in
+            length, or the rows differ in length.
+        ImportError: If the installed ``lmcache.lmcache_native`` does not
+            provide the grouped fold kernel (lightweight install).
+
+    Note:
+        No ordering or grouping of the rows is assumed; a kv-rank shard of an
+        object group is simply another row carrying that group's window.
     """
-    servable = fold(found, num_chunks, num_ranks, group_windows)
+    if _native_fold_grouped is None:
+        raise ImportError(
+            "lmcache.lmcache_native lacks the fold_grouped kernel; install or "
+            "build the full lmcache package"
+        )
+    if not windows:
+        raise ValueError("windows must be non-empty")
+    if len(rows) != len(windows):
+        raise ValueError(
+            f"rows and windows must have the same length, got {len(rows)} rows "
+            f"and {len(windows)} windows"
+        )
+    # The native kernel re-checks the row lengths and raises ValueError.
+    return _native_fold_grouped(list(rows), list(windows))
+
+
+def unfold_grouped(
+    hit_length: int,
+    num_chunks: int,
+    windows: Sequence[int],
+) -> list[Bitmap]:
+    """Expand a model-wide hit length into per-row retain bitmaps.
+
+    Row ``i`` retains the chunks it needs to serve ``hit_length`` under
+    ``windows[i]``: ``[0, hit_length)`` for full attention,
+    ``[hit_length - window, hit_length)`` for a sliding window.
+
+    Args:
+        hit_length: model-wide prefix hit length in chunks (clamped to
+            ``num_chunks``).
+        num_chunks: number of LMCache chunks in the request.
+        windows: per-row cross-chunk sliding-window size in chunks; ``<= 0``
+            means full attention.
+
+    Returns:
+        ``len(windows)`` retain bitmaps of length ``num_chunks``, parallel to
+        ``windows``.
+
+    Raises:
+        ValueError: If ``windows`` is empty or ``num_chunks`` is negative.
+        ImportError: If the installed ``lmcache.lmcache_native`` does not
+            provide the grouped unfold kernel (lightweight install).
+    """
+    if _native_unfold_grouped is None:
+        raise ImportError(
+            "lmcache.lmcache_native lacks the unfold_grouped kernel; install or "
+            "build the full lmcache package"
+        )
+    if not windows:
+        raise ValueError("windows must be non-empty")
+    if num_chunks < 0:
+        raise ValueError(f"num_chunks must be >= 0 (got {num_chunks})")
+
+    return _native_unfold_grouped(hit_length, num_chunks, list(windows))
+
+
+def fold_unfold_grouped(
+    rows: Sequence[Bitmap],
+    windows: Sequence[int],
+) -> tuple[int, list[Bitmap]]:
+    """Compose :func:`fold_grouped` -> :func:`highest_set_bit` ->
+    :func:`unfold_grouped`.
+
+    Computes the model-wide prefix hit length and, per row, the chunks that
+    row must retain to serve it.
+
+    Args:
+        rows: presence bitmaps, all of the same length.
+        windows: per-row cross-chunk window sizes, parallel to ``rows``.
+
+    Returns:
+        ``(hit_length, retain_rows)``; ``retain_rows`` is parallel to ``rows``.
+
+    Raises:
+        ValueError: See :func:`fold_grouped`.
+        ImportError: See :func:`fold_grouped`.
+    """
+    servable = fold_grouped(rows, windows)
+    num_chunks = len(rows[0]) if rows else 0
     # fold's bits are chunk-indexed (bit j == prefix length j + 1), so the hit
     # length is the highest set bit plus one; -1 (no servable prefix) -> 0.
     hit_length = highest_set_bit(servable) + 1
-    return hit_length, unfold(hit_length, num_chunks, num_ranks, group_windows)
-
-
-def fold_unfold(
-    found: Bitmap,
-    num_chunks: int,
-    group_windows: Sequence[int],
-) -> tuple[int, Bitmap]:
-    """:func:`fold_unfold_ranked` for the single-rank (chunk-major) layout.
-
-    Args:
-        found: chunk-major presence bitmap of length
-            ``num_chunks * len(group_windows)``; bit ``j * num_groups + g`` set
-            iff chunk ``j`` is available for object group ``g``.
-        num_chunks: number of LMCache chunks in the request.
-        group_windows: per-object-group cross-chunk window sizes.
-
-    Returns:
-        ``(hit_length, retain_mask)`` over the chunk-major layout.
-    """
-    return fold_unfold_ranked(found, num_chunks, 1, group_windows)
+    return hit_length, unfold_grouped(hit_length, num_chunks, windows)
 
 
 def _fold_python(
@@ -341,27 +421,3 @@ def merge_bitmaps(bitmaps: Iterable[Bitmap], num_keys: int) -> Bitmap:
     for bm in bitmaps:
         merged = merged | bm
     return merged
-
-
-def select_retained(
-    found: Bitmap,
-    num_keys: int,
-    policy: TrimPolicy = TrimPolicy.PREFIX,
-) -> Bitmap:
-    """Select the retained subset of ``found`` for the non-windowed selections.
-
-    ``PREFIX`` (LONGEST) keeps the leading contiguous run and drops everything
-    from the first gap on; any other policy keeps every set bit, gaps included.
-    The windowed hybrid fold is handled by :func:`fold_unfold_ranked`, not here.
-
-    Args:
-        found: Bitmap of found keys, over key indices ``0..num_keys-1``.
-        num_keys: Total number of requested keys.
-        policy: Selection to apply (see :class:`TrimPolicy`).
-
-    Returns:
-        Bitmap of the retained key indices.
-    """
-    if policy is TrimPolicy.PREFIX:
-        return Bitmap(num_keys, found.count_leading_ones())
-    return found

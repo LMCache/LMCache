@@ -56,6 +56,8 @@ The SDK runs on CPU and talks to the server over the engine-driven
 transfer path, which the server does not load by default -- start the
 server with ``--supported-transfer-mode auto`` so both the vLLM
 (lmcache-driven) and SDK (engine-driven) paths are available.
+The SDK request client supports either ZMQ or gRPC. Its ``url`` scheme and the
+vLLM connector endpoint must match the server's ``--transport`` setting.
 To enable shared-memory transfer, pass ``--shm-name`` and disable lazy
 L1 allocation with ``--no-l1-use-lazy``. If shared memory is
 unavailable and these flags are not specified, the SDK falls back to
@@ -132,13 +134,13 @@ Each type of tensor (KV, query intermediate) has its own context.
     import lmcache.sdk as lmc_sdk
 
     kv_ctx = lmc_sdk.kvcache.connect(
-        url="tcp://localhost:6555",         # must match --port
+        url="tcp://localhost:6555",         # tcp:// for ZMQ; grpc:// for gRPC
         http_url="http://localhost:8080",   # must match --http-port
         model_name="Qwen/Qwen3-8B",
         timeout=60,
     )
     q_ctx = lmc_sdk.qcache.connect(
-        url="tcp://localhost:6555",         # must match --port
+        url="tcp://localhost:6555",         # tcp:// for ZMQ; grpc:// for gRPC
         http_url="http://localhost:8080",   # must match --http-port
         model_name="Qwen/Qwen3-8B",
         timeout=60,

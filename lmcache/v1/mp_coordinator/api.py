@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey, Tier
+from lmcache.v1.distributed.api import EncodedObjectKey, ObjectKey, Tier
 
 # ``token_offset`` value meaning "the emitter did not report a position".
 # Distinct from 0, which is a real position (a chunk at the start of its
@@ -23,6 +23,12 @@ from lmcache.v1.distributed.api import EncodedObjectKey, Tier
 # treating that as 0 would place every chunk at the sequence start and
 # re-RoPE reused KV from the wrong source position.
 UNKNOWN_TOKEN_OFFSET = -1
+
+CACHE_EVENT_SCHEMA_VERSION = 1
+"""Version of the cache-event wire shape: :class:`CacheEventBatch` as carried
+by ``POST /events``. Bumped when a field is added, removed or changes meaning,
+so an ``events``-level trace file names the shape its records hold and a
+replayer can refuse one it does not understand."""
 
 
 class CacheEventType(str, Enum):
@@ -39,6 +45,42 @@ class CacheEventType(str, Enum):
     DELETE = "delete"
     ACCESS = "access"
     CONFIG = "config"
+
+
+@dataclass(frozen=True)
+class BlendNamespace:
+    """The retrieval namespace a chunk hash is reachable in.
+
+    A blend match is usable only by a requester whose key expansion lands
+    in the same namespace. ``object_group_id`` is excluded: blend servers
+    must not enable ``--separate-object-groups``.
+
+    Attributes:
+        model_name: Model the KV belongs to.
+        cache_salt: Per-tenant isolation salt applied to the keys.
+        world_size: Parallel world size (TP x PP) selecting the rank
+            fan-out.
+    """
+
+    model_name: str
+    cache_salt: str = ""
+    world_size: int = 1
+
+    @classmethod
+    def from_object_key(cls, key: "ObjectKey") -> "BlendNamespace":
+        """Return the namespace ``key`` was stored in.
+
+        Args:
+            key: A stored key, whose ``kv_rank`` carries the world size.
+
+        Returns:
+            The namespace a requester must share to reach ``key``.
+        """
+        return cls(
+            model_name=key.model_name,
+            cache_salt=key.cache_salt,
+            world_size=ObjectKey.WorldSizeFromKVRank(key.kv_rank),
+        )
 
 
 @dataclass(frozen=True)

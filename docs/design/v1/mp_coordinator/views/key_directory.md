@@ -101,8 +101,11 @@ The lookups this serves:
   window is verified against `binding.token_ids` (exact), and the
   binding's keys give the placements. Discovery uses blend's cheap
   polynomial hash family; the index itself never needs a
-  content-addressed key because every hit is token-verified. Implemented
-  as a derived view over these bindings — see
+  content-addressed key because every hit is token-verified. The query
+  carries the caller's `model_name`/`cache_salt`/`world_size` as the
+  namespace to scope matches to, so a match names a chunk the caller's
+  own key expansion can reach. Implemented as a derived view over these
+  bindings — see
   [blend_index.md](blend_index.md), served by `POST
   /directory/blend-lookup`.
 
@@ -184,6 +187,13 @@ The L1 reverse index (`_l1_keys_by_instance`) is what makes
 full directory scan. The emitter's stream cursor is **not** here — it
 belongs to the gate ([ingest.md](ingest.md)).
 
+Placement counts and reported logical bytes are maintained per tier alongside
+these mutations. They are derived state rather than checkpoint payload:
+`restore()` rebuilds them from the restored placements. `stats()` includes the
+four scalar tier totals from these incrementally maintained counters, so
+placement aggregation does not scan the fleet-wide directory while holding its
+lock.
+
 The Python-phase directory is keyed by `ObjectKey` directly (hashable
 frozen dataclass). The RFC's 16-byte
 `key_hash` with interned `model_id`/`salt_id` is a memory/native-port
@@ -213,16 +223,18 @@ cheap indicator of whether the chunk's tokens are known. Full token ids
 are deliberately not inlined (a page repeats each chunk across its
 ranks/groups; fetch content via `/directory/lookup` for exactly the keys
 that need it).
-- `GET /directory/stats` — key/placement counts, per-instance L1 key
-counts (the fencing index), and the blend-index counts; per-key L2
-detail lives on the keys listing endpoint. Directory contents only —
+- `GET /directory/stats` — key/placement counts, per-tier placement counts and
+reported logical bytes, per-instance L1 key counts (the fencing index), and the
+blend-index counts; per-key L2 detail lives on the keys listing endpoint.
+Directory contents only —
 per-emitter stream state lives on the ingest gate and has no endpoint
 yet (see [ingest.md](ingest.md)).
 
 Type placement:
 
 - **`api.py`** — the cache-event vocabulary (`CacheEventType`,
-`CacheEventEntry`, `CacheEventBatch`): the contract between the
+`CacheEventEntry`, `CacheEventBatch`) plus the blend vocabulary
+(`BlendMatch`, `BlendNamespace`): the contract between the
 MP-server emitter and the directory. Plain dataclasses with intrinsic
 invariants in `__post_init__` (the `ObjectKey` pattern: `seq >= 1`,
 concrete tier, non-empty ids are unconstructible anywhere).
@@ -255,4 +267,3 @@ directives (M3–M4 of the RFC).
 `key → tokens` introspection, fed by `TOKENS` events and refcounted from
 key records via the `content_hash` back-pointer. Nothing
 correctness-bearing reads it, so it ships with its first real consumer.
-
