@@ -146,6 +146,38 @@ class DeviceSpec:
         # TODO(chunxiaozheng): implement on subclasses
         return True
 
+    def current_stream(self, device: object) -> object:
+        """Return the current stream for ``device`` on the active platform."""
+        return self._get_torch_module().current_stream(device)
+
+    def get_stream_handle(self, stream: object) -> int:
+        """Return a native stream handle; platforms must override this method."""
+        raise NotImplementedError(
+            f"DeviceSpec for device_type={self.device_type!r} does not provide "
+            "a native stream handle."
+        )
+
+    def synchronize_stream(self, stream: Any) -> None:
+        """Wait until work already enqueued on ``stream`` has completed."""
+        stream.synchronize()
+
+    def synchronize_device(self, device: object) -> None:
+        """Wait until work already enqueued on ``device`` has completed."""
+        self._get_torch_module().synchronize(device=device)
+
+    def create_stream_event(self, device: object) -> object:
+        """Create an event used to observe completion on ``device``'s stream."""
+        return self._get_torch_module().Event()
+
+    def record_stream_event(self, event: Any, stream: object) -> None:
+        """Record ``event`` after work already queued on ``stream``."""
+        event.record(stream)
+
+    def is_stream_event_complete(self, event: object) -> bool:
+        """Return whether a previously recorded stream event has completed."""
+        event_object: Any = event
+        return event_object.query()
+
     @property
     def event_ipc_backend(self) -> "EventIPCBackend | None":
         """Return the device-event IPC backend for this device, if supported.
@@ -248,3 +280,16 @@ class DeviceSpec:
             "DeviceSpec for device_type=%r does not provide a "
             "BaseCacheContext implementation." % self.device_type
         )
+
+    def _get_torch_module(self) -> Any:
+        """Return the active torch device module, rejecting mismatched types."""
+        # First Party
+        from lmcache.v1.platform._device_detect import get_torch_device
+
+        torch_module, active_device_type = get_torch_device()
+        if active_device_type != self.device_type:
+            raise RuntimeError(
+                "Cannot use stream execution for device type "
+                f"{self.device_type!r} while {active_device_type!r} is active."
+            )
+        return torch_module
