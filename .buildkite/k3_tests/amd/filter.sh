@@ -21,7 +21,7 @@ _path_filter_amd_should_skip() {
         tests/v1/platform/devices/cuda/*|tests/v1/platform/devices/rocm/*)
             return 1
             ;;
-        lmcache/v1/platform/base/*|lmcache/v1/platform/cuda/*)
+        lmcache/v1/platform/base/*)
             return 1
             ;;
         lmcache/v1/platform/devices/__init__.py|lmcache/v1/platform/devices/cuda/*|lmcache/v1/platform/devices/rocm/*)
