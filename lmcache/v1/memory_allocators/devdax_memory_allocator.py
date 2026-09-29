@@ -15,7 +15,7 @@ import torch
 
 # First Party
 from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
-from lmcache.v1.distributed.cxl_types import CxlArenaDescriptor
+from lmcache.v1.distributed.internal_api import CxlArenaDescriptor
 from lmcache.v1.memory_allocators.buffer_allocator import BufferAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
@@ -30,7 +30,7 @@ from lmcache.v1.memory_management import (
 import lmcache.v1.memory_management as memory_management
 
 
-def _map_region(
+def _open_devdax_mapping(
     device_path: str, size: int, offset: int = 0
 ) -> tuple[int, mmap.mmap, Any, torch.Tensor]:
     """Map an aligned device/file range shared between processes."""
@@ -38,7 +38,10 @@ def _map_region(
     try:
         capacity = os.fstat(fd).st_size
         if capacity > 0 and offset + size > capacity:
-            raise ValueError("CXL mapping exceeds the device capacity")
+            raise RuntimeError(
+                f"Device-DAX range ({size} bytes at offset {offset}) exceeds "
+                f"{device_path} capacity ({capacity} bytes)"
+            )
         mapping = mmap.mmap(
             fd,
             size,
@@ -69,13 +72,14 @@ class CxlPeerMapping:
 
     Raises:
         ValueError: If the mapped header does not match the advertised identity.
+        RuntimeError: If the slab exceeds device capacity or GPU registration fails.
         OSError: If mapping the device fails.
     """
 
     def __init__(self, device_path: str, arena: CxlArenaDescriptor) -> None:
         self.arena = arena
         self._fingerprint = arena.fingerprint()
-        self._fd, self._mapping, self._array, buffer = _map_region(
+        self._fd, self._mapping, self._array, buffer = _open_devdax_mapping(
             device_path, arena.alignment + arena.size, arena.offset
         )
         self._buffer = buffer[arena.alignment :]
@@ -353,39 +357,6 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             return self._arenas[0].allocator.address_manager
         return None
 
-    def _open_devdax_mapping(
-        self,
-        device_path: str,
-        size: int,
-    ) -> tuple[int, mmap.mmap, Any, torch.Tensor]:
-        fd: int | None = None
-        mmap_obj: mmap.mmap | None = None
-        try:
-            fd = os.open(device_path, os.O_RDWR)
-            capacity = os.fstat(fd).st_size
-            if capacity > 0 and size > capacity:
-                raise RuntimeError(
-                    f"l1 devdax size ({size} bytes) exceeds "
-                    f"{device_path} capacity ({capacity} bytes)"
-                )
-
-            mmap_obj = mmap.mmap(
-                fd,
-                size,
-                flags=mmap.MAP_SHARED,
-                prot=mmap.PROT_READ | mmap.PROT_WRITE,
-            )
-            array_type = ctypes.c_uint8 * size
-            mmap_buffer = array_type.from_buffer(mmap_obj)
-            buffer = torch.frombuffer(mmap_buffer, dtype=torch.uint8)
-            return fd, mmap_obj, mmap_buffer, buffer
-        except Exception:
-            if mmap_obj is not None:
-                mmap_obj.close()
-            if fd is not None:
-                os.close(fd)
-            raise
-
     def _map_and_append_arena(
         self,
         device_path: str,
@@ -412,14 +383,12 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             OSError: If the device cannot be opened or mapped.
         """
         descriptor = self.cxl_arena if not self._arenas else None
-        if descriptor is None:
-            fd, mmap_obj, mmap_buffer, buffer = self._open_devdax_mapping(
-                device_path, size
-            )
-        else:
-            fd, mmap_obj, mmap_buffer, buffer = _map_region(
-                device_path, size + descriptor.alignment, descriptor.offset
-            )
+        fd, mmap_obj, mmap_buffer, buffer = _open_devdax_mapping(
+            device_path,
+            size + (descriptor.alignment if descriptor else 0),
+            descriptor.offset if descriptor else 0,
+        )
+        if descriptor is not None:
             mmap_obj[:32] = descriptor.fingerprint()
             buffer = buffer[descriptor.alignment :]
         arena: _DevDaxArena | None = None

@@ -18,6 +18,7 @@ releasing a request at any point is a walk over its maps.
 # Standard
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING
 import enum
 import itertools
@@ -53,7 +54,6 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L2AdapterDescriptor,
     MapState,
 )
-from lmcache.v1.memory_management import CXLMemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -1614,11 +1614,16 @@ class PrefetchController(StorageControllerInterface):
                     obj = objects.get(key)
                     if obj is None:
                         continue
-                    assert isinstance(obj, CXLMemoryObj)
                     try:
-                        error = manager.register_shadow(key, obj, tag)
+                        error = manager.register_shadow(
+                            key,
+                            obj,
+                            tag,
+                            is_valid=partial(adapter.is_borrowed_object_valid, obj),
+                            on_release=partial(adapter.release_borrowed_object, obj),
+                        )
                         if error != L1Error.SUCCESS:
-                            obj.release()
+                            adapter.release_borrowed_object(obj)
                             continue
                         result = manager.finish_write_and_reserve_read(
                             [key], read_locks=request.num_kv_readers, tag=tag
@@ -1628,7 +1633,7 @@ class PrefetchController(StorageControllerInterface):
                         else:
                             manager.finish_write_and_delete([key], tag=tag)
                     except Exception:
-                        obj.release()
+                        adapter.release_borrowed_object(obj)
                         raise
             finally:
                 # Adopted views own their reservations; release_lookup only returns

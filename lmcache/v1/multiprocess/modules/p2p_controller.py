@@ -22,7 +22,7 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     PrefetchTaskSpec,
 )
-from lmcache.v1.distributed.cxl_types import CXL_METADATA_KEY, CxlArenaDescriptor
+from lmcache.v1.distributed.internal_api import CXL_METADATA_KEY, CxlArenaDescriptor
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel import (
     delete_transfer_channel_context,

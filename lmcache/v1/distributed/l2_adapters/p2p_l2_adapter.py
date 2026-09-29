@@ -52,6 +52,7 @@ class _LookupTask:
     keys: list[ObjectKey]
     remote_task_id: int
     deadline: float
+    started_at: float
     failed: bool = False
 
 
@@ -226,10 +227,15 @@ class P2PL2Adapter(L2AdapterInterface):
     ) -> L2TaskId:
         task_id = self._next_task_id
         self._next_task_id += 1
+        started_at = time.monotonic()
 
         if self._closed:
             self._lookup_tasks[task_id] = _LookupTask(
-                keys=keys, remote_task_id=-1, deadline=0.0, failed=True
+                keys=keys,
+                remote_task_id=-1,
+                deadline=0.0,
+                started_at=started_at,
+                failed=True,
             )
             return task_id
 
@@ -249,6 +255,7 @@ class P2PL2Adapter(L2AdapterInterface):
             keys=keys,
             remote_task_id=remote_task_id,
             deadline=time.monotonic() + self._config.lookup_timeout_s,
+            started_at=started_at,
             failed=failed,
         )
         return task_id
@@ -274,20 +281,35 @@ class P2PL2Adapter(L2AdapterInterface):
         if addresses is None:
             return None
 
-        bitmap = Bitmap(len(task.keys))
-        for i, (key, addr) in enumerate(zip(task.keys, addresses, strict=True)):
-            if addr.is_valid():
-                bitmap.set(i)
-                self._remote_addresses[key] = addr
+        bitmap = self._process_lookup_result(
+            task_id, task.keys, addresses, task.started_at
+        )
         del self._lookup_tasks[task_id]
         return bitmap
 
-    def submit_unlock(self, keys: list[ObjectKey]) -> None:
+    def submit_unlock(self, keys: list[ObjectKey], *, wait: bool = False) -> None:
+        """Release peer reservations and discard their cached transfer addresses.
+
+        Args:
+            keys: Object keys to unlock. Empty input is a no-op.
+            wait: Wait for the RPC acknowledgment before returning. Borrowing
+                adapters use this on their release worker so draining waits
+                for queued unlocks; ordinary prefetch remains nonblocking.
+
+        Returns:
+            None.
+
+        Raises:
+            TimeoutError: If ``wait`` is True and the RPC acknowledgment times out.
+            Exception: If the transport fails to submit or acknowledge the RPC.
+        """
         if not keys:
             return
-        self._req_client.p2p_unlock_objects(keys)
+        future = self._req_client.p2p_unlock_objects(keys)
         for key in keys:
             self._remote_addresses.pop(key, None)
+        if wait:
+            future.result(timeout=_LOOKUP_RPC_TIMEOUT_S)
 
     # --------------------
     # Load Interface
@@ -389,6 +411,25 @@ class P2PL2Adapter(L2AdapterInterface):
             "in_flight_lookups": len(self._lookup_tasks),
             "in_flight_loads": len(self._load_tasks),
         }
+
+    def _process_lookup_result(
+        self,
+        task_id: L2TaskId,
+        keys: list[ObjectKey],
+        addresses: list[TransferChannelAddress],
+        started_at: float,
+    ) -> Bitmap:
+        """Retain copy addresses; borrowing subclasses retain reservations instead.
+
+        ``started_at`` precedes lookup submission, allowing subclasses to bound
+        remote TTLs without a second lookup timer or task dictionary.
+        """
+        bitmap = Bitmap(len(keys))
+        for i, (key, addr) in enumerate(zip(keys, addresses, strict=True)):
+            if addr.is_valid():
+                bitmap.set(i)
+                self._remote_addresses[key] = addr
+        return bitmap
 
 
 # Self-register config type and adapter factory

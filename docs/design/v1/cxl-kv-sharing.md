@@ -28,14 +28,25 @@ All paths below are relative to `lmcache/v1/`.
 
 | Module | Change | Responsibility |
 | --- | --- | --- |
-| `distributed/cxl_types.py` | New | Validated arena identity and registration metadata key. |
-| `distributed/l2_adapters/cxl_peer_l2_adapter.py` | New `CxlPeerL2Adapter` | Represent one eligible peer; reuse P2P RPC plumbing and return borrowed views instead of copying bytes. Factor common RPC setup out of unconditional RDMA initialization. |
+| `distributed/internal_api.py` | Extend | Validated arena identity alongside the existing L1 memory descriptors. |
+| `distributed/l2_adapters/cxl_peer_l2_adapter.py` | New `CxlPeerL2Adapter` | Specialize the existing P2P adapter to return borrowed views and retain reservations through GPU completion. |
+| `distributed/l2_adapters/p2p_l2_adapter.py` | Extend | Reuse RPC setup, lookup timing/polling, and unlock acknowledgment. Skip transfer-channel initialization for CXL and dispatch completed lookups to the borrow adapter. |
 | `distributed/memory_manager/devdax_l1_memory_manager.py` and `memory_allocators/devdax_memory_allocator.py` | Extend | Describe owned arenas, resolve peer locations, and create/release views. Peer mappings are excluded from local allocation/free lists. |
-| `memory_management.py` | Add `CXLMemoryObj` | A tensor-backed borrowed view with layout, expiry, mapping reference, and release callback; cleanup never frees owner pages. |
+| `memory_management.py` | Reuse `TensorMemoryObj` unchanged | Wrap the peer-mapped tensor and existing layout metadata with no parent allocator. The adapter tracks the reservation; L1 shadow metadata carries validity/release callbacks. |
 | `distributed/l1_manager.py` and `distributed/storage_manager.py` | Extend | Public shadow staging API, admission, and cleanup through existing read completion. |
 | `distributed/storage_controllers/prefetch_controller.py` and `distributed/l2_adapters/base.py` | Extend | Optional borrow capability: skip destination reservation/copy, admit shadows, and transfer reservation ownership to them. |
 | `multiprocess/modules/p2p_controller.py`, request codecs, and coordinator registration | Extend | Advertise/validate CXL peers, return typed locations, and reuse discovery, lookup, unlock, and lifecycle management. |
 | `multiprocess/modules/lmcache_driven_transfer.py` and `multiprocess/object_group_transfer.py` | Reuse | Retrieve through the shadow's tensor pointer; existing GPU completion drives `finish_read_prefetched()`. |
+
+The CXL peer adapter is the only new production module. Owner and peer mappings
+share the Device-DAX allocator module's offset-aware mapping routine; peer views
+do not instantiate an allocator. Lookup submission, polling, and timeout handling
+remain in `P2PL2Adapter`; its result hook lets CXL retain each reservation directly
+without an intermediate copy-address cache or separate lookup timer. The existing
+unlock method optionally waits for acknowledgment on the CXL release worker.
+Discovery, heartbeat, owner read counts/TTL, and adapter draining keep their
+existing implementations. CXL adds pool/session checks and borrowed-view lifetime
+tracking, with no new transfer channel, coordinator, or owner allocation index.
 
 ## Descriptors and peer eligibility
 
@@ -43,7 +54,7 @@ All paths below are relative to `lmcache/v1/`.
 | --- | --- |
 | `CxlArenaDescriptor` | `pool_id: str`, `offset: int`, `size: int`, `alignment: int`, `session_id: str`. Offset is the slab header's device-relative byte offset; size is usable payload bytes; alignment also sizes the header. |
 | `TransferChannelAddress` | Existing `offset` and `size` fields, plus optional `cxl_arena` and `cxl_ttl_seconds`. CXL offsets are relative to the peer payload, in bytes. |
-| Borrow bookkeeping | Adapter lookup-task ID → key → (address, conservative local expiry). A `CXLMemoryObj` owns the reservation after adoption and releases it once. |
+| Borrow bookkeeping | Adapter lookup-task ID → key → (address, conservative local expiry). An ordinary `TensorMemoryObj` holds the mapped view; the adapter tracks its reservation until L1 releases it. |
 
 Advertise the arena as JSON in coordinator metadata `lmcache.cxl.arena`.
 Discovery uses the existing registration, heartbeat, and reconciliation flow.
@@ -79,10 +90,11 @@ The following public APIs connect the components. Paths are relative to
 | `add_cxl_peer(arena, request_url, lookup_timeout)` / storage manager | Peer descriptor, RPC endpoint, deadline seconds | Adapter ID; reuse normal adapter registration and draining. |
 | `supports_borrowing()` / L2 adapter | None | Defaults to `False`; CXL returns `True`. |
 | `take_borrowed_objects(task_id, keys, layouts)` / CXL adapter | Completed lookup ID, selected keys, layouts by group | `dict[ObjectKey, MemoryObj]`; creates borrowed views and transfers reservations to them. Invalid hits remain releasable through `release_lookup`. |
-| `register_shadow(key, obj, tag)` / L1 manager | Key, `CXLMemoryObj`, prefetch writer tag | `L1Error`; stages metadata without payload allocation/capacity checks. Caller retains rejected views. |
+| `register_shadow(key, obj, tag, is_valid=..., on_release=...)` / L1 manager | Key, `MemoryObj`, prefetch writer tag, validity/release callbacks | `L1Error`; stages metadata without payload allocation/capacity checks. Caller retains rejected views. |
 | `finish_write_and_reserve_read(keys, read_locks, tag)` / L1 manager, existing | Staged keys, consumer count, writer tag | Existing admission result; keep a concurrent resident object and release the redundant shadow. |
 | `release_lookup(task_id, keys)` / L2 adapter | Lookup identity and unused keys | Return unused peer reservations; CXL scopes cleanup by task, and adopted views release independently. Other adapters use existing unlock behavior. |
-| `CXLMemoryObj.release()` | Called after final GPU reader | Invalidate the view once and queue owner unlock; never free owner pages or block the GPU callback on RPC. |
+| `release_borrowed_object(obj)` / CXL adapter | Existing `MemoryObj`, after final GPU reader | Invalidate the view once and queue owner unlock; never free owner pages or block the GPU callback on RPC. |
+| `is_borrowed_object_valid(obj)` / CXL adapter | Existing `MemoryObj` | Check the tracked reservation, owner TTL, and mapped session before L1 serves the view. |
 | `reap_expired_shadows()` / L1 manager | None | Reclaim expired/session-invalid views, including abandoned prefetches; called by the prefetch loop. |
 | `get_active_borrow_count()` / CXL adapter | None | Count live views and queued unlock operations; adapter draining waits for zero. |
 
@@ -117,8 +129,8 @@ sequenceDiagram
     Note over PC,PA: Select hits and release losing peer reservations
     PC->>PA: take_borrowed_objects(task_id, selected_keys, layouts)
     PA->>PA: Validate location and create view of B through A mapping
-    PA-->>PC: Shadow objects owning reservations
-    PC->>LA: register_shadow(key, object, tag)
+    PA-->>PC: Existing TensorMemoryObj views with tracked reservations
+    PC->>LA: register_shadow(key, object, tag, validity/release callbacks)
     Note over PC,LA: No payload allocation, capacity check, or copy
     PC->>LA: finish_write_and_reserve_read(keys, readers, tag)
     Note over PC,PA: Prefetch completes with owner read locks still held
@@ -135,8 +147,8 @@ sequenceDiagram
 
 ## Cleanup and validation
 
-Successful shadow admission transfers remote-lock ownership from prefetch to
-the shadow; skip the ordinary post-load peer unlock for those keys. Multiple
+Successful shadow admission transfers responsibility for releasing the remote
+reservation from prefetch to L1 shadow metadata; skip the ordinary post-load peer unlock for those keys. Multiple
 remote borrowers acquire independent owner read counts. Multiple local readers
 of one shadow retain its borrow until their final GPU completion.
 
@@ -144,6 +156,8 @@ Failed admission, unused lookup hits, and cancellation before GPU access
 release their reservations. After GPU access is queued, cleanup waits for completion.
 Lost/abandoned reservations follow the existing TTL policy. Shadow release is
 idempotent locally and does not introduce a new distributed lease protocol.
+The adapter keeps weak references to its tensor views; an unadmitted view that
+is garbage-collected also queues release. `TensorMemoryObj` itself is unchanged.
 
 A view expires at local lookup-submission time plus the advertised owner TTL,
 which is conservative without clock synchronization. Local read-count increases

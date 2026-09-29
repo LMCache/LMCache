@@ -7,7 +7,7 @@ Data types exposed by the transfer channel abstraction.
 from dataclasses import dataclass, field
 
 # First Party
-from lmcache.v1.distributed.cxl_types import CxlArenaDescriptor
+from lmcache.v1.distributed.internal_api import CxlArenaDescriptor
 
 
 @dataclass(frozen=True)

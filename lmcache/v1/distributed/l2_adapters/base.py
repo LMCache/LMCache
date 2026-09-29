@@ -172,6 +172,31 @@ class L2AdapterInterface(ABC):
         """
         raise NotImplementedError("This adapter does not support borrowing")
 
+    def is_borrowed_object_valid(self, obj: MemoryObj) -> bool:
+        """Return whether this adapter still holds a usable reservation for obj.
+
+        Args:
+            obj: A view returned by take_borrowed_objects.
+
+        Ordinary adapters return False. Borrowing adapters also check their
+        owner reservation's expiry and identity before L1 serves the view.
+        """
+        return False
+
+    def release_borrowed_object(self, obj: MemoryObj) -> None:
+        """Release a borrowed view's reservation after all GPU readers finish.
+
+        Args:
+            obj: A view returned by take_borrowed_objects.
+
+        Returns:
+            None. Borrowing adapters must tolerate repeated release calls.
+
+        Raises:
+            NotImplementedError: If this adapter only supports copying.
+        """
+        raise NotImplementedError("This adapter does not support borrowing")
+
     def release_lookup(self, task_id: L2TaskId, keys: list[ObjectKey]) -> None:
         """Release unused reservations belonging to a lookup.
 

@@ -8,16 +8,14 @@ from typing import cast
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import L1BackendType
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
-from lmcache.v1.distributed.cxl_types import CxlArenaDescriptor
-from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.internal_api import CxlArenaDescriptor, L1MemoryDesc
 from lmcache.v1.distributed.memory_manager.l1_memory_manager import L1MemoryManager
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaStatus,
     DevDaxMemoryAllocator,
     DevDaxRemoveMode,
 )
-from lmcache.v1.memory_management import CXLMemoryObj, MemoryObj
+from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
@@ -84,30 +82,13 @@ class DevDaxL1MemoryManager(L1MemoryManager):
         Returns:
             Payload-relative byte offset, or None for a different backing arena.
         """
-        if isinstance(obj, CXLMemoryObj) or self.cxl_arena is None:
+        if self.cxl_arena is None:
             return None
         allocator = cast(DevDaxMemoryAllocator, self._allocator)
         offset = obj.data_ptr - allocator.devdax_buffer.data_ptr()
         if offset < 0 or offset + obj.get_size() > self.cxl_arena.size:
             return None
         return offset
-
-    def free(self, mem_objs: list[MemoryObj]) -> L1Error:
-        """Release borrowed views separately from owned allocator pages.
-
-        Args:
-            mem_objs: Objects no longer used by L1 readers/writers.
-
-        Returns:
-            SUCCESS after releasing all objects.
-        """
-        owned = []
-        for obj in mem_objs:
-            if isinstance(obj, CXLMemoryObj):
-                obj.release()
-            else:
-                owned.append(obj)
-        return super().free(owned)
 
     def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
         """Return the storage medium backing ``memory_obj``.
@@ -121,7 +102,7 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             hybrid configuration.
         """
         allocator = cast(DevDaxMemoryAllocator, self._allocator)
-        if isinstance(memory_obj, CXLMemoryObj) or allocator.is_devdax_obj(memory_obj):
+        if allocator.is_devdax_obj(memory_obj):
             return L1BackendType.DEVDAX
         return L1BackendType.DRAM
 

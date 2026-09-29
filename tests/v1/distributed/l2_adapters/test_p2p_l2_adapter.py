@@ -333,6 +333,29 @@ def test_unlock_empty_is_noop():
         req_client.p2p_unlock_objects.assert_not_called()
 
 
+@pytest.mark.parametrize("wait", [False, True])
+def test_unlock_acknowledgment_is_optional(wait: bool) -> None:
+    """Default unlock is asynchronous; draining can await its acknowledgment."""
+    keys = [_key(0)]
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
+        completion = MagicMock(spec=_FakeFuture)
+        req_client.p2p_unlock_objects.return_value = completion
+        adapter.submit_unlock(keys, wait=wait)
+        req_client.p2p_unlock_objects.assert_called_once_with(keys)
+        if wait:
+            completion.result.assert_called_once()
+        else:
+            completion.result.assert_not_called()
+
+
+def test_unlock_acknowledgment_timeout_propagates() -> None:
+    """A draining caller can handle unlock failures using the owner's TTL."""
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
+        req_client.p2p_unlock_objects.return_value = _FakeFuture(exc=TimeoutError())
+        with pytest.raises(TimeoutError):
+            adapter.submit_unlock([_key(0)], wait=True)
+
+
 def test_store_completes_immediately_without_leaking():
     with _adapter() as (adapter, _mq, _tc_ctx, _tc, _notifier):
         task_id = adapter.submit_store_task([_key(0)], [MagicMock()])

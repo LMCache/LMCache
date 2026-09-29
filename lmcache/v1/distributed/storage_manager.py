@@ -27,9 +27,12 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     get_configured_capacity_bytes,
 )
-from lmcache.v1.distributed.cxl_types import CxlArenaDescriptor
 from lmcache.v1.distributed.error import L1Error, strerror
-from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
+from lmcache.v1.distributed.internal_api import (
+    CxlArenaDescriptor,
+    L1MemoryDesc,
+    L2AdapterListener,
+)
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface

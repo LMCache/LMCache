@@ -3,19 +3,21 @@
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from typing import cast
 import json
 import math
 import threading
 import time
+import weakref
+
+# Third Party
+import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.cxl_types import CxlArenaDescriptor
-from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.internal_api import CxlArenaDescriptor, L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -29,10 +31,10 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_allocators.devdax_memory_allocator import CxlPeerMapping
 from lmcache.v1.memory_management import (
-    CXLMemoryObj,
     MemoryFormat,
     MemoryObj,
     MemoryObjMetadata,
+    TensorMemoryObj,
 )
 
 logger = init_logger(__name__)
@@ -95,8 +97,6 @@ class CxlPeerL2AdapterConfig(P2PL2AdapterConfig):
             if not isinstance(d.get(name), str) or not d[name]:
                 raise ValueError(f"{name} must be a non-empty string")
         timeout = float(d.get("lookup_timeout_s", 30.0))
-        if timeout <= 0:
-            raise ValueError("lookup_timeout_s must be positive")
         return cls(
             d["peer_mq_server_url"],
             d["local_device_path"],
@@ -133,8 +133,10 @@ class CxlPeerL2Adapter(P2PL2Adapter):
         self._borrowed_lookups: dict[
             int, dict[ObjectKey, tuple[TransferChannelAddress, float]]
         ] = {}
-        self._lookup_starts: dict[L2TaskId, float] = {}
         self._borrow_lock = threading.Lock()
+        self._borrowed_views: weakref.WeakKeyDictionary[
+            MemoryObj, tuple[float, weakref.finalize]
+        ] = weakref.WeakKeyDictionary()
         self._active_borrows = 0
         self._live_views = 0
         self._releases = ThreadPoolExecutor(
@@ -163,45 +165,7 @@ class CxlPeerL2Adapter(P2PL2Adapter):
         """
         if len(set(keys)) != len(keys):
             raise ValueError("CXL lookup keys must be unique")
-        started = time.monotonic()
-        task_id = super().submit_lookup_and_lock_task(keys, group_layout_descs)
-        self._lookup_starts[task_id] = started
-        return task_id
-
-    def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
-        """Collect peer hits and retain each lookup's independent reservations.
-
-        Args:
-            task_id: Identity returned by submit_lookup_and_lock_task.
-
-        Returns:
-            Same-pool hit bitmap, or None while the peer lookup is pending.
-        """
-        task = self._lookup_tasks.get(task_id)
-        if task is None:
-            return None
-        result = super().query_lookup_and_lock_result(task_id)
-        if result is None:
-            return None
-        started = self._lookup_starts.pop(task_id)
-        hits: dict[ObjectKey, tuple[TransferChannelAddress, float]] = {}
-        for i, key in enumerate(task.keys):
-            if not result.test(i):
-                continue
-            address = self._remote_addresses.pop(key)
-            expires = started + address.cxl_ttl_seconds
-            if (
-                address.cxl_arena != self._mapping.arena
-                or not self._mapping.is_current()
-                or time.monotonic() >= expires
-            ):
-                result.clear(i)
-                self._queue_unlock({key: expires})
-            else:
-                hits[key] = (address, expires)
-        if hits:
-            self._borrowed_lookups[task_id] = hits
-        return result
+        return super().submit_lookup_and_lock_task(keys, group_layout_descs)
 
     def take_borrowed_objects(
         self,
@@ -250,21 +214,55 @@ class CxlPeerL2Adapter(P2PL2Adapter):
                 shapes=layout.shapes,
                 dtypes=layout.dtypes,
             )
-            obj = CXLMemoryObj(
-                view,
-                metadata,
-                partial(self._release_view, key, expires),
-                expires,
-                self._mapping.is_current,
-            )
+            obj = TensorMemoryObj(view, metadata, parent_allocator=None)
             with self._borrow_lock:
                 self._active_borrows += 1
                 self._live_views += 1
+                self._borrowed_views[obj] = (
+                    expires,
+                    weakref.finalize(obj, self._release_view, key, expires),
+                )
             objects[key] = obj
             del hits[key]
         if not hits:
             self._borrowed_lookups.pop(task_id, None)
         return objects
+
+    def is_borrowed_object_valid(self, obj: MemoryObj) -> bool:
+        """Check a view's reservation TTL and mapped owner incarnation.
+
+        Args:
+            obj: A tensor view returned by take_borrowed_objects.
+
+        Returns:
+            True only while this adapter still holds its live reservation.
+        """
+        with self._borrow_lock:
+            borrow = self._borrowed_views.get(obj)
+            return (
+                borrow is not None
+                and obj.is_valid()
+                and time.monotonic() < borrow[0]
+                and self._mapping.is_current()
+            )
+
+    def release_borrowed_object(self, obj: MemoryObj) -> None:
+        """Invalidate a view and queue its owner unlock after GPU completion.
+
+        Args:
+            obj: A tensor view returned by take_borrowed_objects. Repeated
+                releases and objects belonging to another adapter are ignored.
+
+        Returns:
+            None. Owner pages are never returned to the local allocator.
+        """
+        with self._borrow_lock:
+            borrow = self._borrowed_views.pop(obj, None)
+            if borrow is None:
+                return
+            obj.invalidate()
+            cast(TensorMemoryObj, obj).raw_data = torch.empty(0, dtype=torch.uint8)
+        borrow[1]()
 
     def release_lookup(self, task_id: L2TaskId, keys: list[ObjectKey]) -> None:
         """Return unused reservations from one lookup; repeated calls are inert.
@@ -316,6 +314,33 @@ class CxlPeerL2Adapter(P2PL2Adapter):
             "pool_id": self._mapping.arena.pool_id,
         }
 
+    def _process_lookup_result(
+        self,
+        task_id: L2TaskId,
+        keys: list[ObjectKey],
+        addresses: list[TransferChannelAddress],
+        started_at: float,
+    ) -> Bitmap:
+        """Retain task-scoped borrows without populating the copy-address cache."""
+        result = Bitmap(len(keys))
+        hits: dict[ObjectKey, tuple[TransferChannelAddress, float]] = {}
+        for i, (key, address) in enumerate(zip(keys, addresses, strict=True)):
+            if not address.is_valid():
+                continue
+            expires = started_at + address.cxl_ttl_seconds
+            if (
+                address.cxl_arena != self._mapping.arena
+                or not self._mapping.is_current()
+                or time.monotonic() >= expires
+            ):
+                self._queue_unlock({key: expires})
+            else:
+                result.set(i)
+                hits[key] = (address, expires)
+        if hits:
+            self._borrowed_lookups[task_id] = hits
+        return result
+
     def _release_view(self, key: ObjectKey, expires: float) -> None:
         with self._borrow_lock:
             self._live_views -= 1
@@ -337,7 +362,7 @@ class CxlPeerL2Adapter(P2PL2Adapter):
             keys = [key for key, expires in reservations.items() if now < expires]
             if not keys:
                 return
-            self._req_client.p2p_unlock_objects(keys).result(timeout=3.0)
+            super().submit_unlock(keys, wait=True)
         except Exception:
             logger.warning(
                 "CXL peer unlock failed; reservation follows owner TTL", exc_info=True

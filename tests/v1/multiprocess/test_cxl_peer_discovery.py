@@ -12,7 +12,7 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.config import get_arg_parser, parse_args_to_config
-from lmcache.v1.distributed.cxl_types import CXL_METADATA_KEY, CxlArenaDescriptor
+from lmcache.v1.distributed.internal_api import CXL_METADATA_KEY, CxlArenaDescriptor
 from lmcache.v1.multiprocess.config import (
     CoordinatorConfig,
     P2PConfig,

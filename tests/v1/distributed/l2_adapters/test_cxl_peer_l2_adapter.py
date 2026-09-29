@@ -4,10 +4,12 @@
 # Standard
 from collections.abc import Callable, Iterator
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
 from unittest.mock import MagicMock
+import gc
 import socket
 import time
 
@@ -29,8 +31,8 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.distributed.cxl_types import CxlArenaDescriptor
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import CxlArenaDescriptor
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.cxl_peer_l2_adapter import (
     CxlPeerL2Adapter,
@@ -38,7 +40,7 @@ from lmcache.v1.distributed.l2_adapters.cxl_peer_l2_adapter import (
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_allocators.devdax_memory_allocator import CxlPeerMapping
-from lmcache.v1.memory_management import CXLMemoryObj
+from lmcache.v1.memory_management import TensorMemoryObj
 from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig, P2PConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.modules import p2p_controller
@@ -156,13 +158,13 @@ def _adapter(
     )
 
 
-def _borrow(adapter: CxlPeerL2Adapter, key: ObjectKey = KEY) -> CXLMemoryObj:
+def _borrow(adapter: CxlPeerL2Adapter, key: ObjectKey = KEY) -> TensorMemoryObj:
     task = adapter.submit_lookup_and_lock_task([key], {0: LAYOUT})
     result = adapter.query_lookup_and_lock_result(task)
     assert result is not None and result.test(0)
     objects = adapter.take_borrowed_objects(task, [key], {0: LAYOUT})
     obj = objects[key]
-    assert isinstance(obj, CXLMemoryObj)
+    assert isinstance(obj, TensorMemoryObj)
     return obj
 
 
@@ -191,7 +193,7 @@ def test_prefetch_borrows_with_full_local_slab(peers: tuple) -> None:
     assert owner.delete_l1_keys([KEY]) == (0, 1)
     with borrower.read_prefetched_results([KEY]) as objects:
         shadow = objects[0]
-        assert isinstance(shadow, CXLMemoryObj)
+        assert isinstance(shadow, TensorMemoryObj)
         assert shadow.tensor is not None
         owner_keys, owner_objects = owner.unsafe_read([KEY])
         assert owner_keys == [KEY]
@@ -216,11 +218,28 @@ def test_independent_borrows_and_idempotent_release(peers: tuple) -> None:
     try:
         first, second = _borrow(adapter), _borrow(adapter)
         assert adapter.get_active_borrow_count() == 2
-        first.release()
-        first.release()
+        adapter.release_borrowed_object(first)
+        adapter.release_borrowed_object(first)
         _wait(lambda: adapter.get_active_borrow_count() == 1)
         assert owner.delete_l1_keys([KEY]) == (0, 1)
-        second.release()
+        adapter.release_borrowed_object(second)
+        _wait(lambda: adapter.get_active_borrow_count() == 0)
+        assert owner.delete_l1_keys([KEY]) == (1, 0)
+    finally:
+        adapter.close()
+
+
+def test_abandoned_view_releases_reservation(peers: tuple) -> None:
+    """Dropping an unadmitted ordinary tensor view releases its peer reservation."""
+    borrower, owner, url, path = peers
+    _store(owner)
+    adapter = _adapter(borrower, owner, url, path)
+    try:
+        view = _borrow(adapter)
+        assert type(view) is TensorMemoryObj
+        assert adapter.is_borrowed_object_valid(view)
+        del view
+        gc.collect()
         _wait(lambda: adapter.get_active_borrow_count() == 0)
         assert owner.delete_l1_keys([KEY]) == (1, 0)
     finally:
@@ -246,6 +265,32 @@ def test_unused_lookup_and_invalid_layout_release(peers: tuple) -> None:
         adapter.close()
 
 
+def test_overlapping_lookup_release_keeps_other_reservation(peers: tuple) -> None:
+    """Releasing one completed lookup leaves another hit for the same key usable."""
+    borrower, owner, url, path = peers
+    _store(owner)
+    adapter = _adapter(borrower, owner, url, path)
+    try:
+        first = adapter.submit_lookup_and_lock_task([KEY], {0: LAYOUT})
+        second = adapter.submit_lookup_and_lock_task([KEY], {0: LAYOUT})
+        for task in (second, first):
+            result = adapter.query_lookup_and_lock_result(task)
+            assert result is not None and result.test(0)
+        adapter.release_lookup(first, [KEY])
+        _wait(lambda: adapter.get_active_borrow_count() == 0)
+        assert owner.delete_l1_keys([KEY]) == (0, 1)
+        shadow = adapter.take_borrowed_objects(second, [KEY], {0: LAYOUT})[KEY]
+        assert isinstance(shadow, TensorMemoryObj)
+        try:
+            assert shadow.tensor is not None and torch.all(shadow.tensor == 37)
+        finally:
+            adapter.release_borrowed_object(shadow)
+        _wait(lambda: adapter.get_active_borrow_count() == 0)
+        assert owner.delete_l1_keys([KEY]) == (1, 0)
+    finally:
+        adapter.close()
+
+
 def test_peer_close_waits_for_shadow(peers: tuple) -> None:
     """Adapter teardown cannot unmap a view still held by L1/GPU readers."""
     borrower, owner, url, path = peers
@@ -254,7 +299,7 @@ def test_peer_close_waits_for_shadow(peers: tuple) -> None:
     view = _borrow(adapter)
     with pytest.raises(RuntimeError, match="live shadows"):
         adapter.close()
-    view.release()
+    adapter.release_borrowed_object(view)
     adapter.close()
     assert owner.delete_l1_keys([KEY]) == (1, 0)
 
@@ -316,7 +361,7 @@ def test_shadow_cannot_be_exported_to_another_peer(peers: tuple) -> None:
         assert owner_keys == [KEY]
         assert owner.get_cxl_address(objects[0]) is not None
     finally:
-        view.release()
+        adapter.release_borrowed_object(view)
         adapter.close()
 
 
@@ -343,8 +388,17 @@ def test_shadow_admission_discards_duplicate_without_freeing_payload(
     )
     try:
         first, second = _borrow(adapter), _borrow(adapter)
-        assert manager.register_shadow(KEY, first, "a") == L1Error.SUCCESS
-        assert manager.register_shadow(KEY, second, "b") == L1Error.SUCCESS
+        for obj, tag in ((first, "a"), (second, "b")):
+            assert (
+                manager.register_shadow(
+                    KEY,
+                    obj,
+                    tag,
+                    is_valid=partial(adapter.is_borrowed_object_valid, obj),
+                    on_release=partial(adapter.release_borrowed_object, obj),
+                )
+                == L1Error.SUCCESS
+            )
         assert manager.get_staging_memory_usage() == 0
         assert manager.finish_write_and_reserve_read([KEY], tag="a")[KEY][1] is first
         assert manager.finish_write_and_reserve_read([KEY], tag="b")[KEY][1] is first

@@ -4,17 +4,21 @@ Managing objects and memory for L1 cache
 """
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass
 import threading
 
 # First Party
 from lmcache.lmcache_native import TTLLock
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
-from lmcache.v1.distributed.cxl_types import CxlArenaDescriptor
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
+from lmcache.v1.distributed.internal_api import (
+    CxlArenaDescriptor,
+    L1ManagerListener,
+    L1ObjectMeta,
+)
 from lmcache.v1.distributed.memory_manager import (
     GDSL1MemoryManager,
     L1ManagerProtocol,
@@ -24,7 +28,7 @@ from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.memory_management import CXLMemoryObj, MemoryObj
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -182,7 +186,11 @@ class L1Manager:
         # Staging objects: key -> writer tag -> write-locked object that is
         # invisible to readers until it is admitted by finish_write.
         self._staging: dict[ObjectKey, dict[str, L1ObjectState]] = {}
-        self._shadow_keys: set[ObjectKey] = set()
+        # Shadow metadata owns callbacks, not payload allocation. Ordinary
+        # TensorMemoryObj views retain their existing layout/pointer interface.
+        self._shadows: dict[
+            MemoryObj, tuple[ObjectKey, Callable[[], bool], Callable[[], None]]
+        ] = {}
         # Bytes held by staging objects (kept in sync with ``_staging``).
         self._staging_bytes: int = 0
 
@@ -262,25 +270,36 @@ class L1Manager:
         )
 
     @l1_mgr_synchronized
-    def register_shadow(self, key: ObjectKey, obj: CXLMemoryObj, tag: str) -> L1Error:
+    def register_shadow(
+        self,
+        key: ObjectKey,
+        obj: MemoryObj,
+        tag: str,
+        *,
+        is_valid: Callable[[], bool],
+        on_release: Callable[[], None],
+    ) -> L1Error:
         """Stage a borrowed view without allocating or checking payload capacity.
 
         Args:
             key: Cache key for the borrowed object.
-            obj: Valid CXL view; ownership transfers only on SUCCESS.
+            obj: Existing memory object wrapping peer bytes; ownership transfers
+                only on SUCCESS.
             tag: Prefetch writer identity, used during ordinary admission.
+            is_valid: Nonblocking check of the owner reservation and mapping.
+            on_release: Idempotent, nonblocking callback releasing the peer view.
 
         Returns:
-            SUCCESS or KEY_NOT_WRITABLE when this tag already staged the key.
+            SUCCESS or KEY_NOT_WRITABLE when the tag or view is already staged.
 
         Raises:
             ValueError: If this manager cannot release CXL views or the view
                 is already invalid. A concurrently resident key is resolved
                 by finish_write_and_reserve_read, which discards the loser.
         """
-        if self.cxl_arena is None or not obj.is_valid():
+        if self.cxl_arena is None or not obj.is_valid() or not is_valid():
             raise ValueError("Shadow admission requires a shared CXL manager and view")
-        if self._get_staging(key, tag) is not None:
+        if self._get_staging(key, tag) is not None or obj in self._shadows:
             return L1Error.KEY_NOT_WRITABLE
         entry = L1ObjectState(
             memory_obj=obj,
@@ -289,8 +308,8 @@ class L1Manager:
             is_temporary=True,
         )
         entry.write_lock.lock()
+        self._shadows[obj] = (key, is_valid, on_release)
         self._put_staging(key, tag, entry)
-        self._shadow_keys.add(key)
         return L1Error.SUCCESS
 
     @l1_mgr_synchronized
@@ -300,7 +319,7 @@ class L1Manager:
         Retrieval must complete within the existing owner TTL. Expiry also
         lets abandoned prefetches drain without retaining peer mappings.
         """
-        self._reap_expired_shadows()
+        self._reap_shadows(expired_only=True)
 
     def release_shadows(self) -> None:
         """Release borrowed views before closing peer adapters at shutdown.
@@ -309,7 +328,7 @@ class L1Manager:
         outstanding device work before invalidating views; owned payload
         remains available until the ordinary manager close.
         """
-        if not self._shadow_keys:
+        if not self._shadows:
             return
         # First Party
         from lmcache import torch_dev
@@ -317,16 +336,7 @@ class L1Manager:
         if torch_dev.is_available():
             torch_dev.synchronize()
         with self._lock:
-            objects: list[MemoryObj] = []
-            for key in self._shadow_keys:
-                entry = self._objects.get(key)
-                if entry is not None and isinstance(entry.memory_obj, CXLMemoryObj):
-                    objects.append(self._objects.pop(key).memory_obj)
-                for tag, staged in list(self._staging.get(key, {}).items()):
-                    if isinstance(staged.memory_obj, CXLMemoryObj):
-                        objects.append(self._pop_staging(key, tag).memory_obj)
-            self._shadow_keys.clear()
-            self._memory_manager.free(objects)
+            self._reap_shadows(expired_only=False)
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.
@@ -365,7 +375,7 @@ class L1Manager:
             being written is reported as ``KEY_NOT_EXIST``.
         """
         total = _validate_read_locks(read_locks)
-        self._reap_expired_shadows()
+        self._reap_shadows(expired_only=True)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         for key in keys:
@@ -415,7 +425,9 @@ class L1Manager:
                 ret[key] = (L1Error.KEY_NOT_EXIST, None)
                 continue
 
-            if not entry.read_lock.is_locked() or not entry.memory_obj.is_valid():
+            if not entry.read_lock.is_locked() or not self._is_object_valid(
+                entry.memory_obj
+            ):
                 ret[key] = (L1Error.KEY_NOT_READABLE, None)
                 continue
 
@@ -492,7 +504,7 @@ class L1Manager:
             successful_keys.append(key)
 
         freed_meta = [self._object_meta(obj) for obj in need_to_free]
-        self._memory_manager.free(need_to_free)
+        self._free_objects(need_to_free)
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_read_finished(successful_keys)
@@ -565,7 +577,7 @@ class L1Manager:
 
             staged = self._get_staging(key, tag)
             if staged is not None:
-                if isinstance(staged.memory_obj, CXLMemoryObj):
+                if staged.memory_obj in self._shadows:
                     # A borrowed reservation is read-only, even if the local
                     # staging writer's TTL elapsed before the owner's TTL.
                     ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
@@ -602,7 +614,7 @@ class L1Manager:
 
             # Free the memory if partial allocation succeeded
             if allocated_objs:
-                self._memory_manager.free(allocated_objs)
+                self._free_objects(allocated_objs)
 
         else:
             for (key, is_temp), mem_obj in zip(
@@ -686,7 +698,7 @@ class L1Manager:
                 notification_keys.append(key)
                 notification_keys_meta.append(self._object_meta(entry.memory_obj))
 
-        self._memory_manager.free(discarded)
+        self._free_objects(discarded)
 
         if notification_keys:
             for listener in self._registered_listeners:
@@ -740,7 +752,7 @@ class L1Manager:
             always holds the object that readers see.
         """
         total = _validate_read_locks(read_locks)
-        self._reap_expired_shadows()
+        self._reap_shadows(expired_only=True)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         successful_keys_meta: list[L1ObjectMeta] = []
@@ -771,7 +783,7 @@ class L1Manager:
                 entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
 
-        self._memory_manager.free(discarded)
+        self._free_objects(discarded)
         if resident_keys:
             self._report_read_reserved(resident_keys)
 
@@ -891,7 +903,7 @@ class L1Manager:
             if key not in self._objects and key not in self._staging:
                 gone_keys.append(key)
 
-        self._memory_manager.free(discarded)
+        self._free_objects(discarded)
         self._report_staging_gone(gone_keys)
         return ret
 
@@ -935,7 +947,7 @@ class L1Manager:
             all_keys = list(self._objects.keys())
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
             all_meta = [self._object_meta(obj) for obj in all_memory_objs]
-            self._memory_manager.free(all_memory_objs)
+            self._free_objects(all_memory_objs)
             self._objects.clear()
             for listener in self._registered_listeners:
                 listener.on_l1_keys_deleted_by_manager(all_keys)
@@ -1055,10 +1067,10 @@ class L1Manager:
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
             for per_tag in self._staging.values():
                 all_memory_objs.extend(staged.memory_obj for staged in per_tag.values())
-            self._memory_manager.free(all_memory_objs)
+            self._free_objects(all_memory_objs)
             self._objects.clear()
             self._staging.clear()
-            self._shadow_keys.clear()
+            self._shadows.clear()
             self._staging_bytes = 0
 
         self._memory_manager.close()
@@ -1156,7 +1168,7 @@ class L1Manager:
     def _put_staging(self, key: ObjectKey, tag: str, entry: L1ObjectState) -> None:
         """Store ``entry`` as ``tag``'s staging object for ``key``."""
         self._staging.setdefault(key, {})[tag] = entry
-        if not isinstance(entry.memory_obj, CXLMemoryObj):
+        if entry.memory_obj not in self._shadows:
             self._staging_bytes += entry.memory_obj.get_size()
 
     def _pop_staging(self, key: ObjectKey, tag: str) -> L1ObjectState:
@@ -1168,7 +1180,7 @@ class L1Manager:
         entry = per_tag.pop(tag)
         if not per_tag:
             del self._staging[key]
-        if not isinstance(entry.memory_obj, CXLMemoryObj):
+        if entry.memory_obj not in self._shadows:
             self._staging_bytes -= entry.memory_obj.get_size()
         return entry
 
@@ -1239,7 +1251,7 @@ class L1Manager:
                     tag,
                 )
             freed.append(self._pop_staging(key, tag).memory_obj)
-        self._memory_manager.free(freed)
+        self._free_objects(freed)
         return len(freed)
 
     def _report_read_reserved(self, keys: list[ObjectKey]) -> None:
@@ -1272,7 +1284,7 @@ class L1Manager:
         """Free ``objs`` and report ``keys`` as deleted to listeners and
         the event bus."""
         freed_meta = [self._object_meta(obj) for obj in objs]
-        self._memory_manager.free(objs)
+        self._free_objects(objs)
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_deleted_by_manager(keys)
@@ -1283,33 +1295,47 @@ class L1Manager:
             )
         )
 
-    def _reap_expired_shadows(self) -> None:
-        """Reclaim only tracked shadow metadata, with the manager lock held."""
-        expired_keys: list[ObjectKey] = []
-        expired_objs: list[MemoryObj] = []
-        for key in list(self._shadow_keys):
+    def _is_object_valid(self, obj: MemoryObj) -> bool:
+        """Check ordinary object validity plus the optional owner reservation."""
+        shadow = self._shadows.get(obj)
+        return obj.is_valid() and (shadow is None or shadow[1]())
+
+    def _free_objects(self, objects: list[MemoryObj]) -> None:
+        """Release borrowed views through their owner; free only local payload."""
+        owned = []
+        for obj in objects:
+            shadow = self._shadows.pop(obj, None)
+            if shadow is None:
+                owned.append(obj)
+            else:
+                shadow[2]()
+        self._memory_manager.free(owned)
+
+    def _reap_shadows(self, *, expired_only: bool) -> None:
+        """Remove tracked shadow metadata with the manager lock held."""
+        deleted_keys: list[ObjectKey] = []
+        deleted_objs: list[MemoryObj] = []
+        for obj, (key, _, _) in list(self._shadows.items()):
+            if expired_only and self._is_object_valid(obj):
+                continue
             for tag, staged in list(self._staging.get(key, {}).items()):
-                obj = staged.memory_obj
-                if isinstance(obj, CXLMemoryObj) and not obj.is_valid():
+                if staged.memory_obj is obj:
                     self._pop_staging(key, tag)
-                    self._memory_manager.free([obj])
             entry = self._objects.get(key)
-            if entry is not None and isinstance(entry.memory_obj, CXLMemoryObj):
-                if entry.memory_obj.is_valid():
-                    continue
+            if entry is not None and entry.memory_obj is obj:
                 del self._objects[key]
-                expired_keys.append(key)
-                expired_objs.append(entry.memory_obj)
-            if key not in self._staging:
-                self._shadow_keys.discard(key)
-        if expired_keys:
-            self._free_and_report_deleted(expired_keys, expired_objs)
+                deleted_keys.append(key)
+                deleted_objs.append(obj)
+            else:
+                self._free_objects([obj])
+        if deleted_keys:
+            self._free_and_report_deleted(deleted_keys, deleted_objs)
 
     def _object_meta(self, memory_obj: MemoryObj) -> L1ObjectMeta:
         """Build the listener-facing metadata for one resident object."""
+        if memory_obj in self._shadows:
+            return L1ObjectMeta(size_bytes=0, backend=L1BackendType.DEVDAX)
         return L1ObjectMeta(
-            size_bytes=(
-                0 if isinstance(memory_obj, CXLMemoryObj) else memory_obj.get_size()
-            ),
+            size_bytes=memory_obj.get_size(),
             backend=self._memory_manager.get_backend_type(memory_obj),
         )
