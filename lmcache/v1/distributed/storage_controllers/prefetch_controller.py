@@ -18,7 +18,6 @@ releasing a request at any point is a walk over its maps.
 # Standard
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
-from functools import partial
 from typing import TYPE_CHECKING
 import enum
 import itertools
@@ -1601,29 +1600,30 @@ class PrefetchController(StorageControllerInterface):
         tag = _get_prefetch_write_tag(request.request_id)
         for adapter_idx, cells in list(states.l2_locked_keys.items()):
             adapter = self._l2_adapters[adapter_idx]
-            if not adapter.supports_borrowing():
-                continue
             keys = _gather_keys(request.key_groups, cells)
             task_id = request.lookup_task_ids[adapter_idx]
             objects = adapter.take_borrowed_objects(task_id, keys, layouts)
+            if objects is None:
+                continue
             l1_idx = self._get_l2_affinity_manager(adapter_idx)
             manager = self._l1_managers[l1_idx]
             admitted = Bitmap(len(keys))
             try:
                 for i, key in enumerate(keys):
-                    obj = objects.get(key)
-                    if obj is None:
+                    borrow = objects.get(key)
+                    if borrow is None:
                         continue
+                    obj, is_valid, release = borrow
                     try:
                         error = manager.register_shadow(
                             key,
                             obj,
                             tag,
-                            is_valid=partial(adapter.is_borrowed_object_valid, obj),
-                            on_release=partial(adapter.release_borrowed_object, obj),
+                            is_valid=is_valid,
+                            on_release=release,
                         )
                         if error != L1Error.SUCCESS:
-                            adapter.release_borrowed_object(obj)
+                            release()
                             continue
                         result = manager.finish_write_and_reserve_read(
                             [key], read_locks=request.num_kv_readers, tag=tag
@@ -1633,7 +1633,7 @@ class PrefetchController(StorageControllerInterface):
                         else:
                             manager.finish_write_and_delete([key], tag=tag)
                     except Exception:
-                        adapter.release_borrowed_object(obj)
+                        release()
                         raise
             finally:
                 # Adopted views own their reservations; release_lookup only returns

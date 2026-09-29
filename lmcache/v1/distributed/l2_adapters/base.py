@@ -8,6 +8,7 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Mapping
@@ -28,6 +29,8 @@ from lmcache.v1.mp_observability.event_bus import get_event_bus
 logger = init_logger(__name__)
 
 L2TaskId = int
+BorrowedObject = tuple["MemoryObj", Callable[[], bool], Callable[[], None]]
+"""Existing memory view, validity predicate, and idempotent release callback."""
 
 
 _EMPTY_BY_CACHE_SALT: Mapping[str, int] = MappingProxyType({})
@@ -147,55 +150,26 @@ class L2AdapterInterface(ABC):
     # Event Fd Interface
     #####################
 
-    def supports_borrowing(self) -> bool:
-        """Return whether this adapter can supply borrowed L1 views."""
-        return False
-
     def take_borrowed_objects(
         self,
         task_id: L2TaskId,
         keys: list[ObjectKey],
         layouts: dict[int, MemoryLayoutDesc],
-    ) -> dict[ObjectKey, MemoryObj]:
-        """Transfer selected lookup reservations into metadata-only views.
+    ) -> dict[ObjectKey, BorrowedObject] | None:
+        """Return selected views and their lifetime callbacks, or None to copy.
 
         Args:
             task_id: Completed lookup's local task identity.
-            keys: Selected keys whose views the caller will own.
-            layouts: Layout by object-group ID.
+            keys: Selected keys whose reservations the caller will own.
+            layouts: Expected layout by object-group ID.
 
         Returns:
-            Successfully borrowed views. Missing keys remain caller-releasable.
-
-        Raises:
-            NotImplementedError: If this adapter only supports copying.
+            None for ordinary copy adapters; otherwise key -> (memory object,
+            validity predicate, release callback). Missing keys stay releasable
+            through release_lookup. The caller releases each view after its
+            final GPU reader; release must be idempotent and nonblocking.
         """
-        raise NotImplementedError("This adapter does not support borrowing")
-
-    def is_borrowed_object_valid(self, obj: MemoryObj) -> bool:
-        """Return whether this adapter still holds a usable reservation for obj.
-
-        Args:
-            obj: A view returned by take_borrowed_objects.
-
-        Ordinary adapters return False. Borrowing adapters also check their
-        owner reservation's expiry and identity before L1 serves the view.
-        """
-        return False
-
-    def release_borrowed_object(self, obj: MemoryObj) -> None:
-        """Release a borrowed view's reservation after all GPU readers finish.
-
-        Args:
-            obj: A view returned by take_borrowed_objects.
-
-        Returns:
-            None. Borrowing adapters must tolerate repeated release calls.
-
-        Raises:
-            NotImplementedError: If this adapter only supports copying.
-        """
-        raise NotImplementedError("This adapter does not support borrowing")
+        return None
 
     def release_lookup(self, task_id: L2TaskId, keys: list[ObjectKey]) -> None:
         """Release unused reservations belonging to a lookup.

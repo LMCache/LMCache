@@ -1,197 +1,125 @@
 # Shared CXL KV sharing through L1 shadows
 
-Status: initial implementation for review. This design spans `lmcache/v1/distributed/` and
-`lmcache/v1/multiprocess/`.
+Nodes A and B map one shared CXL pool and own disjoint slabs. A borrows B's
+read-locked chunk, registers a temporary L1 shadow, and reads B's bytes directly
+into its GPU. Shadow creation uses metadata only: no local payload allocation,
+capacity check, DRAM staging, or CXL-to-CXL copy. B remains the allocation owner.
 
-## Scope and invariants
+## Modules and reuse
 
-Nodes A and B map one shared CXL pool and each owns a slab: arena A and arena B.
-A borrows a chunk in arena B by registering a temporary shadow in A's L1/CXL
-manager. The shadow references B's existing bytes; A retrieves them directly
-into its GPU.
+Paths are relative to `lmcache/v1/`. The CXL peer adapter is the only new
+production module; `TensorMemoryObj` is unchanged.
 
-- Shadow creation allocates metadata only. It bypasses local DRAM/CXL payload
-  allocation and capacity checks, including when arena A is full.
-- B owns the physical allocation and accounts for its capacity. A frees only
-  its shadow and mapping reference, never B's pages.
-- Reuse the current CXL manager's mapping, GPU registration, and visibility
-  behavior, plus the existing P2P lookup and TTL read-lock semantics.
-- Each successful borrow increments B's read-lock count. After GPU retrieval
-  completes, A removes the shadow and notifies B to decrement that count.
-  Abandoned reservations follow existing TTL expiry behavior.
-- Export only owned CXL objects. Shadows are read-only and cannot be exported
-  to another peer. Owner-side L1 remains the authoritative key index.
-
-## Modules
-
-All paths below are relative to `lmcache/v1/`.
-
-| Module | Change | Responsibility |
-| --- | --- | --- |
-| `distributed/internal_api.py` | Extend | Validated arena identity alongside the existing L1 memory descriptors. |
-| `distributed/l2_adapters/cxl_peer_l2_adapter.py` | New `CxlPeerL2Adapter` | Specialize the existing P2P adapter to return borrowed views and retain reservations through GPU completion. |
-| `distributed/l2_adapters/p2p_l2_adapter.py` | Extend | Reuse RPC setup, lookup timing/polling, and unlock acknowledgment. Skip transfer-channel initialization for CXL and dispatch completed lookups to the borrow adapter. |
-| `distributed/memory_manager/devdax_l1_memory_manager.py` and `memory_allocators/devdax_memory_allocator.py` | Extend | Describe owned arenas, resolve peer locations, and create/release views. Peer mappings are excluded from local allocation/free lists. |
-| `memory_management.py` | Reuse `TensorMemoryObj` unchanged | Wrap the peer-mapped tensor and existing layout metadata with no parent allocator. The adapter tracks the reservation; L1 shadow metadata carries validity/release callbacks. |
-| `distributed/l1_manager.py` and `distributed/storage_manager.py` | Extend | Public shadow staging API, admission, and cleanup through existing read completion. |
-| `distributed/storage_controllers/prefetch_controller.py` and `distributed/l2_adapters/base.py` | Extend | Optional borrow capability: skip destination reservation/copy, admit shadows, and transfer reservation ownership to them. |
-| `multiprocess/modules/p2p_controller.py`, request codecs, and coordinator registration | Extend | Advertise/validate CXL peers, return typed locations, and reuse discovery, lookup, unlock, and lifecycle management. |
-| `multiprocess/modules/lmcache_driven_transfer.py` and `multiprocess/object_group_transfer.py` | Reuse | Retrieve through the shadow's tensor pointer; existing GPU completion drives `finish_read_prefetched()`. |
-
-The CXL peer adapter is the only new production module. Owner and peer mappings
-share the Device-DAX allocator module's offset-aware mapping routine; peer views
-do not instantiate an allocator. Lookup submission, polling, and timeout handling
-remain in `P2PL2Adapter`; its result hook lets CXL retain each reservation directly
-without an intermediate copy-address cache or separate lookup timer. The existing
-unlock method optionally waits for acknowledgment on the CXL release worker.
-Discovery, heartbeat, owner read counts/TTL, and adapter draining keep their
-existing implementations. CXL adds pool/session checks and borrowed-view lifetime
-tracking, with no new transfer channel, coordinator, or owner allocation index.
-
-## Descriptors and peer eligibility
-
-| Type | Fields and meaning |
+| Module | Responsibility |
 | --- | --- |
-| `CxlArenaDescriptor` | `pool_id: str`, `offset: int`, `size: int`, `alignment: int`, `session_id: str`. Offset is the slab header's device-relative byte offset; size is usable payload bytes; alignment also sizes the header. |
-| `TransferChannelAddress` | Existing `offset` and `size` fields, plus optional `cxl_arena` and `cxl_ttl_seconds`. CXL offsets are relative to the peer payload, in bytes. |
-| Borrow bookkeeping | Adapter lookup-task ID → key → (address, conservative local expiry). An ordinary `TensorMemoryObj` holds the mapped view; the adapter tracks its reservation until L1 releases it. |
+| **New:** `distributed/l2_adapters/cxl_peer_l2_adapter.py` | Specialize `P2PL2Adapter`: turn lookup reservations into ordinary tensor views with validity/release callbacks. |
+| `distributed/l2_adapters/p2p_l2_adapter.py` | Existing RPC setup, lookup submission/polling/timeouts, and acknowledged unlock. CXL skips transfer-channel creation. |
+| `memory_allocators/devdax_memory_allocator.py`, `distributed/memory_manager/devdax_l1_memory_manager.py` | Existing owned-slab allocation plus shared mapping helper and peer mapping. Peer views never enter local allocator/free lists. |
+| `distributed/l1_manager.py`, `distributed/storage_manager.py` | Stage shadows, use existing admission/read completion, and release views before adapter teardown. |
+| `distributed/l2_adapters/base.py`, `distributed/storage_controllers/prefetch_controller.py` | Optional borrowed views bypass ordinary destination reservation and copy. |
+| `distributed/internal_api.py`, `distributed/transfer_channel/api.py`, request codecs | Arena identity and payload-relative addresses, carried by existing ZMQ/gRPC messages. |
+| `multiprocess/modules/p2p_controller.py`, coordinator registration | Existing discovery, heartbeat, owner read counts/TTL, and adapter draining, with pool/session validation. |
+| `multiprocess/modules/lmcache_driven_transfer.py`, `multiprocess/object_group_transfer.py` | Existing GPU retrieval and completion callbacks. |
 
-Advertise the arena as JSON in coordinator metadata `lmcache.cxl.arena`.
-Discovery uses the existing registration, heartbeat, and reconciliation flow.
-Eligible peers must share the pool ID and expose disjoint slab ranges. At
-startup the owner writes a SHA-256 fingerprint of its descriptor into its
-header, with a fresh session ID. The borrower verifies that header through its
-own device mapping before accepting the peer and before serving a shadow.
-This detects mismatched mappings and owner restarts; it is not authentication.
+## Peer identity and addressing
 
-Both ZMQ and gRPC carry the extended address. No RDMA endpoint, transfer engine,
-or locally allocated destination buffer is required. Initially only the primary
-configured CXL slab is exported; DRAM, extra DAX arenas, and shadows are misses.
+`CxlArenaDescriptor` contains `pool_id`, `offset` (slab-header byte offset),
+`size` (payload bytes), `alignment` (also header length), and `session_id`.
+The owner advertises it as JSON under coordinator metadata `lmcache.cxl.arena`
+and writes its SHA-256 fingerprint into the slab header at startup.
+
+Eligible peers share a pool ID and have disjoint slab ranges. The borrower
+checks the mapped fingerprint before accepting a peer and serving its views;
+this detects incorrect mappings and owner restarts, but is not authentication.
+Only the primary owned CXL slab is exported. DRAM, extra arenas, and borrowed
+shadows return misses; owner L1 remains the authoritative key index.
+
+The existing `TransferChannelAddress` carries payload-relative `offset`, `size`,
+`cxl_arena`, and `cxl_ttl_seconds`. B's virtual address never crosses the wire:
 
 ```text
 A_local_pointer = A_mapping_of_B_slab + B.alignment + chunk.offset
 ```
 
-For example, with 4096-byte alignment, a chunk at payload offset 8192 resolves
-to A's mapping of B's slab plus 12288. B's virtual address never crosses the wire.
+With 4096-byte alignment and payload offset 8192, A reads at its mapping base
+plus 12288. The mapping retains a `memoryview` so live tensor views prevent
+unmapping; it creates no allocator or transfer channel.
 
 ## Function contracts
 
-The following public APIs connect the components. Paths are relative to
-`lmcache/v1/`; existing types include `ObjectKey`, `MemoryLayoutDesc`, `MemoryObj`,
-`Bitmap`, and `L1Error`.
-
-| Function / owner | Inputs | Output and behavior |
+| Function / owner | Input | Output / ownership |
 | --- | --- | --- |
-| `cxl_arena` / Device-DAX L1 manager, L1 manager, storage manager | Property | `CxlArenaDescriptor \| None` describing the owned slab. |
-| `get_cxl_address(obj)` / L1 manager and storage manager | Read-reserved `MemoryObj` | `TransferChannelAddress \| None`; returns only owned primary-slab locations and the owner's TTL. |
-| `CxlPeerMapping(device_path, arena)` / Device-DAX allocator module | Local shared-pool device path and peer descriptor | Map and GPU-register peer bytes without a local allocator. Invalid headers/ranges or registration failure raise errors. |
-| `CxlPeerMapping.view(offset, size)` | Payload-relative byte range | `torch.Tensor` byte view; bounds/alignment/session failure raises `ValueError`. |
-| `add_cxl_peer(arena, request_url, lookup_timeout)` / storage manager | Peer descriptor, RPC endpoint, deadline seconds | Adapter ID; reuse normal adapter registration and draining. |
-| `supports_borrowing()` / L2 adapter | None | Defaults to `False`; CXL returns `True`. |
-| `take_borrowed_objects(task_id, keys, layouts)` / CXL adapter | Completed lookup ID, selected keys, layouts by group | `dict[ObjectKey, MemoryObj]`; creates borrowed views and transfers reservations to them. Invalid hits remain releasable through `release_lookup`. |
-| `register_shadow(key, obj, tag, is_valid=..., on_release=...)` / L1 manager | Key, `MemoryObj`, prefetch writer tag, validity/release callbacks | `L1Error`; stages metadata without payload allocation/capacity checks. Caller retains rejected views. |
-| `finish_write_and_reserve_read(keys, read_locks, tag)` / L1 manager, existing | Staged keys, consumer count, writer tag | Existing admission result; keep a concurrent resident object and release the redundant shadow. |
-| `release_lookup(task_id, keys)` / L2 adapter | Lookup identity and unused keys | Return unused peer reservations; CXL scopes cleanup by task, and adopted views release independently. Other adapters use existing unlock behavior. |
-| `release_borrowed_object(obj)` / CXL adapter | Existing `MemoryObj`, after final GPU reader | Invalidate the view once and queue owner unlock; never free owner pages or block the GPU callback on RPC. |
-| `is_borrowed_object_valid(obj)` / CXL adapter | Existing `MemoryObj` | Check the tracked reservation, owner TTL, and mapped session before L1 serves the view. |
-| `reap_expired_shadows()` / L1 manager | None | Reclaim expired/session-invalid views, including abandoned prefetches; called by the prefetch loop. |
-| `get_active_borrow_count()` / CXL adapter | None | Count live views and queued unlock operations; adapter draining waits for zero. |
+| `cxl_arena` / L1 and storage managers | Property | Owned `CxlArenaDescriptor`, or `None`. |
+| `get_cxl_address(obj)` / L1 and storage managers | Read-reserved `MemoryObj` | Owned primary-slab address and TTL, or `None`. |
+| `CxlPeerMapping(device_path, arena)` | Local pool device path, peer descriptor | GPU-registered mapping; invalid identity or failed registration raises an error. |
+| `CxlPeerMapping.view(offset, size)` | Payload-relative byte range | Tensor byte view; invalid bounds/alignment/session raises `ValueError`. |
+| `add_cxl_peer(arena, request_url, lookup_timeout)` / storage manager | Peer descriptor, RPC endpoint, deadline seconds | Adapter ID using existing registration/draining. |
+| `take_borrowed_objects(task_id, keys, layouts)` / L2 adapter | Completed lookup, selected keys, layouts by group | `None` for copy adapters; otherwise key → `(MemoryObj, is_valid, release)`. Invalid hits remain releasable via `release_lookup`. |
+| `register_shadow(key, obj, tag, is_valid=..., on_release=...)` / L1 | View, writer tag, callbacks | `L1Error`; successful staging transfers release responsibility to L1 without checking capacity. |
+| `finish_write_and_reserve_read(keys, read_locks, tag)` / existing L1 | Staged keys, reader count, writer tag | Ordinary admission result; a concurrent resident wins and the redundant shadow is released. |
+| `release_lookup(task_id, keys)` / L2 adapter | Lookup identity, unused keys | Return only unadopted reservations. Adopted views release independently. |
+| `is_valid()` / returned callback | None | Reservation unreleased, within owner TTL, and mapped session current. |
+| `release()` / returned callback | After final GPU reader | Idempotently invalidate the view and enqueue existing owner unlock RPC. No payload free or blocking RPC under L1 locks. |
+| `reap_expired_shadows()` / L1 | None | Reclaim expired/session-invalid views, including abandoned prefetches. |
+| `get_active_borrow_count()` / adapter | None | Live views plus pending unlock operations; removal waits for zero. |
 
-Reuse owner `p2p_lookup_and_lock(keys, layouts) -> task_id`,
-`p2p_query_lookup_results(task_id) -> locations | None`, and
-`p2p_unlock_objects(keys) -> None`. Lookup uses L1-only `reserve_read`; unlock
-uses `finish_read_prefetched` / `finish_read`. Filter non-exportable hits and
-release any reservations acquired for them. Retain task-scoped borrow state
-so overlapping lookups for the same key balance their reservations separately.
-
-## Remote P2P lookup and retrieval flow
+## Remote P2P lookup and retrieval
 
 ```mermaid
 sequenceDiagram
     participant PC as A PrefetchController
     participant PA as A CXL peer adapter
     participant PB as B P2PController
-    participant LB as B L1 / arena B owner
-    participant LA as A L1 / CXL manager
-    participant GPU as A GPU retrieval
-    participant CXL as Shared CXL bytes in arena B
+    participant LB as B L1 / arena owner
+    participant LA as A L1 shadows
+    participant GPU as A GPU
 
-    Note over PA,PB: Existing discovery + same-pool/arena validation
+    Note over PA,PB: Existing discovery + pool/slab validation
     PC->>PA: submit_lookup_and_lock_task(keys, layouts)
     PA->>PB: p2p_lookup_and_lock(keys, layouts)
     PB->>LB: L1-only lookup / reserve_read(keys)
-    LB-->>PB: Hits with read-lock count incremented
+    LB-->>PB: Hits with owner read counts incremented
     PB-->>PA: Lookup task ID
     PA->>PB: p2p_query_lookup_results(task_id)
-    PB-->>PA: Per-key address + arena + owner TTL, or miss
+    PB-->>PA: Addresses + arena + owner TTL
     PA-->>PC: Found bitmap
     Note over PC,PA: Select hits and release losing peer reservations
-    PC->>PA: take_borrowed_objects(task_id, selected_keys, layouts)
-    PA->>PA: Validate location and create view of B through A mapping
-    PA-->>PC: Existing TensorMemoryObj views with tracked reservations
-    PC->>LA: register_shadow(key, object, tag, validity/release callbacks)
-    Note over PC,LA: No payload allocation, capacity check, or copy
-    PC->>LA: finish_write_and_reserve_read(keys, readers, tag)
-    Note over PC,PA: Prefetch completes with owner read locks still held
+    PC->>PA: take_borrowed_objects(task_id, keys, layouts)
+    PA-->>PC: TensorMemoryObj views + validity/release callbacks
+    PC->>LA: register_shadow, finish_write_and_reserve_read
+    Note over PC,LA: Metadata only, owner read locks remain held
     GPU->>LA: read_prefetched_results(keys)
-    LA-->>GPU: Shadow tensor pointers
-    GPU->>CXL: Read directly into A GPU
-    CXL-->>GPU: KV bytes
+    LA-->>GPU: Pointers into A's mapping of B's slab
+    GPU->>LB: Read shared CXL bytes directly into GPU
     GPU->>LA: GPU completion: finish_read_prefetched(keys)
-    LA->>LA: Final local reader: remove shadow / release view
-    LA->>PA: Queue reservation release
+    LA->>PA: Final local reader: remove shadow, release()
     PA->>PB: p2p_unlock_objects(keys)
-    PB->>LB: finish_read(keys): decrement owner read count
+    PB->>LB: finish_read(keys): decrement owner read counts
 ```
 
-## Cleanup and validation
+## Lifetime and deployment limits
 
-Successful shadow admission transfers responsibility for releasing the remote
-reservation from prefetch to L1 shadow metadata; skip the ordinary post-load peer unlock for those keys. Multiple
-remote borrowers acquire independent owner read counts. Multiple local readers
-of one shadow retain its borrow until their final GPU completion.
+Each lookup holds independent owner read counts, scoped locally by task ID.
+Multiple local readers share one shadow reservation until their final GPU
+completion. Failed admission, unused hits, and cancellation release reservations;
+`weakref.finalize` also releases an unadmitted view when it is garbage-collected.
+Peer removal drains lookups, shadows, and queued unlocks before unmapping.
 
-Failed admission, unused lookup hits, and cancellation before GPU access
-release their reservations. After GPU access is queued, cleanup waits for completion.
-Lost/abandoned reservations follow the existing TTL policy. Shadow release is
-idempotent locally and does not introduce a new distributed lease protocol.
-The adapter keeps weak references to its tensor views; an unadmitted view that
-is garbage-collected also queues release. `TensorMemoryObj` itself is unchanged.
+Local expiry is lookup-submission time plus owner TTL; local reader increments
+cannot extend it. Expired or restarted-owner reservations do not send unlocks.
+Retrieval must complete before owner TTL, as in existing P2P. Key-only unlocks
+retain existing delayed-message/TTL limitations; there is no distributed fencing
+or recovery from an owner failure during DMA.
 
-A view expires at local lookup-submission time plus the advertised owner TTL,
-which is conservative without clock synchronization. Local read-count increases
-cannot extend that deadline. Expired or session-invalid shadows are reclaimed;
-cleanup avoids sending unlocks for locally expired reservations or changed owners.
-Retrieval must still complete before the owner TTL, as in the existing P2P path.
-Key-only unlocks retain the existing protocol's delayed-message/TTL limitations;
-this implementation adds no distributed fencing or mid-DMA failure recovery.
+Enable `--p2p-transfer-engine cxl`, `--cxl-pool-id POOL`, and
+`--cxl-pool-offset BYTES` with existing Device-DAX and coordinator settings;
+see [P2P configuration](../../source/mp/p2p.rst). No P2P advertise URL is needed.
+Reserve `alignment + payload_size` bytes per slab: two 2-GiB payloads with
+2-MiB headers start at 0 and 2149580800 and need 4299161600 shared bytes.
+Deployment assigns non-overlapping slabs and must not reinitialize them with
+active readers. Device paths may differ between nodes.
 
-Peer removal stops new borrows and drains lookup tasks, active shadows, and
-GPU readers before closing mapping/RPC resources. Changed owner sessions require revalidation. Physical payload accounting excludes
-shadows; temporary object counts and adapter active-borrow counts expose them.
-
-Acceptance tests: same-pool filtering; different virtual mapping bases; correct
-GPU bytes; borrowing with A's slab full; no receiver payload allocation/copy;
-balanced counts for concurrent borrowers; duplicate admission; cancellation;
-TTL behavior; and peer draining through GPU completion.
-
-Reference: [existing P2P L2 adapter](distributed/l2_adapters/p2p_l2_adapter.md).
-
-## Configuration and deployment boundary
-
-Use `--p2p-transfer-engine cxl`, `--cxl-pool-id POOL`, and
-`--cxl-pool-offset BYTES` together with the existing `--l1-devdax-path`,
-`--l1-size-gb`, `--l1-align-bytes`, `--no-l1-use-lazy`, `--shm-name ""`,
-and coordinator flags. No `--p2p-advertise-url` is needed.
-
-Allocate each slab as `alignment + payload_size` bytes, with device-compatible
-alignment. For example, two 2-GiB payload slabs with 2-MiB headers start at byte
-0 and 2149580800 and require at least 4299161600 shared bytes. The same device
-may have different local paths. Slab assignment remains a deployment responsibility;
-peer validation cannot prevent two owners from initially configuring the same slab.
-Do not reuse/reinitialize a slab while readers are active.
-
-Functional tests map a shared file at different virtual addresses, run both
-ZMQ and gRPC, and exercise GPU copies when available. Cross-host CXL hardware
-coherency, DMA performance, and failure recovery still require hardware validation.
+Tests cover distinct mappings of one shared file, ZMQ/gRPC, GPU copies when
+available, a full borrower slab, independent borrows, duplicate admission,
+expiry, and draining. Cross-host CXL coherency, DMA performance, and failure
+recovery still require hardware validation.

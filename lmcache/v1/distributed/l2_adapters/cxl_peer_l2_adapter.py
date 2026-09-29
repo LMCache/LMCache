@@ -3,6 +3,8 @@
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from functools import partial
 from typing import cast
 import json
 import math
@@ -18,7 +20,11 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import CxlArenaDescriptor, L1MemoryDesc
-from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
+from lmcache.v1.distributed.l2_adapters.base import (
+    BorrowedObject,
+    L2AdapterInterface,
+    L2TaskId,
+)
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     register_l2_adapter_type,
@@ -32,7 +38,6 @@ from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_allocators.devdax_memory_allocator import CxlPeerMapping
 from lmcache.v1.memory_management import (
     MemoryFormat,
-    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
@@ -47,6 +52,7 @@ def _create_cxl_peer_adapter(
     return CxlPeerL2Adapter(cast(CxlPeerL2AdapterConfig, config))
 
 
+@dataclass
 class CxlPeerL2AdapterConfig(P2PL2AdapterConfig):
     """Configure one peer whose slab is visible through a local CXL device.
 
@@ -61,24 +67,21 @@ class CxlPeerL2AdapterConfig(P2PL2AdapterConfig):
         ValueError: If pools differ or owned slab ranges overlap.
     """
 
-    def __init__(
-        self,
-        peer_mq_server_url: str,
-        local_device_path: str,
-        local_arena: CxlArenaDescriptor,
-        peer_arena: CxlArenaDescriptor,
-        lookup_timeout_s: float = 30.0,
-    ) -> None:
-        if not math.isfinite(lookup_timeout_s) or lookup_timeout_s <= 0:
+    peer_mq_server_url: str
+    local_device_path: str
+    local_arena: CxlArenaDescriptor
+    peer_arena: CxlArenaDescriptor
+    lookup_timeout_s: float = 30.0
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.lookup_timeout_s) or self.lookup_timeout_s <= 0:
             raise ValueError("lookup_timeout_s must be positive and finite")
-        super().__init__(peer_mq_server_url, "", lookup_timeout_s)
-        if local_arena.pool_id != peer_arena.pool_id or local_arena.overlaps(
-            peer_arena
+        super().__init__(self.peer_mq_server_url, "", self.lookup_timeout_s)
+        if (
+            self.local_arena.pool_id != self.peer_arena.pool_id
+            or self.local_arena.overlaps(self.peer_arena)
         ):
             raise ValueError("CXL peers require the same pool and disjoint slabs")
-        self.local_device_path = local_device_path
-        self.local_arena = local_arena
-        self.peer_arena = peer_arena
 
     @classmethod
     def from_dict(cls, d: dict) -> "CxlPeerL2AdapterConfig":
@@ -134,18 +137,11 @@ class CxlPeerL2Adapter(P2PL2Adapter):
             int, dict[ObjectKey, tuple[TransferChannelAddress, float]]
         ] = {}
         self._borrow_lock = threading.Lock()
-        self._borrowed_views: weakref.WeakKeyDictionary[
-            MemoryObj, tuple[float, weakref.finalize]
-        ] = weakref.WeakKeyDictionary()
         self._active_borrows = 0
         self._live_views = 0
         self._releases = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="cxl-unlock"
         )
-
-    def supports_borrowing(self) -> bool:
-        """Return True: this adapter supplies views without destination buffers."""
-        return True
 
     def submit_lookup_and_lock_task(
         self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
@@ -172,7 +168,7 @@ class CxlPeerL2Adapter(P2PL2Adapter):
         task_id: L2TaskId,
         keys: list[ObjectKey],
         layouts: dict[int, MemoryLayoutDesc],
-    ) -> dict[ObjectKey, MemoryObj]:
+    ) -> dict[ObjectKey, BorrowedObject]:
         """Move selected reservations into views of peer bytes.
 
         Args:
@@ -181,11 +177,12 @@ class CxlPeerL2Adapter(P2PL2Adapter):
             layouts: Expected layout by object-group ID.
 
         Returns:
-            Borrowed objects; invalid ranges/layouts are omitted and remain
+            Per-key (tensor view, validity predicate, release callback).
+            Invalid ranges/layouts are omitted and remain
             releasable through release_lookup. No payload capacity is used.
         """
         hits = self._borrowed_lookups.get(task_id, {})
-        objects: dict[ObjectKey, MemoryObj] = {}
+        objects: dict[ObjectKey, BorrowedObject] = {}
         for key in keys:
             hit = hits.get(key)
             if hit is None:
@@ -218,51 +215,18 @@ class CxlPeerL2Adapter(P2PL2Adapter):
             with self._borrow_lock:
                 self._active_borrows += 1
                 self._live_views += 1
-                self._borrowed_views[obj] = (
-                    expires,
-                    weakref.finalize(obj, self._release_view, key, expires),
-                )
-            objects[key] = obj
+            release = weakref.finalize(
+                obj, self._release_view, weakref.ref(obj), key, expires
+            )
+            objects[key] = (
+                obj,
+                partial(self._view_is_valid, release, expires),
+                release,
+            )
             del hits[key]
         if not hits:
             self._borrowed_lookups.pop(task_id, None)
         return objects
-
-    def is_borrowed_object_valid(self, obj: MemoryObj) -> bool:
-        """Check a view's reservation TTL and mapped owner incarnation.
-
-        Args:
-            obj: A tensor view returned by take_borrowed_objects.
-
-        Returns:
-            True only while this adapter still holds its live reservation.
-        """
-        with self._borrow_lock:
-            borrow = self._borrowed_views.get(obj)
-            return (
-                borrow is not None
-                and obj.is_valid()
-                and time.monotonic() < borrow[0]
-                and self._mapping.is_current()
-            )
-
-    def release_borrowed_object(self, obj: MemoryObj) -> None:
-        """Invalidate a view and queue its owner unlock after GPU completion.
-
-        Args:
-            obj: A tensor view returned by take_borrowed_objects. Repeated
-                releases and objects belonging to another adapter are ignored.
-
-        Returns:
-            None. Owner pages are never returned to the local allocator.
-        """
-        with self._borrow_lock:
-            borrow = self._borrowed_views.pop(obj, None)
-            if borrow is None:
-                return
-            obj.invalidate()
-            cast(TensorMemoryObj, obj).raw_data = torch.empty(0, dtype=torch.uint8)
-        borrow[1]()
 
     def release_lookup(self, task_id: L2TaskId, keys: list[ObjectKey]) -> None:
         """Return unused reservations from one lookup; repeated calls are inert.
@@ -341,16 +305,31 @@ class CxlPeerL2Adapter(P2PL2Adapter):
             self._borrowed_lookups[task_id] = hits
         return result
 
-    def _release_view(self, key: ObjectKey, expires: float) -> None:
+    def _view_is_valid(self, release: weakref.finalize, expires: float) -> bool:
+        """An adopted reservation ends at release, owner expiry, or owner restart."""
+        return (
+            release.alive and time.monotonic() < expires and self._mapping.is_current()
+        )
+
+    def _release_view(
+        self,
+        reference: weakref.ReferenceType[TensorMemoryObj],
+        key: ObjectKey,
+        expires: float,
+    ) -> None:
+        obj = reference()
+        if obj is not None:
+            obj.invalidate()
+            obj.raw_data = torch.empty(0, dtype=torch.uint8)
         with self._borrow_lock:
             self._live_views -= 1
-        # The view's existing active count covers this queued release.
-        self._releases.submit(self._send_unlock, {key: expires})
+            # Queue before close can observe zero live views and stop the worker.
+            self._releases.submit(self._send_unlock, {key: expires})
 
     def _queue_unlock(self, keys: dict[ObjectKey, float]) -> None:
         with self._borrow_lock:
             self._active_borrows += 1
-        self._releases.submit(self._send_unlock, keys)
+            self._releases.submit(self._send_unlock, keys)
 
     def _send_unlock(self, reservations: dict[ObjectKey, float]) -> None:
         try:
