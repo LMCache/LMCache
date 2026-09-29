@@ -82,6 +82,9 @@ FORMAT_PARAMS = [
     (FMT_VLLM_CS_HND, 4, 8, 256, True),
     (FMT_VLLM_CS_NHD, 4, 8, 256, True),
     (FMT_SGLANG_COMPONENT, 8, 8, 128, True),
+    # nh=33 with hs=256 (thread_dim_x=32) crosses the old nh<=32 limit: 32
+    # concurrent y threads, so one must take a second strided head.
+    (FMT_SGLANG_COMPONENT, 4, 33, 256, True),
 ]
 
 
@@ -324,6 +327,7 @@ TOTAL_BLOCKS = NUM_MEMORY_OBJECTS * BLOCKS_PER_OBJECT  # 64
         "vllm_cs_hnd",
         "vllm_cs_nhd",
         "sglang_component",
+        "sglang_component_nh33",
     ],
 )
 @pytest.mark.parametrize(
@@ -434,6 +438,7 @@ def test_block_transfer_roundtrip(
         "vllm_cs_hnd",
         "vllm_cs_nhd",
         "sglang_component",
+        "sglang_component_nh33",
     ],
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
