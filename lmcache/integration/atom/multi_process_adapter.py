@@ -454,54 +454,6 @@ class AtomMPWorkerAdapter:
             self._release_submission_lease(context)
         return future
 
-    def submit_store_request_with_chunk_events(
-        self,
-        request_id: str,
-        spec: AtomMPTransferSpec,
-        event: _IpcEvent,
-    ) -> MessagingFuture[bool] | None:
-        """Submit a store exposing stream-ordered source-safe token ranges.
-
-        Args:
-            request_id: Engine request ID used to track the operation.
-            spec: Token range and source blocks to store.
-            event: Producer event ordering reads of the source KV buffers.
-
-        Returns:
-            A host-polled chunk future, or an ordinary store future when the
-            module is disabled. Returns None when closed or disconnected.
-
-        Raises:
-            RuntimeError: The adapter has no registered transfer context.
-            TimeoutError: Server capability discovery timed out.
-        """
-        with self._state_lock:
-            if self._closed or not self._health_event.is_set():
-                return None
-            context = self._require_transfer_context_locked()
-            kv_caches = self._kv_caches
-            block_ids = expand_engine_block_ids(
-                self._engine_group_infos,
-                spec.block_ids,
-            )
-            self._context_submission_leases[context] = (
-                self._context_submission_leases.get(context, 0) + 1
-            )
-        try:
-            future = context.submit_store_with_chunk_events(
-                request_id,
-                self._create_key(request_id, spec),
-                kv_caches,
-                block_ids,
-                event,
-                self.blocks_in_chunk,
-            )
-            future.retain_reference(event)
-            self._track_operation_future(context, future)
-        finally:
-            self._release_submission_lease(context)
-        return future
-
     def submit_retrieve_request(
         self,
         request_id: str,

@@ -223,32 +223,6 @@ class TestStorageManagerBasic:
 
         storage_manager.close()
 
-    def test_abort_write_preserves_resident_and_releases_staging(
-        self,
-        basic_storage_manager_config: StorageManagerConfig,
-        basic_layout: MemoryLayoutDesc,
-    ) -> None:
-        """Aborted writes never become visible and can immediately be retried."""
-        sm = StorageManager(basic_storage_manager_config)
-        resident, pending = make_object_key(812), make_object_key(813)
-        try:
-            sm.reserve_write([resident], basic_layout)
-            sm.finish_write([resident])
-            reserved = sm.reserve_write([resident, pending], basic_layout)
-            sm.abort_write(list(reserved))
-            handle = sm.submit_prefetch_task(
-                single_row_spec([resident, pending], basic_layout)
-            )
-            result = sm.query_prefetch_status(handle)
-            assert result is not None
-            assert result.hit_cells[0].get_indices_list() == [0]
-            sm.finish_read_prefetched([resident])
-            retried = sm.reserve_write([pending], basic_layout)
-            assert pending in retried
-            sm.abort_write(list(retried))
-        finally:
-            sm.close()
-
     def test_reserve_write_multiple_keys(
         self, basic_storage_manager_config, basic_layout
     ):

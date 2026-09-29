@@ -6,7 +6,6 @@ from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any, Iterator, cast
 from unittest.mock import MagicMock
-from unittest.mock import call as mock_call
 import inspect
 
 # Third Party
@@ -14,8 +13,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.chunk_event_future import ChunkStoreResponse
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
 
 
@@ -172,158 +169,6 @@ def test_worker_exports_events_through_platform_backend(
     assert backend.calls[0][1] == device
     assert backend.calls[1][1] == device
     assert all(call[-1] == device for call in backend.calls[3:])
-
-
-@pytest.mark.parametrize("enabled", [False, True])
-def test_optional_chunk_store_discovery_and_unregister_drain(
-    monkeypatch: pytest.MonkeyPatch, enabled: bool
-) -> None:
-    """Discover once, fall back when disabled, and ACK before unregister."""
-    # First Party
-    from lmcache.v1.multiprocess.chunk_event_future import (
-        ChunkEventDeviceMessagingFuture,
-    )
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
-
-    backend = _FakeEventBackend()
-    monkeypatch.setattr(worker_transfer, "get_event_ipc_backend", lambda _: backend)
-    monkeypatch.setattr(worker_transfer, "wrap_kv_caches", lambda kv: list(kv.values()))
-    client = MagicMock()
-    client.register_kv_cache.return_value = _resolved_future(True)
-    client.get_experimental.return_value = _resolved_future(
-        ["chunk_store"] if enabled else []
-    )
-    client.store.return_value = _resolved_future((b"terminal", True))
-    raw: MessagingFuture[ChunkStoreResponse] = MessagingFuture()
-    client.store_with_chunk_events.return_value = raw
-    ack: MessagingFuture[None] = MessagingFuture()
-    client.release_chunk_store_events.return_value = ack
-    context = worker_transfer.LMCacheDrivenTransferContext(1, client)
-    caches = {"layer_0": torch.empty(1)}
-    context.register(caches, "model", 1, 1, 0.01)
-    key = IPCCacheServerKey.from_token_ids("model", 1, 0, list(range(16)), 0, 16)
-    event = cast(worker_transfer.IPCEvent, object())
-    futures = [
-        context.submit_store_with_chunk_events("r", key, caches, [[1]], event, 1)
-        for _ in range(2)
-    ]
-    client.get_experimental.assert_called_once()
-    if not enabled:
-        assert all(isinstance(f, DeviceMessagingFuture) for f in futures)
-        assert client.store.call_count == 2
-        client.store_with_chunk_events.assert_not_called()
-        context.unregister()
-        context.close()
-        return
-
-    assert all(isinstance(f, ChunkEventDeviceMessagingFuture) for f in futures)
-    client.store.assert_not_called()
-    raw.set_result((b"terminal", [(b"chunk", 0, 16)], True, "lease"))
-    # Unregister must not destroy exporter events while ACKs are outstanding.
-    with pytest.raises(TimeoutError):
-        context.unregister()
-    client.unregister_kv_cache.assert_not_called()
-    ack.set_result(None)
-    context.unregister()
-    context.close()
-    assert all(f.result(0) for f in futures)
-    client.unregister_kv_cache.assert_called_once_with(1)
-
-
-def test_chunk_release_failure_does_not_lose_other_futures(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Continue draining other leases, preserve failures, and retry on close."""
-    # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
-
-    backend = _FakeEventBackend()
-    monkeypatch.setattr(worker_transfer, "get_event_ipc_backend", lambda _: backend)
-    monkeypatch.setattr(worker_transfer, "wrap_kv_caches", lambda kv: list(kv.values()))
-    client = MagicMock()
-    client.register_kv_cache.return_value = _resolved_future(True)
-    client.get_experimental.return_value = _resolved_future(["chunk_store"])
-    raws: list[MessagingFuture[ChunkStoreResponse]] = [
-        MessagingFuture(),
-        MessagingFuture(),
-    ]
-    client.store_with_chunk_events.side_effect = raws
-    failed_ack: MessagingFuture[None] = MessagingFuture()
-    failed_ack.set_exception(RuntimeError("release failed"))
-    second_ack: MessagingFuture[None] = MessagingFuture()
-    retry_ack = _resolved_future(None)
-    client.release_chunk_store_events.side_effect = [failed_ack, second_ack, retry_ack]
-    context = worker_transfer.LMCacheDrivenTransferContext(1, client)
-    caches = {"layer_0": torch.empty(1)}
-    context.register(caches, "model", 1, 1, 0.01)
-    key = IPCCacheServerKey.from_token_ids("model", 1, 0, list(range(16)), 0, 16)
-    event = cast(worker_transfer.IPCEvent, object())
-    first = context.submit_store_with_chunk_events("r1", key, caches, [[1]], event, 1)
-    raws[0].set_result((b"terminal", [], True, "first"))
-    # Polling cleanup for the previous failed ACK cannot swallow this store.
-    second = context.submit_store_with_chunk_events("r2", key, caches, [[2]], event, 1)
-    raws[1].set_result((b"terminal", [], True, "second"))
-    assert first.result(0) and second.result(0)
-    with pytest.raises(TimeoutError):
-        context.close()
-    second_ack.set_result(None)
-    context.close()
-    assert client.release_chunk_store_events.call_args_list == [
-        mock_call(1, "first"),
-        mock_call(1, "second"),
-        mock_call(1, "first"),
-    ]
-
-
-@pytest.mark.parametrize("failure", ["rpc", "import"])
-def test_chunk_store_cleanup_distinguishes_rpc_and_import_failures(
-    monkeypatch: pytest.MonkeyPatch, failure: str
-) -> None:
-    """Retire raw RPC failures, but retain handles after a failed event import."""
-    # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
-
-    backend = _FakeEventBackend()
-    monkeypatch.setattr(worker_transfer, "get_event_ipc_backend", lambda _: backend)
-    monkeypatch.setattr(worker_transfer, "wrap_kv_caches", lambda kv: list(kv.values()))
-    client = MagicMock()
-    client.register_kv_cache.return_value = _resolved_future(True)
-    client.get_experimental.return_value = _resolved_future(["chunk_store"])
-    client.release_chunk_store_events.return_value = _resolved_future(None)
-    failed: MessagingFuture[ChunkStoreResponse] = MessagingFuture()
-    client.store_with_chunk_events.return_value = failed
-    context = worker_transfer.LMCacheDrivenTransferContext(1, client)
-    caches = {"layer_0": torch.empty(1)}
-    context.register(caches, "model", 1, 1, 0.01)
-    key = IPCCacheServerKey.from_token_ids("model", 1, 0, list(range(16)), 0, 16)
-    future = context.submit_store_with_chunk_events(
-        "r", key, caches, [[1]], cast(worker_transfer.IPCEvent, object()), 1
-    )
-    if failure == "rpc":
-        failed.set_exception(RuntimeError("response lost"))
-    else:
-        failed.set_result((b"terminal", [(b"chunk", 0, 16)], True, "lease"))
-        importer = backend.import_event
-        monkeypatch.setattr(
-            backend,
-            "import_event",
-            MagicMock(side_effect=RuntimeError("import failed")),
-        )
-        with pytest.raises(RuntimeError, match="import failed"):
-            context.unregister()
-        client.unregister_kv_cache.assert_not_called()
-        client.release_chunk_store_events.assert_not_called()
-        monkeypatch.setattr(backend, "import_event", importer)
-    context.unregister()
-    context.close()
-    client.unregister_kv_cache.assert_called_once_with(1)
-    if failure == "rpc":
-        client.release_chunk_store_events.assert_not_called()
-        with pytest.raises(RuntimeError, match="response lost"):
-            future.result(0)
-    else:
-        client.release_chunk_store_events.assert_called_once_with(1, "lease")
-        assert future.result(0)
 
 
 def test_server_store_and_retrieve_delegate_event_ordering(

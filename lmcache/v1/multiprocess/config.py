@@ -122,9 +122,8 @@ class MPServerConfig:
     >= worker_reap_timeout_seconds."""
 
     enable: list[str] = field(default_factory=list)
-    """List of experimental transfer modules to enable. Options:
-    transfer_query, chunk_store (see the multiprocess.modules.experimental package).
-    """
+    """List of experimental transfer modules to enable. Options: transfer_query
+    (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
 
     null_block_id: int = 0
     """Engine block ID that denotes absent KV data. The default ``0`` keeps
@@ -521,7 +520,7 @@ def add_mp_server_args(
         nargs="*",
         default=[],
         help="List of experimental transfer modules to enable. "
-        "Options: transfer_query, chunk_store (see lmcache.v1.multiprocess.modules."
+        "Options: transfer_query (see lmcache.v1.multiprocess.modules."
         "experimental.__init___.py).",
     )
     return parser

@@ -266,18 +266,6 @@ class StorageManager:
 
         # TODO: global key states update
 
-    def abort_write(self, keys: list[ObjectKey]) -> None:
-        """Discard this writer's reserved objects without publishing partial data.
-
-        Args:
-            keys: Keys returned by reserve_write for the failed operation.
-
-        Notes:
-            Call only after all device writes into those objects have completed.
-            Existing resident objects and other writers' staging are preserved.
-        """
-        self._l1_manager.finish_write_and_delete(keys, tag=_L1_WRITE_TAG)
-
     @contextmanager
     def read_prefetched_results(
         self,
