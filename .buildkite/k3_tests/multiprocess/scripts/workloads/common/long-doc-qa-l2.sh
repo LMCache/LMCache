@@ -371,7 +371,7 @@ l1_write_keys = get_counter('lmcache_mp_l1_write_chunks_total')
 store_keys = get_counter('lmcache_mp_l2_store_submitted_objects_chunks_total')
 store_succeeded = get_counter('lmcache_mp_l2_store_completed_objects_chunks_total')
 prefetch_lookups = get_counter('lmcache_mp_l2_prefetch_lookup_requests_total')
-prefetch_hits = get_counter('lmcache_mp_l2_prefetch_hit_chunks_total')
+l2_hit_keys = get_counter('lmcache_mp_lookup_hit_l2_keys_total')
 prefetch_loaded = get_counter('lmcache_mp_l2_prefetch_load_completed_chunks_total')
 
 print('=' * 60)
@@ -381,7 +381,7 @@ print(f'  L1 write keys:               {l1_write_keys:.0f}')
 print(f'  L2 store keys submitted:     {store_keys:.0f}')
 print(f'  L2 store keys succeeded:     {store_succeeded:.0f}')
 print(f'  L2 prefetch lookups:         {prefetch_lookups:.0f}')
-print(f'  L2 prefetch prefix hits:     {prefetch_hits:.0f}')
+print(f'  L2 lookup hit keys:          {l2_hit_keys:.0f}')
 print(f'  L2 prefetch keys loaded:     {prefetch_loaded:.0f}')
 print()
 
@@ -412,9 +412,9 @@ check(store_succeeded > 0,
 check(prefetch_lookups > 0,
       f'L2 prefetch: {prefetch_lookups:.0f} lookup requests',
       'No prefetch lookups (expected > 0 from query round)')
-check(prefetch_hits > 0,
-      f'L2 prefetch: {prefetch_hits:.0f} prefix hits',
-      'No prefix hits from L2 lookup')
+check(l2_hit_keys > 0,
+      f'L2 prefetch: {l2_hit_keys:.0f} hit keys served from L2',
+      'No lookup hit keys served from L2')
 check(prefetch_loaded > 0,
       f'L2 prefetch: {prefetch_loaded:.0f} keys loaded',
       'No keys loaded from L2')

@@ -119,13 +119,13 @@ class WarmPrefetchJobs:
         if handle is None:
             return WarmStatus(state=UNKNOWN)
 
-        found_rows = storage_manager.query_prefetch_status(handle)
-        if found_rows is None:
+        result = storage_manager.query_prefetch_status(handle)
+        if result is None:
             return WarmStatus(state=PENDING)
 
         with self._lock:
             self._jobs.pop(request_id, None)
-        found_keys = sum(row.popcount() for row in found_rows)
+        found_keys = sum(row.popcount() for row in result.hit_cells)
         logger.info(
             "Warm prefetch %s completed: %d/%d keys loaded into L1",
             request_id,

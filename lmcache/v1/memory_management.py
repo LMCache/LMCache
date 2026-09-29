@@ -759,10 +759,12 @@ class TensorMemoryObj(MemoryObj):
             self.meta.ref_count -= 1
             if self.meta.ref_count < 0:
                 logger.warning(
-                    f"Ref count of MemoryObj {self.meta.address}"
-                    f"is negative: {self.meta.ref_count}."
+                    "Ref count of MemoryObj %s"
+                    "is negative: %s."
                     "Double free occurred somewhere."
-                    "Setting ref count back to 0 as a hack but please find the bug."
+                    "Setting ref count back to 0 as a hack but please find the bug.",
+                    self.meta.address,
+                    self.meta.ref_count,
                 )
                 self.meta.ref_count = 0
             if (
@@ -816,10 +818,12 @@ class TensorMemoryObj(MemoryObj):
 
             if self.meta.pin_count < 0:
                 logger.warning(
-                    f"Pin count of MemoryObj {self.meta.address}"
-                    f"is negative: {self.meta.pin_count}."
+                    "Pin count of MemoryObj %s"
+                    "is negative: %s."
                     "Double unpin occurred somewhere."
-                    "Setting pin count back to 0 as a hack but please find the bug."
+                    "Setting pin count back to 0 as a hack but please find the bug.",
+                    self.meta.address,
+                    self.meta.pin_count,
                 )
                 self.meta.pin_count = 0
             return True
@@ -978,10 +982,12 @@ class BytesBufferMemoryObj(MemoryObj):
         self.metadata.pin_count -= 1
         if self.metadata.pin_count < 0:
             logger.warning(
-                f"Pin count of MemoryObj {self.meta.address}"
-                f"is negative: {self.meta.pin_count}."
+                "Pin count of MemoryObj %s"
+                "is negative: %s."
                 "Double unpin occurred somewhere."
-                "Setting pin count back to 0 as a hack but please find the bug."
+                "Setting pin count back to 0 as a hack but please find the bug.",
+                self.meta.address,
+                self.meta.pin_count,
             )
             self.metadata.pin_count = 0
         return True
