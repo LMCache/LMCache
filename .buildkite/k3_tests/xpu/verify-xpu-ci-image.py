@@ -39,7 +39,13 @@ def buildkite_request(
     try:
         with urlopen(request, timeout=30) as response:
             result = json.load(response)
-    except (HTTPError, URLError, TimeoutError) as exc:
+    except HTTPError as exc:
+        details = exc.read(4096).decode("utf-8", errors="replace")
+        details = details.replace(token, "[redacted]")
+        raise RuntimeError(
+            f"Buildkite API request failed for {path}: HTTP {exc.code}: {details}"
+        ) from exc
+    except (URLError, TimeoutError) as exc:
         raise RuntimeError(f"Buildkite API request failed for {path}: {exc}") from exc
     if not isinstance(result, dict):
         raise RuntimeError(f"Invalid Buildkite API response for {path}")
