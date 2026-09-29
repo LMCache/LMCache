@@ -279,8 +279,8 @@ class TestRemoteBackendHealthCheckFallbackRecovery:
 
             Includes phase name and last observed system state in timeout failure.
             """
-            start = time.time()
-            while time.time() - start < timeout:
+            start = time.monotonic()
+            while time.monotonic() - start < timeout:
                 if condition():
                     return
                 time.sleep(interval)
