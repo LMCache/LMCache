@@ -12,7 +12,7 @@ x-flaky-retry: &flaky-retry
 x-pod-1xpu: &pod-1xpu
   containers:
     - name: container-0
-      image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:ee0da84ab9e04ac7610e28580af62c365e898389-xpu
+      image: ${PINNED_XPU_IMAGE}
       imagePullPolicy: IfNotPresent
       resources:
         requests:
@@ -29,7 +29,7 @@ x-pod-1xpu: &pod-1xpu
 x-pod-2xpu: &pod-2xpu
   containers:
     - name: container-0
-      image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:ee0da84ab9e04ac7610e28580af62c365e898389-xpu
+      image: ${PINNED_XPU_IMAGE}
       imagePullPolicy: IfNotPresent
       resources:
         requests:
