@@ -269,7 +269,7 @@ class TestRemoteBackendHealthCheckFallbackRecovery:
         thread = monitor.start()
         assert thread is not None
 
-        def wait_for_state(
+        def _wait_for_state(
             condition,
             phase_name: str,
             timeout: float = 2.0,
@@ -303,7 +303,7 @@ class TestRemoteBackendHealthCheckFallbackRecovery:
         try:
             # Phase 1: Initial healthy state — wait for monitor to complete
             # at least one check cycle
-            wait_for_state(
+            _wait_for_state(
                 lambda: (
                     monitor.total_runs >= 1
                     and mock_local_cpu_backend.use_hot is False
@@ -317,7 +317,7 @@ class TestRemoteBackendHealthCheckFallbackRecovery:
 
             # Phase 2: Simulate failure — wait for observable LOCAL_CPU fallback effects
             controllable_connector.set_ping_error_code(1)
-            wait_for_state(
+            _wait_for_state(
                 lambda: (
                     mock_local_cpu_backend.use_hot is True
                     and "RemoteBackend" in monitor._bypassed_backends
@@ -333,7 +333,7 @@ class TestRemoteBackendHealthCheckFallbackRecovery:
 
             # Phase 3: Simulate recovery — wait for observable recovery effects
             controllable_connector.set_ping_error_code(0)
-            wait_for_state(
+            _wait_for_state(
                 lambda: (
                     mock_local_cpu_backend.use_hot is False
                     and "RemoteBackend" not in monitor._bypassed_backends
