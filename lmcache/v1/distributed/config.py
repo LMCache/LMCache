@@ -12,6 +12,11 @@ import os
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import (
+    HUGEPAGE_SIZE,
+    SPDK_DEFAULT_MEM_SIZE_MB,
+    check_hugepage_availability,
+)
 from lmcache.v1.distributed.api import L1BackendType
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -43,6 +48,30 @@ def _requires_single_l1_memory_region(
     ):
         return type_name
     return None
+
+
+def _spdk_requires_hugepages(l2_adapter_config: "L2AdaptersConfig") -> bool:
+    """Check whether any L2 adapter uses SPDK I/O engine and return True.
+
+    When SPDK is detected we ask the L1 memory allocator to use hugepages
+    so the buffer can be registered for zero-copy PCIe DMA.
+
+    Args:
+        l2_adapter_config: The parsed L2 adapter configuration.
+
+    Returns:
+        ``True`` if at least one adapter uses ``io_engine == "spdk"``,
+        ``False`` otherwise.
+    """
+    for adapter in l2_adapter_config.adapters:
+        io_engine = getattr(adapter, "io_engine", None)
+        if io_engine == "spdk":
+            logger.info(
+                "SPDK I/O engine detected in L2 adapter; "
+                "auto-enabling hugepage allocation for L1 memory"
+            )
+            return True
+    return False
 
 
 def _infer_l1_devdax_overflow_from_dax_adapter(
@@ -122,6 +151,9 @@ class L1MemoryManagerConfig:
 
     shm_name: str = field(default_factory=lambda: f"lmcache_l1_pool_{os.getpid()}")
     """ POSIX shared-memory segment name for L1 pool. Empty disables SHM. """
+
+    use_hugepages: bool = False
+    """ Allocate L1 memory from hugepages for SPDK zero-copy DMA support. """
 
     devdax_path: str | None = None
     """ Optional Device-DAX path to use as the L1 backing arena. """
@@ -624,21 +656,48 @@ def parse_args_to_config(
         StorageManagerConfig: The configuration object.
     """
     shm_name = getattr(args, "shm_name", None)
+
+    # Auto-enable hugepages and disable lazy allocation for SPDK I/O engine
+    l2_adapter_config = parse_args_to_l2_adapters_config(args)
+    use_hugepages = _spdk_requires_hugepages(l2_adapter_config)
+
+    # Lazy allocation is incompatible with SPDK zero-copy
+    use_lazy = args.l1_use_lazy and not use_hugepages
+    if use_hugepages and args.l1_use_lazy:
+        logger.info(
+            "SPDK detected: disabling lazy allocation (--no-l1-use-lazy) "
+            "because SPDK zero-copy requires pre-allocated hugepage memory"
+        )
+
+    if use_hugepages:
+        l1_size_bytes = int(args.l1_size_gb * (1 << 30))
+        aligned_size = (
+            (l1_size_bytes + HUGEPAGE_SIZE - 1) // HUGEPAGE_SIZE
+        ) * HUGEPAGE_SIZE
+        spdk_mem_size_mb = SPDK_DEFAULT_MEM_SIZE_MB
+        try:
+            check_hugepage_availability(aligned_size, spdk_mem_size_mb)
+        except RuntimeError as e:
+            logger.error("SPDK hugepage check failed: %s", e)
+            raise
+
     if shm_name is None:
         memory_config = L1MemoryManagerConfig(
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
-            use_lazy=args.l1_use_lazy,
+            use_lazy=use_lazy,
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
+            use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
         )
     else:
         memory_config = L1MemoryManagerConfig(
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
-            use_lazy=args.l1_use_lazy,
+            use_lazy=use_lazy,
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
             shm_name=shm_name,
+            use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
         )
 
@@ -666,8 +725,6 @@ def parse_args_to_config(
         extra_logging_enabled=getattr(args, "enable_extra_logging", False),
         extra_logging_interval=getattr(args, "extra_logging_interval", 10.0),
     )
-
-    l2_adapter_config = parse_args_to_l2_adapters_config(args)
 
     config = StorageManagerConfig(
         l1_manager_config=l1_manager_config,

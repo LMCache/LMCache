@@ -200,6 +200,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         default_output_path,
         resolve_flamegraph_dir,
     )
+    from lmcache.v1.distributed.config import _spdk_requires_hugepages
     from lmcache.v1.distributed.l2_adapters import create_l2_adapter
     from lmcache.v1.distributed.l2_adapters.config import (
         parse_args_to_l2_adapters_config,
@@ -267,9 +268,13 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     # Use the first adapter config for benchmarking
     adapter_cfg = l2_cfg.adapters[0]
 
+    use_hugepages = _spdk_requires_hugepages(l2_cfg)
+
     # Backing L1 memory buffer for adapters that need an L1 desc.
     # Sized for one in-flight wave of store + load buffers.
-    l1_buffer = make_aligned_tensor(2 * keys_per_round * data_size, l1_align_bytes)
+    l1_buffer = make_aligned_tensor(
+        2 * keys_per_round * data_size, l1_align_bytes, use_hugepages=use_hugepages
+    )
     l1_memory_desc = create_l1_memory_desc(l1_buffer, align_bytes=l1_align_bytes)
 
     # Resolve and validate the flame-graph toolchain up front, before any

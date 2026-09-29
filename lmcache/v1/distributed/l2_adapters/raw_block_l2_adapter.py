@@ -216,7 +216,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
     def __init__(
         self,
         *,
-        device_path: str,
+        device_path: str = "",
         slot_bytes: int,
         capacity_bytes: int = 0,
         use_odirect: bool = True,
@@ -243,11 +243,20 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         num_store_workers: int = 2,
         num_lookup_workers: int = 1,
         num_load_workers: int = 4,
+        # SPDK-specific configuration (only used when io_engine="spdk")
+        spdk_transport_type: str = "tcp",
+        spdk_target_ip: str = "127.0.0.1",
+        spdk_target_port: str = "4420",
+        spdk_target_nqn: str = "nqn.2016-06.io.spdk:cnode1",
+        spdk_core_mask: str = "",
     ):
         """Initialize raw-block MP adapter configuration.
 
         Args:
             device_path: Raw device path or pre-sized file path used for L2.
+                For ``io_engine="spdk"`` with local PCIe NVMe, this may be
+                omitted (empty string) – SPDK discovers and attaches to the
+                NVMe device directly via ``spdk_target_ip`` (PCIe address).
             slot_bytes: Fixed data-slot size in bytes.
             capacity_bytes: Optional cap on usable bytes; zero uses device size.
             use_odirect: Whether to open the raw path with O_DIRECT.
@@ -262,7 +271,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             load_checkpoint_on_init: Whether to load existing checkpoint metadata.
             meta_verify_on_load: Whether recovery verifies slot headers.
             enable_zero_copy: Whether to use aligned direct-buffer I/O.
-            io_engine: Raw-block I/O engine: ``"posix"`` or ``"io_uring"``.
+            io_engine: Raw-block I/O engine: ``"posix"``, ``"io_uring"``, or
+                ``"spdk"``.
             iouring_queue_depth: Queue depth for the Rust io_uring engine.
             use_uring_cmd: Whether to use NVMe io_uring_cmd passthrough.
             max_data_transfer_size: Max data transfer size for a single request.
@@ -286,6 +296,20 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             num_store_workers: Number of store worker threads.
             num_lookup_workers: Number of lookup worker threads.
             num_load_workers: Number of load worker threads.
+            spdk_transport_type: SPDK NVMe transport type. ``"pcie"`` for local
+                NVMe devices, ``"tcp"`` for NVMe over Fabrics over TCP,
+                ``"rdma"`` for NVMe over Fabrics over RDMA
+                (default ``"tcp"``).
+            spdk_target_ip: SPDK target address. For TCP transport, this is the
+                IP address of the NVMe-oF target (default ``"127.0.0.1"``).
+                For PCIe transport, this is the PCIe address (e.g.,
+                ``"0000:01:00.0"``).
+            spdk_target_port: SPDK target port (TCP only, default ``"4420"``).
+            spdk_target_nqn: SPDK NVMe Qualified Name for the target subsystem
+                (default ``"nqn.2016-06.io.spdk:cnode1"``).
+            spdk_core_mask: Hex core mask for SPDK poller/dpdk cores
+                (e.g., ``"0x3f"`` for cores 0-5). Empty string lets SPDK
+                auto-select cores.
         """
         super().__init__()
         self.device_path = device_path
@@ -349,12 +373,26 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         self.num_store_workers = int(num_store_workers)
         self.num_lookup_workers = int(num_lookup_workers)
         self.num_load_workers = int(num_load_workers)
+        # SPDK-specific configuration
+        self.spdk_transport_type = spdk_transport_type
+        self.spdk_target_ip = spdk_target_ip
+        self.spdk_target_port = spdk_target_port
+        self.spdk_target_nqn = spdk_target_nqn
+        self.spdk_core_mask = spdk_core_mask
 
     @classmethod
     def from_dict(cls, d: dict) -> "RawBlockL2AdapterConfig":
         """Build and validate a raw-block config from ``--l2-adapter`` JSON."""
-        device_path = d.get("device_path")
-        if not isinstance(device_path, str) or not device_path:
+        io_engine = normalize_raw_block_io_engine(
+            d.get("io_engine"),
+            use_iouring=d.get("use_iouring"),
+            use_uring=d.get("use_uring"),
+        )
+        device_path = d.get("device_path", "")
+        if not isinstance(device_path, str):
+            device_path = ""
+        # device_path is optional for SPDK mode (NVMe-oF/PCIe managed by SPDK)
+        if io_engine != "spdk" and (not device_path or device_path == ""):
             raise ValueError("device_path must be a non-empty string")
         if "per_tp_device_paths" in d:
             raise ValueError(
@@ -371,11 +409,6 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         header_bytes = int(d.get("header_bytes", 4096))
         meta_total_bytes = int(d.get("meta_total_bytes", 256 * 1024 * 1024))
         capacity_bytes = int(d.get("capacity_bytes", 0))
-        io_engine = normalize_raw_block_io_engine(
-            d.get("io_engine"),
-            use_iouring=d.get("use_iouring"),
-            use_uring=d.get("use_uring"),
-        )
         iouring_queue_depth = int(
             d.get("iouring_queue_depth", DEFAULT_IOURING_QUEUE_DEPTH)
         )
@@ -461,6 +494,12 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             num_store_workers=worker_counts["num_store_workers"],
             num_lookup_workers=worker_counts["num_lookup_workers"],
             num_load_workers=worker_counts["num_load_workers"],
+            # SPDK-specific configuration
+            spdk_transport_type=str(d.get("spdk_transport_type", "tcp")),
+            spdk_target_ip=str(d.get("spdk_target_ip", "127.0.0.1")),
+            spdk_target_port=str(d.get("spdk_target_port", "4420")),
+            spdk_target_nqn=str(d.get("spdk_target_nqn", "nqn.2016-06.io.spdk:cnode1")),
+            spdk_core_mask=str(d.get("spdk_core_mask", "")),
         )
 
     @classmethod
@@ -468,7 +507,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         """Return human-readable raw-block adapter configuration help."""
         return (
             "raw_block L2 adapter config fields:\n"
-            "- device_path (str): raw device or file path (required)\n"
+            "- device_path (str): raw device or file path; optional for "
+            'io_engine=spdk (SPDK manages NVMe connection) (default "")\n'
             "- slot_bytes (int): slot size in bytes, aligned to block_align "
             "(required)\n"
             "- capacity_bytes (int): optional usable capacity cap "
@@ -492,7 +532,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "(default true)\n"
             "- enable_zero_copy (bool): use aligned direct buffers when possible "
             "(default true)\n"
-            "- io_engine (str): posix or io_uring (default posix)\n"
+            "- io_engine (str): posix, io_uring, or spdk (default posix)\n"
             "- iouring_queue_depth (int): Rust io_uring queue depth "
             f"(default {DEFAULT_IOURING_QUEUE_DEPTH})\n"
             "- use_uring_cmd (bool): enable NVMe io_uring_cmd path "
@@ -516,7 +556,16 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "identifier for metadata checkpoints; requires io_uring_cmd\n"
             "- num_store_workers (int): store worker threads (default 2)\n"
             "- num_lookup_workers (int): lookup worker threads (default 1)\n"
-            "- num_load_workers (int): load worker threads (default 4)"
+            "- num_load_workers (int): load worker threads (default 4)\n"
+            "- spdk_transport_type (str): NVMe transport type: pcie or tcp "
+            "(default tcp)\n"
+            "- spdk_target_ip (str): target address (IP for TCP, PCIe addr "
+            "for pcie) (default 127.0.0.1)\n"
+            "- spdk_target_port (str): target port (TCP only, default 4420)\n"
+            "- spdk_target_nqn (str): NVMe Qualified Name for subsystem "
+            '(default "nqn.2016-06.io.spdk:cnode1")\n'
+            "- spdk_core_mask (str): hex core mask for SPDK poller cores "
+            '(e.g., "0x3f", empty for auto-select)'
         )
 
     def to_core_config(self) -> RawBlockCoreConfig:
@@ -545,6 +594,12 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             fdp_slot_affinity_enabled=(
                 self.fdp_slot_reuse_policy == _FDP_SLOT_REUSE_POLICY_PID_AFFINITY
             ),
+            # SPDK-specific configuration (consumed when io_engine="spdk")
+            spdk_transport_type=self.spdk_transport_type,
+            spdk_target_ip=self.spdk_target_ip,
+            spdk_target_port=self.spdk_target_port,
+            spdk_target_nqn=self.spdk_target_nqn,
+            spdk_core_mask=self.spdk_core_mask,
         )
 
 
@@ -574,13 +629,13 @@ class RawBlockL2Adapter(L2AdapterInterface):
         """
         super().__init__()
         if (
-            (config.use_odirect or config.io_engine == "io_uring")
+            (config.use_odirect or config.io_engine in ("io_uring", "spdk"))
             and l1_memory_desc is not None
             and l1_memory_desc.align_bytes < config.block_align
         ):
             raise ValueError(
                 "raw_block requires l1_align_bytes >= block_align when "
-                "use_odirect=true or io_engine=io_uring"
+                "use_odirect=true or io_engine=io_uring/spdk"
             )
 
         self._closed = False
@@ -615,6 +670,25 @@ class RawBlockL2Adapter(L2AdapterInterface):
                     "fixed-buffer registration; zero-copy fixed buffers are "
                     "disabled unless registered by a future MP allocator path"
                 )
+            if config.io_engine == "spdk":
+                logger.info(
+                    "RawBlockL2Adapter: MP raw_block using SPDK I/O engine "
+                    "(transport={config.spdk_transport_type}, "
+                    "target={config.spdk_target_ip}:{config.spdk_target_port}, "
+                    "nqn={config.spdk_target_nqn})"
+                )
+                if l1_memory_desc is not None:
+                    try:
+                        self._core.register_external_memory(
+                            l1_memory_desc.ptr,
+                            l1_memory_desc.size,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "RawBlockL2Adapter: failed to register L1 buffer "
+                            "with SPDK: %s",
+                            e,
+                        )
             self._max_capacity_bytes = int(
                 self._core.report_status().get("usable_capacity_bytes", 0)
             )
