@@ -216,7 +216,16 @@ class MPCacheServerContext:
 
         # Initialize the process-global GDS context.
         # No-op when GDS L1 is disabled (config is None).
-        initialize_gds_context(storage_manager_config.l1_manager_config.gds_l1_config)
+        initialize_gds_context(
+            next(
+                (
+                    c.gds_l1_config
+                    for c in storage_manager_config.l1_manager_configs
+                    if c.gds_l1_config is not None
+                ),
+                None,
+            )
+        )
 
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
@@ -324,7 +333,9 @@ class MPCacheServerContext:
         empty or lazy memory mode is enabled. Otherwise strips any leading ``/``
         and ensures the name starts with ``lmcache_l1_pool_``.
         """
-        mem_cfg = storage_manager_config.l1_manager_config.memory_config
+        if len(storage_manager_config.l1_manager_configs) != 1:
+            return {"shm_name": "", "pool_size": 0}
+        mem_cfg = storage_manager_config.l1_manager_configs[0].memory_config
         shm_name = mem_cfg.shm_name or ""
         if not shm_name or mem_cfg.use_lazy or mem_cfg.devdax_path:
             return {"shm_name": "", "pool_size": 0}

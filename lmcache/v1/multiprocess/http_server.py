@@ -223,8 +223,8 @@ def run_http_server(
         if not l1_exposes_single_memory_region(storage_manager_config):
             raise ValueError(
                 "P2P requires a single L1 memory region the transfer channel "
-                "can register; it is incompatible with GDS L1 (--gds-l1-path) "
-                "and Device-DAX L1 (--l1-devdax-path)."
+                "can register; it is incompatible with multiple L1 managers, "
+                "GDS L1, and Device-DAX L1 (--l1-devdax-path)."
             )
     if coordinator_config.event_reporting and not obs_config.enabled:
         raise ValueError(

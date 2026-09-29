@@ -5,9 +5,11 @@ Configuration for distributed storage manager
 """
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, cast
 import argparse
+import json
+import math
 import os
 
 # First Party
@@ -23,6 +25,143 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
+
+
+def parse_l1_manager_config(
+    raw: str,
+    eviction: "EvictionConfig | None" = None,
+    read_ttl_seconds: int = 300,
+    write_ttl_seconds: int = 600,
+) -> "L1ManagerConfig":
+    """Parse a DRAM or GDS JSON spec, inheriting global eviction/TTL defaults.
+
+    Args:
+        raw: JSON object with type, tag, size_gb and backend-specific fields.
+        eviction: Default eviction settings; required unless supplied in JSON.
+        read_ttl_seconds: Default read-lock TTL.
+        write_ttl_seconds: Default write-lock TTL.
+
+    Returns:
+        A backend-specific L1 config using the existing allocator configs.
+
+    Raises:
+        ValueError: If the spec has missing, unknown or invalid fields.
+    """
+    d = json.loads(raw)
+    if not isinstance(d, dict):
+        raise ValueError("--l1-manager must be a JSON object")
+    kind = d.get("type")
+    if kind not in ("DRAM", "GDS"):
+        raise ValueError("L1 type must be DRAM or GDS")
+    tag = d.get("tag")
+    if not isinstance(tag, str) or not tag.strip():
+        raise ValueError("L1 tag is required and must be a non-empty string")
+    if kind != "DRAM" and tag == "_default":
+        raise ValueError("Only DRAM L1 can use the _default tag")
+    common = {
+        "type",
+        "tag",
+        "size_gb",
+        "align_bytes",
+        "eviction",
+        "read_ttl_seconds",
+        "write_ttl_seconds",
+    }
+    backend_fields = (
+        {"use_lazy", "init_size_gb", "devdax_path", "shm_name"}
+        if kind == "DRAM"
+        else {"path", "backend", "direct_io"}
+    )
+    if unknown := set(d) - common - backend_fields:
+        raise ValueError(f"Unknown L1 fields: {sorted(unknown)}")
+    for name, default in (("size_gb", None), ("init_size_gb", 20)):
+        value = d.get(name, default)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError(f"{name} must be a finite positive number")
+    for name, default in (
+        ("align_bytes", 4096),
+        ("read_ttl_seconds", read_ttl_seconds),
+        ("write_ttl_seconds", write_ttl_seconds),
+    ):
+        value = d.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    align = d.get("align_bytes", 4096)
+    if align & (align - 1):
+        raise ValueError("align_bytes must be a power of two")
+    for name in ("use_lazy", "direct_io"):
+        if name in d and not isinstance(d[name], bool):
+            raise ValueError(f"{name} must be a boolean")
+    override = d.get("eviction", {})
+    if not isinstance(override, dict) or set(override) - {
+        "eviction_policy",
+        "trigger_watermark",
+        "eviction_ratio",
+    }:
+        raise ValueError(
+            "eviction must contain only policy, watermark and ratio fields"
+        )
+    policy = override.get(
+        "eviction_policy", eviction.eviction_policy if eviction else None
+    )
+    if policy not in ("LRU", "ARC", "IsolatedLRU", "noop"):
+        raise ValueError("L1 requires a supported eviction_policy")
+    eviction = replace(eviction or EvictionConfig(policy), **override)
+    for name in ("trigger_watermark", "eviction_ratio"):
+        value = getattr(eviction, name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0 <= value <= 1
+        ):
+            raise ValueError(f"eviction.{name} must be between 0 and 1")
+    size = int(d["size_gb"] * (1 << 30))
+    if size < align:
+        raise ValueError("size_gb must provide at least align_bytes bytes")
+    gds = None
+    if kind == "GDS":
+        path = d.get("path")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("GDS path is required")
+        backend = d.get("backend", "auto")
+        # First Party
+        from lmcache.v1.gpu_connector._gds_backends import available_backends
+
+        if backend not in ("auto", *available_backends()):
+            raise ValueError(f"Unknown GDS backend: {backend!r}")
+        gds = GdsL1Config(path, size, d.get("direct_io", True), backend, align)
+    shm_name = d.get("shm_name", "")
+    devdax_path = d.get("devdax_path")
+    if not isinstance(shm_name, str):
+        raise ValueError("shm_name must be a string")
+    if devdax_path is not None and (
+        not isinstance(devdax_path, str) or not devdax_path.strip()
+    ):
+        raise ValueError("devdax_path must be a non-empty string")
+    use_lazy = d.get("use_lazy", True) if kind == "DRAM" else False
+    if shm_name and (use_lazy or devdax_path):
+        raise ValueError("shm_name cannot coexist with use_lazy or devdax_path")
+    cls = DRAML1Config if kind == "DRAM" else GDSL1Config
+    return cls(
+        memory_config=L1MemoryManagerConfig(
+            size,
+            use_lazy,
+            int(d.get("init_size_gb", 20) * (1 << 30)),
+            align,
+            shm_name,
+            devdax_path,
+        ),
+        gds_l1_config=gds,
+        tag=tag,
+        eviction=eviction,
+        read_ttl_seconds=d.get("read_ttl_seconds", read_ttl_seconds),
+        write_ttl_seconds=d.get("write_ttl_seconds", write_ttl_seconds),
+    )
 
 
 _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS = {
@@ -48,6 +187,7 @@ def _requires_single_l1_memory_region(
 def _infer_l1_devdax_overflow_from_dax_adapter(
     memory_config: "L1MemoryManagerConfig",
     l2_adapter_config: L2AdaptersConfig,
+    tag: str = "_default",
 ) -> None:
     if not memory_config.devdax_path or memory_config.devdax_size_in_bytes:
         return
@@ -56,7 +196,10 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
     remaining_adapters: list[L2AdapterConfigBase] = []
     matched_dax_device: Any | None = None
     for adapter_config in l2_adapter_config.adapters:
-        if get_type_name_for_config(adapter_config) != "dax":
+        if (
+            get_type_name_for_config(adapter_config) != "dax"
+            or adapter_config.affinity_tag != tag
+        ):
             remaining_adapters.append(adapter_config)
             continue
 
@@ -93,6 +236,7 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
             remaining_dax_adapter.eviction_config = dax_adapter.eviction_config
             remaining_dax_adapter.persist_config = dax_adapter.persist_config
             remaining_dax_adapter.serde_config = dax_adapter.serde_config
+            remaining_dax_adapter.affinity_tag = dax_adapter.affinity_tag
             remaining_adapters.append(remaining_dax_adapter)
 
     if matched_dax_device is None:
@@ -215,6 +359,31 @@ class L1ManagerConfig:
     read_ttl_seconds: int = field(default=300)
     """ Time to live for each object's read lock. Default is 300s (5 minutes). """
 
+    tag: str = "_default"
+    """Unique name used by L2 affinity and L1 placement policies."""
+
+    eviction: "EvictionConfig | None" = None
+    """Per-manager eviction settings; None inherits the global settings."""
+
+    type: str = field(init=False)
+    """Backend type exposed in config reports."""
+
+    def __post_init__(self) -> None:
+        self.type = "GDS" if self.gds_l1_config is not None else "DRAM"
+
+
+@dataclass
+class DRAML1Config(L1ManagerConfig):
+    """DRAM L1 configuration, including the temporary Device-DAX option."""
+
+
+@dataclass
+class GDSL1Config(L1ManagerConfig):
+    """GDS L1 configuration with a slab described by gds_l1_config."""
+
+
+L1Config = L1ManagerConfig
+
 
 def get_configured_capacity_bytes(
     config: L1ManagerConfig,
@@ -290,10 +459,10 @@ class StorageManagerConfig:
     The configuration for the distributed storage manager.
     """
 
-    l1_manager_config: L1ManagerConfig
-    """ The configuration for the L1 manager. """
+    l1_manager_config: L1ManagerConfig | None = None
+    """Legacy single-manager input; None when multiple managers are configured."""
 
-    eviction_config: EvictionConfig
+    eviction_config: EvictionConfig | None = None
     """ The configuration for eviction policies. """
 
     l2_adapter_config: L2AdaptersConfig = field(
@@ -313,7 +482,40 @@ class StorageManagerConfig:
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
 
+    l1_manager_configs: list[L1ManagerConfig] = field(default_factory=list)
+    """Peer L1 managers, in configuration order. Tags must be unique."""
+
     def __post_init__(self) -> None:
+        if not self.l1_manager_configs and self.l1_manager_config is not None:
+            self.l1_manager_configs = [self.l1_manager_config]
+        if not self.l1_manager_configs:
+            raise ValueError("Configure at least one L1 manager")
+        tags = [c.tag for c in self.l1_manager_configs]
+        if any(not isinstance(t, str) or not t.strip() for t in tags):
+            raise ValueError("L1 tags must be non-empty strings")
+        if len(set(tags)) != len(tags):
+            raise ValueError("L1 tags must be unique")
+        shm_names = [
+            c.memory_config.shm_name.lstrip("/").removeprefix("lmcache_l1_pool_")
+            for c in self.l1_manager_configs
+            if c.memory_config.shm_name and not c.memory_config.use_lazy
+        ]
+        if len(set(shm_names)) != len(shm_names):
+            raise ValueError("L1 managers must use distinct shm_name values")
+        for config in self.l1_manager_configs:
+            if config.eviction is None:
+                config.eviction = self.eviction_config
+            if config.eviction is None:
+                raise ValueError(f"L1 {config.tag!r} requires an eviction policy")
+            if config.gds_l1_config is not None and config.tag == "_default":
+                raise ValueError("Only DRAM L1 can use the _default tag")
+        # ponytail: one process-global GDS slab; add per-object slab identity
+        # before allowing multiple GDS managers.
+        if sum(c.gds_l1_config is not None for c in self.l1_manager_configs) > 1:
+            raise ValueError("Only one GDS slab per process is currently supported")
+        self.l1_manager_config = (
+            self.l1_manager_configs[0] if len(self.l1_manager_configs) == 1 else None
+        )
         normalize_storage_manager_config(self)
         validate_storage_manager_config(self)
 
@@ -333,8 +535,10 @@ def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
     Raises:
         ValueError: If more than one DAX device matches ``l1-devdax-path``.
     """
-    memory_config = config.l1_manager_config.memory_config
-    _infer_l1_devdax_overflow_from_dax_adapter(memory_config, config.l2_adapter_config)
+    for l1 in config.l1_manager_configs:
+        _infer_l1_devdax_overflow_from_dax_adapter(
+            l1.memory_config, config.l2_adapter_config, l1.tag
+        )
 
 
 def validate_storage_manager_config(config: StorageManagerConfig) -> None:
@@ -353,22 +557,24 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         ValueError: If mutually exclusive L1 tiers are both configured, or
             hybrid L1 is paired with incompatible L2 adapters.
     """
-    if (
-        config.l1_manager_config.gds_l1_config is not None
-        and config.l1_manager_config.memory_config.devdax_path
-    ):
-        raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
-
-    memory_config = config.l1_manager_config.memory_config
-    if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
-        return
-
-    incompatible_adapters = [
-        adapter_name
-        for adapter_config in config.l2_adapter_config.adapters
-        if (adapter_name := _requires_single_l1_memory_region(adapter_config))
-        is not None
-    ]
+    by_tag = {c.tag: c for c in config.l1_manager_configs}
+    for l1 in by_tag.values():
+        if l1.gds_l1_config is not None and l1.memory_config.devdax_path:
+            raise ValueError("GDS L1 cannot be used with l1-devdax-path")
+    incompatible_adapters = []
+    for adapter_config in config.l2_adapter_config.adapters:
+        if adapter_config.affinity_tag not in by_tag:
+            raise ValueError(
+                f"Unknown L1 affinity_tag: {adapter_config.affinity_tag!r}"
+            )
+        memory_config = by_tag[adapter_config.affinity_tag].memory_config
+        adapter_name = _requires_single_l1_memory_region(adapter_config)
+        if (
+            memory_config.devdax_path
+            and memory_config.devdax_size_in_bytes
+            and adapter_name
+        ):
+            incompatible_adapters.append(adapter_name)
     if incompatible_adapters:
         raise ValueError(
             "Hybrid DRAM + Device-DAX L1 cannot be used with L2 adapters "
@@ -387,7 +593,9 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
         ``True`` if L1 is a single registerable memory region, ``False`` for
         GDS L1 or Device-DAX L1.
     """
-    l1_config = config.l1_manager_config
+    if len(config.l1_manager_configs) != 1:
+        return False
+    l1_config = config.l1_manager_configs[0]
     if l1_config.gds_l1_config is not None:
         return False
     if l1_config.memory_config.devdax_path:
@@ -420,9 +628,6 @@ def add_storage_manager_args(
         >>> args = parser.parse_args()
         >>> config = parse_args_to_config(args)
     """
-    # First Party
-    from lmcache.v1.gpu_connector._gds_backends import available_backends
-
     # L1 Memory Manager Config
     memory_group = parser.add_argument_group(
         "L1 Memory Manager", "Configuration for L1 memory manager"
@@ -430,7 +635,7 @@ def add_storage_manager_args(
     memory_group.add_argument(
         "--l1-size-gb",
         type=float,
-        required=True,
+        default=None,
         help="The size of L1 memory in GB.",
     )
     memory_group.add_argument(
@@ -465,34 +670,13 @@ def add_storage_manager_args(
         ),
     )
 
-    # GDS L1 tier (optional, opt-in via --gds-l1-path)
-    gds_group = parser.add_argument_group(
-        "GDS L1 tier",
-        "Configuration for the GDS L1 tier. Setting --gds-l1-path makes the "
-        "L1 medium an NVMe slab accessed via GPUDirect Storage DMA instead of "
-        "pinned DRAM; --l1-size-gb then sizes the slab. cuFile, hipFile, and "
-        "phx use a slab file, while uGDS uses a dedicated raw device. "
-        "Disable byte-array L2 adapters when this is on.",
-    )
-    gds_group.add_argument(
-        "--gds-l1-path",
-        type=str,
-        default=None,
-        help="NVMe directory for cuFile/hipFile/phx, or /dev/ugds_drvX for "
-        "uGDS. Setting this enables GDS L1.",
-    )
-    gds_group.add_argument(
-        "--gds-l1-use-direct-io",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Open the slab file with O_DIRECT (required for the GDS DMA fast "
-        "path on ext4). Default True.",
-    )
-    gds_group.add_argument(
-        "--gds-l1-backend",
-        default="auto",
-        choices=("auto", *available_backends()),
-        help="GDS backend. auto selects the default for this environment.",
+    memory_group.add_argument(
+        "--l1-manager",
+        action="append",
+        default=[],
+        metavar="JSON",
+        help="L1 spec with type, tag, size_gb and eviction; repeat for multiple L1s. "
+        'Example: \'{"type":"DRAM","tag":"_default","size_gb":8}\'.',
     )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
@@ -519,7 +703,7 @@ def add_storage_manager_args(
         "--eviction-policy",
         type=str,
         choices=["LRU", "ARC", "IsolatedLRU", "noop"],
-        required=True,
+        default=None,
         help="The eviction policy to use ('LRU', 'ARC', 'IsolatedLRU', or 'noop'). "
         "'ARC' balances recent and frequently reused keys adaptively. "
         "'IsolatedLRU' maintains one LRU list per cache_salt and requires "
@@ -623,54 +807,51 @@ def parse_args_to_config(
     Returns:
         StorageManagerConfig: The configuration object.
     """
-    shm_name = getattr(args, "shm_name", None)
-    if shm_name is None:
-        memory_config = L1MemoryManagerConfig(
-            size_in_bytes=int(args.l1_size_gb * (1 << 30)),
-            use_lazy=args.l1_use_lazy,
-            init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
-            align_bytes=args.l1_align_bytes,
-            devdax_path=args.l1_devdax_path,
+    eviction_config = None
+    if args.eviction_policy is not None:
+        eviction_config = EvictionConfig(
+            eviction_policy=args.eviction_policy,
+            trigger_watermark=args.eviction_trigger_watermark,
+            eviction_ratio=args.eviction_ratio,
+            extra_logging_enabled=getattr(args, "enable_extra_logging", False),
+            extra_logging_interval=getattr(args, "extra_logging_interval", 10.0),
         )
-    else:
-        memory_config = L1MemoryManagerConfig(
-            size_in_bytes=int(args.l1_size_gb * (1 << 30)),
-            use_lazy=args.l1_use_lazy,
-            init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
-            align_bytes=args.l1_align_bytes,
-            shm_name=shm_name,
-            devdax_path=args.l1_devdax_path,
+    l1_configs: list[L1ManagerConfig] = []
+    if args.l1_size_gb is not None:
+        if eviction_config is None:
+            raise ValueError("--l1-size-gb requires --eviction-policy")
+        shm_name = getattr(args, "shm_name", None)
+        if shm_name is None:
+            shm_name = f"lmcache_l1_pool_{os.getpid()}"
+        l1_configs.append(
+            DRAML1Config(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=int(args.l1_size_gb * (1 << 30)),
+                    use_lazy=args.l1_use_lazy,
+                    init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
+                    align_bytes=args.l1_align_bytes,
+                    shm_name=shm_name,
+                    devdax_path=args.l1_devdax_path,
+                ),
+                write_ttl_seconds=args.l1_write_ttl_seconds,
+                read_ttl_seconds=args.l1_read_ttl_seconds,
+                eviction=eviction_config,
+            )
         )
-
-    gds_l1_config: GdsL1Config | None = None
-    if getattr(args, "gds_l1_path", None):
-        # --l1-size-gb is the single L1 size flag; under GDS it sizes the slab.
-        gds_l1_config = GdsL1Config(
-            file_location=args.gds_l1_path,
-            size_in_bytes=int(args.l1_size_gb * (1 << 30)),
-            use_direct_io=args.gds_l1_use_direct_io,
-            backend=args.gds_l1_backend,
+    for raw in getattr(args, "l1_manager", []):
+        l1_configs.append(
+            parse_l1_manager_config(
+                raw,
+                eviction_config,
+                args.l1_read_ttl_seconds,
+                args.l1_write_ttl_seconds,
+            )
         )
-
-    l1_manager_config = L1ManagerConfig(
-        memory_config=memory_config,
-        gds_l1_config=gds_l1_config,
-        write_ttl_seconds=args.l1_write_ttl_seconds,
-        read_ttl_seconds=args.l1_read_ttl_seconds,
-    )
-
-    eviction_config = EvictionConfig(
-        eviction_policy=args.eviction_policy,
-        trigger_watermark=args.eviction_trigger_watermark,
-        eviction_ratio=args.eviction_ratio,
-        extra_logging_enabled=getattr(args, "enable_extra_logging", False),
-        extra_logging_interval=getattr(args, "extra_logging_interval", 10.0),
-    )
 
     l2_adapter_config = parse_args_to_l2_adapters_config(args)
 
     config = StorageManagerConfig(
-        l1_manager_config=l1_manager_config,
+        l1_manager_configs=l1_configs,
         eviction_config=eviction_config,
         l2_adapter_config=l2_adapter_config,
         store_policy=args.l2_store_policy,

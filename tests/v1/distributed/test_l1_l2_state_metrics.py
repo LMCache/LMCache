@@ -207,17 +207,17 @@ class TestL1MemoryUsageGauge:
 
     def test_gauge_reports_zero_initially(self, l1_manager):
         # A fresh L1 with no writes should report 0 used bytes.
-        before = _value_for("lmcache_mp.l1_memory_usage_bytes")
+        before = _value_for("lmcache_mp.l1_memory_usage_bytes", {"l1_tag": "_default"})
         assert before == 0
 
     def test_gauge_grows_after_writes(self, l1_manager):
-        before = _value_for("lmcache_mp.l1_memory_usage_bytes")
+        before = _value_for("lmcache_mp.l1_memory_usage_bytes", {"l1_tag": "_default"})
 
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         write_keys_to_l1(l1_manager, keys, layout)
 
-        after = _value_for("lmcache_mp.l1_memory_usage_bytes")
+        after = _value_for("lmcache_mp.l1_memory_usage_bytes", {"l1_tag": "_default"})
         assert after > before, "Gauge should reflect bytes written to L1"
 
 

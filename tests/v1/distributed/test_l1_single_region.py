@@ -23,6 +23,7 @@ def _config(
         l1_manager_config=L1ManagerConfig(
             memory_config=memory_config,
             gds_l1_config=gds_l1_config,
+            tag="gds" if gds_l1_config is not None else "_default",
             write_ttl_seconds=600,
             read_ttl_seconds=300,
         ),

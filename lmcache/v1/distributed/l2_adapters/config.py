@@ -172,6 +172,9 @@ class L2AdapterConfigBase(ABC):
     #: means L2 eviction is disabled for this adapter.
     eviction_config: EvictionConfig | None = None
 
+    affinity_tag: str = "_default"
+    """Tag of the L1 whose buffers this adapter reads and writes."""
+
     #: ``True`` when this adapter mounts a storage domain shared by
     #: several instances (e.g. one S3 bucket or shared filesystem).
     shared: bool = False
@@ -492,6 +495,10 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
         config_cls = _L2_ADAPTER_CONFIG_REGISTRY[type_name]
         try:
             adapter_cfg = config_cls.from_dict(d)
+            affinity_tag = d.get("affinity_tag", "_default")
+            if not isinstance(affinity_tag, str) or not affinity_tag.strip():
+                raise ValueError("affinity_tag must be a non-empty string")
+            adapter_cfg.affinity_tag = affinity_tag
             adapter_cfg.shared = bool(d.get("shared", False))
             adapter_cfg.eviction_config = L2AdapterConfigBase._parse_eviction_config(d)
             adapter_cfg.persist_config = L2AdapterConfigBase._parse_persist_config(d)
