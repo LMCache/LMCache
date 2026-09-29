@@ -3,6 +3,7 @@
 from typing import Any, Union
 import ctypes
 import os
+import sys
 import time
 import unittest.mock
 
@@ -18,6 +19,8 @@ from lmcache.v1.multiprocess.native_completion import (
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform import torch_ops as _py_ops
 import lmcache.lmcache_native as lmcache_native
+
+tensor_from_ptr = sys.modules["lmcache.v1.platform.torch_ops._tensor_from_ptr"]
 
 # ==========================================
 # 0. utils functions.
@@ -2891,6 +2894,11 @@ def scenario_multi_layer_block_kv_transfer(
             lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS,
             (num_blocks, block_size, num_heads, fused_hs),
         ),
+        (
+            "sglang_component",
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS,
+            (num_blocks, block_size, num_heads, fused_hs),
+        ),
     ):
         paged_fused = [
             torch.randn(*fused_shape, dtype=dtype).to(device) for _ in range(num_layers)
@@ -3215,8 +3223,8 @@ def test_tensor_from_ptr_routes_musa_pointer(
         )
         return torch.empty(shape, dtype=dtype)
 
-    monkeypatch.setattr(_py_ops.torch, "device", FakeDevice)
-    monkeypatch.setattr(_py_ops, "_tensor_from_musa_ptr", fake_musa_ptr)
+    monkeypatch.setattr(tensor_from_ptr.torch, "device", FakeDevice)
+    monkeypatch.setattr(tensor_from_ptr, "_tensor_from_musa_ptr", fake_musa_ptr)
 
     tensor = _py_ops._tensor_from_ptr(0x1000, (2, 3), torch.float16, "musa:0")
 
@@ -3276,12 +3284,12 @@ def test_tensor_from_musa_ptr_uses_external_storage(
         return fake_tensor
 
     monkeypatch.setattr(
-        _py_ops.torch._C,
+        tensor_from_ptr.torch._C,
         "_construct_storage_from_data_pointer",
         fake_construct_storage,
         raising=False,
     )
-    monkeypatch.setattr(_py_ops.torch, "empty", fake_empty)
+    monkeypatch.setattr(tensor_from_ptr.torch, "empty", fake_empty)
 
     result = _py_ops._tensor_from_musa_ptr(
         0x1000, (2, 3), torch.float16, fake_device, 12
@@ -3313,7 +3321,7 @@ def test_tensor_from_musa_ptr_fails_without_external_storage(
         raise RuntimeError("storage construction unavailable")
 
     monkeypatch.setattr(
-        _py_ops.torch._C,
+        tensor_from_ptr.torch._C,
         "_construct_storage_from_data_pointer",
         fake_construct_storage,
         raising=False,
