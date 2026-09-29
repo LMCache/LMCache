@@ -705,7 +705,7 @@ class TestStorageManagerL2Prefetch:
         keys = [make_object_key(i) for i in range(5)]
 
         # All keys reach L2; keys 2..4 are then L2-only.
-        self._write_keys_and_wait_for_l2(sm, keys, basic_layout)
+        write_keys_and_wait_for_l2(sm, keys, basic_layout)
         deleted, skipped = sm.delete_l1_keys(keys[2:])
         assert (deleted, skipped) == (3, 0)
 
