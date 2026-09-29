@@ -4,7 +4,8 @@ Secondary KV Storage
 LMCache multiprocess mode supports a two-tier storage architecture:
 
 - **L1 (fast tier)** -- CPU memory by default, or an NVMe slab via GPUDirect
-  Storage (cuFile) when ``--gds-l1-path`` is set, managed by the L1 Manager.
+  Storage when ``--l1-manager`` selects ``"type":"GDS"``. An MP server
+  can have :doc:`multiple peer L1 managers <../multi_l1>`.
   All KV cache chunks live here during active use. (Byte-array L2 adapters are
   unsupported under the GDS L1 tier, which exposes no L1 memory buffer.)
 - **L2 (persistent)** -- Durable storage backends (NIXL-based or plain
@@ -23,7 +24,8 @@ Data Flow
 
 1. vLLM stores KV cache chunks into L1 via the ``STORE`` RPC.
 2. The ``StoreController`` detects new objects (via eventfd) and
-   asynchronously submits store tasks to each configured L2 adapter.
+   asynchronously submits store tasks to its L2 adapters with matching
+   ``affinity_tag``.
 3. The L2 adapter writes the data to its backend (e.g., local SSD via GDS).
 
 **Read path (L2 -> L1):**
@@ -41,7 +43,11 @@ LMCache ships several L2 storage backends, grouped by medium under
 :doc:`Supported Backends <supported_storages>`. Select one or more with the
 ``--l2-adapter`` flag.
 
-Every adapter accepts, alongside its type-specific keys, the common
+Every adapter accepts ``affinity_tag`` (default ``_default``), which must
+match an L1 manager tag. It determines the L1 buffers used for stores and
+loads; see :doc:`../multi_l1` for examples.
+
+Every adapter also accepts, alongside its type-specific keys, the common
 ``"shared": true`` option. Set it when the adapter mounts a storage
 domain that several LMCache instances share (one S3 bucket, one NFS
 export): with :doc:`coordinator event reporting <../coordinator>`
@@ -65,8 +71,9 @@ Multiple Adapters (Cascade)
 
 You can configure multiple L2 adapters by repeating the ``--l2-adapter``
 argument.  Adapters are used in the order they are specified.  The
-``StoreController`` pushes data to all configured adapters, and the
-``PrefetchController`` queries adapters in order during lookups.
+store controller for each L1 pushes data to its affinity adapters. The
+prefetch controller queries the adapters and uses the prefetch policy to
+select a source; the default policy prefers the earliest configured adapter.
 
 .. code-block:: bash
 

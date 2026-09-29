@@ -699,16 +699,15 @@ Adapters with no in-flight work emit no datapoint for that scrape.
      - Number of prefetch jobs currently in-flight. A sustained high
        value may indicate slow L2 backends or polling delays.
    * - ``lmcache_mp.l1_memory_usage_bytes``
-     - ObservableGauge
-     - Bytes currently held in L1.  Rising without plateauing typically
-       indicates a leak; saturating at the configured ``--l1-size-gb``
-       indicates working set exceeds capacity.
+     - ObservableGauge (attr: ``l1_tag``)
+     - Bytes currently held in each L1, identified by ``l1_tag``. Compare
+       against that manager's configured capacity (JSON ``size_gb`` or
+       legacy ``--l1-size-gb``).
    * - ``lmcache_mp.l1_usage_ratio``
-     - ObservableGauge
+     - ObservableGauge (attr: ``l1_tag``)
      - L1 used/total ratio (``0.0``–``1.0``), sampled at scrape time
-       from ``L1Manager.get_memory_usage()``. Returns ``0.0`` when the
-       gauge target is not yet wired up or ``total_bytes`` is zero, so
-       the callback never raises during a scrape. Compare against the
+       from ``L1Manager.get_memory_usage()``. Reports one observation per
+       live L1 and returns ``0.0`` when that manager's ``total_bytes`` is zero. Compare against the
        eviction watermark (default ``0.8``) to read whether the
        eviction loop is below or above its trigger threshold.
    * - ``lmcache_mp.l2_usage_bytes``

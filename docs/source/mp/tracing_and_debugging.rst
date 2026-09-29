@@ -122,8 +122,9 @@ Minimal invocation:
     lmcache trace replay /tmp/run.lct \
         --l1-size-gb 100 --eviction-policy LRU
 
-``--l1-size-gb`` and ``--eviction-policy`` are required, just like on
-``lmcache server``. Any storage-manager flag accepted by the server
+Supply an L1 configuration, just like on ``lmcache server``: either the
+legacy ``--l1-size-gb`` and ``--eviction-policy`` pair or the
+:doc:`JSON manager interface <multi_l1>`. Any storage-manager flag accepted by the server
 also works here (``--l2-adapter``, ``--l1-use-lazy``,
 ``--l2-store-policy``, …); run ``lmcache trace replay --help`` for the
 full list.

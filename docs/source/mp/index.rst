@@ -5,6 +5,7 @@ Overview
    :hidden:
 
    request_transport
+   multi_l1
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
 vLLM instances reach through a configurable ZMQ or gRPC request transport.
@@ -353,7 +354,9 @@ L1Manager
 
 ``lmcache/v1/distributed/l1_manager.py``
 
-Manages objects in CPU memory with a state machine:
+Each L1 manager manages its own objects with a state machine. An MP server
+can configure multiple peer managers; see :doc:`multi_l1` for placement,
+eviction, and L2 affinity settings.
 
 .. code-block:: text
 
@@ -376,14 +379,15 @@ tiers selected at startup (all satisfy ``L1ManagerProtocol``):
   device as the full L1 arena; a hybrid configuration uses DRAM first and
   spills overflow allocations into Device-DAX. See the *L1 Memory Manager*
   section of :doc:`configuration` for the accepted knobs.
-- ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
+- ``GDSL1MemoryManager`` -- an NVMe slab file when a ``--l1-manager``
+  JSON object uses ``"type":"GDS"``.
   The bytes live on disk; reads/writes DMA directly between the GPU staging
   buffer and the slab, driven by the process-global ``GDSContext``
   (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The DMA
   backend is selected by platform via ``gpu_connector/_gds_backends.py`` --
   cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on AMD
   ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the
-  vendor-specific requirements. The CPU tier is disabled in this mode.
+  vendor-specific requirements. Other DRAM managers may coexist with GDS.
 
 L2 Adapters
 ~~~~~~~~~~~
