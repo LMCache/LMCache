@@ -270,9 +270,8 @@ __device__ void multi_layer_block_transfer_single_block(
     for (int token_offset = init_token_offset; token_offset < shape_desc.bs;
          token_offset += token_stride) {
       const size_t engine_local_offset =
-          calculate_engine_local_offset<ScalarType, format>(token_offset,
-                                                            head_idx,
-                                                            shape_desc);
+          calculate_engine_local_offset<ScalarType, format>(
+              token_offset, head_idx, shape_desc);
       const size_t lmcache_local_offset =
           calculate_lmcache_local_offset<ScalarType, format>(
               token_offset, head_idx, shape_desc);
@@ -434,8 +433,8 @@ void multi_layer_block_kv_transfer_templated(
   constexpr int kMaxThreadsPerBlock = 1024;
   int thread_dim_y =
       std::min(shape_desc.nh, kMaxThreadsPerBlock / thread_dim_x);
-  int thread_dim_z =
-      std::min(shape_desc.bs, kMaxThreadsPerBlock / (thread_dim_x * thread_dim_y));
+  int thread_dim_z = std::min(
+      shape_desc.bs, kMaxThreadsPerBlock / (thread_dim_x * thread_dim_y));
   thread_dim_z = std::min(thread_dim_z, 64);  // max threads per block in z-dim
 
   dim3 block(thread_dim_x, thread_dim_y, thread_dim_z);
