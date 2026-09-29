@@ -14,6 +14,10 @@ LMCache. Both XPU pipelines install LMCache from their checked-out source on
 each run. The candidate is pushed so both can test the same immutable image.
 Only when UT and MP pass does the nightly record its digest on
 `buildkite_latest_tested_vllm`; failures keep the previous pin.
+For manual validation on a test branch, select `verify_xpu_candidate_only`:
+it builds and smoke-checks the XPU wheel, runs both Buildkite suites, and
+writes the two pins to separate `xpu-nightly-test-*` branches instead of the
+production pin branches. It does not publish the wheel release.
 The image keeps the upstream `vllm serve` entrypoint. `BASH_ENV` loads oneAPI
 in noninteractive Bash jobs (including those launched by Buildkite); a
 non-Bash command must source `/opt/intel/oneapi/setvars.sh` separately if it
