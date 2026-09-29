@@ -37,6 +37,25 @@ LMCACHE_REQUEST_TRANSPORT=zmq \
 The request transport can be `zmq` or `grpc`. The harness maps these values to
 the `tcp://` and `grpc://` connector addresses respectively.
 
+## SGLang nightly validation
+
+Normal SGLang jobs install the source revision recorded in
+`buildkite_latest_tested_sglang/latest_tested_sglang.txt`. A scheduled
+Buildkite build can set `VERIFY_AND_PIN_SGLANG=true` to run the canary path:
+
+```text
+official SGLang nightly index
+  -> resolve newest nightly version and commit
+  -> run lm_eval with LMCache over ZMQ and gRPC
+  -> require both jobs to report identical metadata
+  -> update latest_tested_sglang.txt and tested_runtimes.jsonl
+```
+
+The canary installs the nightly's exact source commit because the LMCache CI
+image uses Python 3.12 while SGLang currently publishes its nightly wheel for
+CPython 3.10. `SGLANG_INSTALL_SPEC` remains available for an explicit per-build
+override.
+
 ## Directory layout
 
 ```text
@@ -46,6 +65,7 @@ multiprocess/
 └── scripts/
     ├── engines/
     │   ├── README.md            # Adapter API details
+    │   ├── sglang.sh            # SGLang implementation
     │   └── vllm.sh              # vLLM implementation
     ├── workloads/
     │   ├── README.md            # Workload classification
@@ -165,6 +185,12 @@ authoritative by assigning defaults with `${VAR:-default}`. A workload that
 must distinguish an LMCache retrieval from an engine-local hit can opt in with
 `VERIFY_LMCACHE_RETRIEVAL=true`; its adapter implements
 `engine_clear_local_cache <port>` without clearing LMCache itself.
+
+The SGLang adapter currently exercises the unified radix-cache integration in
+`lmcache_driven` mode. Its CI coverage reuses the common long-document,
+accuracy, and HTTP API workloads. Server restart recovery,
+`engine_driven`, and special deadlock launch profiles remain excluded until the
+unified connector implements those contracts.
 
 Workload support requires no adapter allowlist. A common workload is available
 to every adapter; an engine-specific workload is available when its script
