@@ -6,8 +6,7 @@ to layer the external Ascend plugin's compiled extension on top of the
 torch baseline. All NPU-specific kernels live in the ``lmcache_ascend``
 plugin, which curates an ops-only binding surface (``lmcache_ascend.ops``,
 mirroring ``lmcache.cuda_ops``); this package only wires detection and
-backend selection. If the plugin is missing, a warning is logged and the
-instance stays on the torch fallback (soft-fail, same as CUDA).
+backend selection. If the plugin is missing, :meth:`ensure_native` raises
 """
 
 # Future
@@ -21,12 +20,9 @@ import ctypes
 import torch
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 import lmcache.lmcache_native as lmcache_native
-
-logger = init_logger(__name__)
 
 
 def _synchronize_npu_stream_pointer(stream_ptr: int) -> None:
@@ -74,12 +70,11 @@ class NpuDeviceOps(DeviceOps):
         try:
             # Third Party
             import lmcache_ascend.ops as native
-        except ImportError:
-            logger.warning(
-                "lmcache_ascend.ops surface not found; NpuDeviceOps stays "
-                "on the torch baseline for all ops."
-            )
-            return
+        except ImportError as exc:
+            raise ImportError(
+                "NPU requires the LMCache-Ascend native ops (lmcache_ascend.ops): "
+                "Install LMCache-Ascend and retry."
+            ) from exc
         self.bind_native(native)
 
     def record_completion_on_stream(

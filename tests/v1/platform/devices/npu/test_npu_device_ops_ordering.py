@@ -123,3 +123,19 @@ def test_ensure_native_keeps_plugin_page_buffer_shape_desc(
     ops = NpuDeviceOps()
     ops.ensure_native()
     assert ops.PageBufferShapeDesc is _CppDesc
+
+
+def test_ensure_native_raises_without_plugin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing lmcache_ascend.ops must fail fast, not soft-fall back.
+
+    The torch baseline reconstructs pointer-mode staging buffers as CPU
+    tensors, which would silently transfer in the wrong address space on
+    NPU
+    """
+    monkeypatch.setitem(sys.modules, "lmcache_ascend", None)
+    monkeypatch.setitem(sys.modules, "lmcache_ascend.ops", None)
+    ops = NpuDeviceOps()
+    with pytest.raises(ImportError, match="LMCache-Ascend"):
+        ops.ensure_native()
