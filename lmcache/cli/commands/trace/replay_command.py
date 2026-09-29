@@ -122,6 +122,8 @@ def run_trace_replay(args: argparse.Namespace) -> None:
     from lmcache.v1.mp_observability.trace.reader import TraceReader
 
     sm_config: StorageManagerConfig = parse_args_to_config(args)
+    if sm_config.l1_manager_config.shared_l1_config is not None:
+        raise ValueError("trace replay does not copy payloads into shared L1")
 
     # ``--trace-level`` / ``--trace-output`` belong to the recording
     # surface.  They are still registered on the parser so the flag set

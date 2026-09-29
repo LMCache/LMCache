@@ -184,6 +184,11 @@ class StorageManager:
             self.get_l2_usages,
         )
 
+    @property
+    def uses_shared_l1(self) -> bool:
+        """Return whether L1 is the coordinator-owned shared-DAX path."""
+        return self._l1_manager.uses_shared_l1
+
     # External APIs for serving engine integration code to call
     @enable_tracing()
     def reserve_write(
@@ -265,6 +270,35 @@ class StorageManager:
         )
 
         # TODO: global key states update
+        if failed_keys and self.uses_shared_l1:
+            raise RuntimeError(
+                "shared-L1 write batch was not committed: "
+                f"{len(failed_keys)} of {len(keys)} keys failed validation"
+            )
+
+    @enable_tracing()
+    def abort_write(
+        self,
+        keys: list[ObjectKey],
+    ) -> None:
+        """Abort failed writes in the coordinator-owned shared-L1 path.
+
+        Args:
+            keys: List of object keys whose reservations must be released.
+
+        Raises:
+            RuntimeError: Some keys could not be aborted, or L1 is not the
+                shared path.
+        """
+        abort_result = self._l1_manager.abort_write(keys, tag=_L1_WRITE_TAG)
+        failed_keys = [
+            key for key, error in abort_result.items() if error != L1Error.SUCCESS
+        ]
+        if failed_keys:
+            raise RuntimeError(
+                "shared-L1 write batch was not fully aborted: "
+                f"{len(failed_keys)} of {len(keys)} keys failed"
+            )
 
     @contextmanager
     def read_prefetched_results(
@@ -633,12 +667,15 @@ class StorageManager:
         Returns:
             L1 per backing medium, then one entry per L2 adapter.
         """
+        # A coordinator-owned shared Device-DAX pool is fleet-shared: its
+        # capacity must be declared once under shared_modules, not summed
+        # per mounting instance.
         capacities = [
             ModuleMemoryCapacity(
                 tier=Tier.L1,
                 backend=backend.value,
                 capacity_bytes=configured,
-                shared=False,
+                shared=self.uses_shared_l1,
             )
             for backend, configured in get_configured_capacity_bytes(
                 self._l1_config
@@ -793,6 +830,9 @@ class StorageManager:
 
         Returns:
             The stable id assigned to the new adapter.
+
+        Raises:
+            ValueError: Shared L1 does not support L2 adapters.
         """
         with self._lifecycle_lock:
             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
@@ -980,6 +1020,8 @@ class StorageManager:
             the freshly allocated stable id, ``adapter`` is the new adapter
             instance, and ``descriptor`` is its descriptor carrying that id.
         """
+        if self.uses_shared_l1:
+            raise ValueError("shared L1 cannot be combined with L2 adapters")
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
         adapter: L2AdapterInterface = create_l2_adapter(config, self._l1_memory_desc)

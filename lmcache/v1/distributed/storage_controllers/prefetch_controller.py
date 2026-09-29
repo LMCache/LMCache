@@ -1057,6 +1057,10 @@ class PrefetchController(StorageControllerInterface):
         Args:
             request: The request whose keys are looked up.
 
+        Raises:
+            RuntimeError: A shared object differs from its consumer's layout.
+                All recorded read locks are released before propagating the error.
+
         Note:
             Locks are taken regardless of the lock mode; under ``NO_LOCK``
             they are released when the request finishes.
@@ -1075,6 +1079,23 @@ class PrefetchController(StorageControllerInterface):
             request.key_states.l1_locked_keys[l1_idx] = _scatter_bitmaps_full_global(
                 res_bitmap, num_rows, num_cols
             )
+            if l1_manager.uses_shared_l1:
+                for group in request.key_groups:
+                    for key in group.keys:
+                        error, obj = result[key]
+                        if error != L1Error.SUCCESS:
+                            continue
+                        if (
+                            obj is None
+                            or obj.get_shapes() != group.layout_desc.shapes
+                            or obj.get_dtypes() != group.layout_desc.dtypes
+                        ):
+                            # Reject foreign layouts before policy or GPU retrieval.
+                            self._release_all_locks(request)
+                            raise RuntimeError(
+                                "shared-L1 object layout does not match "
+                                "the local engine"
+                            )
 
     def _plan_load(
         self,

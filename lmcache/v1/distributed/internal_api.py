@@ -30,10 +30,16 @@ class L1ObjectMeta:
     Attributes:
         size_bytes: Logical byte size of the object.
         backend: The storage medium backing the object.
+        shared: ``True`` when the object lives in a fleet-shared pool
+            (coordinator-owned shared Device-DAX), so directory and usage
+            views must not multiply it per reporting instance. Defaults to
+            ``False`` so pre-``shared`` producers and consumers keep their
+            existing behavior.
     """
 
     size_bytes: int
     backend: L1BackendType
+    shared: bool = False
 
 
 class EventListener(ABC):  # noqa: B024
