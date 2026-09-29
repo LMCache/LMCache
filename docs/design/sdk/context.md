@@ -14,7 +14,7 @@ Retrieve / store / close are **methods** on the context.
 import lmcache.sdk.kvcache as kvcache   # query tensors: lmcache.sdk.qcache
 
 ctx = kvcache.connect(
-    url="tcp://localhost:5555",       # ZMQ url
+    url="tcp://localhost:5555",       # tcp:// for ZMQ; grpc:// for gRPC
     http_url="http://localhost:9000", # HTTP url for retrieving KV cache shape
     model_name="Qwen/Qwen3-8B",
 )
@@ -38,15 +38,17 @@ SDK process                                  LMCache MP server
 -----------                                  -----------------
 LMCacheSDKContext
   ├ ContiguousTransferWrapper
-  │   └ EngineDrivenContext{Shm,Pickle} ──MQ──▶ EngineDrivenTransferModule
+  │   └ EngineDrivenContext{Shm,Pickle} ──RPC─▶ EngineDrivenTransferModule
   │                                             └ StorageManager (L1 pool, locks, prefetch)
-  └ MessageQueueClient ──────────────────ZMQ──▶ LookupModule (LOOKUP / QUERY_PREFETCH_STATUS)
+  └ RequestClient ───────────────────ZMQ/gRPC─▶ LookupModule (LOOKUP / QUERY_PREFETCH_STATUS)
   SharedMemory(name) ◀────────────────────────  L1 POSIX segment (SHM transport only)
 ```
 
-- **Control plane (ZMQ):** lookup/prefetch, slot reservation, lock release, session end.
+- **Request plane (ZMQ or gRPC):** lookup/prefetch, slot reservation, lock release,
+  session end.
 - **Data plane:** **SHM** when the server exposes an L1 pool, otherwise **pickle** over the
-  MQ — both driven through one `EngineDrivenContext`, so the SDK never branches on transport.
+  request transport — both driven through one `EngineDrivenContext`, so the SDK never
+  branches on transport.
 - **`ContiguousTransferWrapper`** ([wrapper/contiguous.py](../../../lmcache/sdk/wrapper/contiguous.py))
   bridges a contiguous `[2, L, T, D]` tensor to the per-chunk `prepare`/`commit` protocol and
   masks the SHM-vs-pickle difference.
@@ -78,13 +80,13 @@ model name is suffixed `##query`, so the lookups below use that key):
 `LMCacheSDKContext`, on which retrieve / store / close are **methods**. `LMCacheSDKContext` /
 `LMCacheSDKCacheKind` / `LMCacheSDKError` are exported from `lmcache.sdk`.
 
-- **`connect(url, http_url, model_name, timeout=60.0)`** — open the MQ client, fetch config,
+- **`connect(url, http_url, model_name, timeout=60.0)`** — open the request client, fetch config,
   run the handshake; returns an `LMCacheSDKContext`.
 - **`ctx.retrieve(tokens, cache_salt="")`** → contiguous CPU `[2, num_layers, hit_tokens,
   hidden_dim]` for the cached prefix, or `None` (empty/sub-chunk input, or nothing cached).
 - **`ctx.store(kv, tokens, cache_salt="")`** → `bool`. `kv` is `[2, L, T, D]`; `len(tokens)`
   must equal `T`; both are truncated to whole chunks before storing.
-- **`ctx.close()`** — shut down the MQ client and ZMQ context.
+- **`ctx.close()`** — shut down the request client and release transport resources.
 
 ## Cache addressing
 

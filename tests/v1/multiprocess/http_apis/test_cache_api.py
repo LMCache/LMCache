@@ -18,7 +18,8 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey, PrefetchResult
 from lmcache.v1.multiprocess.cache_control.object_service import MAX_DELETE_BATCH
 from lmcache.v1.multiprocess.http_apis.cache_api import router as cache_router
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
@@ -440,24 +441,23 @@ class _PrefetchHandle:
         self.total_requested_keys = total
 
 
-class _PrefetchBitmap:
-    def __init__(self, n: int) -> None:
-        self._n = n
-
-    def popcount(self) -> int:
-        return self._n
-
-
 @dataclass
 class _PrefetchStorageManager:
     submit_calls: list[dict] = field(default_factory=list)
 
     def submit_prefetch_task(self, spec, **_) -> _PrefetchHandle:
-        self.submit_calls.append({"keys": list(spec.keys), "mode": spec.mode})
-        return _PrefetchHandle(len(spec.keys))
+        keys = [key for row in spec.key_groups for key in row.keys]
+        self.submit_calls.append({"keys": keys, "lock_mode": spec.lock_mode})
+        return _PrefetchHandle(len(keys))
 
-    def query_prefetch_status(self, handle) -> _PrefetchBitmap:
-        return _PrefetchBitmap(handle.total_requested_keys)
+    def query_prefetch_status(self, handle) -> PrefetchResult:
+        # Every requested key was loaded from L2: one all-set row.
+        n = handle.total_requested_keys
+        return PrefetchResult(
+            hit_cells=[Bitmap(n, n)],
+            l1_hit_cells=[Bitmap(n)],
+            l2_hit_cells=[Bitmap(n, n)],
+        )
 
 
 @dataclass
@@ -588,9 +588,11 @@ class TestPrefetchEndpoint:
 class _ClearEngine:
     clear_calls: int = 0
     cache_contexts: Optional[dict] = None
+    force_values: list[bool] = field(default_factory=list)
 
-    def clear(self) -> None:
+    def clear(self, force: bool = False) -> None:
         self.clear_calls += 1
+        self.force_values.append(force)
 
 
 def _make_clear_app(engine: Optional[_ClearEngine]) -> FastAPI:
@@ -610,6 +612,15 @@ class TestClearEndpoint:
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"status": "ok", "cleared": {"tier": "l1"}}
         assert engine.clear_calls == 1
+        assert engine.force_values == [False]
+
+    def test_clear_l1_force(self):
+        engine = _ClearEngine()
+        client = TestClient(_make_clear_app(engine))
+        resp = client.post("/cache/clear", json={"tier": "l1", "force": True})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "cleared": {"tier": "l1"}}
+        assert engine.force_values == [True]
 
     def test_clear_no_body_defaults_to_l1(self):
         """The body is optional; an absent body defaults to tier l1."""
@@ -619,6 +630,7 @@ class TestClearEndpoint:
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"status": "ok", "cleared": {"tier": "l1"}}
         assert engine.clear_calls == 1
+        assert engine.force_values == [False]
 
     def test_clear_unsupported_tier(self):
         client = TestClient(_make_clear_app(_ClearEngine()))

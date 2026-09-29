@@ -2,37 +2,16 @@
 """Shared helpers for request-transport integration tests."""
 
 # Standard
-from typing import Any, Literal, Protocol
-import importlib
-
-# Third Party
-import zmq
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 # First Party
-from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.transport.base import RequestServer
+from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
 RequestTransport = Literal["zmq", "grpc"]
-
-# Keep the gRPC type and URL path ready, but do not execute gRPC tests until
-# the runtime implementation lands. Enabling both transports is a one-line
-# change to this tuple.
-REQUEST_TRANSPORTS: tuple[RequestTransport, ...] = ("zmq",)
-
-
-class RequestServer(Protocol):
-    """Common lifecycle used by request-transport test servers."""
-
-    def close(self) -> None: ...
-
-
-_LOOKUP_HANDLERS = {
-    RequestType.LOOKUP: "lookup",
-    RequestType.QUERY_PREFETCH_STATUS: "query_prefetch_status",
-    RequestType.WAIT_PREFETCH_STATUS: "wait_prefetch_status",
-    RequestType.QUERY_PREFETCH_LOOKUP_HITS: "query_prefetch_lookup_hits",
-    RequestType.FREE_LOOKUP_LOCKS: "free_lookup_locks",
-    RequestType.END_SESSION: "end_session",
-}
+REQUEST_TRANSPORTS: tuple[RequestTransport, ...] = ("zmq", "grpc")
 
 
 def request_server_url(transport: RequestTransport, port: int) -> str:
@@ -47,6 +26,39 @@ def request_server_url(transport: RequestTransport, port: int) -> str:
     """
     scheme = "tcp" if transport == "zmq" else "grpc"
     return f"{scheme}://127.0.0.1:{port}"
+
+
+def request_server_config(
+    transport: RequestTransport,
+    server_url: str,
+    *,
+    max_cpu_workers: int = 4,
+    max_gpu_workers: int = 1,
+) -> MPServerConfig:
+    """Build a request-server config from a loopback test URL.
+
+    Args:
+        transport: Request transport to exercise.
+        server_url: TCP or gRPC loopback URL returned by request_server_url.
+        max_cpu_workers: Worker count for blocking CPU-bound handlers.
+        max_gpu_workers: Worker count for blocking affinity handlers.
+
+    Returns:
+        Multiprocess server config for create_request_server.
+
+    Raises:
+        ValueError: If the URL does not include a host and TCP port.
+    """
+    parsed = urlsplit(server_url)
+    if parsed.hostname is None or parsed.port is None:
+        raise ValueError(f"Test request URL must include host and port: {server_url}")
+    return MPServerConfig(
+        transport=transport,
+        host=parsed.hostname,
+        port=parsed.port,
+        max_cpu_workers=max_cpu_workers,
+        max_gpu_workers=max_gpu_workers,
+    )
 
 
 def start_lookup_request_server(
@@ -64,37 +76,7 @@ def start_lookup_request_server(
     Returns:
         The started request server. The caller must close it.
     """
-    if transport == "grpc":
-        grpc_server_module = importlib.import_module(
-            "lmcache.v1.multiprocess.transport.grpc_impl.server"
-        )
-        grpc_server_class = vars(grpc_server_module)["GrpcMultiprocessServer"]
-        grpc_server = grpc_server_class(
-            server_url,
-            max_cpu_workers=4,
-            max_gpu_workers=1,
-        )
-        grpc_server.add_modules([lookup])
-        grpc_server.start()
-        return grpc_server
-
-    # Keep concrete transport imports inside the selected branch. This helper
-    # is intentionally transport-neutral: the repository's import-boundary
-    # test rejects leaking implementation modules through shared test code.
-    mq_module = importlib.import_module("lmcache.v1.multiprocess.mq")
-    zmq_server_module = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.zmq_impl.server"
-    )
-    zmq_server = mq_module.MessageQueueServer(server_url, zmq.Context.instance())
-    add_handler_helper = zmq_server_module.add_handler_helper
-    blocking_types: list[RequestType] = []
-    for request_type, method_name in _LOOKUP_HANDLERS.items():
-        handler = getattr(lookup, method_name, None)
-        if not callable(handler):
-            continue
-        add_handler_helper(zmq_server, request_type, handler)
-        blocking_types.append(request_type)
-    if blocking_types:
-        zmq_server.add_normal_thread_pool(blocking_types, max_workers=4)
-    zmq_server.start()
-    return zmq_server
+    mp_config = request_server_config(transport, server_url)
+    server = create_request_server([lookup], mp_config)
+    server.start()
+    return server

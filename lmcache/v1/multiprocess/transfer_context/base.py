@@ -17,7 +17,9 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING
 import inspect
 
@@ -33,6 +35,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.platform import resolve_device_ops
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -42,60 +45,23 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Global capability flag: does device_ops.multi_layer_block_kv_transfer accept
-# list[torch.Tensor] directly for lmcache_objects_ptrs, or only list[int]?
-#
-# We inspect the function signature once at import time. If the annotation
-# for ``lmcache_objects_ptrs`` includes ``Tensor``, the op can handle tensors
-# natively and we pass them through. Otherwise (annotation is list[int], or
-# inspect fails entirely) we must convert tensors to data pointers before
-# calling.
-# ---------------------------------------------------------------------------
-def _detect_block_transfer_accepts_tensor() -> bool:
-    """Return True if device_ops.multi_layer_block_kv_transfer accepts
-    list[torch.Tensor] for its lmcache_objects_ptrs parameter."""
+@lru_cache(maxsize=None)
+def _detect_block_transfer_accepts_tensor(transfer_fn: Callable[..., None]) -> bool:
+    """Inspect the selected transfer op, caching capabilities per callable.
+
+    Tensor-capable ops receive tensor lists directly. Native pointer-only ops
+    (including uninspectable pybind functions) need pointer conversion and
+    pinned host buffers. A process may use both CPU and accelerator ops.
+    """
     try:
-        # First Party
-        from lmcache import device_ops as _device_ops
-
-        fn = _device_ops.multi_layer_block_kv_transfer
-
-        # Attempt: use inspect.signature (works on newer pybind11 builds)
-        # Assumptions: if lmcache_objects_ptrs accepts tensors,
-        # it's fallback path, and we do not convert tensors to ptrs explicitly.
-        # TODO: String matching on annotations is fragile. Wait for device_ops to
-        # expose a direct version flag (e.g., device_ops.__version__) or
-        # an explicit capability boolean.
-        try:
-            sig = inspect.signature(fn)
-            param = sig.parameters.get("lmcache_objects_ptrs")
-            if param is not None and param.annotation is not inspect.Parameter.empty:
-                ann_str = str(param.annotation)
-                if "Tensor" in ann_str:
-                    return True
-                # Annotation exists but no Tensor mention → ptr-only
-                return False
-        except (ValueError, TypeError):
-            pass
-
-    except Exception:
-        # Import failed or any other error → conservative: assume ptr-only
+        # TODO: Replace annotation inspection with an explicit ops capability.
+        sig = inspect.signature(transfer_fn)
+        param = sig.parameters.get("lmcache_objects_ptrs")
+        if param is not None and param.annotation is not inspect.Parameter.empty:
+            return "Tensor" in str(param.annotation)
+    except (ValueError, TypeError):
         pass
-
-    # Default: inspect failed or device_ops not available → assume ptr-only
     return False
-
-
-_LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR: bool = _detect_block_transfer_accepts_tensor()
-"""If True, ``device_ops.multi_layer_block_kv_transfer`` accepts
-``list[torch.Tensor]`` directly for ``lmcache_objects_ptrs``.
-If False, callers must convert tensors to ``list[int]`` data pointers."""
-
-logger.info(
-    "multi_layer_block_kv_transfer mode: %s",
-    "tensor" if _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR else "ptr",
-)
 
 
 def _tensors_to_ptrs(tensors: list[torch.Tensor]) -> list[int]:
@@ -327,6 +293,9 @@ def gather_paged_kv_to_cpu(
 ) -> list[torch.Tensor]:
     """Gather paged KV blocks into CPU chunk tensors.
 
+    The KV tensor device selects the transfer backend and its buffer
+    requirements, independently of process-wide accelerator availability.
+
     Args:
         kv_caches: Per-layer KV tensor mapping.
         block_ids: Flattened block IDs for all chunks.
@@ -356,7 +325,6 @@ def gather_paged_kv_to_cpu(
             of gathered chunks.
     """
     # First Party
-    from lmcache import device_ops
     from lmcache.v1.gpu_connector.utils import (
         get_block_size,
         get_device,
@@ -374,6 +342,12 @@ def gather_paged_kv_to_cpu(
     tensors = list(kv_caches.values())
     fmt, normalized = normalize_kv_and_discover_format(
         tensors, EngineType.VLLM, layout_hints=layout_hints
+    )
+    # KV tensors, not process-wide accelerator availability, select the ops.
+    device = get_device(normalized)
+    device_ops = resolve_device_ops(device.type)
+    accepts_tensor = _detect_block_transfer_accepts_tensor(
+        device_ops.multi_layer_block_kv_transfer
     )
     if engine_kv_format is None:
         engine_kv_format = fmt
@@ -410,7 +384,7 @@ def gather_paged_kv_to_cpu(
 
     # Determine if pinned memory is strictly required
     # (only for the compiled C++ path which does not accept tensor)
-    requires_pinned = not _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR
+    requires_pinned = not accepts_tensor
     needs_staging = False
     staged_chunks = []
 
@@ -475,7 +449,7 @@ def gather_paged_kv_to_cpu(
         )
 
     if selected_block_ids:
-        if _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR:
+        if accepts_tensor:
             # Python fallback: accepts tensor list directly for all params.
             paged_arg = normalized
             objs_arg = chunks
@@ -486,7 +460,7 @@ def gather_paged_kv_to_cpu(
                 paged_arg,
                 objs_arg,
                 block_ids_arg,
-                get_device(normalized),
+                device,
                 lmcache_native.TransferDirection.D2H,
                 shape_desc,
                 chunk_tokens,
@@ -502,14 +476,14 @@ def gather_paged_kv_to_cpu(
                 ),
                 dtype=np.uint64,
             ).view(np.int64)
-            paged_arg = torch.from_numpy(_ptrs_np).to(device=get_device(normalized))
+            paged_arg = torch.from_numpy(_ptrs_np).to(device=device)
 
             # This safely points to either the pre-pinned chunks
             # OR the temporary staged_chunks
             objs_arg = _tensors_to_ptrs(chunks)
 
             block_ids_arg = torch.tensor(
-                selected_block_ids, dtype=torch.int64, device=get_device(normalized)
+                selected_block_ids, dtype=torch.int64, device=device
             )
 
             # Split transfer to respect CUDA kernel's object count limitation
@@ -532,7 +506,7 @@ def gather_paged_kv_to_cpu(
                     paged_arg,
                     batch_objs_ptrs,
                     batch_blocks,
-                    get_device(normalized),
+                    device,
                     lmcache_native.TransferDirection.D2H,
                     shape_desc,
                     chunk_tokens,
@@ -577,6 +551,9 @@ def scatter_cpu_to_paged_kv(
 ) -> None:
     """Scatter CPU chunk tensors back into paged KV tensors.
 
+    The destination KV tensor device selects the transfer backend, not the
+    CPU chunk device or process-wide accelerator availability.
+
     Args:
         kv_caches: Per-layer KV tensor mapping to write into.
         block_ids: Flattened destination block IDs for all chunks.  Length
@@ -597,7 +574,6 @@ def scatter_cpu_to_paged_kv(
             ``len(chunks) * blocks_per_chunk``.
     """
     # First Party
-    from lmcache import device_ops
     from lmcache.v1.gpu_connector.utils import (
         get_block_size,
         get_device,
@@ -623,6 +599,11 @@ def scatter_cpu_to_paged_kv(
     tensors = list(kv_caches.values())
     fmt, normalized = normalize_kv_and_discover_format(
         tensors, EngineType.VLLM, layout_hints=layout_hints
+    )
+    device = get_device(normalized)
+    device_ops = resolve_device_ops(device.type)
+    accepts_tensor = _detect_block_transfer_accepts_tensor(
+        device_ops.multi_layer_block_kv_transfer
     )
     if engine_kv_format is None:
         engine_kv_format = fmt
@@ -667,7 +648,7 @@ def scatter_cpu_to_paged_kv(
     # Only the ptr-only branch below pins temporaries; the tensor branch
     # hands torch the chunks directly and keeps them alive itself.
     dynamically_pinned = False
-    if _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR:
+    if accepts_tensor:
         # Python fallback: accepts tensor list directly for all params.
         paged_arg = normalized
         objs_arg = chunks
@@ -677,7 +658,7 @@ def scatter_cpu_to_paged_kv(
             paged_arg,
             objs_arg,
             block_ids_arg,
-            get_device(normalized),
+            device,
             lmcache_native.TransferDirection.H2D,
             shape_desc,
             chunk_tokens,
@@ -707,10 +688,10 @@ def scatter_cpu_to_paged_kv(
             get_group_data_ptrs(normalized, engine_kv_format, list(range(num_layers))),
             dtype=np.uint64,
         ).view(np.int64)
-        paged_arg = torch.from_numpy(_ptrs_np).to(device=get_device(normalized))
+        paged_arg = torch.from_numpy(_ptrs_np).to(device=device)
         objs_arg = _tensors_to_ptrs(chunks)
         block_ids_arg = torch.tensor(
-            selected_block_ids, dtype=torch.int64, device=get_device(normalized)
+            selected_block_ids, dtype=torch.int64, device=device
         )
 
         # Batched transfer to satisfy cuda's limitation (max 4 objects)
@@ -735,7 +716,7 @@ def scatter_cpu_to_paged_kv(
                 paged_arg,
                 batch_objs_ptrs,
                 batch_blocks,
-                get_device(normalized),
+                device,
                 lmcache_native.TransferDirection.H2D,
                 shape_desc,
                 chunk_tokens,

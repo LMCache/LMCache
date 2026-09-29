@@ -36,11 +36,31 @@ class _CBRopeState:
     # skips re-RoPE for the group, empty list = legacy inferred geometry.
     # Required for MLA: inference would rotate the latent's content dims.
     group_rot: "list[tuple[int, int] | None]" = field(default_factory=list)
+    group_head_size: list[int] = field(default_factory=list)
+
+    def head_size_for_group(self, engine_group_idx: int) -> int:
+        """The scatter head size for one engine group.
+
+        Args:
+            engine_group_idx: The kernel group's engine group index.
+
+        Returns:
+            The group's head size, or the model-wide ``head_size`` when no
+            per-group map was registered.
+        """
+        if not self.group_head_size:
+            return self.head_size
+        if 0 <= engine_group_idx < len(self.group_head_size):
+            return self.group_head_size[engine_group_idx]
+        return self.head_size
 
     def rot_for_group(
         self, engine_group_idx: int, dtype: "torch.dtype | None" = None
     ) -> "tuple[int, int] | None":
         """The rotation window for one kernel group.
+
+        A ``-1`` group is rope-less: ``None`` regardless of ``group_rot``
+        (checked first, so the legacy ``(0, head_size)`` cannot claim it).
 
         Under a declared map, a non-float kernel group returns ``None``: one
         engine group can hold several kernel groups (e.g. a bf16 latent plus
@@ -55,6 +75,12 @@ class _CBRopeState:
         Raises:
             RuntimeError: If ``engine_group_idx`` is outside a non-empty map.
         """
+        if (
+            self.group_to_cache
+            and 0 <= engine_group_idx < len(self.group_to_cache)
+            and self.group_to_cache[engine_group_idx] < 0
+        ):
+            return None  # rope-less group
         if not self.group_rot:
             return (0, self.head_size)
         if dtype is not None and not dtype.is_floating_point:
@@ -71,7 +97,7 @@ class _CBRopeState:
 
         Rope follows attention type, so each engine group has exactly one
         cache. NoPE models register zero caches; every group then returns
-        ``None`` and re-RoPE is skipped.
+        ``None`` and re-RoPE is skipped, as does a rope-less (``-1``) group.
 
         Raises:
             RuntimeError: If ``engine_group_idx`` is outside the map.
@@ -80,6 +106,11 @@ class _CBRopeState:
             return None
         if not self.group_to_cache:
             return self.cos_sin_caches[0]
+        if (
+            0 <= engine_group_idx < len(self.group_to_cache)
+            and self.group_to_cache[engine_group_idx] < 0
+        ):
+            return None  # rope-less group
         if engine_group_idx >= len(self.group_to_cache):
             raise RuntimeError(
                 f"CB re-RoPE: engine group {engine_group_idx} has no rope "
