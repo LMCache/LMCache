@@ -35,6 +35,9 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.hf3fs_l2_adapter import Hf3fsL2AdapterConfig
+from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
+    _object_key_to_filename,
+)
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     _object_key_to_string,
 )
@@ -809,9 +812,19 @@ class TestHf3fsNativeConnector:
         assert completions[0][3] == [False]
 
     def test_multi_path_distribution(self):
-        """Test that data is distributed across multiple base paths."""
+        """Test that data is distributed across multiple base paths.
+
+        After ``submit_batch_set`` completes, every key must exist, and the
+        KV files must be spread across the configured base paths rather than
+        all landing in a single directory: each directory holds a non-zero
+        number of files and no directory holds the total key count.
+        """
         # First Party
         from lmcache.lmcache_hf3fs import LMCacheHf3fsClient
+
+        def _kv_file_count(path: Path) -> int:
+            """Number of KV ``.data`` files directly under ``path``."""
+            return sum(1 for p in path.iterdir() if p.is_file())
 
         # Create two subdirectories under the 3FS mount point
         mp = Path(_HF3FS_MOUNT_POINT)
@@ -819,6 +832,7 @@ class TestHf3fsNativeConnector:
         path2 = mp / f"test_multi_{uuid.uuid4().hex[:8]}_b"
         path1.mkdir(parents=True, exist_ok=True)
         path2.mkdir(parents=True, exist_ok=True)
+        base_paths = [path1, path2]
         try:
             client = LMCacheHf3fsClient(
                 mount_point=str(mp),
@@ -839,10 +853,23 @@ class TestHf3fsNativeConnector:
             client.submit_batch_set(keys, [memoryview(d) for d in data_list])
             _wait_for_completions(client)
 
-            # Verify all keys exist
+            # (1) Verify all keys exist
             client.submit_batch_exists(keys)
             completions = _wait_for_completions(client)
             assert all(completions[0][3])
+
+            # (2) Verify the keys are spread across both base paths: each
+            # directory must hold a non-zero number of KV files and none must
+            # hold the total key count (i.e. nothing is placed in only one
+            # path).
+            total = len(keys)
+            for path in base_paths:
+                count = _kv_file_count(path)
+                assert count != 0, f"no KV files found in {path}"
+                assert count != total, (
+                    f"all {total} KV files landed in {path}; expected a spread "
+                    f"across the {len(base_paths)} base paths"
+                )
 
             client.close()
         finally:
@@ -899,14 +926,11 @@ class TestHf3fsNativeConnector:
         from lmcache.lmcache_hf3fs import LMCacheHf3fsClient
 
         def _seed_file(directory: Path, key: ObjectKey) -> None:
-            """Write a key's .data file directly, matching the C++
-            connector's key_to_filename() encoding (no hash-based placement)."""
-            safe_model = key.model_name.replace("/", "-SEP-")
-            fname = (
-                f"{safe_model}@{key.kv_rank:#010x}@{key.object_group_id:x}"
-                f"@{key.chunk_hash.hex()}.data"
-            )
-            (directory / fname).write_bytes(b"\x00")
+            """Write a key's .data file directly using the shared canonical
+            filename encoding. Files are written straight into each path 
+            (bypassing hash-based placement) so the constructor scan must
+            discover them in every base_path."""
+            (directory / _object_key_to_filename(key)).write_bytes(b"\x00")
 
         mp = Path(_HF3FS_MOUNT_POINT)
         n_paths = 5

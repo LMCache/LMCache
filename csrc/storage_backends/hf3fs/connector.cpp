@@ -14,6 +14,8 @@
 #include <sstream>
 #include <thread>
 
+#include "../keys.h"
+
 namespace lmcache {
 namespace connector {
 
@@ -395,125 +397,39 @@ void Hf3fsConnector::write_file(WorkerHf3fsConn& conn, hf3fs_ior& ior,
 }
 
 /**
- * Convert a key string to a filesystem-safe filename.
+ * Select a base path based on the key's ``chunk_hash``.
  *
- *   Unsalted:  <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>.data
- *   Salted  :  <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
- *
- * Input key format: "{model}@{kv_rank_hex}@{chunk_hash_hex}@{cache_salt?}"
- *
- * Transformations:
- * - Split on '@' — must yield 3 (unsalted) or 4 (salted) fields.
- * - Replace '/' in model_name only with '-SEP-' (not in kv_rank or hash).
- * - Add '0x' prefix to kv_rank_hex.
- * - Append '.data' extension.
- *
- * NOTE: both model_name and cache_salt are forbidden from containing
- * '@' (invariant enforced on the Python side), so splitting on '@'
- * is unambiguous.
- *
- * @param key Key string from Python layer
- * @return Filesystem-safe filename
- */
-std::string Hf3fsConnector::key_to_filename(const std::string& key) {
-  std::vector<std::string> parts;
-  size_t start = 0;
-  for (size_t pos = 0; pos <= key.size(); ++pos) {
-    if (pos == key.size() || key[pos] == '@') {
-      parts.emplace_back(key.substr(start, pos - start));
-      start = pos + 1;
-    }
-  }
-  if (parts.size() != 3 && parts.size() != 4) {
-    fprintf(stderr,
-            "[LMCache HF3FS] key_to_filename: malformed key "
-            "(expected 3 or 4 '@'-separated fields): %s\n",
-            key.c_str());
-    throw std::runtime_error(
-        "Hf3fsConnector: malformed key (expected 3 or 4 '@'-separated "
-        "fields): " +
-        key);
-  }
-
-  const std::string& model_name = parts[0];
-  const std::string& kv_rank_hex = parts[1];
-  const std::string& chunk_hash = parts[2];
-  const std::string cache_salt = parts.size() == 4 ? parts[3] : std::string();
-
-  // Replace '/' with '-SEP-' only in model_name for filesystem safety
-  std::string safe_model = model_name;
-  size_t spos = 0;
-  while ((spos = safe_model.find('/', spos)) != std::string::npos) {
-    safe_model.replace(spos, 1, "-SEP-");
-    spos += 5;
-  }
-
-  // Build filename with '0x' prefix on kv_rank (matches FSConnector and
-  // Python-side _object_key_to_filename).
-  std::string result;
-  result.reserve(safe_model.size() + kv_rank_hex.size() + chunk_hash.size() +
-                 cache_salt.size() + 32);
-  result += safe_model;
-  result += '@';
-  result += "0x";
-  result += kv_rank_hex;
-  result += '@';
-  result += chunk_hash;
-  if (!cache_salt.empty()) {
-    result += '@';
-    result += cache_salt;
-  }
-  result += ".data";
-  return result;
-}
-
-/**
- * Select a base path based on the key's chunk_hash.
+ * Wire format:
+ *   <model>@<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>]
  *
  * Algorithm:
- * 1. Extract chunk_hash from key (format: "model@kv_rank@chunk_hash@salt")
- * 2. Take first 16 characters of hash (64 bits)
- * 3. Convert to uint64_t and mod by number of paths
- *
- * This provides hash-based distribution for load balancing.
+ * 1. Extract the ``chunk_hash_hex`` field via ``keys.h::get_chunk_hash_from_key``.
+ * 2. Use the LAST 16 hex chars (64 bits) of that hash: sequential keys
+ *    like ``...00000000``, ``...00000001`` share leading zeros but differ
+ *    in their low bits, so the tail carries the entropy.
+ * 3. Convert to uint64 and mod by number of paths.
  *
  * @param key Key string
  * @return Selected base path
  */
-const std::string& Hf3fsConnector::select_base_path(
-    const std::string& key) const {
+const std::string& Hf3fsConnector::select_base_path(const std::string& key) const {
   if (base_paths_.size() == 1) {
     return base_paths_[0];
   }
 
-  // Extract chunk_hash from key
-  // Format: "{model}@{kv_rank_hex}@{chunk_hash_hex}@{cache_salt?}"
-  size_t first_at = key.find('@');
-  if (first_at == std::string::npos) {
+  std::string hash_str;
+  try {
+    hash_str = get_chunk_hash_from_key(key);
+  } catch (const std::exception& e) {
+    fprintf(stderr, "[LMCache HF3FS] get_chunk_hash_from_key failed: %s\n", e.what());
     return base_paths_[0];
   }
-  size_t second_at = key.find('@', first_at + 1);
-  if (second_at == std::string::npos) {
-    return base_paths_[0];
-  }
-  size_t hash_start = second_at + 1;
-  size_t hash_end = key.find('@', hash_start);
-  if (hash_end == std::string::npos) {
-    hash_end = key.length();
-  }
 
-  // Extract full hash string
-  std::string hash_str = key.substr(hash_start, hash_end - hash_start);
-
-  // Use last 16 characters (64 bits) for better distribution
-  // Sequential keys like 00000000000000000000000000000000,
-  // 00000000000000000000000000000001 have zeros in first 16 chars
-  // but varying values in last 16 chars
+  // Use last 16 characters (64 bits) for better distribution.
   size_t hash_len = hash_str.length();
   size_t substr_start = (hash_len > 16) ? (hash_len - 16) : 0;
   std::string hash_substr = hash_str.substr(substr_start);
 
-  // Convert to uint64_t and select path
   uint64_t hash_val = std::stoull(hash_substr, nullptr, 16);
   size_t idx = hash_val % base_paths_.size();
 
@@ -523,7 +439,10 @@ const std::string& Hf3fsConnector::select_base_path(
 /**
  * Convert a key to a full file path.
  *
- * @param key Key string
+ * The filename is produced by  ``keys.h::key_to_filename`` The base path is selected by
+ * hashing the key's ``chunk_hash`` across ``base_paths_``.
+ *
+ * @param key Key string (wire format ``model@kv_rank@ogid@chunk_hash[@salt]``)
  * @return Full file path (base_path + filename)
  */
 std::string Hf3fsConnector::key_to_path(const std::string& key) {
@@ -694,17 +613,14 @@ void Hf3fsConnector::scan_and_build_buffer_() {
 /**
  * Scan the given base_path directories and recover keys from .data filenames.
  *
- * Inverts key_to_filename() for the new format:
- *   Filename: <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>.data
- *   Key:      <model>@<kv_rank_hex>@<chunk_hash_hex>
+ * This keeps directory traversal local to the connector; the per-file mapping
+ * from filename to the original wire key is delegated to the shared
+ * ``keys.h::filename_to_key`` (the inverse of ``keys.h::key_to_filename``),
+ * so the on-disk encoding stays consistent with the fs_native connector.
  *
- * Each path in base_paths is iterated in turn; within one directory:
- * 1. Skip non-regular files (e.g. subdirectories)
- * 2. Skip files that do not end with ".data"
- * 3. Strip the ".data" suffix
- * 4. Split on '@' and remove '0x' prefix from kv_rank to recover original key
- * 5. Replace '-SEP-' with '/' to recover the original model_name
- * 6. Insert the recovered key into the provided local set
+ * Each path in base_paths is iterated in turn; within one directory, every
+ * regular ".data" file that decodes to a well-formed key is inserted into the
+ * provided local set.
  *
  * Called from worker threads spawned in scan_and_build_buffer_().
  *
@@ -723,55 +639,10 @@ void Hf3fsConnector::buffer_scan_worker_(
       }
 
       const std::string filename = entry.path().filename().string();
-      if (filename.length() <= 5 ||
-          filename.compare(filename.length() - 5, 5, ".data") != 0) {
-        continue;
+      std::string recovered = filename_to_key(filename);
+      if (!recovered.empty()) {
+        local_set.insert(std::move(recovered));
       }
-
-      std::string key = filename.substr(0, filename.length() - 5);
-
-      // Split on '@' to recover original key parts
-      // Format: <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt?>
-      std::vector<std::string> parts;
-      size_t start = 0;
-      for (size_t pos = 0; pos <= key.size(); ++pos) {
-        if (pos == key.size() || key[pos] == '@') {
-          parts.emplace_back(key.substr(start, pos - start));
-          start = pos + 1;
-        }
-      }
-
-      if (parts.size() < 3) {
-        // Malformed filename, skip
-        continue;
-      }
-
-      // Reconstruct key: <model>@<kv_rank_hex>@<chunk_hash_hex>[@<cache_salt>]
-      // Remove "0x" prefix from kv_rank field (parts[1])
-      std::string kv_rank = parts[1];
-      if (kv_rank.size() >= 2 && kv_rank.substr(0, 2) == "0x") {
-        kv_rank = kv_rank.substr(2);
-      }
-
-      std::string recovered;
-      recovered += parts[0];
-      recovered += '@';
-      recovered += kv_rank;
-      recovered += '@';
-      recovered += parts[2];
-      for (size_t i = 3; i < parts.size(); ++i) {
-        recovered += '@';
-        recovered += parts[i];
-      }
-
-      // Replace '-SEP-' with '/' to recover original model_name with slashes
-      size_t spos = 0;
-      while ((spos = recovered.find("-SEP-", spos)) != std::string::npos) {
-        recovered.replace(spos, 5, "/");
-        spos += 1;
-      }
-
-      local_set.insert(std::move(recovered));
     }
   }
 }

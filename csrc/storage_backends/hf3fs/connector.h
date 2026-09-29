@@ -183,7 +183,6 @@ class Hf3fsConnector : public ConnectorBase<WorkerHf3fsConn> {
 
   // Path selection and key encoding
   const std::string& select_base_path(const std::string& key) const;
-  static std::string key_to_filename(const std::string& key);
   std::string key_to_path(const std::string& key);
 
   // Ior/Iov initialization

@@ -95,5 +95,91 @@ std::string key_to_filename(const std::string& key,
   }
   return chunk_hash.substr(0, 2) + "/" + chunk_hash.substr(2, 2) + "/" + result;
 }
+
+// Inverse of key_to_filename(): convert a filename back to the wire key.
+//
+// Accepts the flat (non-sharded) filename shape produced by key_to_filename():
+//   <safe_model>@0x<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>].data
+// and returns the wire key:
+//   <model>@<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>]
+//
+// Returns an empty string for any file that is not a well-formed KV-key
+// data file (e.g.: wrong extension, fewer than 4 '@'-separated fields).
+std::string filename_to_key(const std::string& filename) {
+  const std::string ext(FILE_EXT);
+  if (filename.size() <= ext.size() ||
+      filename.compare(filename.size() - ext.size(), ext.size(), ext) != 0) {
+    return {};
+  }
+
+  //Strip the ".data" suffix 
+  const std::string body = filename.substr(0, filename.size() - ext.size());
+
+  std::vector<std::string> parts;
+  size_t start = 0;
+  for (size_t pos = 0; pos <= body.size(); ++pos) {
+    if (pos == body.size() || body[pos] == KEY_SEP) {
+      parts.emplace_back(body.substr(start, pos - start));
+      start = pos + 1;
+    }
+  }
+  // Need model, kv_rank, ogid and chunk_hash (4 fields minimum).
+  if (parts.size() != 4 && parts.size() != 5) {
+    return {};
+  }
+
+  // Restore '/' in model_name
+  std::string model = parts[0];
+  const std::string sep(PATH_SLASH_REPLACEMENT);
+  size_t spos = 0;
+  while ((spos = model.find(sep, spos)) != std::string::npos) {
+    model.replace(spos, sep.size(), "/");
+    spos += 1;
+  }
+
+  // Drop the "0x" prefix from kv_rank.
+  std::string kv_rank = parts[1];
+  if (kv_rank.size() >= 2 && kv_rank.substr(0, 2) == "0x") {
+    kv_rank = kv_rank.substr(2);
+  }
+
+  // Reassemble the wire key.
+  std::string result = model;
+  result += KEY_SEP;
+  result += kv_rank;
+  for (size_t i = 2; i < parts.size(); ++i) {
+    result += KEY_SEP;
+    result += parts[i];
+  }
+  return result;
+}
+
+// Extract the ``chunk_hash`` field from key.
+//
+// Wire key format:
+//   <model>@<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>]
+//
+// The chunk_hash is always the 4th '@'-separated field (index 3). 
+std::string get_chunk_hash_from_key(const std::string& key) {
+  std::vector<std::string> parts;
+  size_t start = 0;
+  for (size_t pos = 0; pos <= key.size(); ++pos) {
+    if (pos == key.size() || key[pos] == KEY_SEP) {
+      parts.emplace_back(key.substr(start, pos - start));
+      start = pos + 1;
+    }
+  }
+  if (parts.size() != 4 && parts.size() != 5) {
+    throw std::runtime_error(
+        "Malformed key (expected 4 or 5 '@'-separated fields): " +
+        key);
+  }
+  if (parts[3].empty()) {
+    throw std::runtime_error(
+        "Malformed key (chunk hash field which behind the thrird '@' is empty): " +
+        key);
+  }
+  return parts[3];
+}
 }  // namespace connector
 }  // namespace lmcache
