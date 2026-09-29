@@ -32,6 +32,7 @@ from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
+from lmcache.v1.multiprocess.modules.experimental.chunk_store import ChunkStoreModule
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -39,9 +40,8 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
-from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.protocols.base import HandlerType
 from lmcache.v1.multiprocess.request_handler import (
+    HandlerType,
     iter_request_handlers,
     request_handler,
 )
@@ -94,12 +94,11 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
     calls = _Calls()
 
     class FakeModules:
-        @request_handler(RequestType.LOOKUP, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def lookup(self, key: IPCCacheServerKey, tp_size: int) -> None:
             calls.lookup = (key, tp_size)
 
         @request_handler(
-            RequestType.STORE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
@@ -116,28 +115,6 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             return b"output-event", key.model_name == "model"
 
         @request_handler(
-            RequestType.STORE_WITH_CHUNK_EVENTS,
-            HandlerType.BLOCKING,
-            requires_client_affinity=True,
-        )
-        def store_with_chunk_events(
-            self,
-            key: IPCCacheServerKey,
-            instance_id: int,
-            block_ids: list[list[int]],
-            event_ipc_handle: bytes,
-        ) -> tuple[bytes, list[tuple[bytes, int, int]], bool]:
-            assert instance_id == 7
-            assert block_ids == [[1, 2], [3]]
-            assert event_ipc_handle == b"input-event"
-            return (
-                b"output-event",
-                [(b"chunk-event", 0, 3)],
-                key.model_name == "model",
-            )
-
-        @request_handler(
-            RequestType.PREPARE_STORE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
@@ -151,7 +128,6 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             )
 
         @request_handler(
-            RequestType.PREPARE_RETRIEVE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
@@ -166,26 +142,29 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
                 context={"slot": 3},
             )
 
-        @request_handler(RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
+        @request_handler()
         def register_kv_cache_engine_driven_context(
             self, payload: RegisterEngineDrivenContextPayload
         ) -> RegisterEngineDrivenContextResponse:
             assert payload.num_physical_slots == 32
             return RegisterEngineDrivenContextResponse("shared-memory", 4096)
 
-        @request_handler(RequestType.PING, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def ping(self, instance_id: int | None) -> bool:
             return instance_id == 7
 
-        @request_handler(RequestType.CLEAR, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def clear(self, force: bool = False) -> None:
             calls.clear_force = force
 
-        @request_handler(RequestType.NOOP)
+        @request_handler(operation="noop")
         def debug(self) -> str:
             return "ok"
 
-        @request_handler(RequestType.REPORT_BLOCK_ALLOCATION, HandlerType.BLOCKING)
+        @request_handler(
+            HandlerType.BLOCKING,
+            operation="report_block_allocation",
+        )
         def report_block_allocations(
             self,
             instance_id: int,
@@ -194,7 +173,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
         ) -> None:
             calls.allocation = (instance_id, model_name, records)
 
-        @request_handler(RequestType.CB_UNIFIED_LOOKUP, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def cb_unified_lookup(
             self, key: IPCCacheServerKey, tp_size: int
         ) -> CBUnifiedLookupResult | None:
@@ -205,7 +184,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
                 non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash")],
             )
 
-        @request_handler(RequestType.P2P_LOOKUP_AND_LOCK, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def p2p_lookup_and_lock(
             self,
             keys: list[ObjectKey],
@@ -216,7 +195,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             assert group_layout_descs[0].dtypes == [torch.float16]
             return 41
 
-        @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def p2p_query_lookup_results(
             self, task_id: int
         ) -> list[TransferChannelAddress] | None:
@@ -254,7 +233,6 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     assert "EngineService" not in bindings
     assert {method.name for _, method in iter_methods()} >= {
         "Store",
-        "StoreWithChunkEvents",
         "PrepareStore",
         "Lookup",
         "StoreQ",
@@ -264,7 +242,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     assert set(registry.by_full_name) == generated_methods
 
     lookup_codec = registry.by_full_name["lmcache.mp.LookupService.Lookup"]
-    assert lookup_codec.request_type is RequestType.LOOKUP
+    assert lookup_codec.operation == "lookup"
     assert lookup_codec.payload_types == (IPCCacheServerKey, int)
     assert lookup_codec.response_type is type(None)
 
@@ -277,22 +255,8 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     )
     assert store_codec.response_type == tuple[bytes, bool]
 
-    chunk_store_codec = registry.by_full_name[
-        "lmcache.mp.LMCacheDrivenService.StoreWithChunkEvents"
-    ]
-    assert chunk_store_codec.payload_types == (
-        IPCCacheServerKey,
-        int,
-        list[list[int]],
-        bytes,
-    )
-    assert (
-        chunk_store_codec.response_type
-        == tuple[bytes, list[tuple[bytes, int, int]], bool]
-    )
-
     clear_codec = registry.by_full_name["lmcache.mp.ControllerService.Clear"]
-    assert clear_codec.request_type is RequestType.CLEAR
+    assert clear_codec.operation == "clear"
     assert clear_codec.payload_types == (bool,)
     assert clear_codec.request_decoder(clear_codec.request_encoder((), {})) == (False,)
     assert clear_codec.request_decoder(
@@ -340,19 +304,20 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
         LMCacheDrivenTransferModule,
         EngineDrivenTransferModule,
         QStoreModule,
+        ChunkStoreModule,
         BlendModule,
     )
     handlers = {
-        registered.options.request_type: registered.handler
+        registered.operation: registered.handler
         for module_type in module_types
         for registered in iter_request_handlers(module_type)
     }
     registry = get_method_codec_registry()
     codecs = tuple(registry.by_full_name.values())
 
-    assert set(handlers) == {codec.request_type for codec in codecs}
+    assert set(handlers) == {codec.operation for codec in codecs}
     for codec in codecs:
-        codec.validate_handler(handlers[codec.request_type])
+        codec.validate_handler(handlers[codec.operation])
 
 
 def test_grpc_imports_do_not_load_zmq_runtime() -> None:
@@ -519,9 +484,6 @@ def test_generated_grpc_services_communicate_end_to_end(
         b"output-event",
         True,
     )
-    assert client.store_with_chunk_events(key, 7, [[1, 2], [3]], b"input-event").result(
-        5
-    ) == (b"output-event", [(b"chunk-event", 0, 3)], True)
     assert client.prepare_store(key, 7).result(5) == PrepareStoreResponse(
         context={"slots": [{"offset": 8}], "chunk_indices": [2]}
     )

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import cast
 import gc
 import multiprocessing as mp
 import threading
@@ -13,7 +12,6 @@ import pytest
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.futures import CUDAMessagingFuture, MessagingFuture
-from lmcache.v1.platform.base.event_ipc import EventIPCBackend
 
 
 def _event_ipc_supported_for_active_device() -> bool:
@@ -255,49 +253,6 @@ def test_messaging_future_retains_reference_for_its_lifetime() -> None:
     del future
     gc.collect()
     assert resource_ref() is None
-
-
-def test_chunk_event_future_drains_ranges_before_terminal_event() -> None:
-    class EventBackend:
-        def __init__(self) -> None:
-            self.ready = {b"chunk-0": True, b"chunk-1": False, b"final": False}
-
-        def import_event(self, handle, _device):
-            return handle
-
-        def query_event(self, event):
-            return self.ready[event]
-
-        def synchronize_event(self, event, _device):
-            self.ready[event] = True
-
-    backend = EventBackend()
-    raw: MessagingFuture[tuple[bytes, list[tuple[bytes, int, int]], bool]] = (
-        MessagingFuture()
-    )
-    future = raw.to_chunk_event_device_future(
-        device=0, event_backend=cast(EventIPCBackend, backend)
-    )
-    assert future.take_completed_ranges() == ()
-
-    raw.set_result(
-        (
-            b"final",
-            [(b"chunk-0", 0, 8), (b"chunk-1", 8, 16)],
-            True,
-        )
-    )
-    assert future.take_completed_ranges() == ((0, 8),)
-    assert future.take_completed_ranges() == ()
-    assert not future.query()
-
-    backend.ready[b"chunk-1"] = True
-    assert future.take_completed_ranges() == ((8, 16),)
-    assert not future.query()
-
-    backend.ready[b"final"] = True
-    assert future.query()
-    assert future.result(timeout=0) is True
 
 
 # ==============================================================================
@@ -750,6 +705,48 @@ def test_device_future_delegates_to_backend(monkeypatch):
     assert ("check", "dev") in calls
     assert ("import", b"h", "dev") in calls
     assert any(c[0] == "sync" for c in calls)
+
+
+def test_device_future_wait_on_stream_does_not_synchronize(monkeypatch):
+    """Stream ordering imports the event without blocking the host."""
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    calls = []
+
+    class _FakeBackend:
+        device_type = "fake"
+
+        def check_event_support(self, device):
+            calls.append(("check", device))
+
+        def import_event(self, handle, device):
+            calls.append(("import", handle, device))
+            return "EVT"
+
+        def wait_event(self, event, stream):
+            calls.append(("wait", event, stream))
+
+        def synchronize_event(self, event, device):
+            calls.append(("sync", event, device))
+
+        def query_event(self, event):
+            return False
+
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        lambda device=None: _FakeBackend(),
+    )
+
+    raw = MessagingFuture[tuple[bytes, bool]]()
+    fut = DeviceMessagingFuture.FromMessagingFuture(raw, device="dev")
+    raw.set_result((b"completion-event", True))
+
+    assert fut.wait_on_stream("forward", timeout=0) is True
+    assert ("import", b"completion-event", "dev") in calls
+    assert ("wait", "EVT", "forward") in calls
+    assert not any(call[0] == "sync" for call in calls)
+    assert fut.query() is False
 
 
 def test_device_future_empty_handle_is_terminal(monkeypatch):

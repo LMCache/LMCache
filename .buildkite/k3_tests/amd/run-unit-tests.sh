@@ -6,6 +6,11 @@ export AMD_SERIALIZE_KERNEL=1
 echo "AMD kernel mode: serialized"
 echo "$PWD" # for debugging
 
+# Keep the AMD pod aligned with the PR + latest target branch, matching the
+# k3 harness behavior used by the other test suites.
+source .buildkite/k3_tests/common_scripts/helpers.sh
+merge_pr_base_branch
+
 uv venv --python 3.12 ".venv-${BUILDKITE_BUILD_ID}"
 # shellcheck disable=SC1090 # Buildkite generates a unique virtualenv path per build.
 source ".venv-${BUILDKITE_BUILD_ID}/bin/activate"

@@ -2,10 +2,28 @@
 """Transport-neutral multiprocess request contracts."""
 
 # Standard
-from typing import Any, Protocol
+from typing import Protocol
 
 # First Party
+from lmcache.utils import EngineType
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
+from lmcache.v1.multiprocess.chunk_event_future import ChunkStoreResponse
+from lmcache.v1.multiprocess.custom_types import (
+    BlockAllocationRecord,
+    CBMatchResult,
+    CBUnifiedLookupResult,
+    DeviceIPCWrapper,
+    IPCCacheServerKey,
+    PrepareRetrieveResponse,
+    PrepareStoreResponse,
+    RegisterEngineDrivenContextPayload,
+    RegisterEngineDrivenContextResponse,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.rpc import rpc_method
 
 
 class RequestServer(Protocol):
@@ -21,169 +39,247 @@ class RequestServer(Protocol):
 
 
 class RequestClient(Protocol):
-    """Base class for method-oriented multiprocess request clients."""
+    """Typed, transport-neutral contract for multiprocess RPC clients."""
 
+    @rpc_method
     def register_kv_cache(
         self,
         instance_id: int,
-        kv_cache: Any,
+        kv_cache: list[DeviceIPCWrapper],
         model_name: str,
         world_size: int,
-        engine_type: Any,
-        layout_hints: Any,
-        engine_group_infos: list[Any],
-    ) -> MessagingFuture[Any]: ...
+        engine_type: EngineType,
+        layout_hints: LayoutHints,
+        engine_group_infos: list[EngineGroupInfo],
+    ) -> MessagingFuture[None]: ...
 
-    def unregister_kv_cache(self, instance_id: int) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def unregister_kv_cache(self, instance_id: int) -> MessagingFuture[None]: ...
 
+    @rpc_method
     def register_q_cache(
         self,
         instance_id: int,
-        q_cache: Any,
+        q_cache: list[DeviceIPCWrapper],
         model_name: str,
         world_size: int,
-        engine_type: Any,
-        layout_hints: Any,
-        engine_group_infos: list[Any],
-    ) -> MessagingFuture[Any]: ...
+        engine_type: EngineType,
+        layout_hints: LayoutHints,
+        engine_group_infos: list[EngineGroupInfo],
+    ) -> MessagingFuture[None]: ...
 
-    def unregister_q_cache(self, instance_id: int) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def unregister_q_cache(self, instance_id: int) -> MessagingFuture[None]: ...
 
+    @rpc_method
     def store_q(
         self,
-        key: Any,
+        key: IPCCacheServerKey,
         instance_id: int,
         block_ids: list[list[int]],
         event_ipc_handle: bytes,
-    ) -> MessagingFuture[Any]: ...
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
 
+    @rpc_method
     def store(
         self,
-        key: Any,
+        key: IPCCacheServerKey,
         instance_id: int,
         block_ids: list[list[int]],
         event_ipc_handle: bytes,
-    ) -> MessagingFuture[Any]: ...
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
 
+    @rpc_method
     def store_with_chunk_events(
         self,
-        key: Any,
+        key: IPCCacheServerKey,
         instance_id: int,
         block_ids: list[list[int]],
         event_ipc_handle: bytes,
-    ) -> MessagingFuture[Any]: ...
+    ) -> MessagingFuture[ChunkStoreResponse]:
+        """Store with source-safe chunk events leased until explicit release.
 
+        Args:
+            key: Token range and cache identity.
+            instance_id: Registered worker ID.
+            block_ids: Source block IDs in kernel-group order.
+            event_ipc_handle: Producer event ordering reads of source KV.
+
+        Returns:
+            Future carrying the terminal handle, chunk handles and token
+            ranges, success flag, and event lease ID.
+        """
+        ...
+
+    @rpc_method
+    def release_chunk_store_events(
+        self, instance_id: int, lease_id: str
+    ) -> MessagingFuture[None]:
+        """Acknowledge that no imported events from this lease will be used again.
+
+        Args:
+            instance_id: Worker owning the lease.
+            lease_id: ID returned by store_with_chunk_events.
+
+        Returns:
+            Future acknowledging idempotent lease release.
+        """
+        ...
+
+    @rpc_method
     def retrieve(
         self,
-        key: Any,
+        key: IPCCacheServerKey,
         instance_id: int,
         block_ids: list[list[int]],
         event_ipc_handle: bytes,
         skip_first_n_tokens: int,
-    ) -> MessagingFuture[Any]: ...
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
 
-    def lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def lookup(self, key: IPCCacheServerKey, tp_size: int) -> MessagingFuture[None]: ...
 
-    def query_prefetch_status(self, request_id: str) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def query_prefetch_status(self, request_id: str) -> MessagingFuture[int | None]: ...
 
+    @rpc_method
     def wait_prefetch_status(
         self, request_id: str, timeout: float
-    ) -> MessagingFuture[Any]: ...
+    ) -> MessagingFuture[int | None]: ...
 
-    def query_prefetch_lookup_hits(self, request_id: str) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def free_lookup_locks(
+        self, key: IPCCacheServerKey, tp_size: int
+    ) -> MessagingFuture[None]: ...
 
-    def free_lookup_locks(self, key: Any, tp_size: int) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def end_session(self, request_id: str) -> MessagingFuture[None]: ...
 
-    def end_session(self, request_id: str) -> MessagingFuture[Any]: ...
-
+    @rpc_method
     def register_kv_cache_engine_driven_context(
-        self, payload: Any
-    ) -> MessagingFuture[Any]: ...
+        self, payload: RegisterEngineDrivenContextPayload
+    ) -> MessagingFuture[RegisterEngineDrivenContextResponse]: ...
 
+    @rpc_method
     def unregister_kv_cache_engine_driven_context(
         self, instance_id: int
-    ) -> MessagingFuture[Any]: ...
+    ) -> MessagingFuture[None]: ...
 
-    def prepare_store(self, key: Any, instance_id: int) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def prepare_store(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> MessagingFuture[PrepareStoreResponse]: ...
 
+    @rpc_method
     def commit_store(
-        self, key: Any, instance_id: int, data: bytes
-    ) -> MessagingFuture[Any]: ...
+        self, key: IPCCacheServerKey, instance_id: int, data: bytes
+    ) -> MessagingFuture[bool]: ...
 
-    def prepare_retrieve(self, key: Any, instance_id: int) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def prepare_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> MessagingFuture[PrepareRetrieveResponse]: ...
 
-    def commit_retrieve(self, key: Any, instance_id: int) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def commit_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> MessagingFuture[bool]: ...
 
-    def clear(self, force: bool = False) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def clear(self, force: bool = False) -> MessagingFuture[None]: ...
 
-    def get_chunk_size(self) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def get_chunk_size(self) -> MessagingFuture[int]: ...
 
-    def ping(self, instance_id: int | None) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def ping(self, instance_id: int | None) -> MessagingFuture[bool]: ...
 
+    @rpc_method
     def report_block_allocation(
         self,
         instance_id: int,
         model_name: str,
-        records: list[Any],
-    ) -> MessagingFuture[Any]: ...
+        records: list[BlockAllocationRecord],
+    ) -> MessagingFuture[None]: ...
 
-    def noop(self) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def noop(self) -> MessagingFuture[str]: ...
 
+    @rpc_method
     def cb_register_rope(
         self,
         instance_id: int,
-        cos_sin_caches_ipc: list[Any],
+        cos_sin_caches_ipc: list[DeviceIPCWrapper],
         head_size: int,
         is_neox_style: bool,
         group_to_cache: list[int],
         group_rot: list[list[int]],
-    ) -> MessagingFuture[Any]: ...
+        group_head_size: list[int],
+    ) -> MessagingFuture[None]: ...
 
-    def cb_unregister_rope(self, instance_id: int) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def cb_unregister_rope(self, instance_id: int) -> MessagingFuture[None]: ...
 
+    @rpc_method
     def cb_retrieve_pre_computed(
         self,
-        key: Any,
-        match_results: list[Any],
+        key: IPCCacheServerKey,
+        match_results: list[CBMatchResult],
         block_ids: list[list[int]],
         instance_id: int,
         event_ipc_handle: bytes,
-    ) -> MessagingFuture[Any]: ...
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
 
-    def cb_unified_lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def cb_unified_lookup(
+        self, key: IPCCacheServerKey, tp_size: int
+    ) -> MessagingFuture[CBUnifiedLookupResult | None]: ...
 
-    def cb_protocol_handshake(self, client_version: int) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def cb_protocol_handshake(
+        self, client_version: int
+    ) -> MessagingFuture[tuple[int, bool]]: ...
 
+    @rpc_method
     def p2p_lookup_and_lock(
-        self, keys: list[Any], group_layout_descs: dict[int, Any]
-    ) -> MessagingFuture[Any]: ...
+        self,
+        keys: list[ObjectKey],
+        group_layout_descs: dict[int, MemoryLayoutDesc],
+    ) -> MessagingFuture[int]: ...
 
-    def p2p_query_lookup_results(self, task_id: int) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def p2p_query_lookup_results(
+        self, task_id: int
+    ) -> MessagingFuture[list[TransferChannelAddress] | None]: ...
 
-    def p2p_unlock_objects(self, keys: list[Any]) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def p2p_unlock_objects(self, keys: list[ObjectKey]) -> MessagingFuture[None]: ...
 
-    def get_experimental(self) -> MessagingFuture[Any]: ...
+    @rpc_method
+    def get_experimental(self) -> MessagingFuture[list[str]]: ...
 
     def cb_register_rope_v3(
         self,
         instance_id: int,
-        cos_sin_caches_ipc: list[Any],
+        cos_sin_caches_ipc: list[DeviceIPCWrapper],
         head_size: int,
         is_neox_style: bool,
         group_to_cache: list[int],
         group_rot: list[list[int]],
-    ) -> MessagingFuture[Any]: ...
+        group_head_size: list[int],
+    ) -> MessagingFuture[None]: ...
 
-    def cb_unregister_rope_v3(self, instance_id: int) -> MessagingFuture[Any]: ...
+    def cb_unregister_rope_v3(self, instance_id: int) -> MessagingFuture[None]: ...
 
     def cb_retrieve_pre_computed_v3(
         self,
-        key: Any,
-        match_results: list[Any],
+        key: IPCCacheServerKey,
+        match_results: list[CBMatchResult],
         block_ids: list[list[int]],
         instance_id: int,
         event_ipc_handle: bytes,
-    ) -> MessagingFuture[Any]: ...
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
 
     def close(self) -> None:
         """Close the client and release its transport resources."""
+        ...

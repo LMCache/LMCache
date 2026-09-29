@@ -17,10 +17,15 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
-from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
+from lmcache.v1.multiprocess.chunk_event_future import ChunkEventDeviceMessagingFuture
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheServerKey,
+    RegisterEngineDrivenContextPayload,
+    RegisterEngineDrivenContextResponse,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
+from lmcache.v1.multiprocess.modules.experimental import CHUNK_STORE
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
@@ -420,30 +425,25 @@ class TransferContext(ABC):
     def submit_store_with_chunk_events(
         self,
         request_id: str,
-        key: Any,
+        key: IPCCacheServerKey,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
         event: IPCEvent | None,
         blocks_in_chunk: int,
-    ) -> MessagingFuture:
-        """Submit a store that may report completed token ranges early.
-
-        The base implementation falls back to :meth:`submit_store`, whose
-        future has no ``take_completed_ranges``. Callers must therefore treat
-        early ranges as an optimization and still handle terminal completion as
-        the only guaranteed signal.
+    ) -> MessagingFuture[bool]:
+        """Submit a store, optionally exposing early source-safe token ranges.
 
         Args:
-            request_id: Identifier of the originating request.
-            key: Cache key for the stored range.
-            kv_caches: Registered KV cache tensors by layer name.
-            block_ids: Engine block IDs, indexed by engine group order.
-            event: Producer event ordering the store after the engine's writes.
-            blocks_in_chunk: Engine blocks covered by one LMCache chunk.
+            request_id: Originating engine request ID.
+            key: Cache key describing the stored token range.
+            kv_caches: Registered source tensors.
+            block_ids: Source blocks in kernel-group order.
+            event: Producer event ordering access to source tensors.
+            blocks_in_chunk: Engine blocks in one LMCache chunk.
 
         Returns:
-            A future for the store. It exposes ``take_completed_ranges`` only
-            when the transport supports per-chunk events.
+            A store future. This base implementation falls back to ordinary
+            store; callers must handle terminal completion without early ranges.
         """
         return self.submit_store(
             request_id, key, kv_caches, block_ids, event, blocks_in_chunk
@@ -514,6 +514,31 @@ class LMCacheDrivenTransferContext(TransferContext):
         super().__init__(instance_id, req_client)
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
+        self._mq_timeout: float = 0.0
+        self._inflight_stores: list[MessagingFuture] = []
+        self._inflight_lock = threading.Lock()
+        self._chunk_store_enabled: bool | None = None
+        self._chunk_stores: list[ChunkEventDeviceMessagingFuture] = []
+
+    @staticmethod
+    def _store_settled(future: MessagingFuture) -> bool:
+        """Whether the server is done with this store's engine KV blocks.
+
+        ``query()`` raises when the store's RPC failed, so a failed store is
+        reported as settled: it is no longer reading the blocks, and its error
+        is surfaced by the request path that owns it rather than here.
+
+        Args:
+            future: A store future returned by ``submit_store``.
+
+        Returns:
+            True if the store completed or failed, False if still in flight.
+        """
+        try:
+            return future.query()
+        except Exception:
+            logger.debug("Treating a failed store as settled", exc_info=True)
+            return True
 
     def register(
         self,
@@ -553,7 +578,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 model_name,
                 world_size,
                 engine_type,
-                layout_hints,
+                layout_hints or {},
                 list(engine_group_infos),
             )
         )
@@ -562,6 +587,8 @@ class LMCacheDrivenTransferContext(TransferContext):
             return
         self._device = device
         self._event_backend = event_backend
+        self._mq_timeout = mq_timeout
+        self._chunk_store_enabled = None
 
     def create_recorded_event(self) -> IPCEvent:
         """Create and record an exportable event for handle-based transfer.
@@ -584,10 +611,14 @@ class LMCacheDrivenTransferContext(TransferContext):
     def unregister(self) -> MessagingFuture[Any] | None:
         """Start handle-path unregistration for this worker instance.
 
+        Drain optional chunk-event leases before unregister can destroy their
+        exporters. Failed releases remain tracked for a subsequent retry.
+
         Returns:
             A future for the server's unregister acknowledgement.
 
         """
+        self._drain_chunk_releases(block=True)
         return self._submit_unregistration(
             lambda: self._req_client.unregister_kv_cache(self._instance_id)
         )
@@ -608,7 +639,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             model_name,
             world_size,
             EngineType.VLLM,
-            layout_hints,
+            layout_hints or {},
             list(engine_group_infos),
         )
         future.result(timeout=mq_timeout)
@@ -648,38 +679,86 @@ class LMCacheDrivenTransferContext(TransferContext):
         if event is None:
             raise RuntimeError("LMCache-driven transfer requires an IPC event.")
         event_ipc_handle = self._event_backend.export_event(event, self._device)
-        return self._req_client.store(
+        future = self._req_client.store(
             key, self._instance_id, block_ids, event_ipc_handle
         ).to_device_future(
             device=self._device,
             event_backend=self._event_backend,
         )
+        with self._inflight_lock:
+            self._inflight_stores = [
+                f for f in self._inflight_stores if not self._store_settled(f)
+            ]
+            self._inflight_stores.append(future)
+        return future
 
     def submit_store_with_chunk_events(
         self,
-        _request_id: str,
-        key: Any,
+        request_id: str,
+        key: IPCCacheServerKey,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
         event: IPCEvent | None,
-        _blocks_in_chunk: int,
-    ) -> MessagingFuture:
-        """Submit a handle-based store with per-chunk D2H completion events."""
-        del kv_caches
+        blocks_in_chunk: int,
+    ) -> MessagingFuture[bool]:
+        """Submit to the optional chunk module, or use ordinary store if disabled.
+
+        Args:
+            request_id: Originating engine request ID.
+            key: Cache key describing the stored token range.
+            kv_caches: Registered source tensors.
+            block_ids: Source blocks in kernel-group order.
+            event: Producer event ordering access to source tensors.
+            blocks_in_chunk: Engine blocks in one LMCache chunk.
+
+        Returns:
+            A host-polled chunk-event future when the server advertises the
+            module; otherwise an ordinary terminal-only store future.
+
+        Raises:
+            RuntimeError: Registration or a producer event is missing.
+            TimeoutError: The initial module-discovery request timed out.
+        """
         if self._device is None or self._event_backend is None:
             raise RuntimeError(
-                "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_store_with_chunk_events()."
             )
         if event is None:
             raise RuntimeError("LMCache-driven transfer requires an IPC event.")
-        event_ipc_handle = self._event_backend.export_event(event, self._device)
-        return self._req_client.store_with_chunk_events(
-            key, self._instance_id, block_ids, event_ipc_handle
-        ).to_chunk_event_device_future(
-            device=self._device,
-            event_backend=self._event_backend,
+        if self._chunk_store_enabled is None:
+            self._chunk_store_enabled = (
+                CHUNK_STORE
+                in self._req_client.get_experimental().result(self._mq_timeout)
+            )
+        if not self._chunk_store_enabled:
+            return self.submit_store(
+                request_id, key, kv_caches, block_ids, event, blocks_in_chunk
+            )
+        raw = self._req_client.store_with_chunk_events(
+            key,
+            self._instance_id,
+            block_ids,
+            self._event_backend.export_event(event, self._device),
         )
+        future = ChunkEventDeviceMessagingFuture(
+            raw,
+            self._device,
+            self._event_backend,
+            lambda lease_id: self._req_client.release_chunk_store_events(
+                self._instance_id, lease_id
+            ),
+        )
+        future.retain_reference(event)
+        with self._inflight_lock:
+            self._inflight_stores = [
+                f for f in self._inflight_stores if not self._store_settled(f)
+            ]
+            self._inflight_stores.append(future)
+            # Completed stores still own the release acknowledgement until it
+            # has arrived; close drains these before shutting down transport.
+            self._chunk_stores.append(future)
+        self._drain_chunk_releases(block=False)
+        return future
 
     def submit_q_store(
         self,
@@ -754,11 +833,61 @@ class LMCacheDrivenTransferContext(TransferContext):
     def close(self) -> None:
         """Release the message queue and cached event-backend state."""
         self._mark_closed()
+        self._drain_chunk_releases(block=True)
         self._device = None
         self._event_backend = None
 
+    def _drain_chunk_releases(self, *, block: bool) -> None:
+        with self._inflight_lock:
+            pending = self._chunk_stores
+            self._chunk_stores = []
+        remaining = []
+        first_error: Exception | None = None
+        try:
+            for future in pending:
+                try:
+                    if block:
+                        future.wait_for_release(self._mq_timeout)
+                    elif not future.release_complete():
+                        remaining.append(future)
+                except Exception as exc:
+                    # One failed ACK must not lose other outstanding leases or
+                    # prevent returning a newly submitted store to its owner.
+                    remaining.append(future)
+                    first_error = first_error or exc
+                    logger.exception("Failed draining a chunk store event lease")
+        finally:
+            with self._inflight_lock:
+                self._chunk_stores.extend(remaining)
+        if block and first_error is not None:
+            raise first_error
+
     def flush_inflight_stores(self) -> None:
-        pass
+        """Block until the server has finished reading the engine KV blocks.
+
+        In this mode the server copies the blocks on its own stream after the
+        forward pass that produced them, and the engine never waits for that
+        copy.  When the scheduler preempts a request it frees those blocks
+        immediately and may hand them to another request in the same step,
+        whose forward pass would overwrite blocks the server is still reading
+        and commit the wrong KV under the preempted request's keys.
+
+        A timeout is logged rather than raised, so a slow server degrades to a
+        possibly stale store instead of a crashed engine.
+        """
+        with self._inflight_lock:
+            pending = [f for f in self._inflight_stores if not self._store_settled(f)]
+            self._inflight_stores = []
+        for future in pending:
+            try:
+                if not future.wait(timeout=self._mq_timeout):
+                    logger.warning(
+                        "A store did not finish within %.1fs; its KV blocks may "
+                        "be overwritten while the server is still reading them",
+                        self._mq_timeout,
+                    )
+            except Exception:
+                logger.exception("Failed waiting for an in-flight store")
 
 
 class EngineDrivenTransferContext(TransferContext):

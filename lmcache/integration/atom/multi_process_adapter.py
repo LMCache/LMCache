@@ -460,7 +460,21 @@ class AtomMPWorkerAdapter:
         spec: AtomMPTransferSpec,
         event: _IpcEvent,
     ) -> MessagingFuture[bool] | None:
-        """Submit a store exposing stream-ordered source-safe token ranges."""
+        """Submit a store exposing stream-ordered source-safe token ranges.
+
+        Args:
+            request_id: Engine request ID used to track the operation.
+            spec: Token range and source blocks to store.
+            event: Producer event ordering reads of the source KV buffers.
+
+        Returns:
+            A host-polled chunk future, or an ordinary store future when the
+            module is disabled. Returns None when closed or disconnected.
+
+        Raises:
+            RuntimeError: The adapter has no registered transfer context.
+            TimeoutError: Server capability discovery timed out.
+        """
         with self._state_lock:
             if self._closed or not self._health_event.is_set():
                 return None

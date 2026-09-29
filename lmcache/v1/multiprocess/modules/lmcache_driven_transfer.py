@@ -2,9 +2,9 @@
 """LMCache-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Sequence
-import enum
 import threading
 import time
 
@@ -37,11 +37,9 @@ from lmcache.v1.multiprocess.native_completion import (
 )
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
-    kept_blocks_per_chunk,
     transfer_kv_per_object_group,
 )
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
-from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -88,11 +86,12 @@ def all_null_chunk_masks(
     object_groups: Sequence[ObjectGroupInfo],
     blocks_per_chunk: Sequence[int],
     num_chunks: int,
+    null_block_id: int = 0,
 ) -> list[list[bool]]:
     """Mark, per object group, the chunks whose engine block ids are all null.
 
-    A chunk is null for an object group when every block id of every kernel
-    group in that group is 0 (the vLLM null block). Align-mode Mamba/linear
+    A chunk is null for an object group when every block ID of every kernel
+    group equals the server's null marker. Align-mode Mamba/linear
     layers produce such chunks: only the block holding the last recurrent state
     is real, so every earlier chunk is null. These chunks must not be stored --
     the null block carries no valid KV, and object keys are content hashes, so
@@ -105,6 +104,8 @@ def all_null_chunk_masks(
         blocks_per_chunk: Blocks in one chunk per kernel group, indexed by
             kernel-group index.
         num_chunks: Number of chunks in the request.
+        null_block_id: Server-wide block ID denoting absent data. Defaults to
+            the historical vLLM null block zero.
 
     Returns:
         ``mask[g][i]`` is True iff chunk ``i`` is all-null for object group ``g``.
@@ -116,22 +117,15 @@ def all_null_chunk_masks(
             is_null = True
             for kg in group.kernel_group_indices:
                 bpc = blocks_per_chunk[kg]
-                if any(block_ids[kg][i * bpc : (i + 1) * bpc]):
+                if any(
+                    block != null_block_id
+                    for block in block_ids[kg][i * bpc : (i + 1) * bpc]
+                ):
                     is_null = False
                     break
             chunk_null.append(is_null)
         masks.append(chunk_null)
     return masks
-
-
-class StoreCompletionDetail(enum.Enum):
-    """How much completion detail a store reports back to its caller."""
-
-    TERMINAL_ONLY = enum.auto()
-    """Report a single terminal event covering the whole store."""
-
-    PER_CHUNK_EVENTS = enum.auto()
-    """Additionally report one stream-ordered event per token chunk."""
 
 
 @dataclass
@@ -185,6 +179,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # ops -- never across context creation, layout-registry calls, or
         # empty_cache (leaf-lock invariant: no thread holds two locks).
         self._lock = threading.Lock()
+        self._unregister_listeners: list[Callable[[int], None]] = []
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
@@ -212,6 +207,24 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
+    def add_unregister_listener(self, listener: Callable[[int], None]) -> None:
+        """Register cleanup of module state when a worker explicitly unregisters.
+
+        Args:
+            listener: Callback receiving the retired worker ID, outside our lock.
+        """
+        with self._lock:
+            self._unregister_listeners.append(listener)
+
+    def remove_unregister_listener(self, listener: Callable[[int], None]) -> None:
+        """Detach a previously registered worker-cleanup callback.
+
+        Args:
+            listener: Callback previously passed to add_unregister_listener.
+        """
+        with self._lock:
+            self._unregister_listeners.remove(listener)
+
     def get_and_touch_context_entry(self, instance_id: int) -> ContextEntry | None:
         """Return the entry for ``instance_id``, refreshing its last-seen time.
 
@@ -231,6 +244,58 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
             return entry
+
+    def publish_token_bindings(
+        self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
+    ) -> None:
+        """Publish one ``MP_TOKENS`` event for ``key``'s chunks.
+
+        Pairs each complete chunk in ``[key.start, key.end)`` with its
+        ObjectKey chunk hash and token position. Must be called at store
+        submission, before the write-finished events reach the bus, so the
+        cache-event subscriber can stamp them onto the STORE entries. A
+        store that later fails leaves only unused cache entries.
+
+        Args:
+            key: The IPC key of the store being submitted.
+            obj_keys: One ObjectKey per complete chunk, in chunk order.
+        """
+        # Complete chunks in [key.start, key.end) paired with the absolute
+        # position of each chunk's first token. Prefix-chained chunk hashes
+        # imply a position without revealing it, so it is reported here. A
+        # trailing partial chunk has no stored KV to bind to.
+        chunk_size = self._ctx.chunk_size
+        token_ids = list(key.token_ids)
+        effective_len = min(len(token_ids), key.end)
+        num_complete = effective_len - effective_len % chunk_size
+        token_offsets = list(range(key.start, num_complete, chunk_size))
+        token_chunks = [
+            token_ids[offset : offset + chunk_size] for offset in token_offsets
+        ]
+        if not token_chunks:
+            return
+        if len(obj_keys) != len(token_chunks):
+            logger.warning(
+                "Skipping token bindings for request %s: %d resolved keys "
+                "vs %d complete chunks in [%d, %d)",
+                key.request_id,
+                len(obj_keys),
+                len(token_chunks),
+                key.start,
+                key.end,
+            )
+            return
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=EventType.MP_TOKENS,
+                session_id=key.request_id,
+                metadata={
+                    "chunk_hashes": [obj_key.chunk_hash for obj_key in obj_keys],
+                    "token_chunks": token_chunks,
+                    "token_offsets": token_offsets,
+                },
+            )
+        )
 
     def _release_failed_retrieve_locks(
         self,
@@ -413,7 +478,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             self._cache_contexts.clear()
         self._release_entries(entries)
 
-    @request_handler(RequestType.REGISTER_KV_CACHE)
+    @request_handler()
     def register_kv_cache(
         self,
         instance_id: int,
@@ -504,7 +569,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             cache_context.num_layers,
         )
 
-    @request_handler(RequestType.UNREGISTER_KV_CACHE)
+    @request_handler()
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister the KV cache tensors for a given GPU instance ID.
 
@@ -525,11 +590,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
         # No scalar binding: `popped` must stay the only reference so
         # _release_entries' reclaim actually unmaps the IPC segments.
+        with self._lock:
+            listeners = tuple(self._unregister_listeners)
+        for listener in listeners:
+            listener(instance_id)
         self._release_entries(popped)
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
 
     @request_handler(
-        RequestType.STORE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
@@ -541,86 +609,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """Store the GPU KV cache blocks to CPU, reporting terminal completion.
-
-        Args:
-            key: The IPC key for the KV cache blocks.
-            instance_id: The GPU instance ID (such as PID).
-            gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
-                group index.
-            event_ipc_handle: The IPC handle of the event to wait on.
-
-        Returns:
-            ``(terminal_event_handle, store_succeeded)``. See :meth:`_store`
-            for the full contract.
-
-        Raises:
-            RuntimeError: If the backend does not support IPC event handles.
-        """
-        event, _chunk_events, succeeded = self._store(
-            key,
-            instance_id,
-            gpu_block_ids,
-            event_ipc_handle,
-            completion_detail=StoreCompletionDetail.TERMINAL_ONLY,
-        )
-        return event, succeeded
-
-    @request_handler(
-        RequestType.STORE_WITH_CHUNK_EVENTS,
-        HandlerType.BLOCKING,
-        requires_client_affinity=True,
-    )
-    @_lmcache_nvtx_annotate
-    def store_with_chunk_events(
-        self,
-        key: IPCCacheServerKey,
-        instance_id: int,
-        gpu_block_ids: list[list[int]],
-        event_ipc_handle: bytes,
-    ) -> tuple[bytes, list[tuple[bytes, int, int]], bool]:
-        """Store blocks and report one D2H-complete event per token chunk.
-
-        The chunk events let a caller release each chunk's source buffers as
-        soon as its device-to-host copy has landed. The transfer remains one
-        logical operation with one reservation and one commit.
-
-        Args:
-            key: The IPC key for the KV cache blocks.
-            instance_id: The GPU instance ID (such as PID).
-            gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
-                group index.
-            event_ipc_handle: The IPC handle of the event to wait on.
-
-        Returns:
-            ``(terminal_event_handle, chunk_events, store_succeeded)`` where
-            each chunk event is ``(event_handle, start, end)`` in token order.
-
-        Raises:
-            RuntimeError: If the backend does not support IPC event handles.
-
-        Notes:
-            This path splits one batched native transfer into ``num_chunks``
-            calls. Callers that do not need early release should use
-            :meth:`store`.
-        """
-        return self._store(
-            key,
-            instance_id,
-            gpu_block_ids,
-            event_ipc_handle,
-            completion_detail=StoreCompletionDetail.PER_CHUNK_EVENTS,
-        )
-
-    def _store(
-        self,
-        key: IPCCacheServerKey,
-        instance_id: int,
-        gpu_block_ids: list[list[int]],
-        event_ipc_handle: bytes,
-        *,
-        completion_detail: StoreCompletionDetail,
-    ) -> tuple[bytes, list[tuple[bytes, int, int]], bool]:
         """Store the GPU KV cache blocks to CPU.
 
         Args:
@@ -630,12 +618,13 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
                 group index.
             event_ipc_handle: The IPC handle of the event to wait on.
-            completion_detail: Whether to record per-chunk completion events.
 
         Returns:
-            ``(terminal_event_handle, chunk_events, store_succeeded)``. The
-            terminal handle covers the complete store. ``chunk_events`` is
-            empty unless per-chunk completion was requested.
+            A tuple where the first element is the IPC handle of the event
+            that signals the completion of the store operation, and the second
+            element indicates whether the store operation completed without a
+            fatal error (not whether every requested chunk was stored; see
+            Notes). The event handle is empty when no device work was submitted.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -662,7 +651,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 "Rejecting STORE for unregistered GPU instance ID %d",
                 instance_id,
             )
-            return b"", [], False
+            return b"", False
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
@@ -713,21 +702,19 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     blocks_per_chunk,
                 )
                 event_backend.record_event(event, cache_context.stream)
-                return (
-                    event_backend.export_event(event, cache_context.device),
-                    [],
-                    False,
-                )
+                return event_backend.export_event(event, cache_context.device), False
 
             # Chunks whose block ids are all the null block (e.g. align-mode
             # Mamba chunks holding no real state) carry no valid KV and must not
             # be committed. Computed on the raw block ids before downsampling
             # mutates them.
+            null_block_id = self._ctx.null_block_id
             skipped_chunks = all_null_chunk_masks(
                 gpu_block_ids,
                 cache_context.kv_layer_groups_manager.object_groups,
                 blocks_per_chunk,
                 num_chunks,
+                null_block_id,
             )
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
@@ -757,7 +744,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             if key.worker_id == 0 and self._ctx.event_bus.has_subscribers(
                 EventType.MP_TOKENS
             ):
-                self._publish_token_bindings(key, obj_keys_per_obj_group[0])
+                self.publish_token_bindings(key, obj_keys_per_obj_group[0])
 
             transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
@@ -776,8 +763,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
             reserved_dict: dict[ObjectKey, MemoryObj] = {}
             all_dict: dict[ObjectKey, MemoryObj] = {}
-            memory_objs_per_group: list[list[MemoryObj | None]] = []
-            chunk_events: list[tuple[bytes, int, int]] = []
             total_bytes: int = 0
             store_succeeded = False
             try:
@@ -793,7 +778,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         object_group_id=obj_group_id,
                     )
                     reserved_dict = self._ctx.storage_manager.reserve_write(
-                        keys_to_reserve, layout_desc, "new"
+                        keys_to_reserve, layout_desc
                     )
                     all_dict.update(reserved_dict)
                     if reserved_dict:
@@ -807,59 +792,19 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     memory_objs: list[MemoryObj | None] = [
                         reserved_dict.get(obj_key) for obj_key in obj_keys
                     ]
-                    memory_objs_per_group.append(memory_objs)
 
-                if completion_detail is StoreCompletionDetail.PER_CHUNK_EVENTS:
-                    blocks_per_chunk_staged = [
-                        kept_blocks_per_chunk(cache_context, kernel_group_id)
-                        for kernel_group_id in range(len(block_ids_per_group_gpu))
-                    ]
-                    for chunk_idx in range(num_chunks):
-                        chunk_block_ids = [
-                            staged_ids[chunk_idx * stride : (chunk_idx + 1) * stride]
-                            for staged_ids, stride in zip(
-                                block_ids_per_group_gpu,
-                                blocks_per_chunk_staged,
-                                strict=True,
-                            )
-                        ]
-                        for obj_group_id, memory_objs in enumerate(
-                            memory_objs_per_group
-                        ):
-                            transfer_kv_per_object_group(
-                                cache_context,
-                                chunk_block_ids,
-                                memory_objs[chunk_idx : chunk_idx + 1],
-                                object_group_id=obj_group_id,
-                                batch_size=1,
-                                skip_first_n_tokens=0,
-                                direction=lmcache_native.TransferDirection.D2H,
-                                transfer_key=transfer_key,
-                            )
-                        chunk_event = event_backend.create_event(cache_context.device)
-                        event_backend.record_event(chunk_event, cache_context.stream)
-                        start = key.start + chunk_idx * self._ctx.chunk_size
-                        chunk_events.append(
-                            (
-                                event_backend.export_event(
-                                    chunk_event, cache_context.device
-                                ),
-                                start,
-                                min(start + self._ctx.chunk_size, key.end),
-                            )
-                        )
-                else:
-                    for obj_group_id, memory_objs in enumerate(memory_objs_per_group):
-                        transfer_kv_per_object_group(
-                            cache_context,
-                            block_ids_per_group_gpu,
-                            memory_objs,
-                            object_group_id=obj_group_id,
-                            batch_size=1,
-                            skip_first_n_tokens=0,
-                            direction=lmcache_native.TransferDirection.D2H,
-                            transfer_key=transfer_key,
-                        )
+                    # NOTE: batch_size must stay 1 for store.
+                    transfer_kv_per_object_group(
+                        cache_context,
+                        block_ids_per_group_gpu,
+                        memory_objs,
+                        object_group_id=obj_group_id,
+                        batch_size=1,
+                        skip_first_n_tokens=0,
+                        direction=lmcache_native.TransferDirection.D2H,
+                        transfer_key=transfer_key,
+                        block_ids_host=gpu_block_ids,
+                    )
 
                 store_succeeded = True
             except Exception:
@@ -904,12 +849,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
         return (
             event_backend.export_event(event, cache_context.device),
-            chunk_events,
             store_succeeded,
         )
 
     @request_handler(
-        RequestType.RETRIEVE,
         HandlerType.BLOCKING,
         requires_client_affinity=True,
     )
@@ -1106,6 +1049,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             skip_first_n_tokens=skip_first_n_tokens,
                             direction=lmcache_native.TransferDirection.H2D,
                             transfer_key=transfer_key,
+                            block_ids_host=gpu_block_ids,
                         )
                         # Extend only after the copy is enqueued: on exception,
                         # read_prefetched_results releases this group's locks
@@ -1156,56 +1100,4 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         return (
             event_backend.export_event(event, cache_context.device),
             retrieve_succeeded,
-        )
-
-    def _publish_token_bindings(
-        self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
-    ) -> None:
-        """Publish one ``MP_TOKENS`` event for ``key``'s chunks.
-
-        Pairs each complete chunk in ``[key.start, key.end)`` with its
-        ObjectKey chunk hash and token position. Must be called at store
-        submission, before the write-finished events reach the bus, so the
-        cache-event subscriber can stamp them onto the STORE entries. A
-        store that later fails leaves only unused cache entries.
-
-        Args:
-            key: The IPC key of the store being submitted.
-            obj_keys: One ObjectKey per complete chunk, in chunk order.
-        """
-        # Complete chunks in [key.start, key.end) paired with the absolute
-        # position of each chunk's first token. Prefix-chained chunk hashes
-        # imply a position without revealing it, so it is reported here. A
-        # trailing partial chunk has no stored KV to bind to.
-        chunk_size = self._ctx.chunk_size
-        token_ids = list(key.token_ids)
-        effective_len = min(len(token_ids), key.end)
-        num_complete = effective_len - effective_len % chunk_size
-        token_offsets = list(range(key.start, num_complete, chunk_size))
-        token_chunks = [
-            token_ids[offset : offset + chunk_size] for offset in token_offsets
-        ]
-        if not token_chunks:
-            return
-        if len(obj_keys) != len(token_chunks):
-            logger.warning(
-                "Skipping token bindings for request %s: %d resolved keys "
-                "vs %d complete chunks in [%d, %d)",
-                key.request_id,
-                len(obj_keys),
-                len(token_chunks),
-                key.start,
-                key.end,
-            )
-            return
-        self._ctx.event_bus.publish(
-            Event(
-                event_type=EventType.MP_TOKENS,
-                session_id=key.request_id,
-                metadata={
-                    "chunk_hashes": [obj_key.chunk_hash for obj_key in obj_keys],
-                    "token_chunks": token_chunks,
-                    "token_offsets": token_offsets,
-                },
-            )
         )

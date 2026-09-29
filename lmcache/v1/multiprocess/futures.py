@@ -134,30 +134,6 @@ class MessagingFuture(Generic[T]):
             event_backend,
         )
 
-    def to_chunk_event_device_future(
-        self,
-        device: Any | None = None,
-        event_backend: EventIPCBackend | None = None,
-    ) -> "ChunkEventDeviceMessagingFuture":
-        """Wrap a response carrying one completion event per token range.
-
-        Args:
-            device: The device whose event backend orders completion. Defaults
-                to the active device.
-            event_backend: Backend already selected and validated by the
-                caller during initialization. When omitted, it is resolved for
-                backward compatibility.
-
-        Returns:
-            A future that additionally exposes per-range completion via
-            :meth:`ChunkEventDeviceMessagingFuture.take_completed_ranges`.
-        """
-        return ChunkEventDeviceMessagingFuture(
-            self,  # type: ignore[arg-type]
-            device,
-            event_backend,
-        )
-
     @lmcache_deprecate("Use to_device_future() instead")
     def to_cuda_future(
         self,
@@ -217,6 +193,60 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         self.result_ = result
         self.event_ = event
         self._raw_response_processed = True
+
+    def _prepare(self, timeout: Optional[float] = None) -> T:
+        """Import the remote completion event without waiting for it.
+
+        Args:
+            timeout: Maximum time to wait for the raw server response. ``None``
+                waits indefinitely.
+
+        Returns:
+            The result carried by the raw response.
+
+        Raises:
+            LMCacheTimeoutError: If the server response is not available within
+                ``timeout``.
+
+        Notes:
+            This waits only until the server has submitted device work and
+            returned its completion-event handle. It does not synchronize that
+            event on the CPU.
+        """
+        if not self._raw_response_processed:
+            if not self.raw_future_.wait(timeout):
+                raise LMCacheTimeoutError(
+                    "DeviceMessagingFuture raw result not available within timeout"
+                )
+            self._on_raw_future_complete()
+
+        assert self.result_ is not None
+        return self.result_
+
+    def wait_on_stream(self, stream: Any, timeout: Optional[float] = None) -> T:
+        """Make ``stream`` wait for remote device work without blocking the CPU.
+
+        Args:
+            stream: Device stream that consumes the remotely produced data.
+            timeout: Maximum time to wait for the raw server response. ``None``
+                waits indefinitely.
+
+        Returns:
+            The result carried by the raw server response.
+
+        Raises:
+            LMCacheTimeoutError: If the server response is not available within
+                ``timeout``.
+
+        Notes:
+            The call may wait for the server to return an event handle, but
+            device completion is ordered by a stream wait rather than a host
+            synchronization.
+        """
+        result = self._prepare(timeout)
+        if self.event_ is not None:
+            self._event_backend.wait_event(self.event_, stream)
+        return result
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         """
@@ -307,84 +337,6 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         event_backend: EventIPCBackend | None = None,
     ) -> "DeviceMessagingFuture[T]":
         return DeviceMessagingFuture(raw_future, device, event_backend)
-
-
-class ChunkEventDeviceMessagingFuture(DeviceMessagingFuture[T]):
-    """Device future that reports per-chunk completion before terminal.
-
-    The raw future must resolve to
-    ``(terminal_event_handle, [(chunk_event_handle, start, end), ...], result)``.
-    The base class contract is unchanged: :meth:`query`, :meth:`wait`, and
-    :meth:`result` still pend on terminal completion only. The chunk events are
-    an additional, strictly earlier signal drained via
-    :meth:`take_completed_ranges`.
-    """
-
-    def __init__(
-        self,
-        raw_future: MessagingFuture[tuple[bytes, list[tuple[bytes, int, int]], T]],
-        device: Any | None = None,
-        event_backend: EventIPCBackend | None = None,
-    ) -> None:
-        super().__init__(raw_future, device, event_backend)  # type: ignore[arg-type]
-        # Ranges not yet observed as complete. Drained by
-        # take_completed_ranges(), so this list only ever shrinks.
-        self._pending_ranges: list[tuple[Any | None, tuple[int, int]]] = []
-
-    def _on_raw_future_complete(self) -> None:
-        if self._raw_response_processed:
-            return
-        # The base class types raw_future_ as resolving to (bytes, T); this
-        # subclass is constructed with the wider three-element response, so
-        # narrow it back here rather than weakening the base annotation.
-        raw_future = cast(
-            "MessagingFuture[tuple[bytes, list[tuple[bytes, int, int]], T]]",
-            self.raw_future_,
-        )
-        event_bytes, chunk_events, result = raw_future.result()
-        self.event_ = (
-            self._event_backend.import_event(event_bytes, self.device_)
-            if event_bytes
-            else None
-        )
-        self._pending_ranges = [
-            (
-                (
-                    self._event_backend.import_event(handle, self.device_)
-                    if handle
-                    else None
-                ),
-                (int(start), int(end)),
-            )
-            for handle, start, end in chunk_events
-        ]
-        self.result_ = result
-        self._raw_response_processed = True
-
-    def take_completed_ranges(self) -> tuple[tuple[int, int], ...]:
-        """Drain the token ranges whose device work has completed.
-
-        Non-blocking: each pending range is polled once per call and a range is
-        returned at most once, so repeated calls converge to an empty tuple.
-        Returns an empty tuple while the server response is still in flight.
-
-        Returns:
-            Newly completed ``(start, end)`` token ranges, in the order the
-            server recorded them.
-        """
-        if not self._raw_response_processed:
-            if not self.raw_future_.query():
-                return ()
-            self._on_raw_future_complete()
-        ready: list[tuple[int, int]] = []
-        still_pending: list[tuple[Any | None, tuple[int, int]]] = []
-        for event, token_range in self._pending_ranges:
-            if event is None or self._event_backend.query_event(event):
-                ready.append(token_range)
-            else:
-                still_pending.append((event, token_range))
-        self._pending_ranges = still_pending
-        return tuple(ready)
 
 
 # Backward-compatible alias for existing imports.

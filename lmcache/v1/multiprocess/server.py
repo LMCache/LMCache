@@ -49,7 +49,11 @@ from lmcache.v1.multiprocess.engine_module import EngineModule, InstanceLiveness
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.modules.experimental import EXPERIMENTAL_TRANSFER
+from lmcache.v1.multiprocess.modules.experimental import (
+    CHUNK_STORE,
+    EXPERIMENTAL_TRANSFER,
+)
+from lmcache.v1.multiprocess.modules.experimental.chunk_store import ChunkStoreModule
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -265,7 +269,11 @@ def _build_modules(
                 f"Experimental module '{enabled_module}' requires "
                 "supported_transfer_mode='lmcache_driven' or 'auto'."
             )
-        module = QStoreModule(ctx)
+        module: QStoreModule | ChunkStoreModule
+        if enabled_module == CHUNK_STORE:
+            module = ChunkStoreModule(ctx, lmcache_driven_module)
+        else:
+            module = QStoreModule(ctx)
         experimental_modules.append(module)
         liveness_targets.append(module)
         experimental_transfer.append(enabled_module)
@@ -336,7 +344,9 @@ def run_cache_server(
 
     init_gc_monitor(obs_config.gc_monitor)
 
-    maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
+    maybe_initialize_trace_recorder(
+        event_bus, obs_config, storage_manager_config, instance_id=mp_config.instance_id
+    )
 
     # When the engine-driven path is loaded (auto or engine_driven):
     # apply shm_name from mp_config and verify capacity.
@@ -373,6 +383,7 @@ def run_cache_server(
         storage_manager_config=storage_manager_config,
         chunk_size=mp_config.chunk_size,
         hash_algorithm=mp_config.hash_algorithm,
+        null_block_id=mp_config.null_block_id,
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
     )
