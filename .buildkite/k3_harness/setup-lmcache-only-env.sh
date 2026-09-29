@@ -18,11 +18,10 @@ echo "--- :python: Installing LMCache from source (no vLLM)"
 # Skip setuptools_scm git describe; the repo carries non-PEP-440 tags
 # (nightly, nightly-cu13) that crash the newer vcs_versioning backend.
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
+uv pip install -r requirements/proto.txt
 uv pip install -e . --no-build-isolation
 
-# Editable installs do not run setuptools' build_py hook. Install the pinned
-# generator and create the ignored bindings required when server.py is imported.
-uv pip install -r requirements/proto.txt
+# Generate ignored bindings for editable installs that skip the build_py hook.
 echo "--- :gear: Generating LMCache gRPC bindings"
 python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py"
 
