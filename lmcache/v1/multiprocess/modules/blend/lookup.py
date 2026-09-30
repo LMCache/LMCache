@@ -2,7 +2,7 @@
 """Blend unified lookup FSM: prefix, local-match, coordinator, and sparse legs."""
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 import threading
 import time
@@ -76,6 +76,9 @@ class _CBUnifiedJob:
     per_hash_obj_keys: dict | None = None
     hash_to_col: dict[bytes, int] | None = None  # sparse: chunk hash -> row column
     found_rows: list[Bitmap] | None = None  # stashed when the sparse poll completes
+    # Cells the prefetch could not stage for want of L1 room; stashed with
+    # found_rows so classify can tell backpressure from a missing chunk.
+    capacity_miss_rows: list[Bitmap] = field(default_factory=list)
     l2_keys: int = 0  # sparse keys needing an L2 load (0 => no L2 read, span skipped)
     coord_submitted: bool = False  # coordinator match query was issued
     coord_deadline: float = 0.0  # time.monotonic() wall-clock cutoff for the leg
@@ -213,25 +216,49 @@ class LookupMixin:
         found_rows: list[Bitmap],
         per_hash_obj_keys: dict[bytes, list],
         hash_to_col: dict[bytes, int],
+        capacity_miss_rows: list[Bitmap] | None = None,
     ) -> list[CBMatchResult]:
-        """Classify each prefetched chunk as found or stale, and finalize state.
+        """Classify each prefetched chunk as found, capacity-missed, or stale.
 
         A chunk is found only if every (read group x rank) key loaded — a
-        partially loaded chunk cannot be blended, so it is dropped whole and
-        takes an eviction strike (evicted at threshold, kept while still
-        in-flight). Stashes the found chunks' obj_keys for the retrieve path.
+        partially loaded chunk cannot be blended, so it is dropped whole.
+
+        A chunk none of whose missing keys are attributable to L1 running out
+        of room is stale: it is absent from storage, so it takes an eviction
+        strike (evicted at threshold, kept while still in-flight). A chunk
+        that missed because L1 could not stage it is NOT stale — it is still
+        in storage and a later request can load it once L1 drains — so it is
+        dropped for this request without a strike. Striking it would evict a
+        live chunk from the fingerprint table over transient backpressure,
+        and nothing re-registers it, so the reuse loss would be permanent.
+
+        Stashes the found chunks' obj_keys for the retrieve path.
 
         Returns:
             The found subset, in cur_st order.
         """
         found_cb_match_result: list[CBMatchResult] = []
         stale_hashes: list[bytes] = []
+        capacity_missed = 0
         for r in matches:
             col = hash_to_col.get(r.hash)
             if col is not None and all(row.test(col) for row in found_rows):
                 found_cb_match_result.append(r)
+            elif col is not None and any(
+                row.test(col) for row in capacity_miss_rows or []
+            ):
+                capacity_missed += 1
             else:
                 stale_hashes.append(r.hash)
+        if capacity_missed:
+            logger.warning(
+                "CB sparse classify for %s: %d chunk(s) skipped because L1 had "
+                "no room to stage them; they stay in the fingerprint table. "
+                "Raise --l1-size-gb or lower --eviction-trigger-watermark so "
+                "free L1 exceeds the in-flight prefetch working set.",
+                key.request_id,
+                capacity_missed,
+            )
         # Stale drops silently shrink coverage — log so it is diagnosable.
         if stale_hashes:
             logger.warning(
@@ -595,6 +622,7 @@ class LookupMixin:
             if result is None:
                 return None  # sparse still loading -> defer
             job.found_rows = result.hit_cells
+            job.capacity_miss_rows = result.capacity_miss_cells
             if job.l2_keys > 0:
                 self._event_bus.publish(
                     Event(
@@ -615,6 +643,7 @@ class LookupMixin:
                 job.found_rows or [],
                 job.per_hash_obj_keys or {},
                 job.hash_to_col or {},
+                job.capacity_miss_rows,
             )
             # Overlap dedup over the retrievable candidates; dropped
             # candidates' keys are released by the retrieve's orphan sweep.

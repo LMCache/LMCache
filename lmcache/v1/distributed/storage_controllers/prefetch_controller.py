@@ -220,7 +220,7 @@ def _reserve_l1_cells(
     cells: Bitmap2D,
     retain: dict[ObjectKey, bool],
     tag: str,
-) -> tuple[Bitmap2D, dict[ObjectKey, "MemoryObj"], int]:
+) -> tuple[Bitmap2D, dict[ObjectKey, "MemoryObj"], int, Bitmap2D]:
     """Reserve a staging buffer in one L1 manager for every cell in ``cells``.
 
     Each row is reserved with its own key group's layout.
@@ -235,13 +235,17 @@ def _reserve_l1_cells(
         tag: The writer tag for the reservations.
 
     Returns:
-        The tuple of (L1 reserve result, reserved objects, failed count).
-        The failed count is the number of cells that were not reserved for
-        any reason.
+        The tuple of (L1 reserve result, reserved objects, failed count,
+        out-of-memory cells). The failed count is the number of cells that
+        were not reserved for any reason; the out-of-memory cells are the
+        subset that failed only for want of L1 room, which the caller
+        reports separately so a reader cannot mistake backpressure for a
+        missing object.
     """
     success = cells.zeros_like()
     objs: dict[ObjectKey, "MemoryObj"] = {}
     failed_count = 0
+    oom_cells = cells.zeros_like()
     oom_keys: list[ObjectKey] = []
     contended_keys: list[ObjectKey] = []
     for row_id, (group, row) in enumerate(zip(key_groups, cells, strict=True)):
@@ -261,6 +265,7 @@ def _reserve_l1_cells(
                 failed_count += 1
                 if error == L1Error.OUT_OF_MEMORY:
                     oom_keys.append(key)
+                    oom_cells[row_id].set(col)
                 elif error == L1Error.KEY_NOT_WRITABLE:
                     contended_keys.append(key)
                 logger.debug(
@@ -293,7 +298,7 @@ def _reserve_l1_cells(
                 metadata={"reason": "l1_contended", "keys": contended_keys},
             )
         )
-    return success, objs, failed_count
+    return success, objs, failed_count, oom_cells
 
 
 def _build_request(
@@ -361,6 +366,11 @@ class InFlightPrefetchRequest:
     # Cells loaded from L2 so far, one row per key group; empty until the
     # first load result is admitted.
     l2_loaded_cells: Bitmap2D = field(default_factory=lambda: Bitmap2D([]))
+
+    # Cells whose L1 reservation failed for want of room, accumulated across
+    # every L1 manager and replan pass. Reported so a reader can tell L1
+    # backpressure from an object that is genuinely absent.
+    l1_oom_cells: Bitmap2D = field(default_factory=lambda: Bitmap2D([]))
 
     # private fields
     _flattened_keys: list[ObjectKey] = field(init=False, repr=False)
@@ -1188,12 +1198,17 @@ class PrefetchController(StorageControllerInterface):
 
         cells_by_l1, retain = self._build_l1_allocation_plans(request)
         for l1_idx, cells in cells_by_l1.items():
-            success, objs, l1_failed_count = _reserve_l1_cells(
+            success, objs, l1_failed_count, oom_cells = _reserve_l1_cells(
                 self._l1_managers[l1_idx], request.key_groups, cells, retain, tag
             )
             l1_reserved_keys[l1_idx] = success
             reserved_objs.update(objs)
             num_failed_reservations += l1_failed_count
+            if oom_cells.popcount():
+                if len(request.l1_oom_cells) == 0:
+                    request.l1_oom_cells = oom_cells
+                else:
+                    request.l1_oom_cells += oom_cells
         states.l1_reserved_keys = l1_reserved_keys
 
         # Steps 4 and 5 only matter when some reservation failed; otherwise the
@@ -1496,12 +1511,19 @@ class PrefetchController(StorageControllerInterface):
         else:
             l2_hit_cells = hit_cells.zeros_like()
         l1_hit_cells = hit_cells - l2_hit_cells
+        # A cell that hit OOM on one pass may still have landed on a later
+        # replan; only the ones that never became resident are reported.
+        if len(request.l1_oom_cells) > 0:
+            capacity_miss_cells = request.l1_oom_cells - hit_cells
+        else:
+            capacity_miss_cells = hit_cells.zeros_like()
         self._publish_result(
             request,
             PrefetchResult(
                 hit_cells=hit_cells.to_list(),
                 l1_hit_cells=l1_hit_cells.to_list(),
                 l2_hit_cells=l2_hit_cells.to_list(),
+                capacity_miss_cells=capacity_miss_cells.to_list(),
             ),
         )
         logger.debug(
