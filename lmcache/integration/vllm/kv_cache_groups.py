@@ -9,6 +9,9 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    # Third Party
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+
     # First Party
     from lmcache.v1.gpu_connector.utils import LayoutHints
 
@@ -71,6 +74,22 @@ def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
     return block_size
 
 
+def is_transferable_group(group: KVCacheGroupSpec) -> bool:
+    """Whether a vLLM group contains reusable KV that permits transfer.
+
+    Args:
+        group: A vLLM KV cache group. Older vLLM versions without
+            ``enable_kv_transfer`` default to allowing transfer.
+
+    Returns:
+        False for scratch groups and connector-private pools such as
+        HiSparse's resident and hot buffers.
+    """
+    return getattr(group, "enable_kv_transfer", True) and not is_scratch_spec(
+        group.kv_cache_spec
+    )
+
+
 def _is_sliding_window_spec(spec: Any) -> bool:
     """Return whether the KV cache spec is a vLLM sliding-window spec.
 
@@ -117,6 +136,8 @@ def _resolve_per_layer_sw_sizes(
     """
     per_layer_sw_size = [-1] * num_layers
     for group in vllm_groups:
+        if not is_transferable_group(group):
+            continue
         spec = getattr(group, "kv_cache_spec", None)
         if spec is None:
             continue
@@ -196,6 +217,8 @@ def _resolve_per_layer_recurrent(
     """
     per_layer_recurrent = [False] * num_layers
     for group in vllm_groups:
+        if not is_transferable_group(group):
+            continue
         spec = getattr(group, "kv_cache_spec", None)
         if spec is None:
             continue
@@ -288,8 +311,9 @@ def create_engine_group_infos_from_vllm(
         ``dcp_size`` to stay in the scheduler's coordinate space; its ratio
         to the physical slot count is what sizes each rank's memory object.
         Mamba groups are replicated per rank and stay unscaled. Layers of
-        scratch groups (see :func:`is_scratch_spec`) are excluded and never
-        form an info.
+        scratch groups and groups with ``enable_kv_transfer=False`` are
+        excluded and never form an info. Engine group IDs retain their
+        original vLLM indices, including gaps left by excluded groups.
 
     Returns:
         The list of ``EngineGroupInfo`` in protocol order, i.e. the LMCache group
@@ -319,13 +343,13 @@ def create_engine_group_infos_from_vllm(
         else ()
     )
 
-    # Scratch groups skip format discovery: their layers are excluded below and
+    # Non-transferable groups skip format discovery: their layers are excluded and
     # never transferred, so a layout the transfer kernels reject must not fail
     # registration.
     layer_index_groups = [
         [layer_to_idx[name] for name in group.layer_names]
         for group in vllm_groups
-        if not is_scratch_spec(group.kv_cache_spec)
+        if is_transferable_group(group)
     ]
 
     # CacheBlend fused-aux (presence-gated): the pool joins detection as
@@ -352,6 +376,8 @@ def create_engine_group_infos_from_vllm(
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
         for engine_group_id, group in enumerate(vllm_groups):
+            if not is_transferable_group(group):
+                continue
             # The spec's block_size is the logical tokens covered by one of
             # this group's paged chunks (block IDs); the physical slot count
             # per chunk is discovered later from the registered tensors.

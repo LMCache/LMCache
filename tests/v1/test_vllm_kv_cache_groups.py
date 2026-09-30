@@ -73,6 +73,7 @@ class UniformTypeKVCacheSpecs:
 class MockKVCacheGroup:
     layer_names: list[str]
     kv_cache_spec: object
+    enable_kv_transfer: bool = True
 
 
 @dataclass
@@ -531,3 +532,33 @@ def test_conversion_skips_format_discovery_for_scratch_layers():
 
     assert [g.engine_group_id for g in spec] == [0]
     assert get_engine_group_indices(spec, 2) == [0, EXCLUDED_ENGINE_GROUP]
+
+
+@pytest.mark.parametrize("include_private_tensor", [False, True])
+def test_conversion_excludes_transfer_disabled_group(
+    include_private_tensor: bool,
+) -> None:
+    """Private pools may be absent or have unsupported layouts; IDs stay stable."""
+    kv_caches = _mla_caches(["indexer", "source"])
+    if include_private_tensor:
+        kv_caches["private"] = torch.zeros(1)
+    config = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["indexer"], MLAAttentionSpec(block_size=16)),
+            MockKVCacheGroup(
+                ["private"],
+                SlidingWindowSpec(block_size=7, sliding_window=7),
+                enable_kv_transfer=False,
+            ),
+            MockKVCacheGroup(["source"], MLAAttentionSpec(block_size=16)),
+        ]
+    )
+
+    infos = create_engine_group_infos_from_vllm(config, kv_caches)
+
+    assert [info.engine_group_id for info in infos] == [0, 2]
+    assert [info.layer_indices for info in infos] == [(0,), (1,)]
+    assert expand_engine_block_ids(infos, [[10, 11], [99], [20, 21]]) == [
+        [10, 11],
+        [20, 21],
+    ]

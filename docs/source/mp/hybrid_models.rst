@@ -83,6 +83,12 @@ Recipe pages for the validated hybrid-attention architectures:
 What Works
 ----------
 
+HiSparse integration currently covers group selection and registration metadata
+only. The connector excludes vLLM groups marked ``enable_kv_transfer=False``
+(HiSparse's resident and hot pools) and scratch groups. HiSparse's CPU MLA source
+and GPU indexer still require mixed CPU/GPU transfer support before LMCache can
+offload or restore them; this is not yet a supported serving configuration.
+
 Models whose layers all use **standard paged attention** — including hybrids
 that mix sliding-window and full attention — are supported with no special
 configuration. Examples:

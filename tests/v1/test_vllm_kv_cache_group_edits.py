@@ -75,12 +75,14 @@ class _Spec:
     block_size: int
     page_size_bytes: int
     mamba_cache_mode: str = "align"
+    prefix_cacheable: bool = True
 
 
 @dataclass
 class _Group:
     layer_names: list[str]
     kv_cache_spec: _Spec
+    enable_kv_transfer: bool = True
 
 
 @dataclass
@@ -264,6 +266,26 @@ def test_subpaged_edit_fires_on_fused_kv_layout(edits):
     """
     cache = _fused_kv_cache()
     assert _edit_attention(edits, cache).shape[2] == LOGICAL_BLOCK_SIZE
+
+
+@pytest.mark.parametrize("exclusion", ["scratch", "transfer_disabled"])
+def test_hybrid_edits_skip_filtered_groups(edits: ModuleType, exclusion: str) -> None:
+    """Removing private pools must not break edits for the remaining Mamba hybrid."""
+    config, caches = _hybrid_config(_fused_kv_cache())
+    private_spec = _attention_spec()
+    private_spec.prefix_cacheable = exclusion != "scratch"
+    config.kv_cache_groups.append(
+        _Group(
+            ["private"],
+            private_spec,
+            enable_kv_transfer=exclusion != "transfer_disabled",
+        )
+    )
+
+    edited = edits.apply_kv_cache_group_edits(config, caches, layout_hints={})
+
+    assert set(edited) == set(caches)
+    assert edited["attn.0"].shape[2] == LOGICAL_BLOCK_SIZE
 
 
 def test_subpaged_edit_fires_on_split_kv_layout(edits):

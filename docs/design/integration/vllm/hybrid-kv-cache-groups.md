@@ -135,6 +135,31 @@ skips them — they never form their own info. (Placing them in a group would
 duplicate work and, when their block size differs from the group they default
 into, corrupt the per-group block-id counts.)
 
+### HiSparse transfer eligibility
+
+Registration and scheduler geometry also honor `enable_kv_transfer=False`.
+HiSparse's GPU indexer and CPU source groups are eligible; its resident and hot
+groups are private pools. Excluded groups have zero token spans, and their
+tensors are removed before layout discovery and transport selection. Registered
+tensor views retain their strides, including HiSparse's BLHNC block stride.
+
+Engine group IDs are **not compacted**. For groups `[indexer, resident, hot,
+source]`, spans are `[64, 0, 0, 64]` and the engine IDs in `EngineGroupInfo` are
+`0` and `3`. Existing block-ID slicing leaves empty lists at IDs `1` and `2`;
+`expand_engine_block_ids` selects IDs `0` and `3` at the transport boundary.
+
+This is registration/metadata support only. Mixed CPU/GPU transport remains
+unsupported. `tests/v1/test_vllm_integration.py` runs real HiSparse allocation,
+chunked prefill and decode through `MultiConnector`, with recording doubles at
+the server and transfer-context boundaries. It checks tensor identity, group
+membership and store block-ID routing; it does not validate offload or restore.
+Run it with `CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest -q
+tests/v1/test_vllm_integration.py` using current vLLM and Hopper or newer.
+
+The LMCache child must set `kv_connector_module_path` to
+`lmcache.integration.vllm.lmcache_mp_connector`; otherwise vLLM selects its
+built-in connector implementation.
+
 ### Scratch groups
 
 A scratch group is an engine group whose spec vLLM marks
