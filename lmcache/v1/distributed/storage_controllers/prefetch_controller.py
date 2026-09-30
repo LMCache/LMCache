@@ -214,12 +214,80 @@ def _scatter_bitmaps_full_global(
     return ret
 
 
+def _repack_whole_columns(
+    l1_manager: L1Manager,
+    key_groups: list[GroupedObjectKeys],
+    cells: Bitmap2D,
+    retain: dict[ObjectKey, bool],
+    tag: str,
+    success: Bitmap2D,
+    objs: dict[ObjectKey, "MemoryObj"],
+) -> None:
+    """Re-pack a short reservation into whole columns, in place.
+
+    Releases every split column (reserved in some requested rows, not all),
+    then re-offers the freed staging to the incomplete columns in column
+    order, whole columns at a time, stopping at the first that no longer
+    fits. Mutates ``success`` and ``objs``.
+    """
+    requested_rows: dict[int, list[int]] = {}
+    for row_id, row in enumerate(cells):
+        for col in row.get_indices_list():
+            requested_rows.setdefault(col, []).append(row_id)
+
+    # Release the split columns' staging.
+    incomplete: list[int] = []
+    for col, row_ids in sorted(requested_rows.items()):
+        got = [rid for rid in row_ids if success[rid].test(col)]
+        if len(got) == len(row_ids):
+            continue
+        incomplete.append(col)
+        release_keys: list[ObjectKey] = []
+        for rid in got:
+            key = key_groups[rid].keys[col]
+            release_keys.append(key)
+            success[rid].clear(col)
+            objs.pop(key, None)
+        if release_keys:
+            l1_manager.finish_write_and_delete(release_keys, tag=tag)
+
+    # Retry whole columns with the freed staging.
+    for col in incomplete:
+        col_objs: dict[ObjectKey, "MemoryObj"] = {}
+        oom = False
+        for rid in requested_rows[col]:
+            group = key_groups[rid]
+            key = group.keys[col]
+            results = l1_manager.reserve_write(
+                keys=[key],
+                is_temporary=[not retain[key]],
+                layout_desc=group.layout_desc,
+                tag=tag,
+            )
+            error, mem_obj = results[key]
+            if error != L1Error.SUCCESS or mem_obj is None:
+                oom = error == L1Error.OUT_OF_MEMORY
+                break
+            col_objs[key] = mem_obj
+        else:
+            for rid in requested_rows[col]:
+                success[rid].set(col)
+            objs.update(col_objs)
+            continue
+        if col_objs:
+            l1_manager.finish_write_and_delete(list(col_objs), tag=tag)
+        if oom:
+            # Columns are uniform in per-row size: nothing later fits either.
+            break
+
+
 def _reserve_l1_cells(
     l1_manager: L1Manager,
     key_groups: list[GroupedObjectKeys],
     cells: Bitmap2D,
     retain: dict[ObjectKey, bool],
     tag: str,
+    whole_columns: bool = False,
 ) -> tuple[Bitmap2D, dict[ObjectKey, "MemoryObj"], int]:
     """Reserve a staging buffer in one L1 manager for every cell in ``cells``.
 
@@ -233,6 +301,9 @@ def _reserve_l1_cells(
         retain: Whether each key in ``cells`` stays resident after the
             reader is done.
         tag: The writer tag for the reservations.
+        whole_columns: On a shortfall, re-pack the reservation into whole
+            columns (see :func:`_repack_whole_columns`) so the staging is
+            spent only on columns the caller can use.
 
     Returns:
         The tuple of (L1 reserve result, reserved objects, failed count).
@@ -270,6 +341,15 @@ def _reserve_l1_cells(
             success[row_id].set(col)
             objs[key] = mem_obj
 
+    if whole_columns and failed_count > 0:
+        _repack_whole_columns(l1_manager, key_groups, cells, retain, tag, success, objs)
+        failed_count = sum(row.popcount() for row in cells) - sum(
+            row.popcount() for row in success
+        )
+        # The repack may have recovered keys the first pass failed.
+        oom_keys = [k for k in oom_keys if k not in objs]
+        contended_keys = [k for k in contended_keys if k not in objs]
+
     event_bus = get_event_bus()
     if oom_keys:
         logger.warning(
@@ -306,6 +386,7 @@ def _build_request(
         fetching_policy=spec.fetching_policy,
         lock_mode=spec.lock_mode,
         num_kv_readers=spec.num_kv_readers,
+        require_whole_columns=spec.require_whole_columns,
     )
 
 
@@ -346,6 +427,7 @@ class InFlightPrefetchRequest:
     fetching_policy: FetchingPolicy
     lock_mode: PrefetchLockMode
     num_kv_readers: int
+    require_whole_columns: bool = False
 
     # The locked and reserved keys during the prefetch lifecycle.
     key_states: PrefetchKeyState = field(default_factory=PrefetchKeyState)
@@ -1189,7 +1271,12 @@ class PrefetchController(StorageControllerInterface):
         cells_by_l1, retain = self._build_l1_allocation_plans(request)
         for l1_idx, cells in cells_by_l1.items():
             success, objs, l1_failed_count = _reserve_l1_cells(
-                self._l1_managers[l1_idx], request.key_groups, cells, retain, tag
+                self._l1_managers[l1_idx],
+                request.key_groups,
+                cells,
+                retain,
+                tag,
+                whole_columns=request.require_whole_columns,
             )
             l1_reserved_keys[l1_idx] = success
             reserved_objs.update(objs)
@@ -1472,6 +1559,11 @@ class PrefetchController(StorageControllerInterface):
         _hit_length, retain_rows = fold_unfold_grouped(found.to_list(), windows)
         if request.fetching_policy == "prefix":
             hit_cells = Bitmap2D(retain_rows) & found
+        elif request.require_whole_columns:
+            # A column split by a load failure is not a hit; the release
+            # below then returns its rows instead of read-locking them for a
+            # caller that cannot use them.
+            hit_cells = found.whole_columns()
         else:
             hit_cells = found
 

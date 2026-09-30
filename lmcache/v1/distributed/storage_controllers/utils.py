@@ -253,6 +253,17 @@ class Bitmap2D:
         ]
         return self
 
+    def whole_columns(self) -> "Bitmap2D":
+        """Return the grid restricted to the columns set in every row."""
+        if not self._rows:
+            return self
+        common = self._rows[0]
+        for row in self._rows[1:]:
+            common = common & row
+        if all(row.popcount() == common.popcount() for row in self._rows):
+            return self  # every row equals the intersection: nothing split
+        return Bitmap2D([row & common for row in self._rows])
+
 
 class MapState:
     """Tracks the global bitmap state.

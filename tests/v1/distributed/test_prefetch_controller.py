@@ -104,6 +104,7 @@ def make_spec(
     num_kv_readers: int = 1,
     fetching_policy: FetchingPolicy = "prefix",
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK,
+    require_whole_columns: bool = False,
 ) -> PrefetchTaskSpec:
     """Build a request over the given rows."""
     return PrefetchTaskSpec(
@@ -111,6 +112,7 @@ def make_spec(
         num_kv_readers=num_kv_readers,
         fetching_policy=fetching_policy,
         lock_mode=lock_mode,
+        require_whole_columns=require_whole_columns,
     )
 
 
@@ -1195,6 +1197,42 @@ class TestReservationFailures:
             assert_l2_unlocked(adapter)
             if held:
                 l1_manager.finish_read(held)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            l1_manager.close()
+
+    def test_out_of_memory_repacks_into_whole_columns(self):
+        """With ``require_whole_columns`` the same shortfall loads whole
+        columns instead: room for 4 of 6 cells over two rows yields columns
+        0 and 1 complete, not row 0 complete and row 1 empty."""
+        layout = make_layout()
+        object_bytes = 100 * 2 * 512 * 2
+        l1_manager = L1Manager(
+            make_l1_config(size_in_bytes=object_bytes * 4 + 65536, use_lazy=False)
+        )
+        adapter = make_adapter()
+        rows = [
+            make_group([make_object_key(i, gid=0) for i in range(3)], gid=0),
+            make_group([make_object_key(i, gid=1) for i in range(3)], gid=1),
+        ]
+        all_keys = rows[0].keys + rows[1].keys
+        store_keys_in_l2(adapter, all_keys, layout)
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+        try:
+            req_id = ctrl.submit_prefetch_request(
+                make_spec(rows, fetching_policy="full", require_whole_columns=True)
+            )
+            result = wait_for_result(ctrl, req_id, timeout=10.0)
+
+            assert [row_bits(result, 0), row_bits(result, 1)] == [[0, 1], [0, 1]]
+            held = [rows[r].keys[c] for r in range(2) for c in (0, 1)]
+            assert_read_locked(l1_manager, held)
+            assert_absent(l1_manager, [k for k in all_keys if k not in held])
+            assert l1_manager.get_staging_memory_usage() == 0
+            assert_l2_unlocked(adapter)
+            l1_manager.finish_read(held)
         finally:
             ctrl.stop()
             adapter.close()

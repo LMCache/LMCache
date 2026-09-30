@@ -285,6 +285,7 @@ def _enc_prefetch_task_spec(s: PrefetchTaskSpec) -> dict[str, Any]:
         "num_kv_readers": s.num_kv_readers,
         "fetching_policy": s.fetching_policy,
         "lock_mode": encode_value(s.lock_mode),
+        "require_whole_columns": s.require_whole_columns,
     }
 
 
@@ -294,6 +295,7 @@ def _dec_prefetch_task_spec(d: dict[str, Any]) -> PrefetchTaskSpec:
         num_kv_readers=d["num_kv_readers"],
         fetching_policy=d["fetching_policy"],
         lock_mode=decode_value(d["lock_mode"]),
+        require_whole_columns=d.get("require_whole_columns", False),
     )
 
 
