@@ -290,24 +290,6 @@ class L1Manager:
         return ret
 
     @l1_mgr_synchronized
-    def peek_keys(self, keys: list[ObjectKey]) -> set[ObjectKey]:
-        """Report which of ``keys`` are resident and readable in L1.
-
-        Unlike :meth:`reserve_read`, this takes no read locks and updates no
-        recency -- it is a pure presence probe used by the APC-covered lookup
-        path to decide the contiguous stored prefix without holding the keys.
-        Staging (write-in-flight) objects are not readable and are reported as
-        absent, matching :meth:`reserve_read`.
-
-        Args:
-            keys: The object keys to probe.
-
-        Returns:
-            The subset of ``keys`` that are resident and readable in L1.
-        """
-        return {key for key in keys if self._objects.get(key, None) is not None}
-
-    @l1_mgr_synchronized
     def unsafe_read(
         self,
         keys: list[ObjectKey],

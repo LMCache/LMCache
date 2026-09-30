@@ -523,21 +523,6 @@ class StorageManager:
         """
         self._l1_manager.touch_keys(keys)
 
-    def peek_l1_keys(self, keys: list[ObjectKey]) -> set[ObjectKey]:
-        """Report which of ``keys`` are resident and readable in L1.
-
-        Takes no read locks and updates no recency (see
-        :meth:`L1Manager.peek_keys`). Used by the APC-covered lookup path to
-        determine the contiguous stored prefix without holding the keys.
-
-        Args:
-            keys (list[ObjectKey]): List of object keys to probe.
-
-        Returns:
-            The subset of ``keys`` resident and readable in L1.
-        """
-        return self._l1_manager.peek_keys(keys)
-
     def delete_l1_keys(
         self, keys: list[ObjectKey], force: bool = False
     ) -> tuple[int, int]:

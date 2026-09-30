@@ -290,7 +290,7 @@ class LookupModule:
             (key.request_configs or {}).get(COVERED_CHUNKS_CONFIG_KEY, 0)
         )
         covered_chunks = min(max(0, requested_covered), len(chunk_hashes))
-        # Touch the covered prefix (keep it warm); covered-present not transmitted yet.
+        # Touch the covered prefix to keep it warm; no lock/prefetch.
         self._touch_covered_prefix(
             key, chunk_hashes, covered_chunks, attn_desc.num_object_groups
         )
@@ -388,51 +388,28 @@ class LookupModule:
         chunk_hashes: list[bytes],
         covered_chunks: int,
         num_object_groups: int,
-    ) -> int:
-        """Touch the APC-covered prefix in L1 and report its resident prefix.
+    ) -> None:
+        """Touch the APC-covered prefix in L1 so a busy prefix is not evicted.
 
-        Marks every resident covered key as recently used (so a busy APC prefix
-        is not evicted from L1) without read-locking or fetching anything, and
-        returns the number of leading covered chunks present in L1 across every
-        object group and kv rank -- the contiguous already-stored prefix.
+        Marks every covered key as recently used (LRU) without read-locking or
+        fetching. Absent keys are ignored by the eviction policy, so no presence
+        probe is needed.
 
         Args:
             key: The lookup IPC key (``worker_id=None`` fans out to all ranks).
             chunk_hashes: Full-range chunk hashes in token order.
             covered_chunks: Number of leading chunks the serving engine covers.
             num_object_groups: Object-group count for this model/world size.
-
-        Returns:
-            The contiguous L1-resident prefix length within ``[0, covered_chunks)``.
         """
         if covered_chunks <= 0:
-            return 0
+            return
         covered_hashes = chunk_hashes[:covered_chunks]
         per_group = ipc_key_to_object_keys(
             key, covered_hashes, list(range(num_object_groups))
         )
         all_keys = [obj_key for group_keys in per_group for obj_key in group_keys]
-        present = self._ctx.storage_manager.peek_l1_keys(all_keys)
-        present_keys = [obj_key for obj_key in all_keys if obj_key in present]
-        if present_keys:
-            self._ctx.storage_manager.touch_l1_keys(present_keys)
-
-        # Contiguous prefix: chunk i counts only if all ranks of all groups are present.
-        covered_present = 0
-        for chunk_idx in range(covered_chunks):
-            chunk_present = True
-            for group_keys in per_group:
-                num_ranks = len(group_keys) // covered_chunks
-                base = chunk_idx * num_ranks
-                if any(
-                    group_keys[base + rank] not in present for rank in range(num_ranks)
-                ):
-                    chunk_present = False
-                    break
-            if not chunk_present:
-                break
-            covered_present += 1
-        return covered_present
+        if all_keys:
+            self._ctx.storage_manager.touch_l1_keys(all_keys)
 
     @request_handler(HandlerType.BLOCKING)
     def query_prefetch_status(
