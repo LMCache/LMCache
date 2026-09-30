@@ -65,24 +65,30 @@ Participants: **Scheduler** (vLLM), **Connector** (`LMCacheMPConnector`),
 **Adapter** (`LMCacheMPSchedulerAdapter`), **LookupModule** (server),
 **Storage** (`StorageManager`/`L1Manager`).
 
-```text
-Legend: S=Scheduler  C=Connector  A=Adapter  L=LookupModule  SM=Storage
+```mermaid
+sequenceDiagram
+    participant S as Scheduler
+    participant C as Connector
+    participant A as Adapter
+    participant L as LookupModule
+    participant SM as Storage
 
- S --get_num_new_matched_tokens(num_computed = APC hit)--> C
- C :  c0 = align(num_computed) -> covered_chunks   (no pin)
- C --maybe_submit_lookup_request(covered_chunks)--------> A
- A --LOOKUP(key, covered_chunks)------------------------> L
- L --touch covered [0,c0)  (no lock / no prefetch)---------> SM
- L --reserve_read + prefetch uncovered [c0,end)---------> SM
- C --check_lookup_result--------------------------------> A
- A --returns LookupOutcome(hit, stored)-----------------> C
+    S->>C: get_num_new_matched_tokens(num_computed = APC hit)
+    Note over C: c0 = align(num_computed) then covered_chunks (no pin)
+    C->>A: maybe_submit_lookup_request(covered_chunks)
+    A->>L: LOOKUP(key, covered_chunks)
+    L->>SM: touch covered [0,c0) - no lock / no prefetch
+    L->>SM: reserve_read + prefetch uncovered [c0,end)
+    C->>A: check_lookup_result
+    A-->>C: LookupOutcome(hit, stored)
 
- shrink (APC hit < c0):
-   C --free stale [c0,ret) locks (BLOCKING ack) + cleanup--> A
-   C :  set covered_skip_disabled; reset per-lookup state
-   C --> S :  (None, True)  re-poll -> full lookup covered_chunks=0
- normal:
-   C --> S :  need_to_load = hit - num_computed
-   S --update_state_after_alloc-------------------------> C
-   C --free_lookup_locks([0, vllm_hit))----------------> A   [clamp c0; c0=0 after shrink]
+    alt APC hit shrank below c0
+        C->>A: free stale [c0,ret) locks (BLOCKING ack) + cleanup
+        Note over C: set covered_skip_disabled, reset per-lookup state
+        C-->>S: (None, True) re-poll, full lookup covered_chunks=0
+    else normal
+        C-->>S: need_to_load = hit - num_computed
+        S->>C: update_state_after_alloc
+        C->>A: free_lookup_locks([0, vllm_hit)) [clamp c0, 0 after shrink]
+    end
 ```
