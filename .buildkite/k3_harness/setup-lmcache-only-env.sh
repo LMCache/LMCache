@@ -23,7 +23,12 @@ if [[ -n "${XPU_WHEEL_ARTIFACT_ID:-}" ]]; then
     rmdir -- "$(dirname "${wheel_path}")"
     export PYTHONSAFEPATH=1
     wheel_site_packages="$(python -P -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
-    export PYTHONPATH="${wheel_site_packages}:${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+    # Spawned workers need repo test helpers, but must never import source lmcache.
+    test_import_root="$(mktemp -d "${TMPDIR:-/tmp}/lmcache-xpu-test-imports.XXXXXX")"
+    ln -s "${REPO_ROOT}/tests" "${test_import_root}/tests"
+    ln -s "${REPO_ROOT}/benchmarks" "${test_import_root}/benchmarks"
+    ln -s "${REPO_ROOT}/setup_extensions" "${test_import_root}/setup_extensions"
+    export PYTHONPATH="${test_import_root}:${wheel_site_packages}"
     python -c 'import lmcache, pathlib, sysconfig; assert pathlib.Path(lmcache.__file__).is_relative_to(sysconfig.get_path("purelib")), lmcache.__file__; print("LMCache loaded from wheel:", lmcache.__file__)'
 else
     # Skip setuptools_scm git describe; the repo carries non-PEP-440 tags

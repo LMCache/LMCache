@@ -15,6 +15,13 @@ built by this run. They download the GitHub Actions artifact by ID, verify
 its SHA-256, and install it with its declared runtime dependencies using
 `uv pip install` in the same immutable candidate image. Dependency resolution
 may change installed package versions, as with source installs.
+Wheel validation uses a temporary import directory linking the repository's
+`tests`, `benchmarks`, and `setup_extensions`, followed by site-packages;
+the checkout itself is not on `PYTHONPATH`. Spawned workers can import test
+helpers without importing source `lmcache` instead of the installed wheel.
+The Buildkite checkout must match the GitHub Actions source commit; candidate
+validation refuses PR-base pre-merges so tests and wheel use the same revision.
+The temporary directory remains available for the lifetime of the job pod.
 Ordinary Buildkite runs still install LMCache from source. Only when
 both nightly Buildkite builds pass does the nightly record its digest on
 `buildkite_latest_tested_vllm`; failures keep the previous pin.

@@ -111,6 +111,7 @@ def main() -> None:
                 "env": {
                     "XPU_CANDIDATE_IMAGE": image,
                     "XPU_CANDIDATE_VALIDATION": "1",
+                    "XPU_SOURCE_COMMIT": commit,
                     "XPU_WHEEL_ARTIFACT_ID": wheel_id,
                     "XPU_WHEEL_ARTIFACT_DIGEST": wheel_digest,
                 },
