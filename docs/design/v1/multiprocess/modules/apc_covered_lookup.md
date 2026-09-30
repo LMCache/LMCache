@@ -2,10 +2,9 @@
 
 When the serving engine's prefix cache (vLLM APC) already covers the first `N`
 tokens of a request, the MP-server lookup no longer read-locks or L2-prefetches
-the LMCache objects for that covered prefix — it only presence-checks and
-LRU-touches them (so they stay warm) and prefetches just the uncovered tail
-`[N, end)`. Gated by `lmcache.mp.skip_covered_lookup` (default off ⇒ identical to
-today).
+the LMCache objects for that covered prefix — it only LRU-touches them (so they
+stay warm) and prefetches just the uncovered tail `[N, end)`. Gated by
+`lmcache.mp.skip_covered_lookup` (default off ⇒ identical to today).
 
 The APC hit can shrink while the async lookup is in flight (a WAITING request's
 matched blocks are unprotected until `allocate_slots`). **This branch handles that
@@ -54,7 +53,7 @@ Legend: S=Scheduler  C=Connector  A=Adapter  L=LookupModule  SM=Storage  BP=Bloc
  C --get_cached_block + touch  [PIN covered blocks]------> BP
  C --maybe_submit_lookup_request(covered_chunks)--------> A
  A --LOOKUP(key, covered_chunks)------------------------> L
- L --peek + touch covered [0,c0)  (no lock / no prefetch)-> SM
+ L --touch covered [0,c0)  (no lock / no prefetch)---------> SM
  L --reserve_read + prefetch uncovered [c0,end)---------> SM
  C --check_lookup_result--------------------------------> A
  A --returns LookupOutcome(hit, stored)-----------------> C

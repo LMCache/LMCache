@@ -1456,7 +1456,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
-        # Contiguous persisted prefix (equals the hit until covered_present is wired).
+        # Contiguous persisted prefix (currently equals the hit).
         tracker.num_stored_tokens = stored
         tracker.num_lmcache_hit_tokens = ret
 
