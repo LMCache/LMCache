@@ -28,7 +28,11 @@ from lmcache.v1.distributed.config import (
     get_configured_capacity_bytes,
 )
 from lmcache.v1.distributed.error import L1Error, strerror
-from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
+from lmcache.v1.distributed.internal_api import (
+    CxlArenaDescriptor,
+    L1MemoryDesc,
+    L2AdapterListener,
+)
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
@@ -57,6 +61,7 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L1ManagerDescriptor,
     L2AdapterDescriptor,
 )
+from lmcache.v1.distributed.transfer_channel.api import MemoryRegionAddress
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -785,6 +790,51 @@ class StorageManager:
         self._publish_capacity_changed()
         return result
 
+    @property
+    def cxl_arena(self) -> CxlArenaDescriptor | None:
+        """Return this server's owned shared-pool slab, if configured."""
+        return self._l1_manager.cxl_arena
+
+    def get_cxl_address(self, obj: MemoryObj) -> MemoryRegionAddress | None:
+        """Return the shareable address of a read-reserved owned object.
+
+        Args:
+            obj: Object protected by an L1 read reservation.
+
+        Returns:
+            Peer-addressable CXL location, or None for another backing store.
+        """
+        return self._l1_manager.get_cxl_address(obj)
+
+    def add_cxl_peer(
+        self, arena: CxlArenaDescriptor, request_url: str, lookup_timeout: float
+    ) -> int:
+        """Validate/map a peer slab and attach its borrowing adapter.
+
+        Args:
+            arena: Descriptor advertised by the peer.
+            request_url: Its existing lookup/unlock endpoint.
+            lookup_timeout: Lookup deadline in seconds.
+
+        Returns:
+            Stable adapter ID.
+
+        Raises:
+            ValueError: If this server has no CXL slab or identity checks fail.
+        """
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.cxl_peer_l2_adapter import (
+            CxlPeerL2AdapterConfig,
+        )
+
+        local = self.cxl_arena
+        path = self._l1_config.memory_config.devdax_path
+        if local is None or path is None:
+            raise ValueError("CXL peer sharing requires a configured owned slab")
+        return self.add_l2_adapter(
+            CxlPeerL2AdapterConfig(request_url, path, local, arena, lookup_timeout)
+        )
+
     def add_l2_adapter(self, config: L2AdapterConfigBase) -> int:
         """Blocking function to add a new L2 adapter at runtime. Thread-safe.
 
@@ -894,12 +944,13 @@ class StorageManager:
         self._eviction_controller.stop()
         self._l2_eviction_controller.stop()
 
-        PeriodicEventNotifier.shutdown()
-
+        # Release CXL shadows while their peer RPC clients are still available.
+        self._l1_manager.release_shadows()
         for adapter in self._l2_adapters.values():
             adapter.close()
-
         self._l1_manager.close()
+        # Adapters unregister descriptors through the notifier before destruction.
+        PeriodicEventNotifier.shutdown()
 
     def report_status(self) -> dict:
         """Return a status dict aggregating all sub-component statuses."""

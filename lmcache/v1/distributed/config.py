@@ -128,8 +128,21 @@ class L1MemoryManagerConfig:
 
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
+    cxl_pool_id: str = ""
+    """Shared-pool identity; enables an identity header before the owned slab."""
+    cxl_pool_offset: int = 0
+    """Byte offset of the owned slab header in the shared pool device."""
 
     def __post_init__(self):
+        if self.cxl_pool_id:
+            if self.align_bytes < 4096 or self.align_bytes & (self.align_bytes - 1):
+                raise ValueError("CXL alignment must be a power of two >= 4096")
+            if not self.devdax_path:
+                raise ValueError("cxl-pool-id requires l1-devdax-path")
+            if self.cxl_pool_offset < 0 or self.cxl_pool_offset % self.align_bytes:
+                raise ValueError("cxl-pool-offset must be nonnegative and aligned")
+        elif self.cxl_pool_offset:
+            raise ValueError("cxl-pool-offset requires cxl-pool-id")
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
 
         if self.devdax_path is not None:
@@ -465,6 +478,18 @@ def add_storage_manager_args(
         ),
     )
 
+    memory_group.add_argument(
+        "--cxl-pool-id",
+        default="",
+        help="Shared CXL pool identity. Reserves one alignment-sized slab header.",
+    )
+    memory_group.add_argument(
+        "--cxl-pool-offset",
+        type=int,
+        default=0,
+        help="Byte offset of this node's slab header in the shared CXL device.",
+    )
+
     # GDS L1 tier (optional, opt-in via --gds-l1-path)
     gds_group = parser.add_argument_group(
         "GDS L1 tier",
@@ -631,6 +656,8 @@ def parse_args_to_config(
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
             devdax_path=args.l1_devdax_path,
+            cxl_pool_id=getattr(args, "cxl_pool_id", ""),
+            cxl_pool_offset=getattr(args, "cxl_pool_offset", 0),
         )
     else:
         memory_config = L1MemoryManagerConfig(
@@ -640,6 +667,8 @@ def parse_args_to_config(
             align_bytes=args.l1_align_bytes,
             shm_name=shm_name,
             devdax_path=args.l1_devdax_path,
+            cxl_pool_id=getattr(args, "cxl_pool_id", ""),
+            cxl_pool_offset=getattr(args, "cxl_pool_offset", 0),
         )
 
     gds_l1_config: GdsL1Config | None = None

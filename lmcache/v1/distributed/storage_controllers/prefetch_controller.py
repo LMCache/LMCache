@@ -352,6 +352,7 @@ class InFlightPrefetchRequest:
 
     # In flight L2 operations: L2 adapter idx -> L2 task ID
     inflight_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
+    lookup_task_ids: dict[int, L2TaskId] = field(default_factory=dict)
     inflight_load_tasks: dict[int, L2TaskId] = field(default_factory=dict)
 
     # L2 adapter idx -> L1 bytes reserved for that adapter's in-flight load.
@@ -824,6 +825,9 @@ class PrefetchController(StorageControllerInterface):
             poller.register(efd, select.POLLIN)
 
         while not self._stop_flag.is_set():
+            for manager in self._l1_managers.values():
+                if manager.cxl_arena is not None:
+                    manager.reap_expired_shadows()
             # First, apply runtime add/remove of the L2 adapters.
             self._apply_pending_adapter_ops(poller)
 
@@ -946,6 +950,8 @@ class PrefetchController(StorageControllerInterface):
             the request has returned its L2 read locks; the entry is removed
             when the adapter's load result is admitted.
         """
+        if self._l2_adapters[adapter_id].get_active_borrow_count():
+            return True
         for request in self._in_flight_requests.values():
             if (
                 adapter_id in request.inflight_lookup_tasks
@@ -1028,6 +1034,7 @@ class PrefetchController(StorageControllerInterface):
                 flattened_keys, spec.group_layout_descs
             )
             request.inflight_lookup_tasks[adapter_idx] = task_id
+            request.lookup_task_ids[adapter_idx] = task_id
 
         # No live L2 adapter: serve from L1 alone, on this thread.
         if not active_adapters:
@@ -1112,7 +1119,9 @@ class PrefetchController(StorageControllerInterface):
         for l2_idx, cells in l2_dropped.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys:
-                self._l2_adapters[l2_idx].submit_unlock(keys)
+                self._l2_adapters[l2_idx].release_lookup(
+                    request.lookup_task_ids[l2_idx], keys
+                )
 
         states.l1_locked_keys = load_plan.l1_planned_keys.copy()
         states.l2_locked_keys = load_plan.l2_planned_keys.copy()
@@ -1179,9 +1188,65 @@ class PrefetchController(StorageControllerInterface):
         }
         self._plan_load(request, active_l2_descs)
 
+        # Admit selected peer views without reserving destination capacity.
+        layouts = {
+            group.object_group_id: group.layout_desc for group in request.key_groups
+        }
+        tag = _get_prefetch_write_tag(request.request_id)
+        for adapter_idx, cells in list(states.l2_locked_keys.items()):
+            adapter = self._l2_adapters[adapter_idx]
+            keys = _gather_keys(request.key_groups, cells)
+            task_id = request.lookup_task_ids[adapter_idx]
+            objects = adapter.take_borrowed_objects(task_id, keys, layouts)
+            if objects is None:
+                continue
+            l1_idx = self._get_l2_affinity_manager(adapter_idx)
+            manager = self._l1_managers[l1_idx]
+            admitted = Bitmap(len(keys))
+            try:
+                for i, key in enumerate(keys):
+                    borrow = objects.get(key)
+                    if borrow is None:
+                        continue
+                    obj, is_valid, release = borrow
+                    try:
+                        error = manager.register_shadow(
+                            key,
+                            obj,
+                            tag,
+                            is_valid=is_valid,
+                            on_release=release,
+                        )
+                        if error != L1Error.SUCCESS:
+                            release()
+                            continue
+                        result = manager.finish_write_and_reserve_read(
+                            [key], read_locks=request.num_kv_readers, tag=tag
+                        )
+                        if result[key][0] == L1Error.SUCCESS:
+                            admitted.set(i)
+                        else:
+                            manager.finish_write_and_delete([key], tag=tag)
+                    except Exception:
+                        release()
+                        raise
+            finally:
+                # Adopted views own their reservations; release_lookup only returns
+                # reservations which were not moved into a view.
+                adapter.release_lookup(task_id, keys)
+                loaded = _scatter_bitmaps(cells, admitted)
+                if l1_idx in states.l1_locked_keys:
+                    states.l1_locked_keys[l1_idx] += loaded
+                else:
+                    states.l1_locked_keys[l1_idx] = loaded
+                if len(request.l2_loaded_cells):
+                    request.l2_loaded_cells += loaded
+                else:
+                    request.l2_loaded_cells = loaded.copy()
+                del states.l2_locked_keys[adapter_idx]
+
         # Step 3: reserve L1 write buffers for the planned L2 keys
         # with L1-L2 affinity.
-        tag = _get_prefetch_write_tag(request.request_id)
         l1_reserved_keys = MapState()
         reserved_objs: dict[ObjectKey, "MemoryObj"] = {}
         num_failed_reservations = 0
@@ -1209,7 +1274,9 @@ class PrefetchController(StorageControllerInterface):
             for l2_idx, bitmap2d in l2_keys_to_unlock.items():
                 keys = _gather_keys(request.key_groups, bitmap2d)
                 if keys:
-                    self._l2_adapters[l2_idx].submit_unlock(keys)
+                    self._l2_adapters[l2_idx].release_lookup(
+                        request.lookup_task_ids[l2_idx], keys
+                    )
             states.l2_locked_keys = l2_locked_keys_new
 
             # Step 5: re-plan on what is actually reserved. An L2 cell dropped
@@ -1390,8 +1457,9 @@ class PrefetchController(StorageControllerInterface):
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
 
             # Unlock L2
-            self._l2_adapters[adapter_idx].submit_unlock(
-                _gather_keys(request.key_groups, planned)
+            self._l2_adapters[adapter_idx].release_lookup(
+                request.lookup_task_ids[adapter_idx],
+                _gather_keys(request.key_groups, planned),
             )
 
             # Update the key states and the inflight load tasks
@@ -1552,7 +1620,9 @@ class PrefetchController(StorageControllerInterface):
         for l2_idx, cells in states.l2_locked_keys.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys and l2_idx in self._l2_adapters:
-                self._l2_adapters[l2_idx].submit_unlock(keys)
+                self._l2_adapters[l2_idx].release_lookup(
+                    request.lookup_task_ids[l2_idx], keys
+                )
         for l1_idx, cells in states.l1_reserved_keys.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys:

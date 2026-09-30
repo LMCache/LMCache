@@ -1,19 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+from contextlib import ExitStack
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, List, Optional, Union
-import ctypes
+from typing import List, Optional, Union
 import mmap
 import os
 import threading
+import uuid
 
 # Third Party
 import torch
 
 # First Party
 from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
+from lmcache.v1.distributed.internal_api import CxlArenaDescriptor
 from lmcache.v1.memory_allocators.buffer_allocator import BufferAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
@@ -26,6 +28,111 @@ from lmcache.v1.memory_management import (
     logger,
 )
 import lmcache.v1.memory_management as memory_management
+
+
+def _open_devdax_mapping(
+    device_path: str, size: int, offset: int = 0
+) -> tuple[mmap.mmap, torch.Tensor]:
+    """Map ``size`` bytes at aligned ``offset`` in a shared device/file.
+
+    Returns the mapping and its byte tensor. Live tensor views prevent unmapping.
+    Raises RuntimeError for insufficient capacity, or OSError on open/map failure.
+    """
+    with open(device_path, "r+b", buffering=0) as device, ExitStack() as cleanup:
+        capacity = os.fstat(device.fileno()).st_size
+        if capacity > 0 and offset + size > capacity:
+            raise RuntimeError(
+                f"Device-DAX range ({size} bytes at offset {offset}) exceeds "
+                f"{device_path} capacity ({capacity} bytes)"
+            )
+        mapping = cleanup.enter_context(
+            mmap.mmap(
+                device.fileno(),
+                size,
+                flags=mmap.MAP_SHARED,
+                prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                offset=offset,
+            )
+        )
+        buffer = torch.frombuffer(memoryview(mapping), dtype=torch.uint8)
+        cleanup.pop_all()
+        return mapping, buffer
+
+
+class CxlPeerMapping:
+    """GPU-register a peer slab without creating a local allocator.
+
+    Args:
+        device_path: This node's path to the shared pool.
+        arena: Descriptor advertised by the peer.
+
+    Raises:
+        ValueError: If the mapped header does not match the advertised identity.
+        RuntimeError: If the slab exceeds device capacity or GPU registration fails.
+        OSError: If mapping the device fails.
+    """
+
+    def __init__(self, device_path: str, arena: CxlArenaDescriptor) -> None:
+        self.arena = arena
+        self._fingerprint = arena.fingerprint()
+        self._mapping, buffer = _open_devdax_mapping(
+            device_path, arena.alignment + arena.size, arena.offset
+        )
+        self._buffer = buffer[arena.alignment :]
+        del buffer
+        self._pinned = False
+        self._closed = False
+        if not self.is_current():
+            self.close()
+            raise ValueError("CXL peer header does not match the advertised arena")
+        spec = memory_management.current_device_spec
+        try:
+            if spec.is_pin_supported:
+                self._pinned = spec.pin_memory(self._buffer.data_ptr(), arena.size)
+                if not self._pinned:
+                    raise RuntimeError("Cannot GPU-register the peer CXL mapping")
+        except Exception:
+            self.close()
+            raise
+
+    def is_current(self) -> bool:
+        """Return whether this mapping still has its advertised incarnation."""
+        return not self._closed and self._mapping[:32] == self._fingerprint
+
+    def view(self, offset: int, size: int) -> torch.Tensor:
+        """Return a byte view without copying or allocating payload.
+
+        Args:
+            offset: Byte offset relative to peer payload start.
+            size: Number of bytes in the object.
+
+        Raises:
+            ValueError: If the range or peer incarnation is invalid.
+        """
+        if (
+            not self.is_current()
+            or offset < 0
+            or size <= 0
+            or offset % self.arena.alignment
+            or offset + size > self.arena.size
+        ):
+            raise ValueError("Invalid CXL peer object range or incarnation")
+        return self._buffer[offset : offset + size]
+
+    def close(self) -> None:
+        """Unregister and unmap after all shadow/GPU readers have drained.
+
+        Raises:
+            BufferError: If Python views still reference the mapping.
+        """
+        if self._closed:
+            return
+        if self._pinned:
+            memory_management.current_device_spec.unpin_memory(self._buffer.data_ptr())
+            self._pinned = False
+        self._buffer = torch.empty(0, dtype=torch.uint8)
+        self._mapping.close()
+        self._closed = True
 
 
 class DevDaxArenaState(Enum):
@@ -84,7 +191,7 @@ class DevDaxArenaStatus:
 class _DevDaxArena:
     """Mutable bookkeeping for one mmap-backed Device-DAX arena.
 
-    Each arena owns its own file descriptor, mmap, flat ``torch.uint8`` view, and
+    Each arena owns its own mmap, flat ``torch.uint8`` view, and
     :class:`TensorMemoryAllocator`. Allocations carry the owning
     :class:`DevDaxMemoryAllocator` as their parent; frees are routed back to the
     correct arena by locating the arena whose ``[base_ptr, base_ptr + size)``
@@ -93,9 +200,7 @@ class _DevDaxArena:
 
     device_path: str
     size: int
-    fd: int
     mmap_obj: mmap.mmap
-    mmap_buffer: Any
     buffer: torch.Tensor
     allocator: TensorMemoryAllocator
     is_primary: bool
@@ -161,6 +266,8 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         local_size: int = 0,
         shm_name: str | None = None,
         align_bytes: int = AddressManager.ALIGN_BYTES,
+        pool_id: str = "",
+        pool_offset: int = 0,
     ) -> None:
         if not device_path:
             raise ValueError("device_path must be a non-empty string")
@@ -178,6 +285,15 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         self.size = size
         self.device_path = device_path
         self.align_bytes = align_bytes
+        self.cxl_arena = (
+            CxlArenaDescriptor(
+                pool_id, pool_offset, size, align_bytes, uuid.uuid4().hex
+            )
+            if pool_id
+            else None
+        )
+        if pool_offset and not pool_id:
+            raise ValueError("pool_offset requires pool_id")
         self.local_allocator = local_allocator
         if local_size:
             self.local_allocator = MixedMemoryAllocator(
@@ -193,7 +309,9 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         # Primary (non-removable) only in pure Device-DAX mode. The constructor
         # runs single-threaded, so no lock is needed here.
         self._map_and_append_arena(
-            device_path, size, is_primary=self.local_allocator is None
+            device_path,
+            size,
+            is_primary=self.local_allocator is None or self.cxl_arena is not None,
         )
 
     @property
@@ -231,39 +349,6 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             return self._arenas[0].allocator.address_manager
         return None
 
-    def _open_devdax_mapping(
-        self,
-        device_path: str,
-        size: int,
-    ) -> tuple[int, mmap.mmap, Any, torch.Tensor]:
-        fd: int | None = None
-        mmap_obj: mmap.mmap | None = None
-        try:
-            fd = os.open(device_path, os.O_RDWR)
-            capacity = os.fstat(fd).st_size
-            if capacity > 0 and size > capacity:
-                raise RuntimeError(
-                    f"l1 devdax size ({size} bytes) exceeds "
-                    f"{device_path} capacity ({capacity} bytes)"
-                )
-
-            mmap_obj = mmap.mmap(
-                fd,
-                size,
-                flags=mmap.MAP_SHARED,
-                prot=mmap.PROT_READ | mmap.PROT_WRITE,
-            )
-            array_type = ctypes.c_uint8 * size
-            mmap_buffer = array_type.from_buffer(mmap_obj)
-            buffer = torch.frombuffer(mmap_buffer, dtype=torch.uint8)
-            return fd, mmap_obj, mmap_buffer, buffer
-        except Exception:
-            if mmap_obj is not None:
-                mmap_obj.close()
-            if fd is not None:
-                os.close(fd)
-            raise
-
     def _map_and_append_arena(
         self,
         device_path: str,
@@ -289,16 +374,22 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             RuntimeError: If the device capacity is smaller than ``size``.
             OSError: If the device cannot be opened or mapped.
         """
-        fd, mmap_obj, mmap_buffer, buffer = self._open_devdax_mapping(device_path, size)
+        descriptor = self.cxl_arena if not self._arenas else None
+        mmap_obj, buffer = _open_devdax_mapping(
+            device_path,
+            size + (descriptor.alignment if descriptor else 0),
+            descriptor.offset if descriptor else 0,
+        )
+        if descriptor is not None:
+            mmap_obj[:32] = descriptor.fingerprint()
+            buffer = buffer[descriptor.alignment :]
         arena: _DevDaxArena | None = None
         try:
             allocator = TensorMemoryAllocator(buffer, align_bytes=self.align_bytes)
             arena = _DevDaxArena(
                 device_path=device_path,
                 size=size,
-                fd=fd,
                 mmap_obj=mmap_obj,
-                mmap_buffer=mmap_buffer,
                 buffer=buffer,
                 allocator=allocator,
                 is_primary=is_primary,
@@ -308,12 +399,10 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             # Release the mapping on any setup failure; all references into
             # the mmap must be dropped before it can close.
             buffer = torch.empty(0, dtype=torch.uint8)
-            mmap_buffer = None
             if arena is not None:
                 self._close_arena_locked(arena)
             else:
                 mmap_obj.close()
-                os.close(fd)
             raise
 
         self._arenas.append(arena)
@@ -322,17 +411,13 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
     def _close_arena_locked(self, arena: _DevDaxArena) -> None:
         """Unpin and unmap one arena. The caller must hold ``host_mem_lock``.
 
-        Every reference into the mmap (the allocator buffer, the arena buffer,
-        and the ctypes array exported from the mmap) is released before the mmap
-        is closed; otherwise CPython refuses to close a buffer with exported
-        pointers.
+        Drop tensor references before closing their underlying memoryview;
+        CPython refuses to unmap while exported views remain.
         """
         self._unregister_arena_pin(arena)
         arena.allocator.buffer = torch.empty(0, dtype=torch.uint8)
         arena.buffer = torch.empty(0, dtype=torch.uint8)
-        arena.mmap_buffer = None
         arena.mmap_obj.close()
-        os.close(arena.fd)
 
     def _register_arena_pin(self, arena: _DevDaxArena) -> None:
         if not memory_management.current_device_spec.is_pin_supported:

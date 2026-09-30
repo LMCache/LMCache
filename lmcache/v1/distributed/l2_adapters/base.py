@@ -8,6 +8,7 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Mapping
@@ -28,6 +29,8 @@ from lmcache.v1.mp_observability.event_bus import get_event_bus
 logger = init_logger(__name__)
 
 L2TaskId = int
+BorrowedObject = tuple["MemoryObj", Callable[[], bool], Callable[[], None]]
+"""Existing memory view, validity predicate, and idempotent release callback."""
 
 
 _EMPTY_BY_CACHE_SALT: Mapping[str, int] = MappingProxyType({})
@@ -146,6 +149,40 @@ class L2AdapterInterface(ABC):
     #####################
     # Event Fd Interface
     #####################
+
+    def take_borrowed_objects(
+        self,
+        task_id: L2TaskId,
+        keys: list[ObjectKey],
+        layouts: dict[int, MemoryLayoutDesc],
+    ) -> dict[ObjectKey, BorrowedObject] | None:
+        """Return selected views and their lifetime callbacks, or None to copy.
+
+        Args:
+            task_id: Completed lookup's local task identity.
+            keys: Selected keys whose reservations the caller will own.
+            layouts: Expected layout by object-group ID.
+
+        Returns:
+            None for ordinary copy adapters; otherwise key -> (memory object,
+            validity predicate, release callback). Missing keys stay releasable
+            through release_lookup. The caller releases each view after its
+            final GPU reader; release must be idempotent and nonblocking.
+        """
+        return None
+
+    def release_lookup(self, task_id: L2TaskId, keys: list[ObjectKey]) -> None:
+        """Release unused reservations belonging to a lookup.
+
+        Args:
+            task_id: Local lookup identity; ordinary adapters release by key.
+            keys: Reservations to return.
+        """
+        self.submit_unlock(keys)
+
+    def get_active_borrow_count(self) -> int:
+        """Return live borrowed views which must drain before adapter removal."""
+        return 0
 
     # IMPORTANT: Each of the three event fd methods below MUST return a
     # distinct file descriptor.  The store controller and prefetch controller

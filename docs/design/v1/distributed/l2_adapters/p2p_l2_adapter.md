@@ -2,13 +2,14 @@
 
 `lmcache/v1/distributed/l2_adapters/p2p_l2_adapter.py`
 
-An L2 adapter that treats a **single peer cache server** as a read-only L2
-tier. Instead of a storage backend, it looks up objects that are resident in
-the peer's L1 (CPU RAM) and pulls them directly over the transfer channel
-(RDMA). One adapter instance is created per connected peer; the peer discovery
-and the dynamic add/remove that wire these into the storage manager are owned
-by separate PRs (the P2P controller and the runtime `add_l2_adapter`
-interface).
+For the proposed shared-pool CXL path, see
+[Shared CXL KV sharing through L1 shadows](../../cxl-kv-sharing.md).
+
+An L2 adapter that treats one peer memory region as a read-only L2 tier. The
+base implementation copies from registered memory through NIXL or Mooncake;
+`CxlPeerL2Adapter` borrows a mapped slab through temporary L1 shadows. Both
+share lookup/unlock RPCs and region lifecycle hooks. Existing discovery and
+storage-manager adapter registration own connection setup and removal.
 
 See the Confluence design *LMCache MP P2P design → P2P L2 adapter design* for
 the full system context.
@@ -23,6 +24,14 @@ the full system context.
 
 ## Lifecycle
 
+`register_peer_region()` runs once at construction using the adapter config.
+The base implementation imports the region through the existing transfer
+handshake; CXL maps and GPU-registers the peer slab. The adapter itself is the
+region handle, so offsets always belong to its configured peer region.
+`unregister_peer_region()` runs from `close()` after reads drain. These are
+backend lifecycle hooks; callers construct and close adapters through the
+existing factory and storage manager.
+
 ```
 lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
 ```
@@ -31,7 +40,7 @@ lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
    peer; it read-locks every L1-resident key (sparse; gaps allowed) and
    returns a task id.
 2. **query** — poll `P2P_QUERY_LOOKUP_RESULTS(task_id)`; once ready the peer
-   returns one `TransferChannelAddress` per key (invalid offset for keys it did
+   returns one `MemoryRegionAddress` per key (invalid offset for keys it did
    not lock). The adapter stashes the valid addresses keyed by `ObjectKey` and
    reports a found/not-found `Bitmap` to the prefetch controller.
 3. **load** — for the found keys, translate the local destination objects'
@@ -93,18 +102,24 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
 ```json
 {
   "type": "p2p",
-  "peer_mq_server_url": "tcp://peer-host:5555",
+  "peer_rpc_url": "tcp://peer-host:5555",
   "peer_transfer_channel_server_url": "peer-host:7600",
   "lookup_timeout_s": 10.0,
   "load_timeout_s": 10.0
 }
 ```
 
+`peer_rpc_url` is the neutral configuration name for either ZMQ or gRPC;
+`peer_mq_server_url` remains accepted and retained in serialized configs.
+`MemoryRegionAddress` aliases the existing `TransferChannelAddress`; wire
+messages and field names are unchanged. Its `read_ttl_seconds` accessor exposes
+the owner TTL, or zero for legacy copying peers that omit it.
+
 ## close()
 
-Sets a closed flag (later submits are inert), unregisters the lookup/load fds
-from the periodic notifier, removes the transfer-channel client from the
-`TransferChannelContext` via `remove_transfer_channel_client(peer_url)` (which
-closes it and releases its transport handles), closes the request client, and
-closes the three event notifiers. `close()` is idempotent: the closed flag guards
-against a second teardown of these shared resources.
+Unregisters the peer region before closing shared RPC and notifier resources.
+The copying backend removes its transfer-channel client; CXL rejects teardown
+with live shadows and otherwise drains pending owner unlocks before unmapping.
+A failed teardown keeps RPC available so readers can finish and close can be
+retried. Successful close is idempotent. Failed construction also releases RPC
+and event resources acquired before region registration.

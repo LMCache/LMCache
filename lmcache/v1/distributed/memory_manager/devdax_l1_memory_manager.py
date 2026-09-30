@@ -8,7 +8,7 @@ from typing import cast
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import L1BackendType
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
-from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.internal_api import CxlArenaDescriptor, L1MemoryDesc
 from lmcache.v1.distributed.memory_manager.l1_memory_manager import L1MemoryManager
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaStatus,
@@ -59,12 +59,36 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             local_size=local_size,
             shm_name=config.shm_name or None,
             align_bytes=config.align_bytes,
+            pool_id=config.cxl_pool_id,
+            pool_offset=config.cxl_pool_offset,
         )
         # Retained so runtime reconfiguration can report the configured topology
         # alongside the live arena pool.
         self._config = config
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
+
+    @property
+    def cxl_arena(self) -> CxlArenaDescriptor | None:
+        """Return the shared-pool descriptor, or None for ordinary Device-DAX."""
+        return cast(DevDaxMemoryAllocator, self._allocator).cxl_arena
+
+    def get_cxl_offset(self, obj: MemoryObj) -> int | None:
+        """Locate an owned object in the shared slab; exclude borrowed views.
+
+        Args:
+            obj: Read-reserved object to locate.
+
+        Returns:
+            Payload-relative byte offset, or None for a different backing arena.
+        """
+        if self.cxl_arena is None:
+            return None
+        allocator = cast(DevDaxMemoryAllocator, self._allocator)
+        offset = obj.data_ptr - allocator.devdax_buffer.data_ptr()
+        if offset < 0 or offset + obj.get_size() > self.cxl_arena.size:
+            return None
+        return offset
 
     def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
         """Return the storage medium backing ``memory_obj``.

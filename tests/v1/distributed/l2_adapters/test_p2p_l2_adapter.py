@@ -11,6 +11,8 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.internal_api import CxlArenaDescriptor
+from lmcache.v1.distributed.l2_adapters import cxl_peer_l2_adapter as cxl_mod
 from lmcache.v1.distributed.l2_adapters import p2p_l2_adapter as p2p_mod
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     P2PL2Adapter,
@@ -84,16 +86,18 @@ def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
 # ---------------------------------------------------------------------------
 
 
-def test_config_from_dict_roundtrip():
+@pytest.mark.parametrize("url_field", ["peer_mq_server_url", "peer_rpc_url"])
+def test_config_from_dict_roundtrip(url_field: str) -> None:
     config = P2PL2AdapterConfig.from_dict(
         {
             "type": "p2p",
-            "peer_mq_server_url": "tcp://peer:5555",
+            url_field: "tcp://peer:5555",
             "peer_transfer_channel_server_url": "peer:7600",
             "lookup_timeout_s": 4,
             "load_timeout_s": 6,
         }
     )
+    assert config.peer_rpc_url == "tcp://peer:5555"
     assert config.peer_mq_server_url == "tcp://peer:5555"
     assert config.peer_transfer_channel_server_url == "peer:7600"
     assert config.lookup_timeout_s == 4.0
@@ -136,6 +140,48 @@ def test_factory_creates_adapter():
         adapter = create_l2_adapter(config)
         assert isinstance(adapter, P2PL2Adapter)
         adapter.close()
+
+
+@pytest.mark.parametrize("cxl", [False, True])
+def test_failed_region_registration_releases_rpc_resources(cxl: bool) -> None:
+    """Both registration backends unwind RPC clients, event fds and notifier state."""
+    client = MagicMock(spec=RequestClient)
+    events = [MagicMock() for _ in range(3)]
+    for fd, event in enumerate(events):
+        event.fileno.return_value = fd
+    notifier = MagicMock()
+    context = MagicMock()
+    context.get_transfer_channel_client.side_effect = RuntimeError(
+        "registration failed"
+    )
+    with (
+        patch.object(p2p_mod.RequestClientFactory, "create", return_value=client),
+        patch.object(p2p_mod, "create_event_notifier", side_effect=events),
+        patch.object(p2p_mod, "PeriodicEventNotifier") as periodic,
+        patch.object(p2p_mod, "get_transfer_channel_context", return_value=context),
+        patch.object(
+            cxl_mod, "CxlPeerMapping", side_effect=ValueError("registration failed")
+        ),
+    ):
+        periodic.get.return_value = notifier
+        with pytest.raises((RuntimeError, ValueError), match="registration failed"):
+            if cxl:
+                cxl_mod.CxlPeerL2Adapter(
+                    cxl_mod.CxlPeerL2AdapterConfig(
+                        "tcp://peer:5555",
+                        "/dev/dax0.0",
+                        CxlArenaDescriptor("pool", 0, 4096, 4096, "a"),
+                        CxlArenaDescriptor("pool", 8192, 4096, 4096, "b"),
+                    )
+                )
+            else:
+                P2PL2Adapter(P2PL2AdapterConfig("tcp://peer:5555", "peer:7600"))
+    client.close.assert_called_once()
+    for event in events:
+        event.close.assert_called_once()
+    assert {call.args[0] for call in notifier.unregister_fd.call_args_list} == {1, 2}
+    if cxl:
+        context.get_transfer_channel_client.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +379,29 @@ def test_unlock_empty_is_noop():
         req_client.p2p_unlock_objects.assert_not_called()
 
 
+@pytest.mark.parametrize("wait", [False, True])
+def test_unlock_acknowledgment_is_optional(wait: bool) -> None:
+    """Default unlock is asynchronous; draining can await its acknowledgment."""
+    keys = [_key(0)]
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
+        completion = MagicMock(spec=_FakeFuture)
+        req_client.p2p_unlock_objects.return_value = completion
+        adapter.submit_unlock(keys, wait=wait)
+        req_client.p2p_unlock_objects.assert_called_once_with(keys)
+        if wait:
+            completion.result.assert_called_once()
+        else:
+            completion.result.assert_not_called()
+
+
+def test_unlock_acknowledgment_timeout_propagates() -> None:
+    """A draining caller can handle unlock failures using the owner's TTL."""
+    with _adapter() as (adapter, req_client, _tc_ctx, _tc, _notifier):
+        req_client.p2p_unlock_objects.return_value = _FakeFuture(exc=TimeoutError())
+        with pytest.raises(TimeoutError):
+            adapter.submit_unlock([_key(0)], wait=True)
+
+
 def test_store_completes_immediately_without_leaking():
     with _adapter() as (adapter, _mq, _tc_ctx, _tc, _notifier):
         task_id = adapter.submit_store_task([_key(0)], [MagicMock()])
@@ -401,3 +470,18 @@ def test_close_is_idempotent():
         # The second close is a no-op: no duplicate teardown of shared resources.
         req_client.close.assert_called_once()
         tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
+
+
+def test_region_teardown_failure_keeps_rpc_open_for_retry() -> None:
+    """A failed region teardown must not prevent completing owner unlocks."""
+    with _adapter() as (adapter, client, context, _tc, notifier):
+        context.remove_transfer_channel_client.side_effect = [
+            RuntimeError("busy"),
+            None,
+        ]
+        with pytest.raises(RuntimeError, match="busy"):
+            adapter.close()
+        client.close.assert_not_called()
+        notifier.unregister_fd.assert_not_called()
+        adapter.close()
+        client.close.assert_called_once()
