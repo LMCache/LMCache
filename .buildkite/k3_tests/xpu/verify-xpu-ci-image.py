@@ -73,21 +73,30 @@ def require_string(record: dict[str, object], key: str) -> str:
 
 
 def main() -> None:
-    """Gate promotion on wheel runs of both XPU suites."""
+    """Gate promotion on wheel runs of both XPU suites.
+
+    Accept the bare SHA-256 digest from actions/upload-artifact or a
+    sha256-prefixed digest, and forward the prefixed form to Buildkite.
+
+    Raises:
+        RuntimeError: If inputs are invalid, an API request fails, or CI fails.
+        TimeoutError: If the hardware pipelines do not finish before the deadline.
+    """
     token = os.environ["BUILDKITE_API_TOKEN"]
     image = os.environ["CANDIDATE_IMAGE"]
     commit = os.environ["SOURCE_COMMIT"]
     branch = os.environ["SOURCE_BRANCH"]
     wheel_id = os.environ["WHEEL_ARTIFACT_ID"]
-    wheel_digest = os.environ["WHEEL_ARTIFACT_DIGEST"]
+    wheel_digest = os.environ["WHEEL_ARTIFACT_DIGEST"].removeprefix("sha256:")
     if (
         not all((token, image, commit, branch))
         or not re.fullmatch(r"[0-9]+", wheel_id)
-        or not re.fullmatch(r"sha256:[0-9a-f]{64}", wheel_digest)
+        or not re.fullmatch(r"[0-9a-f]{64}", wheel_digest)
     ):
         raise RuntimeError(
             "Buildkite credentials, source, and XPU wheel artifact are required"
         )
+    wheel_digest = f"sha256:{wheel_digest}"
 
     builds: dict[str, tuple[str, str, int]] = {}
     for name, slug in (("unit", "unit-tests-xpu"), ("multiprocess", "xpu-mp-test")):
