@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""HiSparse registration and metadata integration with real vLLM inference.
-
-The server and transfer context are recording doubles: mixed CPU/GPU transfer
-is a later integration phase. These tests certify registration and block-ID
-routing, not persistence or external cache restores.
-"""
+"""HiSparse indexer offload and restore through a live LMCache server."""
 
 # Standard
-from unittest.mock import MagicMock, patch
+from pathlib import Path
+from unittest.mock import patch
 import os
+import socket
 import subprocess
 import sys
+import time
 
 # Third Party
 import pytest
@@ -30,40 +28,28 @@ from lmcache.integration.vllm import (  # noqa: E402
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     LMCacheMPConnector,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture  # noqa: E402
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (  # noqa: E402
-    TransferContext,
+    LMCacheDrivenTransferContext,
 )
-from lmcache.v1.multiprocess.transport.base import RequestClient  # noqa: E402
 
 
-def _run_hisparse_registration() -> None:
+def _run_hisparse_offload_restore() -> None:
     """Run allocation, registration, prefill and decode in an isolated process."""
-    client = MagicMock(spec=RequestClient)
-    for method, result in (
-        ("get_chunk_size", 64),
-        ("get_experimental", set()),
-        ("ping", True),
-        ("lookup", None),
-        ("query_prefetch_status", 0),
-        ("end_session", None),
-    ):
-        future: MessagingFuture[object] = MessagingFuture()
-        future.set_result(result)
-        getattr(client, method).return_value = future
-    transfer = MagicMock(spec=TransferContext)
-    transfer.create_recorded_event.return_value = None
-    transfer.unregister.return_value = None
-    completed: MessagingFuture[bool] = MessagingFuture()
-    completed.set_result(True)
-    transfer.submit_store.return_value = completed
     original_register = LMCacheMPConnector.register_kv_caches
 
     with (
-        patch.object(adapter_mod.RequestClientFactory, "create", return_value=client),
         patch.object(
-            adapter_mod, "create_transfer_context", return_value=transfer
-        ) as create_transfer,
+            LMCacheDrivenTransferContext,
+            "submit_store",
+            autospec=True,
+            side_effect=LMCacheDrivenTransferContext.submit_store,
+        ) as store,
+        patch.object(
+            LMCacheDrivenTransferContext,
+            "submit_retrieve",
+            autospec=True,
+            side_effect=LMCacheDrivenTransferContext.submit_retrieve,
+        ) as retrieve,
         patch.object(
             LMCacheMPConnector,
             "register_kv_caches",
@@ -109,6 +95,13 @@ def _run_hisparse_registration() -> None:
                                 "lmcache.integration.vllm.lmcache_mp_connector"
                             ),
                             "kv_role": "kv_both",
+                            "kv_connector_extra_config": {
+                                "lmcache.mp.host": "tcp://127.0.0.1",
+                                "lmcache.mp.mq_timeout": 30,
+                                "lmcache.mp.port": int(
+                                    os.environ["HISPARSE_TEST_PORT"]
+                                ),
+                            },
                         },
                     ]
                 },
@@ -127,13 +120,19 @@ def _run_hisparse_registration() -> None:
             core = llm.llm_engine.engine_core.engine_core
             runner = core.model_executor.driver_worker.worker.model_runner
             groups = runner.kv_cache_config.kv_cache_groups
-            expected_ids = runner.kv_cache_config.transfer_group_ids
+            expected_ids = [
+                i
+                for i, group in enumerate(groups)
+                if group.role == KVCacheGroupRole.HISPARSE_INDEXER
+            ]
             assert {groups[i].role for i in expected_ids} == {
                 KVCacheGroupRole.HISPARSE_INDEXER,
-                KVCacheGroupRole.HISPARSE_SOURCE,
             }
             register.assert_called_once()
             connector, original_caches = register.call_args.args
+            assert connector.worker_adapter.model_name.endswith(
+                "##lmcache-hisparse-indexer-v1"
+            )
             caches = connector.worker_adapter.kv_caches
             infos = connector.worker_adapter.engine_group_infos
             assert set(original_caches) > set(caches)
@@ -146,18 +145,9 @@ def _run_hisparse_registration() -> None:
                 names = [list(caches)[i] for i in info.layer_indices]
                 assert set(names) == set(groups[info.engine_group_id].layer_names)
                 assert info.tokens_per_block == 64
-                expected_device = (
-                    "cpu" if groups[info.engine_group_id].host_resident else "cuda"
-                )
                 for name in names:
                     assert caches[name] is original_caches[name]
-                    assert caches[name].device.type == expected_device
-            # Exclusion must happen before transport selection, too.
-            assert create_transfer.call_args.args[0] is caches
-            assert transfer.register.call_args.kwargs["engine_group_infos"] == infos
-            assert transfer.register.call_args.kwargs["layout_hints"]["kv_layout"] == (
-                "BLHNC"
-            )
+                    assert caches[name].device.type == "cuda"
             assert any(not cache.is_contiguous() for cache in caches.values())
 
             prompt = {"prompt_token_ids": [1000 + i % 64 for i in range(257)]}
@@ -165,13 +155,13 @@ def _run_hisparse_registration() -> None:
                 [prompt], SamplingParams(temperature=0, max_tokens=4, ignore_eos=True)
             )
             assert len(outputs[0].outputs[0].token_ids) == 4
-            assert transfer.submit_store.call_count >= 2  # Chunked prefill.
+            assert store.call_count >= 2  # Chunked prefill.
             stored_ranges = []
-            assert submit.call_count == transfer.submit_store.call_count
+            assert submit.call_count == store.call_count
             for call, input_call in zip(
-                transfer.submit_store.call_args_list, submit.call_args_list, strict=True
+                store.call_args_list, submit.call_args_list, strict=True
             ):
-                _, key, store_caches, block_ids, _, _ = call.args
+                _, _, key, store_caches, block_ids, _, _ = call.args
                 op = input_call.args[2]
                 assert store_caches is caches
                 assert len(block_ids) == len(infos)
@@ -185,15 +175,61 @@ def _run_hisparse_registration() -> None:
                 stored_ranges.append((key.start, key.end))
             assert stored_ranges[0][0] == 0
             assert stored_ranges[-1][1] == 256
-            transfer.submit_retrieve.assert_not_called()
+            retrieve.assert_not_called()
+            expected = outputs[0].outputs[0].token_ids
+            stored_block_ids = [
+                block for call in store.call_args_list for block in call.args[4][0]
+            ]
+            stored_indexer = {
+                name: cache[stored_block_ids].cpu() for name, cache in caches.items()
+            }
+            for i in range(4):
+                llm.generate(
+                    [
+                        {
+                            "prompt_token_ids": [
+                                2000 + i * 128 + j % 64 for j in range(257)
+                            ]
+                        }
+                    ],
+                    SamplingParams(temperature=0, max_tokens=4, ignore_eos=True),
+                )
+            before = retrieve.call_count
+            actual = llm.generate(
+                [prompt], SamplingParams(temperature=0, max_tokens=4, ignore_eos=True)
+            )
+            assert retrieve.call_count > before, "Expected a real LMCache restore"
+            assert actual[0].outputs[0].token_ids == expected
+            for call in retrieve.call_args_list:
+                _, _, key, _, block_ids, *_ = call.args
+                assert key.end > key.start
+                assert len(block_ids) == len(infos)
+                for name, cache in caches.items():
+                    assert torch.equal(
+                        cache[block_ids[0]].cpu(),
+                        stored_indexer[name][key.start // 64 : key.end // 64],
+                    )
+
+            # Without MLA in the host pool, indexer-only hits cannot be used.
+            llm.generate([{"prompt_token_ids": [42]}], SamplingParams(max_tokens=1))
+            managers = core.scheduler.kv_cache_manager.coordinator.single_type_managers
+            for manager in managers:
+                pool = manager.block_pool
+                pool.evict_blocks(set(range(pool.num_gpu_blocks)))
+            before = retrieve.call_count
+            cold = llm.generate(
+                [prompt], SamplingParams(temperature=0, max_tokens=4, ignore_eos=True)
+            )
+            assert retrieve.call_count == before
+            assert cold[0].outputs[0].token_ids == expected
         finally:
             llm.llm_engine.engine_core.shutdown()
 
 
 @pytest.mark.integration
 @pytest.mark.cuda
-def test_hisparse_registration_and_store_metadata() -> None:
-    """Real HiSparse inference routes only indexer/source pools to LMCache."""
+def test_hisparse_indexer_offload_and_restore(tmp_path: Path) -> None:
+    """Indexer restores preserve outputs and require a locally cached MLA prefix."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 9:
         pytest.skip("HiSparse requires Hopper or newer")
     env = dict(
@@ -202,18 +238,62 @@ def test_hisparse_registration_and_store_metadata() -> None:
         VLLM_DEEP_GEMM_WARMUP="skip",
         LMCACHE_TRACK_USAGE="false",
     )
-    subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import runpy, sys; runpy.run_path(sys.argv[1], run_name='__main__')",
-            __file__,
-        ],
-        env=env,
-        check=True,
-        timeout=600,
-    )
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    env["HISPARSE_TEST_PORT"] = str(port)
+    with (tmp_path / "server.log").open("w") as log:
+        server = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "lmcache.v1.multiprocess.server",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--chunk-size",
+                "64",
+                "--l1-size-gb",
+                "0.25",
+                "--eviction-policy",
+                "LRU",
+            ],
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            deadline = time.monotonic() + 60
+            while True:
+                assert server.poll() is None, (tmp_path / "server.log").read_text()
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=1):
+                        break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        pytest.fail((tmp_path / "server.log").read_text())
+                    time.sleep(0.1)
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import runpy, sys; "
+                    "runpy.run_path(sys.argv[1], run_name='__main__')",
+                    __file__,
+                ],
+                env=env,
+                check=True,
+                timeout=600,
+            )
+        finally:
+            server.terminate()
+            try:
+                server.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait()
 
 
 if __name__ == "__main__":
-    _run_hisparse_registration()
+    _run_hisparse_offload_restore()

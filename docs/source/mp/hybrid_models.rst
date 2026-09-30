@@ -83,11 +83,32 @@ Recipe pages for the validated hybrid-attention architectures:
 What Works
 ----------
 
-HiSparse integration currently covers group selection and registration metadata
-only. The connector excludes vLLM groups marked ``enable_kv_transfer=False``
-(HiSparse's resident and hot pools) and scratch groups. HiSparse's CPU MLA source
-and GPU indexer still require mixed CPU/GPU transfer support before LMCache can
-offload or restore them; this is not yet a supported serving configuration.
+HiSparse supports GPU indexer offload and restore with current vLLM on Hopper
+or newer. CPU MLA stays in vLLM's host pool: LMCache caps indexer restores at the
+MLA prefix still cached locally and falls back to computation when it is absent.
+Configure ``MultiConnector`` with ``HiSparseConnector`` first and the LMCache
+connector second:
+
+.. code-block:: json
+
+   {
+     "kv_connector": "MultiConnector",
+     "kv_role": "kv_both",
+     "kv_connector_extra_config": {
+       "connectors": [
+         {"kv_connector": "HiSparseConnector", "kv_role": "kv_both"},
+         {
+           "kv_connector": "LMCacheMPConnector",
+           "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector",
+           "kv_role": "kv_both"
+         }
+       ]
+     }
+   }
+
+Enable HiSparse in vLLM's attention configuration and start the LMCache MP server
+as usual. MLA transfer through LMCache and cross-engine HiSparse cache reuse
+are not supported by this indexer-only path.
 
 Models whose layers all use **standard paged attention** — including hybrids
 that mix sliding-window and full attention — are supported with no special

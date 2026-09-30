@@ -50,9 +50,9 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 )
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
+    get_cache_group_ids,
     get_tokens_per_block,
     is_scratch_spec,
-    is_transferable_group,
 )
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
@@ -226,7 +226,7 @@ def get_group_tokens_per_block(
     Attention pages are local DCP shards and therefore cover
     ``spec.block_size * dcp_size`` global tokens. Recurrent-state pages are
     replicated and retain their physical ``spec.block_size`` span. Scratch
-    groups and groups with ``enable_kv_transfer=False`` report ``0``.
+    and unselected groups report ``0``; HiSparse selects only the indexer.
     Group positions retain the original vLLM IDs. When vLLM does not provide
     group metadata, preserve the legacy single-group rule.
 
@@ -244,11 +244,12 @@ def get_group_tokens_per_block(
         if kv_cache_config is not None
         else ()
     )
+    selected_ids = get_cache_group_ids(groups)
     return [
         get_tokens_per_block(group.kv_cache_spec, dcp_size)
-        if is_transferable_group(group)
+        if group_id in selected_ids
         else 0
-        for group in groups
+        for group_id, group in enumerate(groups)
     ] or [vllm_config.cache_config.block_size * dcp_size]
 
 
@@ -542,6 +543,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
     # appends. The scheduler role sets it from the vLLM config.
     _mamba_relocation_window: int = 0
+    # Omitted cacheable groups that must cover every externally restored token.
+    _bounding_group_ids: tuple[int, ...] = ()
 
     def __init__(
         self,
@@ -574,12 +577,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         group_tokens_per_block = get_group_tokens_per_block(
             vllm_config, kv_cache_config
         )
+        if kv_cache_config is not None:
+            self._bounding_group_ids = tuple(
+                i
+                for i, group in enumerate(kv_cache_config.kv_cache_groups)
+                if not group_tokens_per_block[i]
+                and not is_scratch_spec(group.kv_cache_spec)
+            )
         mamba_cache_mode = getattr(vllm_config.cache_config, "mamba_cache_mode", "none")
         self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
         scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
         )
         cache_model_name = get_dcp_decorated_model_name(vllm_config, kv_cache_config)
+        if kv_cache_config is not None and any(
+            getattr(group, "role", None) == "hisparse_indexer"
+            for group in kv_cache_config.kv_cache_groups
+        ):
+            # Indexer-only objects must not share keys with normal MLA+indexer KV.
+            cache_model_name += "##lmcache-hisparse-indexer-v1"
 
         assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
@@ -829,10 +845,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """
-        Register transferable KV caches, preserving their tensor views.
+        Register selected KV caches, preserving their tensor views.
 
-        Scratch and transfer-disabled pools are removed before format
-        detection and transport selection. vLLM group IDs remain unchanged.
+        HiSparse registers only the indexer, leaving MLA in vLLM's host pool.
+        Scratch pools are removed before format detection and transport
+        selection. vLLM group IDs remain unchanged.
 
         Args:
             kv_caches: dictionary of layer names, kv cache
@@ -840,10 +857,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         logger.info("Registering kv caches!")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
         if kv_cache_config is not None:
+            groups = kv_cache_config.kv_cache_groups
+            selected_ids = get_cache_group_ids(groups)
             excluded_layers = {
                 name
-                for group in kv_cache_config.kv_cache_groups
-                if not is_transferable_group(group)
+                for group_id, group in enumerate(groups)
+                if group_id not in selected_ids
                 for name in group.layer_names
             }
             kv_caches = {
@@ -1199,7 +1218,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         Notes:
             The connector should only consider the largest prefix of prompt-
             tokens for which KV cache is actually available at the time of the
-            call. If the cache cannot be loaded for some tokens (e.g., due to
+            call. HiSparse hits are capped at the MLA prefix cached locally.
+            If the cache cannot be loaded for some tokens (e.g., due to
             connectivity issues or eviction), those tokens must not be taken
             into account.
         """
@@ -1272,6 +1292,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             return 0, False
 
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
+
+        tracker.num_prefetched_tokens = ret
+        if self._bounding_group_ids:
+            # Every omitted group must already cover the prefix locally.
+            assert self._kv_cache_manager is not None
+            _, per_group_hits = (
+                self._kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                    request.block_hashes, request.num_tokens - 1
+                )
+            )
+            bound = min(per_group_hits[i] for i in self._bounding_group_ids)
+            chunk_size = self.scheduler_adapter.lmcache_tokens_per_chunk
+            ret = min(ret, bound // chunk_size * chunk_size)
 
         tracker.num_stored_tokens = ret
         tracker.num_lmcache_hit_tokens = ret
@@ -1380,6 +1413,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             # Clean up lookup future in scheduler adapter
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+
+            # Release the unused suffix only when allocation commits the hit;
+            # the scheduler may poll repeatedly as the local prefix changes.
+            if tracker.num_prefetched_tokens > tracker.num_lmcache_hit_tokens:
+                self.scheduler_adapter.free_lookup_locks(
+                    token_ids=tracker.get_token_ids(),
+                    start=tracker.num_lmcache_hit_tokens,
+                    end=tracker.num_prefetched_tokens,
+                    request_id=request.request_id,
+                    cache_salt=tracker.cache_salt,
+                    request_configs=tracker.request_configs,
+                )
 
             # Free locks on chunks that vLLM already computed and won't
             # retrieve from LMCache.

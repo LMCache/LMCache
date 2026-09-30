@@ -74,6 +74,7 @@ class MockKVCacheGroup:
     layer_names: list[str]
     kv_cache_spec: object
     enable_kv_transfer: bool = True
+    role: str = "default"
 
 
 @dataclass
@@ -562,3 +563,17 @@ def test_conversion_excludes_transfer_disabled_group(
         [10, 11],
         [20, 21],
     ]
+
+
+def test_hisparse_registers_indexer_with_original_group_id() -> None:
+    """The source stays in vLLM's host pool and cannot affect format detection."""
+    source = MockKVCacheGroup(["source"], MLAAttentionSpec(block_size=16))
+    indexer = MockKVCacheGroup(["indexer"], MLAAttentionSpec(block_size=16))
+    source.role = "hisparse_source"
+    indexer.role = "hisparse_indexer"
+    infos = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig([source, indexer]), _mla_caches(["indexer"])
+    )
+    assert [info.engine_group_id for info in infos] == [1]
+    assert infos[0].layer_indices == (0,)
+    assert expand_engine_block_ids(infos, [[11], [22]]) == [[22]]
