@@ -76,8 +76,7 @@ class _CBUnifiedJob:
     per_hash_obj_keys: dict | None = None
     hash_to_col: dict[bytes, int] | None = None  # sparse: chunk hash -> row column
     found_rows: list[Bitmap] | None = None  # stashed when the sparse poll completes
-    # Cells the prefetch could not stage for want of L1 room; stashed with
-    # found_rows so classify can tell backpressure from a missing chunk.
+    # cells the prefetch could not stage for want of L1 room
     capacity_miss_rows: list[Bitmap] = field(default_factory=list)
     l2_keys: int = 0  # sparse keys needing an L2 load (0 => no L2 read, span skipped)
     coord_submitted: bool = False  # coordinator match query was issued
@@ -220,19 +219,10 @@ class LookupMixin:
     ) -> list[CBMatchResult]:
         """Classify each prefetched chunk as found, capacity-missed, or stale.
 
-        A chunk is found only if every (read group x rank) key loaded — a
-        partially loaded chunk cannot be blended, so it is dropped whole.
-
-        A chunk none of whose missing keys are attributable to L1 running out
-        of room is stale: it is absent from storage, so it takes an eviction
-        strike (evicted at threshold, kept while still in-flight). A chunk
-        that missed because L1 could not stage it is NOT stale — it is still
-        in storage and a later request can load it once L1 drains — so it is
-        dropped for this request without a strike. Striking it would evict a
-        live chunk from the fingerprint table over transient backpressure,
-        and nothing re-registers it, so the reuse loss would be permanent.
-
-        Stashes the found chunks' obj_keys for the retrieve path.
+        A chunk is found only if every (read group x rank) key loaded. One that
+        missed because L1 had no room is dropped without an eviction strike;
+        any other miss is stale and strikes as before. Stashes the found
+        chunks' obj_keys for the retrieve path.
 
         Returns:
             The found subset, in cur_st order.
@@ -252,10 +242,7 @@ class LookupMixin:
                 stale_hashes.append(r.hash)
         if capacity_missed:
             logger.warning(
-                "CB sparse classify for %s: %d chunk(s) skipped because L1 had "
-                "no room to stage them; they stay in the fingerprint table. "
-                "Raise --l1-size-gb or lower --eviction-trigger-watermark so "
-                "free L1 exceeds the in-flight prefetch working set.",
+                "CB sparse classify for %s: %d chunk(s) skipped, L1 full",
                 key.request_id,
                 capacity_missed,
             )

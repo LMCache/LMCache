@@ -562,11 +562,10 @@ class PrefetchResult:
     ``l1_hit_cells`` marks the hit cells L1 already held, ``l2_hit_cells``
     those the task loaded from L2.
 
-    ``capacity_miss_cells`` marks cells that missed only because L1 had no
-    room to stage them: the object exists in storage, the reservation hit
-    ``L1Error.OUT_OF_MEMORY``. A caller must not read a capacity miss as
-    evidence that the object is gone -- it is transient backpressure, and
-    retrying once L1 drains can succeed. Disjoint from ``hit_cells``.
+    ``capacity_miss_cells`` marks cells that missed only because the L1
+    reservation hit ``L1Error.OUT_OF_MEMORY``; the object is still in storage,
+    so a caller must not read one as evidence that it is gone. Disjoint from
+    ``hit_cells``.
 
     Note:
         ``l1_hit_cells`` and ``l2_hit_cells`` are disjoint and their union is

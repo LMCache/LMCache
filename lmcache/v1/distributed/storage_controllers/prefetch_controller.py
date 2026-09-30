@@ -236,11 +236,9 @@ def _reserve_l1_cells(
 
     Returns:
         The tuple of (L1 reserve result, reserved objects, failed count,
-        out-of-memory cells). The failed count is the number of cells that
-        were not reserved for any reason; the out-of-memory cells are the
-        subset that failed only for want of L1 room, which the caller
-        reports separately so a reader cannot mistake backpressure for a
-        missing object.
+        out-of-memory cells). The failed count covers cells not reserved for
+        any reason; the out-of-memory cells are the subset that failed only
+        for want of L1 room.
     """
     success = cells.zeros_like()
     objs: dict[ObjectKey, "MemoryObj"] = {}
@@ -368,8 +366,7 @@ class InFlightPrefetchRequest:
     l2_loaded_cells: Bitmap2D = field(default_factory=lambda: Bitmap2D([]))
 
     # Cells whose L1 reservation failed for want of room, accumulated across
-    # every L1 manager and replan pass. Reported so a reader can tell L1
-    # backpressure from an object that is genuinely absent.
+    # every L1 manager and replan pass.
     l1_oom_cells: Bitmap2D = field(default_factory=lambda: Bitmap2D([]))
 
     # private fields
@@ -1511,8 +1508,7 @@ class PrefetchController(StorageControllerInterface):
         else:
             l2_hit_cells = hit_cells.zeros_like()
         l1_hit_cells = hit_cells - l2_hit_cells
-        # A cell that hit OOM on one pass may still have landed on a later
-        # replan; only the ones that never became resident are reported.
+        # Exclude cells that hit OOM on one pass but landed on a later replan.
         if len(request.l1_oom_cells) > 0:
             capacity_miss_cells = request.l1_oom_cells - hit_cells
         else:
