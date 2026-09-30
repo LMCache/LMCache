@@ -77,7 +77,7 @@ class LMCacheMPRequestTracker:
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
-    # APC-covered boundary in tokens, frozen at lookup submit (valid while PREFETCHING).
+    # APC-covered boundary in tokens, frozen at lookup submit.
     lookup_covered_tokens: int = 0
 
     # GPU block ids pinned for the APC-covered prefix; released once per terminal path.
