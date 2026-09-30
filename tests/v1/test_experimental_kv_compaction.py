@@ -81,6 +81,99 @@ def test_copies_applied_in_order_compact_the_sequence_in_place() -> None:
     assert compacted == [f"entry{index}" for index in retained_kv_entry_indices]
 
 
+def _replay_physical_slot_copies(
+    kv_entry_by_physical_slot: dict[int, str],
+    physical_slot_copies: list[tuple[int, int]],
+) -> None:
+    """Apply the copies one at a time, as a sequential in-place executor would."""
+    for source_physical_slot, destination_physical_slot in physical_slot_copies:
+        kv_entry_by_physical_slot[destination_physical_slot] = (
+            kv_entry_by_physical_slot[source_physical_slot]
+        )
+
+
+def test_repeated_compaction_indexes_the_current_kv_entry_sequence() -> None:
+    """A later drop in the same request addresses the already-compacted
+    sequence, so retaining [1, 3, 4, 7] and then [1, 3] of the result leaves
+    the original entries [3, 7] at the front.
+    """
+    request_block_ids = [4, 1, 6, 3]
+    physical_slots_per_block = 2
+    # Slot of each KV-entry index under those blocks.
+    physical_slot_by_kv_entry_index = [8, 9, 2, 3, 12, 13, 6, 7]
+    kv_entry_by_physical_slot = {
+        slot: f"entry{index}"
+        for index, slot in enumerate(physical_slot_by_kv_entry_index)
+    }
+
+    _replay_physical_slot_copies(
+        kv_entry_by_physical_slot,
+        plan_kv_compaction_moves(
+            request_block_ids=request_block_ids,
+            retained_kv_entry_indices=[1, 3, 4, 7],
+            physical_slots_per_block=physical_slots_per_block,
+        ),
+    )
+    assert [
+        kv_entry_by_physical_slot[slot] for slot in physical_slot_by_kv_entry_index[:4]
+    ] == ["entry1", "entry3", "entry4", "entry7"]
+
+    # Indices 1 and 3 now name entries of the compacted sequence, not of the
+    # original one. The second copy crosses from block 1 back into block 4.
+    _replay_physical_slot_copies(
+        kv_entry_by_physical_slot,
+        plan_kv_compaction_moves(
+            request_block_ids=request_block_ids,
+            retained_kv_entry_indices=[1, 3],
+            physical_slots_per_block=physical_slots_per_block,
+        ),
+    )
+    assert [
+        kv_entry_by_physical_slot[slot] for slot in physical_slot_by_kv_entry_index[:2]
+    ] == ["entry3", "entry7"]
+
+
+def test_dropping_only_the_first_entry_shifts_every_later_entry_left() -> None:
+    """Retaining [1, capacity) makes every copy's source the previous copy's
+    destination, across block boundaries and shuffled physical blocks, so the
+    planner's order is the only order an in-place replay can use.
+    """
+    request_block_ids = [6, 2, 9, 4]
+    physical_slots_per_block = 3
+    physical_slot_by_kv_entry_index = [
+        block_id * physical_slots_per_block + offset
+        for block_id in request_block_ids
+        for offset in range(physical_slots_per_block)
+    ]
+    kv_entry_capacity = len(physical_slot_by_kv_entry_index)
+    kv_entry_by_physical_slot = {
+        slot: f"entry{index}"
+        for index, slot in enumerate(physical_slot_by_kv_entry_index)
+    }
+
+    physical_slot_copies = plan_kv_compaction_moves(
+        request_block_ids=request_block_ids,
+        retained_kv_entry_indices=list(range(1, kv_entry_capacity)),
+        physical_slots_per_block=physical_slots_per_block,
+    )
+
+    # Every entry moves one position earlier, emitted in sequence order.
+    assert physical_slot_copies == [
+        (
+            physical_slot_by_kv_entry_index[kv_entry_index + 1],
+            physical_slot_by_kv_entry_index[kv_entry_index],
+        )
+        for kv_entry_index in range(kv_entry_capacity - 1)
+    ]
+
+    _replay_physical_slot_copies(kv_entry_by_physical_slot, physical_slot_copies)
+    compacted = [
+        kv_entry_by_physical_slot[slot]
+        for slot in physical_slot_by_kv_entry_index[: kv_entry_capacity - 1]
+    ]
+    assert compacted == [f"entry{index}" for index in range(1, kv_entry_capacity)]
+
+
 @pytest.mark.parametrize(
     "retained_kv_entry_indices",
     [

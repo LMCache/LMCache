@@ -38,6 +38,11 @@ def plan_kv_compaction_moves(
 ) -> list[tuple[int, int]]:
     """Plan the copies that pack a request's retained KV entries at the front.
 
+    For example, with block IDs ``[4, 1]`` and two physical slots per
+    block, KV-entry positions ``[0, 1, 2, 3]`` live in physical slots
+    ``[8, 9, 2, 3]``. Retaining positions ``[1, 3]`` packs those entries
+    into positions ``[0, 1]``, so this returns copies ``[(9, 8), (3, 9)]``.
+
     The planner sees only the capacity the supplied blocks represent,
     ``len(request_block_ids) * physical_slots_per_block``, and not the
     request's exact current KV-entry length when its final block is partially
