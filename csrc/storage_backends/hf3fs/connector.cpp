@@ -551,8 +551,8 @@ bool Hf3fsConnector::do_single_delete(WorkerHf3fsConn& conn,
     }
     return removed;
   } catch (const std::filesystem::filesystem_error& e) {
-    fprintf(stderr, "[LMCache HF3FS] Delete file %s failed: %s\n", file_path.c_str(),
-            e.what());
+    fprintf(stderr, "[LMCache HF3FS] Delete file %s failed: %s\n",
+            file_path.c_str(), e.what());
     return false;
   }
 }

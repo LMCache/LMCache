@@ -96,11 +96,12 @@ std::string key_to_filename(const std::string& key,
   return chunk_hash.substr(0, 2) + "/" + chunk_hash.substr(2, 2) + "/" + result;
 }
 
-// Inverse of key_to_filename(): convert a filename back to the wire key.
+// Inverse of key_to_filename(): convert a flat (non-sharded) filename back to
+// wire key.
 //
-// Accepts the flat (non-sharded) filename shape produced by key_to_filename():
+// The flat (non-sharded) filename shape produced by key_to_filename():
 //   <safe_model>@0x<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>].data
-// and returns the wire key:
+// Returns the wire key:
 //   <model>@<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>]
 //
 // Returns an empty string for any file that is not a well-formed KV-key
@@ -175,7 +176,7 @@ std::string get_chunk_hash_from_key(const std::string& key) {
   }
   if (parts[3].empty()) {
     throw std::runtime_error(
-        "Malformed key (chunk hash field which behind the thrird '@' is "
+        "Malformed key (chunk hash field which behind the third '@' is "
         "empty): " +
         key);
   }
