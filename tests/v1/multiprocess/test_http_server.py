@@ -172,6 +172,41 @@ def test_http_event_reporting_without_coordinator_url_registers_no_subscriber(
     asyncio.run(exercise_lifespan())
 
 
+def test_shutdown_flushes_cache_events_before_deregistering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The coordinator fences a server's L1 when it deregisters, so the
+    final cache-event flush has to reach it first."""
+    order: list[str] = []
+    event_bus = MagicMock()
+    event_bus.stop.side_effect = lambda: order.append("event bus stopped")
+    _patch_lifespan_dependencies(
+        monkeypatch,
+        CoordinatorConfig(url="http://coordinator:9300"),
+        MagicMock(),
+        MagicMock(),
+        event_bus,
+    )
+
+    async def registered_until_cancelled(*args: object, **kwargs: object) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            order.append("deregistered")
+
+    monkeypatch.setattr(
+        http_server_module, "keep_registered", registered_until_cancelled
+    )
+
+    async def exercise_lifespan() -> None:
+        async with http_server_module.lifespan(FastAPI()):
+            await asyncio.sleep(0)
+
+    asyncio.run(exercise_lifespan())
+
+    assert order == ["event bus stopped", "deregistered"]
+
+
 def _make_kv_tensors(
     num_layers: int = 2,
     num_blocks: int = 4,
