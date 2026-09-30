@@ -39,7 +39,7 @@ std::string make_agent_name() {
 WorkerNixlContext::WorkerNixlContext(
     std::string context_agent_name, const std::string& backend_name,
     const std::unordered_map<std::string, std::string>& backend_params,
-    uintptr_t l1_base, size_t l1_size)
+    uintptr_t l1_base, size_t l1_size, size_t l1_alignment)
     : agent_name(std::move(context_agent_name)), l1_registration(DRAM_SEG) {
   nixlAgentConfig config;
   config.syncMode = nixl_thread_sync_t::NIXL_THREAD_SYNC_NONE;
@@ -75,7 +75,19 @@ WorkerNixlContext::WorkerNixlContext(
                              backend_name);
   }
 
-  l1_registration.addDesc(nixlBlobDesc(l1_base, l1_size, 0, std::string()));
+  // OBJ implementations may require transfer descriptors to match registered
+  // memory regions exactly. Register each L1 cache page independently so an
+  // object transfer never refers to a subrange of one whole-arena region.
+  // FILE backends retain the cheaper single-arena registration.
+  if (storage_kind == NixlStorageKind::Object) {
+    for (size_t offset = 0; offset < l1_size; offset += l1_alignment) {
+      l1_registration.addDesc(
+          nixlBlobDesc(l1_base + offset, l1_alignment, 0, std::string()));
+    }
+  } else {
+    l1_registration.addDesc(
+        nixlBlobDesc(l1_base, l1_size, 0, std::string()));
+  }
   nixl_opt_args_t options;
   options.backends = {backend};
   check_nixl(agent->registerMem(l1_registration, &options),
@@ -134,7 +146,8 @@ NixlConnector::NixlConnector(
   for (int worker = 0; worker < num_workers; ++worker) {
     std::unique_ptr<WorkerNixlContext> context =
         std::make_unique<WorkerNixlContext>(make_agent_name(), backend,
-                                            backend_params, l1_base_, l1_size_);
+                                            backend_params, l1_base_, l1_size_,
+                                            l1_alignment_);
     if (contexts_.empty()) {
       storage_type_ = nixl_storage_kind_name(context->storage_kind);
       storage_capabilities_ = context->storage->capabilities();
