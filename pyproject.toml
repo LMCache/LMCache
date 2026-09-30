@@ -138,7 +138,6 @@ ignore = [
 "lmcache/v1/storage_backend/connector/hf3fs_adapter.py" = ["G004"]
 "lmcache/v1/storage_backend/connector/mooncakestore_connector.py" = ["G004"]
 "lmcache/v1/storage_backend/nixl_storage_backend.py" = ["G004"]
-"lmcache/v1/transfer_channel/nixl_channel.py" = ["G004"]
 "tests/disagg/test_nixl_channel.py" = ["G004"]
 
 [tool.ruff.lint.isort]
