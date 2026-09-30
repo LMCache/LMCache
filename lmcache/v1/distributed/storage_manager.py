@@ -4,46 +4,41 @@ Distributed multi-tier storage manager for MP mode
 """
 
 # Standard
-from contextlib import contextmanager
-from dataclasses import replace
-from typing import Iterator, Optional
+from contextlib import contextmanager, nullcontext
+from typing import Any, Iterator, Optional, cast
 import threading
 import time
 
 # First Party
-from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
+from lmcache.lmcache_native import PeriodicEventNotifier
 from lmcache.logging import init_logger
-from lmcache.utils import lmcache_deprecate
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
     CapacitySnapshot,
     MemoryLayoutDesc,
     ModuleMemoryCapacity,
     ObjectKey,
     PrefetchHandle,
-    PrefetchLockMode,
+    PrefetchResult,
     PrefetchTaskSpec,
     Tier,
 )
-from lmcache.v1.distributed.bitmap_ops import fold_unfold_ranked
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     StorageManagerConfig,
-    get_configured_capacity_bytes,
+    requires_single_l1_memory_region,
+    unwrap_l2_adapter_config,
 )
-from lmcache.v1.distributed.error import L1Error, strerror
-from lmcache.v1.distributed.internal_api import (
-    L1MemoryDesc,
-    L2AdapterListener,
-    PrefetchMode,
-    PrefetchRequestSpec,
-    TrimPolicy,
-)
+from lmcache.v1.distributed.error import L1Error, L1ReconfigureError, strerror
+from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
-from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
+from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdapterConfigBase,
+    get_type_name_for_config,
+)
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
+    L2DeviceOwner,
     L2ReconfigurableAdapter,
     L2ReconfigureError,
 )
@@ -61,8 +56,16 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     create_prefetch_policy,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     create_store_policy,
+)
+from lmcache.v1.distributed.storage_controllers.utils import (
+    L1ManagerDescriptor,
+    L2AdapterDescriptor,
+)
+from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+    DevDaxArenaState,
+    DevDaxArenaStatus,
+    DevDaxRemoveMode,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
@@ -83,73 +86,9 @@ logger = init_logger(__name__)
 _L1_WRITE_TAG = "storage_manager"
 
 
-@lmcache_deprecate(
-    "transitional adapter to the flat PrefetchRequestSpec; removed with the "
-    "prefetch controller refactor"
-)
-def _flatten_rows(spec: PrefetchTaskSpec) -> list[ObjectKey]:
-    """Flatten the key groups of a request into a single key list.
-
-    Args:
-        spec: The grouped request.
-
-    Returns:
-        The flat key list of ``spec.group_size * len(spec.key_groups)`` keys.
-
-    Note:
-        The groups are interleaved chunk-major: every group's key 0, then
-        every group's key 1, and so on. :func:`_split_rows` is the exact
-        inverse.
-    """
-    rows = spec.key_groups
-    return [row.keys[c] for c in range(spec.group_size) for row in rows]
-
-
-@lmcache_deprecate(
-    "transitional adapter to the flat PrefetchRequestSpec; removed with the "
-    "prefetch controller refactor"
-)
-def _split_rows(found: Bitmap, num_key_groups: int) -> list[Bitmap]:
-    """Split a flat result bitmap into one bitmap per key group.
-
-    Args:
-        found: Bitmap over the flat key list built by :func:`_flatten_rows`.
-        num_key_groups: Number of key groups the flat list interleaves.
-
-    Returns:
-        ``num_key_groups`` bitmaps of ``len(found) // num_key_groups`` bits
-        each; bit ``i`` of bitmap ``k`` is set iff the flat bit of group
-        ``k``'s key ``i`` is set.
-
-    Raises:
-        ValueError: If ``num_key_groups`` is not positive or does not divide
-            the bitmap size.
-    """
-    if num_key_groups < 1:
-        raise ValueError(f"num_key_groups must be >= 1 (got {num_key_groups})")
-    total = len(found)
-    if total % num_key_groups != 0:
-        raise ValueError(
-            f"bitmap of {total} bits cannot be split into {num_key_groups} "
-            "equal key groups"
-        )
-    per_row: list[list[int]] = [[] for _ in range(num_key_groups)]
-    # Chunk-major interleave: flat index i -> (chunk i // R, group i % R).
-    for i in found.get_indices_list():
-        chunk, row_idx = divmod(i, num_key_groups)
-        per_row[row_idx].append(chunk)
-    rows = [Bitmap(total // num_key_groups) for _ in range(num_key_groups)]
-    for bitmap, indices in zip(rows, per_row, strict=True):
-        bitmap.batched_set(indices)
-    return rows
-
-
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
-        # Retained for the L1 half of the capacity report; L1's configured
-        # size is a pure function of it.
-        self._l1_config = config.l1_manager_config
         self._event_bus = get_event_bus()
 
         # L1 eviction controller
@@ -165,13 +104,17 @@ class StorageManager:
         # and serde is transparent.
         self._l1_memory_desc = self._l1_manager.get_l1_memory_desc()
         self._next_adapter_id = 0
-        # Serializes add_l2_adapter / delete_l2_adapter against each other.
+        # Serializes L1/L2 additions and L2 adapter registration/deletion.
+        # Held from ownership check through add, before allocator/device locks.
         self._lifecycle_lock = threading.Lock()
+        # Keeps capacity snapshots ordered by the point at which they are
+        # built. Registration can publish concurrently with runtime changes.
+        self._capacity_publish_lock = threading.Lock()
         # Guards the _l2_adapters and _adapter_descriptors dicts.
         self._adapters_lock = threading.Lock()
         self._registered_l2_listeners: list[L2AdapterListener] = []
         self._l2_adapters: dict[int, L2AdapterInterface] = {}
-        self._adapter_descriptors: dict[int, AdapterDescriptor] = {}
+        self._adapter_descriptors: dict[int, L2AdapterDescriptor] = {}
         for ac in config.l2_adapter_config.adapters:
             adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
             self._l2_adapters[adapter_id] = adapter
@@ -229,7 +172,10 @@ class StorageManager:
 
         # Prefetch controller
         self._prefetch_controller = PrefetchController(
-            l1_manager=self._l1_manager,
+            l1_managers=[self._l1_manager],
+            l1_manager_descriptors=[
+                L1ManagerDescriptor(index=0, config=config.l1_manager_config)
+            ],
             l2_adapters=list(self._l2_adapters.values()),
             adapter_descriptors=list(self._adapter_descriptors.values()),
             policy=create_prefetch_policy(config.prefetch_policy),
@@ -488,258 +434,70 @@ class StorageManager:
         Args:
             spec: The request (see :class:`PrefetchTaskSpec`).
             external_request_id: Caller id for end-to-end log tracing.
-            skip_l2: If True, do not load from L2. Under ``LOCK`` only
-                already-resident L1 keys are locked and reported; under
-                ``NO_LOCK`` nothing is loaded and an empty handle is returned.
+            skip_l2: If True, serve from L1 only. The result is available
+                as soon as this returns.
 
         Returns:
             PrefetchHandle to track the task.
         """
-        num_key_groups = len(spec.key_groups)
-        request = self._to_controller_spec(spec)
-        keys = request.keys
-
-        if request.mode is PrefetchMode.WARM:
-            # Warm path: load all keys, lock none. skip_l2 makes it a no-op.
-            prefetch_request_id = -1
-            if not skip_l2 and keys and self._l2_adapters:
-                prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                    request
-                )
-            return PrefetchHandle(
-                prefetch_request_id=prefetch_request_id,
-                external_request_id=external_request_id,
-                l1_found_indices=(),
-                l1_hit_chunks=0,
-                total_requested_keys=len(keys),
-                submit_time=time.monotonic(),
-                l2_orig_indices=(
-                    tuple(range(len(keys))) if prefetch_request_id != -1 else ()
-                ),
-                num_key_groups=num_key_groups,
-            )
-
-        # NOTE: now we only have L1, so the prefetch is essentially checking how many
-        # objects are already in L1, and adding read locks to them.
-
-        l1_read_result = self._l1_manager.reserve_read(
-            keys, read_locks=request.num_kv_readers
+        prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
+            spec, skip_l2=skip_l2
         )
-
-        if request.policy is TrimPolicy.SPARSE:
-            # SPARSE: retain a read lock on every L1 hit (not just the leading
-            # prefix) and send all L1 misses to L2 as one coalesced request.
-            # reserve_read locks only SUCCESS keys, so the found-set already
-            # equals the locked set -- nothing to release.
-            l1_found_indices: list[int] = []
-            succeeded_keys: list[ObjectKey] = []
-            sparse_l2_indices: list[int] = []
-            remaining_keys: list[ObjectKey] = []
-            for i, key in enumerate(keys):
-                ent = l1_read_result.get(key)
-                if ent is not None and ent[0] == L1Error.SUCCESS and ent[1] is not None:
-                    l1_found_indices.append(i)
-                    succeeded_keys.append(key)
-                else:
-                    sparse_l2_indices.append(i)
-                    remaining_keys.append(key)
-
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.SM_READ_PREFETCHED,
-                    metadata={
-                        "succeeded_keys": succeeded_keys,
-                        "failed_keys": remaining_keys,
-                    },
-                )
-            )
-
-            prefetch_request_id = -1
-            if not skip_l2 and remaining_keys and self._has_l2_adapters():
-                prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                    replace(request, keys=remaining_keys)
-                )
-            return PrefetchHandle(
-                prefetch_request_id=prefetch_request_id,
-                external_request_id=external_request_id,
-                l1_found_indices=tuple(l1_found_indices),
-                l1_hit_chunks=0,
-                total_requested_keys=len(keys),
-                submit_time=time.monotonic(),
-                l2_orig_indices=(
-                    tuple(sparse_l2_indices) if prefetch_request_id != -1 else ()
-                ),
-                num_key_groups=num_key_groups,
-            )
-
-        # PREFIX: fold the per-(group, chunk, rank) L1 presence into the
-        # model-wide hit and the per-object-group retain set (sliding-window
-        # aware). All-full-attention reduces to the contiguous leading-ones
-        # prefix. Keys past the L1 hit are sent to L2.
-        elif request.policy is TrimPolicy.PREFIX:
-            return self._submit_prefix_fold(
-                request,
-                l1_read_result,
-                external_request_id,
-                skip_l2,
-                num_key_groups,
-            )
-
-        raise ValueError(f"Unsupported trim policy: {request.policy}")
-
-    def _submit_prefix_fold(
-        self,
-        request: PrefetchRequestSpec,
-        l1_read_result: dict[ObjectKey, tuple[L1Error, "MemoryObj | None"]],
-        external_request_id: str,
-        skip_l2: bool,
-        num_key_groups: int,
-    ) -> PrefetchHandle:
-        """PREFIX path: fold L1 presence, retain in-window keys, submit rest to L2.
-
-        Args:
-            request: The flat prefetch request; must carry the ``PREFIX``
-                policy.
-            l1_read_result: Per-key ``reserve_read`` results from the L1
-                probe; SUCCESS entries count as L1-present and stay
-                read-locked until the fold releases the out-of-window ones.
-            external_request_id: Engine-side request id, for logging/trace.
-            skip_l2: When True, serve from L1 only (no L2 prefetch).
-            num_key_groups: Number of key groups in the request, recorded on
-                the returned handle.
-
-        Returns:
-            A :class:`PrefetchHandle` carrying the L1 hit (retained indices
-            and hit chunks) and the pending L2 prefetch request id (``-1``
-            when nothing was submitted to L2).
-        """
-        keys = request.keys
-        attn_desc = request.attn_desc
-        num_object_groups = attn_desc.num_object_groups
-        stride = num_object_groups * attn_desc.world_size
-        num_chunks = len(keys) // stride
-
-        l1_presence = Bitmap(len(keys))
-        for i, key in enumerate(keys):
-            ent = l1_read_result.get(key)
-            if ent is not None and ent[0] == L1Error.SUCCESS and ent[1] is not None:
-                l1_presence.set(i)
-
-        l1_hit_chunks, retain = fold_unfold_ranked(
-            l1_presence,
-            num_chunks,
-            attn_desc.world_size,
-            attn_desc.num_chunks_in_sw,
-        )
-        retained_indices = retain.get_indices_list()
-
-        released_bitmap = l1_presence & (~retain)
-        released = released_bitmap.gather(keys)
-        if released:
-            self._l1_manager.finish_read(released, read_locks=request.num_kv_readers)
-
-        # Keys from chunk l1_hit_chunks onwards are candidates for L2.
-        l1_key_boundary = l1_hit_chunks * stride
-        remaining_keys = keys[l1_key_boundary:]
-
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.SM_READ_PREFETCHED,
-                metadata={
-                    "succeeded_keys": retain.gather(keys),
-                    "failed_keys": (~retain).gather(keys),
-                },
-            )
-        )
-
-        l1_only = skip_l2 or not self._has_l2_adapters()
-        prefetch_request_id = -1
-        l2_orig_indices: tuple[int, ...] = ()
-
-        if not l1_only and remaining_keys:
-            prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                replace(request, keys=remaining_keys)
-            )
-            l2_orig_indices = tuple(range(l1_key_boundary, len(keys)))
-
-        submit_time = time.monotonic()
         logger.debug(
-            "Prefetch request submitted: "
-            "%d total keys, %d L1 hit chunks (%d retained keys), "
-            "%d remaining for L2 "
-            "(external_request_id=%s, "
-            "prefetch_request_id=%d)",
-            len(keys),
-            l1_hit_chunks,
-            len(retained_indices),
-            len(remaining_keys),
+            "Prefetch request submitted: %d keys in %d groups "
+            "(external_request_id=%s, prefetch_request_id=%d, skip_l2=%s)",
+            len(spec.key_groups) * spec.group_size,
+            len(spec.key_groups),
             external_request_id,
             prefetch_request_id,
+            skip_l2,
         )
-
         return PrefetchHandle(
             prefetch_request_id=prefetch_request_id,
             external_request_id=external_request_id,
-            l1_found_indices=tuple(retained_indices),
-            l1_hit_chunks=l1_hit_chunks,
-            total_requested_keys=len(keys),
-            submit_time=submit_time,
-            l2_orig_indices=l2_orig_indices,
-            num_key_groups=num_key_groups,
+            total_requested_keys=len(spec.key_groups) * spec.group_size,
+            submit_time=time.monotonic(),
+            sliding_windows=tuple(row.sliding_window_size for row in spec.key_groups),
         )
 
-    def _combine_found(
-        self, handle: PrefetchHandle, l2_local: "Bitmap | None"
-    ) -> Bitmap:
-        """Merge the L1 found indices with an L2 result bitmap into one bitmap
-        over the original key positions.
-
-        ``l2_local`` is indexed over the keys submitted to L2 (0-based); its
-        set bits are mapped back to original positions via
-        ``handle.l2_orig_indices``.
+    def query_prefetch_status(self, handle: PrefetchHandle) -> PrefetchResult | None:
         """
-        found = Bitmap(handle.total_requested_keys)
-        found.batched_set(handle.l1_found_indices)
-        if l2_local is not None:
-            # gather maps each L2 set bit i to its original position
-            # ``l2_orig_indices[i]``; batched_set drops any position >= size.
-            found.batched_set(l2_local.gather(handle.l2_orig_indices))
-        return found
-
-    def query_prefetch_lookup_hits(
-        self,
-        handle: PrefetchHandle,
-    ) -> int | None:
-        """
-        Query the number of prefix-hit chunks for a prefetch task before the
-        L2 prefetching is done.
+        Query the status of the prefetch task.
 
         Args:
-            handle (PrefetchHandle): The handle of the lookup task.
+            handle (PrefetchHandle): The handle of the prefetch task.
 
         Returns:
-            the number of prefix-hit chunks (L1 + L2) if the lookup is done,
-            None if it's still in progress or the prefetch task is already done.
+            The task's result once it has finished, None while it is still
+            in progress.
 
         Note:
-            This function is designed for the scenario where the caller wants
-            to check the L1 prefix hits as soon as possible without waiting for
-            the whole prefetch task to be done.
-            When the prefetch task is already done and the prefetch task result
-            has already been queried by `query_prefetch_status`, this function
-            will return None forever for the same prefetch handle.
-            Therefore, it's the caller’s responsibility to make sure not calling
-            this function after the prefetch task is done.
+            Each result is returned once; later calls for the same handle
+            return None.
         """
         if handle.prefetch_request_id == -1:
-            return handle.l1_hit_chunks
-
-        l2_r = self._prefetch_controller.query_lookup_result(handle.prefetch_request_id)
-        if l2_r is None:
-            # Still in progress, or already consumed by query_prefetch_status.
+            return PrefetchResult(hit_cells=[], l1_hit_cells=[], l2_hit_cells=[])
+        result = self._prefetch_controller.query_prefetch_result(
+            handle.prefetch_request_id
+        )
+        if result is None:
             return None
-        # Both l1_hit_chunks and l2_r are chunk-level counts.
-        return handle.l1_hit_chunks + l2_r
+        total_hits = sum(row.popcount() for row in result.hit_cells)
+        if total_hits > 0:
+            elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
+            logger.info(
+                "Prefetch request completed (L1+L2): "
+                "%d/%d retained keys (%d L1, %d L2) in %.1f ms "
+                "(external_request_id=%s, prefetch_request_id=%d)",
+                total_hits,
+                handle.total_requested_keys,
+                result.l1_hit_count,
+                result.l2_hit_count,
+                elapsed_ms,
+                handle.external_request_id,
+                handle.prefetch_request_id,
+            )
+        return result
 
     def wait_prefetch_status(
         self,
@@ -749,72 +507,22 @@ class StorageManager:
         """
         Block until the prefetch task for ``handle`` has a result, or timeout.
 
-        L1-only prefetches (``prefetch_request_id == -1``) have no L2 result to
-        wait for and return immediately. This lets a caller avoid busy-polling
-        query_prefetch_status; the status itself is still retrieved via
-        query_prefetch_status afterwards.
+        This lets a caller avoid busy-polling query_prefetch_status; the
+        status itself is still retrieved via query_prefetch_status afterwards.
 
         Args:
             handle (PrefetchHandle): The handle of the prefetch task.
-            timeout: Maximum number of seconds to wait for the L2 result.
+            timeout: Maximum number of seconds to wait for the result.
 
         Returns:
-            True if a result is available within the timeout (always True for
-            an L1-only prefetch), False if the wait timed out.
+            True if a result is available within the timeout, False if the
+            wait timed out.
         """
         if handle.prefetch_request_id == -1:
             return True
         return self._prefetch_controller.wait_prefetch_result(
             handle.prefetch_request_id, timeout
         )
-
-    def query_prefetch_status(
-        self,
-        handle: PrefetchHandle,
-    ) -> list[Bitmap] | None:
-        """
-        Query the status of the prefetch task.
-
-        Args:
-            handle (PrefetchHandle): The handle of the prefetch task.
-
-        Returns:
-            ``None`` while the prefetch is still in progress. Otherwise one
-            found-key bitmap per key row of the submitted request, in row
-            order: bit ``i`` of ``rows[k]`` is set iff key ``i`` of row ``k``
-            is resident in L1 (and read-locked under ``LOCK``).
-        """
-        l2_r: Bitmap | None = None
-        if handle.prefetch_request_id != -1:
-            l2_r = self._prefetch_controller.query_prefetch_result(
-                handle.prefetch_request_id
-            )
-            if l2_r is None:
-                return None
-
-        found = self._combine_found(handle, l2_r)
-        # popcount (not count_leading_ones) so the log is accurate for
-        # non-contiguous policies (SEGMENTED_PREFIX / SPARSE) too.
-        total_hits = found.popcount()
-        elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
-
-        if total_hits > 0:
-            # L1 and L2 sets are disjoint (only L1-misses go to L2).
-            l1_hits = len(handle.l1_found_indices)
-            l2_hits = l2_r.popcount() if l2_r is not None else 0
-            logger.info(
-                "Prefetch request completed (L1+L2): "
-                "%d/%d retained keys (%d L1, %d L2) in %.1f ms "
-                "(external_request_id=%s, prefetch_request_id=%d)",
-                total_hits,
-                handle.total_requested_keys,
-                l1_hits,
-                l2_hits,
-                elapsed_ms,
-                handle.external_request_id,
-                handle.prefetch_request_id,
-            )
-        return _split_rows(found, handle.num_key_groups)
 
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
@@ -943,9 +651,9 @@ class StorageManager:
                 capacity_bytes=configured,
                 shared=False,
             )
-            for backend, configured in get_configured_capacity_bytes(
-                self._l1_config
-            ).items()
+            for backend, configured in (
+                self._l1_manager.get_capacity_bytes_by_backend().items()
+            )
         ]
         for _adapter_id, desc, adapter in self._snapshot_adapters():
             try:
@@ -976,6 +684,139 @@ class StorageManager:
             Tuple of ``(used_bytes, total_bytes)``.
         """
         return self._l1_manager.get_memory_usage()
+
+    # L1 reconfiguration APIs
+    def get_l1_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
+        """Return runtime status for every Device-DAX L1 arena.
+
+        Returns:
+            One status per mapped arena, in pool order.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed.
+        """
+        return self._l1_manager.get_devdax_arena_statuses()
+
+    def add_l1_devdax_device(
+        self,
+        device_path: str,
+        size_in_bytes: int,
+    ) -> DevDaxArenaStatus:
+        """Add a Device-DAX device to the L1 arena pool.
+
+        A successful addition publishes the current whole capacity topology.
+
+        The addition is refused while an L2 adapter that registers a single L1
+        memory region is configured.
+        The compatibility checks and addition are protected by ``_lifecycle_lock``.
+
+        Args:
+            device_path: Path of the Device-DAX device to map.
+            size_in_bytes: Number of bytes to map.
+
+        Returns:
+            Status of the newly added arena.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed, a single-region
+                L2 adapter is configured (409), the physical device is already
+                mapped by L2 (409), or the request cannot be applied.
+        """
+        with self._lifecycle_lock:
+            # Report the L1 backing error before adapter compatibility.
+            self._l1_manager.get_devdax_arena_statuses()
+            incompatible = self._single_region_adapter_names()
+            if incompatible:
+                raise L1ReconfigureError(
+                    409,
+                    "cannot add a Device-DAX L1 arena: L2 adapters that "
+                    "register a single L1 memory region are configured "
+                    f"({', '.join(incompatible)}); their transfers cover "
+                    "only the primary arena",
+                )
+            device_owners = self._l2_device_owner_names(device_path)
+            if device_owners:
+                raise L1ReconfigureError(
+                    409,
+                    "cannot add a Device-DAX L1 arena: the physical device "
+                    "is already mapped by L2 adapter(s) "
+                    f"({', '.join(device_owners)})",
+                )
+            status = self._l1_manager.add_devdax_device(device_path, size_in_bytes)
+        self._publish_capacity_changed()
+        return status
+
+    def remove_l1_devdax_device(
+        self,
+        device_path: str,
+        mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
+    ) -> DevDaxArenaStatus:
+        """Remove a Device-DAX device from the L1 arena pool.
+
+        Whenever the call changes usable capacity, it publishes the current
+        whole topology. This includes a drain transition whose later device
+        cleanup raises an exception.
+
+        Args:
+            device_path: Path of the mapped Device-DAX device.
+            mode: Removal strategy. Only drain mode is currently supported.
+
+        Returns:
+            Status of the arena after the removal request.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed or the request
+                cannot be applied.
+            RuntimeError: If device synchronization or cleanup fails after the
+                drain transition.
+            OSError: If unmapping or closing the device fails after the drain
+                transition.
+        """
+        target_was_active = self._l1_devdax_arena_is_active(device_path)
+        try:
+            status = self._l1_manager.remove_devdax_device(device_path, mode)
+        except Exception:
+            # Draining begins before an empty arena is synchronized and
+            # unmapped. If that cleanup raises, usable capacity has still
+            # changed and the coordinator must not retain the old topology.
+            try:
+                if target_was_active and not self._l1_devdax_arena_is_active(
+                    device_path
+                ):
+                    self._publish_capacity_changed()
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile L1 capacity after a Device-DAX remove error"
+                )
+            raise
+        self._publish_capacity_changed()
+        return status
+
+    def _single_region_adapter_names(self) -> list[str]:
+        """Return type names of registered L2 adapters needing one L1 region.
+
+        The caller holds ``_lifecycle_lock`` so the answer stays valid while
+        it acts on it; ``_adapters_lock`` only guards the dict read.
+        """
+        with self._adapters_lock:
+            descriptors = list(self._adapter_descriptors.values())
+        return [
+            name
+            for descriptor in descriptors
+            if (name := requires_single_l1_memory_region(descriptor.config)) is not None
+        ]
+
+    def _l1_devdax_arena_is_active(self, device_path: str) -> bool:
+        """Return whether an ACTIVE Device-DAX arena is mapped at ``device_path``.
+
+        The path must match the one used when adding the arena. ``False``
+        when L1 is not Device-DAX backed or nothing is registered there.
+        """
+        try:
+            status = self._l1_manager.get_devdax_arena_status(device_path)
+        except L1ReconfigureError:
+            return False
+        return status.state is DevDaxArenaState.ACTIVE
 
     def get_usage_bytes_by_cache_salt(self) -> dict[str, int]:
         """Aggregate ``cache_salt`` byte usage across every L2 adapter.
@@ -1040,29 +881,23 @@ class StorageManager:
     def _publish_capacity_changed(self) -> None:
         """Announce the current capacity topology on the event bus.
 
-        Lock-free. ``_build_capacities`` guards its own reads
-        (``_snapshot_adapters`` takes ``_adapters_lock``), and ordering is
-        not this class's problem: the cache-event subscriber numbers
-        declarations as it emits them, on the one bus drain thread, so a
-        number cannot come apart from the topology it labels. Callers here
-        are concurrent -- registration publishes from the event loop while a
-        worker may be adding an adapter -- which is exactly why the counter
-        does not live here.
+        Snapshot construction and enqueue are serialized because registration
+        can publish concurrently with runtime reconfiguration. The subscriber
+        assigns revisions in queue order, so an older snapshot must not be
+        enqueued after a newer one. The locks used by ``_build_capacities`` to
+        protect its reads are still required; this lock only orders declarations.
 
-        The event carries the whole topology, not a delta, so a dropped one
-        is repaired by the next rather than leaving the coordinator
-        permanently wrong.
+        The event carries the whole topology, not a delta, so a later
+        publication can repair a dropped declaration.
         """
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.SM_CAPACITY_CHANGED,
-                metadata={
-                    "snapshot": CapacitySnapshot(
-                        modules=tuple(self._build_capacities())
-                    )
-                },
+        with self._capacity_publish_lock:
+            snapshot = CapacitySnapshot(modules=tuple(self._build_capacities()))
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.SM_CAPACITY_CHANGED,
+                    metadata={"snapshot": snapshot},
+                )
             )
-        )
 
     def reconfigure_l2_adapter(
         self,
@@ -1080,11 +915,14 @@ class StorageManager:
         Returns:
             JSON-serializable operation result.
         """
-        adapter = self._get_reconfigurable_l2_adapter(adapter_index)
-        result = adapter.reconfigure(operation, payload)
+        with self._lifecycle_lock if operation == "add" else nullcontext():
+            adapter = self._get_reconfigurable_l2_adapter(adapter_index)
+            result = adapter.reconfigure(
+                operation,
+                payload,
+                device_owners=lambda path: self._device_owner_names(path, adapter),
+            )
         result["adapter_index"] = adapter_index
-        # Lock-free: reconfigure did not serialize against adapter
-        # add/delete before, and publishing is no reason to start.
         self._publish_capacity_changed()
         return result
 
@@ -1096,8 +934,35 @@ class StorageManager:
 
         Returns:
             The stable id assigned to the new adapter.
+
+        Raises:
+            ValueError: If the adapter registers a single L1 memory region
+                while L1 spans more than one (hybrid DRAM + Device-DAX, or
+                more than one Device-DAX arena), or a DAX device is already
+                mapped by L1 or another L2 adapter.
         """
         with self._lifecycle_lock:
+            # Mirror of the check in add_l1_devdax_device: a single-region
+            # adapter may only be added while L1 is exactly one memory region.
+            adapter_name = requires_single_l1_memory_region(config)
+            region_count = self._l1_manager.memory_region_count()
+            if adapter_name is not None and region_count > 1:
+                raise ValueError(
+                    f"{adapter_name} registers a single L1 memory region, but "
+                    f"L1 currently spans {region_count} regions (hybrid DRAM + "
+                    "Device-DAX, or more than one Device-DAX arena); remove the "
+                    "additional Device-DAX regions before adding it"
+                )
+            # Check all DAX devices before the constructor maps any.
+            device_config = unwrap_l2_adapter_config(config)
+            if get_type_name_for_config(device_config) == "dax":
+                for device in cast(Any, device_config).devices:
+                    owners = self._device_owner_names(device.device_path)
+                    if owners:
+                        raise ValueError(
+                            f"device {device.device_path} is already mapped by "
+                            f"{', '.join(owners)}"
+                        )
             adapter_id, adapter, descriptor = self._build_l2_adapter(config)
             for listener in self._registered_l2_listeners:
                 adapter.register_listener(listener)
@@ -1161,7 +1026,7 @@ class StorageManager:
             logger.info("Deleted L2 adapter %d", adapter_id)
             self._publish_capacity_changed()
 
-    def l2_adapters(self) -> list[tuple[AdapterDescriptor, L2AdapterInterface]]:
+    def l2_adapters(self) -> list[tuple[L2AdapterDescriptor, L2AdapterInterface]]:
         """Return all active L2 adapters paired with descriptors, in
         ascending adapter-id order (== configuration order for the initial
         set, then runtime-added adapters). The list is empty when no L2 is
@@ -1250,7 +1115,7 @@ class StorageManager:
 
     def _snapshot_adapters(
         self,
-    ) -> list[tuple[int, AdapterDescriptor, L2AdapterInterface]]:
+    ) -> list[tuple[int, L2AdapterDescriptor, L2AdapterInterface]]:
         """Snapshot the active adapters under the lock, in ascending
         adapter-id order. Iterate this instead of the live dicts so a
         concurrent add/delete cannot change them mid-iteration.
@@ -1272,7 +1137,7 @@ class StorageManager:
     def _build_l2_adapter(
         self,
         config: L2AdapterConfigBase,
-    ) -> tuple[int, L2AdapterInterface, AdapterDescriptor]:
+    ) -> tuple[int, L2AdapterInterface, L2AdapterDescriptor]:
         """Create a L2 adapter instance based on the config.
 
         Args:
@@ -1292,7 +1157,7 @@ class StorageManager:
                 serde=create_serde_processor(config.serde_config),
                 l1_manager=self._l1_manager,
             )
-        descriptor = AdapterDescriptor(index=adapter_id, config=config)
+        descriptor = L2AdapterDescriptor(index=adapter_id, config=config)
         # Stamp the registered type name so the adapter's cache events on
         # the observability bus carry their backend identity.
         adapter.set_backend_identity(descriptor.type_name, shared=config.shared)
@@ -1339,6 +1204,40 @@ class StorageManager:
 
         return None
 
+    def _device_owner_names(
+        self, device_path: str, exclude: Optional[L2ReconfigurableAdapter] = None
+    ) -> list[str]:
+        """Return other L1/L2 owners while the caller holds the lifecycle lock."""
+        owners = ["L1"] if self._l1_manager.owns_device(device_path) else []
+        return owners + self._l2_device_owner_names(device_path, exclude)
+
+    def _l2_device_owner_names(
+        self, device_path: str, exclude: Optional[L2ReconfigurableAdapter] = None
+    ) -> list[str]:
+        """Return L2 type names that own the physical device at a path.
+
+        The caller holds ``_lifecycle_lock`` so registered adapters cannot be
+        added or deleted between this check and the mapping attempt.
+
+        Args:
+            device_path: Candidate Device-DAX path.
+            exclude: L2 adapter whose own mappings are ignored.
+
+        Returns:
+            Registered adapter type names whose open device has the same
+            physical identity.
+        """
+        owners: list[str] = []
+        for _adapter_id, descriptor, adapter in self._snapshot_adapters():
+            owner = self._unwrap_reconfigurable_l2_adapter(adapter)
+            if (
+                owner is not exclude
+                and isinstance(owner, L2DeviceOwner)
+                and owner.owns_device(device_path)
+            ):
+                owners.append(descriptor.type_name)
+        return owners
+
     def _list_reconfigurable_l2_adapters(
         self,
     ) -> list[tuple[int, L2ReconfigurableAdapter]]:
@@ -1359,46 +1258,3 @@ class StorageManager:
         if adapter_index < 0 or adapter_index >= len(adapters):
             raise L2ReconfigureError(404, "L2 adapter not reconfigurable")
         return adapters[adapter_index][1]
-
-    @lmcache_deprecate(
-        "transitional adapter to the flat PrefetchRequestSpec; removed with "
-        "the prefetch controller refactor"
-    )
-    def _to_controller_spec(self, spec: PrefetchTaskSpec) -> PrefetchRequestSpec:
-        """Convert a grouped prefetch request into the flat-key payload.
-
-        Args:
-            spec: The grouped request.
-
-        Returns:
-            The equivalent flat payload.
-
-        Note:
-            The flat key order is defined by :func:`_flatten_rows`. Each key
-            group becomes one fold unit of the flat payload (``attn_desc``
-            lists one window per key group, ``world_size`` 1), so the groups
-            may appear in any order. ``group_layout_descs`` is keyed by the
-            groups' object group ids.
-        """
-        group_layout_descs: dict[int, MemoryLayoutDesc] = {
-            row.object_group_id: row.layout_desc for row in spec.key_groups
-        }
-        return PrefetchRequestSpec(
-            keys=_flatten_rows(spec),
-            group_layout_descs=group_layout_descs,
-            num_kv_readers=spec.num_kv_readers,
-            policy=(
-                TrimPolicy.PREFIX
-                if spec.fetching_policy == "prefix"
-                else TrimPolicy.SPARSE
-            ),
-            attn_desc=AttnWindowDesc(
-                num_chunks_in_sw=[row.sliding_window_size for row in spec.key_groups],
-                world_size=1,
-            ),
-            mode=(
-                PrefetchMode.LOOKUP
-                if spec.lock_mode is PrefetchLockMode.LOCK
-                else PrefetchMode.WARM
-            ),
-        )
