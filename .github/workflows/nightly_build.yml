@@ -4,12 +4,18 @@ on:
   schedule:
     - cron: '30 7 * * *'
   workflow_dispatch:
+    inputs:
+      verify_xpu_candidate_only:
+        description: Test XPU wheel, CI, and isolated pins without publishing
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   nightly-wheels:
+    if: github.ref == 'refs/heads/dev' && !inputs.verify_xpu_candidate_only
     name: Build nightly CUDA wheels (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -189,6 +195,7 @@ jobs:
 
   resolve-xpu-nightly:
     name: Resolve vLLM XPU nightly runtime
+    if: github.ref == 'refs/heads/dev' || inputs.verify_xpu_candidate_only
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.runtime.outputs.image }}
@@ -206,7 +213,7 @@ jobs:
 
   build-xpu-ci-candidate:
     name: Build XPU CI candidate
-    if: github.ref == 'refs/heads/dev'
+    if: github.ref == 'refs/heads/dev' || inputs.verify_xpu_candidate_only
     needs: resolve-xpu-nightly
     runs-on: ubuntu-latest
     outputs:
@@ -262,13 +269,14 @@ jobs:
           WHEEL_ARTIFACT_ID: ${{ needs.nightly-xpu-wheel.outputs.wheel_artifact_id }}
           WHEEL_ARTIFACT_DIGEST: ${{ needs.nightly-xpu-wheel.outputs.wheel_artifact_digest }}
           SOURCE_COMMIT: ${{ github.sha }}
+          SOURCE_BRANCH: ${{ github.ref_name }}
         run: python3 .buildkite/k3_tests/xpu/verify-xpu-ci-image.py
       - name: Promote verified XPU CI image pin
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_PLATFORM: buildkite
           PIN_BACKEND: xpu
-          PIN_VLLM_BRANCH: buildkite_latest_tested_vllm
+          PIN_VLLM_BRANCH: ${{ inputs.verify_xpu_candidate_only && format('xpu-nightly-test-buildkite-{0}-{1}', github.run_id, github.run_attempt) || 'buildkite_latest_tested_vllm' }}
           VLLM_IMAGE_TAG: ${{ needs.build-xpu-ci-candidate.outputs.tag }}
           VLLM_IMAGE_REF: ${{ needs.build-xpu-ci-candidate.outputs.image }}
           XPU_CI_IMAGE_DIGEST: ${{ needs.build-xpu-ci-candidate.outputs.digest }}
@@ -280,6 +288,7 @@ jobs:
 
   nightly-xpu-wheel:
     name: Build XPU nightly wheel
+    if: github.ref == 'refs/heads/dev' || inputs.verify_xpu_candidate_only
     needs: build-xpu-ci-candidate
     uses: ./.github/workflows/build_xpu_artifacts.yml
     with:
@@ -305,7 +314,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CI_PLATFORM: github_actions
           PIN_BACKEND: xpu
-          PIN_VLLM_BRANCH: github_nightly_tested_vllm
+          PIN_VLLM_BRANCH: ${{ inputs.verify_xpu_candidate_only && format('xpu-nightly-test-base-{0}-{1}', github.run_id, github.run_attempt) || 'github_nightly_tested_vllm' }}
           VLLM_IMAGE_TAG: vllm/vllm-openai-xpu:nightly
           VLLM_IMAGE_REF: ${{ needs.resolve-xpu-nightly.outputs.image }}
           XPU_BASE_IMAGE_DIGEST: ${{ needs.resolve-xpu-nightly.outputs.digest }}
@@ -314,6 +323,7 @@ jobs:
 
   publish-nightly-xpu:
     name: Publish XPU nightly wheel
+    if: '!inputs.verify_xpu_candidate_only'
     needs: [resolve-xpu-nightly, nightly-xpu-wheel, pin-nightly-xpu-base]
     runs-on: ubuntu-latest
     permissions:
@@ -361,6 +371,7 @@ jobs:
   # never be mistaken for a release.
   nightly-rocm-wheel:
     name: Build ROCm nightly wheel
+    if: github.ref == 'refs/heads/dev' && !inputs.verify_xpu_candidate_only
     uses: ./.github/workflows/build_rocm_artifacts.yml
     with:
       dev_version: true
@@ -407,6 +418,7 @@ jobs:
   # published to a rolling GitHub Release rather than PyPI.
   nightly-musa-wheel:
     name: Build MUSA nightly wheel
+    if: github.ref == 'refs/heads/dev' && !inputs.verify_xpu_candidate_only
     uses: ./.github/workflows/build_musa_artifacts.yml
     with:
       dev_version: true
@@ -449,6 +461,7 @@ jobs:
           asset_glob: dist/musa/*.whl
 
   nightly-build:
+    if: github.ref == 'refs/heads/dev' && !inputs.verify_xpu_candidate_only
     name: Build image (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -707,6 +720,7 @@ jobs:
 
   nightly-verify-cpu-vllm:
     name: CPU device tests
+    if: github.ref == 'refs/heads/dev' && !inputs.verify_xpu_candidate_only
     # Reuse the PR-gating CPU device suite (server bench + vLLM e2e over
     # two models) rather than keeping a second, weaker copy of the install
     # steps here: "today's nightly is importable" says very little, while
@@ -728,7 +742,7 @@ jobs:
   nightly-pin-or-report-vllm:
     name: Pin or report vLLM
     needs: nightly-verify-cpu-vllm
-    if: always()
+    if: always() && github.ref == 'refs/heads/dev' && !inputs.verify_xpu_candidate_only
     concurrency:
       group: github-nightly-vllm-pin
       cancel-in-progress: false

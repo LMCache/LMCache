@@ -77,10 +77,11 @@ def main() -> None:
     token = os.environ["BUILDKITE_API_TOKEN"]
     image = os.environ["CANDIDATE_IMAGE"]
     commit = os.environ["SOURCE_COMMIT"]
+    branch = os.environ["SOURCE_BRANCH"]
     wheel_id = os.environ["WHEEL_ARTIFACT_ID"]
     wheel_digest = os.environ["WHEEL_ARTIFACT_DIGEST"]
     if (
-        not all((token, image, commit))
+        not all((token, image, commit, branch))
         or not re.fullmatch(r"[0-9]+", wheel_id)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", wheel_digest)
     ):
@@ -96,7 +97,7 @@ def main() -> None:
             token,
             {
                 "commit": commit,
-                "branch": "dev",
+                "branch": branch,
                 "message": f"XPU nightly wheel candidate {image}",
                 "env": {
                     "XPU_CANDIDATE_IMAGE": image,
