@@ -14,6 +14,11 @@ from lmcache.v1.platform.ops_types import StagingCopy
 import lmcache.lmcache_native as lmcache_native
 
 
+def _is_bar_backed(memory_obj: MemoryObj) -> bool:
+    """Return True if memory_obj's backing allocator is a PCIe BAR region."""
+    return getattr(memory_obj.parent(), "is_pcie_bar_memory", False)
+
+
 # Helper functions
 def lmcache_memcpy_async_h2d(
     memory_obj: MemoryObj,
@@ -49,6 +54,13 @@ def lmcache_memcpy_async_h2d(
             lmcache_native.TransferDirection.H2D,
             memory_obj.meta.address,
             LazyMemoryAllocator.PIN_CHUNK_SIZE,
+        )
+    elif _is_bar_backed(memory_obj):
+        device_ops.bar_memcpy_async(
+            memory_obj.data_ptr,
+            gpu_buffer.data_ptr(),
+            memory_obj.get_size(),
+            lmcache_native.TransferDirection.H2D,
         )
     else:
         gpu_buffer.view(torch.uint8).copy_(
@@ -91,6 +103,13 @@ def lmcache_memcpy_async_d2h(
             memory_obj.meta.address,
             LazyMemoryAllocator.PIN_CHUNK_SIZE,
         )
+    elif _is_bar_backed(memory_obj):
+        device_ops.bar_memcpy_async(
+            memory_obj.data_ptr,
+            gpu_buffer.data_ptr(),
+            memory_obj.get_size(),
+            lmcache_native.TransferDirection.D2H,
+        )
     else:
         dst_tensor.view(torch.uint8)[:mem_obj_size].copy_(
             gpu_buffer.view(torch.uint8), non_blocking=True
@@ -102,14 +121,14 @@ def build_staging_copies(
     gpu_buffers: Sequence[torch.Tensor],
     is_h2d: bool,
 ) -> list[StagingCopy]:
-    """Build native ``StagingCopy`` descriptors for one batch of lazy objects.
+    """Build native ``StagingCopy`` descriptors for one batch of objects.
 
     The H2D/D2H direction decides which side is source vs. destination; the host
-    side is always the lazy memory object. Callers must ensure every object is
-    lazy-allocator-backed.
+    side is always the memory object. Supports both lazy-allocator-backed DRAM
+    objects and PCIe BAR-backed objects (``is_bar`` flag on the copy).
 
     Args:
-        memory_objs: Lazy-allocator memory objects, one per chunk in the batch.
+        memory_objs: Memory objects, one per chunk in the batch.
         gpu_buffers: GPU staging buffers, aligned element-wise with
             ``memory_objs``.
         is_h2d: True for retrieve (CPU->GPU), False for store (GPU->CPU).
@@ -136,13 +155,18 @@ def build_staging_copies(
             )
         host_ptr = memory_obj.data_ptr
         gpu_ptr = gpu_buffer.data_ptr()
-        host_offset = memory_obj.meta.address
+        bar = _is_bar_backed(memory_obj)
+        host_offset = 0 if bar else memory_obj.meta.address
         if is_h2d:
             copies.append(
-                device_ops.StagingCopy(gpu_ptr, host_ptr, mem_obj_size, host_offset)
+                device_ops.StagingCopy(
+                    gpu_ptr, host_ptr, mem_obj_size, host_offset, bar
+                )
             )
         else:
             copies.append(
-                device_ops.StagingCopy(host_ptr, gpu_ptr, mem_obj_size, host_offset)
+                device_ops.StagingCopy(
+                    host_ptr, gpu_ptr, mem_obj_size, host_offset, bar
+                )
             )
     return copies

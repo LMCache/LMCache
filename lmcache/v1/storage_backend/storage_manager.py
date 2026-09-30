@@ -514,6 +514,23 @@ class StorageManager:
                 return memory_objs
         return [None] * len(keys)
 
+    def region_of(self, memory_obj: "MemoryObj") -> str:
+        """Return the region name that owns the given memory object.
+
+        Args:
+            memory_obj: A previously allocated memory object.
+
+        Returns:
+            The region name, or ``"dram"`` when the allocator does not
+            support per-region tracking.
+        """
+        backend = self.storage_backends.get("LocalCPUBackend")
+        if backend is not None:
+            allocator = backend.memory_allocator
+            if hasattr(allocator, "region_of"):
+                return allocator.region_of(memory_obj)
+        return "dram"
+
     def layerwise_batched_get(
         self,
         keys: List[List[CacheEngineKey]],

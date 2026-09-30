@@ -14,11 +14,15 @@
 
 // One asynchronous host<->device copy. `host_offset` is the host-side virtual
 // offset in the lmcache allocator (source for H2D, destination for D2H).
+// When `is_bar` is true the host pointer is a PCIe BAR IO-memory region
+// registered with cudaHostRegisterIoMemory; the copy uses bar_memcpy_async
+// (cudaMemcpyDeviceToDevice) instead of the regular lmcache_memcpy_async.
 struct StagingCopy {
   uintptr_t dest;
   uintptr_t src;
   size_t nbytes;
   size_t host_offset;
+  bool is_bar = false;
 };
 
 // One kernel launch within a batch step. The batch-invariant arguments live in
