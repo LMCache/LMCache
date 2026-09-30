@@ -7,6 +7,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 import json
 import os
+import re
 import time
 
 
@@ -72,13 +73,21 @@ def require_string(record: dict[str, object], key: str) -> str:
 
 
 def main() -> None:
-    """Trigger both XPU suites on the candidate image, failing closed."""
+    """Gate promotion on wheel runs of both XPU suites."""
     token = os.environ["BUILDKITE_API_TOKEN"]
     image = os.environ["CANDIDATE_IMAGE"]
     commit = os.environ["SOURCE_COMMIT"]
     branch = os.environ["SOURCE_BRANCH"]
-    if not all((token, image, commit, branch)):
-        raise RuntimeError("Buildkite token, image, commit, and branch are required")
+    wheel_id = os.environ["WHEEL_ARTIFACT_ID"]
+    wheel_digest = os.environ["WHEEL_ARTIFACT_DIGEST"]
+    if (
+        not all((token, image, commit, branch))
+        or not re.fullmatch(r"[0-9]+", wheel_id)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", wheel_digest)
+    ):
+        raise RuntimeError(
+            "Buildkite credentials, source, and XPU wheel artifact are required"
+        )
 
     builds: dict[str, tuple[str, str, int]] = {}
     for name, slug in (("unit", "unit-tests-xpu"), ("multiprocess", "xpu-mp-test")):
@@ -89,10 +98,12 @@ def main() -> None:
             {
                 "commit": commit,
                 "branch": branch,
-                "message": f"XPU nightly candidate {image}",
+                "message": f"XPU nightly wheel candidate {image}",
                 "env": {
-                    "PINNED_XPU_IMAGE": image,
+                    "XPU_CANDIDATE_IMAGE": image,
                     "XPU_CANDIDATE_VALIDATION": "1",
+                    "XPU_WHEEL_ARTIFACT_ID": wheel_id,
+                    "XPU_WHEEL_ARTIFACT_DIGEST": wheel_digest,
                 },
             },
         )

@@ -10,10 +10,16 @@
 The scheduled nightly builds an XPU CI candidate from the current
 `vllm/vllm-openai-xpu:nightly` digest. Its Dockerfile installs DPC++ using
 `.buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh`, but does not install
-LMCache. Both XPU pipelines install LMCache from their checked-out source on
-each run. The candidate is pushed so both can test the same immutable image.
-Only when UT and MP pass does the nightly record its digest on
+LMCache. During nightly validation, both XPU pipelines install the wheel
+built by this run. They download the GitHub Actions artifact by ID, verify
+its SHA-256, and install it with `--no-deps` in the same immutable candidate
+image. Ordinary Buildkite runs still install LMCache from source. Only when
+both nightly Buildkite builds pass does the nightly record its digest on
 `buildkite_latest_tested_vllm`; failures keep the previous pin.
+The same verified run also records the upstream vLLM XPU base image digest on
+`github_nightly_tested_vllm` for provenance; it is distinct from the CI image.
+Candidate builds pass `XPU_CANDIDATE_IMAGE` to the XPU pod; ordinary builds
+resolve the previously promoted image from the pin branch.
 For manual validation on a test branch, select `verify_xpu_candidate_only`:
 it builds and smoke-checks the XPU wheel, runs both Buildkite suites, and
 writes the two pins to separate `xpu-nightly-test-*` branches instead of the
@@ -28,6 +34,8 @@ pipelines. Configure `BUILD_KITE_API_TOKEN` as a secret with `read_builds` and
 `write_builds` scopes. The existing
 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` must be able to push to the public
 `lmcache/vllm-openai-xpu-ci` repository; XPU nodes must be able to pull it.
+The `buildkite-git-creds` Kubernetes secret on the XPU queue must contain
+`GITHUB_TOKEN` with GitHub Actions artifact read permission for `LMCache/LMCache`.
 GitHub Actions must be able to update `buildkite_latest_tested_vllm`.
 
 ### Trigger strategy

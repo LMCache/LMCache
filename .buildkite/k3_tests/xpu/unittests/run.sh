@@ -42,7 +42,7 @@ python - <<'PY'
 import lmcache
 import lmcache.xpu_ops
 
-print("LMCache XPU extension installed from source")
+print("LMCache XPU extension installed")
 PY
 
 discover_xpu_tests() {
@@ -88,6 +88,9 @@ log "discovered ${#XPU_TEST_FILES[@]} XPU-related test files"
 printf '  %s\n' "${XPU_TEST_FILES[@]}"
 
 PYTEST_ARGS=(-q --maxfail=1 -m "not cuda and not musa and not sglang")
+if [ -n "${XPU_WHEEL_ARTIFACT_ID:-}" ]; then
+  PYTEST_ARGS+=(--import-mode=importlib)
+fi
 if [ -n "${TEST_SELECTOR:-}" ]; then
   PYTEST_ARGS+=(-k "${TEST_SELECTOR}")
 fi
@@ -95,4 +98,3 @@ fi
 log "running XPU-related tests"
 pytest "${PYTEST_ARGS[@]}" "${XPU_TEST_FILES[@]}"
 log "xpu smoke test finished successfully"
-

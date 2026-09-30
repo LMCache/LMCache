@@ -246,7 +246,7 @@ jobs:
           echo "tag=${CANDIDATE_TAG}" >> "$GITHUB_OUTPUT"
 
   verify-and-pin-xpu-ci:
-    name: Verify XPU CI candidate and promote
+    name: Verify XPU wheel and promote image pin
     needs: [build-xpu-ci-candidate, nightly-xpu-wheel]
     if: >-
       always() &&
@@ -266,10 +266,12 @@ jobs:
         env:
           BUILDKITE_API_TOKEN: ${{ secrets.BUILD_KITE_API_TOKEN }}
           CANDIDATE_IMAGE: ${{ needs.build-xpu-ci-candidate.outputs.image }}
+          WHEEL_ARTIFACT_ID: ${{ needs.nightly-xpu-wheel.outputs.wheel_artifact_id }}
+          WHEEL_ARTIFACT_DIGEST: ${{ needs.nightly-xpu-wheel.outputs.wheel_artifact_digest }}
           SOURCE_COMMIT: ${{ github.sha }}
           SOURCE_BRANCH: ${{ github.ref_name }}
         run: python3 .buildkite/k3_tests/xpu/verify-xpu-ci-image.py
-      - name: Promote verified candidate for subsequent Buildkite jobs
+      - name: Promote verified XPU CI image pin
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_PLATFORM: buildkite
@@ -277,12 +279,12 @@ jobs:
           PIN_VLLM_BRANCH: ${{ inputs.verify_xpu_candidate_only && format('xpu-nightly-test-buildkite-{0}-{1}', github.run_id, github.run_attempt) || 'buildkite_latest_tested_vllm' }}
           VLLM_IMAGE_TAG: ${{ needs.build-xpu-ci-candidate.outputs.tag }}
           VLLM_IMAGE_REF: ${{ needs.build-xpu-ci-candidate.outputs.image }}
-          VLLM_IMAGE_DIGEST: ${{ needs.build-xpu-ci-candidate.outputs.digest }}
+          XPU_CI_IMAGE_DIGEST: ${{ needs.build-xpu-ci-candidate.outputs.digest }}
           BUILD_NUMBER: ${{ steps.validate.outputs.unit_build_number }}
           BUILD_URL: ${{ steps.validate.outputs.unit_build_url }}
           COMMIT_SHA: ${{ github.sha }}
           LMCACHE_VERSION: ${{ needs.nightly-xpu-wheel.outputs.xpu_version }}
-        run: bash .github/scripts/pin-tested-vllm.sh
+        run: VLLM_IMAGE_DIGEST="${XPU_CI_IMAGE_DIGEST}" bash .github/scripts/pin-tested-vllm.sh
 
   nightly-xpu-wheel:
     name: Build XPU nightly wheel
@@ -294,9 +296,9 @@ jobs:
       dev_version: true
     secrets: inherit
 
-  pin-nightly-xpu:
-    name: Pin smoke-verified XPU runtime
-    needs: [resolve-xpu-nightly, nightly-xpu-wheel]
+  pin-nightly-xpu-base:
+    name: Promote verified XPU base image pin
+    needs: [resolve-xpu-nightly, nightly-xpu-wheel, verify-and-pin-xpu-ci]
     concurrency:
       group: github-nightly-vllm-pin
       cancel-in-progress: false
@@ -307,7 +309,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
-      - name: Record XPU runtime pin
+      - name: Promote XPU base image pin
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_PLATFORM: github_actions
@@ -315,14 +317,14 @@ jobs:
           PIN_VLLM_BRANCH: ${{ inputs.verify_xpu_candidate_only && format('xpu-nightly-test-runtime-{0}-{1}', github.run_id, github.run_attempt) || 'github_nightly_tested_vllm' }}
           VLLM_IMAGE_TAG: vllm/vllm-openai-xpu:nightly
           VLLM_IMAGE_REF: ${{ needs.resolve-xpu-nightly.outputs.image }}
-          VLLM_IMAGE_DIGEST: ${{ needs.resolve-xpu-nightly.outputs.digest }}
+          XPU_BASE_IMAGE_DIGEST: ${{ needs.resolve-xpu-nightly.outputs.digest }}
           LMCACHE_VERSION: ${{ needs.nightly-xpu-wheel.outputs.xpu_version }}
-        run: bash .github/scripts/pin-tested-vllm.sh
+        run: VLLM_IMAGE_DIGEST="${XPU_BASE_IMAGE_DIGEST}" bash .github/scripts/pin-tested-vllm.sh
 
   publish-nightly-xpu:
     name: Publish XPU nightly wheel
     if: '!inputs.verify_xpu_candidate_only'
-    needs: [resolve-xpu-nightly, nightly-xpu-wheel, pin-nightly-xpu]
+    needs: [resolve-xpu-nightly, nightly-xpu-wheel, pin-nightly-xpu-base]
     runs-on: ubuntu-latest
     permissions:
       contents: write

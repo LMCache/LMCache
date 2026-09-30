@@ -14,16 +14,27 @@ source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 check_gpu_health 80
 merge_pr_base_branch
 
-echo "--- :python: Installing LMCache from source (no vLLM)"
-# Skip setuptools_scm git describe; the repo carries non-PEP-440 tags
-# (nightly, nightly-cu13) that crash the newer vcs_versioning backend.
-export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
-uv pip install -r requirements/proto.txt
-uv pip install -e . --no-build-isolation
+echo "--- :python: Installing LMCache (no vLLM)"
+if [[ -n "${XPU_WHEEL_ARTIFACT_ID:-}" ]]; then
+    echo "--- :package: Installing verified XPU wheel"
+    wheel_path="$(python "${REPO_ROOT}/.buildkite/k3_tests/xpu/download-wheel.py")"
+    uv pip install --no-deps "${wheel_path}"
+    rm -f -- "${wheel_path}"
+    rmdir -- "$(dirname "${wheel_path}")"
+    export PYTHONSAFEPATH=1
+    export PYTHONPATH="$(python -P -c 'import sysconfig; print(sysconfig.get_path("purelib"))')${PYTHONPATH:+:${PYTHONPATH}}"
+    python -c 'import lmcache, pathlib, sysconfig; assert pathlib.Path(lmcache.__file__).is_relative_to(sysconfig.get_path("purelib")), lmcache.__file__; print("LMCache loaded from wheel:", lmcache.__file__)'
+else
+    # Skip setuptools_scm git describe; the repo carries non-PEP-440 tags
+    # (nightly, nightly-cu13) that crash the newer vcs_versioning backend.
+    export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
+    uv pip install -r requirements/proto.txt
+    uv pip install -e . --no-build-isolation
 
-# Generate ignored bindings for editable installs that skip the build_py hook.
-echo "--- :gear: Generating LMCache gRPC bindings"
-python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py"
+    # Generate ignored bindings for editable installs that skip the build_py hook.
+    echo "--- :gear: Generating LMCache gRPC bindings"
+    python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py"
+fi
 
 echo "--- :white_check_mark: Environment ready (LMCache only, no vLLM)"
-python -c "import lmcache; print('LMCache installed from source')"
+python -c "import lmcache; print('LMCache installed')"
