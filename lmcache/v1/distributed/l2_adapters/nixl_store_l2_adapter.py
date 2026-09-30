@@ -212,12 +212,25 @@ class NixlStorageAgent:
     def init_mem_handlers(self, device, buffer_ptr, buffer_size, page_size, device_id):
         """
         Initialize memory handlers for the given device and buffer.
+
+        Register OBJ memory at page granularity so each transfer descriptor
+        has a matching registration and each registration is bounded by the
+        configured page size. Non-OBJ backends retain the single-arena
+        registration.
         """
-        reg_list = [(buffer_ptr, buffer_size, device_id, "")]
+        if page_size <= 0:
+            raise ValueError("page_size must be positive")
+        if buffer_size <= 0 or buffer_size % page_size != 0:
+            raise ValueError("L1 buffer size must be a positive page multiple")
+
         xfer_desc = [
             (base_addr, page_size, device_id)
             for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size)
         ]
+        if self.backend == "OBJ":
+            reg_list = [(*desc, "") for desc in xfer_desc]
+        else:
+            reg_list = [(buffer_ptr, buffer_size, device_id, "")]
 
         if device == "cpu":
             mem_type = "DRAM"
