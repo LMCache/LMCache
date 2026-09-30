@@ -45,26 +45,33 @@ Participants: **Scheduler** (vLLM), **Connector** (`LMCacheMPConnector`),
 **Adapter** (`LMCacheMPSchedulerAdapter`), **LookupModule** (server),
 **Storage** (`StorageManager`/`L1Manager`), **BlockPool** (vLLM GPU block pool).
 
-```text
-Legend: S=Scheduler  C=Connector  A=Adapter  L=LookupModule  SM=Storage  BP=BlockPool
+```mermaid
+sequenceDiagram
+    participant S as Scheduler
+    participant C as Connector
+    participant A as Adapter
+    participant L as LookupModule
+    participant SM as Storage
+    participant BP as BlockPool
 
- S --get_num_new_matched_tokens(num_computed = APC hit)--> C
- C :  c0 = align(num_computed) -> covered_chunks
- C --get_cached_block + touch  [PIN covered blocks]------> BP
- C --maybe_submit_lookup_request(covered_chunks)--------> A
- A --LOOKUP(key, covered_chunks)------------------------> L
- L --touch covered [0,c0)  (no lock / no prefetch)---------> SM
- L --reserve_read + prefetch uncovered [c0,end)---------> SM
- C --check_lookup_result--------------------------------> A
- A --returns LookupOutcome(hit, stored)-----------------> C
+    S->>C: get_num_new_matched_tokens(num_computed = APC hit)
+    Note over C: c0 = align(num_computed) then covered_chunks
+    C->>BP: get_cached_block + touch [PIN covered blocks]
+    C->>A: maybe_submit_lookup_request(covered_chunks)
+    A->>L: LOOKUP(key, covered_chunks)
+    L->>SM: touch covered [0,c0) - no lock / no prefetch
+    L->>SM: reserve_read + prefetch uncovered [c0,end)
+    C->>A: check_lookup_result
+    A-->>C: LookupOutcome(hit, stored)
 
- shrink below c0 AND no pin held:
-   C --free_lookup_locks--------------------------------> A
-   C --free_blocks (unpin)------------------------------> BP
-   C --> S :  (0, False)  bypass -> recompute locally
- normal:
-   C --> S :  need_to_load = hit - num_computed
-   S --update_state_after_alloc-------------------------> C
-   C --free_blocks (release pin, idempotent)-----------> BP
-   C --free_lookup_locks([0, vllm_hit))----------------> A   [server clamps to [c0, ret)]
+    alt APC hit shrank below c0 and no pin held
+        C->>A: free_lookup_locks
+        C->>BP: free_blocks (unpin)
+        C-->>S: (0, False) bypass, recompute locally
+    else normal
+        C-->>S: need_to_load = hit - num_computed
+        S->>C: update_state_after_alloc
+        C->>BP: free_blocks (release pin, idempotent)
+        C->>A: free_lookup_locks([0, vllm_hit)) - server clamps to [c0,ret)
+    end
 ```
