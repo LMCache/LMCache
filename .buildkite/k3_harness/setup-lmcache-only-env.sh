@@ -22,7 +22,8 @@ if [[ -n "${XPU_WHEEL_ARTIFACT_ID:-}" ]]; then
     rm -f -- "${wheel_path}"
     rmdir -- "$(dirname "${wheel_path}")"
     export PYTHONSAFEPATH=1
-    export PYTHONPATH="$(python -P -c 'import sysconfig; print(sysconfig.get_path("purelib"))')${PYTHONPATH:+:${PYTHONPATH}}"
+    wheel_site_packages="$(python -P -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+    export PYTHONPATH="${wheel_site_packages}:${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
     python -c 'import lmcache, pathlib, sysconfig; assert pathlib.Path(lmcache.__file__).is_relative_to(sysconfig.get_path("purelib")), lmcache.__file__; print("LMCache loaded from wheel:", lmcache.__file__)'
 else
     # Skip setuptools_scm git describe; the repo carries non-PEP-440 tags
