@@ -200,6 +200,22 @@ class L1Manager:
         else:
             self._memory_manager = L1MemoryManager(config.memory_config)
 
+        # ``use_hugepages`` only ever backs a DRAM L1 pool, so it is a no-op
+        # for the device-backed GDS tier and for a pure (non-hybrid)
+        # Device-DAX arena.
+        l1_cfg = config.memory_config
+        if l1_cfg.use_hugepages:
+            if config.gds_l1_config is not None:
+                logger.warning(
+                    "l1-use-hugepages is a no-op for the GDS L1 tier; "
+                    "hugepages are ignored."
+                )
+            elif l1_cfg.devdax_path and not l1_cfg.devdax_size_in_bytes:
+                logger.warning(
+                    "l1-use-hugepages is a no-op for a pure Device-DAX L1 "
+                    "arena (no local DRAM pool)."
+                )
+
         # CPU and GDS capacity is fixed at boot. Device-DAX overlays its entry
         # from the live arena pool because devices can be added or drained.
         self._boot_capacity_bytes_by_backend = get_configured_capacity_bytes(config)

@@ -165,6 +165,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         local_size: int = 0,
         shm_name: str | None = None,
         align_bytes: int = AddressManager.ALIGN_BYTES,
+        use_hugepages: bool = False,
     ) -> None:
         if not device_path:
             raise ValueError("device_path must be a non-empty string")
@@ -188,6 +189,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
                 local_size,
                 align_bytes=self.align_bytes,
                 shm_name=shm_name,
+                use_hugepages=use_hugepages,
             )
         self.host_mem_lock = threading.Lock()
         self.buffer_allocator = BufferAllocator("cpu")

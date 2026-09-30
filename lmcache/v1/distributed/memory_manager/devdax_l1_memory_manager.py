@@ -61,6 +61,7 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             local_size=local_size,
             shm_name=config.shm_name or None,
             align_bytes=config.align_bytes,
+            use_hugepages=config.use_hugepages,
         )
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
