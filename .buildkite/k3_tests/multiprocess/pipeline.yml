@@ -552,7 +552,6 @@ steps:
     env:
       INFERENCE_ENGINE: "{{matrix.inference_engine}}"
       LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
-      LIMIT: "20"
     timeout_in_minutes: 30
     retry: *flaky-retry
     agents: { queue: "k8s" }
