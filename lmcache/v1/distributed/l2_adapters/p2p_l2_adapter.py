@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """P2P L2 adapter: reads KV objects from a single peer cache server.
 
-Lookups and unlocks are sent to the peer's P2P controller over the MQ; the
-located objects are pulled from the peer's L1 over the transfer channel. The
+Lookups and unlocks are sent to the peer's P2P controller over RPC; the
+default implementation pulls objects over the transfer channel. CXL specializes
+region registration and borrowing while sharing this control plane. The
 adapter never stores, evicts, or deletes -- a peer's cache is read-only here.
 
 Because neither the lookup RPC nor the transfer-channel read exposes a
@@ -17,6 +18,7 @@ its own task-id counter and bookkeeping dicts), so this class needs no locks.
 """
 
 # Standard
+from contextlib import ExitStack
 from dataclasses import dataclass
 import time
 
@@ -35,7 +37,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.transfer_channel.api import MemoryRegionAddress
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
@@ -68,7 +70,8 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
     """Config for the P2P L2 adapter.
 
     Fields:
-    - peer_mq_server_url: Peer request server URL (lookup/unlock RPCs).
+    - peer_rpc_url: Peer request server URL (lookup/unlock RPCs).
+      The constructor and serialized config retain ``peer_mq_server_url``.
     - peer_transfer_channel_server_url: the peer's transfer-channel server url.
     - lookup_timeout_s: deadline for a lookup result before it counts as a miss.
     - load_timeout_s: deadline for a load before it counts as a failure.
@@ -86,11 +89,28 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
         self.lookup_timeout_s = lookup_timeout_s
         self.load_timeout_s = load_timeout_s
 
+    @property
+    def peer_rpc_url(self) -> str:
+        """Return the lookup/unlock endpoint, independent of RPC transport."""
+        return self.peer_mq_server_url
+
     @classmethod
     def from_dict(cls, d: dict) -> "P2PL2AdapterConfig":
-        peer_mq_server_url = d.get("peer_mq_server_url")
+        """Parse peer endpoints and lookup/load deadlines.
+
+        Args:
+            d: Config fields; ``peer_rpc_url`` takes precedence over the legacy
+                ``peer_mq_server_url`` spelling when both are present.
+
+        Returns:
+            Validated peer adapter configuration.
+
+        Raises:
+            ValueError: If an endpoint is absent or a deadline is nonpositive.
+        """
+        peer_mq_server_url = d.get("peer_rpc_url", d.get("peer_mq_server_url"))
         if not isinstance(peer_mq_server_url, str) or not peer_mq_server_url:
-            raise ValueError("peer_mq_server_url must be a non-empty string")
+            raise ValueError("peer_rpc_url must be a non-empty string")
 
         peer_tc_url = d.get("peer_transfer_channel_server_url")
         if not isinstance(peer_tc_url, str) or not peer_tc_url:
@@ -114,9 +134,11 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
 
     @classmethod
     def help(cls) -> str:
+        """Return supported peer configuration fields and deadline defaults."""
         return (
             "P2P L2 adapter config fields:\n"
-            "- peer_mq_server_url (str): peer request server URL (required)\n"
+            "- peer_rpc_url (str): peer request server URL (required; "
+            "peer_mq_server_url is also accepted)\n"
             "- peer_transfer_channel_server_url (str): the peer's transfer channel "
             "server url (required)\n"
             "- lookup_timeout_s (float): lookup result deadline in seconds "
@@ -127,54 +149,86 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
 
 
 class P2PL2Adapter(L2AdapterInterface):
-    """L2 adapter that reads KV objects from a single peer cache server."""
+    """Read one peer region through shared registration and lookup lifecycles.
 
-    def __init__(
-        self, config: P2PL2AdapterConfig, *, use_transfer_channel: bool = True
-    ) -> None:
+    Construction registers the region described by ``config``; the adapter
+    itself scopes returned offsets to that region. ``close`` unregisters it
+    after the controllers drain reads. Subclasses specialize registration and
+    retrieval without adding a separate region manager.
+
+    Args:
+        config: Peer RPC/transfer endpoints and lookup/load deadlines.
+    """
+
+    def __init__(self, config: P2PL2AdapterConfig) -> None:
         super().__init__(max_capacity_bytes=0)
         self._config = config
 
-        self._req_client: RequestClient = RequestClientFactory.create(
-            config.peer_mq_server_url,
-            context=zmq.Context.instance(),
-        )
-        self._tc_context = (
-            get_transfer_channel_context() if use_transfer_channel else None
-        )
-        self._tc_client = (
-            self._tc_context.get_transfer_channel_client(
-                config.peer_transfer_channel_server_url
+        with ExitStack() as resources:
+            self._req_client: RequestClient = RequestClientFactory.create(
+                config.peer_rpc_url,
+                context=zmq.Context.instance(),
             )
-            if self._tc_context is not None
-            else None
-        )
+            resources.callback(self._req_client.close)
+            self._store_efd = create_event_notifier()
+            resources.callback(self._store_efd.close)
+            self._lookup_efd = create_event_notifier()
+            resources.callback(self._lookup_efd.close)
+            self._load_efd = create_event_notifier()
+            resources.callback(self._load_efd.close)
 
-        self._store_efd = create_event_notifier()
-        self._lookup_efd = create_event_notifier()
-        self._load_efd = create_event_notifier()
-
-        PeriodicEventNotifier.create(
-            interval_ms=_PERIODIC_NOTIFIER_INTERVAL_MS, use_eventfd=HAS_EVENTFD
-        )
-        notifier = PeriodicEventNotifier.get()
-        if notifier is None:
-            raise RuntimeError("PeriodicEventNotifier is unavailable after create()")
-        self._notifier = notifier
-        self._notifier.register_fd(self._lookup_efd.fileno())
-        self._notifier.register_fd(self._load_efd.fileno())
+            PeriodicEventNotifier.create(
+                interval_ms=_PERIODIC_NOTIFIER_INTERVAL_MS, use_eventfd=HAS_EVENTFD
+            )
+            notifier = PeriodicEventNotifier.get()
+            if notifier is None:
+                raise RuntimeError(
+                    "PeriodicEventNotifier is unavailable after create()"
+                )
+            for event in (self._lookup_efd, self._load_efd):
+                notifier.register_fd(event.fileno())
+                resources.callback(notifier.unregister_fd, event.fileno())
+            self.register_peer_region()
+            self._resources = resources.pop_all()
 
         # Prefetch-loop-thread state (lookup / load).
         self._next_task_id: L2TaskId = 0
         self._lookup_tasks: dict[L2TaskId, _LookupTask] = {}
         self._load_tasks: dict[L2TaskId, _LoadTask] = {}
-        self._remote_addresses: dict[ObjectKey, TransferChannelAddress] = {}
+        self._remote_addresses: dict[ObjectKey, MemoryRegionAddress] = {}
 
         # Store-loop-thread state (store no-op completions).
         self._next_store_task_id: L2TaskId = 0
         self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
 
         self._closed = False
+
+    def register_peer_region(self) -> None:
+        """Connect to the configured peer and import its registered region.
+
+        Lifecycle hook called once during construction, before serving requests.
+        Uses the existing transfer-channel handshake; CXL overrides this with
+        local mapping and GPU registration. The adapter owns the resulting
+        region access until ``close`` calls ``unregister_peer_region``.
+
+        Raises:
+            RuntimeError: If the transfer context is unavailable or setup fails.
+        """
+        self._tc_context = get_transfer_channel_context()
+        self._tc_client = self._tc_context.get_transfer_channel_client(
+            self._config.peer_transfer_channel_server_url
+        )
+
+    def unregister_peer_region(self) -> None:
+        """Release the configured peer's registration through its transfer context.
+
+        Lifecycle hook called by ``close`` after controllers stop submissions
+        and drain reads. Subclasses must reject teardown while borrowed views
+        still need the region, leaving RPC resources available for release.
+        """
+        self._tc_context.remove_transfer_channel_client(
+            self._config.peer_transfer_channel_server_url
+        )
 
     # --------------------
     # Event Fd Interface
@@ -247,7 +301,7 @@ class P2PL2Adapter(L2AdapterInterface):
         except TimeoutError:
             logger.warning(
                 "P2P lookup submit to %s timed out; treating as a miss",
-                self._config.peer_mq_server_url,
+                self._config.peer_rpc_url,
             )
             failed = True
 
@@ -320,11 +374,10 @@ class P2PL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        assert self._tc_context is not None and self._tc_client is not None
         task_id = self._next_task_id
         self._next_task_id += 1
 
-        remote_addresses: list[TransferChannelAddress] = []
+        remote_addresses: list[MemoryRegionAddress] = []
         for key in keys:
             addr = self._remote_addresses.get(key)
             if addr is None or not addr.is_valid():
@@ -366,7 +419,6 @@ class P2PL2Adapter(L2AdapterInterface):
             logger.warning("P2P load task %d timed out; treating as a failure", task_id)
             return Bitmap(len(task.keys))
 
-        assert self._tc_client is not None
         result = self._tc_client.query_read_status(task.read_task_id)
         if not result.is_finished():
             return None
@@ -383,28 +435,27 @@ class P2PL2Adapter(L2AdapterInterface):
     # --------------------
 
     def close(self) -> None:
+        """Unregister the drained peer region, then close shared RPC resources.
+
+        Idempotent after success. If region teardown fails, callers may finish
+        outstanding reads and retry without losing the unlock connection.
+
+        Raises:
+            RuntimeError: If a borrowing adapter still has live views.
+            BufferError: If a mapped region still has exported tensor buffers.
+        """
         if self._closed:
             return
+        self.unregister_peer_region()
         self._closed = True
-
-        self._notifier.unregister_fd(self._lookup_efd.fileno())
-        self._notifier.unregister_fd(self._load_efd.fileno())
-        # Release the peer's transfer-channel client now that this adapter no
-        # longer reads from it.
-        if self._tc_context is not None:
-            self._tc_context.remove_transfer_channel_client(
-                self._config.peer_transfer_channel_server_url
-            )
-        self._req_client.close()
-        self._store_efd.close()
-        self._lookup_efd.close()
-        self._load_efd.close()
+        self._resources.close()
 
     def report_status(self) -> dict:
         return {
             "is_healthy": True,
             "type": "P2PL2Adapter",
-            "peer_mq_server_url": self._config.peer_mq_server_url,
+            "peer_rpc_url": self._config.peer_rpc_url,
+            "peer_mq_server_url": self._config.peer_rpc_url,
             "peer_transfer_channel_server_url": (
                 self._config.peer_transfer_channel_server_url
             ),
@@ -416,7 +467,7 @@ class P2PL2Adapter(L2AdapterInterface):
         self,
         task_id: L2TaskId,
         keys: list[ObjectKey],
-        addresses: list[TransferChannelAddress],
+        addresses: list[MemoryRegionAddress],
         started_at: float,
     ) -> Bitmap:
         """Retain copy addresses; borrowing subclasses retain reservations instead.

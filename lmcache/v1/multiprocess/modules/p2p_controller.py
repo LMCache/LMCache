@@ -28,7 +28,7 @@ from lmcache.v1.distributed.transfer_channel import (
     delete_transfer_channel_context,
     initialize_transfer_channel_context,
 )
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.transfer_channel.api import MemoryRegionAddress
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -43,7 +43,7 @@ from lmcache.v1.periodic_thread import (
 logger = init_logger(__name__)
 
 # Sentinel address for keys that were not found (or fell past the L1 prefix).
-_INVALID_ADDRESS = TransferChannelAddress(offset=-1, size=0)
+_INVALID_ADDRESS = MemoryRegionAddress(offset=-1, size=0)
 
 # Consecutive missed polls a peer may be absent before its adapter is removed.
 _MAX_MISSES = 3
@@ -321,22 +321,22 @@ class P2PController:
     def p2p_query_lookup_results(
         self,
         task_id: int,
-    ) -> list[TransferChannelAddress] | None:
+    ) -> list[MemoryRegionAddress] | None:
         """Query the results of the lookup request specified by the task ID.
 
-        Returning a list of TransferChannelAddress objects indicates when the
+        Returning a list of MemoryRegionAddress objects indicates when the
         lookup is completed. None indicates the lookup has not completed yet.
 
         The returned list will always have the same length as the number of
         keys submitted in the corresponding p2p_lookup_and_lock call. For
-        objects that is not found, the corresponding TransferChannelAddress
+        objects that is not found, the corresponding MemoryRegionAddress
         will have an invalid offset (negative value).
 
         Args:
             task_id: The unique task ID returned by p2p_lookup_and_lock.
 
         Returns:
-            A list of TransferChannelAddress objects if the lookup is complete,
+            A list of MemoryRegionAddress objects if the lookup is complete,
             or None if the lookup is still in progress or the result has been
             queried. (Exactly once request)
         """
@@ -382,7 +382,7 @@ class P2PController:
         self,
         job: _P2PLookupJob,
         found_rows: list[Bitmap],
-    ) -> list[TransferChannelAddress]:
+    ) -> list[MemoryRegionAddress]:
         """Build the per-key transfer addresses for a completed lookup.
 
         ``found_rows`` is parallel to ``job.key_groups``; the keys at its set
@@ -428,7 +428,7 @@ class P2PController:
                     self._ctx.storage_manager.finish_read_prefetched([key])
                     continue
             else:
-                address = TransferChannelAddress(
+                address = MemoryRegionAddress(
                     offset=obj.shm_offset,
                     size=obj.shm_byte_length,
                 )
@@ -637,7 +637,7 @@ class P2PController:
                     return False
                 adapter_id = self._ctx.storage_manager.add_cxl_peer(
                     inst.cxl_arena,
-                    config.peer_mq_server_url,
+                    config.peer_rpc_url,
                     self._p2p_config.lookup_timeout,
                 )
             else:

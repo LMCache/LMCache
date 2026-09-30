@@ -7,7 +7,7 @@ from typing import Protocol
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.transfer_channel.api import MemoryRegionAddress
 from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -212,7 +212,7 @@ class RequestClient(Protocol):
     @rpc_method
     def p2p_query_lookup_results(
         self, task_id: int
-    ) -> MessagingFuture[list[TransferChannelAddress] | None]: ...
+    ) -> MessagingFuture[list[MemoryRegionAddress] | None]: ...
 
     @rpc_method
     def p2p_unlock_objects(self, keys: list[ObjectKey]) -> MessagingFuture[None]: ...

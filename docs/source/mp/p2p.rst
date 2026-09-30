@@ -151,6 +151,13 @@ of the owner's bytes. GPU retrieval reads those bytes through the local mapping;
 shadow creation consumes no local DRAM or CXL payload capacity. The final GPU
 reader releases the owner's reservation.
 
+Both RDMA and CXL set up peer-region access once when the peer adapter connects.
+RDMA imports the peer's registered memory; CXL maps and GPU-registers its slab.
+Per-chunk lookups reuse this setup and return region-relative offsets. Adapter
+removal releases the region after outstanding reads drain. The current server
+configuration selects one P2P mode; shared APIs do not yet enable both modes
+concurrently.
+
 Each node needs a local mapping of the entire shared pool, a matching
 ``--cxl-pool-id``, a unique ``--cxl-pool-offset`` in bytes, and a coordinator.
 No NIXL installation or ``--p2p-advertise-url`` is required for this mode.

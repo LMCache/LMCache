@@ -96,17 +96,6 @@ class CxlArenaDescriptor:
         """Return the 32-byte identity expected in the mapped slab header."""
         return hashlib.sha256(self.to_json().encode()).digest()
 
-    def overlaps(self, other: "CxlArenaDescriptor") -> bool:
-        """Return whether two slabs overlap, including their headers.
-
-        Args:
-            other: Another slab descriptor in the same or a different pool.
-        """
-        return self.pool_id == other.pool_id and (
-            self.offset < other.offset + other.alignment + other.size
-            and other.offset < self.offset + self.alignment + self.size
-        )
-
 
 @dataclass(frozen=True)
 class L1ObjectMeta:

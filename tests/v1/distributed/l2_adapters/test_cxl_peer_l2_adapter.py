@@ -3,7 +3,9 @@
 
 # Standard
 from collections.abc import Callable, Iterator
-from dataclasses import replace
+from concurrent.futures import Future
+from dataclasses import asdict, replace
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
@@ -45,12 +47,21 @@ from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig, P2
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.modules import p2p_controller
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
 pytestmark = pytest.mark.no_shared_allocator
 PAGE = 4096
 LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([PAGE])], dtypes=[torch.uint8])
 KEY = ObjectKey(chunk_hash=b"shared-chunk", model_name="cxl", kv_rank=0)
+
+
+def _call_locally(handler: Callable[..., object], *args: object) -> Future[object]:
+    """Wrap a real controller response in the request client's future contract."""
+    future: Future[object] = Future()
+    future.set_result(handler(*args))
+    return future
 
 
 def _wait(check: Callable[[], bool]) -> None:
@@ -93,14 +104,14 @@ def owner_ttl() -> int:
     return 300
 
 
-@pytest.fixture(params=["zmq", "grpc"])
+@pytest.fixture(params=["direct", "zmq", "grpc"])
 def peers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
     owner_ttl: int,
 ) -> Iterator[tuple[StorageManager, StorageManager, str, Path]]:
-    """Run two disjoint slabs and the owner's real P2P request server."""
+    """Run disjoint slabs with real owner handlers, directly or over RPC."""
     path = tmp_path / "pool.bin"
     with path.open("wb") as stream:
         stream.truncate(PAGE * 16)
@@ -116,6 +127,24 @@ def peers(
         CoordinatorConfig(url="http://coordinator"),
         instance_id="owner",
     )
+    if request.param == "direct":
+        client = MagicMock(spec=RequestClient)
+        for name in (
+            "p2p_lookup_and_lock",
+            "p2p_query_lookup_results",
+            "p2p_unlock_objects",
+        ):
+            getattr(client, name).side_effect = partial(
+                _call_locally, getattr(controller, name)
+            )
+        monkeypatch.setattr(RequestClientFactory, "create", lambda *_, **__: client)
+        try:
+            yield borrower, owner, "tcp://owner:5555", path
+        finally:
+            borrower.close()
+            controller.close()
+            owner.close()
+        return
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -149,11 +178,13 @@ def _adapter(
 ) -> CxlPeerL2Adapter:
     assert borrower.cxl_arena is not None and owner.cxl_arena is not None
     return CxlPeerL2Adapter(
-        CxlPeerL2AdapterConfig(
-            url,
-            str(path),
-            borrower.cxl_arena,
-            owner.cxl_arena,
+        CxlPeerL2AdapterConfig.from_dict(
+            {
+                "peer_rpc_url": url,
+                "local_device_path": str(path),
+                "local_arena": asdict(borrower.cxl_arena),
+                "peer_arena": asdict(owner.cxl_arena),
+            }
         )
     )
 
@@ -308,6 +339,7 @@ def test_peer_close_waits_for_shadow(peers: tuple) -> None:
         adapter.close()
     release()
     assert not view.is_valid()
+    adapter.close()
     adapter.close()
     assert owner.delete_l1_keys([KEY]) == (1, 0)
 

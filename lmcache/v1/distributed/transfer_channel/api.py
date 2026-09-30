@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Data types exposed by the transfer channel abstraction.
+Region-relative addresses shared by copying and borrowing peer adapters.
 """
 
 # Standard
@@ -12,15 +12,18 @@ from lmcache.v1.distributed.internal_api import CxlArenaDescriptor
 
 @dataclass(frozen=True)
 class TransferChannelAddress:
-    """A transfer-channel-specific address, with starting position and size
-    (in bytes).
+    """Locate one object within a registered or mapped memory region.
 
-    A single address corresponds to a single memory object.
+    Args:
+        offset: Byte offset from the region's payload base; negative for a miss.
+        size: Object length in bytes.
+        cxl_arena: Shared-slab identity for CXL, otherwise the transfer client's
+            registered region supplies the address scope.
+        cxl_ttl_seconds: Owner read TTL, exposed as ``read_ttl_seconds``.
+            Zero means unspecified for legacy copying peers.
 
-    Note:
-        Currently, this is no difference between a tuple of (offset, size).
-        But we are wrapping this as a class for future extensibility (e.g.
-        support non L1 memory).
+    Use the neutral ``MemoryRegionAddress`` alias in peer APIs. The class and
+    serialized field names remain stable for existing ZMQ/gRPC clients.
     """
 
     offset: int
@@ -35,9 +38,18 @@ class TransferChannelAddress:
     cxl_ttl_seconds: int = 0
     """Owner read-lock TTL; borrowers bound views from lookup submission time."""
 
+    @property
+    def read_ttl_seconds(self) -> int:
+        """Return the owner read TTL, or zero when the peer did not provide it."""
+        return self.cxl_ttl_seconds
+
     def is_valid(self) -> bool:
         """Whether the address is valid (non-negative offset and size)."""
         return self.offset >= 0 and self.size > 0
+
+
+# Preserve the serialized class identity while sharing one address type.
+MemoryRegionAddress = TransferChannelAddress
 
 
 @dataclass

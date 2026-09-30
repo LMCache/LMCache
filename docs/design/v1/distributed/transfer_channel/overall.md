@@ -61,7 +61,7 @@ All names below are exported from
 
 | Type | Fields | Notes |
 |---|---|---|
-| `TransferChannelAddress` | `offset: int`, `size: int` | A transfer-channel address (frozen). `offset` is relative to the L1 base. Wrapped in a class for future extensibility. |
+| `MemoryRegionAddress` | `offset: int`, `size: int` | A frozen region-relative address shared with CXL borrowing. Aliases `TransferChannelAddress` to retain wire compatibility; the peer adapter/client scopes offsets to its registered or mapped region. |
 | `TransferChannelReadResult` | `finished: bool`, `succeeded_mask: list[bool]` | Result of `query_read_status`. `is_finished()` accessor. `succeeded_mask` holds a per-object success flag aligned with the submitted addresses; empty while in flight. |
 
 ### Abstract interfaces (`abstract.py`)
@@ -79,7 +79,7 @@ All names below are exported from
     task ids for that client become invalid; a later
     `get_transfer_channel_client` returns a fresh one. A no-op for an unknown
     peer.
-  - `get_transfer_channel_address(lmcache_addresses: list[tuple[int, int]]) -> list[TransferChannelAddress]`
+  - `get_transfer_channel_address(lmcache_addresses: list[tuple[int, int]]) -> list[MemoryRegionAddress]`
     — validate `(offset, size)` pairs against the registered region and convert.
   - `get_num_connected_clients() -> int`
   - `close() -> None`
@@ -119,7 +119,7 @@ typically obtained from `L1MemoryManager.get_l1_memory_desc()`.
 3. **Translate addresses.** Both sides express objects as `(offset, size)` pairs
    relative to their own L1 base. The reader converts its **local**
    (destination) addresses via `get_transfer_channel_address(...)`. **Remote**
-   (source) addresses are constructed directly as `TransferChannelAddress`
+   (source) addresses are constructed directly as `MemoryRegionAddress`
    instances (they refer to the peer's region, so they are not validated against
    the local region).
 4. **Submit + poll.** `submit_read(local, remote)` returns a task id; the caller

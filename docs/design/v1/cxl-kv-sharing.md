@@ -13,7 +13,7 @@ production module; `TensorMemoryObj` is unchanged.
 | Module | Responsibility |
 | --- | --- |
 | **New:** `distributed/l2_adapters/cxl_peer_l2_adapter.py` | Specialize `P2PL2Adapter`: turn lookup reservations into ordinary tensor views with validity/release callbacks. |
-| `distributed/l2_adapters/p2p_l2_adapter.py` | Existing RPC setup, lookup submission/polling/timeouts, and acknowledged unlock. CXL skips transfer-channel creation. |
+| `distributed/l2_adapters/p2p_l2_adapter.py` | Common peer-region registration/teardown, RPC setup, lookup/polling/timeouts, and acknowledged unlock. |
 | `memory_allocators/devdax_memory_allocator.py`, `distributed/memory_manager/devdax_l1_memory_manager.py` | Existing owned-slab allocation plus shared mapping helper and peer mapping. Peer views never enter local allocator/free lists. |
 | `distributed/l1_manager.py`, `distributed/storage_manager.py` | Stage shadows, use existing admission/read completion, and release views before adapter teardown. |
 | `distributed/l2_adapters/base.py`, `distributed/storage_controllers/prefetch_controller.py` | Optional borrowed views bypass ordinary destination reservation and copy. |
@@ -34,8 +34,10 @@ this detects incorrect mappings and owner restarts, but is not authentication.
 Only the primary owned CXL slab is exported. DRAM, extra arenas, and borrowed
 shadows return misses; owner L1 remains the authoritative key index.
 
-The existing `TransferChannelAddress` carries payload-relative `offset`, `size`,
-`cxl_arena`, and `cxl_ttl_seconds`. B's virtual address never crosses the wire:
+The shared `MemoryRegionAddress` carries payload-relative `offset`, `size`,
+optional `cxl_arena`, and `read_ttl_seconds`. It aliases `TransferChannelAddress`
+and preserves its serialized fields (including `cxl_ttl_seconds`) for existing
+ZMQ/gRPC peers. B's virtual address never crosses the wire:
 
 ```text
 A_local_pointer = A_mapping_of_B_slab + B.alignment + chunk.offset
@@ -49,6 +51,8 @@ unmapping; it creates no allocator or transfer channel.
 
 | Function / owner | Input | Output / ownership |
 | --- | --- | --- |
+| `register_peer_region()` / P2P adapter | Adapter's constructor config | Once per connection: import the registered RDMA region or map/GPU-register the CXL slab. The adapter itself scopes region-relative addresses. |
+| `unregister_peer_region()` / P2P adapter | Drained adapter, called by `close()` | Release RDMA resources or unmap CXL after borrowed readers and unlocks drain; RPC stays open if draining fails. |
 | `cxl_arena` / L1 and storage managers | Property | Owned `CxlArenaDescriptor`, or `None`. |
 | `get_cxl_address(obj)` / L1 and storage managers | Read-reserved `MemoryObj` | Owned primary-slab address and TTL, or `None`. |
 | `CxlPeerMapping(device_path, arena)` | Local pool device path, peer descriptor | GPU-registered mapping; invalid identity or failed registration raises an error. |
@@ -99,6 +103,12 @@ sequenceDiagram
 
 ## Lifetime and deployment limits
 
+Registration lasts for the peer connection; read reservations last for individual
+retrievals. RDMA unlock follows the copy into local DRAM, whereas CXL unlock follows
+the final GPU read. Both use `peer_rpc_url` for lookup/unlock; configuration also
+accepts the existing `peer_mq_server_url` name. Registration failure closes RPC
+and notifier resources, and successful adapter close is idempotent.
+
 Each lookup holds independent owner read counts, scoped locally by task ID.
 Multiple local readers share one shadow reservation until their final GPU
 completion. Failed admission, unused hits, and cancellation release reservations;
@@ -118,6 +128,8 @@ Reserve `alignment + payload_size` bytes per slab: two 2-GiB payloads with
 2-MiB headers start at 0 and 2149580800 and need 4299161600 shared bytes.
 Deployment assigns non-overlapping slabs and must not reinitialize them with
 active readers. Device paths may differ between nodes.
+The shared API does not enable concurrent RDMA/CXL discovery or multiple L1
+managers; those still require the separate routing integration.
 
 Tests cover distinct mappings of one shared file, ZMQ/gRPC, GPU copies when
 available, a full borrower slab, independent borrows, duplicate admission,

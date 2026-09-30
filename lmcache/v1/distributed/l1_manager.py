@@ -27,7 +27,7 @@ from lmcache.v1.distributed.memory_manager import (
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.transfer_channel.api import MemoryRegionAddress
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -251,7 +251,7 @@ class L1Manager:
             return self._memory_manager.cxl_arena
         return None
 
-    def get_cxl_address(self, obj: MemoryObj) -> TransferChannelAddress | None:
+    def get_cxl_address(self, obj: MemoryObj) -> MemoryRegionAddress | None:
         """Return the location of a read-reserved owned CXL object.
 
         Args:
@@ -265,7 +265,7 @@ class L1Manager:
         offset = self._memory_manager.get_cxl_offset(obj)
         if offset is None:
             return None
-        return TransferChannelAddress(
+        return MemoryRegionAddress(
             offset, obj.get_size(), self.cxl_arena, self._read_ttl_seconds
         )
 

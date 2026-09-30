@@ -61,7 +61,7 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L1ManagerDescriptor,
     L2AdapterDescriptor,
 )
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.transfer_channel.api import MemoryRegionAddress
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -795,7 +795,7 @@ class StorageManager:
         """Return this server's owned shared-pool slab, if configured."""
         return self._l1_manager.cxl_arena
 
-    def get_cxl_address(self, obj: MemoryObj) -> TransferChannelAddress | None:
+    def get_cxl_address(self, obj: MemoryObj) -> MemoryRegionAddress | None:
         """Return the shareable address of a read-reserved owned object.
 
         Args:

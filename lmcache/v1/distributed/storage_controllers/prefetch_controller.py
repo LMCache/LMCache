@@ -1188,11 +1188,65 @@ class PrefetchController(StorageControllerInterface):
         }
         self._plan_load(request, active_l2_descs)
 
-        self._admit_borrowed_objects(request)
+        # Admit selected peer views without reserving destination capacity.
+        layouts = {
+            group.object_group_id: group.layout_desc for group in request.key_groups
+        }
+        tag = _get_prefetch_write_tag(request.request_id)
+        for adapter_idx, cells in list(states.l2_locked_keys.items()):
+            adapter = self._l2_adapters[adapter_idx]
+            keys = _gather_keys(request.key_groups, cells)
+            task_id = request.lookup_task_ids[adapter_idx]
+            objects = adapter.take_borrowed_objects(task_id, keys, layouts)
+            if objects is None:
+                continue
+            l1_idx = self._get_l2_affinity_manager(adapter_idx)
+            manager = self._l1_managers[l1_idx]
+            admitted = Bitmap(len(keys))
+            try:
+                for i, key in enumerate(keys):
+                    borrow = objects.get(key)
+                    if borrow is None:
+                        continue
+                    obj, is_valid, release = borrow
+                    try:
+                        error = manager.register_shadow(
+                            key,
+                            obj,
+                            tag,
+                            is_valid=is_valid,
+                            on_release=release,
+                        )
+                        if error != L1Error.SUCCESS:
+                            release()
+                            continue
+                        result = manager.finish_write_and_reserve_read(
+                            [key], read_locks=request.num_kv_readers, tag=tag
+                        )
+                        if result[key][0] == L1Error.SUCCESS:
+                            admitted.set(i)
+                        else:
+                            manager.finish_write_and_delete([key], tag=tag)
+                    except Exception:
+                        release()
+                        raise
+            finally:
+                # Adopted views own their reservations; release_lookup only returns
+                # reservations which were not moved into a view.
+                adapter.release_lookup(task_id, keys)
+                loaded = _scatter_bitmaps(cells, admitted)
+                if l1_idx in states.l1_locked_keys:
+                    states.l1_locked_keys[l1_idx] += loaded
+                else:
+                    states.l1_locked_keys[l1_idx] = loaded
+                if len(request.l2_loaded_cells):
+                    request.l2_loaded_cells += loaded
+                else:
+                    request.l2_loaded_cells = loaded.copy()
+                del states.l2_locked_keys[adapter_idx]
 
         # Step 3: reserve L1 write buffers for the planned L2 keys
         # with L1-L2 affinity.
-        tag = _get_prefetch_write_tag(request.request_id)
         l1_reserved_keys = MapState()
         reserved_objs: dict[ObjectKey, "MemoryObj"] = {}
         num_failed_reservations = 0
@@ -1590,62 +1644,3 @@ class PrefetchController(StorageControllerInterface):
             )
             self._release_all_locks(request)
             self._retire_request(request)
-
-    def _admit_borrowed_objects(self, request: InFlightPrefetchRequest) -> None:
-        """Admit selected peer views without reserving destination capacity."""
-        states = request.key_states
-        layouts = {
-            group.object_group_id: group.layout_desc for group in request.key_groups
-        }
-        tag = _get_prefetch_write_tag(request.request_id)
-        for adapter_idx, cells in list(states.l2_locked_keys.items()):
-            adapter = self._l2_adapters[adapter_idx]
-            keys = _gather_keys(request.key_groups, cells)
-            task_id = request.lookup_task_ids[adapter_idx]
-            objects = adapter.take_borrowed_objects(task_id, keys, layouts)
-            if objects is None:
-                continue
-            l1_idx = self._get_l2_affinity_manager(adapter_idx)
-            manager = self._l1_managers[l1_idx]
-            admitted = Bitmap(len(keys))
-            try:
-                for i, key in enumerate(keys):
-                    borrow = objects.get(key)
-                    if borrow is None:
-                        continue
-                    obj, is_valid, release = borrow
-                    try:
-                        error = manager.register_shadow(
-                            key,
-                            obj,
-                            tag,
-                            is_valid=is_valid,
-                            on_release=release,
-                        )
-                        if error != L1Error.SUCCESS:
-                            release()
-                            continue
-                        result = manager.finish_write_and_reserve_read(
-                            [key], read_locks=request.num_kv_readers, tag=tag
-                        )
-                        if result[key][0] == L1Error.SUCCESS:
-                            admitted.set(i)
-                        else:
-                            manager.finish_write_and_delete([key], tag=tag)
-                    except Exception:
-                        release()
-                        raise
-            finally:
-                # Adopted views own their reservations; release_lookup only returns
-                # reservations which were not moved into a view.
-                adapter.release_lookup(task_id, keys)
-                loaded = _scatter_bitmaps(cells, admitted)
-                if l1_idx in states.l1_locked_keys:
-                    states.l1_locked_keys[l1_idx] += loaded
-                else:
-                    states.l1_locked_keys[l1_idx] = loaded
-                if len(request.l2_loaded_cells):
-                    request.l2_loaded_cells += loaded
-                else:
-                    request.l2_loaded_cells = loaded.copy()
-                del states.l2_locked_keys[adapter_idx]

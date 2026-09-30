@@ -34,7 +34,7 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     P2PL2Adapter,
     P2PL2AdapterConfig,
 )
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.transfer_channel.api import MemoryRegionAddress
 from lmcache.v1.memory_allocators.devdax_memory_allocator import CxlPeerMapping
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -77,9 +77,10 @@ class CxlPeerL2AdapterConfig(P2PL2AdapterConfig):
         if not math.isfinite(self.lookup_timeout_s) or self.lookup_timeout_s <= 0:
             raise ValueError("lookup_timeout_s must be positive and finite")
         super().__init__(self.peer_mq_server_url, "", self.lookup_timeout_s)
-        if (
-            self.local_arena.pool_id != self.peer_arena.pool_id
-            or self.local_arena.overlaps(self.peer_arena)
+        local, peer = self.local_arena, self.peer_arena
+        if local.pool_id != peer.pool_id or (
+            local.offset < peer.offset + peer.alignment + peer.size
+            and peer.offset < local.offset + local.alignment + local.size
         ):
             raise ValueError("CXL peers require the same pool and disjoint slabs")
 
@@ -96,12 +97,13 @@ class CxlPeerL2AdapterConfig(P2PL2AdapterConfig):
         Raises:
             ValueError: If required fields or arena identities are invalid.
         """
-        for name in ("peer_mq_server_url", "local_device_path"):
+        d = {**d, "peer_rpc_url": d.get("peer_rpc_url", d.get("peer_mq_server_url"))}
+        for name in ("peer_rpc_url", "local_device_path"):
             if not isinstance(d.get(name), str) or not d[name]:
                 raise ValueError(f"{name} must be a non-empty string")
         timeout = float(d.get("lookup_timeout_s", 30.0))
         return cls(
-            d["peer_mq_server_url"],
+            d["peer_rpc_url"],
             d["local_device_path"],
             CxlArenaDescriptor.from_json(json.dumps(d.get("local_arena"))),
             CxlArenaDescriptor.from_json(json.dumps(d.get("peer_arena"))),
@@ -112,7 +114,8 @@ class CxlPeerL2AdapterConfig(P2PL2AdapterConfig):
     def help(cls) -> str:
         """Return the required fields for a shared-pool CXL peer."""
         return (
-            "CXL peer: peer_mq_server_url, local_device_path, local_arena, peer_arena"
+            "CXL peer: peer_rpc_url (or peer_mq_server_url), local_device_path, "
+            "local_arena, peer_arena"
         )
 
 
@@ -127,14 +130,9 @@ class CxlPeerL2Adapter(P2PL2Adapter):
     """
 
     def __init__(self, config: CxlPeerL2AdapterConfig) -> None:
-        self._mapping = CxlPeerMapping(config.local_device_path, config.peer_arena)
-        try:
-            super().__init__(config, use_transfer_channel=False)
-        except Exception:
-            self._mapping.close()
-            raise
+        super().__init__(config)
         self._borrowed_lookups: dict[
-            int, dict[ObjectKey, tuple[TransferChannelAddress, float]]
+            int, dict[ObjectKey, tuple[MemoryRegionAddress, float]]
         ] = {}
         self._borrow_lock = threading.Lock()
         self._active_borrows = 0
@@ -142,6 +140,20 @@ class CxlPeerL2Adapter(P2PL2Adapter):
         self._releases = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="cxl-unlock"
         )
+
+    def register_peer_region(self) -> None:
+        """Map and GPU-register the configured peer slab during construction.
+
+        Uses the same lifecycle as transfer-channel registration, with the
+        existing CXL mapping supplying region access instead of a copy client.
+
+        Raises:
+            ValueError: If the mapped slab identity does not match the peer.
+            RuntimeError: If the mapping or GPU registration fails.
+            OSError: If the shared device cannot be opened or mapped.
+        """
+        config = cast(CxlPeerL2AdapterConfig, self._config)
+        self._mapping = CxlPeerMapping(config.local_device_path, config.peer_arena)
 
     def submit_lookup_and_lock_task(
         self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
@@ -251,14 +263,15 @@ class CxlPeerL2Adapter(P2PL2Adapter):
         with self._borrow_lock:
             return self._active_borrows
 
-    def close(self) -> None:
-        """Drain queued releases and close the peer mapping and RPC resources.
+    def unregister_peer_region(self) -> None:
+        """Drain owner releases, then unregister and unmap the peer slab.
+
+        Called by the shared ``close`` lifecycle before RPC teardown.
 
         Raises:
             RuntimeError: If L1 still owns live shadows; callers must drain them.
+            BufferError: If an exported tensor still references the mapping.
         """
-        if self._closed:
-            return
         with self._borrow_lock:
             if self._live_views:
                 raise RuntimeError("Cannot close a CXL peer with live shadows")
@@ -266,7 +279,6 @@ class CxlPeerL2Adapter(P2PL2Adapter):
             self.release_lookup(task_id, list(hits))
         self._releases.shutdown(wait=True)
         self._mapping.close()
-        super().close()
 
     def report_status(self) -> dict:
         """Return peer identity and outstanding borrow count for observability."""
@@ -282,16 +294,16 @@ class CxlPeerL2Adapter(P2PL2Adapter):
         self,
         task_id: L2TaskId,
         keys: list[ObjectKey],
-        addresses: list[TransferChannelAddress],
+        addresses: list[MemoryRegionAddress],
         started_at: float,
     ) -> Bitmap:
         """Retain task-scoped borrows without populating the copy-address cache."""
         result = Bitmap(len(keys))
-        hits: dict[ObjectKey, tuple[TransferChannelAddress, float]] = {}
+        hits: dict[ObjectKey, tuple[MemoryRegionAddress, float]] = {}
         for i, (key, address) in enumerate(zip(keys, addresses, strict=True)):
             if not address.is_valid():
                 continue
-            expires = started_at + address.cxl_ttl_seconds
+            expires = started_at + address.read_ttl_seconds
             if (
                 address.cxl_arena != self._mapping.arena
                 or not self._mapping.is_current()
