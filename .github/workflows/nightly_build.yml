@@ -314,7 +314,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CI_PLATFORM: github_actions
           PIN_BACKEND: xpu
-          PIN_VLLM_BRANCH: ${{ inputs.verify_xpu_candidate_only && format('xpu-nightly-test-runtime-{0}-{1}', github.run_id, github.run_attempt) || 'github_nightly_tested_vllm' }}
+          PIN_VLLM_BRANCH: ${{ inputs.verify_xpu_candidate_only && format('xpu-nightly-test-base-{0}-{1}', github.run_id, github.run_attempt) || 'github_nightly_tested_vllm' }}
           VLLM_IMAGE_TAG: vllm/vllm-openai-xpu:nightly
           VLLM_IMAGE_REF: ${{ needs.resolve-xpu-nightly.outputs.image }}
           XPU_BASE_IMAGE_DIGEST: ${{ needs.resolve-xpu-nightly.outputs.digest }}

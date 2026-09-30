@@ -21,9 +21,9 @@ The same verified run also records the upstream vLLM XPU base image digest on
 Candidate builds pass `XPU_CANDIDATE_IMAGE` to the XPU pod; ordinary builds
 resolve the previously promoted image from the pin branch.
 For manual validation on a test branch, select `verify_xpu_candidate_only`:
-it builds and smoke-checks the XPU wheel, runs both Buildkite suites, and
-writes the two pins to separate `xpu-nightly-test-*` branches instead of the
-production pin branches. It does not publish the wheel release.
+it builds and smoke-checks the XPU wheel, runs both Buildkite suites with
+that wheel, and writes the two pins to separate `xpu-nightly-test-*` branches
+instead of the production pin branches. It does not publish the wheel release.
 The image keeps the upstream `vllm serve` entrypoint. `BASH_ENV` loads oneAPI
 in noninteractive Bash jobs (including those launched by Buildkite); a
 non-Bash command must source `/opt/intel/oneapi/setvars.sh` separately if it
