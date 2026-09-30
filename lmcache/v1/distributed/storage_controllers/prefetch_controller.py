@@ -429,6 +429,11 @@ class InFlightPrefetchRequest:
     num_kv_readers: int
     require_whole_columns: bool = False
 
+    # Cells the L2 lookups pinned, accumulated as each lookup completes.
+    # Unioned with the landed cells at finish to report found_cells: what
+    # provably existed, whether or not it could be staged.
+    l2_found_cells: "Bitmap2D | None" = None
+
     # The locked and reserved keys during the prefetch lifecycle.
     key_states: PrefetchKeyState = field(default_factory=PrefetchKeyState)
 
@@ -1235,6 +1240,16 @@ class PrefetchController(StorageControllerInterface):
             l2_found_bitmap = _scatter_bitmaps_full_global(result, num_rows, num_cols)
             request.key_states.l2_locked_keys[adapter_idx] = l2_found_bitmap
 
+            # Whole-column callers classify on existence, so snapshot what
+            # the lookup pinned before the load plan trims it; the result
+            # then tells "found but not staged" from "absent". Other callers
+            # skip the snapshot and get found_cells=None.
+            if request.require_whole_columns:
+                if request.l2_found_cells is None:
+                    request.l2_found_cells = l2_found_bitmap.copy()
+                else:
+                    request.l2_found_cells += l2_found_bitmap
+
             # Remove the completed lookup task from inflight_lookup_tasks
             del request.inflight_lookup_tasks[adapter_idx]
 
@@ -1588,12 +1603,24 @@ class PrefetchController(StorageControllerInterface):
         else:
             l2_hit_cells = hit_cells.zeros_like()
         l1_hit_cells = hit_cells - l2_hit_cells
+
+        # Whole-column callers only: everything that provably existed --
+        # landed in L1 (before the whole-column trim) or pinned by an L2
+        # lookup even if it could not be staged. Lets the caller tell a
+        # capacity drop from an eviction.
+        found_cells = None
+        if request.require_whole_columns:
+            found_cells = found
+            if request.l2_found_cells is not None:
+                found_cells = found_cells + request.l2_found_cells
+
         self._publish_result(
             request,
             PrefetchResult(
                 hit_cells=hit_cells.to_list(),
                 l1_hit_cells=l1_hit_cells.to_list(),
                 l2_hit_cells=l2_hit_cells.to_list(),
+                found_cells=None if found_cells is None else found_cells.to_list(),
             ),
         )
         logger.debug(

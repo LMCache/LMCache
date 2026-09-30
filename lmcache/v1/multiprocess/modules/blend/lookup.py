@@ -76,6 +76,7 @@ class _CBUnifiedJob:
     per_hash_obj_keys: dict | None = None
     hash_to_col: dict[bytes, int] | None = None  # sparse: chunk hash -> row column
     found_rows: list[Bitmap] | None = None  # stashed when the sparse poll completes
+    avail_rows: list[Bitmap] | None = None  # cells found in L1/L2, loaded or not
     l2_keys: int = 0  # sparse keys needing an L2 load (0 => no L2 read, span skipped)
     coord_submitted: bool = False  # coordinator match query was issued
     coord_deadline: float = 0.0  # time.monotonic() wall-clock cutoff for the leg
@@ -214,14 +215,17 @@ class LookupMixin:
         found_rows: list[Bitmap],
         per_hash_obj_keys: dict[bytes, list],
         hash_to_col: dict[bytes, int],
+        avail_rows: list[Bitmap] | None = None,
     ) -> list[CBMatchResult]:
-        """Classify each prefetched chunk as found, partial, or stale.
+        """Classify each prefetched chunk as found, skipped, or stale.
 
         Found: every (read group x rank) key loaded; obj_keys stashed for the
-        retrieve. Stale: no key loaded; takes an eviction strike. Partial:
-        some keys loaded — still stored, just didn't fit L1 — so no strike,
-        and the loaded keys' read locks are released now (the retrieve cannot
-        use them).
+        retrieve. Skipped: every key exists in storage (``avail_rows``, the
+        prefetch's L1+pinned-L2 view) but not all could be staged — no
+        strike, and any loaded keys' read locks are released now (the
+        retrieve cannot use them). Stale: some key is absent from storage;
+        takes an eviction strike. Without ``avail_rows`` (older producer),
+        any-key-loaded approximates existence.
 
         Returns:
             The found subset, in cur_st order.
@@ -238,7 +242,12 @@ class LookupMixin:
             landed = [row.test(col) for row in found_rows]
             if all(landed):
                 found_cb_match_result.append(r)
-            elif any(landed):
+                continue
+            if avail_rows is not None:
+                exists = all(row.test(col) for row in avail_rows)
+            else:
+                exists = any(landed)
+            if exists:
                 if r.hash not in partial_seen:
                     partial_seen.add(r.hash)
                     keys = per_hash_obj_keys.get(r.hash, ())
@@ -618,6 +627,7 @@ class LookupMixin:
             if result is None:
                 return None  # sparse still loading -> defer
             job.found_rows = result.hit_cells
+            job.avail_rows = result.found_cells
             if job.l2_keys > 0:
                 self._event_bus.publish(
                     Event(
@@ -638,6 +648,7 @@ class LookupMixin:
                 job.found_rows or [],
                 job.per_hash_obj_keys or {},
                 job.hash_to_col or {},
+                job.avail_rows,
             )
             # Overlap dedup over the retrievable candidates; dropped
             # candidates' keys are released by the retrieve's orphan sweep.

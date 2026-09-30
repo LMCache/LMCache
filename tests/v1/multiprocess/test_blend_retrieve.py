@@ -946,3 +946,36 @@ def test_sparse_classify_fully_missing_chunk_still_strikes():
     )
     eng._token_range_matcher.remove_chunks.assert_called_once_with([b"gone"])
     assert eng._stale_strike == {}
+
+
+def test_sparse_classify_unstaged_but_found_chunk_takes_no_strike():
+    """With the prefetch's found view available, a chunk that exists in
+    storage (pinned by the L2 lookup) but landed NO rows is skipped -- no
+    strike, nothing to release -- while a chunk absent from the found view
+    keeps the stale path."""
+    # First Party
+    from lmcache.lmcache_native import Bitmap
+
+    eng = _classify_engine()
+    key = _classify_key()
+    matches = [_classify_match(0, b"unstaged"), _classify_match(1, b"gone")]
+    per_hash_obj_keys = {
+        b"unstaged": ["k-u-r0", "k-u-r1"],
+        b"gone": ["k-g-r0", "k-g-r1"],
+    }
+    hash_to_col = {b"unstaged": 0, b"gone": 1}
+    landed_rows = [Bitmap(2), Bitmap(2)]  # nothing landed at all
+    avail0 = Bitmap(2)
+    avail0.set(0)  # column 0 exists in both rows; column 1 nowhere
+    avail1 = Bitmap(2)
+    avail1.set(0)
+
+    found = eng._sparse_classify(
+        key, matches, landed_rows, per_hash_obj_keys, hash_to_col, [avail0, avail1]
+    )
+
+    assert found == []
+    # "unstaged" exists -> skipped without a strike or a release.
+    eng._ctx.storage_manager.finish_read_prefetched.assert_not_called()
+    # "gone" is absent from every tier -> the stale path, unchanged.
+    assert eng._stale_strike == {b"gone": 1}

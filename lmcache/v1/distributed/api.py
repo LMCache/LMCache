@@ -570,11 +570,17 @@ class PrefetchResult:
     Note:
         ``l1_hit_cells`` and ``l2_hit_cells`` are disjoint and their union is
         ``hit_cells``.
+
+    ``found_cells`` marks every cell that provably existed when the task
+    planned: resident in L1 or pinned by the L2 lookup. It is a superset of
+    ``hit_cells``; a cell found but not hit was dropped for capacity (no L1
+    staging), not evicted. ``None`` when the producer does not report it.
     """
 
     hit_cells: list["Bitmap"]
     l1_hit_cells: list["Bitmap"]
     l2_hit_cells: list["Bitmap"]
+    found_cells: "list[Bitmap] | None" = None
     _l1_hit_count: int = field(init=False, repr=False, compare=False)
     _l2_hit_count: int = field(init=False, repr=False, compare=False)
 

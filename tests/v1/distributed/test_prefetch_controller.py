@@ -1227,6 +1227,13 @@ class TestReservationFailures:
             result = wait_for_result(ctrl, req_id, timeout=10.0)
 
             assert [row_bits(result, 0), row_bits(result, 1)] == [[0, 1], [0, 1]]
+            # Everything was pinned in L2, so the capacity-dropped column 2
+            # is still reported found -- absent would mean evicted.
+            assert result is not None and result.found_cells is not None
+            assert [row.get_indices_list() for row in result.found_cells] == [
+                [0, 1, 2],
+                [0, 1, 2],
+            ]
             held = [rows[r].keys[c] for r in range(2) for c in (0, 1)]
             assert_read_locked(l1_manager, held)
             assert_absent(l1_manager, [k for k in all_keys if k not in held])
