@@ -447,6 +447,10 @@ class _RecordingRawDevice:
     def size_bytes(self) -> int:
         return self.size
 
+    def fixed_buffer_status(self) -> tuple[bool, int]:
+        """Return the unregistered state of this recording device."""
+        return False, 0
+
     def _submit_batch(self, count: int) -> int:
         """Register an accepted batch and its per-entry completion results.
 
@@ -1193,6 +1197,9 @@ class _FakeRawDevice:
         self.batched_write_calls: list[
             tuple[list[int], list[int], list[int | None] | None]
         ] = []
+        self.fixed_buffer_calls: list[tuple[list[int], list[int]]] = []
+        self.registered_bytes = 0
+        self.registration_error: Exception | None = None
         self.write_uring_calls: list[tuple[int, int, int, int | None]] = []
         self._batch_results: dict[int, list[bool]] = {}
 
@@ -1222,6 +1229,20 @@ class _FakeRawDevice:
         assert batch_id == 123
         return self._batch_results.pop(batch_id), []
 
+    def register_fixed_buffers(
+        self,
+        buffer_ptrs: list[int],
+        buffer_sizes: list[int],
+    ) -> None:
+        self.fixed_buffer_calls.append((list(buffer_ptrs), list(buffer_sizes)))
+        if self.registration_error is not None:
+            raise self.registration_error
+        self.registered_bytes = sum(buffer_sizes)
+
+    def fixed_buffer_status(self) -> tuple[bool, int]:
+        """Return successful registration state and bytes."""
+        return self.registered_bytes > 0, self.registered_bytes
+
     def write_uring(
         self,
         offset: int,
@@ -1234,7 +1255,7 @@ class _FakeRawDevice:
         self.write_uring_calls.append((offset, payload_len, total_len, placement_id))
 
     def close(self) -> None:
-        return None
+        self.registered_bytes = 0
 
 
 def _make_fake_io_uring_core(
@@ -1301,6 +1322,54 @@ def _make_fake_io_uring_core(
         key_namespace="object",
     )
     return core, raw_devices[0]
+
+
+def test_raw_block_core_register_fixed_range_splits_at_one_gib(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core, raw_device = _make_fake_io_uring_core(tmp_path, monkeypatch)
+    base_ptr = 0x4000
+    one_gib = 1 << 30
+
+    try:
+        assert core.report_status()["fixed_buffers_registered"] is False
+        assert core.report_status()["fixed_buffer_registered_bytes"] == 0
+        core.register_fixed_buffer_range(base_ptr, 2 * one_gib + 4096)
+
+        assert raw_device.fixed_buffer_calls == [
+            (
+                [base_ptr, base_ptr + one_gib, base_ptr + 2 * one_gib],
+                [one_gib, one_gib, 4096],
+            )
+        ]
+        status = core.report_status()
+        assert status["fixed_buffers_registered"] is True
+        assert status["fixed_buffer_registered_bytes"] == 2 * one_gib + 4096
+    finally:
+        core.close()
+
+    status = core.report_status()
+    assert status["fixed_buffers_registered"] is False
+    assert status["fixed_buffer_registered_bytes"] == 0
+
+
+def test_raw_block_core_reports_failed_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core, raw_device = _make_fake_io_uring_core(tmp_path, monkeypatch)
+    raw_device.registration_error = RuntimeError("memlock exhausted")
+    try:
+        with pytest.raises(RuntimeError, match="memlock exhausted"):
+            core.register_fixed_buffer_range(0x4000, 4096)
+
+        status = core.report_status()
+        assert status["is_healthy"] is True
+        assert status["fixed_buffers_registered"] is False
+        assert status["fixed_buffer_registered_bytes"] == 0
+    finally:
+        core.close()
 
 
 def test_raw_block_core_checkpoint_uses_metadata_placement_id(tmp_path, monkeypatch):
