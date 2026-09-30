@@ -234,9 +234,11 @@ jobs:
             -t "${CANDIDATE_TAG}" .
           DIGEST="$(docker buildx imagetools inspect "${CANDIDATE_TAG}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
           [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "image=${CANDIDATE_TAG%%:*}@${DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "tag=${CANDIDATE_TAG}" >> "$GITHUB_OUTPUT"
+          {
+            echo "image=${CANDIDATE_TAG%%:*}@${DIGEST}"
+            echo "digest=${DIGEST}"
+            echo "tag=${CANDIDATE_TAG}"
+          } >> "$GITHUB_OUTPUT"
 
   verify-and-pin-xpu-ci:
     name: Verify XPU wheel and promote image pin
