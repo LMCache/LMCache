@@ -22,6 +22,10 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.protocols.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
+)
 from lmcache.v1.multiprocess.rpc import rpc_method
 
 
@@ -87,6 +91,31 @@ class RequestClient(Protocol):
         block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
+    def store_with_chunk_events(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, list[tuple[bytes, int, int]], bool]]:
+        """Submit complete chunks to the configured chunk-store server plugin.
+
+        Args:
+            key: Worker key describing an absolute, chunk-aligned token range.
+            instance_id: Registered worker ID.
+            block_ids: Raw source blocks for the range, in kernel-group order.
+            event_ipc_handle: Producer event ordering reads of the source KV.
+
+        Returns:
+            A future resolving to the terminal handle, per-chunk
+            ``(handle, start, end)`` completions, and success. Completion permits
+            source reuse, not guaranteed cache residency. Handles follow the
+            same backend lifetime contract as ``store``. Requires the server
+            module ``lmcache.v1.multiprocess.modules.chunk_store`` to be loaded.
+        """
+        ...
 
     @rpc_method
     def retrieve(
@@ -219,6 +248,11 @@ class RequestClient(Protocol):
 
     @rpc_method
     def get_experimental(self) -> MessagingFuture[list[str]]: ...
+
+    @rpc_method
+    def server_module_call(
+        self, request: ServerModuleCallRequest
+    ) -> MessagingFuture[ServerModuleCallResponse]: ...
 
     def cb_register_rope_v3(
         self,
