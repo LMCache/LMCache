@@ -12,7 +12,7 @@ LMCache functionality.
 
 ```
 lmcache
-├── server                          # Launch LMCache server (ZMQ + HTTP)
+├── server                          # Launch LMCache server (request RPC + HTTP)
 ├── coordinator                     # Launch the mp coordinator (HTTP)
 ├── describe {kvcache,engine}       # Rich status view of a running endpoint
 ├── ping     {kvcache,engine}       # Pure liveness check (OK/FAIL)
@@ -40,7 +40,7 @@ All client commands use a `--url` flag pointing to the **LMCache HTTP server**
 
 Replaces `python3 -m lmcache.v1.multiprocess.http_server`. Runs in foreground,
 Ctrl-C to stop. HTTP frontend is enabled by default; use `--no-http` to run
-ZMQ-only.
+the request server without the HTTP frontend.
 
 ```bash
 lmcache server \

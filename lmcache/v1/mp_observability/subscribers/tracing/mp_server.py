@@ -291,6 +291,12 @@ class MPServerTracingSubscriber(EventSubscriber):
                 root_span.set_attribute("l1_hit_rate", l1_hit_tokens / denom)
                 root_span.set_attribute("l2_hit_rate", l2_hit_tokens / denom)
                 root_span.set_attribute(
+                    "l1_hit_keys", int(event.metadata.get("l1_hit_keys", 0))
+                )
+                root_span.set_attribute(
+                    "l2_hit_keys", int(event.metadata.get("l2_hit_keys", 0))
+                )
+                root_span.set_attribute(
                     "early_exit_reason", str(event.metadata["early_exit_reason"])
                 )
 

@@ -16,9 +16,9 @@ from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
-from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import (
     BoundRequestHandler,
+    HandlerType,
     iter_request_handlers,
 )
 from lmcache.v1.multiprocess.transport.base import RequestServer
@@ -46,7 +46,7 @@ _CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
 
 @dataclass
 class _GrpcRequestHandler:
-    request_type: RequestType
+    operation: str
     handler: Callable[..., Any] | None
     handler_type: HandlerType
     requires_client_affinity: bool
@@ -92,7 +92,7 @@ class _GeneratedServicer:
             if registered.handler is None:
                 context.abort(
                     grpc.StatusCode.UNIMPLEMENTED,
-                    f"{registered.request_type.name} is not enabled on this server",
+                    f"{registered.operation} is not enabled on this server",
                 )
                 raise RuntimeError("gRPC context abort unexpectedly returned")
             payloads = registered.request_decoder(request)
@@ -180,18 +180,18 @@ class GrpcMultiprocessServer(RequestServer):
             TypeError: If a module handler does not match its protocol types.
             ValueError: If a module exposes invalid handler metadata.
         """
-        handlers_by_request: dict[RequestType, BoundRequestHandler] = {}
+        handlers_by_operation: dict[str, BoundRequestHandler] = {}
         for module in modules:
             for registered in iter_request_handlers(module):
-                handlers_by_request[registered.options.request_type] = registered
+                handlers_by_operation[registered.operation] = registered
 
         for binding in get_service_bindings().values():
-            self._add_generated_service(binding, handlers_by_request)
+            self._add_generated_service(binding, handlers_by_operation)
 
     def _add_generated_service(
         self,
         binding: ServiceBinding,
-        handlers_by_request: dict[RequestType, BoundRequestHandler],
+        handlers_by_operation: dict[str, BoundRequestHandler],
     ) -> None:
         service_name = binding.descriptor.name
 
@@ -199,12 +199,12 @@ class GrpcMultiprocessServer(RequestServer):
         codec_registry = get_method_codec_registry()
         for method in binding.descriptor.methods:
             method_codec = codec_registry.by_full_name[method.full_name]
-            bound_handler = handlers_by_request.get(method_codec.request_type)
+            bound_handler = handlers_by_operation.get(method_codec.operation)
             if bound_handler is not None:
                 method_codec.validate_handler(bound_handler.handler)
             full_name = method.full_name
             registered = _GrpcRequestHandler(
-                request_type=method_codec.request_type,
+                operation=method_codec.operation,
                 handler=(bound_handler.handler if bound_handler is not None else None),
                 handler_type=(
                     bound_handler.options.handler_type

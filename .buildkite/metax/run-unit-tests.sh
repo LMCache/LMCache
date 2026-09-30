@@ -22,9 +22,9 @@ pytest --maxfail=1 --cov=lmcache \
     --ignore=tests/v1/storage_backend/test_eic.py \
     --deselect="tests/v1/distributed/serde/test_turboquant.py::test_turboquant_direct_roundtrip_cuda[turboquant_k8v4-2.6-0.95]" \
     --ignore=tests/v1/mp_coordinator/test_instances_usage_e2e.py \
-    --ignore=tests/v1/platform/test_cuda_ipc_wrapper.py \
-    --ignore=tests/v1/platform/test_timeline_semaphore_event_ipc.py \
-    --ignore=tests/v1/platform/test_vmm_ipc_wrapper.py \
+    --ignore=tests/v1/platform/devices/cuda/test_cuda_ipc_wrapper.py \
+    --ignore=tests/v1/platform/devices/cuda/test_timeline_semaphore_event_ipc.py \
+    --ignore=tests/v1/platform/devices/cuda/test_vmm_ipc_wrapper.py \
     --ignore=tests/v1/multiprocess/test_mq.py \
     --ignore=tests/v1/multiprocess/test_cb_plan_executor_gpu.py \
     --ignore=tests/v1/multiprocess/test_custom_types.py \
@@ -55,7 +55,7 @@ pytest --maxfail=1 --cov=lmcache \
 # - test_cuda_ipc_wrapper.py, test_timeline_semaphore_event_ipc.py,
 #   test_vmm_ipc_wrapper.py: whole files ignored. All three depend on
 #   NVIDIA's `cuda.bindings` (cuda-python) package for raw driver-level IPC
-#   calls (lmcache/v1/platform/cuda/utils.py's _import_cuda_bindings()),
+#   calls (lmcache/v1/platform/devices/cuda/utils.py's _import_cuda_bindings()),
 #   which isn't installed on MACA and isn't expected to work there even if
 #   it were -- it binds to NVIDIA's own driver ABI, not a CUDA-API surface
 #   MACA's cu-bridge shims. All three already skip this area for ROCm for

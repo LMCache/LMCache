@@ -2,11 +2,14 @@
 """Tests for MP coordinator metrics initialization."""
 
 # Standard
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 # First Party
+from lmcache.v1.mp_coordinator import observability
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.observability import init_coordinator_metrics
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
 def test_disabled_metrics_are_not_initialized() -> None:
@@ -51,3 +54,42 @@ def test_otlp_metrics_reuse_shared_initializer() -> None:
         resource_attributes={"service.name": "lmcache-mp-coordinator"},
         start_http_server=False,
     )
+
+
+def test_key_directory_gauges_bind_registered_directory() -> None:
+    directory = MagicMock(spec=KeyDirectory)
+    directory.stats.return_value = SimpleNamespace(
+        l1_count=2,
+        l1_size_bytes=300,
+        l2_count=1,
+        l2_size_bytes=400,
+    )
+
+    with patch.object(observability, "register_gauge") as mock_register:
+        observability.register_key_directory_metrics(directory)
+
+    assert mock_register.call_count == 2
+    count_call, size_call = mock_register.call_args_list
+    assert count_call.args[:3] == (
+        "lmcache.mp_coordinator",
+        "lmcache_mp.key_directory_placement_count",
+        "Number of placements currently recorded in the Coordinator "
+        "Key Directory, by cache tier.",
+    )
+    assert size_call.args[:3] == (
+        "lmcache.mp_coordinator",
+        "lmcache_mp.key_directory_placement_size_bytes",
+        "Sum of reported logical object sizes for placements currently "
+        "recorded in the Coordinator Key Directory, by cache tier.",
+    )
+
+    count_callback = count_call.args[3]
+    size_callback = size_call.args[3]
+    assert count_callback() == [
+        (2, {"tier": "l1"}),
+        (1, {"tier": "l2"}),
+    ]
+    assert size_callback() == [
+        (300, {"tier": "l1"}),
+        (400, {"tier": "l2"}),
+    ]

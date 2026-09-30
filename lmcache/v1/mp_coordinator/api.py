@@ -24,6 +24,12 @@ from lmcache.v1.distributed.api import EncodedObjectKey, ObjectKey, Tier
 # re-RoPE reused KV from the wrong source position.
 UNKNOWN_TOKEN_OFFSET = -1
 
+CACHE_EVENT_SCHEMA_VERSION = 1
+"""Version of the cache-event wire shape: :class:`CacheEventBatch` as carried
+by ``POST /events``. Bumped when a field is added, removed or changes meaning,
+so an ``events``-level trace file names the shape its records hold and a
+replayer can refuse one it does not understand."""
+
 
 class CacheEventType(str, Enum):
     """The kind of cache-state change a :class:`CacheEventBatch` reports.
@@ -31,8 +37,8 @@ class CacheEventType(str, Enum):
     ``STORE`` commits placements; ``DELETE`` removes them (owners report
     evictions as deletes); ``ACCESS`` refreshes recency and counts a use
     without changing placement state. ``CONFIG`` carries no placement at
-    all: it declares one compartment's configured capacity, so the fleet
-    view has a denominator for the bytes the other three report.
+    all: it declares one compartment's declared usable capacity, so the
+    fleet view has a denominator for the bytes the other three report.
     """
 
     STORE = "store"

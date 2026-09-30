@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import argparse
 import asyncio
 import contextlib
-import time
 
 # Third Party
 from fastapi import FastAPI
@@ -21,8 +21,7 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.mp_coordinator.cache_events import (
-    CacheEventSubscriber,
-    HttpCacheEventSink,
+    maybe_create_cache_event_subscriber,
 )
 from lmcache.v1.mp_coordinator.registrar import keep_registered
 from lmcache.v1.mp_observability.config import (
@@ -31,6 +30,7 @@ from lmcache.v1.mp_observability.config import (
     parse_args_to_observability_config,
 )
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.trace.lifecycle import EVENTS_LEVEL
 from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
     CoordinatorConfig,
@@ -66,12 +66,12 @@ _configs: dict = {}
 # FastAPI lifespan for initialization and cleanup
 # ----------------------------
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     Manage the lifecycle of the LMCache HTTP server.
 
-    On startup: Initialize ZMQ server and cache engine.
-    On shutdown: Clean up ZMQ server and cache engine resources.
+    On startup: Initialize the selected request server and cache engine.
+    On shutdown: Clean up request server and cache engine resources.
     """
     # Startup
     logger.info(
@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI):
         coordinator_config=coordinator_config,
     )
     assert result is not None, "run_cache_server returned None with return_engine=True"
-    zmq_server, engine = result
+    request_server, engine = result
 
     # Launch runtime plugins if configured. Plugins receive the full
     # server config (including HTTP host/port) via the
@@ -110,7 +110,7 @@ async def lifespan(app: FastAPI):
         )
         plugin_launcher.launch_plugins()
 
-    app.state.zmq_server = zmq_server
+    app.state.request_server = request_server
     app.state.engine = engine
     # Typed per-app context the cache handlers resolve via ``get_context``
     # (built now that the engine is ready).
@@ -141,22 +141,13 @@ async def lifespan(app: FastAPI):
                 on_registered=engine.storage_manager.publish_capacity,
             )
         )
-    # Optionally report cache events to the coordinator
-    if (
-        coordinator_client is not None
-        and coordinator_config.url
-        and coordinator_config.event_reporting
-    ):
-        get_event_bus().register_subscriber(
-            CacheEventSubscriber(
-                sink=HttpCacheEventSink(coordinator_config.url),
-                instance_id=mp_config.instance_id,
-                # Server start time: fences out placements this instance
-                # reported before a restart (its pools restarted empty).
-                incarnation=int(time.time()),
-                flush_interval=coordinator_config.event_flush_interval,
-            )
-        )
+    # Optionally emit cache events: to the coordinator, to an events-level
+    # trace file, or both.
+    subscriber = maybe_create_cache_event_subscriber(
+        mp_config, http_config, coordinator_config
+    )
+    if subscriber is not None:
+        get_event_bus().register_subscriber(subscriber)
 
     app.state.coordinator_client = coordinator_client
     app.state.coordinator_registration_task = coordinator_registration_task
@@ -181,8 +172,7 @@ async def lifespan(app: FastAPI):
     if launcher is not None:
         launcher.stop_plugins()
     get_event_bus().stop()
-    if hasattr(app.state, "zmq_server") and app.state.zmq_server is not None:
-        app.state.zmq_server.close()
+    request_server.close()
     engine.close()
     logger.info("LMCache HTTP server stopped")
 
@@ -206,11 +196,11 @@ def run_http_server(
     coordinator_config: CoordinatorConfig,
 ) -> None:
     """
-    Run the LMCache HTTP server with integrated MP (ZMQ) server.
+    Run the LMCache HTTP server with an integrated MP request server.
 
     Args:
         http_config: Configuration for the HTTP frontend
-        mp_config: Configuration for the ZMQ multiprocess server
+        mp_config: Configuration for the multiprocess request server
         storage_manager_config: Configuration for the storage manager
         obs_config: Configuration for the observability stack
         coordinator_config: Configuration for MP coordinator registration
@@ -219,8 +209,9 @@ def run_http_server(
     Raises:
         ValueError: If P2P is enabled without a coordinator URL, or with an L1
             tier that is not a single registerable memory region; or if
-            coordinator event reporting is enabled with observability
-            disabled (the cache-event stream rides the event bus).
+            coordinator event reporting or ``--trace-level events`` is enabled
+            with observability disabled (the cache-event stream rides the
+            event bus).
     """
     if mp_config.p2p_config.enabled:
         if not coordinator_config.url:
@@ -239,6 +230,11 @@ def run_http_server(
         raise ValueError(
             "--coordinator-event-reporting rides the observability event "
             "bus: remove --disable-observability to report cache events."
+        )
+    if obs_config.trace_level == EVENTS_LEVEL and not obs_config.enabled:
+        raise ValueError(
+            "--trace-level events records the cache-event stream, which rides "
+            "the observability event bus: remove --disable-observability."
         )
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
