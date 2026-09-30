@@ -536,15 +536,18 @@ steps:
   - label: ":test_tube: Verify SGLang nightly / {{matrix.request_transport}}"
     if: build.env("VERIFY_AND_PIN_SGLANG") =~ /true/
     command: |
-      unset SGLANG_INSTALL_SPEC PINNED_SGLANG_VERSION PINNED_SGLANG_SHA
+      bash -euo pipefail <<'BASH'
+      unset SGLANG_INSTALL_SPEC PINNED_SGLANG_VERSION PINNED_SGLANG_SHA \
+        PINNED_SGLANG_INDEX_URL
       export USE_PINNED_SGLANG=false
       source .buildkite/k3_harness/resolve-pinned-sglang.sh
       .buildkite/k3_tests/multiprocess/run.sh lm_eval
       {
-        printf '%s\n' "${PINNED_SGLANG_VERSION}"
-        printf 'short_sha=%s\n' "${PINNED_SGLANG_SHA}"
-        printf 'index_url=%s\n' "${PINNED_SGLANG_INDEX_URL}"
+        printf '%s\n' "$${PINNED_SGLANG_VERSION}"
+        printf 'short_sha=%s\n' "$${PINNED_SGLANG_SHA}"
+        printf 'index_url=%s\n' "$${PINNED_SGLANG_INDEX_URL}"
       } > "verified_sglang_{{matrix.request_transport}}.txt"
+      BASH
     matrix: *sglang-smoke-matrix
     env:
       INFERENCE_ENGINE: "{{matrix.inference_engine}}"
