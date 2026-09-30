@@ -86,6 +86,24 @@ def _l2_batch(
     )
 
 
+def _prompt_batch(
+    event_type: CacheEventType, keys: list[ObjectKey], size: int = 0
+) -> CacheEventBatch:
+    """One batch carrying a prompt's chunks in emission order."""
+    return CacheEventBatch(
+        instance_id="node-a",
+        incarnation=1,
+        seq=1,
+        event_type=event_type,
+        tier=Tier.L2,
+        backend="fs",
+        entries=[
+            CacheEventEntry(key=k.to_encoded_object_key(), size_bytes=size)
+            for k in keys
+        ],
+    )
+
+
 def _broadcast(
     ctrl: FleetEvictionController, usage: CacheUsageManager, batch: CacheEventBatch
 ) -> None:
@@ -126,7 +144,7 @@ def test_on_lookup_touches_key():
     k2 = _make_key("a", h="02")
     _store(ctrl, kd, k1, 100)
     _store(ctrl, kd, k2, 100)
-    ctrl.on_lookup(k1)
+    ctrl.on_lookup([k1])
     result = ctrl.compute_eviction_plan()
     assert result["a"][0] == k2
 
@@ -134,7 +152,7 @@ def test_on_lookup_touches_key():
 def test_on_lookup_unknown_key_is_noop():
     ctrl, _, kd = _setup(eviction_ratio=1.0)
     k = _make_key("a")
-    ctrl.on_lookup(k)
+    ctrl.on_lookup([k])
     # Lookup without prior store ⇒ key never tracked. Add an
     # unrelated key so the salt has some usage, but the unknown key
     # mustn't show up in the plan.
@@ -660,6 +678,27 @@ def test_consume_maps_l2_events_onto_the_lru():
 
     _broadcast(ctrl, kd, _l2_batch(CacheEventType.DELETE, k2))
     assert ctrl.compute_eviction_plan()["a"] == [k1]
+
+
+def test_consume_evicts_a_stored_prompt_from_its_last_chunk():
+    """Chunk hashes are prefix-chained, so evicting a prompt's first
+    chunk strands the rest; the last chunk must be the first victim."""
+    ctrl, qs, kd = _setup(eviction_ratio=0.25)
+    qs.set_quota("a", 100)
+    chunks = [_make_key("a", h=f"0{i}") for i in range(4)]
+    _broadcast(ctrl, kd, _prompt_batch(CacheEventType.STORE, chunks, 100))
+    assert ctrl.compute_eviction_plan()["a"] == [chunks[-1]]
+
+
+def test_consume_keeps_an_accessed_prompt_evictable_from_its_last_chunk():
+    """A lookup of the whole prompt must not turn its first chunk into
+    the next victim."""
+    ctrl, qs, kd = _setup(eviction_ratio=0.25)
+    qs.set_quota("a", 100)
+    chunks = [_make_key("a", h=f"0{i}") for i in range(4)]
+    _broadcast(ctrl, kd, _prompt_batch(CacheEventType.STORE, chunks, 100))
+    _broadcast(ctrl, kd, _prompt_batch(CacheEventType.ACCESS, chunks))
+    assert ctrl.compute_eviction_plan()["a"] == [chunks[-1]]
 
 
 def test_consume_keeps_key_in_lru_while_another_placement_remains():
