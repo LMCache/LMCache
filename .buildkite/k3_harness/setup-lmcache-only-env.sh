@@ -18,7 +18,7 @@ echo "--- :python: Installing LMCache (no vLLM)"
 if [[ -n "${XPU_WHEEL_ARTIFACT_ID:-}" ]]; then
     echo "--- :package: Installing verified XPU wheel"
     wheel_path="$(python "${REPO_ROOT}/.buildkite/k3_tests/xpu/download-wheel.py")"
-    uv pip install --no-deps "${wheel_path}"
+    uv pip install "${wheel_path}"
     rm -f -- "${wheel_path}"
     rmdir -- "$(dirname "${wheel_path}")"
     export PYTHONSAFEPATH=1

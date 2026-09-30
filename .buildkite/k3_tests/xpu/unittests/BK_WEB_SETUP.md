@@ -12,8 +12,10 @@ The scheduled nightly builds an XPU CI candidate from the current
 `.buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh`, but does not install
 LMCache. During nightly validation, both XPU pipelines install the wheel
 built by this run. They download the GitHub Actions artifact by ID, verify
-its SHA-256, and install it with `--no-deps` in the same immutable candidate
-image. Ordinary Buildkite runs still install LMCache from source. Only when
+its SHA-256, and install it with its declared runtime dependencies using
+`uv pip install` in the same immutable candidate image. Dependency resolution
+may change installed package versions, as with source installs.
+Ordinary Buildkite runs still install LMCache from source. Only when
 both nightly Buildkite builds pass does the nightly record its digest on
 `buildkite_latest_tested_vllm`; failures keep the previous pin.
 The same verified run also records the upstream vLLM XPU base image digest on
