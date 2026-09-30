@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 import asyncio
 import contextlib
+import heapq
 import time
 
 # Third Party
@@ -113,12 +114,12 @@ class Ingested:
 
 @dataclass
 class EventsTrace:
-    """A fleet's cache-event stream, one record after another in time order.
+    """A fleet's cache-event stream, its files merged by wall-clock time.
 
     Attributes:
-        records: Batches and lifecycle marks, ascending by ``t_wall``.
-            Records with equal timestamps keep file order, so no server's
-            sequence is reordered.
+        records: Batches and lifecycle marks, merged by ``t_wall``.
+            Each file's records keep their file order, even where its
+            clock stepped back, so no server's sequence is reordered.
         meta: The ``level_meta`` of the first file loaded.
         files: The files the records came from.
     """
@@ -141,7 +142,7 @@ class EventsTrace:
             ValueError: If a file is not an ``events``-level trace, or its
                 batches use a cache-event schema this build does not speak.
         """
-        records: list[Record] = []
+        per_file: list[list[Record]] = []
         meta: dict[str, Any] = {}
         for path in paths:
             with TraceReader(path) as reader:
@@ -159,8 +160,10 @@ class EventsTrace:
                     )
                 if not meta:
                     meta = dict(header.level_meta)
-                records.extend(reader.records())
-        records.sort(key=lambda record: record.t_wall)
+                per_file.append(list(reader.records()))
+        # A merge, not a sort: a wall clock can step back mid-file, and the
+        # coordinator drops any batch that arrives behind a later seq.
+        records = list(heapq.merge(*per_file, key=lambda record: record.t_wall))
         return cls(records=records, meta=meta, files=list(paths))
 
     @property

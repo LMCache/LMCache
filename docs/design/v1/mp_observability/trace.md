@@ -603,10 +603,10 @@ attributable after the merge.
 `lmcache/v1/mp_coordinator/events_replay.py`. `EventsTrace.load(paths)`
 reads each file with `TraceReader`, refuses any level but `events` or a
 `cache_event_schema_version` this build does not speak, and merges the
-records by `t_wall`. The sort is stable, so a server's own order (its
-`seq`) is never disturbed; across servers the merge carries each host's
-clock skew, which the coordinator tolerates because it orders per emitter
-only.
+files by `t_wall`. The merge never reorders records within one file, so a
+server's own order (its `seq`) is never disturbed, even if its clock stepped
+back; across servers the merge carries each host's clock skew, which the
+coordinator tolerates because it orders per emitter only.
 
 `replay(trace, target, speed)` hands each record to a `CoordinatorTarget`:
 `start(identity)`, `batch(wire_batch)`, `stop(instance_id)`, and
