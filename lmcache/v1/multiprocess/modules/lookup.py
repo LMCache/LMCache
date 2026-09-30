@@ -331,8 +331,7 @@ class LookupModule:
         # Prefetch only the uncovered sub-range; status offsets hits back to absolute.
         sub_hashes = chunk_hashes[covered_chunks:]
         if not sub_hashes:
-            # Fully covered by APC: nothing to look up. Report the covered
-            # prefix as the whole hit via the covered offset at status time.
+            # Fully covered by APC: report the covered prefix as the hit via the offset.
             self._register_prefetch_job(
                 _PrefetchJob(
                     handle=PrefetchHandle(
@@ -418,9 +417,7 @@ class LookupModule:
         if present_keys:
             self._ctx.storage_manager.touch_l1_keys(present_keys)
 
-        # Contiguous prefix: chunk i counts only if every group's every rank key
-        # is present. Each group's list is chunk-major, rank-minor (see
-        # ``ipc_key_to_object_keys``), so a chunk spans ``num_ranks`` entries.
+        # Contiguous prefix: chunk i counts only if all ranks of all groups are present.
         covered_present = 0
         for chunk_idx in range(covered_chunks):
             chunk_present = True
@@ -483,21 +480,14 @@ class LookupModule:
         # Offset sub-range fold to absolute chunks (covered prefix counts as hit).
         found_count = job.covered_chunks + sub_found
 
-        # Record the model-wide hit length on the session so a later
-        # free_lookup_locks can reconstruct which keys the prefetch
-        # read-locked (see ``unfold``: full-attention groups lock the whole
-        # hit prefix, sliding-window groups only its in-window suffix). The
-        # covered clamp in ``resolve_prefetched_obj_keys`` keeps the release
-        # from touching the unlocked covered prefix.
+        # Record the model-wide hit so free_lookup_locks can rebuild the locked keys.
         session = self._ctx.session_manager.get_or_create(job.request_id)
         session.record_prefetch_result(
             found_count,
             tuple(range(job.attn_desc.num_object_groups)),
         )
 
-        # L1 is credited with the prefix its own cells serve under the same
-        # window rule, offset by the engine-resident APC-covered prefix; L2 with
-        # however far it extended that prefix.
+        # Credit L1 with the prefix its cells serve (offset by covered); L2 the rest.
         l1_chunks = min(job.covered_chunks + sub_l1_found, found_count)
         l2_chunks = found_count - l1_chunks
         self._ctx.event_bus.publish(
@@ -592,11 +582,7 @@ class LookupModule:
                 key.request_id,
             )
 
-        # Release exactly the groups the prefetch locked (std lookup: all;
-        # CB prefix leg: its prefix set) -- releasing an unlocked group
-        # would drop another request's lock on the shared object key. The
-        # covered clamp keeps the release above the APC-covered prefix, which
-        # the lookup never locked.
+        # Release only the locked groups; the covered clamp stays above the APC prefix.
         locked_gids = session.prefetch_locked_gids
         obj_keys = resolve_prefetched_obj_keys(
             self._ctx,

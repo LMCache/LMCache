@@ -149,15 +149,7 @@ class Session:
         group_windows: tuple[int, ...],
         covered_chunks: int = 0,
     ) -> None:
-        """Record a new lookup and reset its per-lookup release state.
-
-        Args:
-            key: The lookup IPC key.
-            group_windows: Per-object-group sliding-window sizes (in chunks).
-            covered_chunks: Leading chunks the serving engine already covers;
-                the lookup skips read-locking/prefetching them, so lock-release
-                ranges are clamped to start no earlier than this boundary.
-        """
+        """Record a new lookup and reset its per-lookup release state."""
         with self._lock:
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
@@ -181,12 +173,7 @@ class Session:
         self,
         key: IPCCacheServerKey,
     ) -> tuple[int, tuple[int, ...], tuple[int, ...], int, int] | None:
-        """Return a stable snapshot for a failed worker's lock release.
-
-        The trailing element is ``prefetch_covered_chunks`` -- the APC-covered
-        prefix the lookup never locked -- so the release path can clamp its
-        range and avoid dropping a lock it never took.
-        """
+        """Return a stable snapshot for a failed worker's lock release."""
         if key.worker_id is None:
             return None
 

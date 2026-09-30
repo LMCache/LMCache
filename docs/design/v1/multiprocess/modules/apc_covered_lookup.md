@@ -30,8 +30,8 @@ Shared covered-skip mechanics:
 
 Non-pin-specific handling (this branch):
 
-- No GPU-block pinning: `_acquire_covered_resources` / `_release_covered_resources`
-  are no-ops, so there is no block-pool pressure.
+- No GPU-block pinning at all, so there is no block-pool pressure (the pin method
+  in `core/skip-apc-pin` adds the acquire/release-pin machinery this branch omits).
 - **Full re-lookup on shrink** (`_handle_covered_shrink`): when the current aligned
   APC hit drops below the frozen `c0`, the completed lookup skipped a now-uncovered
   gap. Rather than chase the moving boundary, fall back to a full lookup from token

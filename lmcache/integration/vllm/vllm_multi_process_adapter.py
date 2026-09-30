@@ -739,8 +739,7 @@ class LMCacheMPSchedulerAdapter:
         self._lookup_params: dict[
             str, tuple[list[int], str, dict[str, Any] | None]
         ] = {}
-        # APC-covered-lookup bookkeeping (skip_covered_lookup feature):
-        # request_id -> covered boundary in chunks (sent on the LOOKUP key).
+        # skip_covered_lookup bookkeeping: request_id -> covered boundary in chunks.
         self._lookup_covered: dict[str, int] = {}
 
         self.model_name = model_name
@@ -1082,11 +1081,7 @@ class LMCacheMPSchedulerAdapter:
 
         token_count = min_chunks * self.lmcache_tokens_per_chunk
 
-        # ``stored_tokens`` currently equals the hit: the covered-present signal
-        # that would shorten it on a covered-range hole needs the LOOKUP reply
-        # to carry a value (a proto field + regen), which is a follow-up. Until
-        # then a covered chunk evicted while covered is re-stored via the normal
-        # store path once a later request observes it as a miss.
+        # stored_tokens == hit until covered-present is wired (proto follow-up).
         result = LookupOutcome(hit_tokens=token_count, stored_tokens=token_count)
         self._finished_lookup_results[request_id] = result
         return result

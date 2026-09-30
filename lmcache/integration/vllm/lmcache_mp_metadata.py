@@ -80,8 +80,7 @@ class LMCacheMPRequestTracker:
     # APC-covered boundary in tokens, frozen at lookup submit (valid while PREFETCHING).
     lookup_covered_tokens: int = 0
 
-    # Sticky: set once the APC hit shrank below the covered boundary. From then on
-    # the request looks up the full prefix from token 0 (no covered skip).
+    # Sticky: after a shrink, the request looks up the full prefix from token 0.
     covered_skip_disabled: bool = False
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
