@@ -832,3 +832,117 @@ def test_destroy_listener_failure_does_not_break_removal():
     manager.get_or_create("req-x")
     assert manager.remove("req-x") is not None
     assert manager.get("req-x") is None
+
+
+# ---------------------------------------------------------------------------
+# Sparse classify: found / partial / stale chunk accounting
+# ---------------------------------------------------------------------------
+
+
+def _classify_engine():
+    """Engine with the real ``_sparse_classify`` bound over mocked state."""
+    # Standard
+    import threading
+
+    eng = MagicMock(spec=BlendModule)
+    eng._sparse_classify = BlendModule._sparse_classify.__get__(eng)
+    eng.UNRETRIEVED_KEYS_EXTRA = BlendModule.UNRETRIEVED_KEYS_EXTRA
+    eng._STALE_STRIKE_THRESHOLD = 2
+    eng._pending_fp_lock = threading.Lock()
+    eng._pending_fp_hashes = set()
+    eng._stale_strike = {}
+    eng._ctx = MagicMock()
+    eng._ctx.session_manager.get_or_create.return_value = SimpleNamespace(extras={})
+    eng._event_bus = MagicMock()
+    eng._token_range_matcher = MagicMock()
+    return eng
+
+
+def _classify_key(request_id: str = "req-classify", num_kv_readers: int = 1):
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    return IPCCacheServerKey(
+        model_name="m",
+        world_size=1,
+        num_kv_readers=num_kv_readers,
+        worker_id=None,
+        token_ids=(1, 2, 3),
+        start=0,
+        end=3,
+        request_id=request_id,
+    )
+
+
+def _classify_match(col: int, h: bytes):
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+
+    n = _UNRETRIEVED_CHUNK
+    return CBMatchResult(
+        old_st=0, old_ed=n, cur_st=col * n, cur_ed=(col + 1) * n, hash=h
+    )
+
+
+def test_sparse_classify_partial_column_releases_and_takes_no_strike():
+    """A chunk with some but not all rows loaded is not blendable and not
+    stale: its landed keys' locks are released immediately (not held for the
+    read TTL) and it takes no eviction strike -- the content is still stored,
+    it merely did not fit L1."""
+    # First Party
+    from lmcache.lmcache_native import Bitmap
+
+    eng = _classify_engine()
+    key = _classify_key(num_kv_readers=8)
+    matches = [_classify_match(0, b"whole"), _classify_match(1, b"partial")]
+    per_hash_obj_keys = {
+        b"whole": ["k-whole-r0", "k-whole-r1"],
+        b"partial": ["k-partial-r0", "k-partial-r1"],
+    }
+    hash_to_col = {b"whole": 0, b"partial": 1}
+    # Row 0 loaded both columns; row 1 only column 0.
+    row0 = Bitmap(2, 2)
+    row1 = Bitmap(2)
+    row1.set(0)
+
+    found = eng._sparse_classify(
+        key, matches, [row0, row1], per_hash_obj_keys, hash_to_col
+    )
+
+    assert [r.hash for r in found] == [b"whole"]
+    # The partial chunk's landed key released the whole reservation, now.
+    eng._ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
+        ["k-partial-r0"], read_locks=8
+    )
+    # No strike and no matcher eviction for the partial chunk.
+    assert eng._stale_strike == {}
+    eng._token_range_matcher.remove_chunks.assert_not_called()
+
+
+def test_sparse_classify_fully_missing_chunk_still_strikes():
+    """A chunk with NO rows loaded keeps the stale-strike path: struck once
+    below the threshold, evicted from the matcher at the threshold."""
+    # First Party
+    from lmcache.lmcache_native import Bitmap
+
+    eng = _classify_engine()
+    key = _classify_key()
+    matches = [_classify_match(0, b"gone")]
+    per_hash_obj_keys = {b"gone": ["k-gone-r0", "k-gone-r1"]}
+    hash_to_col = {b"gone": 0}
+    empty_rows = [Bitmap(1), Bitmap(1)]
+
+    assert (
+        eng._sparse_classify(key, matches, empty_rows, per_hash_obj_keys, hash_to_col)
+        == []
+    )
+    assert eng._stale_strike == {b"gone": 1}
+    eng._token_range_matcher.remove_chunks.assert_not_called()
+    eng._ctx.storage_manager.finish_read_prefetched.assert_not_called()
+
+    assert (
+        eng._sparse_classify(key, matches, empty_rows, per_hash_obj_keys, hash_to_col)
+        == []
+    )
+    eng._token_range_matcher.remove_chunks.assert_called_once_with([b"gone"])
+    assert eng._stale_strike == {}

@@ -214,31 +214,53 @@ class LookupMixin:
         per_hash_obj_keys: dict[bytes, list],
         hash_to_col: dict[bytes, int],
     ) -> list[CBMatchResult]:
-        """Classify each prefetched chunk as found or stale, and finalize state.
+        """Classify each prefetched chunk as found, partial, or stale.
 
-        A chunk is found only if every (read group x rank) key loaded — a
-        partially loaded chunk cannot be blended, so it is dropped whole and
-        takes an eviction strike (evicted at threshold, kept while still
-        in-flight). Stashes the found chunks' obj_keys for the retrieve path.
+        Found: every (read group x rank) key loaded; obj_keys stashed for the
+        retrieve. Stale: no key loaded; takes an eviction strike. Partial:
+        some keys loaded — still stored, just didn't fit L1 — so no strike,
+        and the loaded keys' read locks are released now (the retrieve cannot
+        use them).
 
         Returns:
             The found subset, in cur_st order.
         """
         found_cb_match_result: list[CBMatchResult] = []
         stale_hashes: list[bytes] = []
+        partial_release_keys: list = []
+        partial_seen: set[bytes] = set()
         for r in matches:
             col = hash_to_col.get(r.hash)
-            if col is not None and all(row.test(col) for row in found_rows):
+            if col is None:
+                stale_hashes.append(r.hash)
+                continue
+            landed = [row.test(col) for row in found_rows]
+            if all(landed):
                 found_cb_match_result.append(r)
+            elif any(landed):
+                if r.hash not in partial_seen:
+                    partial_seen.add(r.hash)
+                    keys = per_hash_obj_keys.get(r.hash, ())
+                    partial_release_keys.extend(
+                        k for k, hit in zip(keys, landed, strict=False) if hit
+                    )
             else:
                 stale_hashes.append(r.hash)
-        # Stale drops silently shrink coverage — log so it is diagnosable.
-        if stale_hashes:
+        if partial_release_keys:
+            self._ctx.storage_manager.finish_read_prefetched(
+                partial_release_keys,
+                read_locks=key.require_num_kv_readers(),
+            )
+        # Stale and partial drops silently shrink coverage — log so it is
+        # diagnosable.
+        if stale_hashes or partial_seen:
             logger.warning(
-                "CB sparse classify for %s: %d found, %d stale of %d submitted",
+                "CB sparse classify for %s: %d found, %d stale, %d partial "
+                "of %d submitted",
                 key.request_id,
                 len(found_cb_match_result),
                 len(stale_hashes),
+                len(partial_seen),
                 len(matches),
             )
 
