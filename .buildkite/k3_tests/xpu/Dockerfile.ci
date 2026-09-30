@@ -1,0 +1,10 @@
+ARG XPU_BASE_IMAGE
+FROM ${XPU_BASE_IMAGE}
+
+USER root
+COPY .buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh /tmp/install_xpu_dpcpp_compiler.sh
+
+RUN PYTHON="$(command -v python3)" bash /tmp/install_xpu_dpcpp_compiler.sh \
+    && python3 -m pip install uv
+
+ENV BASH_ENV=/opt/intel/oneapi/setvars.sh
