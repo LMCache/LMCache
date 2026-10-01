@@ -599,6 +599,21 @@ class LMCacheEngine:
             store_stats.put_time * 1000,
         )
 
+    def _store_layer_skipped(self):
+        """Stand in for a ``store_layer`` that stores nothing.
+
+        ``store_layer``'s callers advance it a fixed number of times and cannot
+        know in advance whether the store will be skipped: the vLLM adapter
+        advances it once per layer from ``save_kv_layer`` and once more from
+        ``wait_for_save``. Every exit path therefore has to yield
+        ``num_layers + 1`` times, or the caller's ``next()`` raises
+        ``StopIteration`` -- which vLLM surfaces as ``EngineDeadError``, killing
+        the engine rather than degrading.
+        """
+        for _ in range(self.num_layers):
+            yield
+        yield
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store_layer(
@@ -630,6 +645,7 @@ class LMCacheEngine:
         # Health check: block operation if LMCache is unhealthy
         if not self.is_healthy():
             logger.warning("LMCache is unhealthy, skipping store_layer operation")
+            yield from self._store_layer_skipped()
             return
 
         assert self.storage_manager is not None
@@ -661,9 +677,9 @@ class LMCacheEngine:
                 "Freeze mode enabled, skipping store_layer for %d tokens",
                 num_to_store_tokens,
             )
-            # Still need to yield to avoid StopIteration
-            for layer_id in range(self.num_layers):
-                yield
+            # Still need to yield to avoid StopIteration -- including the
+            # finalizing advance from wait_for_save.
+            yield from self._store_layer_skipped()
             return
 
         starts = []
