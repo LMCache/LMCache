@@ -45,15 +45,19 @@ def create_request_client(
     import zmq
 
     # First Party
-    from lmcache.v1.multiprocess.transport.zmq_impl.client import (
-        ZmqMultiprocessClient,
+    from lmcache.v1.multiprocess.transport.zmq_impl.client_layerwise import (
+        ZmqLayerwiseClient,
     )
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueClient
+    from lmcache.v1.multiprocess.transport.zmq_impl.mq_streaming import (
+        StreamingMessageQueueClient,
+    )
 
     if context is None:
         context = zmq.Context.instance()
-    return ZmqMultiprocessClient(  # type: ignore[abstract]
-        MessageQueueClient(server_url, context)
+    # The layer-wise subclass only adds the two layer-wise operations; every
+    # shared operation behaves exactly as on the plain client.
+    return ZmqLayerwiseClient(  # type: ignore[abstract]
+        StreamingMessageQueueClient(server_url, context)
     )
 
 

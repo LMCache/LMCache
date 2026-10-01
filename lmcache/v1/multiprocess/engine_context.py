@@ -206,11 +206,13 @@ class MPCacheServerContext:
         full_sw_kv: bool = False,
         null_block_id: int = 0,
         session_ttl_seconds: float = SessionManager.DEFAULT_SESSION_TTL,
+        layerwise_batch: int = 0,
     ) -> None:
         self._chunk_size = chunk_size
         self._null_block_id = null_block_id
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
+        self._layerwise_batch = layerwise_batch
 
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
@@ -241,6 +243,11 @@ class MPCacheServerContext:
     def null_block_id(self) -> int:
         """Engine block ID that denotes absent KV data."""
         return self._null_block_id
+
+    @property
+    def layerwise_batch(self) -> int:
+        """Per-layer batch size (0 = disabled)."""
+        return self._layerwise_batch
 
     @property
     def separate_object_groups(self) -> bool:
