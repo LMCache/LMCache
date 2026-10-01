@@ -110,11 +110,6 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[int | None]: ...
 
     @rpc_method
-    def query_prefetch_lookup_hits(
-        self, request_id: str
-    ) -> MessagingFuture[int | None]: ...
-
-    @rpc_method
     def free_lookup_locks(
         self, key: IPCCacheServerKey, tp_size: int
     ) -> MessagingFuture[None]: ...

@@ -98,7 +98,7 @@ def _build_metadata(chunk_size: int) -> LMCacheMetadata:
         DEFAULT_KV_SHAPE[3],
         DEFAULT_KV_SHAPE[4],
     )
-    logger.info(f"_build_metadata: chunk_size {chunk_size}, kv_shape {kv_shape}")
+    logger.info("_build_metadata: chunk_size %s, kv_shape %s", chunk_size, kv_shape)
     return LMCacheMetadata(
         model_name="benchmark_model",
         world_size=1,
@@ -125,7 +125,7 @@ def _make_memory_objs(
         memory_allocator = AdHocMemoryAllocator(device="cpu")
     if shapes is None:
         shapes = [DEFAULT_TORCH_SHAPE]
-    logger.info(f"_make_memory_objs, shapes: {shapes}")
+    logger.info("_make_memory_objs, shapes: %s", shapes)
 
     objs = []
     for i in range(num_ops):
@@ -371,7 +371,7 @@ class StorageBackendBenchmark(ABC):
         # Setup
         self._loop, self._loop_thread = _start_loop()
         metadata = _build_metadata(self.chunk_size)
-        logger.info(f"Prepare config for {self.backend_name} ...")
+        logger.info("Prepare config for %s ...", self.backend_name)
 
         rust_raw = "rust" in self.backend_name
 
@@ -407,7 +407,7 @@ class StorageBackendBenchmark(ABC):
                 dst_device="cpu",
                 memory_allocator=AdHocMemoryAllocator(device="cpu"),
             )
-        logger.info(f"Creating {self.backend_name} ...")
+        logger.info("Creating %s ...", self.backend_name)
         # Create the specific backend
         self._backend = self._create_backend(
             config, metadata, self._loop, self._local_cpu
@@ -426,15 +426,15 @@ class StorageBackendBenchmark(ABC):
         )
 
         # Run benchmark
-        logger.info(f"Start benchmark with {self.backend_name} ...")
+        logger.info("Start benchmark with %s ...", self.backend_name)
         self._start_time = time.perf_counter()
         result = self._execute_benchmark()
-        logger.info(f"End benchmark with {self.backend_name} ...")
+        logger.info("End benchmark with %s ...", self.backend_name)
         # Cleanup (skip if already handled in _execute_benchmark)
         if not self._skip_cleanup:
             _release_memory_objs(self._objs)
         self._close_backend()
-        logger.info(f"Closed {self.backend_name} ...")
+        logger.info("Closed %s ...", self.backend_name)
 
         self._cleanup_device()
         _stop_loop(self._loop, self._loop_thread)
@@ -1250,7 +1250,7 @@ def main() -> None:
             output_path = os.path.join(output_path, f"storage_backend_io_{ts}.json")
         with open(output_path, "w") as f:
             json.dump(results, f, indent=2)
-        logger.info(f"Wrote results to {output_path}")
+        logger.info("Wrote results to %s", output_path)
 
 
 if __name__ == "__main__":

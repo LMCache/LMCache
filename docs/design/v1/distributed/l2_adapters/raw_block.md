@@ -184,7 +184,7 @@ Important validation rules:
 - `per_tp_device_paths` is rejected in MP mode
 - `load_checkpoint_on_init=false` starts with an empty in-memory index instead
   of loading the latest on-device metadata checkpoint
-- with `use_odirect=true`, MP L1 alignment must satisfy
+- with `use_odirect=true` or `use_uring_cmd=true`, MP L1 alignment must satisfy
   `l1_align_bytes >= block_align`
 - with `use_odirect=true`, raw-block I/O rejects offsets and total I/O lengths
   that are not aligned to `block_align`; misaligned write buffers use an

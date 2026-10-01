@@ -185,7 +185,7 @@ class NixlStorageAgent:
             device_id=0,  # 0 indicates cpu
         )
 
-        if self.backend in ["GDS", "GDS_MT", "POSIX", "HF3FS"]:
+        if self.backend in _FILE_BACKENDS:
             file_size = int(
                 self.backend_params.get("file_size", l1_memory_desc.align_bytes)
             )
@@ -368,20 +368,35 @@ class NixlStorageAgent:
             raise RuntimeError("NIXL transfer failed")
 
     async def post_non_blocking(self, handle: NixlXferHandle) -> None:
-        """Post a Nixl transfer handle and await until the transfer is done."""
+        """Post a Nixl transfer handle and await until the transfer is done.
 
+        Spin-checks up to 20 times without yielding before falling back to a
+        1 ms cooperative sleep.  io_uring-backed backends (IBM_SCALE, GDS)
+        typically complete in <1 ms and will be "DONE" during the spin,
+        eliminating the 10 ms floor that the old unconditional sleep imposed.
+
+        The sleep is placed *before* check_xfer_state in the back-off loop
+        (not after) so that a transfer completing on the first check exits
+        immediately without paying an extra sleep on the way out.
+        """
         state = self.nixl_agent.transfer(handle)
-
+        # Fast path: spin-check without yielding for io_uring-backed backends.
+        if state != "DONE" and state != "ERR":
+            for _ in range(20):
+                try:
+                    state = self.nixl_agent.check_xfer_state(handle)
+                except nixlBind.nixlBackendError:
+                    raise
+                if state == "DONE" or state == "ERR":
+                    break
+        # Back-off path: sleep *before* each check so we exit immediately
+        # once "DONE" is returned without paying an extra sleep on the way out.
         while state != "DONE" and state != "ERR":
+            await asyncio.sleep(0.001)
             try:
                 state = self.nixl_agent.check_xfer_state(handle)
             except nixlBind.nixlBackendError:
                 raise
-
-            # TODO(Jiayi): Tune this for better perf
-            if state != "DONE" and state != "ERR":
-                await asyncio.sleep(0.01)
-
         if state == "ERR":
             raise RuntimeError("NIXL transfer failed")
 
@@ -785,9 +800,10 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 mem_indices_flat,
                 storage_indices_flat,
             )
-
-            await self.nixl_agent.post_non_blocking(handle)
-            self.nixl_agent.release_handle(handle)
+            try:
+                await self.nixl_agent.post_non_blocking(handle)
+            finally:
+                self.nixl_agent.release_handle(handle)
 
             with self._lock:
                 for key, storage_obj in zip(stored_keys, storage_objs, strict=False):
@@ -876,6 +892,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
         try:
             mem_indices_flat = []
             storage_indices_flat = []
+            loaded_indices: list[int] = []
 
             with self._lock:
                 for i, key in enumerate(keys):
@@ -887,17 +904,21 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
                     mem_indices_flat.extend(mem_indices)
                     storage_indices_flat.extend(storage_obj.page_indices)
-
-                    bitmap.set(i)
-                    accessed_keys.append(key)
+                    loaded_indices.append(i)
 
             if mem_indices_flat:
                 handle = self.nixl_agent.get_storage_to_mem_handle(
                     mem_indices_flat,
                     storage_indices_flat,
                 )
-                await self.nixl_agent.post_non_blocking(handle)
-                self.nixl_agent.release_handle(handle)
+                try:
+                    await self.nixl_agent.post_non_blocking(handle)
+                finally:
+                    self.nixl_agent.release_handle(handle)
+
+                for i in loaded_indices:
+                    bitmap.set(i)
+                    accessed_keys.append(keys[i])
         except Exception:
             logger.exception("NIXL load task %d failed", task_id)
 
@@ -919,8 +940,9 @@ _VALID_NIXL_BACKENDS = (
     "HF3FS",
     "OBJ",
     "AZURE_BLOB",
+    "IBM_SCALE",
 )
-_FILE_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS")
+_FILE_BACKENDS = ("GDS", "GDS_MT", "POSIX", "HF3FS", "IBM_SCALE")
 
 
 class NixlStoreL2AdapterConfig(L2AdapterConfigBase):

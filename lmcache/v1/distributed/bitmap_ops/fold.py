@@ -22,12 +22,12 @@ the per-group presence bitmaps into that single answer in three steps:
 
 When every group is full attention the servable set is a downward-closed prefix,
 so the hit length equals the leading-ones count of the AND of the per-group
-presences -- i.e. the plain ``TrimPolicy.PREFIX`` / require-all intersection.
+presences -- i.e. the plain longest-prefix / require-all intersection.
 Fold/unfold is a strict generalization of that behavior.
 
 Two input layouts are supported:
 
-- **flat / chunk-major** (:func:`fold`, :func:`unfold`, :func:`fold_unfold_ranked`):
+- **flat / chunk-major** (:func:`fold`, :func:`unfold`):
   bit ``j * num_groups + g`` is set iff chunk ``j`` is available for object
   group ``g`` (single-rank), or ``j * (num_groups * num_ranks) + g * num_ranks
   + r`` in the ranked layout;
@@ -42,7 +42,6 @@ from collections.abc import Callable, Iterable, Sequence
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.internal_api import TrimPolicy
 
 # Lightweight installs (e.g. lmcache-cli) ship a lmcache_native without
 # the fold kernels; this module must stay importable there because CLI
@@ -203,34 +202,6 @@ def unfold(
     return _native_unfold(hit_length, num_chunks, num_ranks, list(group_windows))
 
 
-def fold_unfold_ranked(
-    found: Bitmap,
-    num_chunks: int,
-    num_ranks: int,
-    group_windows: Sequence[int],
-) -> tuple[int, Bitmap]:
-    """Compose :func:`fold` -> :func:`highest_set_bit` -> :func:`unfold`.
-
-    Convenience for the full pipeline over the ``chunk x group x kv_rank``
-    lookup key layout: the model-wide hit length and the keys each group must
-    retain to serve it.
-
-    Args:
-        found: presence bitmap (see :func:`fold`).
-        num_chunks: number of LMCache chunks in the request.
-        num_ranks: number of kv_rank shards per chunk.
-        group_windows: per-object-group cross-chunk window sizes.
-
-    Returns:
-        ``(hit_length, retain_mask)`` over the same ranked layout as ``found``.
-    """
-    servable = fold(found, num_chunks, num_ranks, group_windows)
-    # fold's bits are chunk-indexed (bit j == prefix length j + 1), so the hit
-    # length is the highest set bit plus one; -1 (no servable prefix) -> 0.
-    hit_length = highest_set_bit(servable) + 1
-    return hit_length, unfold(hit_length, num_chunks, num_ranks, group_windows)
-
-
 def fold_grouped(
     rows: Sequence[Bitmap],
     windows: Sequence[int],
@@ -347,26 +318,6 @@ def fold_unfold_grouped(
     return hit_length, unfold_grouped(hit_length, num_chunks, windows)
 
 
-def fold_unfold(
-    found: Bitmap,
-    num_chunks: int,
-    group_windows: Sequence[int],
-) -> tuple[int, Bitmap]:
-    """:func:`fold_unfold_ranked` for the single-rank (chunk-major) layout.
-
-    Args:
-        found: chunk-major presence bitmap of length
-            ``num_chunks * len(group_windows)``; bit ``j * num_groups + g`` set
-            iff chunk ``j`` is available for object group ``g``.
-        num_chunks: number of LMCache chunks in the request.
-        group_windows: per-object-group cross-chunk window sizes.
-
-    Returns:
-        ``(hit_length, retain_mask)`` over the chunk-major layout.
-    """
-    return fold_unfold_ranked(found, num_chunks, 1, group_windows)
-
-
 def _fold_python(
     found: Bitmap,
     num_chunks: int,
@@ -470,27 +421,3 @@ def merge_bitmaps(bitmaps: Iterable[Bitmap], num_keys: int) -> Bitmap:
     for bm in bitmaps:
         merged = merged | bm
     return merged
-
-
-def select_retained(
-    found: Bitmap,
-    num_keys: int,
-    policy: TrimPolicy = TrimPolicy.PREFIX,
-) -> Bitmap:
-    """Select the retained subset of ``found`` for the non-windowed selections.
-
-    ``PREFIX`` (LONGEST) keeps the leading contiguous run and drops everything
-    from the first gap on; any other policy keeps every set bit, gaps included.
-    The windowed hybrid fold is handled by :func:`fold_unfold_ranked`, not here.
-
-    Args:
-        found: Bitmap of found keys, over key indices ``0..num_keys-1``.
-        num_keys: Total number of requested keys.
-        policy: Selection to apply (see :class:`TrimPolicy`).
-
-    Returns:
-        Bitmap of the retained key indices.
-    """
-    if policy is TrimPolicy.PREFIX:
-        return Bitmap(num_keys, found.count_leading_ones())
-    return found

@@ -1043,7 +1043,10 @@ def _update_config_from_env(self):
                 self._user_set_keys.add(name)
             except (ValueError, json.JSONDecodeError) as e:
                 logger.warning(
-                    f"Failed to parse {get_env_name(name)}={raw_value!r}: {e}"
+                    "Failed to parse %s=%r: %s",
+                    get_env_name(name),
+                    raw_value,
+                    e,
                 )
                 # Keep existing value if conversion fails
     self.validate()
