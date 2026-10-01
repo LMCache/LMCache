@@ -77,8 +77,8 @@ def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
 def get_cache_group_ids(groups: Sequence[KVCacheGroupSpec]) -> tuple[int, ...]:
     """Select vLLM groups to store and restore, retaining their original IDs.
 
-    HiSparse offloads only its indexer; the MLA source stays in vLLM's host
-    pool. Other models use all prefix-cacheable groups that allow transfer.
+    Select prefix-cacheable groups that allow transfer, including HiSparse's
+    CPU MLA source and GPU indexer; its private GPU pools are excluded.
 
     Args:
         groups: vLLM KV cache groups in engine order.
@@ -86,13 +86,6 @@ def get_cache_group_ids(groups: Sequence[KVCacheGroupSpec]) -> tuple[int, ...]:
     Returns:
         Original group IDs included in LMCache operations.
     """
-    indexer_ids = tuple(
-        i
-        for i, group in enumerate(groups)
-        if getattr(group, "role", None) == "hisparse_indexer"
-    )
-    if indexer_ids:
-        return indexer_ids
     return tuple(
         i
         for i, group in enumerate(groups)

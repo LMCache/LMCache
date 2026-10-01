@@ -68,8 +68,6 @@ class LMCacheMPRequestTracker:
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
     num_lmcache_hit_tokens: int = 0
-    # Full lookup prefix whose locks must be released, even if restore is capped.
-    num_prefetched_tokens: int = 0
 
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
@@ -94,7 +92,6 @@ class LMCacheMPRequestTracker:
         self.num_stored_tokens = 0
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
-        self.num_prefetched_tokens = 0
         self.state = LMCacheMPRequestState.PREFETCHING
         self.mm_adjusted_prompt_ids = []
         mm_hashes, mm_positions = extract_mm_features(request)

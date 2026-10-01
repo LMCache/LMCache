@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""HiSparse indexer offload and restore through a live LMCache server."""
+"""HiSparse MLA and indexer offload and restore through a live LMCache server."""
 
 # Standard
 from pathlib import Path
@@ -28,8 +28,8 @@ from lmcache.integration.vllm import (  # noqa: E402
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     LMCacheMPConnector,
 )
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (  # noqa: E402
-    LMCacheDrivenTransferContext,
+from lmcache.v1.multiprocess.transfer_context.mixed import (  # noqa: E402
+    MixedTransferContext,
 )
 
 
@@ -39,16 +39,16 @@ def _run_hisparse_offload_restore() -> None:
 
     with (
         patch.object(
-            LMCacheDrivenTransferContext,
+            MixedTransferContext,
             "submit_store",
             autospec=True,
-            side_effect=LMCacheDrivenTransferContext.submit_store,
+            side_effect=MixedTransferContext.submit_store,
         ) as store,
         patch.object(
-            LMCacheDrivenTransferContext,
+            MixedTransferContext,
             "submit_retrieve",
             autospec=True,
-            side_effect=LMCacheDrivenTransferContext.submit_retrieve,
+            side_effect=MixedTransferContext.submit_retrieve,
         ) as retrieve,
         patch.object(
             LMCacheMPConnector,
@@ -120,19 +120,14 @@ def _run_hisparse_offload_restore() -> None:
             core = llm.llm_engine.engine_core.engine_core
             runner = core.model_executor.driver_worker.worker.model_runner
             groups = runner.kv_cache_config.kv_cache_groups
-            expected_ids = [
-                i
-                for i, group in enumerate(groups)
-                if group.role == KVCacheGroupRole.HISPARSE_INDEXER
-            ]
+            expected_ids = runner.kv_cache_config.transfer_group_ids
             assert {groups[i].role for i in expected_ids} == {
+                KVCacheGroupRole.HISPARSE_SOURCE,
                 KVCacheGroupRole.HISPARSE_INDEXER,
             }
             register.assert_called_once()
             connector, original_caches = register.call_args.args
-            assert connector.worker_adapter.model_name.endswith(
-                "##lmcache-hisparse-indexer-v1"
-            )
+            assert connector.worker_adapter.model_name.endswith("##lmcache-hisparse-v1")
             caches = connector.worker_adapter.kv_caches
             infos = connector.worker_adapter.engine_group_infos
             assert set(original_caches) > set(caches)
@@ -147,7 +142,9 @@ def _run_hisparse_offload_restore() -> None:
                 assert info.tokens_per_block == 64
                 for name in names:
                     assert caches[name] is original_caches[name]
-                    assert caches[name].device.type == "cuda"
+                    assert caches[name].device.type == (
+                        "cpu" if groups[info.engine_group_id].host_resident else "cuda"
+                    )
             assert any(not cache.is_contiguous() for cache in caches.values())
 
             prompt = {"prompt_token_ids": [1000 + i % 64 for i in range(257)]}
@@ -177,12 +174,16 @@ def _run_hisparse_offload_restore() -> None:
             assert stored_ranges[-1][1] == 256
             retrieve.assert_not_called()
             expected = outputs[0].outputs[0].token_ids
-            stored_block_ids = [
-                block for call in store.call_args_list for block in call.args[4][0]
-            ]
-            stored_indexer = {
-                name: cache[stored_block_ids].cpu() for name, cache in caches.items()
-            }
+            stored_kv = {}
+            for group_idx, info in enumerate(infos):
+                stored_block_ids = [
+                    block
+                    for call in store.call_args_list
+                    for block in call.args[4][group_idx]
+                ]
+                for layer_idx in info.layer_indices:
+                    name = list(caches)[layer_idx]
+                    stored_kv[name] = caches[name][stored_block_ids].cpu().clone()
             for i in range(4):
                 llm.generate(
                     [
@@ -200,36 +201,41 @@ def _run_hisparse_offload_restore() -> None:
             )
             assert retrieve.call_count > before, "Expected a real LMCache restore"
             assert actual[0].outputs[0].token_ids == expected
-            for call in retrieve.call_args_list:
-                _, _, key, _, block_ids, *_ = call.args
-                assert key.end > key.start
-                assert len(block_ids) == len(infos)
-                for name, cache in caches.items():
-                    assert torch.equal(
-                        cache[block_ids[0]].cpu(),
-                        stored_indexer[name][key.start // 64 : key.end // 64],
-                    )
-
-            # Without MLA in the host pool, indexer-only hits cannot be used.
+            # Remove both local prefixes and poison their backing KV: a restore
+            # must repopulate the CPU MLA pool before HiSparse can consume it.
             llm.generate([{"prompt_token_ids": [42]}], SamplingParams(max_tokens=1))
             managers = core.scheduler.kv_cache_manager.coordinator.single_type_managers
             for manager in managers:
                 pool = manager.block_pool
                 pool.evict_blocks(set(range(pool.num_gpu_blocks)))
+            torch.accelerator.synchronize()
+            for cache in caches.values():
+                cache.zero_()
             before = retrieve.call_count
             cold = llm.generate(
                 [prompt], SamplingParams(temperature=0, max_tokens=4, ignore_eos=True)
             )
-            assert retrieve.call_count == before
+            assert retrieve.call_count > before
             assert cold[0].outputs[0].token_ids == expected
+            for call in retrieve.call_args_list[before:]:
+                _, _, key, _, block_ids, *_ = call.args
+                assert key.end > key.start
+                assert len(block_ids) == len(infos)
+                for group_idx, info in enumerate(infos):
+                    for layer_idx in info.layer_indices:
+                        name = list(caches)[layer_idx]
+                        assert torch.equal(
+                            caches[name][block_ids[group_idx]].cpu(),
+                            stored_kv[name][key.start // 64 : key.end // 64],
+                        )
         finally:
             llm.llm_engine.engine_core.shutdown()
 
 
 @pytest.mark.integration
 @pytest.mark.cuda
-def test_hisparse_indexer_offload_and_restore(tmp_path: Path) -> None:
-    """Indexer restores preserve outputs and require a locally cached MLA prefix."""
+def test_hisparse_mla_and_indexer_offload_and_restore(tmp_path: Path) -> None:
+    """Cold restores recover both CPU MLA and GPU indexer bytes and greedy output."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 9:
         pytest.skip("HiSparse requires Hopper or newer")
     env = dict(

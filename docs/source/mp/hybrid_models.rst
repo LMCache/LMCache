@@ -83,9 +83,9 @@ Recipe pages for the validated hybrid-attention architectures:
 What Works
 ----------
 
-HiSparse supports GPU indexer offload and restore with current vLLM on Hopper
-or newer. CPU MLA stays in vLLM's host pool: LMCache caps indexer restores at the
-MLA prefix still cached locally and falls back to computation when it is absent.
+HiSparse supports CPU MLA and GPU indexer offload and restore with current vLLM
+on Hopper or newer. MLA copies pass through a reusable GPU chunk; restores
+repopulate vLLM's original host pool before inference resumes.
 Configure ``MultiConnector`` with ``HiSparseConnector`` first and the LMCache
 connector second:
 
@@ -107,8 +107,9 @@ connector second:
    }
 
 Enable HiSparse in vLLM's attention configuration and start the LMCache MP server
-as usual. MLA transfer through LMCache and cross-engine HiSparse cache reuse
-are not supported by this indexer-only path.
+as usual. Use the default ``auto`` transfer mode or ``lmcache_driven``.
+The initial mixed-device path serializes transfers and waits per chunk, adding
+copies and worker blocking; it does not duplicate the host pool on GPU.
 
 Models whose layers all use **standard paged attention** — including hybrids
 that mix sliding-window and full attention — are supported with no special
