@@ -148,7 +148,7 @@ class PrefetchPolicy(ABC):
                 manager that may appear in ``l1_locked_keys``.
             l2_adapter_descs: L2 adapter index -> descriptor, for every L2
                 adapter that may appear in ``l2_locked_keys``.
-            fetching_policy: See :data:`FetchingPolicy`.
+            fetching_policy: ``"prefix"`` or ``"full"``.
 
         Returns:
             The plan consists of the planned L1 and L2 keys.
@@ -224,7 +224,7 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
                 manager that may appear in ``l1_locked_keys``.
             l2_adapter_descs: L2 adapter index -> descriptor, for every L2
                 adapter that may appear in ``l2_locked_keys``.
-            fetching_policy: See :data:`FetchingPolicy`.
+            fetching_policy: ``"prefix"`` or ``"full"``.
 
         Returns:
             The plan. Every cell in it is locked in the tier it is planned

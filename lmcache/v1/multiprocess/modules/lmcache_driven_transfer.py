@@ -558,12 +558,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
         Returns:
             A tuple where the first element is the IPC handle of the event
-            that signals the completion of the store operation, the second
+            that signals the completion of the store operation, and the second
             element indicates whether the store operation completed without a
             fatal error (not whether every requested chunk was stored; see
-            Notes), and the third marks per chunk whether every object group
-            committed it. The event handle is empty when no device work was
-            submitted.
+            Notes). The event handle is empty when no device work was submitted.
+            The third element marks per chunk whether every object group
+            committed it.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.

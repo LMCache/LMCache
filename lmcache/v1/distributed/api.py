@@ -29,10 +29,8 @@ FetchingPolicy = Literal["prefix", "full"]
 
 ``"prefix"`` -- only fetch the prefix hit and discard all non-prefix hits.
 
-``"full"`` -- fetch every hit chunk, in or out of the prefix. A chunk
-(column) counts only when every row of it loads: staging is trimmed to whole
-columns, and the result also reports what the lookup found (``found_cells``)
-so callers can tell "did not fit" from "absent".
+``"full"`` -- fetch all of the hit chunks, no matter whether they are in the
+prefix or not.
 """
 
 FULL_ATTENTION_WINDOW_CHUNKS = -1
