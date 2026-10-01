@@ -275,7 +275,7 @@ class TestFingerprintJobTuple:
     def test_store_enqueues_request_id(self):
         eng = _make_engine()
         eng._transfer_module = MagicMock()
-        eng._transfer_module.store_with_chunk_mask.return_value = (
+        eng._transfer_module.store.return_value = (
             b"handle",
             True,
             [True, True],

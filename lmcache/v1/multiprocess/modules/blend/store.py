@@ -75,8 +75,8 @@ class StoreMixin:
             The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
-        handle, store_ok, stored_mask = self._transfer_module.store_with_chunk_mask(
-            key, instance_id, gpu_block_ids, event_ipc_handle
+        handle, store_ok, stored_mask = self._transfer_module.store(
+            key, instance_id, gpu_block_ids, event_ipc_handle, return_chunk_mask=True
         )
         result = (handle, store_ok)
 
