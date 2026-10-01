@@ -659,6 +659,53 @@ def _row_windows(group_windows, num_ranks: int) -> list[int]:
     return [w for w in group_windows for _ in range(num_ranks)]
 
 
+@pytest.mark.parametrize("num_chunks", [0, 1, 7, 8, 9, 17, 65])
+@pytest.mark.parametrize("windows", [[-1, 2], [2, -1], [0, 3, -2], [1, 4]])
+@pytest.mark.parametrize("missing", [None, -1, 0, 7, 8])
+def test_grouped_prefix_gaps_and_row_order(
+    num_chunks: int, windows: list[int], missing: int | None
+) -> None:
+    """Check servable prefixes and retained rows against the window contract."""
+    present = [[True] * num_chunks for _ in windows]
+    for row_index, row in enumerate(present):
+        if missing == -1:
+            row[:] = [False] * num_chunks
+        elif missing is not None and missing + row_index < num_chunks:
+            row[missing + row_index] = False
+
+    rows = [Bitmap(num_chunks) for _ in windows]
+    for bitmap, row in zip(rows, present, strict=True):
+        bitmap.batched_set([j for j, value in enumerate(row) if value])
+    before = [row.get_indices_list() for row in rows]
+    expected = [
+        length - 1
+        for length in range(1, num_chunks + 1)
+        if all(
+            all(row[0 if window <= 0 else max(0, length - window) : length])
+            for row, window in zip(present, windows, strict=True)
+        )
+    ]
+    hit = max(expected, default=-1) + 1
+    retained = [
+        list(range(0 if window <= 0 else max(0, hit - window), hit))
+        for window in windows
+    ]
+
+    for order in [list(range(len(rows))), list(reversed(range(len(rows))))]:
+        ordered_rows = [rows[i] for i in order]
+        ordered_windows = [windows[i] for i in order]
+        servable = fold_grouped(ordered_rows, ordered_windows)
+        actual_hit, masks = fold_unfold_grouped(ordered_rows, ordered_windows)
+        assert len(servable) == num_chunks
+        assert servable.get_indices_list() == expected
+        assert actual_hit == hit
+        assert [mask.get_indices_list() for mask in masks] == [
+            retained[i] for i in order
+        ]
+        assert all(len(mask) == num_chunks for mask in masks)
+        assert [row.get_indices_list() for row in rows] == before
+
+
 class TestGroupedMatchesFlat:
     """With one row per (group, rank), each carrying its group's window, the
     grouped kernels compute exactly what the flat ones do."""

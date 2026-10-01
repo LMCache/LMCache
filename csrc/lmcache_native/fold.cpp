@@ -116,23 +116,34 @@ Bitmap fold_grouped(const std::vector<Bitmap>& rows,
   // serve that length: ``run`` counts consecutive present chunks ending at
   // ``j``, and a length-L prefix needs ``run >= min(window, L)``.
   std::vector<char> servable(num_chunks, 1);
-  for (size_t i = 0; i < rows.size(); ++i) {
+  size_t candidate_chunks = num_chunks;
+  for (size_t i = 0; i < rows.size() && candidate_chunks > 0; ++i) {
     const int64_t window = windows[i];
-    const size_t eff_window =
-        (window <= 0) ? num_chunks : static_cast<size_t>(window);
     const Bitmap& row = rows[i];
+    if (window <= 0) {
+      // A missing full-attention chunk rules out every longer prefix.
+      for (size_t j = 0; j < candidate_chunks; ++j) {
+        if (!row.test(j)) {
+          candidate_chunks = j;
+          break;
+        }
+      }
+      continue;
+    }
+
+    const size_t eff_window = static_cast<size_t>(window);
     size_t run = 0;
-    for (size_t prefix_len = 1; prefix_len <= num_chunks; ++prefix_len) {
+    for (size_t prefix_len = 1; prefix_len <= candidate_chunks; ++prefix_len) {
       const size_t j = prefix_len - 1;
       run = row.test(j) ? run + 1 : 0;
-      if (servable[j] && run < std::min(eff_window, prefix_len)) {
+      if (run < eff_window && run < prefix_len) {
         servable[j] = 0;
       }
     }
   }
 
   Bitmap servable_lengths(num_chunks);
-  for (size_t j = 0; j < num_chunks; ++j) {
+  for (size_t j = 0; j < candidate_chunks; ++j) {
     if (servable[j]) servable_lengths.set(j);
   }
   return servable_lengths;
