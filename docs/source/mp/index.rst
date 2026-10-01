@@ -223,11 +223,6 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - (SGLang only) Block until a prefetch job completes, then return its
        loaded chunk count, or ``None`` on timeout. The blocking alternative
        to polling ``QUERY_PREFETCH_STATUS``.
-   * - ``QUERY_PREFETCH_LOOKUP_HITS``
-     - BLOCKING
-     - Query the lookup-phase hit chunk count by request_id, before the
-       prefetch finishes. Returns ``None`` while the lookup is still
-       running.
    * - ``FREE_LOOKUP_LOCKS``
      - BLOCKING
      - Release read locks from a cancelled lookup without doing a full

@@ -276,6 +276,12 @@ def test_multi_manager_harness_rejects_unsupported_serving(
             operation([key(1)])
     with pytest.raises(ValueError, match="owner-routed writes only"):
         store.add_l2_adapter(MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=1))
+    with pytest.raises(ValueError, match="owner-routed writes only"):
+        store.get_l1_devdax_arena_statuses()
+    with pytest.raises(ValueError, match="owner-routed writes only"):
+        store.add_l1_devdax_device("/unused", 4096)
+    with pytest.raises(ValueError, match="owner-routed writes only"):
+        store.remove_l1_devdax_device("/unused")
 
 
 def test_single_manager_legacy_finish_and_read(storage_factory: StorageFactory) -> None:
