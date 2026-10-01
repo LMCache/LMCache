@@ -2,6 +2,7 @@
 """Tests for full sync functionality (Tracker and KVController)."""
 
 # Standard
+from types import SimpleNamespace
 import asyncio
 import time
 
@@ -445,3 +446,24 @@ class TestIntegration:
 
         assert kv.full_sync_tracker.get_global_progress() == 0.5
         assert kv.full_sync_tracker.can_exit_freeze() is True
+
+
+class TestFullSyncBeforeStorageInit:
+    """A FullSyncCommand can arrive before the engine has created its storage
+    manager (workers register before the KV caches are registered). The
+    worker must skip it instead of raising, and sync on a later request."""
+
+    def test_sender_is_none_without_storage_manager(self):
+        # First Party
+        from lmcache.v1.cache_controller.worker import LMCacheWorker
+
+        worker = LMCacheWorker.__new__(LMCacheWorker)
+        worker._full_sync_sender = None
+        worker.lmcache_engine = SimpleNamespace(storage_manager=None)
+
+        assert worker._get_full_sync_sender() is None
+
+    def test_command_skips_without_sender(self):
+        worker = SimpleNamespace(_get_full_sync_sender=lambda: None)
+
+        FullSyncCommand(reason="worker_re_registered").execute(worker)
