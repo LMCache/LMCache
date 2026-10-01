@@ -223,7 +223,6 @@ def _reserve_l1_cells(
     cells: Bitmap2D,
     retain: dict[ObjectKey, bool],
     tag: str,
-    whole_columns: bool = False,
 ) -> tuple[Bitmap2D, dict[ObjectKey, "MemoryObj"], int]:
     """Reserve a staging buffer in one L1 manager for every cell in ``cells``.
 
@@ -237,8 +236,6 @@ def _reserve_l1_cells(
         retain: Whether each key in ``cells`` stays resident after the
             reader is done.
         tag: The writer tag for the reservations.
-        whole_columns: On a shortfall, trim the reservation to whole
-            columns (:func:`all_grouped`) and release the rest.
 
     Returns:
         The tuple of (L1 reserve result, reserved objects, failed count).
@@ -275,18 +272,6 @@ def _reserve_l1_cells(
                 continue
             success[row_id].set(col)
             objs[key] = mem_obj
-
-    if whole_columns and failed_count > 0:
-        # A split column is unusable to the caller: trim to whole columns
-        # and release the rest of the staging.
-        drop = success - Bitmap2D(all_grouped(success.to_list()))
-        release_keys = _gather_keys(key_groups, drop)
-        if release_keys:
-            l1_manager.finish_write_and_delete(release_keys, tag=tag)
-            for key in release_keys:
-                objs.pop(key, None)
-            success -= drop
-            failed_count = (cells - success).popcount()
 
     event_bus = get_event_bus()
     if oom_keys:
@@ -1220,16 +1205,27 @@ class PrefetchController(StorageControllerInterface):
         cells_by_l1, retain = self._build_l1_allocation_plans(request)
         for l1_idx, cells in cells_by_l1.items():
             success, objs, l1_failed_count = _reserve_l1_cells(
-                self._l1_managers[l1_idx],
-                request.key_groups,
-                cells,
-                retain,
-                tag,
-                whole_columns=request.require_whole_columns,
+                self._l1_managers[l1_idx], request.key_groups, cells, retain, tag
             )
             l1_reserved_keys[l1_idx] = success
             reserved_objs.update(objs)
             num_failed_reservations += l1_failed_count
+
+        # Step 3.5: a whole-columns request can use a column only if every
+        # row reserved; trim to whole columns and release the rest.
+        if request.require_whole_columns and num_failed_reservations > 0:
+            merged = l1_reserved_keys.merge()
+            if len(merged) > 0:
+                kept = Bitmap2D(all_grouped(merged.to_list()))
+                for l1_idx, grid in l1_reserved_keys.items():
+                    release_keys = _gather_keys(request.key_groups, grid - kept)
+                    if release_keys:
+                        self._l1_managers[l1_idx].finish_write_and_delete(
+                            release_keys, tag=tag
+                        )
+                        for key in release_keys:
+                            reserved_objs.pop(key, None)
+                        l1_reserved_keys[l1_idx] = grid & kept
         states.l1_reserved_keys = l1_reserved_keys
 
         # Steps 4 and 5 only matter when some reservation failed; otherwise the
