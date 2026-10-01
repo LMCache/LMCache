@@ -685,52 +685,61 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
         memory_obj: MemoryObj,
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
-        reserved_new_key: bool = True,
         reserved_size: Optional[int] = None,
     ) -> None:
         """
-        Convert KV to bytes and async store bytes to disk.
+        Write an admitted KV chunk to disk and publish its metadata.
 
+        The caller must reserve capacity and register the put task for a new
+        key, and retain one memory-object reference, as submit_put_task does.
+        That reference is released before the key becomes visible. Failures
+        during preparation or writing roll back the reservation; errors after
+        a successful write propagate without rolling back committed capacity.
+
+        :param key: Cache key for the admitted write.
+        :param memory_obj: Memory object containing the KV data.
         :param on_complete_callback: Optional callback invoked after the disk
             write completes for this key. Callback exceptions are caught and
             logged.
-        :param reserved_new_key: Whether submit_put_task reserved capacity and
-            cache policy state for a newly stored key.
-        :param reserved_size: Physical size reserved by submit_put_task.
+        :param reserved_size: Physical size reserved by submit_put_task. When
+            omitted, obtain the size from memory_obj before writing.
+        :raises Exception: Preparation, write, or metadata publication errors
+            are propagated after releasing the reference and put-task marker.
         """
         size = reserved_size
         try:
-            if size is None:
-                size = memory_obj.get_physical_size()
-            kv_chunk = memory_obj.tensor
-            assert kv_chunk is not None
-            buffer = memory_obj.byte_array
-            path = self._key_to_path(key)
+            try:
+                if size is None:
+                    size = memory_obj.get_physical_size()
+                kv_chunk = memory_obj.tensor
+                assert kv_chunk is not None
+                buffer = memory_obj.byte_array
+                path = self._key_to_path(key)
+                shape = memory_obj.metadata.shape
+                dtype = memory_obj.metadata.dtype
+                fmt = memory_obj.metadata.fmt
+                cached_positions = memory_obj.metadata.cached_positions
 
-            # TODO(Jiayi): need to add ref count in disk memory object
-            self.write_file(buffer, path)
-            shape = memory_obj.metadata.shape
-            dtype = memory_obj.metadata.dtype
-            fmt = memory_obj.metadata.fmt
-            cached_positions = memory_obj.metadata.cached_positions
+                self.write_file(buffer, path)
+            except Exception:
+                if size is not None:
+                    with self.disk_lock:
+                        self.current_cache_size -= size
+                        self.cache_policy.update_on_force_evict(key)
+                raise
+            finally:
+                # Release the staging reference before publishing the key so
+                # lookup visibility also signals that write staging is freed.
+                memory_obj.ref_count_down()
 
-            if reserved_new_key:
-                with self.disk_lock:
-                    self.usage += size
-                    self.stats_monitor.update_local_storage_usage(self.usage)
+            with self.disk_lock:
+                self.usage += size
             self.insert_key(
                 key, size, shape, dtype, fmt, cached_positions=cached_positions
             )
-        except Exception:
-            if reserved_new_key and size is not None:
-                with self.disk_lock:
-                    self.current_cache_size = max(0.0, self.current_cache_size - size)
-                    self.cache_policy.update_on_force_evict(key)
-            raise
+            with self.disk_lock:
+                self.stats_monitor.update_local_storage_usage(self.usage)
         finally:
-            # ref count down here because there's a ref_count_up in
-            # `submit_put_task` above.
-            memory_obj.ref_count_down()
             self.disk_worker.remove_put_task(key)
 
         # Call the completion callback if provided

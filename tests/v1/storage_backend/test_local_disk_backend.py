@@ -278,54 +278,127 @@ class TestAsyncSaveBytesToDiskExceptionSafety:
         assert local_disk_backend.usage == 0
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    def test_existing_key_write_failure_keeps_old_cache_state(
+    def test_success_releases_staging_before_key_is_visible(
         self, local_disk_backend: LocalDiskBackend
     ) -> None:
-        """A failed rewrite must not evict bookkeeping for an existing key."""
+        """Lookup visibility must imply that the write staging ref was released."""
+        key, memory_obj = self._prepare_admitted_write(local_disk_backend)
+        metadata = memory_obj.metadata
+        on_complete_callback = MagicMock()
+
+        def release_staging() -> None:
+            assert not local_disk_backend.contains(key)
+            # Allocators may recycle metadata as soon as the ref is released.
+            memory_obj.metadata = None
+
+        memory_obj.ref_count_down.side_effect = release_staging
+        with patch.object(local_disk_backend, "write_file"):
+            local_disk_backend.async_save_bytes_to_disk(
+                key,
+                memory_obj,
+                on_complete_callback=on_complete_callback,
+                reserved_size=4096,
+            )
+
+        memory_obj.ref_count_down.assert_called_once_with()
+        assert local_disk_backend.contains(key)
+        assert local_disk_backend.dict[key].shape == metadata.shape
+        assert local_disk_backend.dict[key].dtype == metadata.dtype
+        assert local_disk_backend.dict[key].fmt == metadata.fmt
+        assert local_disk_backend.current_cache_size == 4096
+        assert local_disk_backend.usage == 4096
+        assert not local_disk_backend.exists_in_put_tasks(key)
+        on_complete_callback.assert_called_once_with(key)
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    @pytest.mark.parametrize("failure_target", ["notification", "metrics"])
+    def test_post_write_failure_preserves_published_state(
+        self, local_disk_backend: LocalDiskBackend, failure_target: str
+    ) -> None:
+        """Post-write errors must not roll back capacity for a published key."""
+        key, memory_obj = self._prepare_admitted_write(local_disk_backend)
+        on_complete_callback = MagicMock()
+        failing_target: object
+        if failure_target == "notification":
+            sender = MagicMock()
+            local_disk_backend.batched_msg_sender = sender
+            failing_target = sender
+            failing_method = "add_kv_op"
+        else:
+            failing_target = local_disk_backend.stats_monitor
+            failing_method = "update_local_storage_usage"
+
+        with (
+            patch.object(local_disk_backend, "write_file"),
+            patch.object(
+                failing_target, failing_method, side_effect=RuntimeError("after write")
+            ),
+            patch.object(
+                local_disk_backend.cache_policy, "update_on_force_evict"
+            ) as mock_force_evict,
+        ):
+            with pytest.raises(RuntimeError, match="after write"):
+                local_disk_backend.async_save_bytes_to_disk(
+                    key,
+                    memory_obj,
+                    on_complete_callback=on_complete_callback,
+                    reserved_size=4096,
+                )
+
+        memory_obj.ref_count_down.assert_called_once_with()
+        assert local_disk_backend.contains(key)
+        assert local_disk_backend.dict[key].size == 4096
+        assert local_disk_backend.current_cache_size == 4096
+        assert local_disk_backend.usage == 4096
+        assert not local_disk_backend.exists_in_put_tasks(key)
+        mock_force_evict.assert_not_called()
+        on_complete_callback.assert_not_called()
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_write_failure_uses_admitted_size_for_rollback(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Cleanup uses the original reservation without re-reading its size."""
+        key, memory_obj = self._prepare_admitted_write(local_disk_backend)
+        memory_obj.get_physical_size.side_effect = RuntimeError("size unavailable")
+
+        with patch.object(
+            local_disk_backend, "write_file", side_effect=OSError("disk full")
+        ):
+            with pytest.raises(OSError, match="disk full"):
+                local_disk_backend.async_save_bytes_to_disk(
+                    key, memory_obj, reserved_size=4096
+                )
+
+        memory_obj.get_physical_size.assert_not_called()
+        memory_obj.ref_count_down.assert_called_once_with()
+        assert not local_disk_backend.contains(key)
+        assert not local_disk_backend.exists_in_put_tasks(key)
+        assert local_disk_backend.current_cache_size == 0
+        assert local_disk_backend.usage == 0
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def _prepare_admitted_write(
+        self, backend: LocalDiskBackend
+    ) -> tuple[CacheEngineKey, MagicMock]:
+        """Create a retained staging object and its admitted disk reservation."""
         key = create_test_key(203)
-        physical_size = 4096
-        shape = torch.Size([28, 2, 256, 8, 128])
-        metadata = DiskCacheMetadata(
-            path="/old/path.pt",
-            size=physical_size,
-            shape=shape,
-            dtype=torch.bfloat16,
-            cached_positions=None,
-            fmt=MemoryFormat.KV_2LTD,
-            pin_count=0,
-        )
         memory_obj = MagicMock(spec=MemoryObj)
         memory_obj.tensor = torch.empty(1)
         memory_obj.byte_array = b"0" * 16
-        memory_obj.get_physical_size.return_value = physical_size
-
-        local_disk_backend.dict[key] = metadata
-        local_disk_backend.current_cache_size = physical_size
-        local_disk_backend.usage = physical_size
-        local_disk_backend.disk_worker.insert_put_task(key)
-
-        with patch.object(
-            local_disk_backend,
-            "write_file",
-            side_effect=OSError("disk full"),
-        ):
-            with patch.object(
-                local_disk_backend.cache_policy, "update_on_force_evict"
-            ) as mock_force_evict:
-                with pytest.raises(OSError, match="disk full"):
-                    local_disk_backend.async_save_bytes_to_disk(
-                        key,
-                        memory_obj,
-                        reserved_new_key=False,
-                    )
-
-        memory_obj.ref_count_down.assert_called_once_with()
-        assert not local_disk_backend.exists_in_put_tasks(key)
-        assert local_disk_backend.dict[key] is metadata
-        assert local_disk_backend.current_cache_size == physical_size
-        assert local_disk_backend.usage == physical_size
-        mock_force_evict.assert_not_called()
-        local_disk_backend.local_cpu_backend.memory_allocator.close()
+        memory_obj.get_physical_size.return_value = 4096
+        memory_obj.metadata = MemoryObjMetadata(
+            shape=torch.Size([1]),
+            dtype=torch.bfloat16,
+            address=0,
+            phy_size=4096,
+            fmt=MemoryFormat.KV_2LTD,
+            ref_count=1,
+        )
+        backend.current_cache_size = 4096
+        backend.disk_worker.insert_put_task(key)
+        backend.cache_policy.update_on_put(key)
+        return key, memory_obj
 
 
 class TestBatchedGetNonBlockingAllocationFailure:
