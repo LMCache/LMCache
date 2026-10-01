@@ -2,19 +2,17 @@
 
 ## Summary
 
-LMCache already has a token-dropping SDK path for offline experiments. It runs
-outside the vLLM worker, stages KV and Q through CPU memory, and needs external
-orchestration around the serving engine.
+LMCache already has a [KV Cache SDK](../../../source/mp/sdk.rst) for offline KV
+transformations such as token dropping. It runs outside the vLLM worker, stages
+KV and Q through CPU memory, and needs external orchestration around the serving
+engine.
 
-M1 moves the token-dropping algorithm and compaction into the vLLM worker. The
-R-KV algorithm reads post-RoPE query (Q) and KV directly on GPU. LMCache
+The MVP moves the token-dropping algorithm and compaction into the vLLM worker.
+The R-KV algorithm reads post-RoPE query (Q) and KV directly on GPU. LMCache
 compacts the selected KV there, and the LMCache server stays off the compaction
 path. Only control metadata crosses the worker / scheduler boundary.
 
-The goal is not just fewer KV entries. **Dropped KV should become real vLLM
-capacity that other requests can reuse.** R-KV is the first token-dropping
-algorithm on this path; the compaction mechanism only consumes the retained
-positions produced by the algorithm.
+Dropped KV becomes reusable vLLM capacity for other requests.
 
 **Invariant:** compaction changes the physical KV layout; it does not shorten or
 renumber the request's logical token sequence.
@@ -23,14 +21,15 @@ renumber the request's logical token sequence.
 
 ```text
 Prior SDK:  worker GPU -> CPU-staged KV/Q -> external SDK -> worker GPU
-M1:         worker GPU -> token-dropping algorithm + compaction -> worker GPU
+MVP:        worker GPU -> token-dropping algorithm + compaction -> worker GPU
 ```
 
-For M1's one-KV-entry-per-token layout, at a step boundary:
+For the MVP, each processed token corresponds to one KV position, so physical KV
+length can be tracked as:
 
-- `L` is the number of logical tokens already processed for the request.
-- `D` is the number of KV entries dropped so far.
-- `P = L - D` is the number of KV entries still resident.
+- `logicalLen` is the number of logical tokens already processed.
+- `totalDropped` is the number of KV entries dropped so far.
+- `kvLen = logicalLen - totalDropped` is the number of resident KV entries.
 
 ```text
 vLLM worker (GPU)
@@ -41,59 +40,56 @@ vLLM worker (GPU)
           v
   LMCache compaction
           | rewrite KV in place on GPU
-          | report Δ = entries dropped this step
+          | report stepDropped
           v
   worker result
           |
           v
 vLLM scheduler
-  LMCache connector: D += Δ; P = L - D
+  LMCache connector:
+    totalDropped += stepDropped
+    kvLen = logicalLen - totalDropped
   vLLM allocator: return unused tail blocks
                   run normal allocation
           |
           | next-step metadata
-          | P + full block IDs if changed
+          | kvLen + full block IDs if changed
           v
 LMCache worker adapter
-  model positions use L
-  KV reads / writes use P + block IDs
+  model positions use logicalLen
+  KV addressing uses kvLen + block IDs
           |
       next forward
 ```
 
-Both updates use vLLM's existing connector interface: the worker adds `Δ` to
-its result, and the scheduler sends `P` plus updated block IDs with the next
-step. The token-dropping algorithm runs in the worker; M1 adds no separate
-algorithm process or RPC.
+Both directions use vLLM's existing connector interface: the worker reports
+`stepDropped`, and the scheduler sends `kvLen` plus the full current block IDs
+when allocation changes.
 
 ## State and ownership
 
 | State | Source of truth | Used for |
 |---|---|---|
-| Logical progress `L` | vLLM request | Model positions and request progress |
-| Cumulative dropped count `D` | LMCache scheduler-side connector | Deriving `P` |
-| Physical KV length `P` | `L - D` (derived) | Allocation and worker KV addressing |
+| Logical progress `logicalLen` | vLLM request | Model positions and request progress |
+| Cumulative dropped count `totalDropped` | LMCache scheduler-side connector | Deriving `kvLen` |
+| Physical KV length `kvLen` | `logicalLen - totalDropped` (derived) | Allocation and worker KV addressing |
 | Block IDs | vLLM scheduler / allocator | Physical blocks owned by the request |
 
-Before compaction, `L == P`. Afterward they can be very different: after 1,000
-logical tokens, only 256 KV entries may remain in memory. The model's next
-position is still 1,000; attention reads the 256 resident entries.
+After 1,000 logical tokens, 256 KV entries may remain; the model position is
+still 1,000 while attention reads those 256 entries.
 
-The worker reports `Δ` for a successful compaction, or a request-level failure
-otherwise. On success, LMCache's scheduler-side connector accumulates `D`,
-derives `P`, and sends `P`, not `D`, back to the worker. The worker only needs
-the current physical length.
+The worker reports `stepDropped` for a successful compaction, or a request-level
+failure otherwise. On success, the scheduler-side connector accumulates
+`totalDropped`, derives `kvLen`, and sends `kvLen` to the worker.
 
-Block ownership stays with vLLM. LMCache can change the contents and effective
-occupancy of a request's blocks, but it does not maintain a second allocator.
+vLLM retains block ownership and allocation; LMCache only rewrites KV contents
+and occupancy.
 
 ## Algorithm and compaction contract
 
 A token-dropping algorithm returns retained positions, in sequence order, from
-the request's **current physical KV sequence**. M1 compaction consumes one
-request-level retained set shared by all KV heads and layers. The algorithm
-decides when to produce that set; LMCache owns the GPU movement and the vLLM
-integration.
+the request's **current physical KV sequence**. The MVP uses one request-level
+retained set shared by all KV heads and layers.
 
 For example (`|` marks a block boundary):
 
@@ -103,11 +99,10 @@ Keep (0-based):  [1, 3, 4, 7] -> [B, D, E, H]
 Compacted KV:    [B D E H | - - - -]
 ```
 
-Moving a KV entry to a new physical slot does not change its model position.
-Physical KV layout and logical token position are separate after compaction.
+Moving an entry changes only its physical slot, not its model position.
 
-The planner maps those retained positions through the request's vLLM block IDs
-to concrete GPU source and destination slots. The executor copies the relevant
+The planner maps retained positions through the request's vLLM block IDs to
+concrete GPU source and destination slots. The executor copies the corresponding
 KV entries between those slots.
 
 If the request is compacted again, indices refer to the already-compacted
@@ -118,118 +113,80 @@ sequence:
 [B D E H]         -- keep [1,3]     --> [D H]
 ```
 
-Compaction therefore does not need a persistent map back to original token
-positions; vLLM continues to own logical progress through `L`.
+Indices always refer to the current physical sequence; no original-position map
+is required.
 
 ```text
-R-KV owns:        trigger, scoring, budget, recent Q, retained indices
+R-KV owns:        trigger, scoring, retained indices
 Compaction owns:  retained indices -> physical KV movement
 ```
 
-M1 does not support shared KV blocks. A compacted request therefore owns every
-block it rewrites and can compact them in place. Supporting shared or
-prefix-cached blocks later requires copy-on-write before compaction.
+The MVP compacts only private vLLM blocks; shared or prefix-cached blocks require
+copy-on-write and are follow-up.
 
 ## Scheduler / worker flow
 
-M1 compacts at the end of a forward step, before the next step is scheduled:
+The MVP compacts at the end of a forward step, before the next step is scheduled:
 
 ```text
 Step N forward
   -> R-KV selects retained entries
   -> worker compacts KV on GPU
-  -> worker reports Δ
+  -> worker reports stepDropped
 
 scheduler side
-  -> D += Δ
-  -> P = L - D
-  -> return tail blocks no longer needed by P
+  -> totalDropped += stepDropped
+  -> kvLen = logicalLen - totalDropped
+  -> return tail blocks no longer needed by kvLen
   -> run normal vLLM allocation for Step N+1
-  -> send P + full block IDs if allocation changed
+  -> send kvLen + full block IDs if allocation changed
 
 worker
-  -> keep model positions based on L
-  -> address KV using P + current block IDs
+  -> keep model positions based on logicalLen
+  -> address KV using kvLen + current block IDs
   -> Step N+1 forward
 ```
 
-Tail blocks are returned only after the scheduler receives the compaction result
-for that step; until then the worker may still be using the old allocation. The
-worker result itself is the handoff, so M1 does not add another acknowledgement
-before those blocks can be reclaimed.
+The scheduler reclaims tail blocks only after receiving that step's compaction
+result; that result is the reclaim handoff.
 
-For KV allocation, the request behaves as if it currently had `P` resident
-entries. Future growth continues through normal vLLM allocation; token dropping
-does not add its own reserve logic. If allocation changes the request's block
-IDs, the scheduler sends the full current IDs before the next forward and the
-worker mirrors them.
+After compaction, normal vLLM allocation continues from `kvLen` resident
+entries. If allocation changes the request's block IDs, the scheduler sends the
+full current IDs before the next forward and the worker mirrors them.
 
 ## vLLM integration boundary
 
-M1 targets the pinned vLLM v0.25.1 classic GPU model runner. All pinned-vLLM
-access stays in one compatibility adapter. The rest of the feature depends on
-five vLLM capabilities:
+The MVP targets the pinned vLLM v0.25.1 classic GPU model runner. All pinned-vLLM
+access stays in one compatibility adapter. The MVP needs vLLM integration
+support for:
 
-1. read the post-RoPE Q needed by the token-dropping algorithm;
-2. prepare KV reads and writes from `P` while model positions remain based on `L`;
-3. return unused tail blocks to vLLM's block pool;
-4. keep token-dropping requests from reading or publishing to the local prefix
-   cache;
-5. terminate a token-dropping request after preemption or compaction failure.
+1. access the post-RoPE Q needed by the token-dropping algorithm;
+2. keep model positions based on `logicalLen` while KV addressing uses `kvLen`;
+3. reclaim unused tail blocks through vLLM's allocator;
+4. keep token-dropping requests out of the local prefix cache;
+5. terminate token-dropping requests after preemption or compaction failure.
 
-Keeping this boundary in one adapter lets stable upstream APIs replace the
-private hooks later without changing the algorithm, compaction API, or
-`L / D / P` state model.
+## MVP scope
 
-## M1 and M2 scope
+The MVP supports token dropping after a full prefill or decode step on a single
+GPU with ordinary paged-attention KV. Chunked prefill is unsupported and rejected
+at startup; speculative decoding is unsupported.
 
-### M1: live GPU-native token dropping
+The MVP requires synchronous scheduling with one in-flight step, so compaction
+is committed before reclaimed blocks can be reused.
 
-M1 is complete when a running request can compact KV, return the unused blocks
-to vLLM, and continue correctly without a CPU round trip. M1 supports token
-dropping after a full prefill or decode step. Chunked prefill is out of scope;
-M1 requires it to be disabled and rejects the configuration at startup.
+Token-dropping requests bypass LMCache persistence and local prefix caching.
+Requests without token dropping are unchanged: they continue to use the normal
+LMCache and vLLM cache paths.
 
-M1 requires synchronous scheduling with one in-flight step. Requests co-batched
-with a compaction wait for it before the next decode step. This keeps one
-unambiguous physical state between steps. With async scheduling, a later step
-can be scheduled before the previous `Δ` is committed. Supporting that path
-needs per-step physical-state tracking, and reclaimed blocks cannot be reused
-until the matching compaction has finished.
+**Failure and preemption:** token-dropping requests are terminated; the MVP does
+not recover compacted state.
 
-For requests with token dropping enabled, M1 bypasses LMCache persistence: it
-does not store, look up, or restore KV. Token-dropping requests use private vLLM
-blocks: they neither read from nor publish to the local prefix cache. Requests
-without token dropping keep the existing cache behavior. M1 does not support
-speculative decoding. The supported path is the classic GPU runner
-on a single GPU with ordinary paged-attention KV and one physical KV entry per
-token. Hybrid or sliding-window KV layouts and multi-GPU execution are deferred.
+## Follow-up
 
-On compaction failure, the worker reports a request-level failure instead of
-`Δ`. M1 does not recover token-dropping requests after preemption or compaction
-failure: the scheduler terminates the request and discards its local KV and
-compression state. It does not roll back or partially recover compacted state.
+Initial persistence scoping includes an algorithm-defined `compression_spec` as
+part of the cache key, so compacted KV is reused only with a compatible
+compression configuration.
 
-### M2: compacted persistence and broader runtime support
-
-M2 adds compacted KV store and restore. A compacted cache entry has both logical
-progress `L` and physical KV length `P`, so restore must recover both. M2
-therefore defines store, cache identity, and restore together rather than adding
-a write-only format in M1.
-
-Other follow-up work includes async scheduling and compaction overlap,
-shared-block copy-on-write, broader KV layouts, multi-GPU support, and
-profiling-driven compaction optimizations.
-
-## Code / PR map
-
-| Area | Change |
-|---|---|
-| Compaction planner | [PR #5352](https://github.com/LMCache/LMCache/pull/5352) |
-| GPU compaction executor | [PR #5405](https://github.com/LMCache/LMCache/pull/5405) |
-| R-KV algorithm + GPU Q capture | follow-up |
-| Scheduler state + block reclaim | follow-up |
-| Worker physical addressing | follow-up |
-
-Each implementation PR should point back to this document for the end-to-end
-state and ownership contract.
+Other follow-up work includes async scheduling, shared-block copy-on-write,
+broader KV layouts, multi-GPU support, and compaction performance optimizations.
