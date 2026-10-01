@@ -273,7 +273,7 @@ def test_lazy_config_is_disabled_when_musa_binding_is_missing(
 def test_lazy_allocator_pins_and_unpins_only_successful_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Lazy allocation uses mapped registration and joins before unpinning."""
+    """Lazy allocation uses portable mapped registration, joins before unpin."""
     chunk_size = 4096
     events: list[str] = []
 
@@ -329,14 +329,17 @@ def test_lazy_allocator_pins_and_unpins_only_successful_chunks(
         final_size=3 * chunk_size,
         align_bytes=chunk_size,
     )
+    # Pinning is deferred until a device is bound; the inline thread then
+    # runs the expansion synchronously, so all chunks are pinned here.
+    allocator.ensure_pinning(0)
     events.clear()
     allocator.close()
 
     base_ptr = fake_spec.pin_calls[0][0]
     assert fake_spec.pin_calls == [
-        (base_ptr, chunk_size, 0x02),
-        (base_ptr + chunk_size, chunk_size, 0x02),
-        (base_ptr + 2 * chunk_size, chunk_size, 0x02),
+        (base_ptr, chunk_size, 0x03),
+        (base_ptr + chunk_size, chunk_size, 0x03),
+        (base_ptr + 2 * chunk_size, chunk_size, 0x03),
     ]
     assert fake_spec.unpin_calls == [base_ptr, base_ptr + 2 * chunk_size]
     assert events == ["join", "unpin", "unpin"]
