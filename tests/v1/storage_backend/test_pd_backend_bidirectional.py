@@ -18,6 +18,7 @@ import threading
 import pytest
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.storage_backend.pd_backend import (
     CacheQueryRequest,
@@ -36,7 +37,7 @@ class TestPDConfigBothRole:
         config = MagicMock()
         config.pd_role = "both"
         config.pd_buffer_size = 1024
-        config.pd_buffer_device = "cuda:0"
+        config.pd_buffer_device = f"{torch_device_type}:0"
         config.pd_peer_host = "10.0.0.1"
         config.pd_peer_init_port = [5000]
         config.pd_peer_alloc_port = [5001]
@@ -49,7 +50,7 @@ class TestPDConfigBothRole:
 
         with patch(
             "lmcache.v1.storage_backend.pd_backend.get_correct_device",
-            return_value="cuda:0",
+            return_value=f"{torch_device_type}:0",
         ):
             pd_config = PDConfig.from_cache_engine_config(config, metadata, tp_rank=0)
 
@@ -64,7 +65,7 @@ class TestPDConfigBothRole:
         config = MagicMock()
         config.pd_role = "sender"
         config.pd_buffer_size = 1024
-        config.pd_buffer_device = "cuda:0"
+        config.pd_buffer_device = f"{torch_device_type}:0"
         config.pd_peer_host = None
         config.pd_peer_init_port = None
         config.pd_peer_alloc_port = None
@@ -77,7 +78,7 @@ class TestPDConfigBothRole:
 
         with patch(
             "lmcache.v1.storage_backend.pd_backend.get_correct_device",
-            return_value="cuda:0",
+            return_value=f"{torch_device_type}:0",
         ):
             pd_config = PDConfig.from_cache_engine_config(config, metadata, tp_rank=0)
 
@@ -88,7 +89,7 @@ class TestPDConfigBothRole:
         config = MagicMock()
         config.pd_role = "receiver"
         config.pd_buffer_size = 1024
-        config.pd_buffer_device = "cuda:0"
+        config.pd_buffer_device = f"{torch_device_type}:0"
         config.pd_peer_host = "10.0.0.1"
         config.pd_peer_init_port = [5000]
         config.pd_peer_alloc_port = [5001]
@@ -101,7 +102,7 @@ class TestPDConfigBothRole:
 
         with patch(
             "lmcache.v1.storage_backend.pd_backend.get_correct_device",
-            return_value="cuda:0",
+            return_value=f"{torch_device_type}:0",
         ):
             pd_config = PDConfig.from_cache_engine_config(config, metadata, tp_rank=0)
 
@@ -112,7 +113,7 @@ class TestPDConfigBothRole:
         config = MagicMock()
         config.pd_role = "invalid"
         config.pd_buffer_size = 1024
-        config.pd_buffer_device = "cuda:0"
+        config.pd_buffer_device = f"{torch_device_type}:0"
 
         metadata = MagicMock()
         metadata.worker_id = 0
@@ -120,7 +121,7 @@ class TestPDConfigBothRole:
         with pytest.raises(AssertionError, match="Invalid role"):
             with patch(
                 "lmcache.v1.storage_backend.pd_backend.get_correct_device",
-                return_value="cuda:0",
+                return_value=f"{torch_device_type}:0",
             ):
                 PDConfig.from_cache_engine_config(config, metadata, tp_rank=0)
 

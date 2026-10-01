@@ -36,8 +36,17 @@ from lmcache.v1.mp_observability.subscribers.metrics.l2_throughput import (
 from lmcache.v1.mp_observability.subscribers.metrics.lookup import (
     LookupMetricsSubscriber,
 )
+from lmcache.v1.mp_observability.subscribers.metrics.mp_transfer import (
+    MPTransferCountersSubscriber,
+)
+from lmcache.v1.mp_observability.subscribers.metrics.phase_timing import (
+    TransferPhaseMetricsSubscriber,
+)
 from lmcache.v1.mp_observability.subscribers.metrics.sm_lifecycle import (
     SMLifecycleSubscriber,
+)
+from lmcache.v1.mp_observability.subscribers.metrics.timeout import (
+    TimeoutMetricsSubscriber,
 )
 
 __all__ = [
@@ -54,5 +63,8 @@ __all__ = [
     "L2MetricsSubscriber",
     "L2ThroughputSubscriber",
     "LookupMetricsSubscriber",
+    "MPTransferCountersSubscriber",
     "SMLifecycleSubscriber",
+    "TimeoutMetricsSubscriber",
+    "TransferPhaseMetricsSubscriber",
 ]

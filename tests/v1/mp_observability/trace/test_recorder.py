@@ -130,7 +130,7 @@ class TestRecordRoundtrip:
             )
             publish_call_event(
                 "lmcache.X.method2",
-                {"extra_count": 7},
+                {"num_kv_readers": 7},
             )
             _flush(bus)
         finally:
@@ -144,7 +144,7 @@ class TestRecordRoundtrip:
         # the replay driver (PR2). We assert structure only.
         assert "keys" in records[0].args
         assert records[0].args["mode"] == "new"
-        assert records[1].args["extra_count"] == 7
+        assert records[1].args["num_kv_readers"] == 7
         assert records[0].t_mono >= 0
         assert records[1].t_mono >= records[0].t_mono
 

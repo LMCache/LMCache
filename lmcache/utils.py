@@ -9,8 +9,9 @@ from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, TypeVar,
 import asyncio
 import functools
 import hashlib
-import inspect
+import os
 import re
+import stat
 import threading
 import traceback
 import warnings
@@ -30,6 +31,7 @@ except ImportError:
 
 
 # Third Party
+from cachetools import TTLCache as _TTLCache  # type: ignore
 import torch
 
 # First Party
@@ -46,52 +48,50 @@ KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 
 
 # Device utility functions
-def check_interprocess_event_support() -> None:
-    """Check if the current backend supports interprocess Events.
+def get_device_identity(source: str | int) -> tuple[bool, int, int] | None:
+    """Return the physical identity of a character device or regular file.
 
-    This function checks if torch_dev.Event exists and exposes the
-    interprocess parameter, which is required for multiprocess IPC.
+    Args:
+        source: Path (str, following symlinks) or open file descriptor (int).
+
+    Returns:
+        ``(True, st_rdev, 0)`` for a character device,
+        ``(False, st_dev, st_ino)`` for a regular file, or ``None`` otherwise.
+
+        ``None`` means unidentified (unsupported type or failed path/fd lookup),
+        not unowned. Callers must check for ``None`` candidates before comparing
+        identities.
+    """
+    try:
+        info = os.fstat(source) if isinstance(source, int) else os.stat(source)
+    except (OSError, ValueError) as exc:
+        if isinstance(source, int):
+            logger.warning("Failed to inspect DAX device fd %s: %s", source, exc)
+        return None
+    if stat.S_ISCHR(info.st_mode):
+        return True, info.st_rdev, 0
+    if stat.S_ISREG(info.st_mode):
+        return False, info.st_dev, info.st_ino
+    return None
+
+
+def check_interprocess_event_support() -> None:
+    """Check if the current backend supports interprocess device events.
+
+    This compatibility helper delegates to the platform event IPC backend for
+    the active device type. Call it only after process-wide IPC configuration
+    has been finalized; mode-aware integrations should validate through their
+    selected transfer context instead.
 
     Raises:
-        RuntimeError: If the backend does not support interprocess Events
-            or if the Event class doesn't expose the interprocess parameter.
+        RuntimeError: If the active backend does not support event IPC.
     """
     # First Party
-    from lmcache import torch_dev, torch_device_type
+    from lmcache import torch_device_type
+    from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 
-    if not hasattr(torch_dev, "Event"):
-        raise RuntimeError(
-            f"Backend '{torch_device_type}' does not support "
-            "interprocess Events (torch_dev.Event not available). "
-            "Multiprocess IPC requires CUDA."
-        )
-
-    event_cls = torch_dev.Event
-
-    def has_interprocess_parameter(obj) -> bool:
-        try:
-            sig = inspect.signature(obj)
-        except (TypeError, ValueError):
-            return False
-
-        return "interprocess" in sig.parameters
-
-    if not (
-        has_interprocess_parameter(event_cls)
-        or has_interprocess_parameter(event_cls.__new__)
-    ):
-        raise RuntimeError(
-            f"Backend '{torch_device_type}' does not support "
-            "interprocess=True parameter for Events. "
-            "Multiprocess IPC requires CUDA."
-        )
-
-    if not hasattr(torch_dev.Event, "from_ipc_handle"):
-        raise RuntimeError(
-            f"Backend '{torch_device_type}' does not support IPC event "
-            "handles (Event.from_ipc_handle not available). "
-            "Multiprocess IPC requires CUDA."
-        )
+    backend = get_event_ipc_backend(torch_device_type)
+    backend.check_event_support(torch_device_type)
 
 
 # Math utility functions
@@ -100,9 +100,28 @@ def cdiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
+def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
+    """
+    Calculate the size in bytes with the given shapes and dtypes.
+    """
+    assert len(shapes) == len(kv_dtypes), (
+        f"shapes and dtypes must have the same length, "
+        f"but got {len(shapes)} and {len(kv_dtypes)}"
+    )
+    return sum(
+        shape.numel() * kv_dtype.itemsize
+        for shape, kv_dtype in zip(shapes, kv_dtypes, strict=True)
+    )
+
+
 def round_down(x: int, y: int) -> int:
     """Round down x to the nearest multiple of y."""
     return (x // y) * y
+
+
+def round_up(x: int, y: int) -> int:
+    """Round up x to the nearest multiple of y."""
+    return ((x + y - 1) // y) * y
 
 
 def compress_slot_mapping(slots: list[int]) -> list[Union[int, list[int]]]:
@@ -638,8 +657,8 @@ class LayerCacheEngineKey(CacheEngineKey):
 
 @dataclass
 class CacheStoreEvent:
-    block_hashes: list[int]
-    parent_block_hash: int | None
+    block_hashes: list[int | bytes]
+    parent_block_hash: int | bytes | None
     token_ids: list[int]
     block_size: int
 
@@ -654,6 +673,7 @@ class CacheStoreEvent:
 
 class EngineType(Enum):
     VLLM = "vllm"
+    ATOM = "atom"
     SGLANG = "sglang"
     TRTLLM = "trtllm"
     MOCK = "mock"
@@ -764,7 +784,7 @@ def start_loop_in_thread_with_exceptions(loop: asyncio.AbstractEventLoop):
     def loop_excepthook(loop, context):
         msg = context.get("message", "Unhandled exception in event loop")
         exc = context.get("exception")
-        logger.error(f"[asyncio] {msg}")
+        logger.error("[asyncio] %s", msg)
         if exc:
             traceback.print_exception(type(exc), exc, exc.__traceback__)
 
@@ -779,3 +799,23 @@ def mock_up_broadcast_fn(t: torch.Tensor, i: int) -> None:
 
 def mock_up_broadcast_object_fn(a: Any, i: int) -> None:
     raise NotImplementedError("Calling invalid broadcast object function")
+
+
+class TTLCache:
+    """Thread-safe wrapper around cachetools.TTLCache for existence checks."""
+
+    def __init__(self, max_size: int, ttl_seconds: float):
+        self.cache: _TTLCache = _TTLCache(maxsize=max_size, ttl=ttl_seconds)
+        self.lock = threading.RLock()
+
+    def get(self, key: str) -> Optional[bool]:
+        with self.lock:
+            return self.cache.get(key)
+
+    def put(self, key: str, val: bool):
+        with self.lock:
+            self.cache[key] = val
+
+    def invalidate(self, key: str):
+        with self.lock:
+            self.cache.pop(key, None)

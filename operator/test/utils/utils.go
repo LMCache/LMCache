@@ -30,7 +30,74 @@ import (
 const (
 	defaultKindBinary  = "kind"
 	defaultKindCluster = "kind"
+
+	// certManagerDefaultVersion is the cert-manager release installed on the
+	// target cluster when none is already present. cert-manager is a hard
+	// prerequisite for the operator's mutating admission webhook: it mints the
+	// serving certificate (config/certmanager) and injects the CA bundle into
+	// the MutatingWebhookConfiguration. Override with CERT_MANAGER_VERSION.
+	certManagerDefaultVersion = "v1.16.3"
+	// certManagerManifestURLTmpl is the upstream static install manifest,
+	// parameterised by release tag.
+	certManagerManifestURLTmpl = "https://github.com/cert-manager/cert-manager/releases/download/%s/cert-manager.yaml"
 )
+
+// certManagerVersion returns the cert-manager release to install, honoring the
+// CERT_MANAGER_VERSION env var and falling back to certManagerDefaultVersion.
+func certManagerVersion() string {
+	if v := os.Getenv("CERT_MANAGER_VERSION"); v != "" {
+		return v
+	}
+	return certManagerDefaultVersion
+}
+
+// IsCertManagerCRDsInstalled reports whether cert-manager's CRDs are already
+// registered in the target cluster. Used to skip installation (and teardown)
+// when running against a cluster that ships cert-manager (e.g. a shared
+// OpenShift/EKS cluster), so the suite never uninstalls something it did not
+// install.
+func IsCertManagerCRDsInstalled() bool {
+	cmd := exec.Command("kubectl", "get", "crd", "certificates.cert-manager.io", "--ignore-not-found=true")
+	out, err := Run(cmd)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(out, "certificates.cert-manager.io")
+}
+
+// InstallCertManager applies the upstream cert-manager static manifest and
+// blocks until its controller, webhook, and CA-injector Deployments report
+// Available. cert-manager must be ready before `make deploy` applies the
+// operator's Issuer/Certificate and the CA-injected webhook, otherwise the
+// apply is rejected (unknown cert-manager.io kinds) and the serving-cert
+// secret the controller-manager mounts never materialises.
+func InstallCertManager() error {
+	url := fmt.Sprintf(certManagerManifestURLTmpl, certManagerVersion())
+	if _, err := Run(exec.Command("kubectl", "apply", "-f", url)); err != nil {
+		return fmt.Errorf("failed to apply cert-manager manifest %q: %w", url, err)
+	}
+	for _, deploy := range []string{"cert-manager", "cert-manager-webhook", "cert-manager-cainjector"} {
+		cmd := exec.Command("kubectl", "wait", "deployment/"+deploy,
+			"--for=condition=Available",
+			"--namespace=cert-manager",
+			"--timeout=5m",
+		)
+		if _, err := Run(cmd); err != nil {
+			return fmt.Errorf("cert-manager deployment %q did not become Available: %w", deploy, err)
+		}
+	}
+	return nil
+}
+
+// UninstallCertManager removes the cert-manager release installed by
+// InstallCertManager. Best-effort: failures are logged to GinkgoWriter rather
+// than failing the suite, since teardown runs after the specs have reported.
+func UninstallCertManager() {
+	url := fmt.Sprintf(certManagerManifestURLTmpl, certManagerVersion())
+	if _, err := Run(exec.Command("kubectl", "delete", "-f", url, "--ignore-not-found=true")); err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "warning: cert-manager uninstall failed: %v\n", err)
+	}
+}
 
 // Run executes the provided command within this context
 func Run(cmd *exec.Cmd) (string, error) {

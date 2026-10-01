@@ -5,7 +5,10 @@
 import time
 
 # First Party
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
+from lmcache.v1.mp_coordinator.views.instance_registry import (
+    InstanceRegistry,
+    MPInstance,
+)
 
 
 def _instance(instance_id: str, heartbeat: float = 0.0) -> MPInstance:
@@ -75,3 +78,34 @@ def test_stale_detects_expired():
     registry.register(_instance("old", heartbeat=now - 100.0))
     stale = registry.stale(timeout=30.0)
     assert stale == ["old"]
+
+
+def test_random_instance_empty_returns_none():
+    registry = InstanceRegistry()
+    assert registry.random_instance() is None
+
+
+def test_random_instance_single_is_deterministic():
+    registry = InstanceRegistry()
+    inst = _instance("only")
+    registry.register(inst)
+    # Sampling a 1-element population is deterministic.
+    assert registry.random_instance() is inst
+
+
+def test_random_instance_samples_from_live_set():
+    # Standard
+    import random as _random
+
+    registry = InstanceRegistry()
+    for letter in "abc":
+        registry.register(_instance(letter))
+    # Deterministic seed → reproducible assertion that random_instance
+    # actually samples from the registered set (and only it).
+    _random.seed(7)
+    seen = {registry.random_instance().instance_id for _ in range(50)}
+    assert seen <= {"a", "b", "c"}
+    # With 50 picks across 3 items the chance of missing one is
+    # (2/3)**50 ≈ 1.6e-9 — close enough to "covers the set" for
+    # a sanity test with a fixed seed.
+    assert seen == {"a", "b", "c"}

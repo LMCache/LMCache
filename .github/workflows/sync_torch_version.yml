@@ -27,13 +27,37 @@ jobs:
           token: ${{ github.token }}
           fetch-depth: 0
 
+      # The published lmcache wheel is installed next to *stable* vLLM (see
+      # docker/Dockerfile image-release). Syncing the torch pin from vLLM main
+      # would run the wheel's build-time torch ahead of the torch actually
+      # installed at runtime, producing a silent `lmcache.cuda_ops` ABI mismatch.
+      # `/releases/latest` excludes drafts and pre-releases.
+      - name: Resolve latest stable vLLM release
+        id: vllm
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+
+          tag="$(gh api repos/vllm-project/vllm/releases/latest --jq .tag_name)"
+
+          if [[ -z "$tag" ]]; then
+            echo "Could not resolve the latest stable vLLM release tag."
+            exit 1
+          fi
+
+          echo "Latest stable vLLM release: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Sync torch version with vLLM
         id: sync
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          readonly UPSTREAM_URL="https://raw.githubusercontent.com/vllm-project/vllm/main/pyproject.toml"
+          readonly VLLM_TAG="${{ steps.vllm.outputs.tag }}"
+          readonly UPSTREAM_URL="https://raw.githubusercontent.com/vllm-project/vllm/${VLLM_TAG}/pyproject.toml"
           readonly TARGET_FILE="pyproject.toml"
 
           tmp_upstream="$(mktemp)"
@@ -44,7 +68,7 @@ jobs:
           }
           trap cleanup EXIT
 
-          echo "Fetching upstream pyproject.toml from vLLM..."
+          echo "Fetching pyproject.toml from vLLM ${VLLM_TAG}..."
           curl \
             --fail \
             --show-error \
@@ -131,15 +155,20 @@ jobs:
           signoff: true
           add-paths: |
             pyproject.toml
-          commit-message: "[Build] sync torch version with vLLM (${{
-            steps.sync.outputs.upstream }})"
-          title: "[Build] sync torch version with vLLM (${{
-            steps.sync.outputs.upstream }})"
+          commit-message: "[Build] sync torch version with vLLM ${{
+            steps.vllm.outputs.tag }} (${{ steps.sync.outputs.upstream }})"
+          title: "[Build] sync torch version with vLLM ${{
+            steps.vllm.outputs.tag }} (${{ steps.sync.outputs.upstream }})"
           body: |
-            Auto-sync the pinned torch version in `pyproject.toml` with vLLM.
+            Auto-sync the pinned torch version in `pyproject.toml` with the
+            latest **stable** vLLM release, `${{ steps.vllm.outputs.tag }}`.
 
             - Current: `${{ steps.sync.outputs.current }}`
             - Upstream: `${{ steps.sync.outputs.upstream }}`
+
+            The pin tracks stable rather than vLLM main because the published
+            wheel is installed alongside stable vLLM; a pin ahead of stable
+            makes `lmcache.cuda_ops` fail to load against the installed torch.
 
             This PR was generated automatically by GitHub Actions.
           labels: |

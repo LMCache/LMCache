@@ -1,0 +1,217 @@
+# vLLM Prefiller + Decoder Deployments for standard PD disaggregation.
+#
+# Both Deployments opt in to the LMCache webhook and point at the SAME
+# LMCacheEngine. The webhook selects the correct MultiConnector config key
+# based on the lmcache.ai/pd-role annotation on each pod:
+#
+#   pd-role: prefiller  →  kv-transfer-config-prefiller.json  (kv_producer)
+#   pd-role: decoder    →  kv-transfer-config-decoder.json    (kv_consumer)
+#
+# The webhook injects into each opted-in pod:
+#   - hostIPC=true
+#   - --kv-transfer-config <MultiConnector JSON>
+#   - PYTHONHASHSEED=0
+#   - VLLM_NIXL_SIDE_CHANNEL_HOST (downward API status.podIP)
+#   - VLLM_NIXL_SIDE_CHANNEL_PORT (from spec.pd.nixlSideChannelPort on the engine)
+#
+# PREREQUISITES:
+#   1. LMCacheEngine "lmcache-engine" (pd block set) is Ready
+#      (see lmcache_v1alpha1_lmcacheengine_pd_prefiller.yaml).
+#   2. The webhook is deployed (make deploy) and cert-manager is installed.
+#   3. This namespace is labeled pod-security.kubernetes.io/enforce=privileged.
+#
+# After creation, verify injection on a pod:
+#   kubectl get pod -l app=pd-prefiller -o yaml | \
+#     grep -E "hostIPC|kv-transfer-config|NIXL|lmcache-injected"
+#
+# Then send requests via the pd-router Service on port 30000.
+---
+# ── Prefiller vLLM ──────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pd-prefiller
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pd-prefiller
+  template:
+    metadata:
+      labels:
+        app: pd-prefiller
+        lmcache.ai/lmcache-inject: "true"
+      annotations:
+        lmcache.ai/lmcache-engine: "lmcache-engine"
+        lmcache.ai/pd-role: "prefiller"
+    spec:
+      runtimeClassName: nvidia
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Do NOT set hostIPC — the webhook injects hostIPC=true.
+      # Do NOT add --kv-transfer-config — the webhook injects it.
+      containers:
+        - name: vllm
+          image: lmcache/vllm-openai:latest-nightly
+          args:
+            - "meta-llama/Llama-3.1-8B-Instruct"
+            - "--served-model-name"
+            - "Llama-3.1-8B-Instruct"
+            - "--port"
+            - "8001"
+            - "--tensor-parallel-size"
+            - "1"
+            - "--enforce-eager"
+            - "--max-model-len"
+            - "16384"
+            - "--gpu-memory-utilization"
+            - "0.4"
+          ports:
+            - name: http
+              containerPort: 8001
+          env:
+            - name: UCX_NET_DEVICES
+              value: "all"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            # Prefiller uses port 5557; decoder uses 5558. With hostNetwork both
+            # pods share the host IP, so distinct ports are required. The webhook
+            # respects a pre-set VLLM_NIXL_SIDE_CHANNEL_PORT and will not override it.
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: "5557"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pd-prefiller
+  namespace: default
+spec:
+  selector:
+    app: pd-prefiller
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001
+---
+# ── Decoder vLLM ────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pd-decoder
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pd-decoder
+  template:
+    metadata:
+      labels:
+        app: pd-decoder
+        lmcache.ai/lmcache-inject: "true"
+      annotations:
+        lmcache.ai/lmcache-engine: "lmcache-engine"
+        lmcache.ai/pd-role: "decoder"
+    spec:
+      runtimeClassName: nvidia
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: vllm
+          image: lmcache/vllm-openai:latest-nightly
+          args:
+            - "meta-llama/Llama-3.1-8B-Instruct"
+            - "--served-model-name"
+            - "Llama-3.1-8B-Instruct"
+            - "--port"
+            - "8002"
+            - "--tensor-parallel-size"
+            - "1"
+            - "--enforce-eager"
+            - "--max-model-len"
+            - "16384"
+            - "--gpu-memory-utilization"
+            - "0.4"
+          ports:
+            - name: http
+              containerPort: 8002
+          env:
+            - name: UCX_NET_DEVICES
+              value: "all"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: "5558"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pd-decoder
+  namespace: default
+spec:
+  selector:
+    app: pd-decoder
+  ports:
+    - name: http
+      port: 8002
+      targetPort: 8002
+---
+# ── vLLM Router ─────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pd-router
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pd-router
+  template:
+    metadata:
+      labels:
+        app: pd-router
+    spec:
+      containers:
+        - name: router
+          image: vllm/vllm-router:nightly
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              exec vllm-router \
+                --policy round_robin \
+                --vllm-pd-disaggregation \
+                --prefill http://pd-prefiller.default.svc.cluster.local:8001 \
+                --decode  http://pd-decoder.default.svc.cluster.local:8002 \
+                --host 0.0.0.0 \
+                --port 30000 \
+                --intra-node-data-parallel-size 1
+          ports:
+            - name: http
+              containerPort: 30000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pd-router
+  namespace: default
+spec:
+  selector:
+    app: pd-router
+  ports:
+    - name: http
+      port: 30000
+      targetPort: 30000

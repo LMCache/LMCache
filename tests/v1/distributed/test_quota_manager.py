@@ -15,7 +15,7 @@ from lmcache.v1.distributed.quota_manager import QuotaEntry, QuotaManager
 
 class TestQuotaManagerBasics:
     def test_unregistered_salt_limit_is_zero(self):
-        """Allowlist semantics — anything unregistered has limit 0."""
+        """Legacy allowlist semantics — anything unregistered has limit 0."""
         qm = QuotaManager()
         assert qm.get_limit_bytes("alice") == 0
         assert not qm.has_quota("alice")
@@ -192,3 +192,92 @@ class TestQuotaManagerEdgeCases:
             qm.set_quota(f"user-{i}", i)
         assert len(qm.list_quotas()) == 10_000
         assert qm.get_limit_bytes("user-9999") == 9999
+
+
+class TestQuotaManagerDefaultLimit:
+    """Default-quota semantics used by the coordinator's eviction manager
+    (``effective_limit_bytes``); ``get_limit_bytes`` keeps the legacy
+    allowlist behavior for the MP server's local eviction controller."""
+
+    def test_default_starts_unset(self):
+        qm = QuotaManager()
+        assert qm.get_default_limit_bytes() is None
+
+    def test_effective_limit_none_for_unregistered_until_default_set(self):
+        """Boot state: unregistered salts are exempt (None), even though
+        the legacy ``get_limit_bytes`` still reports 0."""
+        qm = QuotaManager()
+        assert qm.effective_limit_bytes("alice") is None
+        assert qm.get_limit_bytes("alice") == 0
+
+    def test_default_zero_applies_to_unregistered(self):
+        qm = QuotaManager()
+        qm.set_default_limit_bytes(0)
+        assert qm.get_default_limit_bytes() == 0
+        assert qm.effective_limit_bytes("alice") == 0
+
+    def test_positive_default_applies_to_unregistered(self):
+        qm = QuotaManager()
+        qm.set_default_limit_bytes(4096)
+        assert qm.effective_limit_bytes("alice") == 4096
+
+    def test_explicit_quota_wins_over_default(self):
+        qm = QuotaManager()
+        qm.set_default_limit_bytes(4096)
+        qm.set_quota("alice", 1024)
+        assert qm.effective_limit_bytes("alice") == 1024
+
+    def test_explicit_zero_quota_wins_over_unset_default(self):
+        """An explicit 0 is enforceable even while the default is None."""
+        qm = QuotaManager()
+        qm.set_quota("alice", 0)
+        assert qm.effective_limit_bytes("alice") == 0
+        assert qm.effective_limit_bytes("bob") is None
+
+    def test_default_resettable_to_none(self):
+        qm = QuotaManager()
+        qm.set_default_limit_bytes(0)
+        qm.set_default_limit_bytes(None)
+        assert qm.get_default_limit_bytes() is None
+        assert qm.effective_limit_bytes("alice") is None
+
+    def test_negative_default_rejected(self):
+        qm = QuotaManager()
+        with pytest.raises(ValueError):
+            qm.set_default_limit_bytes(-1)
+
+
+class TestQuotaManagerSectionName:
+    """The durable section a registry writes to is its own, so a process
+    holding one registry per tier can persist them side by side."""
+
+    def test_defaults_to_the_single_registry_name(self):
+        assert QuotaManager().name == "quotas"
+
+    def test_a_named_registry_writes_its_own_section(self):
+        assert QuotaManager(section_name="l1_quotas").name == "l1_quotas"
+
+    def test_two_registries_do_not_share_a_section(self):
+        """An artifact is keyed by section name, so a shared one would
+        make the second registry silently overwrite the first."""
+        l1 = QuotaManager(section_name="l1_quotas")
+        l2 = QuotaManager()
+        l1.set_quota("alice", 1024)
+        l2.set_quota("alice", 4096)
+
+        assert l1.name != l2.name
+        sections = {q.name: q.capture() for q in (l1, l2)}
+        assert len(sections) == 2
+        assert sections["l1_quotas"]["limits"] == {"alice": 1024}
+        assert sections["quotas"]["limits"] == {"alice": 4096}
+
+    def test_a_named_registry_round_trips(self):
+        source = QuotaManager(section_name="l1_quotas")
+        source.set_quota("alice", 2048)
+        source.set_default_limit_bytes(0)
+
+        restored = QuotaManager(section_name="l1_quotas")
+        restored.restore(source.capture())
+
+        assert restored.get_limit_bytes("alice") == 2048
+        assert restored.get_default_limit_bytes() == 0

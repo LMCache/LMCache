@@ -8,8 +8,12 @@ only, so tensor-parallel deployments print a single banner). Setting the
 """
 
 # Standard
-from typing import TextIO
+from typing import TYPE_CHECKING
 import os
+
+if TYPE_CHECKING:
+    # Standard
+    from typing import TextIO
 
 try:
     # First Party
@@ -97,7 +101,7 @@ def _render_banner(colored: bool) -> str:
     return "\n".join(lines)
 
 
-def print_banner_once(stream: TextIO) -> None:
+def print_banner_once(stream: "TextIO") -> None:
     """Print the LMCache startup banner to ``stream`` at most once.
 
     The banner shows the LMCache logo, version, and website, followed by

@@ -3,6 +3,11 @@
 Chunk Statistics
 ================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 The chunk statistics feature provides insights into KV cache chunk reuse patterns, helping you understand cache efficiency and optimize your deployment.
 
 Overview

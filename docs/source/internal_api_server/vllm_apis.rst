@@ -3,6 +3,11 @@
 vLLM / Inference APIs
 =====================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/http_api`.
+
+
 These APIs are specific to vLLM inference workers and provide cache management,
 configuration, freeze control, chunk statistics, and version information.
 

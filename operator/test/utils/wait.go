@@ -111,3 +111,66 @@ func WaitDeploymentAvailable(
 		return false, nil
 	})
 }
+
+// WaitDeploymentAvailableOrImagePullError is WaitDeploymentAvailable with a
+// fast-fail short-circuit: it returns a descriptive error the moment any pod
+// selected by the Deployment has a container or init container wedged in
+// ImagePullBackOff. A wrong image/tag, a missing pull Secret, or a credential
+// without pull access never resolves on its own, so blocking for the full
+// timeout only delays a guaranteed failure (and buries the registry's own
+// error message, which ImagePullBackOff's waiting state carries verbatim).
+// Returns nil once Available, the pull error when a pull is wedged, or the
+// poll timeout error otherwise.
+func WaitDeploymentAvailableOrImagePullError(
+	ctx context.Context,
+	c client.Client,
+	key types.NamespacedName,
+	timeout time.Duration,
+) error {
+	return wait.PollUntilContextTimeout(ctx, 2*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		dep := &appsv1.Deployment{}
+		if err := c.Get(ctx, key, dep); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		for _, cond := range dep.Status.Conditions {
+			if cond.Type == appsv1.DeploymentAvailable && cond.Status == corev1.ConditionTrue {
+				return true, nil
+			}
+		}
+		if msg := imagePullBackOff(ctx, c, key.Namespace, dep.Spec.Selector.MatchLabels); msg != "" {
+			return false, fmt.Errorf(
+				"deployment %s will never become Available — image pull wedged: %s", key, msg)
+		}
+		return false, nil
+	})
+}
+
+// imagePullBackOff scans pods matching sel and returns a one-line description
+// (pod, container, image, kubelet message) of the first container or init
+// container in ImagePullBackOff, or "" if none. The kubelet message is the
+// registry's own error (e.g. "pull access denied" / "manifest unknown"), which
+// is what a caller needs to tell a credential problem from a wrong tag.
+func imagePullBackOff(ctx context.Context, c client.Client, ns string, sel map[string]string) string {
+	pods := &corev1.PodList{}
+	if err := c.List(ctx, pods, client.InNamespace(ns), client.MatchingLabels(sel)); err != nil {
+		return ""
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.DeletionTimestamp != nil {
+			continue
+		}
+		statuses := append(append([]corev1.ContainerStatus{},
+			p.Status.InitContainerStatuses...), p.Status.ContainerStatuses...)
+		for _, cs := range statuses {
+			if w := cs.State.Waiting; w != nil && w.Reason == "ImagePullBackOff" {
+				return fmt.Sprintf("pod %s container %q image %q: %s",
+					p.Name, cs.Name, cs.Image, w.Message)
+			}
+		}
+	}
+	return ""
+}

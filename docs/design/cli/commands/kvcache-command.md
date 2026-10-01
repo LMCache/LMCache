@@ -221,7 +221,7 @@ All CLI operations target the **MP HTTP server**
 
 | CLI sub-command | Existing MP HTTP endpoint | Notes |
 |----------------|--------------------------|-------|
-| `clear` | `POST /clear-cache` | Clears all L1 cache. Works as-is. |
+| `clear` | `POST /cache/clear` | Clears all L1 cache. Works as-is. |
 
 ### Needs new MP HTTP endpoints
 

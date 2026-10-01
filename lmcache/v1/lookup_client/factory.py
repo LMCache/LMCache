@@ -190,11 +190,6 @@ class LookupClientFactory:
         metadata: LMCacheMetadata,
     ) -> "MooncakeLookupClient":
         """Create a MooncakeLookupClient instance."""
-        # First Party
-        from lmcache.v1.lookup_client.mooncake_lookup_client import (
-            MooncakeLookupClient,
-        )
-
         return MooncakeLookupClient(config, metadata, master_address)
 
     @staticmethod

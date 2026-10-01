@@ -10,6 +10,23 @@ distributor:
         http:
           endpoint: 0.0.0.0:4318
 
+# Keep recent traces in the local-blocks processor so Grafana can compute
+# TraceQL metrics (span latency / rate graphs) without a separate backend.
+metrics_generator:
+  processor:
+    local_blocks:
+      flush_to_storage: true
+      # Cut/complete blocks quickly so TraceQL-metrics see recent traces within
+      # seconds (sparse demo traffic otherwise sits in an open block for minutes).
+      trace_idle_period: 5s
+      flush_check_period: 5s
+      max_block_duration: 30s
+      complete_block_timeout: 1h
+  storage:
+    path: /var/tempo/generator/wal
+  traces_storage:
+    path: /var/tempo/generator/traces
+
 storage:
   trace:
     backend: local
@@ -17,3 +34,9 @@ storage:
       path: /var/tempo/blocks
     wal:
       path: /var/tempo/wal
+
+# Turn on the local-blocks processor for the (single, default) tenant.
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [local-blocks]

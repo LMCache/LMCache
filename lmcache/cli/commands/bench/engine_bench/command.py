@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """``lmcache bench engine`` subcommand implementation.
 
-This module owns the full registration + execution flow for the
-inference engine benchmark. ``BenchCommand`` only forwards CLI dispatch
-to :func:`run_engine_bench` and parser registration to
-:func:`register_engine_parser`.
+This module provides argument registration via :func:`add_engine_arguments`
+and the execution orchestrator :func:`run_engine_bench` for the inference
+engine benchmark.
 """
 
 # Future
@@ -19,6 +18,7 @@ import sys
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import (
     EngineBenchConfig,
+    WarmupPolicy,
     parse_args_to_config,
 )
 from lmcache.cli.commands.bench.engine_bench.interactive import run_interactive
@@ -26,6 +26,9 @@ from lmcache.cli.commands.bench.engine_bench.interactive.state import (
     InteractiveState,
 )
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
+from lmcache.cli.commands.bench.engine_bench.quality.dataset import (
+    describe_hub_datasets,
+)
 from lmcache.cli.commands.bench.engine_bench.request_sender import (
     RequestSender,
 )
@@ -33,7 +36,13 @@ from lmcache.cli.commands.bench.engine_bench.stats import (
     FinalStats,
     StatsCollector,
 )
-from lmcache.cli.commands.bench.engine_bench.workloads import create_workload
+from lmcache.cli.commands.bench.engine_bench.workloads import (
+    DEFAULT_DOC_ALIGN_TOKENS,
+    create_workload,
+    parse_template_kwargs,
+    validate_max_output_length_supported,
+)
+from lmcache.cli.commands.bench.engine_bench.workloads.base import BaseWorkload
 from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
@@ -42,32 +51,30 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Default for --ldqa-max-output-length; centralized so the "max output length
+# explicitly set" check stays in sync with the parser.
+_LDQA_MAX_OUTPUT_LENGTH_DEFAULT = 128
+
+# Workload-specific arguments that have no default, as
+# ``{workload: ((namespace attr, CLI flag), ...)}``. Routing them through the
+# general missing-argument path gives --no-interactive, the TUI, and --config
+# replay consistent handling.
+_REQUIRED_WORKLOAD_ARGS: dict[str, tuple[tuple[str, str], ...]] = {
+    "rag-qa-quality": (("rag_dataset", "--rag-dataset"),),
+}
+
 
 # ---------------------------------------------------------------------------
 # Parser registration
 # ---------------------------------------------------------------------------
 
 
-def register_engine_parser(
-    subparsers: argparse._SubParsersAction,
-    dispatch_func,
-) -> argparse.ArgumentParser:
-    """Register the ``lmcache bench engine`` subcommand parser.
+def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add ``lmcache bench engine`` arguments to *parser*.
 
     Args:
-        subparsers: The ``bench`` subparsers action.
-        dispatch_func: Function to bind via ``set_defaults(func=...)``.
-            Typically ``BenchCommand.execute`` so that the outer
-            dispatcher can route the call back into
-            :func:`run_engine_bench`.
-
-    Returns:
-        The created ``ArgumentParser`` (mostly for testing).
+        parser: The ``ArgumentParser`` for the engine bench subcommand.
     """
-    parser = subparsers.add_parser(
-        "engine",
-        help="Benchmark an inference engine.",
-    )
 
     # --- Config file ---
     parser.add_argument(
@@ -104,6 +111,7 @@ def register_engine_parser(
             "long-doc-qa",
             "multi-round-chat",
             "prefix-suffix-tuner",
+            "rag-qa-quality",
             "random-prefill",
         ],
         help="Workload type.",
@@ -148,6 +156,25 @@ def register_engine_parser(
         help="Suppress real-time progress display.",
     )
     parser.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help=(
+            "Force generation to run for the full output length by ignoring "
+            "the model's EOS token (vLLM sampling extension). Makes decode "
+            "throughput reproducible regardless of when the model would stop."
+        ),
+    )
+    parser.add_argument(
+        "--no-warmup",
+        action="store_true",
+        help=(
+            "Skip the warmup phase entirely and start measuring immediately. "
+            "The first requests then pay the engine's first-request cost and "
+            "run against a cold cache, so use it to measure a cold start -- "
+            "not to compare against a warmed run."
+        ),
+    )
+    parser.add_argument(
         "--no-interactive",
         action="store_true",
         help=("Disable interactive mode. Errors if required arguments are missing."),
@@ -174,13 +201,15 @@ def register_engine_parser(
         "--ldp-context-length",
         type=int,
         default=5000,
-        help="Token length of each context (default: 5000).",
+        help="Exact token length of each context (default: 5000). Requires a "
+        "loadable tokenizer; pass --model when the engine reports a name that "
+        "is not a HuggingFace repo ID or local path.",
     )
     ldp_group.add_argument(
         "--ldp-system-prompt-length",
         type=int,
         default=1000,
-        help="Token length of the shared system prompt (default: 1000). "
+        help="Exact token length of the shared system prompt (default: 1000). "
         "Use 0 for no system prompt.",
     )
     ldp_group.add_argument(
@@ -195,6 +224,14 @@ def register_engine_parser(
         type=int,
         default=1,
         help="Max concurrent in-flight requests (default: 1).",
+    )
+    ldp_group.add_argument(
+        "--ldp-max-output-length",
+        type=int,
+        default=128,
+        help="Max tokens to generate per permutation request (default: 128). "
+        "Use 1 to measure prefill alone; combine larger values with "
+        "--ignore-eos for a reproducible decode phase.",
     )
 
     # --- Long-doc-qa workload args ---
@@ -222,6 +259,16 @@ def register_engine_parser(
         type=int,
         default=3,
         help="Max concurrent in-flight requests (default: 3).",
+    )
+    group.add_argument(
+        "--ldqa-max-output-length",
+        type=int,
+        default=_LDQA_MAX_OUTPUT_LENGTH_DEFAULT,
+        help=(
+            f"Max tokens to generate per benchmark query "
+            f"(default: {_LDQA_MAX_OUTPUT_LENGTH_DEFAULT}). Combine with "
+            "--ignore-eos for a reproducible decode phase."
+        ),
     )
 
     # --- Multi-round-chat workload args ---
@@ -294,6 +341,68 @@ def register_engine_parser(
         "or the L1 (LMCache DRAM) size for tiered baselines.",
     )
 
+    # --- Rag-qa-quality workload args ---
+    rag_group = parser.add_argument_group("rag-qa-quality workload options")
+    rag_group.add_argument(
+        "--rag-dataset",
+        default=None,
+        help=(
+            "Required for this workload. A known dataset name or a path to a "
+            f"local QA file. Known names -- {describe_hub_datasets()}. Named "
+            "datasets download from the HuggingFace Hub on first use."
+        ),
+    )
+    rag_group.add_argument(
+        "--rag-num-samples",
+        type=int,
+        default=50,
+        help="Questions to measure, taken in dataset order (default: 50).",
+    )
+    rag_group.add_argument(
+        "--rag-max-output-length",
+        type=int,
+        default=1024,
+        help=(
+            "Token budget per answer (default: 1024). Must fit a reasoning "
+            "model's thinking block as well as the <final_answer> tags, or "
+            "samples fail to parse and drop out of the score."
+        ),
+    )
+    rag_group.add_argument(
+        "--rag-doc-align-tokens",
+        type=int,
+        default=DEFAULT_DOC_ALIGN_TOKENS,
+        help=(
+            f"Pad documents and the system block to a multiple of this many "
+            f"tokens (default: {DEFAULT_DOC_ALIGN_TOKENS}, LMCache's own "
+            "default chunk size). Set it to the deployment's chunk size: a "
+            "mismatch leaves documents off-phase and reuse partial. Both runs "
+            "being compared must use the same value."
+        ),
+    )
+    rag_group.add_argument(
+        "--rag-template-kwargs",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Chat-template variables, repeatable. Left unset, the model's own "
+            "template default applies. Use it to bound a runaway thinking "
+            "block (reasoning_effort=high) or to enable one "
+            "(thinking_mode=enabled) -- the right value is model-specific, and "
+            "turning thinking off outright can lower multi-hop answer quality."
+        ),
+    )
+    rag_group.add_argument(
+        "--rag-output",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Per-sample results JSON (default: <output-dir>/rag_qa_quality.json). "
+            "Name the two runs apart to diff them by sample id."
+        ),
+    )
+
     # --- Random-prefill workload args ---
     rp_group = parser.add_argument_group(
         "random-prefill workload options",
@@ -310,9 +419,6 @@ def register_engine_parser(
         default=50,
         help="Number of requests to send (default: 50).",
     )
-
-    parser.set_defaults(func=dispatch_func)
-    return parser
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +438,9 @@ def _get_missing_args(args: argparse.Namespace) -> list[str]:
         and getattr(args, "lmcache_url", None) is None
     ):
         missing.append("--tokens-per-gb-kvcache or --lmcache-url")
+    for attr, flag in _REQUIRED_WORKLOAD_ARGS.get(args.workload, ()):
+        if getattr(args, attr, None) is None:
+            missing.append(flag)
     return missing
 
 
@@ -410,12 +519,21 @@ def _export_config(
     state.set("workload", config.workload)
     state.set("kv_cache_volume", config.kv_cache_volume_gb)
     state.set("tokens_per_gb_kvcache", config.tokens_per_gb_kvcache)
+    state.set("ignore_eos", config.ignore_eos)
+    state.set("no_warmup", config.warmup_policy is WarmupPolicy.SKIP)
 
     # Workload-specific args from namespace
     for item in state.get_workload_items():
         value = getattr(args, item.key, item.default)
         if value is not None:
             state.set(item.key, value)
+
+    # Required workload args live in the required phase, so the loop above
+    # does not see them; without this the export would drop them.
+    for attr, _flag in _REQUIRED_WORKLOAD_ARGS.get(config.workload, ()):
+        value = getattr(args, attr, None)
+        if value is not None:
+            state.set(attr, value)
 
     # to_json() handles filtering out engine_url, lmcache_url, etc.
     data = state.to_json()
@@ -436,11 +554,30 @@ def _export_config(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_extra_body(args: argparse.Namespace) -> dict[str, object]:
+    """Build the request ``extra_body`` implied by the CLI arguments.
+
+    Args:
+        args: Resolved CLI arguments.
+
+    Returns:
+        Fields to merge into every request body; empty when none apply.
+
+    Raises:
+        ValueError: If a template kwarg is not in ``KEY=VALUE`` form.
+    """
+    template_kwargs = parse_template_kwargs(getattr(args, "rag_template_kwargs", []))
+    if not template_kwargs:
+        return {}
+    return {"chat_template_kwargs": template_kwargs}
+
+
 def _emit_final_metrics(
     command: "BaseCommand",
     config: EngineBenchConfig,
     final: FinalStats,
     args: argparse.Namespace,
+    workload: BaseWorkload,
 ) -> None:
     """Emit final benchmark summary using the CLI metrics system."""
     title = f"Engine Benchmark Result ({config.workload})"
@@ -502,6 +639,11 @@ def _emit_final_metrics(
         round(final.p99_decode_speed, 2),
     )
 
+    for extra in workload.extra_metric_sections():
+        section = metrics.add_section(extra.key, extra.label)
+        for key, label, value in extra.entries:
+            section.add(key, label, value)
+
     metrics.emit()
 
 
@@ -523,6 +665,11 @@ def run_engine_bench(command: "BaseCommand", args: argparse.Namespace) -> None:
 
     # 1. Parse config
     config = parse_args_to_config(args)
+
+    # 1a. A max output length can only be set for workloads that have a
+    # max-output-length parameter; reject it for any other workload.
+    if args.ldqa_max_output_length != _LDQA_MAX_OUTPUT_LENGTH_DEFAULT:
+        validate_max_output_length_supported(config.workload)
 
     # 1b. --export-config: save resolved config and exit
     export_path = getattr(args, "export_config", None)
@@ -546,7 +693,12 @@ def run_engine_bench(command: "BaseCommand", args: argparse.Namespace) -> None:
     )
 
     # 3. Create request sender (callbacks wired after workload creation)
-    request_sender = RequestSender(config.engine_url, config.model)
+    request_sender = RequestSender(
+        config.engine_url,
+        config.model,
+        ignore_eos=config.ignore_eos,
+        extra_body=_resolve_extra_body(args),
+    )
 
     # 4. Create workload
     workload = create_workload(
@@ -573,13 +725,13 @@ def run_engine_bench(command: "BaseCommand", args: argparse.Namespace) -> None:
     workload.log_config()
     progress_monitor.start()
     try:
-        workload.run()
+        workload.run(config.warmup_policy)
     finally:
         progress_monitor.stop()
 
     # 7. Final metrics
     final = stats_collector.get_final_stats()
-    _emit_final_metrics(command, config, final, args)
+    _emit_final_metrics(command, config, final, args, workload)
 
     # 8. Export
     if config.export_csv:

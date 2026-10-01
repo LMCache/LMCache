@@ -1,0 +1,108 @@
+# Azure Blob connector integration test against the Azurite emulator.
+#
+# Runs the full write->read transaction of AzureConnector through the real
+# azure-storage-blob async client against Azurite (a local Azure Blob emulator)
+# started as a service container. No cloud account, credentials, or GPU needed,
+# so this can gate every PR that touches the Azure connector.
+name: Azure integration
+
+on:
+  push:
+    branches:
+      - "dev"
+      - "release-**"
+    paths:
+      - "lmcache/v1/storage_backend/connector/azure_connector.py"
+      - "tests/v1/storage_backend/test_azure_connector.py"
+      - "tests/v1/storage_backend/test_azure_connector_azurite.py"
+      - ".github/workflows/azure_integration.yml"
+  pull_request:
+    branches:
+      - "dev"
+      - "release-**"
+    paths:
+      - "lmcache/v1/storage_backend/connector/azure_connector.py"
+      - "tests/v1/storage_backend/test_azure_connector.py"
+      - "tests/v1/storage_backend/test_azure_connector_azurite.py"
+      - ".github/workflows/azure_integration.yml"
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+# Cancel older in-flight runs on the same PR / branch.
+concurrency:
+  group: azure-integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  azure-blob-azurite:
+    name: Azure connector (Azurite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            **/pyproject.toml
+            **/requirements/*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements/common.txt
+          python -m pip install -r requirements/test.txt
+          python -m pip install azure-storage-blob
+          NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation
+
+      - name: Start Azurite
+        run: |
+          docker run --detach --rm \
+            --name lmcache-azurite \
+            --publish 10000:10000 \
+            mcr.microsoft.com/azure-storage/azurite:latest \
+            azurite-blob \
+            --blobHost 0.0.0.0 \
+            --skipApiVersionCheck \
+            --disableTelemetry
+
+      - name: Wait for Azurite
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/10000) 2>/dev/null; then
+              echo "Azurite is up"
+              exit 0
+            fi
+            echo "Waiting for Azurite ($i/30)"
+            sleep 1
+          done
+          echo "Azurite did not become reachable on 127.0.0.1:10000" >&2
+          exit 1
+
+      - name: Run Azure connector integration test
+        run: |
+          pytest -v --tb=short \
+            tests/v1/storage_backend/test_azure_connector_azurite.py
+
+      - name: Stop Azurite
+        if: always()
+        run: docker rm --force lmcache-azurite

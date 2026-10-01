@@ -44,7 +44,7 @@ Setup B: vLLM with LMCache
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Run LMCache as a standalone service and point vLLM at it with the
-``LMCacheMPConnector``. See :doc:`/mp/quickstart` for the full MP-mode
+``LMCacheMPConnector``. See :doc:`/getting_started/quickstart` for the full MP-mode
 walkthrough.
 
 **Start the LMCache server:**
@@ -54,8 +54,9 @@ walkthrough.
     lmcache server \
         --l1-size-gb 66 --eviction-policy LRU
 
-The ZMQ port defaults to **5555** (used by vLLM) and the HTTP frontend
-defaults to **8080** (used by ``lmcache bench engine --lmcache-url``).
+The request port defaults to **5555** and uses ZMQ unless ``--transport grpc``
+is selected. The HTTP frontend defaults to **8080** and is used by
+``lmcache bench engine --lmcache-url``.
 
 **Start vLLM with the MP connector in a separate terminal:**
 

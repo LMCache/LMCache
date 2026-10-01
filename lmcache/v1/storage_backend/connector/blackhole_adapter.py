@@ -17,5 +17,5 @@ class BlackholeConnectorAdapter(ConnectorAdapter):
         # Local
         from .blackhole_connector import BlackholeConnector
 
-        logger.info(f"Creating Blackhole connector for URL: {context.url}")
+        logger.info("Creating Blackhole connector for URL: %s", context.url)
         return BlackholeConnector()

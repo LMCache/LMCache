@@ -34,8 +34,8 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
-    AdHocMemoryAllocator,
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
@@ -98,7 +98,7 @@ def _build_metadata(chunk_size: int) -> LMCacheMetadata:
         DEFAULT_KV_SHAPE[3],
         DEFAULT_KV_SHAPE[4],
     )
-    logger.info(f"_build_metadata: chunk_size {chunk_size}, kv_shape {kv_shape}")
+    logger.info("_build_metadata: chunk_size %s, kv_shape %s", chunk_size, kv_shape)
     return LMCacheMetadata(
         model_name="benchmark_model",
         world_size=1,
@@ -125,7 +125,7 @@ def _make_memory_objs(
         memory_allocator = AdHocMemoryAllocator(device="cpu")
     if shapes is None:
         shapes = [DEFAULT_TORCH_SHAPE]
-    logger.info(f"_make_memory_objs, shapes: {shapes}")
+    logger.info("_make_memory_objs, shapes: %s", shapes)
 
     objs = []
     for i in range(num_ops):
@@ -371,7 +371,7 @@ class StorageBackendBenchmark(ABC):
         # Setup
         self._loop, self._loop_thread = _start_loop()
         metadata = _build_metadata(self.chunk_size)
-        logger.info(f"Prepare config for {self.backend_name} ...")
+        logger.info("Prepare config for %s ...", self.backend_name)
 
         rust_raw = "rust" in self.backend_name
 
@@ -407,7 +407,7 @@ class StorageBackendBenchmark(ABC):
                 dst_device="cpu",
                 memory_allocator=AdHocMemoryAllocator(device="cpu"),
             )
-        logger.info(f"Creating {self.backend_name} ...")
+        logger.info("Creating %s ...", self.backend_name)
         # Create the specific backend
         self._backend = self._create_backend(
             config, metadata, self._loop, self._local_cpu
@@ -426,15 +426,15 @@ class StorageBackendBenchmark(ABC):
         )
 
         # Run benchmark
-        logger.info(f"Start benchmark with {self.backend_name} ...")
+        logger.info("Start benchmark with %s ...", self.backend_name)
         self._start_time = time.perf_counter()
         result = self._execute_benchmark()
-        logger.info(f"End benchmark with {self.backend_name} ...")
+        logger.info("End benchmark with %s ...", self.backend_name)
         # Cleanup (skip if already handled in _execute_benchmark)
         if not self._skip_cleanup:
             _release_memory_objs(self._objs)
         self._close_backend()
-        logger.info(f"Closed {self.backend_name} ...")
+        logger.info("Closed %s ...", self.backend_name)
 
         self._cleanup_device()
         _stop_loop(self._loop, self._loop_thread)
@@ -708,8 +708,10 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
         cleanup_raw_device: bool,
         write_bench: bool,
         use_uring: bool,
+        use_uring_cmd: bool,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         verify_integrity: bool = False,
+        max_data_transfer_size: int = 0,
     ):
         super().__init__(
             "rust_raw_block",
@@ -728,6 +730,8 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
         self._temp_dir: Optional[str] = None
         self._manifest_path: Optional[str] = None
         self.use_uring = use_uring
+        self.use_uring_cmd = use_uring_cmd
+        self.max_data_transfer_size = max_data_transfer_size
         # Create manifest path
         self._manifest_path = os.path.join(
             tempfile.gettempdir(),
@@ -744,11 +748,14 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
             "rust_raw_block.manifest_path": self._manifest_path,
             "rust_raw_block.manifest_write_interval": 0,
             "rust_raw_block.use_uring": self.use_uring,
+            "rust_raw_block.use_uring_cmd": self.use_uring_cmd,
+            "rust_raw_block.max_data_transfer_size": self.max_data_transfer_size,
         }
 
     def _setup_device(self) -> None:
         """Setup raw block device or temp file."""
         is_block_device = False
+        is_char_device = False
         self._temp_dir = None
         prefix = "write" if self.write_bench else "read"
         prefix = prefix + "raw_block_bench_"
@@ -756,16 +763,18 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
             try:
                 st_mode = os.stat(self.raw_device).st_mode
                 is_block_device = stat.S_ISBLK(st_mode)
+                is_char_device = stat.S_ISCHR(st_mode)
             except FileNotFoundError:
                 is_block_device = False
+                is_char_device = False
 
         # Create temp file if no device specified
         if not self.raw_device:
             self._temp_dir = tempfile.mkdtemp(prefix)
             self.raw_device = os.path.join(self._temp_dir, "raw_block.bin")
 
-        # Truncate if not a real block device
-        if self.raw_device and not is_block_device:
+        # Truncate if not a real block device or character device
+        if self.raw_device and not is_block_device and not is_char_device:
             with open(self.raw_device, "wb") as f:
                 f.truncate(int(self.raw_device_size_gb * 1024**3))
 
@@ -823,7 +832,10 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
 
     def _get_extra_result_fields(self) -> dict:
         """Get extra fields for RustRawBlockBackend benchmark results."""
-        return {"use_uring": self.use_uring}
+        return {
+            "use_uring": self.use_uring,
+            "use_uring_cmd": self.use_uring_cmd,
+        }
 
     def _cleanup_device(self) -> None:
         """Cleanup temp files."""
@@ -970,6 +982,37 @@ class FsBackendBenchmark(RemoteBackendBenchmark):
 
 
 # ============================================================================
+# BigtableBackendBenchmark Implementation
+# ============================================================================
+class BigtableBackendBenchmark(RemoteBackendBenchmark):
+    def __init__(
+        self,
+        num_ops: int,
+        concurrency: int,
+        remote_url: str,
+        use_odirect: bool,
+        alignment: int,
+        write_bench: bool,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        verify_integrity: bool = False,
+    ):
+        super().__init__(
+            "bigtable",
+            num_ops,
+            concurrency,
+            remote_url,
+            use_odirect,
+            alignment,
+            write_bench,
+            chunk_size,
+            verify_integrity,
+        )
+
+    @property
+    def extra_config_keys(self) -> dict:
+        return {}
+
+
 # Main Entry Point
 # ============================================================================
 def main() -> None:
@@ -988,6 +1031,7 @@ def main() -> None:
             "both",
             "hf3fs_backend",
             "fs_backend",
+            "bigtable",
         ],
         default="both",
         help=(
@@ -1005,6 +1049,25 @@ def main() -> None:
         "--use-uring",
         action="store_true",
         help="Enable io_uring for raw block backend",
+    )
+    parser.add_argument(
+        "--use-uring-cmd",
+        action="store_true",
+        help=(
+            "Enable io_uring_cmd for raw block backend. "
+            "This automatically enables --use-uring. "
+            "Must use nvme character device node (/dev/ngXnY)"
+        ),
+    )
+    parser.add_argument(
+        "--max-data-transfer-size",
+        type=int,
+        default=0,
+        help=(
+            "Maximum data transfer size for use_uring_cmd. "
+            " > 0: Split based on the specified limit. "
+            " <= 0: Split based on device reported max hardware sector size"
+        ),
     )
     parser.add_argument(
         "--verify-integrity",
@@ -1058,6 +1121,10 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # use_uring_cmd requires io_uring as io_engine
+    if args.use_uring_cmd:
+        args.use_uring = True
+
     # write_bench defaults to True (write benchmark), set to False for read benchmark
     write_bench = args.write_bench.lower() in ("true", "1", "yes", "y", "")
 
@@ -1098,8 +1165,10 @@ def main() -> None:
             cleanup_raw_device=cleanup_raw_device,
             write_bench=write_bench,
             use_uring=args.use_uring,
+            use_uring_cmd=args.use_uring_cmd,
             chunk_size=args.chunk_size,
             verify_integrity=args.verify_integrity,
+            max_data_transfer_size=args.max_data_transfer_size,
         )
         result = rustraw_bench.run()
         result["raw_device"] = raw_device
@@ -1137,6 +1206,22 @@ def main() -> None:
         result["fs_dir"] = args.remote_url
         results.append(result)
 
+    # Run BigtableBackend benchmark
+    if args.backend in ("bigtable",):
+        bigtable_bench = BigtableBackendBenchmark(
+            num_ops=args.num_ops,
+            concurrency=args.concurrency,
+            remote_url=args.remote_url,
+            use_odirect=False,
+            alignment=args.alignment,
+            write_bench=write_bench,
+            chunk_size=args.chunk_size,
+            verify_integrity=args.verify_integrity,
+        )
+        result = bigtable_bench.run()
+        result["bigtable_table"] = args.remote_url
+        results.append(result)
+
     # Print results
     for result in results:
         print(
@@ -1165,7 +1250,7 @@ def main() -> None:
             output_path = os.path.join(output_path, f"storage_backend_io_{ts}.json")
         with open(output_path, "w") as f:
             json.dump(results, f, indent=2)
-        logger.info(f"Wrote results to {output_path}")
+        logger.info("Wrote results to %s", output_path)
 
 
 if __name__ == "__main__":

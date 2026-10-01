@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Unit tests for the ``WAIT_PREFETCH_STATUS`` request handler path.
+
+The prefetch-controller tests cover the condition-variable wait in isolation;
+these cover the ``LookupModule`` handler that ``WAIT_PREFETCH_STATUS`` dispatches
+to, i.e. the ``wait_prefetch_status -> query_prefetch_status`` path: count
+computation, event emission, and exactly-once job consumption. The storage
+manager is mocked, so no GPU or native bitmap is needed.
+"""
+
+# Standard
+from unittest import mock
+import threading
+
+# First Party
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed.api import PrefetchHandle, PrefetchResult
+from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
+
+
+def _result(found):
+    """A finished result whose hits all came from L1, or None."""
+    if found is None:
+        return None
+    return PrefetchResult(
+        hit_cells=found,
+        l1_hit_cells=[row.copy() for row in found],
+        l2_hit_cells=[Bitmap(len(row)) for row in found],
+    )
+
+
+def _make_ctx(wait_result=True, found=None):
+    storage_manager = mock.Mock()
+    storage_manager.wait_prefetch_status.return_value = wait_result
+    storage_manager.query_prefetch_status.return_value = _result(found)
+    ctx = mock.Mock()
+    ctx.storage_manager = storage_manager
+    ctx.event_bus = mock.Mock()
+    ctx.chunk_size = 256
+    return ctx
+
+
+def _make_module(ctx):
+    # Bypass __init__ (which wires up otel metrics needing a full context); the
+    # handler methods only touch _ctx, _prefetch_jobs, and _prefetch_job_lock.
+    module = object.__new__(LookupModule)
+    module._ctx = ctx
+    module._prefetch_jobs = {}
+    module._prefetch_job_lock = threading.Lock()
+    return module
+
+
+def test_wait_prefetch_status_returns_count_and_consumes_job():
+    # 8 keys = 4 chunks with world_size=2, 1 object group: one 4-chunk row
+    # per kv rank. All bits set -> fold_unfold_grouped returns hit_length=4.
+    num_chunks, world_size = 4, 2
+    found = [Bitmap(num_chunks, num_chunks) for _ in range(world_size)]
+    handle = PrefetchHandle(
+        prefetch_request_id=0,
+        external_request_id="req",
+        total_requested_keys=num_chunks * world_size,
+        submit_time=0.0,
+        sliding_windows=(-1,) * world_size,
+    )
+    ctx = _make_ctx(wait_result=True, found=found)
+    module = _make_module(ctx)
+    module._prefetch_jobs["req"] = _PrefetchJob(
+        handle=handle,
+        row_windows=(-1,) * world_size,
+        request_id="req",
+        requested_tokens=512,
+    )
+
+    assert module.wait_prefetch_status("req", timeout=1.0) == 4
+    ctx.storage_manager.wait_prefetch_status.assert_called_once_with(handle, 1.0)
+    ctx.event_bus.publish.assert_called_once()
+    # Exactly-once: the job is removed after a non-None result.
+    assert "req" not in module._prefetch_jobs
+    # The hit length is recorded on the session so free_lookup_locks can
+    # later reconstruct which keys the prefetch read-locked.
+    ctx.session_manager.get_or_create.assert_called_once_with("req")
+    session = ctx.session_manager.get_or_create.return_value
+    session.record_prefetch_result.assert_called_once_with(4, (0,))
+
+
+def test_wait_prefetch_status_timeout_returns_none_and_keeps_job():
+    ctx = _make_ctx(wait_result=False)
+    module = _make_module(ctx)
+    job = _PrefetchJob(
+        handle=mock.sentinel.handle,
+        row_windows=(-1,),
+        request_id="req",
+        requested_tokens=0,
+    )
+    module._prefetch_jobs["req"] = job
+
+    assert module.wait_prefetch_status("req", timeout=0.5) is None
+    ctx.storage_manager.query_prefetch_status.assert_not_called()
+    # Job is kept so a later wait/query can still resolve it.
+    assert module._prefetch_jobs["req"] is job
+
+
+def test_wait_prefetch_status_unknown_request_returns_zero():
+    module = _make_module(_make_ctx())
+    assert module.wait_prefetch_status("missing", timeout=1.0) == 0

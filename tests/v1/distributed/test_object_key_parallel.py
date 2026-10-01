@@ -22,10 +22,13 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
+    PrefetchHandle,
 )
+from lmcache.v1.distributed.bitmap_ops import fold_unfold_grouped
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -34,6 +37,9 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_management import MemoryFormat
+
+# Test helpers
+from tests.v1.distributed.utils import ranked_spec, single_row_spec
 
 # ==============================================================================
 # Test Fixtures
@@ -112,33 +118,46 @@ def create_object_key(
     )
 
 
-def create_interleaved_lookup_keys(
+def create_lookup_key_rows(
     num_chunks: int,
     world_size: int,
     model_name: str = "test_model",
-) -> list[ObjectKey]:
+) -> list[list[ObjectKey]]:
     """
-    Create interleaved lookup keys for scheduler-style TP lookup.
+    Create the per-rank key rows of a scheduler-style TP lookup.
 
-    The order matches what the scheduler expects:
-    [chunk0_worker0, chunk0_worker1, ..., chunk0_workerN,
-     chunk1_worker0, chunk1_worker1, ..., chunk1_workerN, ...]
-
-    This simulates the key expansion that happens for scheduler lookups
-    where worker_id=None gets expanded to all workers.
+    Row ``r`` holds worker ``r``'s keys for chunks ``0..num_chunks-1`` in
+    chunk order -- the ``GroupedObjectKeys`` layout the scheduler submits when a
+    lookup with ``worker_id=None`` is expanded to all workers.
     """
-    keys = []
-    for chunk_idx in range(num_chunks):
-        for worker_id in range(world_size):
-            keys.append(
-                create_object_key(
-                    chunk_hash=chunk_idx,
-                    worker_id=worker_id,
-                    world_size=world_size,
-                    model_name=model_name,
-                )
+    return [
+        [
+            create_object_key(
+                chunk_hash=chunk_idx,
+                worker_id=worker_id,
+                world_size=world_size,
+                model_name=model_name,
             )
-    return keys
+            for chunk_idx in range(num_chunks)
+        ]
+        for worker_id in range(world_size)
+    ]
+
+
+def tp_lookup_hit_chunks(
+    storage_manager: StorageManager, handle: PrefetchHandle, world_size: int
+) -> tuple[int, list]:
+    """
+    Resolve a TP lookup the way ``MPCacheServer.lookup`` does.
+
+    Returns ``(hit_chunks, rows)``: the number of leading chunks every worker
+    has (the fold over the per-rank rows) and the per-rank found bitmaps.
+    """
+    result = storage_manager.query_prefetch_status(handle)
+    assert result is not None
+    rows = result.hit_cells
+    hit_chunks, _ = fold_unfold_grouped(rows, [-1] * world_size)
+    return hit_chunks, rows
 
 
 # ==============================================================================
@@ -147,8 +166,8 @@ def create_interleaved_lookup_keys(
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for tensor parallel tests",
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
 )
 class TestStorageManagerTPLookup:
     """
@@ -174,22 +193,20 @@ class TestStorageManagerTPLookup:
                 )
                 for i in range(num_chunks)
             ]
-            reserved_dict = storage_manager.reserve_write(
-                storage_keys, test_layout, "new"
-            )
+            reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
 
-        # Create interleaved lookup keys for scheduler-style lookup
-        lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
+        # Scheduler-style lookup: one key row per worker
+        rows = create_lookup_key_rows(num_chunks, world_size)
+        handle = storage_manager.submit_prefetch_task(ranked_spec(rows, test_layout))
+        hit_chunks, found_rows = tp_lookup_hit_chunks(
+            storage_manager, handle, world_size
+        )
 
-        # All keys should be found (5 chunks * 2 workers = 10)
-        assert found_count == num_chunks * world_size
-
-        # Simulating MPCacheEngine.lookup logic
-        found_ipc_count = found_count // world_size
-        assert found_ipc_count == num_chunks
+        # Every worker has every chunk: all 5 chunks hit.
+        assert hit_chunks == num_chunks
+        for row in found_rows:
+            assert row.get_indices_list() == list(range(num_chunks))
 
     def test_tp2_only_worker0_has_cache_asymmetric(self, storage_manager, test_layout):
         """
@@ -204,24 +221,21 @@ class TestStorageManagerTPLookup:
             create_object_key(chunk_hash=i, worker_id=0, world_size=world_size)
             for i in range(num_chunks)
         ]
-        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout, "new")
+        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
         storage_manager.finish_write(list(reserved_dict.keys()))
 
-        # Create interleaved lookup keys for scheduler-style lookup
-        lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
+        # Scheduler-style lookup: one key row per worker
+        rows = create_lookup_key_rows(num_chunks, world_size)
+        handle = storage_manager.submit_prefetch_task(ranked_spec(rows, test_layout))
+        hit_chunks, found_rows = tp_lookup_hit_chunks(
+            storage_manager, handle, world_size
+        )
 
-        # Only worker 0's first chunk is found, then lookup stops
-        # at worker 1's missing chunk
-        # The ordering is: [chunk0_worker0, chunk0_worker1, chunk1_worker0, ...]
-        # So we find chunk0_worker0 (1), then miss chunk0_worker1
-        assert found_count == 1
-
-        # Simulating MPCacheEngine.lookup logic
-        found_ipc_count = found_count // world_size
-        # 1 // 2 = 0, so no complete cache hit
-        assert found_ipc_count == 0
+        # A chunk hits only when every worker has it; worker 1 has none, so
+        # nothing hits and worker 0's out-of-prefix keys are released.
+        assert hit_chunks == 0
+        for row in found_rows:
+            assert row.popcount() == 0
 
     def test_tp2_only_worker1_has_cache_asymmetric(self, storage_manager, test_layout):
         """
@@ -236,20 +250,20 @@ class TestStorageManagerTPLookup:
             create_object_key(chunk_hash=i, worker_id=1, world_size=world_size)
             for i in range(num_chunks)
         ]
-        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout, "new")
+        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
         storage_manager.finish_write(list(reserved_dict.keys()))
 
-        # Create interleaved lookup keys for scheduler-style lookup
-        lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
+        # Scheduler-style lookup: one key row per worker
+        rows = create_lookup_key_rows(num_chunks, world_size)
+        handle = storage_manager.submit_prefetch_task(ranked_spec(rows, test_layout))
+        hit_chunks, found_rows = tp_lookup_hit_chunks(
+            storage_manager, handle, world_size
+        )
 
-        # First lookup key is chunk0_worker0 which is missing
-        assert found_count == 0
-
-        # Simulating MPCacheEngine.lookup logic
-        found_ipc_count = found_count // world_size
-        assert found_ipc_count == 0
+        # Worker 0 has nothing, so no chunk is complete.
+        assert hit_chunks == 0
+        for row in found_rows:
+            assert row.popcount() == 0
 
     def test_tp2_partial_prefix_both_workers(self, storage_manager, test_layout):
         """
@@ -268,22 +282,20 @@ class TestStorageManagerTPLookup:
                 )
                 for i in range(num_stored_chunks)
             ]
-            reserved_dict = storage_manager.reserve_write(
-                storage_keys, test_layout, "new"
-            )
+            reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
 
-        # Request 5 chunks with scheduler-style interleaved lookup
-        lookup_keys = create_interleaved_lookup_keys(num_requested_chunks, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
+        # Request 5 chunks with a scheduler-style lookup (one row per worker)
+        rows = create_lookup_key_rows(num_requested_chunks, world_size)
+        handle = storage_manager.submit_prefetch_task(ranked_spec(rows, test_layout))
+        hit_chunks, found_rows = tp_lookup_hit_chunks(
+            storage_manager, handle, world_size
+        )
 
-        # First 3 chunks * 2 workers = 6 keys found, then stops at chunk3_worker0
-        assert found_count == num_stored_chunks * world_size
-
-        # Simulating MPCacheEngine.lookup logic
-        found_ipc_count = found_count // world_size
-        assert found_ipc_count == num_stored_chunks
+        # Both workers have chunks 0-2: a 3-chunk hit.
+        assert hit_chunks == num_stored_chunks
+        for row in found_rows:
+            assert row.get_indices_list() == list(range(num_stored_chunks))
 
     def test_tp2_different_partial_hits_min_common_prefix(
         self, storage_manager, test_layout
@@ -301,9 +313,7 @@ class TestStorageManagerTPLookup:
             create_object_key(chunk_hash=i, worker_id=0, world_size=world_size)
             for i in range(5)
         ]
-        reserved_dict = storage_manager.reserve_write(
-            storage_keys_w0, test_layout, "new"
-        )
+        reserved_dict = storage_manager.reserve_write(storage_keys_w0, test_layout)
         storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Worker 1 has only 2 chunks
@@ -311,30 +321,21 @@ class TestStorageManagerTPLookup:
             create_object_key(chunk_hash=i, worker_id=1, world_size=world_size)
             for i in range(2)
         ]
-        reserved_dict = storage_manager.reserve_write(
-            storage_keys_w1, test_layout, "new"
-        )
+        reserved_dict = storage_manager.reserve_write(storage_keys_w1, test_layout)
         storage_manager.finish_write(list(reserved_dict.keys()))
 
-        # Request 5 chunks with scheduler-style interleaved lookup
-        lookup_keys = create_interleaved_lookup_keys(5, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
+        # Request 5 chunks with a scheduler-style lookup (one row per worker)
+        rows = create_lookup_key_rows(5, world_size)
+        handle = storage_manager.submit_prefetch_task(ranked_spec(rows, test_layout))
+        hit_chunks, found_rows = tp_lookup_hit_chunks(
+            storage_manager, handle, world_size
+        )
 
-        # Lookup order:
-        # chunk0_w0, chunk0_w1, chunk1_w0, chunk1_w1, chunk2_w0, chunk2_w1...
-        # chunk0_w0: found (1)
-        # chunk0_w1: found (2)
-        # chunk1_w0: found (3)
-        # chunk1_w1: found (4)
-        # chunk2_w0: found (5)
-        # chunk2_w1: NOT found (stops)
-        assert found_count == 5  # 2 complete chunks * 2 workers + 1 partial
-
-        # Simulating MPCacheEngine.lookup logic
-        found_ipc_count = found_count // world_size
-        # 5 // 2 = 2, so only 2 complete chunks
-        assert found_ipc_count == 2
+        # Worker 0: chunks 0-4 resident; worker 1: chunks 0-1. The hit is the
+        # minimum common prefix (2 chunks); worker 0's chunks 2-4 are released.
+        assert hit_chunks == 2
+        assert found_rows[0].get_indices_list() == [0, 1]
+        assert found_rows[1].get_indices_list() == [0, 1]
 
     def test_tp4_all_workers_have_cache(self, storage_manager, test_layout):
         """
@@ -351,21 +352,20 @@ class TestStorageManagerTPLookup:
                 )
                 for i in range(num_chunks)
             ]
-            reserved_dict = storage_manager.reserve_write(
-                storage_keys, test_layout, "new"
-            )
+            reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
 
-        # Scheduler-style interleaved lookup
-        lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
+        # Scheduler-style lookup: one key row per worker
+        rows = create_lookup_key_rows(num_chunks, world_size)
+        handle = storage_manager.submit_prefetch_task(ranked_spec(rows, test_layout))
+        hit_chunks, found_rows = tp_lookup_hit_chunks(
+            storage_manager, handle, world_size
+        )
 
-        # All keys found: 3 chunks * 4 workers = 12
-        assert found_count == num_chunks * world_size
-
-        found_ipc_count = found_count // world_size
-        assert found_ipc_count == num_chunks
+        # All 4 workers have all 3 chunks.
+        assert hit_chunks == num_chunks
+        for row in found_rows:
+            assert row.get_indices_list() == list(range(num_chunks))
 
     def test_tp4_one_worker_missing_causes_no_hit(self, storage_manager, test_layout):
         """
@@ -383,25 +383,20 @@ class TestStorageManagerTPLookup:
                 )
                 for i in range(num_chunks)
             ]
-            reserved_dict = storage_manager.reserve_write(
-                storage_keys, test_layout, "new"
-            )
+            reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
 
-        # Scheduler-style interleaved lookup
-        lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
-        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
+        # Scheduler-style lookup: one key row per worker
+        rows = create_lookup_key_rows(num_chunks, world_size)
+        handle = storage_manager.submit_prefetch_task(ranked_spec(rows, test_layout))
+        hit_chunks, found_rows = tp_lookup_hit_chunks(
+            storage_manager, handle, world_size
+        )
 
-        # Lookup order: chunk0_w0, chunk0_w1, chunk0_w2, chunk0_w3, ...
-        # chunk0_w0: found (1)
-        # chunk0_w1: found (2)
-        # chunk0_w2: NOT found (stops)
-        assert found_count == 2
-
-        found_ipc_count = found_count // world_size
-        # 2 // 4 = 0, no complete chunks
-        assert found_ipc_count == 0
+        # Worker 2 has nothing, so no chunk is complete across all workers.
+        assert hit_chunks == 0
+        for row in found_rows:
+            assert row.popcount() == 0
 
 
 # ==============================================================================
@@ -410,8 +405,8 @@ class TestStorageManagerTPLookup:
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for tensor parallel tests",
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
 )
 class TestStorageManagerTPStoreRetrieve:
     """Tests for store and retrieve operations with tensor parallel."""
@@ -427,17 +422,19 @@ class TestStorageManagerTPStoreRetrieve:
         key_w1 = create_object_key(chunk_hash=100, worker_id=1, world_size=world_size)
 
         # Store worker 0's data
-        reserved_dict0 = storage_manager.reserve_write([key_w0], test_layout, "new")
+        reserved_dict0 = storage_manager.reserve_write([key_w0], test_layout)
         assert len(reserved_dict0) == 1
         storage_manager.finish_write(list(reserved_dict0.keys()))
 
         # Store worker 1's data
-        reserved_dict1 = storage_manager.reserve_write([key_w1], test_layout, "new")
+        reserved_dict1 = storage_manager.reserve_write([key_w1], test_layout)
         assert len(reserved_dict1) == 1
         storage_manager.finish_write(list(reserved_dict1.keys()))
 
         # Prefetch to secure both entries
-        handle = storage_manager.submit_prefetch_task([key_w0, key_w1], test_layout)
+        handle = storage_manager.submit_prefetch_task(
+            single_row_spec([key_w0, key_w1], test_layout)
+        )
         _ = storage_manager.query_prefetch_status(handle)
 
         # Both should be retrievable independently
@@ -462,12 +459,14 @@ class TestStorageManagerTPStoreRetrieve:
                 )
                 for i in range(3)
             ]
-            reserved_dict = storage_manager.reserve_write(keys, test_layout, "new")
+            reserved_dict = storage_manager.reserve_write(keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
             all_keys.extend(keys)
 
         # Prefetch to secure all entries
-        handle = storage_manager.submit_prefetch_task(all_keys, test_layout)
+        handle = storage_manager.submit_prefetch_task(
+            single_row_spec(all_keys, test_layout)
+        )
         _ = storage_manager.query_prefetch_status(handle)
 
         # Retrieve only worker 0's data
@@ -493,8 +492,8 @@ class TestStorageManagerTPStoreRetrieve:
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for tensor parallel tests",
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
 )
 class TestTPEdgeCases:
     """Edge case tests for tensor parallel support."""
@@ -512,12 +511,18 @@ class TestTPEdgeCases:
             create_object_key(chunk_hash=i, worker_id=0, world_size=world_size)
             for i in range(num_chunks)
         ]
-        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout, "new")
+        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
         storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Lookup should find all chunks
-        handle = storage_manager.submit_prefetch_task(storage_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
+        handle = storage_manager.submit_prefetch_task(
+            single_row_spec(storage_keys, test_layout)
+        )
+        found_count = (
+            storage_manager.query_prefetch_status(handle)
+            .hit_cells[0]
+            .count_leading_ones()
+        )
         assert found_count == num_chunks
 
         # Retrieve should work
@@ -542,26 +547,18 @@ class TestTPEdgeCases:
                 for i in range(num_chunks)
             ]
             all_keys.extend(storage_keys)
-            reserved_dict = storage_manager.reserve_write(
-                storage_keys, test_layout, "new"
-            )
+            reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
 
-        # Create interleaved lookup keys (simulating scheduler lookup)
-        # Order: [chunk0_w0, chunk0_w1, ..., chunk0_w7, chunk1_w0, ...]
-        lookup_keys = []
-        for chunk_idx in range(num_chunks):
-            for worker_id in range(world_size):
-                lookup_keys.append(
-                    create_object_key(
-                        chunk_hash=chunk_idx, worker_id=worker_id, world_size=world_size
-                    )
-                )
-
-        # All keys should be found
-        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
-        assert found_count == num_chunks * world_size
+        # Scheduler lookup: one key row per worker
+        rows = create_lookup_key_rows(num_chunks, world_size)
+        handle = storage_manager.submit_prefetch_task(ranked_spec(rows, test_layout))
+        hit_chunks, found_rows = tp_lookup_hit_chunks(
+            storage_manager, handle, world_size
+        )
+        assert hit_chunks == num_chunks
+        for row in found_rows:
+            assert row.get_indices_list() == list(range(num_chunks))
 
         # Verify retrieval for each worker
         for worker_id in range(world_size):
@@ -592,13 +589,19 @@ class TestTPEdgeCases:
         assert len(set(storage_keys)) == world_size
 
         # Store all keys
-        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout, "new")
+        reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
         assert len(reserved_dict) == world_size
         storage_manager.finish_write(list(reserved_dict.keys()))
 
         # Lookup all keys
-        handle = storage_manager.submit_prefetch_task(storage_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
+        handle = storage_manager.submit_prefetch_task(
+            single_row_spec(storage_keys, test_layout)
+        )
+        found_count = (
+            storage_manager.query_prefetch_status(handle)
+            .hit_cells[0]
+            .count_leading_ones()
+        )
         assert found_count == world_size
 
         # Retrieve each worker's key independently
@@ -617,8 +620,8 @@ class TestTPEdgeCases:
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for tensor parallel tests",
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
 )
 class TestTPIntegration:
     """Integration tests simulating real TP workflows."""
@@ -628,7 +631,7 @@ class TestTPIntegration:
         Simulate a full TP=2 workflow:
         1. Worker 0 stores chunks 0, 1, 2
         2. Worker 1 stores chunks 0, 1, 2
-        3. Scheduler looks up chunks 0, 1, 2, 3, 4 (interleaved for all workers)
+        3. Scheduler looks up chunks 0, 1, 2, 3, 4 (one key row per worker)
         4. Verify correct hit count
         5. Workers retrieve their respective chunks
         """
@@ -644,33 +647,20 @@ class TestTPIntegration:
                 )
                 for i in range(stored_chunks)
             ]
-            reserved_dict = storage_manager.reserve_write(
-                storage_keys, test_layout, "new"
-            )
+            reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved_dict.keys()))
 
-        # Step 3: Scheduler lookup with interleaved keys
-        # Order: [chunk0_w0, chunk0_w1, chunk1_w0, chunk1_w1, ...]
-        lookup_keys = []
-        for chunk_idx in range(requested_chunks):
-            for worker_id in range(world_size):
-                lookup_keys.append(
-                    create_object_key(
-                        chunk_hash=chunk_idx,
-                        worker_id=worker_id,
-                        world_size=world_size,
-                    )
-                )
-        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
+        # Step 3: Scheduler lookup, one key row per worker
+        rows = create_lookup_key_rows(requested_chunks, world_size)
+        handle = storage_manager.submit_prefetch_task(ranked_spec(rows, test_layout))
+        hit_chunks, found_rows = tp_lookup_hit_chunks(
+            storage_manager, handle, world_size
+        )
 
-        # Step 4: Verify hit count
-        # First 3 chunks * 2 workers = 6 keys found, then stops at chunk3_worker0
-        assert found_count == stored_chunks * world_size
-
-        # Compute number of complete IPC-level hits
-        found_ipc_count = found_count // world_size
-        assert found_ipc_count == stored_chunks
+        # Step 4: Verify hit count -- both workers have chunks 0-2.
+        assert hit_chunks == stored_chunks
+        for row in found_rows:
+            assert row.get_indices_list() == list(range(stored_chunks))
 
         # Step 5: Workers retrieve their chunks
         for worker_id in range(world_size):
@@ -700,7 +690,7 @@ class TestTPIntegration:
                 )
                 for i in range(num_chunks)
             ]
-            reserved = storage_manager.reserve_write(storage_keys, test_layout, "new")
+            reserved = storage_manager.reserve_write(storage_keys, test_layout)
             storage_manager.finish_write(list(reserved.keys()))
             results[worker_id] = len(reserved)
 
@@ -718,17 +708,10 @@ class TestTPIntegration:
         assert results[0] == num_chunks
         assert results[1] == num_chunks
 
-        # Verify lookup works with interleaved keys
-        lookup_keys = []
-        for chunk_idx in range(num_chunks):
-            for worker_id in range(world_size):
-                lookup_keys.append(
-                    create_object_key(
-                        chunk_hash=chunk_idx,
-                        worker_id=worker_id,
-                        world_size=world_size,
-                    )
-                )
-        handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
-        assert found_count == num_chunks * world_size
+        # Verify lookup works with one key row per worker
+        rows = create_lookup_key_rows(num_chunks, world_size)
+        handle = storage_manager.submit_prefetch_task(ranked_spec(rows, test_layout))
+        hit_chunks, found_rows = tp_lookup_hit_chunks(
+            storage_manager, handle, world_size
+        )
+        assert hit_chunks == num_chunks

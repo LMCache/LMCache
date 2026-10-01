@@ -956,6 +956,15 @@ def main():
         help="Heartbeat service URL, e.g.: http://example.com/heartbeat",
     )
     parser.add_argument(
+        "--report-host",
+        type=str,
+        default=None,
+        help="Host to report in heartbeat api_address. When set, bypasses "
+        "get_local_ip() auto-detection. Useful for local dev or multi-NIC "
+        "hosts where the auto-detected IP is not reachable from the "
+        "discovery service side.",
+    )
+    parser.add_argument(
         "--heartbeat-initial-delay",
         type=int,
         default=0,
@@ -999,13 +1008,16 @@ def main():
     # Start heartbeat service if URL is configured
     if args.heartbeat_url:
         # Set application configuration for heartbeat service
-        heartbeat_service.set_app_config(args.host, args.port, target_nodes)
+        heartbeat_service.set_app_config(
+            args.host, args.port, target_nodes, args.report_host
+        )
 
         print("Starting heartbeat service...")
         print(f"Heartbeat URL: {args.heartbeat_url}")
         print(f"Initial delay: {args.heartbeat_initial_delay}s")
         print(f"Interval: {args.heartbeat_interval}s")
-        print(f"API Address: http://{args.host}:{args.port}")
+        reported_host = args.report_host or heartbeat_service.get_local_ip()
+        print(f"API Address: http://{reported_host}:{args.port}")
         print(f"Target nodes count: {len(target_nodes)}")
 
         heartbeat_service.start(

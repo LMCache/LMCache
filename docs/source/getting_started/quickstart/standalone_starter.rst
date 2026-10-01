@@ -3,6 +3,11 @@
 Standalone Starter
 ==================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 The LMCache Standalone Starter allows you to run LMCacheEngine as a standalone service without vLLM or GPU dependencies. This is particularly useful for:
 
 - Testing and development environments

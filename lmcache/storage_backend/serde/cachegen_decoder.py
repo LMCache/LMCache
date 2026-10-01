@@ -6,7 +6,7 @@ from typing import List, Optional
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import device_ops, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.cachegen_basics import (
     CacheGenConfig,
@@ -17,7 +17,6 @@ from lmcache.storage_backend.serde.serde import Deserializer
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
-import lmcache.c_ops as lmc_ops
 import lmcache.storage_backend.serde.cachegen_basics as CGBasics
 
 logger = init_logger(__name__)
@@ -71,7 +70,7 @@ def decode_chunk(
         .cumsum(0)
         .reshape(data_chunk.bytestream_lengths.shape)
     )
-    lmc_ops.decode_fast_prefsum(cdf, bytes_tensor, length_prefsum, target_buffer)
+    device_ops.decode_fast_prefsum(cdf, bytes_tensor, length_prefsum, target_buffer)
 
 
 @_lmcache_nvtx_annotate

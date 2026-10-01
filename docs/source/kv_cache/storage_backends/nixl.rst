@@ -2,6 +2,11 @@
 Nixl
 ====
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/l2_storage/nixl`.
+
+
 .. _nixl-overview:
 
 Overview
@@ -47,12 +52,13 @@ Key settings:
 
 - ``nixl_pool_size``: number of descriptors opened at init time for nixl backend. Set to 0 for dynamic mode.
 
-- ``nixl_path``: directory under which the storage files will be saved (e.g. /mnt/nixl/). Needed for NIXL backends that store to file.
+- ``nixl_path``: directory (or list of directories) under which the storage files will be saved (e.g. /mnt/nixl/). Needed for NIXL backends that store to file. When using a list of paths with ``path_sharding``, paths will be selected based on the sharding strategy.
 
 - ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS", "GDS_MT", and "OBJ" backends - for "POSIX", "HF3FS", "AZURE_BLOB" & "DOCA_MEMOS", must be "cpu". In CPU mode, NIXL shares ``LocalCPUBackend``'s pinned buffer; ``LocalCPUBackend`` is always created when ``nixl_buffer_device: cpu``, regardless of the ``local_cpu`` setting. ``local_cpu: false`` still suppresses hot-cache promotions — the backend acts as a staging buffer only, mirroring how ``local_disk`` already uses ``LocalCPUBackend``.
 
 - ``nixl_backend``: configuration of which nixl backend to use for storage.
 
+- ``nixl_path_sharding``: strategy for selecting path when multiple paths are provided. Currently only "by_gpu" is supported, which selects paths based on GPU device ID.
 - ``local_cpu_use_hugepages``: whether to use Linux hugepages (2 MiB) for ``LocalCPUBackend``'s pinned pool (which NIXL shares in CPU mode). Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Default: ``false``. **Deprecated alias:** ``extra_config.nixl_use_hugepages`` — accepted with a warning and copied into this field; will be removed in a future release.
 
 .. note::
@@ -63,11 +69,37 @@ Key settings:
 
     ``enable_p2p: true`` is rejected together with ``nixl_buffer_device: cpu``. The combination is structurally supported — both backends share ``LocalCPUBackend``'s pinned pool, each runs its own NIXL agent over it, and allocations route through ``LocalCPUBackend.allocate()`` — but it has not been exercised end-to-end and has no CI coverage. Use ``enable_p2p: true`` with ``nixl_buffer_device: cuda`` instead, or disable ``enable_p2p`` when running the NIXL CPU shared pool.
 
+- ``nixl_presence_cache``: whether to keep an in-DRAM presence cache of keys known to exist, so repeated existence checks for the same key are answered locally instead of via a NIXL ``query_memory`` call. Applies to the dynamic backend (``nixl_pool_size: 0``). Default: ``false``.
+
+- ``nixl_presence_cache_only``: when ``true``, the dynamic NIXL backend treats the local presence cache (and in-progress put set) as authoritative for existence checks. If a key is not known locally, lookup reports a miss **without** issuing a NIXL ``query_memory`` check. This requires ``nixl_presence_cache: true`` and can intentionally produce **false negatives** for objects that exist in the underlying storage but are absent from local presence metadata — giving "DRAM-only metadata" semantics where a process restart always yields a logically empty cache. Default: ``false``.
+
+  .. note::
+
+     This is a **lookup/existence-check** mode, not a "never touch the underlying storage" policy. It gates ``contains`` / ``batched_contains`` (and the async variant); direct retrieval still reads from the underlying storage. In normal operation a retrieval is only issued for a key that lookup already reported as present, so locally-unknown keys are not fetched. The option is only consulted by the dynamic backend (``nixl_pool_size: 0``); it is accepted but unused for static configurations.
+
 .. note::
 
     Supported backends are: ["GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ", "AZURE_BLOB", "DOCA_MEMOS"].
 
     Backend specific params should be provided via ``extra_config.nixl_backend_params``. Please refer to NIXL documentation for specifics.
+
+Example ``lmcache-config.yaml`` for POSIX backend with multipath support:
+
+.. code-block:: yaml
+
+    chunk_size: 256
+    nixl_buffer_size: 1073741824 # 1GB
+    nixl_buffer_device: cpu
+    extra_config:
+      enable_nixl_storage: true
+      nixl_backend: POSIX
+      nixl_pool_size: 64
+      nixl_path: 
+        - /mnt/nixl/cache0/
+        - /mnt/nixl/cache1/
+        - /mnt/nixl/cache2/
+      nixl_path_sharding: by_gpu
+      use_direct_io: True
 
 Example ``lmcache-config.yaml`` for OBJ backend using S3 API:
 

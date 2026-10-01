@@ -106,6 +106,7 @@ class L1EvictionController(EvictionController):
         self._listener = L1EvictionPolicy(self._eviction_policy)
         self._l1_manager.register_listener(self._listener)
         self._event_bus = get_event_bus()
+        self._last_extra_log = time.monotonic()
 
     def report_status(self) -> dict:
         return {
@@ -142,6 +143,20 @@ class L1EvictionController(EvictionController):
             )
         )
 
+    def _maybe_log_memory_usage(self, used_bytes: int, total_bytes: int) -> None:
+        """Emit the opt-in L1 memory usage INFO line, throttled to the interval."""
+        now = time.monotonic()
+        if now - self._last_extra_log < self._eviction_config.extra_logging_interval:
+            return
+        self._last_extra_log = now
+        pct = 0.0 if total_bytes == 0 else used_bytes / total_bytes * 100.0
+        logger.info(
+            "L1 memory usage: %.2f/%.2f GiB (%.1f%%)",
+            used_bytes / (1 << 30),
+            total_bytes / (1 << 30),
+            pct,
+        )
+
     def eviction_loop(self):
         watermark = self._eviction_config.trigger_watermark
         eviction_ratio = self._eviction_config.eviction_ratio
@@ -149,6 +164,8 @@ class L1EvictionController(EvictionController):
         while not self._stop_flag.is_set():
             time.sleep(1)
             used_bytes, total_bytes = self._l1_manager.get_memory_usage()
+            if self._eviction_config.extra_logging_enabled:
+                self._maybe_log_memory_usage(used_bytes, total_bytes)
             usage = 0 if total_bytes == 0 else used_bytes / total_bytes
             if usage < watermark:
                 logger.debug(
@@ -186,9 +203,11 @@ class L2AdapterEvictionState:
 
     def __init__(
         self,
+        adapter_id: int,
         adapter: L2AdapterInterface,
         eviction_config: EvictionConfig,
     ):
+        self.adapter_id = adapter_id
         self.adapter = adapter
         self.eviction_config = eviction_config
         self.eviction_policy = CreateEvictionPolicy(eviction_config)
@@ -219,6 +238,8 @@ class L2EvictionController(StorageControllerInterface):
     ):
         self._adapter_states = l2_adapter_states
         self._quota_manager = quota_manager
+        # Guards _adapter_states against concurrent runtime add/remove.
+        self._states_lock = threading.Lock()
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
             target=self._eviction_loop,
@@ -233,6 +254,23 @@ class L2EvictionController(StorageControllerInterface):
         self._stop_flag.set()
         self._thread.join()
 
+    def add_adapter_state(self, state: L2AdapterEvictionState) -> None:
+        """Register a new adapter's eviction state at runtime."""
+        with self._states_lock:
+            self._adapter_states.append(state)
+
+    def remove_adapter_state(self, adapter_id: int) -> None:
+        """Drop the eviction state for ``adapter_id``.
+
+        Blocks until any in-progress eviction pass finishes (it holds the
+        same lock), so the adapter is guaranteed idle here before the
+        caller closes it. A no-op if the adapter has no eviction state.
+        """
+        with self._states_lock:
+            self._adapter_states = [
+                s for s in self._adapter_states if s.adapter_id != adapter_id
+            ]
+
     def report_status(self) -> dict:
         # NOTE: ``usage.bytes_by_cache_salt`` is intentionally NOT
         # surfaced here. A deployment can have 10k+ salts, so embedding
@@ -241,7 +279,9 @@ class L2EvictionController(StorageControllerInterface):
         # quota endpoints (which pull from ``QuotaManager`` +
         # ``StorageManager.get_usage_bytes_by_cache_salt``).
         adapter_statuses = []
-        for state in self._adapter_states:
+        with self._states_lock:
+            states = list(self._adapter_states)
+        for state in states:
             usage = state.adapter.get_usage()
             adapter_statuses.append(
                 {
@@ -263,8 +303,12 @@ class L2EvictionController(StorageControllerInterface):
     def _eviction_loop(self):
         while not self._stop_flag.is_set():
             time.sleep(1)
-            for state in self._adapter_states:
-                self._check_and_evict(state)
+            # Hold the lock across the whole pass so remove_adapter_state
+            # cannot detach (and the caller close) an adapter while we are
+            # calling into it.
+            with self._states_lock:
+                for state in self._adapter_states:
+                    self._check_and_evict(state)
 
     def _check_and_evict(self, state: L2AdapterEvictionState):
         if state.eviction_policy.support_isolation and self._quota_manager is not None:

@@ -2,5 +2,6 @@
 # LMCACHE_CUDA_MAJOR=12. The cu13 default lives in cuda13_core.txt.
 
 cupy-cuda12x
-# nixl on PyPI is a meta-package that pulls nixl-cu12 (CUDA-only).
-nixl; python_version < "3.13"
+# cuda.bindings, used by the timeline-semaphore event IPC backend
+# (selected under isolated IPC) and the raw CUDA IPC wrapper.
+cuda-python>=12,<13

@@ -21,6 +21,7 @@ from lmcache.utils import (
     parse_cache_key,
     parse_mixed_slot_mapping,
     round_down,
+    round_up,
 )
 
 
@@ -56,6 +57,20 @@ class TestRoundDown:
 
     def test_zero(self):
         assert round_down(0, 5) == 0
+
+
+class TestRoundUp:
+    def test_exact_multiple(self):
+        assert round_up(10, 5) == 10
+
+    def test_not_exact_multiple(self):
+        assert round_up(7, 3) == 9
+
+    def test_smaller_than_y(self):
+        assert round_up(2, 5) == 5
+
+    def test_zero(self):
+        assert round_up(0, 5) == 0
 
 
 # ============================================================

@@ -5,6 +5,7 @@ This microbenchmark compares multiple storage backends under high write/read con
 - **RustRawBlockBackend** - Raw block device with optional O_DIRECT and io_uring
 - **Hf3fsBackend** - HF3FS remote storage
 - **FsBackend** - Filesystem connector backend
+- The **io_uring** backend can optionally use **io_uring_cmd** (NVMe passthrough) for direct device access.
 
 ## What It Measures
 
@@ -44,6 +45,19 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
   --raw-device /dev/nvme0n1 \
   --verify-integrity \
   --output-json /tmp/storage_backend_io.json
+
+# Rust raw block backend with io_uring_cmd (write benchmark)
+# Note: io_uring_cmd requires NVMe character device node (/dev/ngXnY)
+python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
+  --num-ops 1024 \
+  --concurrency 4 \
+  --backend rust_raw_block \
+  --raw-device /dev/ng0n1 \
+  --chunk-size 256 \
+  --alignment 4096 \
+  --use-uring \
+  --use-uring-cmd \
+  --output-json /tmp/rust_raw_block_uring_cmd.json
 
 # HF3FS backend (write benchmark)
 python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
@@ -89,6 +103,10 @@ python benchmarks/storage_backend_io/storage_backend_io_benchmark.py \
 - When `--local-disk-odirect` is enabled, the benchmark allocates **page-aligned** buffers to avoid EINVAL from O_DIRECT.
 - Local disk backend uses its internal worker pool; completion is tracked via callbacks.
 - Rust raw block benchmark uses a unique manifest path per run to avoid stale-index reuse between runs.
+- For io_uring there is a limit on the number of fixed buffers that can be registered. For unprivileged users its 16384.
+- Buffer registration and de-registration is time consuming.
+- **io_uring_cmd** requires using the NVMe character device node (e.g., `/dev/ng0n1`) instead of the block device node (e.g., `/dev/nvme0n1`).
+- **io_uring_cmd** requires io_uring as the underlying I/O engine.
 
 ## How To Compare On Real NVMe
 
@@ -201,7 +219,8 @@ For write+read benchmarks (`--write_bench False`):
     "verify_integrity": true,
     "integrity_errors": 0,
     "integrity_passed": true,
-    "use_uring": false
+    "use_uring": false,
+    "use_uring_cmd": false
   }
 ]
 ```

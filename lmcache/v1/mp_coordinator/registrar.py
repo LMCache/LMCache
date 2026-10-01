@@ -13,6 +13,7 @@ logged and retried, and it never takes the MP server down.
 """
 
 # Standard
+from collections.abc import Callable
 import asyncio
 import contextlib
 
@@ -27,6 +28,7 @@ from lmcache.v1.rpc_utils import get_ip
 
 logger = init_logger(__name__)
 
+
 _DEFAULT_HEARTBEAT_INTERVAL = 5.0
 
 
@@ -37,6 +39,8 @@ async def register(
     http_port: int,
     advertise_ip: str,
     instance_id: str = "",
+    p2p_advertised_url: str = "",
+    mq_port: int = 0,
 ) -> str:
     """Register an MP server with the coordinator and return its id.
 
@@ -46,6 +50,10 @@ async def register(
         http_port: This MP server's HTTP port to advertise.
         advertise_ip: IP the coordinator should reach this server at.
         instance_id: Desired id; empty lets the coordinator assign one.
+        p2p_advertised_url: Transfer-channel URL to advertise for P2P. Empty
+            when P2P is disabled.
+        mq_port: Port of this server's ZMQ message-queue server for P2P lookup
+            RPCs. 0 when P2P is disabled.
 
     Returns:
         The registered instance id (coordinator-assigned if ``instance_id`` was
@@ -55,9 +63,15 @@ async def register(
         httpx.HTTPError: If the request fails or returns a non-2xx status.
     """
     body = RegisterRequest(
-        instance_id=instance_id, ip=advertise_ip, http_port=http_port
+        instance_id=instance_id,
+        ip=advertise_ip,
+        http_port=http_port,
+        p2p_advertised_url=p2p_advertised_url,
+        mq_port=mq_port,
     )
-    response = await client.post(f"{base_url}/instances", json=body.model_dump())
+    response = await client.post(
+        f"{base_url}/instances", json=body.model_dump(mode="json")
+    )
     response.raise_for_status()
     return RegisterResponse.model_validate(response.json()).instance_id
 
@@ -70,6 +84,9 @@ async def keep_registered(
     instance_id: str = "",
     advertise_ip: str = "",
     heartbeat_interval: float = _DEFAULT_HEARTBEAT_INTERVAL,
+    p2p_advertised_url: str = "",
+    mq_port: int = 0,
+    on_registered: Callable[[], None],
 ) -> None:
     """Register, heartbeat on a timer, and deregister on cancellation.
 
@@ -89,6 +106,15 @@ async def keep_registered(
         advertise_ip: IP the coordinator should reach this server at; defaults to
             the machine's outbound IP.
         heartbeat_interval: Seconds between heartbeats.
+        p2p_advertised_url: Transfer-channel URL to advertise for P2P. Empty
+            when P2P is disabled.
+        mq_port: Port of this server's ZMQ message-queue server for P2P lookup
+            RPCs. 0 when P2P is disabled.
+        on_registered: Called after every successful registration, including
+            a re-registration. Required, not defaulted: the coordinator keeps
+            some state only in memory -- capacity declarations above all --
+            and a caller that republishes nothing has to say so. Pass
+            ``lambda: None`` to mean it.
     """
     base_url = coordinator_url.rstrip("/")
     ip = advertise_ip or get_ip()
@@ -103,8 +129,11 @@ async def keep_registered(
                         http_port=http_port,
                         advertise_ip=ip,
                         instance_id=instance_id,
+                        p2p_advertised_url=p2p_advertised_url,
+                        mq_port=mq_port,
                     )
                     logger.info("Registered with coordinator as %s", assigned_id)
+                    on_registered()
                 else:
                     response = await client.put(
                         f"{base_url}/instances/{assigned_id}/heartbeat"

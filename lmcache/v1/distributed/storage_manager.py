@@ -4,24 +4,44 @@ Distributed multi-tier storage manager for MP mode
 """
 
 # Standard
-from contextlib import contextmanager
-from typing import Iterator, Literal
+from contextlib import contextmanager, nullcontext
+from typing import Any, Iterator, Optional, cast
+import threading
 import time
 
 # First Party
+from lmcache.lmcache_native import PeriodicEventNotifier
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap, PeriodicEventNotifier
 from lmcache.v1.distributed.api import (
+    CapacitySnapshot,
     MemoryLayoutDesc,
+    ModuleMemoryCapacity,
     ObjectKey,
     PrefetchHandle,
-    TrimPolicy,
+    PrefetchResult,
+    PrefetchTaskSpec,
+    Tier,
 )
-from lmcache.v1.distributed.config import StorageManagerConfig
-from lmcache.v1.distributed.error import L1Error, strerror
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    StorageManagerConfig,
+    requires_single_l1_memory_region,
+    unwrap_l2_adapter_config,
+)
+from lmcache.v1.distributed.error import L1Error, L1ReconfigureError, strerror
+from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
-from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
+from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdapterConfigBase,
+    get_type_name_for_config,
+)
+from lmcache.v1.distributed.l2_adapters.reconfiguration import (
+    L2DeviceOwner,
+    L2ReconfigurableAdapter,
+    L2ReconfigureError,
+)
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.serde import create_serde_processor
@@ -36,10 +56,19 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     create_prefetch_policy,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     create_store_policy,
 )
+from lmcache.v1.distributed.storage_controllers.utils import (
+    L1ManagerDescriptor,
+    L2AdapterDescriptor,
+)
+from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+    DevDaxArenaState,
+    DevDaxArenaStatus,
+    DevDaxRemoveMode,
+)
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -51,6 +80,10 @@ from lmcache.v1.mp_observability.trace.decorator import (
 from lmcache.v1.platform import HAS_EVENTFD
 
 logger = init_logger(__name__)
+
+# L1 write tag for every object reserved through this manager. Sharing one
+# tag makes concurrent stores of the same key exclude each other.
+_L1_WRITE_TAG = "storage_manager"
 
 
 class StorageManager:
@@ -69,17 +102,23 @@ class StorageManager:
         # a ``serde_config``, the adapter is wrapped with
         # ``SerdeL2AdapterWrapper`` so controllers see a plain L2 adapter
         # and serde is transparent.
-        l1_memory_desc = self._l1_manager.get_l1_memory_desc()
-        self._l2_adapters: list[L2AdapterInterface] = []
+        self._l1_memory_desc = self._l1_manager.get_l1_memory_desc()
+        self._next_adapter_id = 0
+        # Serializes L1/L2 additions and L2 adapter registration/deletion.
+        # Held from ownership check through add, before allocator/device locks.
+        self._lifecycle_lock = threading.Lock()
+        # Keeps capacity snapshots ordered by the point at which they are
+        # built. Registration can publish concurrently with runtime changes.
+        self._capacity_publish_lock = threading.Lock()
+        # Guards the _l2_adapters and _adapter_descriptors dicts.
+        self._adapters_lock = threading.Lock()
+        self._registered_l2_listeners: list[L2AdapterListener] = []
+        self._l2_adapters: dict[int, L2AdapterInterface] = {}
+        self._adapter_descriptors: dict[int, L2AdapterDescriptor] = {}
         for ac in config.l2_adapter_config.adapters:
-            adapter: L2AdapterInterface = create_l2_adapter(ac, l1_memory_desc)
-            if ac.serde_config is not None:
-                adapter = SerdeL2AdapterWrapper(
-                    inner=adapter,
-                    serde=create_serde_processor(ac.serde_config),
-                    l1_manager=self._l1_manager,
-                )
-            self._l2_adapters.append(adapter)
+            adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
+            self._l2_adapters[adapter_id] = adapter
+            self._adapter_descriptors[adapter_id] = descriptor
 
         PeriodicEventNotifier.create(
             interval_ms=config.periodic_notifier_interval_ms,
@@ -102,50 +141,43 @@ class StorageManager:
         # counts which the base class tracks regardless of capacity,
         # so they are wired up unconditionally.
         l2_eviction_states: list[L2AdapterEvictionState] = []
-        for adapter, ac in zip(
+        for adapter_id, ac in zip(
             self._l2_adapters, config.l2_adapter_config.adapters, strict=True
         ):
-            if ac.eviction_config is None:
-                continue
-            policy_name = ac.eviction_config.eviction_policy
-            if policy_name != "IsolatedLRU" and not adapter.supports_global_eviction:
-                logger.warning(
-                    "L2 adapter %s configured with '%s' eviction but does "
-                    "not support global eviction (max_capacity_bytes=0); "
-                    "skipping aggregate-usage eviction setup.",
-                    type(adapter).__name__,
-                    policy_name,
+            adapter = self._l2_adapters[adapter_id]
+            if self._should_enable_l2_eviction(adapter, ac.eviction_config):
+                assert ac.eviction_config is not None  # make linter happy
+                l2_eviction_states.append(
+                    L2AdapterEvictionState(
+                        adapter_id=adapter_id,
+                        adapter=adapter,
+                        eviction_config=ac.eviction_config,
+                    )
                 )
-                continue
-            l2_eviction_states.append(
-                L2AdapterEvictionState(
-                    adapter=adapter,
-                    eviction_config=ac.eviction_config,
-                )
-            )
         self._l2_eviction_controller = L2EvictionController(
             l2_eviction_states, quota_manager=self._quota_manager
         )
         self._l2_eviction_controller.start()
 
-        self._adapter_descriptors = [
-            AdapterDescriptor(index=i, config=ac)
-            for i, ac in enumerate(config.l2_adapter_config.adapters)
-        ]
-
+        # Controllers receive the initial set as ordered lists; they key
+        # their own copies by ``descriptor.index`` (== adapter_id) and learn
+        # of later changes via add_adapter/request_remove_adapter.
         self._store_controller = StoreController(
             l1_manager=self._l1_manager,
-            l2_adapters=self._l2_adapters,
-            adapter_descriptors=self._adapter_descriptors,
+            l2_adapters=list(self._l2_adapters.values()),
+            adapter_descriptors=list(self._adapter_descriptors.values()),
             policy=create_store_policy(config.store_policy),
         )
         self._store_controller.start()
 
         # Prefetch controller
         self._prefetch_controller = PrefetchController(
-            l1_manager=self._l1_manager,
-            l2_adapters=self._l2_adapters,
-            adapter_descriptors=self._adapter_descriptors,
+            l1_managers=[self._l1_manager],
+            l1_manager_descriptors=[
+                L1ManagerDescriptor(index=0, config=config.l1_manager_config)
+            ],
+            l2_adapters=list(self._l2_adapters.values()),
+            adapter_descriptors=list(self._adapter_descriptors.values()),
             policy=create_prefetch_policy(config.prefetch_policy),
             max_in_flight=config.prefetch_max_in_flight,
         )
@@ -169,7 +201,6 @@ class StorageManager:
         self,
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
-        mode: Literal["new", "update", "all"],
     ) -> dict[ObjectKey, MemoryObj]:
         """
         Reserve the object for writing into the storage manager.
@@ -178,11 +209,6 @@ class StorageManager:
             keys (list[ObjectKey]): List of object keys to reserve for writing.
             layout_desc (MemoryLayoutDesc): Description of the memory layout
                 for the objects to be reserved.
-            mode (Literal["new", "update", "all"]): Reservation mode.
-            - "new": Reserve only new objects that do not exist.
-            - "update": Reserve only existing objects for update.
-            - "all": Reserve all writable objects regardless of existence.
-
         Returns:
             dict[ObjectKey, MemoryObj]: A dictionary mapping object keys to their
                 reserved memory objects. Note that not all requested keys could be
@@ -192,7 +218,7 @@ class StorageManager:
             keys=keys,
             is_temporary=[False] * len(keys),
             layout_desc=layout_desc,
-            mode=mode,
+            tag=_L1_WRITE_TAG,
         )
 
         result = {k: m for k, (e, m) in reserve_result.items() if m is not None}
@@ -229,10 +255,14 @@ class StorageManager:
         """
         Finish writing the objects into the storage manager.
 
+        Admits the objects reserved by :meth:`reserve_write`: each becomes
+        visible to readers unless the key is already resident, in which case
+        the reserved copy is dropped.
+
         Args:
             keys (list[ObjectKey]): List of object keys that have been written.
         """
-        finish_result = self._l1_manager.finish_write(keys)
+        finish_result = self._l1_manager.finish_write(keys, tag=_L1_WRITE_TAG)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
         self._event_bus.publish(
@@ -370,16 +400,16 @@ class StorageManager:
     def finish_read_prefetched(
         self,
         keys: list[ObjectKey],
-        extra_count: int = 0,
+        read_locks: int = 1,
     ) -> None:
         """Finish reading prefetched objects.
 
         Args:
             keys: Object keys that have been read.
-            extra_count: Extra read locks to release per key
-                (on top of the default 1).
+            read_locks: Read locks to release per key (the whole
+                reservation when releasing a lookup's locks).
         """
-        finish_result = self._l1_manager.finish_read(keys, extra_count=extra_count)
+        finish_result = self._l1_manager.finish_read(keys, read_locks=read_locks)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
         self._event_bus.publish(
@@ -395,210 +425,42 @@ class StorageManager:
     @enable_tracing()
     def submit_prefetch_task(
         self,
-        keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
-        extra_count: int = 0,
+        spec: PrefetchTaskSpec,
         external_request_id: str = "",
-        policy: TrimPolicy = TrimPolicy.PREFIX,
+        skip_l2: bool = False,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
         Args:
-            keys: Object keys to prefetch.
-            layout_desc: Memory layout description.
-            extra_count: Extra workers (on top of the default
-                1) that will independently retrieve the same
-                key.  Total locks = 1 + extra_count.
-            external_request_id: Request ID from the caller
-                for end-to-end log tracing.
-            policy: Which retained-subset policy to apply (see
-                :class:`TrimPolicy`).  ``PREFIX`` keeps the contiguous prefix;
-                ``SPARSE`` keeps every found key (gap-tolerant).
+            spec: The request (see :class:`PrefetchTaskSpec`).
+            external_request_id: Caller id for end-to-end log tracing.
+            skip_l2: If True, serve from L1 only. The result is available
+                as soon as this returns.
 
         Returns:
             PrefetchHandle to track the task.
         """
-        # NOTE: now we only have L1, so the prefetch is essentially checking how many
-        # objects are already in L1, and adding read locks to them.
-
-        l1_read_result = self._l1_manager.reserve_read(keys, extra_count=extra_count)
-
-        if policy is TrimPolicy.SPARSE:
-            # SPARSE: retain a read lock on every L1 hit (not just the leading
-            # prefix) and send all L1 misses to L2 as one coalesced request.
-            # reserve_read locks only SUCCESS keys, so the found-set already
-            # equals the locked set -- nothing to release.
-            l1_found_indices: list[int] = []
-            succeeded_keys: list[ObjectKey] = []
-            sparse_l2_indices: list[int] = []
-            remaining_keys: list[ObjectKey] = []
-            for i, key in enumerate(keys):
-                ent = l1_read_result.get(key)
-                if ent is not None and ent[0] == L1Error.SUCCESS and ent[1] is not None:
-                    l1_found_indices.append(i)
-                    succeeded_keys.append(key)
-                else:
-                    sparse_l2_indices.append(i)
-                    remaining_keys.append(key)
-
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.SM_READ_PREFETCHED,
-                    metadata={
-                        "succeeded_keys": succeeded_keys,
-                        "failed_keys": remaining_keys,
-                    },
-                )
-            )
-
-            prefetch_request_id = -1
-            if remaining_keys and self._l2_adapters:
-                prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                    remaining_keys,
-                    layout_desc,
-                    extra_count=extra_count,
-                    policy=TrimPolicy.SPARSE,
-                )
-            return PrefetchHandle(
-                prefetch_request_id=prefetch_request_id,
-                external_request_id=external_request_id,
-                l1_found_indices=tuple(l1_found_indices),
-                total_requested_keys=len(keys),
-                submit_time=time.monotonic(),
-                l2_orig_indices=tuple(sparse_l2_indices),
-            )
-
-        hit_count = 0
-        for key in keys:
-            entry = l1_read_result.get(key, None)
-            if entry is None:
-                break
-
-            err, obj = entry
-            if err != L1Error.SUCCESS:
-                break
-
-            hit_count += 1
-
-        # NOTE: For L1, there will be cases that "object in the middle" is not found.
-        # In this case, we need to `finish_read` for the latter objects so that
-        # there won't be dangling read locks.
-        skipped_keys = []
-        for key in keys[hit_count:]:
-            if key in l1_read_result and l1_read_result[key][1] is not None:
-                # this key is actually reserved, need to release the read lock
-                skipped_keys.append(key)
-
-        if skipped_keys:
-            self._l1_manager.finish_read(skipped_keys, extra_count=extra_count)
-
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.SM_READ_PREFETCHED,
-                metadata={
-                    "succeeded_keys": keys[:hit_count],
-                    "failed_keys": keys[hit_count:],
-                },
-            )
+        prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
+            spec, skip_l2=skip_l2
         )
-
-        # Submit remaining keys to L2 prefetch controller
-        remaining_keys = keys[hit_count:]
-        prefetch_request_id = -1
-        l2_orig_indices: tuple[int, ...] = ()
-        if remaining_keys and self._l2_adapters:
-            prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                remaining_keys,
-                layout_desc,
-                extra_count=extra_count,
-            )
-            # The controller indexes its result bitmap over remaining_keys
-            # (0-based); map those local indices back to original positions.
-            l2_orig_indices = tuple(range(hit_count, len(keys)))
-
-        submit_time = time.monotonic()
         logger.debug(
-            "Prefetch request submitted: "
-            "%d total keys, %d L1 prefix hits, "
-            "%d remaining for L2 "
-            "(external_request_id=%s, "
-            "prefetch_request_id=%d)",
-            len(keys),
-            hit_count,
-            len(remaining_keys),
+            "Prefetch request submitted: %d keys in %d groups "
+            "(external_request_id=%s, prefetch_request_id=%d, skip_l2=%s)",
+            len(spec.key_groups) * spec.group_size,
+            len(spec.key_groups),
             external_request_id,
             prefetch_request_id,
+            skip_l2,
         )
-
         return PrefetchHandle(
             prefetch_request_id=prefetch_request_id,
             external_request_id=external_request_id,
-            l1_found_indices=tuple(range(hit_count)),
-            total_requested_keys=len(keys),
-            submit_time=submit_time,
-            l2_orig_indices=l2_orig_indices,
+            total_requested_keys=len(spec.key_groups) * spec.group_size,
+            submit_time=time.monotonic(),
+            sliding_windows=tuple(row.sliding_window_size for row in spec.key_groups),
         )
 
-    def _combine_found(
-        self, handle: PrefetchHandle, l2_local: "Bitmap | None"
-    ) -> Bitmap:
-        """Merge the L1 found indices with an L2 result bitmap into one bitmap
-        over the original key positions.
-
-        ``l2_local`` is indexed over the keys submitted to L2 (0-based); its
-        set bits are mapped back to original positions via
-        ``handle.l2_orig_indices``.
-        """
-        found = Bitmap(handle.total_requested_keys)
-        found.batched_set(handle.l1_found_indices)
-        if l2_local is not None:
-            # gather maps each L2 set bit i to its original position
-            # ``l2_orig_indices[i]``; batched_set drops any position >= size.
-            found.batched_set(l2_local.gather(handle.l2_orig_indices))
-        return found
-
-    def query_prefetch_lookup_hits(
-        self,
-        handle: PrefetchHandle,
-    ) -> int | None:
-        """
-        Query the number of prefix-hit chunks for a prefetch task before the
-        L2 prefetching is done.
-
-        Args:
-            handle (PrefetchHandle): The handle of the lookup task.
-
-        Returns:
-            the number of prefix-hit chunks (L1 + L2) if the lookup is done,
-            None if it's still in progress or the prefetch task is already done.
-
-        Note:
-            This function is designed for the scenario where the caller wants
-            to check the L1 prefix hits as soon as possible without waiting for
-            the whole prefetch task to be done.
-            When the prefetch task is already done and the prefetch task result
-            has already been queried by `query_prefetch_status`, this function
-            will return None forever for the same prefetch handle.
-            Therefore, it's the caller’s responsibility to make sure not calling
-            this function after the prefetch task is done.
-        """
-        # Prefix-path only: l1_found_indices is contiguous, so len() == prefix hits.
-        l1_hits = len(handle.l1_found_indices)
-        if handle.prefetch_request_id == -1:
-            # No L2 request: the L1 prefix hit count is final.
-            return l1_hits
-
-        l2_r = self._prefetch_controller.query_lookup_result(handle.prefetch_request_id)
-        if l2_r is None:
-            # Still in progress, or already consumed by query_prefetch_status.
-            return None
-        # L2 lookup done: total prefix hits are L1 plus the L2 continuation.
-        return l1_hits + l2_r
-
-    def query_prefetch_status(
-        self,
-        handle: PrefetchHandle,
-    ) -> Bitmap | None:
+    def query_prefetch_status(self, handle: PrefetchHandle) -> PrefetchResult | None:
         """
         Query the status of the prefetch task.
 
@@ -606,41 +468,61 @@ class StorageManager:
             handle (PrefetchHandle): The handle of the prefetch task.
 
         Returns:
-            the found-key bitmap (over original positions) if the prefetch is
-            done, None if it's still in progress. Derive the prefix hit count
-            via ``count_leading_ones``.
+            The task's result once it has finished, None while it is still
+            in progress.
+
+        Note:
+            Each result is returned once; later calls for the same handle
+            return None.
         """
-        l2_r: Bitmap | None = None
-        if handle.prefetch_request_id != -1:
-            l2_r = self._prefetch_controller.query_prefetch_result(
-                handle.prefetch_request_id
-            )
-            if l2_r is None:
-                return None
-
-        found = self._combine_found(handle, l2_r)
-        # popcount (not count_leading_ones) so the log is accurate for
-        # non-contiguous policies (SEGMENTED_PREFIX / SPARSE) too.
-        total_hits = found.popcount()
-        elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
-
+        if handle.prefetch_request_id == -1:
+            return PrefetchResult(hit_cells=[], l1_hit_cells=[], l2_hit_cells=[])
+        result = self._prefetch_controller.query_prefetch_result(
+            handle.prefetch_request_id
+        )
+        if result is None:
+            return None
+        total_hits = sum(row.popcount() for row in result.hit_cells)
         if total_hits > 0:
-            # L1 and L2 sets are disjoint (only L1-misses go to L2).
-            l1_hits = len(handle.l1_found_indices)
-            l2_hits = l2_r.popcount() if l2_r is not None else 0
+            elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
             logger.info(
                 "Prefetch request completed (L1+L2): "
                 "%d/%d retained keys (%d L1, %d L2) in %.1f ms "
                 "(external_request_id=%s, prefetch_request_id=%d)",
                 total_hits,
                 handle.total_requested_keys,
-                l1_hits,
-                l2_hits,
+                result.l1_hit_count,
+                result.l2_hit_count,
                 elapsed_ms,
                 handle.external_request_id,
                 handle.prefetch_request_id,
             )
-        return found
+        return result
+
+    def wait_prefetch_status(
+        self,
+        handle: PrefetchHandle,
+        timeout: float,
+    ) -> bool:
+        """
+        Block until the prefetch task for ``handle`` has a result, or timeout.
+
+        This lets a caller avoid busy-polling query_prefetch_status; the
+        status itself is still retrieved via query_prefetch_status afterwards.
+
+        Args:
+            handle (PrefetchHandle): The handle of the prefetch task.
+            timeout: Maximum number of seconds to wait for the result.
+
+        Returns:
+            True if a result is available within the timeout, False if the
+            wait timed out.
+        """
+        if handle.prefetch_request_id == -1:
+            return True
+        return self._prefetch_controller.wait_prefetch_result(
+            handle.prefetch_request_id, timeout
+        )
 
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
@@ -651,6 +533,26 @@ class StorageManager:
             keys (list[ObjectKey]): List of object keys to touch.
         """
         self._l1_manager.touch_keys(keys)
+
+    def delete_l1_keys(
+        self, keys: list[ObjectKey], force: bool = False
+    ) -> tuple[int, int]:
+        """Delete the given keys from L1.
+
+        Args:
+            keys (list[ObjectKey]): List of object keys to delete.
+            force (bool): When True, delete even read/write-locked keys; else
+                skip them.
+
+        Returns:
+            tuple[int, int]: ``(deleted, skipped)`` -- the number of keys removed
+                and the number refused because they were locked (non-force only).
+                Missing keys are a no-op, so the operation is idempotent.
+        """
+        results = self._l1_manager.delete(keys, force=force)
+        deleted = sum(1 for err in results.values() if err == L1Error.SUCCESS)
+        skipped = sum(1 for err in results.values() if err == L1Error.KEY_IS_LOCKED)
+        return deleted, skipped
 
     def unsafe_read(
         self, keys: list[ObjectKey]
@@ -677,6 +579,11 @@ class StorageManager:
         """
         return self._quota_manager
 
+    @property
+    def l1_memory_desc(self) -> L1MemoryDesc:
+        """Descriptor of the L1 memory buffer backing this storage manager."""
+        return self._l1_memory_desc
+
     def get_l2_usages(
         self,
     ) -> list[tuple[int | float, dict[str, object]]]:
@@ -691,20 +598,225 @@ class StorageManager:
             whose ``get_usage()`` raises are skipped (the gauge prefers
             silence over a poison observation).
         """
-        out: list[tuple[int | float, dict[str, object]]] = []
-        for adapter, desc in zip(
-            self._l2_adapters, self._adapter_descriptors, strict=True
-        ):
+        return [
+            (int(usage.total_bytes_used), {"l2_name": type_name})
+            for type_name, usages in self.get_l2_usages_by_type().items()
+            for usage in usages
+        ]
+
+    def get_l2_usages_by_type(self) -> dict[str, list[AdapterUsage]]:
+        """Per-adapter usage snapshots grouped by adapter type name.
+
+        Backing data for usage telemetry's per-connector presence and
+        occupancy reporting and for the :meth:`get_l2_usages` gauge.
+        Adapters whose ``get_usage()`` raises are skipped.
+
+        Returns:
+            Mapping from adapter type name (e.g. ``"dax"``) to one usage
+            snapshot per active adapter of that type; empty when no L2
+            adapters are configured.
+        """
+        out_by_type: dict[str, list[AdapterUsage]] = {}
+        for _adapter_id, desc, adapter in self._snapshot_adapters():
             try:
                 usage = adapter.get_usage()
             except Exception:
                 logger.exception(
-                    "L2 adapter %s get_usage() failed; skipping in gauge",
+                    "L2 adapter %s get_usage() failed; skipping in usage snapshot",
                     desc.type_name,
                 )
                 continue
-            out.append((int(usage.total_bytes_used), {"l2_name": desc.type_name}))
-        return out
+            out_by_type.setdefault(desc.type_name, []).append(usage)
+        return out_by_type
+
+    def publish_capacity(self) -> None:
+        """Announce the current capacity topology on the event bus.
+
+        Called after every coordinator registration, so a restarted
+        coordinator relearns this server's capacities even if nothing is
+        ever reconfigured. Later changes announce themselves.
+        """
+        self._publish_capacity_changed()
+
+    def _build_capacities(self) -> list[ModuleMemoryCapacity]:
+        """Assemble one capacity entry per memory compartment.
+
+        Returns:
+            L1 per backing medium, then one entry per L2 adapter.
+        """
+        capacities = [
+            ModuleMemoryCapacity(
+                tier=Tier.L1,
+                backend=backend.value,
+                capacity_bytes=configured,
+                shared=False,
+            )
+            for backend, configured in (
+                self._l1_manager.get_capacity_bytes_by_backend().items()
+            )
+        ]
+        for _adapter_id, desc, adapter in self._snapshot_adapters():
+            try:
+                usage = adapter.get_usage()
+            except Exception:
+                logger.exception(
+                    "L2 adapter %s get_usage() failed; omitting from the "
+                    "capacity report",
+                    desc.type_name,
+                )
+                continue
+            capacities.append(
+                ModuleMemoryCapacity(
+                    tier=Tier.L2,
+                    backend=desc.type_name,
+                    capacity_bytes=int(usage.total_capacity_bytes),
+                    shared=bool(desc.config.shared),
+                )
+            )
+        return capacities
+
+    def get_l1_usage(self) -> tuple[int, int]:
+        """Current occupancy of the L1 memory pool.
+
+        Backing data for usage telemetry's L1 occupancy reporting.
+
+        Returns:
+            Tuple of ``(used_bytes, total_bytes)``.
+        """
+        return self._l1_manager.get_memory_usage()
+
+    # L1 reconfiguration APIs
+    def get_l1_devdax_arena_statuses(self) -> list[DevDaxArenaStatus]:
+        """Return runtime status for every Device-DAX L1 arena.
+
+        Returns:
+            One status per mapped arena, in pool order.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed.
+        """
+        return self._l1_manager.get_devdax_arena_statuses()
+
+    def add_l1_devdax_device(
+        self,
+        device_path: str,
+        size_in_bytes: int,
+    ) -> DevDaxArenaStatus:
+        """Add a Device-DAX device to the L1 arena pool.
+
+        A successful addition publishes the current whole capacity topology.
+
+        The addition is refused while an L2 adapter that registers a single L1
+        memory region is configured.
+        The compatibility checks and addition are protected by ``_lifecycle_lock``.
+
+        Args:
+            device_path: Path of the Device-DAX device to map.
+            size_in_bytes: Number of bytes to map.
+
+        Returns:
+            Status of the newly added arena.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed, a single-region
+                L2 adapter is configured (409), the physical device is already
+                mapped by L2 (409), or the request cannot be applied.
+        """
+        with self._lifecycle_lock:
+            # Report the L1 backing error before adapter compatibility.
+            self._l1_manager.get_devdax_arena_statuses()
+            incompatible = self._single_region_adapter_names()
+            if incompatible:
+                raise L1ReconfigureError(
+                    409,
+                    "cannot add a Device-DAX L1 arena: L2 adapters that "
+                    "register a single L1 memory region are configured "
+                    f"({', '.join(incompatible)}); their transfers cover "
+                    "only the primary arena",
+                )
+            device_owners = self._l2_device_owner_names(device_path)
+            if device_owners:
+                raise L1ReconfigureError(
+                    409,
+                    "cannot add a Device-DAX L1 arena: the physical device "
+                    "is already mapped by L2 adapter(s) "
+                    f"({', '.join(device_owners)})",
+                )
+            status = self._l1_manager.add_devdax_device(device_path, size_in_bytes)
+        self._publish_capacity_changed()
+        return status
+
+    def remove_l1_devdax_device(
+        self,
+        device_path: str,
+        mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
+    ) -> DevDaxArenaStatus:
+        """Remove a Device-DAX device from the L1 arena pool.
+
+        Whenever the call changes usable capacity, it publishes the current
+        whole topology. This includes a drain transition whose later device
+        cleanup raises an exception.
+
+        Args:
+            device_path: Path of the mapped Device-DAX device.
+            mode: Removal strategy. Only drain mode is currently supported.
+
+        Returns:
+            Status of the arena after the removal request.
+
+        Raises:
+            L1ReconfigureError: If L1 is not Device-DAX backed or the request
+                cannot be applied.
+            RuntimeError: If device synchronization or cleanup fails after the
+                drain transition.
+            OSError: If unmapping or closing the device fails after the drain
+                transition.
+        """
+        target_was_active = self._l1_devdax_arena_is_active(device_path)
+        try:
+            status = self._l1_manager.remove_devdax_device(device_path, mode)
+        except Exception:
+            # Draining begins before an empty arena is synchronized and
+            # unmapped. If that cleanup raises, usable capacity has still
+            # changed and the coordinator must not retain the old topology.
+            try:
+                if target_was_active and not self._l1_devdax_arena_is_active(
+                    device_path
+                ):
+                    self._publish_capacity_changed()
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile L1 capacity after a Device-DAX remove error"
+                )
+            raise
+        self._publish_capacity_changed()
+        return status
+
+    def _single_region_adapter_names(self) -> list[str]:
+        """Return type names of registered L2 adapters needing one L1 region.
+
+        The caller holds ``_lifecycle_lock`` so the answer stays valid while
+        it acts on it; ``_adapters_lock`` only guards the dict read.
+        """
+        with self._adapters_lock:
+            descriptors = list(self._adapter_descriptors.values())
+        return [
+            name
+            for descriptor in descriptors
+            if (name := requires_single_l1_memory_region(descriptor.config)) is not None
+        ]
+
+    def _l1_devdax_arena_is_active(self, device_path: str) -> bool:
+        """Return whether an ACTIVE Device-DAX arena is mapped at ``device_path``.
+
+        The path must match the one used when adding the arena. ``False``
+        when L1 is not Device-DAX backed or nothing is registered there.
+        """
+        try:
+            status = self._l1_manager.get_devdax_arena_status(device_path)
+        except L1ReconfigureError:
+            return False
+        return status.state is DevDaxArenaState.ACTIVE
 
     def get_usage_bytes_by_cache_salt(self) -> dict[str, int]:
         """Aggregate ``cache_salt`` byte usage across every L2 adapter.
@@ -715,12 +827,220 @@ class StorageManager:
         are additive.
         """
         totals: dict[str, int] = {}
-        for adapter in self._l2_adapters:
+        for _adapter_id, _desc, adapter in self._snapshot_adapters():
             snap = adapter.get_usage().bytes_by_cache_salt
             for salt, used in snap.items():
                 totals[salt] = totals.get(salt, 0) + used
         return totals
 
+    # L2 APIs
+    def get_l2_adapter_reconfigure_status(self) -> dict:
+        """Return status for all runtime-reconfigurable L2 adapters.
+
+        Returns:
+            JSON-serializable status. If no reconfigurable adapter is configured,
+            ``enabled`` is ``False`` and the adapter list is empty.
+        """
+        type_names = {
+            adapter_id: desc.type_name
+            for adapter_id, desc, _ in self._snapshot_adapters()
+        }
+        adapters = []
+        for adapter_index, (
+            l2_adapter_index,
+            adapter,
+        ) in enumerate(self._list_reconfigurable_l2_adapters()):
+            status = dict(adapter.reconfigure_status())
+            if l2_adapter_index in type_names:
+                status["backend"] = type_names[l2_adapter_index]
+            status["adapter_index"] = adapter_index
+            status["l2_adapter_index"] = l2_adapter_index
+            adapters.append(status)
+
+        return {
+            "enabled": bool(adapters),
+            "num_adapters": len(adapters),
+            "adapters": adapters,
+        }
+
+    def reconfigurable_l2_backends(self) -> set[str]:
+        """Return the ``type_name`` of every L2 adapter that supports runtime
+        reconfiguration.
+
+        Returns:
+            The set of reconfigurable adapter ``type_name`` strings (empty when
+            none are reconfigurable). The ``{backend}`` path parameter the
+            ``/reconfigure`` routes expect is the adapter's ``type_name``.
+        """
+        return {
+            desc.type_name
+            for _adapter_id, desc, adapter in self._snapshot_adapters()
+            if self._unwrap_reconfigurable_l2_adapter(adapter) is not None
+        }
+
+    def _publish_capacity_changed(self) -> None:
+        """Announce the current capacity topology on the event bus.
+
+        Snapshot construction and enqueue are serialized because registration
+        can publish concurrently with runtime reconfiguration. The subscriber
+        assigns revisions in queue order, so an older snapshot must not be
+        enqueued after a newer one. The locks used by ``_build_capacities`` to
+        protect its reads are still required; this lock only orders declarations.
+
+        The event carries the whole topology, not a delta, so a later
+        publication can repair a dropped declaration.
+        """
+        with self._capacity_publish_lock:
+            snapshot = CapacitySnapshot(modules=tuple(self._build_capacities()))
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.SM_CAPACITY_CHANGED,
+                    metadata={"snapshot": snapshot},
+                )
+            )
+
+    def reconfigure_l2_adapter(
+        self,
+        adapter_index: int,
+        operation: str,
+        payload: dict[str, object],
+    ) -> dict:
+        """Route a runtime reconfiguration request to one L2 adapter.
+
+        Args:
+            adapter_index: Zero-based reconfigurable-adapter index.
+            operation: Adapter-specific operation name.
+            payload: Adapter-specific operation payload.
+
+        Returns:
+            JSON-serializable operation result.
+        """
+        with self._lifecycle_lock if operation == "add" else nullcontext():
+            adapter = self._get_reconfigurable_l2_adapter(adapter_index)
+            result = adapter.reconfigure(
+                operation,
+                payload,
+                device_owners=lambda path: self._device_owner_names(path, adapter),
+            )
+        result["adapter_index"] = adapter_index
+        self._publish_capacity_changed()
+        return result
+
+    def add_l2_adapter(self, config: L2AdapterConfigBase) -> int:
+        """Blocking function to add a new L2 adapter at runtime. Thread-safe.
+
+        Args:
+            config: The adapter configuration.
+
+        Returns:
+            The stable id assigned to the new adapter.
+
+        Raises:
+            ValueError: If the adapter registers a single L1 memory region
+                while L1 spans more than one (hybrid DRAM + Device-DAX, or
+                more than one Device-DAX arena), or a DAX device is already
+                mapped by L1 or another L2 adapter.
+        """
+        with self._lifecycle_lock:
+            # Mirror of the check in add_l1_devdax_device: a single-region
+            # adapter may only be added while L1 is exactly one memory region.
+            adapter_name = requires_single_l1_memory_region(config)
+            region_count = self._l1_manager.memory_region_count()
+            if adapter_name is not None and region_count > 1:
+                raise ValueError(
+                    f"{adapter_name} registers a single L1 memory region, but "
+                    f"L1 currently spans {region_count} regions (hybrid DRAM + "
+                    "Device-DAX, or more than one Device-DAX arena); remove the "
+                    "additional Device-DAX regions before adding it"
+                )
+            # Check all DAX devices before the constructor maps any.
+            device_config = unwrap_l2_adapter_config(config)
+            if get_type_name_for_config(device_config) == "dax":
+                for device in cast(Any, device_config).devices:
+                    owners = self._device_owner_names(device.device_path)
+                    if owners:
+                        raise ValueError(
+                            f"device {device.device_path} is already mapped by "
+                            f"{', '.join(owners)}"
+                        )
+            adapter_id, adapter, descriptor = self._build_l2_adapter(config)
+            for listener in self._registered_l2_listeners:
+                adapter.register_listener(listener)
+            with self._adapters_lock:
+                self._l2_adapters[adapter_id] = adapter
+                self._adapter_descriptors[adapter_id] = descriptor
+            self._store_controller.add_adapter(adapter_id, adapter, descriptor)
+            self._prefetch_controller.add_adapter(adapter_id, adapter, descriptor)
+            if self._should_enable_l2_eviction(adapter, config.eviction_config):
+                assert config.eviction_config is not None  # make linter happy
+                self._l2_eviction_controller.add_adapter_state(
+                    L2AdapterEvictionState(
+                        adapter_id=adapter_id,
+                        adapter=adapter,
+                        eviction_config=config.eviction_config,
+                    )
+                )
+            logger.info("Added L2 adapter %d (%s)", adapter_id, descriptor.type_name)
+            self._publish_capacity_changed()
+            return adapter_id
+
+    def delete_l2_adapter(self, adapter_id: int, timeout: float = 30.0) -> None:
+        """Blocking function to drain the L2 adapter gracefully at runtime.
+        Thread-safe.
+
+        Stops routing new stores/prefetches to the adapter, waits for its
+        in-flight work to finish, removes it from the controllers, and
+        closes it.
+
+        Args:
+            adapter_id: Stable id of the adapter to remove.
+            timeout: Maximum seconds to wait for in-flight work to drain.
+
+        Raises:
+            ValueError: If no adapter with ``adapter_id`` is active.
+            TimeoutError: If draining did not complete within ``timeout``;
+                the adapter is left active (draining) so the caller can
+                retry.
+        """
+        with self._lifecycle_lock:
+            if adapter_id not in self._l2_adapters:
+                raise ValueError(f"No L2 adapter with id {adapter_id}")
+
+            deadline = time.monotonic() + timeout
+            store_done = self._store_controller.request_remove_adapter(adapter_id)
+            prefetch_done = self._prefetch_controller.request_remove_adapter(adapter_id)
+            if not store_done.wait(timeout=max(0.0, deadline - time.monotonic())):
+                raise LMCacheTimeoutError(
+                    f"Timed out draining adapter {adapter_id} from store controller"
+                )
+            if not prefetch_done.wait(timeout=max(0.0, deadline - time.monotonic())):
+                raise LMCacheTimeoutError(
+                    f"Timed out draining adapter {adapter_id} from prefetch controller"
+                )
+
+            self._l2_eviction_controller.remove_adapter_state(adapter_id)
+            with self._adapters_lock:
+                adapter = self._l2_adapters.pop(adapter_id)
+                self._adapter_descriptors.pop(adapter_id, None)
+            adapter.close()
+            logger.info("Deleted L2 adapter %d", adapter_id)
+            self._publish_capacity_changed()
+
+    def l2_adapters(self) -> list[tuple[L2AdapterDescriptor, L2AdapterInterface]]:
+        """Return all active L2 adapters paired with descriptors, in
+        ascending adapter-id order (== configuration order for the initial
+        set, then runtime-added adapters). The list is empty when no L2 is
+        configured.
+
+        Do not cache the returned pairs — ``reconfigure_l2_adapter``,
+        ``add_l2_adapter``, and ``delete_l2_adapter`` may change the set at
+        runtime.
+        """
+        return [
+            (desc, adapter) for _adapter_id, desc, adapter in self._snapshot_adapters()
+        ]
+
+    # Management APIs
     def clear(self, force: bool = False):
         """
         Clear data in the storage manager.
@@ -744,7 +1064,7 @@ class StorageManager:
 
         PeriodicEventNotifier.shutdown()
 
-        for adapter in self._l2_adapters:
+        for adapter in self._l2_adapters.values():
             adapter.close()
 
         self._l1_manager.close()
@@ -756,7 +1076,7 @@ class StorageManager:
         prefetch = self._prefetch_controller.report_status()
         l1_eviction = self._eviction_controller.report_status()
         l2_eviction = self._l2_eviction_controller.report_status()
-        adapters = [a.report_status() for a in self._l2_adapters]
+        adapters = [a.report_status() for _id, _desc, a in self._snapshot_adapters()]
         children = [l1, store, prefetch, l1_eviction, l2_eviction] + adapters
         return {
             "is_healthy": all(c["is_healthy"] for c in children),
@@ -766,8 +1086,22 @@ class StorageManager:
             "l1_eviction_controller": l1_eviction,
             "l2_eviction_controller": l2_eviction,
             "l2_adapters": adapters,
-            "num_l2_adapters": len(self._l2_adapters),
+            "num_l2_adapters": len(adapters),
         }
+
+    def register_l2_listener(self, listener: L2AdapterListener) -> None:
+        """Register a listener on all current and future L2 adapters.
+
+        The listener is recorded so that adapters added later via
+        :meth:`add_l2_adapter` receive it too.
+
+        Args:
+            listener: The listener to register.
+        """
+        with self._lifecycle_lock:
+            self._registered_l2_listeners.append(listener)
+            for adapter in self._l2_adapters.values():
+                adapter.register_listener(listener)
 
     # Functions for debugging and testing
     def memcheck(self) -> bool:
@@ -778,3 +1112,149 @@ class StorageManager:
             True if memory is consistent, False otherwise.
         """
         return self._l1_manager.memcheck()
+
+    def _snapshot_adapters(
+        self,
+    ) -> list[tuple[int, L2AdapterDescriptor, L2AdapterInterface]]:
+        """Snapshot the active adapters under the lock, in ascending
+        adapter-id order. Iterate this instead of the live dicts so a
+        concurrent add/delete cannot change them mid-iteration.
+
+        Returns:
+            A list of ``(adapter_id, descriptor, adapter)`` tuples.
+        """
+        with self._adapters_lock:
+            return [
+                (adapter_id, self._adapter_descriptors[adapter_id], adapter)
+                for adapter_id, adapter in sorted(self._l2_adapters.items())
+            ]
+
+    def _has_l2_adapters(self) -> bool:
+        """Return whether any L2 adapter is currently active."""
+        with self._adapters_lock:
+            return bool(self._l2_adapters)
+
+    def _build_l2_adapter(
+        self,
+        config: L2AdapterConfigBase,
+    ) -> tuple[int, L2AdapterInterface, L2AdapterDescriptor]:
+        """Create a L2 adapter instance based on the config.
+
+        Args:
+            config: The adapter configuration.
+
+        Returns:
+            A ``(adapter_id, adapter, descriptor)`` tuple. ``adapter_id`` is
+            the freshly allocated stable id, ``adapter`` is the new adapter
+            instance, and ``descriptor`` is its descriptor carrying that id.
+        """
+        adapter_id = self._next_adapter_id
+        self._next_adapter_id += 1
+        adapter: L2AdapterInterface = create_l2_adapter(config, self._l1_memory_desc)
+        if config.serde_config is not None:
+            adapter = SerdeL2AdapterWrapper(
+                inner=adapter,
+                serde=create_serde_processor(config.serde_config),
+                l1_manager=self._l1_manager,
+            )
+        descriptor = L2AdapterDescriptor(index=adapter_id, config=config)
+        # Stamp the registered type name so the adapter's cache events on
+        # the observability bus carry their backend identity.
+        adapter.set_backend_identity(descriptor.type_name, shared=config.shared)
+        return adapter_id, adapter, descriptor
+
+    def _should_enable_l2_eviction(
+        self,
+        adapter: L2AdapterInterface,
+        eviction_config: EvictionConfig | None,
+    ) -> bool:
+        """Whether to wire an adapter into the L2 eviction controller.
+
+        Args:
+            adapter: The adapter to evaluate.
+            eviction_config: The adapter's eviction config, if any.
+
+        Returns:
+            True if an eviction state should be created for this adapter.
+        """
+        if eviction_config is None:
+            return False
+        policy_name = eviction_config.eviction_policy
+        if policy_name != "IsolatedLRU" and not adapter.supports_global_eviction:
+            logger.warning(
+                "L2 adapter %s configured with '%s' eviction but does "
+                "not support global eviction (max_capacity_bytes=0); "
+                "skipping aggregate-usage eviction setup.",
+                type(adapter).__name__,
+                policy_name,
+            )
+            return False
+        return True
+
+    def _unwrap_reconfigurable_l2_adapter(
+        self,
+        adapter: L2AdapterInterface,
+    ) -> Optional[L2ReconfigurableAdapter]:
+        if isinstance(adapter, L2ReconfigurableAdapter):
+            return adapter
+
+        inner = getattr(adapter, "inner_adapter", None)
+        if inner is not None and isinstance(inner, L2ReconfigurableAdapter):
+            return inner
+
+        return None
+
+    def _device_owner_names(
+        self, device_path: str, exclude: Optional[L2ReconfigurableAdapter] = None
+    ) -> list[str]:
+        """Return other L1/L2 owners while the caller holds the lifecycle lock."""
+        owners = ["L1"] if self._l1_manager.owns_device(device_path) else []
+        return owners + self._l2_device_owner_names(device_path, exclude)
+
+    def _l2_device_owner_names(
+        self, device_path: str, exclude: Optional[L2ReconfigurableAdapter] = None
+    ) -> list[str]:
+        """Return L2 type names that own the physical device at a path.
+
+        The caller holds ``_lifecycle_lock`` so registered adapters cannot be
+        added or deleted between this check and the mapping attempt.
+
+        Args:
+            device_path: Candidate Device-DAX path.
+            exclude: L2 adapter whose own mappings are ignored.
+
+        Returns:
+            Registered adapter type names whose open device has the same
+            physical identity.
+        """
+        owners: list[str] = []
+        for _adapter_id, descriptor, adapter in self._snapshot_adapters():
+            owner = self._unwrap_reconfigurable_l2_adapter(adapter)
+            if (
+                owner is not exclude
+                and isinstance(owner, L2DeviceOwner)
+                and owner.owns_device(device_path)
+            ):
+                owners.append(descriptor.type_name)
+        return owners
+
+    def _list_reconfigurable_l2_adapters(
+        self,
+    ) -> list[tuple[int, L2ReconfigurableAdapter]]:
+        with self._adapters_lock:
+            items = sorted(self._l2_adapters.items())
+        adapters: list[tuple[int, L2ReconfigurableAdapter]] = []
+        for l2_adapter_index, adapter in items:
+            reconfigurable_adapter = self._unwrap_reconfigurable_l2_adapter(adapter)
+            if reconfigurable_adapter is not None:
+                adapters.append((l2_adapter_index, reconfigurable_adapter))
+        return adapters
+
+    def _get_reconfigurable_l2_adapter(
+        self,
+        adapter_index: int,
+    ) -> L2ReconfigurableAdapter:
+        adapters = self._list_reconfigurable_l2_adapters()
+        if adapter_index < 0 or adapter_index >= len(adapters):
+            raise L2ReconfigureError(404, "L2 adapter not reconfigurable")
+        return adapters[adapter_index][1]

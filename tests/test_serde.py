@@ -4,19 +4,18 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.storage_backend.serde.cachegen_basics import CacheGenEncoderOutput
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
 from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
 
-# CacheGen has hand-written CUDA and SYCL kernels only; gate the test on
-# those backends explicitly (whitelist), so HPU / CPU-only CI / future
-# backends without a CacheGen kernel are skipped automatically.
-# torch_device_type is set to "cuda"/"xpu" only after is_available() passes
-# in lmcache.__init__, so no extra availability check is needed here.
-_GPU_AVAILABLE = torch_device_type == "cuda" or torch_device_type == "xpu"
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 
 def generate_kv_cache(num_tokens, device):
@@ -42,10 +41,6 @@ def to_blob(kv_tuples):
 
 
 @pytest.mark.parametrize("chunk_size", [16, 128, 256])
-@pytest.mark.skipif(
-    not _GPU_AVAILABLE,
-    reason="No GPU backend (CUDA or XPU) available",
-)
 def test_cachegen_encoder(chunk_size):
     config = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)
     metadata = LMCacheMetadata(
@@ -82,10 +77,6 @@ def test_cachegen_encoder(chunk_size):
 
 
 @pytest.mark.parametrize("chunk_size", [16, 128, 256])
-@pytest.mark.skipif(
-    not _GPU_AVAILABLE,
-    reason="No GPU backend (CUDA or XPU) available",
-)
 def test_cachegen_decoder(chunk_size):
     config = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)
     metadata = LMCacheMetadata(
@@ -108,10 +99,6 @@ def test_cachegen_decoder(chunk_size):
     assert decoded_kv.mean() != 0
 
 
-@pytest.mark.skipif(
-    not _GPU_AVAILABLE,
-    reason="No GPU backend (CUDA or XPU) available",
-)
 def test_cachegen_unmatched_size():
     chunk_size = 256
     config = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)

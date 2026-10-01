@@ -180,7 +180,7 @@ docker run --runtime nvidia --gpus all \
 | `UBUNTU_VERSION` | `24.04` | Ubuntu base version |
 | `PYTHON_VERSION` | `3.12` | Python version |
 | `max_jobs` | `2` | Max parallel jobs for build |
-| `nvcc_threads` | `8` | Number of nvcc threads |
+| `nvcc_threads` | `auto` | nvcc `--threads`; `auto` sizes it so `max_jobs` × `nvcc_threads` fits the host's CPUs and RAM (~3 GiB per compile). A number forces it |
 | `torch_cuda_arch_list` | `7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX` | CUDA architectures |
 
 `Dockerfile.lightweight` does not define build arguments. ROCm images use ROCm-specific arguments such as `ROCM_VERSION` and `PYTORCH_ROCM_ARCH`.
@@ -191,7 +191,6 @@ docker run --runtime nvidia --gpus all \
 docker build \
   --build-arg CUDA_VERSION=12.4 \
   --build-arg max_jobs=4 \
-  --build-arg nvcc_threads=16 \
   --target image-build \
   --tag lmcache/vllm-openai:cuda12.4 \
   --file docker/Dockerfile .
@@ -213,6 +212,21 @@ Pre-built images are available on Docker Hub:
 # Pull pre-built images
 docker pull lmcache/vllm-openai:latest
 docker pull lmcache/standalone:latest
+```
+
+The default CUDA 13 `lmcache/vllm-openai`, `lmcache/standalone`, and
+`lmcache/lmcache-payload` release and nightly tags are multi-platform images
+for `linux/amd64` and `linux/arm64`. The `lmcache/vllm-openai:lightweight`
+release image and the CUDA 12.9 `-cu129` release and nightly variants support
+both platforms as well. Docker selects the matching image automatically. The
+ARM64 variant targets NVIDIA Grace/SBSA systems; it is not a Jetson/L4T image.
+To select one explicitly:
+
+```bash
+docker pull --platform linux/arm64 lmcache/vllm-openai:latest
+docker pull --platform linux/arm64 lmcache/vllm-openai:lightweight
+docker pull --platform linux/arm64 lmcache/vllm-openai:latest-cu129
+docker pull --platform linux/arm64 lmcache/standalone:latest
 ```
 
 ---

@@ -41,6 +41,29 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     layer_indices: tuple[int, ...] = ()
     """Registered KV tensor indices assigned to this group."""
 
+    tokens_per_block: int = 0
+    """Logical tokens covered by one paged chunk (one engine block ID) of
+    this engine group, as declared by the engine's KV cache spec
+    (``kv_cache_spec.block_size`` for vLLM). ``0`` means the engine did not
+    report it; consumers then fall back to the physical slot count detected
+    from the registered tensors (i.e. the group is treated as
+    uncompressed)."""
+
+    sw_size_tokens: int = -1
+    """Sliding window size in tokens for the layers of this group.
+    ``-1`` means the layers are not sliding-window attention."""
+
+    extra_object_group_tag: int = 0
+    """Connector-private extra-group tag under ``--separate-object-groups``:
+    ``0`` = a regular group; ``> 0`` = an extra group (e.g. the CacheBlend
+    fused-aux pool) bucketed by tag, after the regular groups. Defaulted
+    field: wire-compatible with old payloads."""
+
+    recurrent_state: bool = False
+    """Pages hold recurrent state snapshots (Mamba/GDN) rather than attention
+    KV; the one-block window reflects restore semantics and blend full-window
+    forcing must not widen it. Defaulted field: wire-compatible."""
+
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).
@@ -93,6 +116,31 @@ def _engine_group_id_per_view(
     return tuple(group.engine_group_id for group in groups)
 
 
+def engine_group_layer_indices(
+    groups: Sequence[EngineGroupInfo],
+) -> list[list[int]]:
+    """Return each engine group's layer indices, ordered by engine group id.
+
+    Several ``EngineGroupInfo`` may share one ``engine_group_id``; their
+    ``layer_indices`` are unioned into that group's entry.
+
+    Args:
+        groups: The LMCache KV groups, in protocol order.
+
+    Returns:
+        One sorted ``list[int]`` of layer indices per engine group, indexed by
+        engine group id (dense from 0). Empty when ``groups`` is empty (a single
+        non-hybrid group with no per-group split).
+    """
+    if not groups:
+        return []
+    num_groups = max(group.engine_group_id for group in groups) + 1
+    per_group: list[list[int]] = [[] for _ in range(num_groups)]
+    for group in groups:
+        per_group[group.engine_group_id].extend(group.layer_indices)
+    return [sorted(indices) for indices in per_group]
+
+
 def expand_engine_block_ids(
     groups: Sequence[EngineGroupInfo],
     engine_side_block_ids: Sequence[Sequence[int]] | Sequence[int],
@@ -131,45 +179,56 @@ def expand_engine_block_ids(
 
 def slice_block_ids_per_group(
     allocated_block_ids: Mapping[int, Sequence[int]],
-    group_block_sizes: Sequence[int],
-    base_block_size: int,
-    start_block_idx: int,
-    end_block_idx: int,
+    group_tokens_per_block: Sequence[int],
+    start_token_idx: int,
+    end_token_idx: int,
 ) -> list[list[int]]:
-    """Slice each engine group's block IDs for a block range.
+    """Slice each engine group's block IDs for a token range.
 
-    The range is given in *base* blocks -- the block size that every group's
-    block size is a multiple of. A group whose own block size is ``k`` times the
-    base size holds ``1/k`` as many block IDs over the same tokens, so the range
-    is divided by ``k = group_block_size // base_block_size`` for that group.
-    Example: with base 16, a block_size-32 group gets half the IDs of a
-    block_size-16 group.
+    The range is given in tokens — the only unit shared by every engine
+    group. A group whose paged chunks each cover ``tokens_per_block`` tokens
+    holds one block ID per ``tokens_per_block`` tokens, so the range is
+    divided by that group's ``tokens_per_block``. Example: over the same 256
+    tokens, a tokens_per_block-64 group gets 4 IDs while a
+    tokens_per_block-256 group gets 1.
 
     Args:
         allocated_block_ids: Block IDs keyed by engine group id; a missing group
             yields an empty list.
-        group_block_sizes: Each group's block size, in engine-group order. Every
-            value must be a positive multiple of ``base_block_size``.
-        base_block_size: Block size the range indices are counted in.
-        start_block_idx: Range start block index, inclusive.
-        end_block_idx: Range end block index, exclusive.
+        group_tokens_per_block: Each group's tokens-per-paged-chunk, in
+            engine-group order. Every value must divide both range endpoints;
+            ``0`` marks a scratch group, which slices to an empty list.
+        start_token_idx: Range start token index, inclusive.
+        end_token_idx: Range end token index, exclusive.
 
     Returns:
         One block-ID list per engine group, in engine-group order.
 
     Raises:
-        ValueError: If the range does not align to a group's block boundary.
+        ValueError: If the range does not align to a group's chunk boundary.
     """
     sliced: list[list[int]] = []
-    for engine_group_idx, block_size in enumerate(group_block_sizes):
-        k = block_size // base_block_size
-        if start_block_idx % k != 0 or end_block_idx % k != 0:
+    for engine_group_idx, tokens_per_block in enumerate(group_tokens_per_block):
+        if tokens_per_block == 0:
+            sliced.append([])
+            continue
+        if start_token_idx % tokens_per_block != 0 or (
+            end_token_idx % tokens_per_block != 0
+        ):
             raise ValueError(
-                f"block range [{start_block_idx}, {end_block_idx}) does not "
-                f"align to group {engine_group_idx} block factor {k}"
+                f"token range [{start_token_idx}, {end_token_idx}) does not "
+                f"align to group {engine_group_idx} tokens_per_block "
+                f"{tokens_per_block}"
             )
         group_block_ids = allocated_block_ids.get(engine_group_idx, [])
-        sliced.append(list(group_block_ids[start_block_idx // k : end_block_idx // k]))
+        sliced.append(
+            list(
+                group_block_ids[
+                    start_token_idx // tokens_per_block : end_token_idx
+                    // tokens_per_block
+                ]
+            )
+        )
     return sliced
 
 

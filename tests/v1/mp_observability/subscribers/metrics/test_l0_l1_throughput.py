@@ -14,6 +14,7 @@ import time
 import pytest
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.metrics.l0_l1_throughput import (
@@ -36,7 +37,7 @@ def _start_event(
     session_id: str,
     t: float,
     engine_id: int = 0,
-    device: str = "cuda:0",
+    device: str = f"{torch_device_type}:0",
     model_name: str = "test-model",
 ) -> Event:
     return Event(
@@ -57,7 +58,7 @@ def _end_event(
     t: float,
     total_bytes: int,
     engine_id: int = 0,
-    device: str = "cuda:0",
+    device: str = f"{torch_device_type}:0",
     model_name: str = "test-model",
 ) -> Event:
     return Event(
@@ -142,7 +143,11 @@ class TestStoreThroughput:
         # 2 GB in 0.1 s → 20 GB/s
         subscriber._on_store_start(
             _start_event(
-                EventType.MP_STORE_START, "req-1", 1000.0, engine_id=7, device="cuda:3"
+                EventType.MP_STORE_START,
+                "req-1",
+                1000.0,
+                engine_id=7,
+                device=f"{torch_device_type}:3",
             )
         )
         subscriber._on_store_end(
@@ -152,7 +157,7 @@ class TestStoreThroughput:
                 1000.1,
                 total_bytes=2_000_000_000,
                 engine_id=7,
-                device="cuda:3",
+                device=f"{torch_device_type}:3",
             )
         )
 
@@ -163,7 +168,7 @@ class TestStoreThroughput:
         attrs = _attrs_of_nonzero_dps(_STORE_METRIC)
         assert any(
             a.get("engine_id") == "7"
-            and a.get("device") == "cuda:3"
+            and a.get("device") == f"{torch_device_type}:3"
             and a.get("model_name") == "test-model"
             for a in attrs
         )
@@ -172,12 +177,12 @@ class TestStoreThroughput:
         subscriber._on_store_start(
             _start_event(EventType.MP_STORE_START, "req-drain", 0.0)
         )
-        assert ("req-drain", "cuda:0") in subscriber._pending_store
+        assert ("req-drain", f"{torch_device_type}:0") in subscriber._pending_store
 
         subscriber._on_store_end(
             _end_event(EventType.MP_STORE_END, "req-drain", 0.1, total_bytes=1_000)
         )
-        assert ("req-drain", "cuda:0") not in subscriber._pending_store
+        assert ("req-drain", f"{torch_device_type}:0") not in subscriber._pending_store
 
 
 class TestLoadThroughput:
@@ -192,7 +197,7 @@ class TestLoadThroughput:
                 "req-r1",
                 2000.0,
                 engine_id=2,
-                device="cuda:0",
+                device=f"{torch_device_type}:0",
             )
         )
         subscriber._on_retrieve_end(
@@ -202,7 +207,7 @@ class TestLoadThroughput:
                 2000.05,
                 total_bytes=500_000_000,
                 engine_id=2,
-                device="cuda:0",
+                device=f"{torch_device_type}:0",
             )
         )
 
@@ -213,7 +218,7 @@ class TestLoadThroughput:
         attrs = _attrs_of_nonzero_dps(_LOAD_METRIC)
         assert any(
             a.get("engine_id") == "2"
-            and a.get("device") == "cuda:0"
+            and a.get("device") == f"{torch_device_type}:0"
             and a.get("model_name") == "test-model"
             for a in attrs
         )
@@ -260,7 +265,7 @@ class TestEdgeCases:
                 event_type=EventType.MP_STORE_START,
                 timestamp=1.0,
                 session_id="",
-                metadata={"engine_id": 1, "device": "cuda:0"},
+                metadata={"engine_id": 1, "device": f"{torch_device_type}:0"},
             )
         )
         assert len(subscriber._pending_store) == 0
@@ -291,8 +296,8 @@ class TestEdgeCases:
         subscriber._on_store_end(
             _end_event(EventType.MP_STORE_END, "req-dual", 0.1, total_bytes=10**9)
         )
-        assert ("req-dual", "cuda:0") not in subscriber._pending_store
-        assert ("req-dual", "cuda:0") in subscriber._pending_load
+        assert ("req-dual", f"{torch_device_type}:0") not in subscriber._pending_store
+        assert ("req-dual", f"{torch_device_type}:0") in subscriber._pending_load
 
     def test_same_session_id_different_devices_do_not_collide(self, subscriber):
         # One MP server handles multiple GPUs; TP replicas of the same
@@ -306,7 +311,7 @@ class TestEdgeCases:
                 "tp-req",
                 100.0,
                 engine_id=0,
-                device="cuda:0",
+                device=f"{torch_device_type}:0",
             )
         )
         subscriber._on_store_start(
@@ -315,11 +320,11 @@ class TestEdgeCases:
                 "tp-req",
                 100.0,
                 engine_id=1,
-                device="cuda:1",
+                device=f"{torch_device_type}:1",
             )
         )
-        assert ("tp-req", "cuda:0") in subscriber._pending_store
-        assert ("tp-req", "cuda:1") in subscriber._pending_store
+        assert ("tp-req", f"{torch_device_type}:0") in subscriber._pending_store
+        assert ("tp-req", f"{torch_device_type}:1") in subscriber._pending_store
 
         # Both END independently — both must record.
         subscriber._on_store_end(
@@ -329,7 +334,7 @@ class TestEdgeCases:
                 100.1,
                 total_bytes=1_000_000_000,
                 engine_id=0,
-                device="cuda:0",
+                device=f"{torch_device_type}:0",
             )
         )
         subscriber._on_store_end(
@@ -339,13 +344,13 @@ class TestEdgeCases:
                 100.1,
                 total_bytes=1_000_000_000,
                 engine_id=1,
-                device="cuda:1",
+                device=f"{torch_device_type}:1",
             )
         )
 
         assert _total_count(_STORE_METRIC) == count_before + 2
-        assert ("tp-req", "cuda:0") not in subscriber._pending_store
-        assert ("tp-req", "cuda:1") not in subscriber._pending_store
+        assert ("tp-req", f"{torch_device_type}:0") not in subscriber._pending_store
+        assert ("tp-req", f"{torch_device_type}:1") not in subscriber._pending_store
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +372,7 @@ class TestEventBusIntegration:
                 "bus-req",
                 100.0,
                 engine_id=9,
-                device="cuda:1",
+                device=f"{torch_device_type}:1",
             )
         )
         bus.publish(
@@ -377,7 +382,7 @@ class TestEventBusIntegration:
                 100.2,
                 total_bytes=4_000_000_000,
                 engine_id=9,
-                device="cuda:1",
+                device=f"{torch_device_type}:1",
             )
         )
         time.sleep(_DRAIN_WAIT)
@@ -386,5 +391,6 @@ class TestEventBusIntegration:
         assert _total_count(_STORE_METRIC) == count_before + 1
         attrs = _attrs_of_nonzero_dps(_STORE_METRIC)
         assert any(
-            a.get("engine_id") == "9" and a.get("device") == "cuda:1" for a in attrs
+            a.get("engine_id") == "9" and a.get("device") == f"{torch_device_type}:1"
+            for a in attrs
         )

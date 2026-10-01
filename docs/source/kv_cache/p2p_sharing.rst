@@ -3,6 +3,11 @@
 P2P KV Cache Sharing
 ====================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/p2p`.
+
+
 P2P (Peer-to-Peer) KV cache sharing enables direct cache transfer between multiple serving engine instances without requiring a centralized cache server. This approach provides high-performance cache sharing with reduced latency and improved scalability, especially beneficial in distributed inference scenarios.
 
 LMCache supports P2P sharing through a controller-based architecture using NIXL (NVIDIA Inference Xfer Library) for optimized data transfer between instances.

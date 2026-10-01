@@ -2,10 +2,10 @@ lmcache server
 ==============
 
 The ``lmcache server`` command launches the standalone LMCache
-Multi-Process (MP) server, which exposes a ZMQ control plane and an HTTP
-frontend (status, healthcheck, cache-clear, checksum APIs). It is the server
-that ``lmcache describe``, ``lmcache ping kvcache``, ``lmcache kvcache``, and
-``lmcache bench server`` talk to.
+Multi-Process (MP) server, which exposes a configurable ZMQ or gRPC request
+endpoint and an HTTP frontend (status, healthcheck, cache-clear, checksum
+APIs). It is the server that ``lmcache describe``, ``lmcache ping kvcache``,
+``lmcache kvcache``, and ``lmcache bench server`` talk to.
 
 .. note::
 
@@ -47,22 +47,26 @@ Commonly used flags include:
 
    * - Flag
      - Description
+   * - ``--transport {zmq,grpc}``
+     - Request transport exposed by the server (default: ``zmq``).
    * - ``--host HOST``
      - Bind address for the server.
    * - ``--port PORT``
-     - ZMQ control-plane port.
+     - Request-transport port.
    * - ``--chunk-size N``
      - KV cache chunk size in tokens.
    * - ``--l1-size-gb GB``
      - L1 (CPU/DRAM) cache capacity in GB.
    * - ``--eviction-policy POLICY``
-     - L1 eviction policy (e.g. ``LRU``).
+     - L1 eviction policy (``LRU``, ``ARC``, ``IsolatedLRU``, or ``noop``).
    * - ``--eviction-trigger-watermark RATIO``
      - L1 fill ratio at which eviction begins.
    * - ``--eviction-ratio RATIO``
      - Fraction of L1 cleared per eviction cycle.
    * - ``--max-workers N``
-     - Number of server worker processes.
+     - Base number of request worker threads.
+   * - ``--grpc-server-workers N``
+     - gRPC dispatch threads (used only with ``--transport grpc``).
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
        ``http://coordinator:9300``). Opt-in; enables fleet registration. See
@@ -73,8 +77,44 @@ Commonly used flags include:
    * - ``--coordinator-heartbeat-interval SECONDS``
      - Seconds between heartbeats (``> 0``, default ``5``). Keep well below the
        coordinator's instance timeout.
-   * - ``--trace-level {storage}``
-     - Enable storage-level trace recording (see :doc:`trace`).
+   * - ``--coordinator-event-reporting``
+     - Stream cache store/access/delete events to the coordinator, feeding the
+       key directory (fleet-wide placement tracking), L2 usage/quota tracking
+       and eviction, and the blend index behind fleet CacheBlend matching.
+   * - ``--coordinator-event-flush-interval SECONDS``
+     - Seconds between cache-event batch flushes (``> 0``, default ``1``).
+   * - ``--coordinator-event-transport {http,kafka}``
+     - Cache-event transport (default ``http``). ``kafka`` publishes each
+       batch to a Kafka topic instead of ``POST /events``; it needs the
+       optional ``lmcache[kafka]`` extra. See :doc:`/mp/coordinator`.
+   * - ``--coordinator-kafka-bootstrap-servers SERVERS``
+     - Comma-separated Kafka bootstrap servers. Required with
+       ``--coordinator-event-transport kafka``.
+   * - ``--coordinator-kafka-topic TOPIC``
+     - Kafka topic receiving cache events (default ``lmcache-cache-events``).
+   * - ``--coordinator-kafka-delivery-timeout SECONDS``
+     - Seconds one flush waits for broker acknowledgement (``> 0``, default
+       ``10``).
+   * - ``--p2p-advertise-url HOST:PORT``
+     - Enable P2P KV cache sharing and advertise this server's
+       transfer-channel endpoint to peers (e.g. ``10.0.0.1:8500``). Setting it
+       turns P2P on; it additionally requires ``--coordinator-url`` for peer
+       discovery. See :doc:`/mp/p2p`.
+   * - ``--p2p-listen-url HOST:PORT``
+     - Address the transfer-channel server binds to. Defaults to
+       ``--p2p-advertise-url``. Set it when the advertised address differs from
+       the bind address (e.g. bind ``0.0.0.0`` while advertising a routable IP).
+   * - ``--p2p-lookup-timeout SECONDS``
+     - Deadline for a peer lookup before it counts as a miss (default ``30``).
+   * - ``--p2p-load-timeout SECONDS``
+     - Deadline for a peer KV read before it counts as a failure
+       (default ``30``).
+   * - ``--p2p-transfer-engine ENGINE``
+     - Transfer-channel implementation for P2P reads (default ``nixl``).
+   * - ``--trace-level {storage,events}``
+     - Enable trace recording: ``storage`` records StorageManager calls for
+       replay, ``events`` records the cache-event stream emitted for the
+       coordinator, with or without one configured (see :doc:`trace`).
    * - ``--trace-output PATH``
      - Destination for recorded ``.lct`` trace files.
 

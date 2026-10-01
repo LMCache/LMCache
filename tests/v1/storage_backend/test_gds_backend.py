@@ -15,6 +15,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import CacheEngineKey, LayerCacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
@@ -37,6 +38,14 @@ from tests.v1.utils import create_test_memory_obj, has_cufile, has_hipfile
 # direct-I/O-capable storage (ext4/xfs on real disk); overlayfs and tmpfs
 # fail with CU_FILE_IO_NOT_SUPPORTED (err=5027).
 _TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
+
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="GDS backend tests are not supported on non-CUDA devices",
+    ),
+]
 
 
 def create_test_config(gds_path: str, gds_path_sharding: str = "by_gpu"):
@@ -114,12 +123,12 @@ def gds_backend(temp_gds_path, async_loop):
         config=config,
         loop=async_loop,
         metadata=metadata,
-        dst_device="cuda:0",
+        dst_device=f"{torch_device_type}:0",
     )
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
     reason="Requires CUDA for TestGdsBackend",
 )
 @pytest.mark.skipif(
@@ -136,10 +145,10 @@ class TestGdsBackend:
             config=config,
             loop=async_loop,
             metadata=metadata,
-            dst_device="cuda:0",
+            dst_device=f"{torch_device_type}:0",
         )
         assert backend.gds_path == temp_gds_path
-        assert backend.dst_device == "cuda:0"
+        assert backend.dst_device == f"{torch_device_type}:0"
         assert os.path.exists(temp_gds_path)
 
     def test_str(self, gds_backend):
@@ -147,7 +156,7 @@ class TestGdsBackend:
 
     def test_key_to_path_and_insert_key(self, gds_backend):
         key = create_test_key(0)
-        memory_obj = create_test_memory_obj(device="cuda")
+        memory_obj = create_test_memory_obj(device=torch_device_type)
         gds_backend.insert_key(key, memory_obj)
         # Check that the key is in hot_cache
         assert key in gds_backend.hot_cache
@@ -162,7 +171,7 @@ class TestGdsBackend:
 
     def test_contains_key_exists(self, gds_backend):
         key = create_test_key(0)
-        memory_obj = create_test_memory_obj(device="cuda")
+        memory_obj = create_test_memory_obj(device=torch_device_type)
         gds_backend.insert_key(key, memory_obj)
         assert gds_backend.contains(key)
         assert gds_backend.contains(key, pin=True)
@@ -177,7 +186,7 @@ class TestGdsBackend:
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(
-        not torch.cuda.is_available(),
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
         reason="Requires CUDA for GdsBackend get_blocking",
     )
     @pytest.mark.skipif(
@@ -187,7 +196,7 @@ class TestGdsBackend:
     )
     async def test_submit_put_task_and_get_blocking(self, gds_backend):
         key = create_test_key(0)
-        memory_obj = create_test_memory_obj(device="cuda")
+        memory_obj = create_test_memory_obj(device=torch_device_type)
         # submit_put_task returns a Future
         future = gds_backend.submit_put_task(key, memory_obj)
         assert future is not None
@@ -204,7 +213,9 @@ class TestGdsBackend:
     @pytest.mark.asyncio
     async def test_batched_submit_put_task(self, gds_backend):
         keys = [create_test_key(i) for i in range(2, 5)]
-        memory_objs = [create_test_memory_obj(device="cuda") for _ in range(3)]
+        memory_objs = [
+            create_test_memory_obj(device=torch_device_type) for _ in range(3)
+        ]
         futures = gds_backend.batched_submit_put_task(keys, memory_objs)
         assert futures is not None
         assert len(futures) == 3
@@ -236,7 +247,7 @@ class TestGdsBackend:
 
         # Create metadata file
         os.makedirs(os.path.join(temp_gds_path, l1_dir, l2_dir), exist_ok=True)
-        memory_obj = create_test_memory_obj(device="cuda")
+        memory_obj = create_test_memory_obj(device=torch_device_type)
         metadata = pack_metadata(
             memory_obj.tensor,
             fmt=memory_obj.metadata.fmt,
@@ -343,7 +354,7 @@ class TestGdsBackend:
     ):
         """Test error handling when GDS write operation fails."""
         key = create_test_key(300)
-        memory_obj = create_test_memory_obj(device="cuda")
+        memory_obj = create_test_memory_obj(device=torch_device_type)
         memory_obj.ref_count_up()
 
         # Mock _save_gds to raise an exception
@@ -372,7 +383,7 @@ class TestGdsBackend:
         Test that metadata write failures during task execution trigger cache cleanup.
         """
         key = create_test_key(500)
-        memory_obj = create_test_memory_obj(device="cuda")
+        memory_obj = create_test_memory_obj(device=torch_device_type)
         memory_obj.ref_count_up()
 
         # Mock save_metadata to raise an exception during execution
@@ -450,7 +461,7 @@ class TestGdsBackend:
                     config=config,
                     loop=async_loop,
                     metadata=metadata,
-                    dst_device="cuda:0",
+                    dst_device=f"{torch_device_type}:0",
                 )
                 try:
                     key = create_test_key(0)
@@ -489,7 +500,7 @@ class TestGdsBackend:
                     config=config,
                     loop=async_loop,
                     metadata=metadata,
-                    dst_device="cuda:0",
+                    dst_device=f"{torch_device_type}:0",
                 )
 
     class _DummyAllocator:
@@ -513,10 +524,13 @@ class TestGdsBackend:
         temp_gds_path: str,
         async_loop: asyncio.AbstractEventLoop,
         allocator=None,
+        extra_config=None,
     ) -> GdsBackend:
         """Return a GdsBackend with tmpfs mocked so GDS is auto-disabled."""
         eff_allocator = allocator or TestGdsBackend._DummyAllocator()
         config = create_test_config(temp_gds_path)
+        if extra_config:
+            config.extra_config.update(extra_config)
         metadata = create_test_metadata()
         with (
             mock.patch(
@@ -535,7 +549,7 @@ class TestGdsBackend:
                 config=config,
                 loop=async_loop,
                 metadata=metadata,
-                dst_device="cuda:0",
+                dst_device=f"{torch_device_type}:0",
             )
 
     def test_allocate_retry_then_succeed(self, temp_gds_path, async_loop):
@@ -612,7 +626,9 @@ class TestGdsBackend:
 
     def test_batched_get_blocking_no_thread_pool(self, temp_gds_path, async_loop):
         """batched_get_blocking returns None per missing key when thread pool is off."""
-        backend = self._make_mocked_backend(temp_gds_path, async_loop)
+        backend = self._make_mocked_backend(
+            temp_gds_path, async_loop, extra_config={"disk_io_threads": 0}
+        )
         try:
             assert not backend.use_thread_pool
             keys = [create_test_key(i) for i in range(3)]
@@ -625,7 +641,7 @@ class TestGdsBackend:
     async def test_batched_get_blocking_thread_pool(self, gds_backend):
         """batched_get_blocking returns correct results via the thread pool."""
         keys = [create_test_key(i) for i in range(700, 703)]
-        memory_objs = [create_test_memory_obj(device="cuda") for _ in keys]
+        memory_objs = [create_test_memory_obj(device=torch_device_type) for _ in keys]
 
         futures = gds_backend.batched_submit_put_task(keys, memory_objs)
         assert futures is not None
@@ -644,7 +660,7 @@ class TestGdsBackend:
     async def test_on_complete_callback_invoked(self, gds_backend):
         """on_complete_callback is called with the key after the write finishes."""
         key = create_test_key(600)
-        memory_obj = create_test_memory_obj(device="cuda")
+        memory_obj = create_test_memory_obj(device=torch_device_type)
         received: list = []
 
         future = gds_backend.submit_put_task(
@@ -658,7 +674,7 @@ class TestGdsBackend:
     async def test_on_complete_callback_exception_does_not_propagate(self, gds_backend):
         """A callback that raises must not crash the put pipeline."""
         key = create_test_key(601)
-        memory_obj = create_test_memory_obj(device="cuda")
+        memory_obj = create_test_memory_obj(device=torch_device_type)
 
         def bad_callback(k: CacheEngineKey) -> None:
             raise RuntimeError("intentional callback error")
@@ -680,12 +696,12 @@ class TestGdsBackend:
             config=config,
             loop=async_loop,
             metadata=metadata,
-            dst_device="cuda:0",
+            dst_device=f"{torch_device_type}:0",
         )
 
         layer_key = create_test_layer_key(0xABCD, 4)
 
-        memory_obj = create_test_memory_obj(device="cuda")
+        memory_obj = create_test_memory_obj(device=torch_device_type)
         future = backend.submit_put_task(layer_key, memory_obj)
         future.result(timeout=10)
         memory_obj.ref_count_down()
@@ -697,7 +713,7 @@ class TestGdsBackend:
             config=config,
             loop=async_loop,
             metadata=metadata,
-            dst_device="cuda:0",
+            dst_device=f"{torch_device_type}:0",
         )
         # Wait for the background scan to complete
         time.sleep(1)
@@ -706,7 +722,7 @@ class TestGdsBackend:
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
     reason="Requires CUDA for TestGdsMultiPath",
 )
 @pytest.mark.skipif(sys.platform != "linux", reason="Runs only on Linux")
@@ -764,7 +780,9 @@ class TestGdsMultiPath:
 
     def test_single_path_backward_compat(self, temp_gds_path, async_loop):
         """A single gds_path (no commas) behaves like before."""
-        backend = self._make_backend(temp_gds_path, "cuda:0", async_loop)
+        backend = self._make_backend(
+            temp_gds_path, f"{torch_device_type}:0", async_loop
+        )
         try:
             assert backend.gds_paths == [temp_gds_path]
             assert backend.gds_path == temp_gds_path
@@ -776,7 +794,7 @@ class TestGdsMultiPath:
         paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(3)]
         try:
             gds_path = ",".join(paths)
-            backend = self._make_backend(gds_path, "cuda:0", async_loop)
+            backend = self._make_backend(gds_path, f"{torch_device_type}:0", async_loop)
             try:
                 assert backend.gds_paths == paths
                 assert len(backend.gds_paths) == 3
@@ -791,7 +809,7 @@ class TestGdsMultiPath:
         paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(2)]
         try:
             gds_path = f"  {paths[0]}  ,  {paths[1]}  "
-            backend = self._make_backend(gds_path, "cuda:0", async_loop)
+            backend = self._make_backend(gds_path, f"{torch_device_type}:0", async_loop)
             try:
                 assert backend.gds_paths == paths
             finally:
@@ -806,12 +824,12 @@ class TestGdsMultiPath:
         try:
             gds_path = ",".join(paths)
             for device_id in range(8):
-                dst = f"cuda:{device_id}"
+                dst = f"{torch_device_type}:{device_id}"
                 backend = self._make_backend(gds_path, dst, async_loop)
                 try:
                     expected = paths[device_id % 4]
                     assert backend.gds_path == expected, (
-                        f"cuda:{device_id} should map to {expected}, "
+                        f"{torch_device_type}:{device_id} should map to {expected}, "
                         f"got {backend.gds_path}"
                     )
                 finally:
@@ -826,7 +844,7 @@ class TestGdsMultiPath:
         try:
             paths = [os.path.join(base, f"nvme{i}") for i in range(3)]
             gds_path = ",".join(paths)
-            backend = self._make_backend(gds_path, "cuda:0", async_loop)
+            backend = self._make_backend(gds_path, f"{torch_device_type}:0", async_loop)
             try:
                 for p in paths:
                     assert os.path.isdir(p), f"{p} should exist"
@@ -840,7 +858,7 @@ class TestGdsMultiPath:
         paths = [tempfile.mkdtemp(dir=_TEST_TMPDIR) for _ in range(2)]
         try:
             gds_path = ",".join(paths)
-            backend = self._make_backend(gds_path, "cuda:0", async_loop)
+            backend = self._make_backend(gds_path, f"{torch_device_type}:0", async_loop)
             try:
                 key = create_test_key(0)
                 file_path, _, _, _ = backend._key_to_path(key)
@@ -858,7 +876,9 @@ class TestGdsMultiPath:
             gds_path = ",".join(paths)
             selected = set()
             for _ in range(5):
-                backend = self._make_backend(gds_path, "cuda:1", async_loop)
+                backend = self._make_backend(
+                    gds_path, f"{torch_device_type}:1", async_loop
+                )
                 try:
                     selected.add(backend.gds_path)
                 finally:
@@ -911,7 +931,7 @@ class TestGdsMultiPath:
 
             # Create backend — cuda:0 affinity selects paths[0]
             gds_path = ",".join(paths)
-            backend = self._make_backend(gds_path, "cuda:0", async_loop)
+            backend = self._make_backend(gds_path, f"{torch_device_type}:0", async_loop)
             try:
                 assert backend.gds_path == paths[0]
 
@@ -969,7 +989,7 @@ class TestGdsMultiPath:
                 f.write(metadata_bytes)
 
             gds_path = ",".join(paths)
-            backend = self._make_backend(gds_path, "cuda:0", async_loop)
+            backend = self._make_backend(gds_path, f"{torch_device_type}:0", async_loop)
             try:
                 assert backend.gds_path == paths[0]
 
@@ -990,7 +1010,9 @@ class TestGdsMultiPath:
 
     def test_gds_path_sharding_default(self, temp_gds_path, async_loop):
         """Default gds_path_sharding is 'by_gpu' (backend inits OK)."""
-        backend = self._make_backend(temp_gds_path, "cuda:0", async_loop)
+        backend = self._make_backend(
+            temp_gds_path, f"{torch_device_type}:0", async_loop
+        )
         try:
             assert backend.gds_path == temp_gds_path
         finally:
@@ -1000,7 +1022,7 @@ class TestGdsMultiPath:
         """Explicitly setting gds_path_sharding='by_gpu' works."""
         backend = self._make_backend(
             temp_gds_path,
-            "cuda:0",
+            f"{torch_device_type}:0",
             async_loop,
             gds_path_sharding="by_gpu",
         )
@@ -1014,7 +1036,7 @@ class TestGdsMultiPath:
         with pytest.raises(ValueError, match="Unsupported path sharding strategy"):
             self._make_backend(
                 temp_gds_path,
-                "cuda:0",
+                f"{torch_device_type}:0",
                 async_loop,
                 gds_path_sharding="round_robin",
             )

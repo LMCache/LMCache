@@ -1,26 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Configuration for the multiprocess (ZMQ) server and HTTP frontend.
-"""
+"""Configuration for the multiprocess cache server and HTTP frontend."""
 
 # Standard
 from dataclasses import dataclass, field
+from typing import Literal
 import argparse
 import json
 import math
 import os
+import uuid
+
+# First Party
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclass
 class MPServerConfig:
-    """Configuration for the ZMQ-based multiprocess cache server."""
+    """Configuration for the multiprocess cache server."""
+
+    transport: Literal["zmq", "grpc"] = "zmq"
+    """Request transport exposed by the cache server."""
 
     host: str = "localhost"
-    """ZMQ server host."""
+    """Request server host."""
 
     port: int = 5555
-    """ZMQ server port."""
+    """Request server port."""
 
     chunk_size: int = 256
     """Chunk size for KV cache operations."""
@@ -36,30 +44,117 @@ class MPServerConfig:
     """Worker threads for the normal (CPU) pool (LOOKUP, END_SESSION, etc.).
     Resolved from --max-cpu-workers or --max-workers."""
 
+    grpc_server_workers: int = 32
+    """Worker threads for gRPC request dispatch. Only used by gRPC transport."""
+
     hash_algorithm: str = "blake3"
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
 
     engine_type: str = "default"
-    """Cache engine backend type
-    ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
-    """
+    """Cache engine backend type: 'default' for standard prefix caching,
+    'blend' to compose the blend module (non-prefix KV reuse)."""
 
-    supported_transfer_mode: str = "auto"
-    """Transfer mode: 'gpu' for GPU-based IPC transfer (STORE/RETRIEVE),
-    'non_gpu' for non-GPU-based transfer (PREPARE/COMMIT), or 'auto' to
-    enable both."""
+    separate_object_groups: bool = False
+    """When True, split kernel groups into one object group per
+    sliding-window size at KV-cache registration (hybrid models). When False
+    (default), all kernel groups share a single full-attention object group."""
+
+    enable_segmented_prefix: bool = False
+    """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
+    failure, retain the gapped contiguous prefix so the post-gap chunks stay
+    L1-resident (served by the sparse leg as L1 hits, the hole recomputed)
+    instead of truncating the prefix at the gap. No effect for other engines."""
+
+    enable_dedup_content: bool = False
+    """engine_type='blend' only: skip fingerprint registration for a chunk whose
+    content is already indexed, so the same text stored behind two prefixes is
+    indexed once. No effect for other engines."""
+
+    supported_transfer_mode: Literal["lmcache_driven", "engine_driven", "auto"] = (
+        "lmcache_driven"
+    )
+    """Transfer mode: 'lmcache_driven' for server-driven transfer
+    (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
+    engine-driven transfer (PREPARE/COMMIT), or 'auto' to enable both."""
+
+    isolated_ipc: bool = False
+    """Whether IPC mechanisms must work across isolated containers (no shared
+    host IPC namespace or /dev/shm); see lmcache.v1.platform.ipc_policy.
+    Must match the engine workers' ``lmcache.mp.isolated_ipc`` setting."""
 
     runtime_plugin_config: "RuntimePluginConfig" = field(
         default_factory=lambda: RuntimePluginConfig()
     )
     """Runtime plugin configuration (locations + extra config)."""
 
-    shm_name: str | None = None
-    """SHM segment name for non-GPU KV transfer.
-    None: auto-allocate (default). "": force pickle. Other: use that name."""
+    p2p_config: "P2PConfig" = field(default_factory=lambda: P2PConfig())
+    """Peer-to-peer configuration. P2P is enabled when its advertise URL is
+    set."""
+
+    shm_name: str | None = ""
+    """SHM segment name for engine-driven KV transfer.
+    "" (default): force pickle. None: auto-allocate. Other: use that name."""
 
     script_allowed_imports: list[str] = field(default_factory=list)
     """Modules that /run_script endpoint is allowed to import."""
+
+    run_script_api_enabled: bool = False
+    """Enable the /run_script HTTP endpoint. It executes caller-supplied
+    Python in-process (the restricted builtins are not a security boundary),
+    so it is disabled by default; only enable on a trusted network."""
+
+    instance_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    """Stable identity of this MP server, the single source of truth for who
+    this server is. Used as the coordinator membership key and projected onto
+    the OTel ``service.instance.id`` resource attribute (see
+    ``run_cache_server``) so metrics, traces, and coordinator state all key on
+    the same id. Set via ``--instance-id``; defaults to a random UUID v4."""
+
+    worker_reap_timeout_seconds: float = 120.0
+    """Silence budget (seconds) after which a ping-proven worker's KV cache
+    registration is reaped. 0 disables worker reaping. Keep it >= 3 x the
+    engine adapter's heartbeat interval so a few missed pings never reap a live
+    worker."""
+
+    worker_registration_grace_seconds: float = 3600.0
+    """Silence budget (seconds) for a worker that registered but has never
+    sent a PING (model warmup, or death before its first request). Must be
+    >= worker_reap_timeout_seconds."""
+
+    enable: list[str] = field(default_factory=list)
+    """List of experimental transfer modules to enable. Options: transfer_query
+    (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
+
+    null_block_id: int = 0
+    """Engine block ID that denotes absent KV data. The default ``0`` keeps
+    compatibility with vLLM; engines where block zero is valid can select a
+    different sentinel, for example ``-1``."""
+
+    def __post_init__(self) -> None:
+        """Validate the worker-reaping timeouts.
+
+        Raises:
+            ValueError: If a timeout is non-finite, the reap timeout is
+                negative or a non-zero value below the 30 s floor, or the
+                registration grace is below the reap timeout.
+        """
+        reap = self.worker_reap_timeout_seconds
+        grace = self.worker_registration_grace_seconds
+        if self.grpc_server_workers < 1:
+            raise ValueError(
+                f"grpc server workers must be >= 1; got {self.grpc_server_workers}"
+            )
+        if not math.isfinite(reap) or reap < 0 or (reap != 0 and reap < 30.0):
+            raise ValueError(
+                "worker reap timeout must be 0 (disabled) or >= 30s; keep it "
+                ">= 3 x your configured lmcache.mp.heartbeat_interval "
+                f"(default 10s); got {reap}"
+            )
+        if not math.isfinite(grace) or grace < reap:
+            raise ValueError(
+                "worker registration grace must be >= the worker reap timeout "
+                f"({reap}s); got {grace}"
+            )
 
 
 @dataclass
@@ -76,6 +171,45 @@ class RuntimePluginConfig:
     """
 
 
+@dataclass
+class P2PConfig:
+    """Configuration for peer-to-peer KV transfer.
+
+    P2P is enabled when :attr:`advertise_url` is non-empty. It additionally
+    requires a coordinator URL for peer discovery (validated at startup).
+    """
+
+    advertise_url: str = ""
+    """Transfer-channel server ``host:port`` this instance advertises to peers.
+    Empty disables P2P."""
+
+    listen_url: str = ""
+    """Transfer-channel server ``host:port`` to bind and listen on. Empty
+    defers to :attr:`advertise_url`."""
+
+    lookup_timeout: float = 30.0
+    """Seconds before a peer lookup result counts as a miss."""
+
+    load_timeout: float = 30.0
+    """Seconds before a peer load counts as a failure."""
+
+    transfer_engine: str = "nixl"
+    """Transfer-channel implementation to use."""
+
+    @property
+    def enabled(self) -> bool:
+        """Whether P2P is enabled (an advertise URL is configured)."""
+        return bool(self.advertise_url)
+
+    @property
+    def effective_listen_url(self) -> str:
+        """The listen URL, defaulting to the advertise URL when unset."""
+        return self.listen_url or self.advertise_url
+
+
+DEFAULT_P2P_CONFIG = P2PConfig()
+
+
 DEFAULT_MP_SERVER_CONFIG = MPServerConfig()
 
 
@@ -83,7 +217,7 @@ DEFAULT_MP_SERVER_CONFIG = MPServerConfig()
 class HTTPFrontendConfig:
     """Configuration for the HTTP frontend (uvicorn/FastAPI)."""
 
-    http_host: str = "0.0.0.0"
+    http_host: str = "127.0.0.1"
     """HTTP server host."""
 
     http_port: int = 8080
@@ -91,6 +225,46 @@ class HTTPFrontendConfig:
 
 
 DEFAULT_HTTP_FRONTEND_CONFIG = HTTPFrontendConfig()
+
+DEFAULT_KAFKA_CACHE_EVENT_TOPIC = "lmcache-cache-events"
+DEFAULT_KAFKA_DELIVERY_TIMEOUT = 10.0
+
+
+@dataclass(frozen=True)
+class HttpCacheEventSinkConfig:
+    """Configuration for direct HTTP cache-event delivery."""
+
+
+@dataclass(frozen=True)
+class KafkaCacheEventSinkConfig:
+    """Configuration for publishing cache events to Kafka.
+
+    Attributes:
+        bootstrap_servers: Comma-separated Kafka bootstrap servers.
+        topic: Topic receiving cache-event records.
+        delivery_timeout: Seconds to wait for broker acknowledgement.
+    """
+
+    bootstrap_servers: str
+    topic: str = DEFAULT_KAFKA_CACHE_EVENT_TOPIC
+    delivery_timeout: float = DEFAULT_KAFKA_DELIVERY_TIMEOUT
+
+    def __post_init__(self) -> None:
+        """Validate the bootstrap servers, topic, and delivery timeout.
+
+        Raises:
+            ValueError: If bootstrap servers or the topic are empty, or the
+                delivery timeout is not a positive finite number.
+        """
+        if not self.bootstrap_servers.strip():
+            raise ValueError("Kafka bootstrap servers must be non-empty")
+        if not self.topic.strip():
+            raise ValueError("Kafka cache-event topic must be non-empty")
+        if not math.isfinite(self.delivery_timeout) or self.delivery_timeout <= 0:
+            raise ValueError(
+                "Kafka delivery timeout must be a finite number > 0, "
+                f"got {self.delivery_timeout}"
+            )
 
 
 @dataclass
@@ -114,6 +288,27 @@ class CoordinatorConfig:
     """Seconds between heartbeats. Must be strictly positive and kept well below
     the coordinator's ``INSTANCE_TIMEOUT``."""
 
+    event_reporting: bool = False
+    """When ``True``, stream cache store/access/delete events to the
+    coordinator, feeding the key directory (fleet-wide placement
+    tracking) and, for L2 events, usage/quota tracking and eviction."""
+
+    event_flush_interval: float = 1.0
+    """Seconds between cache-event flush attempts to the coordinator."""
+
+    event_sink_config: HttpCacheEventSinkConfig | KafkaCacheEventSinkConfig = field(
+        default_factory=HttpCacheEventSinkConfig
+    )
+    """Transport-specific cache-event delivery configuration."""
+
+    blend_timeout: float = 1.0
+    """Seconds a fleet CacheBlend lookup may take: both the per-request HTTP
+    timeout and the per-lookup match budget of the blend coordinator client."""
+
+    blend_match_concurrency: int = 8
+    """Max fleet CacheBlend match round-trips the blend coordinator client keeps
+    in flight at once. Must be strictly positive."""
+
 
 DEFAULT_COORDINATOR_CONFIG = CoordinatorConfig()
 
@@ -131,25 +326,46 @@ def add_mp_server_args(
         The same parser with MP server arguments added.
     """
     mp_group = parser.add_argument_group(
-        "MP Server", "Configuration for the ZMQ multiprocess cache server"
+        "MP Server", "Configuration for the multiprocess cache server"
+    )
+    mp_group.add_argument(
+        "--instance-id",
+        type=str,
+        default=None,
+        help="Stable identity of this MP server. Used as the coordinator "
+        "membership key and as the OTel 'service.instance.id' resource "
+        "attribute on every metric and span. Defaults to a random UUID v4 "
+        "minted at startup.",
+    )
+    mp_group.add_argument(
+        "--transport",
+        choices=("zmq", "grpc"),
+        default="zmq",
+        help="Request transport exposed by the cache server. Default is zmq.",
     )
     mp_group.add_argument(
         "--host",
         type=str,
         default="localhost",
-        help="Host to bind the ZMQ server. Default is localhost.",
+        help="Host to bind the request server. Default is localhost.",
     )
     mp_group.add_argument(
         "--port",
         type=int,
         default=5555,
-        help="Port to bind the ZMQ server. Default is 5555.",
+        help="Port to bind the request server. Default is 5555.",
     )
     mp_group.add_argument(
         "--chunk-size",
         type=int,
         default=256,
         help="Chunk size for KV cache operations. Default is 256.",
+    )
+    mp_group.add_argument(
+        "--null-block-id",
+        type=int,
+        default=0,
+        help="Engine block ID that denotes absent KV data. Default is 0.",
     )
     mp_group.add_argument(
         "--max-workers",
@@ -174,6 +390,13 @@ def add_mp_server_args(
         "Defaults to --max-workers if not specified.",
     )
     mp_group.add_argument(
+        "--grpc-server-workers",
+        type=int,
+        default=32,
+        help="Worker threads for gRPC request dispatch. Only used by "
+        "--transport grpc. Default is 32.",
+    )
+    mp_group.add_argument(
         "--hash-algorithm",
         type=str,
         default="blake3",
@@ -184,20 +407,31 @@ def add_mp_server_args(
         "--engine-type",
         type=str,
         default="default",
-        choices=["default", "blend", "blend_legacy"],
+        choices=["default", "blend"],
         help="Cache engine backend type. 'default' uses standard prefix caching; "
-        "'blend' selects CacheBlend V3 (the current implementation); "
-        "'blend_legacy' selects the original CacheBlend. Default is 'default'.",
+        "'blend' composes the blend module for non-prefix KV reuse. "
+        "Default is 'default'.",
     )
     mp_group.add_argument(
         "--supported-transfer-mode",
         type=str,
-        default="auto",
-        choices=["gpu", "non_gpu", "auto"],
-        help="Supported transfer mode: 'gpu' for GPU-based IPC transfer "
-        "(STORE/RETRIEVE), 'non_gpu' for non-GPU-based transfer "
-        "(PREPARE/COMMIT), or 'auto' to enable both transfer paths. "
-        "Default is 'auto'.",
+        default="lmcache_driven",
+        choices=["lmcache_driven", "engine_driven", "auto"],
+        help="Supported transfer mode: 'lmcache_driven' for server-driven "
+        "transfer (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), "
+        "'engine_driven' for engine-driven transfer (PREPARE/COMMIT), "
+        "or 'auto' to enable both transfer paths. "
+        "Default is 'lmcache_driven'.",
+    )
+    mp_group.add_argument(
+        "--isolated-ipc",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Assume engine workers and this server run in containers that "
+        "share no host IPC namespace or /dev/shm, and use IPC mechanisms "
+        "that work there (CUDA: timeline-semaphore events instead of "
+        "interprocess event handles). Must match the engine workers' "
+        "lmcache.mp.isolated_ipc setting. (Default is False)",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",
@@ -219,11 +453,12 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--shm-name",
         type=str,
-        default=None,
-        help="SHM segment name for non-GPU KV transfer. "
-        "Default (not specified): auto-allocate. "
-        'Set to "" to force pickle path (disable SHM). '
-        "Set to a name to use that specific SHM segment.",
+        default="",
+        help="SHM segment name for engine-driven KV transfer. "
+        'Default "" (not specified): disable SHM. '
+        "Set to a name to create and use that specific SHM segment. "
+        "(Only use this for engine_driven transfer mode, see "
+        "`--supported-transfer-mode`.) ",
     )
     mp_group.add_argument(
         "--script-allowed-imports",
@@ -232,6 +467,61 @@ def add_mp_server_args(
         default=[],
         help="Python modules that the /run_script endpoint is allowed to "
         "import. Example: --script-allowed-imports numpy pandas",
+    )
+    mp_group.add_argument(
+        "--run-script-api-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable the /run_script HTTP endpoint, which executes "
+        "caller-supplied Python in-process (full remote code execution; the "
+        "restricted builtins are not a security boundary). Default is False. "
+        "Only enable it on a trusted network.",
+    )
+    mp_group.add_argument(
+        "--separate-object-groups",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Split kernel groups into one object group per sliding-window size "
+        "at KV-cache registration (for hybrid models). (Default is False)",
+    )
+    mp_group.add_argument(
+        "--worker-reap-timeout-seconds",
+        type=float,
+        default=120.0,
+        help="Silence budget (s) before a ping-proven worker's KV cache "
+        "registration is reaped. 0 disables reaping. Must be >= 3 x the "
+        "engine adapter's heartbeat interval. Default is 120.",
+    )
+    mp_group.add_argument(
+        "--worker-registration-grace-seconds",
+        type=float,
+        default=3600.0,
+        help="Silence budget (s) for a worker that registered but never "
+        "pinged (model warmup or early death). Must be >= the worker reap "
+        "timeout. Default is 3600.",
+    )
+    mp_group.add_argument(
+        "--enable-segmented-prefix",
+        action="store_true",
+        help="CacheBlend (--engine-type blend) only: on a mid-prefix L2 "
+        "retrieve failure, retain the gapped prefix so post-gap chunks stay "
+        "L1-resident instead of truncating at the gap. No effect otherwise.",
+    )
+    mp_group.add_argument(
+        "--enable-dedup-content",
+        action="store_true",
+        help="--engine-type blend only: skip fingerprint registration for a "
+        "chunk whose content is already indexed, so the same text stored "
+        "behind different prefixes is indexed once. No effect otherwise.",
+    )
+    mp_group.add_argument(
+        "--enable",
+        type=str,
+        nargs="*",
+        default=[],
+        help="List of experimental transfer modules to enable. "
+        "Options: transfer_query (see lmcache.v1.multiprocess.modules."
+        "experimental.__init___.py).",
     )
     return parser
 
@@ -256,21 +546,103 @@ def parse_args_to_mp_server_config(
     except json.JSONDecodeError as exc:
         raise ValueError("--runtime-plugin-config is not valid JSON: %s" % exc) from exc
     return MPServerConfig(
+        instance_id=args.instance_id or str(uuid.uuid4()),
+        transport=args.transport,
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,
+        null_block_id=args.null_block_id,
         max_workers=base,
         max_gpu_workers=max_gpu,
         max_cpu_workers=max_cpu,
+        grpc_server_workers=args.grpc_server_workers,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
+        separate_object_groups=args.separate_object_groups,
+        enable_segmented_prefix=args.enable_segmented_prefix,
+        enable_dedup_content=args.enable_dedup_content,
         supported_transfer_mode=args.supported_transfer_mode,
+        isolated_ipc=args.isolated_ipc,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
             extra_config=plugin_extra,
         ),
+        p2p_config=parse_args_to_p2p_config(args),
         shm_name=args.shm_name,
         script_allowed_imports=args.script_allowed_imports or [],
+        run_script_api_enabled=args.run_script_api_enabled,
+        worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
+        worker_registration_grace_seconds=args.worker_registration_grace_seconds,
+        enable=args.enable or [],
+    )
+
+
+def add_p2p_args(
+    parser: argparse.ArgumentParser,
+) -> argparse.ArgumentParser:
+    """Add peer-to-peer configuration arguments to an existing parser.
+
+    Args:
+        parser: The argument parser to add arguments to.
+
+    Returns:
+        The same parser with P2P arguments added.
+    """
+    group = parser.add_argument_group(
+        "P2P", "Configuration for peer-to-peer KV transfer"
+    )
+    group.add_argument(
+        "--p2p-advertise-url",
+        type=str,
+        default="",
+        help="Transfer-channel server host:port this instance advertises to "
+        "peers. Setting it enables P2P (also requires --coordinator-url).",
+    )
+    group.add_argument(
+        "--p2p-listen-url",
+        type=str,
+        default="",
+        help="Transfer-channel server host:port to bind. Defaults to "
+        "--p2p-advertise-url.",
+    )
+    group.add_argument(
+        "--p2p-lookup-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds before a peer lookup result counts as a miss. Default is 30.",
+    )
+    group.add_argument(
+        "--p2p-load-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds before a peer load counts as a failure. Default is 30.",
+    )
+    group.add_argument(
+        "--p2p-transfer-engine",
+        type=str,
+        default="nixl",
+        help="Transfer-channel implementation to use. Default is nixl.",
+    )
+    return parser
+
+
+def parse_args_to_p2p_config(
+    args: argparse.Namespace,
+) -> P2PConfig:
+    """Convert parsed command line arguments to a P2PConfig.
+
+    Args:
+        args: Parsed arguments from the argument parser.
+
+    Returns:
+        The configuration object.
+    """
+    return P2PConfig(
+        advertise_url=getattr(args, "p2p_advertise_url", "") or "",
+        listen_url=getattr(args, "p2p_listen_url", "") or "",
+        lookup_timeout=getattr(args, "p2p_lookup_timeout", 30.0),
+        load_timeout=getattr(args, "p2p_load_timeout", 30.0),
+        transfer_engine=getattr(args, "p2p_transfer_engine", "nixl"),
     )
 
 
@@ -292,8 +664,10 @@ def add_http_frontend_args(
     http_group.add_argument(
         "--http-host",
         type=str,
-        default="0.0.0.0",
-        help="Host to bind the HTTP server. Default is 0.0.0.0.",
+        default="127.0.0.1",
+        help="Host to bind the HTTP server. Default is 127.0.0.1; the admin "
+        "API has no authentication, so only bind a non-loopback address on a "
+        "trusted network.",
     )
     http_group.add_argument(
         "--http-port",
@@ -327,9 +701,11 @@ def add_coordinator_args(
 ) -> argparse.ArgumentParser:
     """Add MP coordinator registration arguments to an existing parser.
 
-    Each flag falls back to its ``LMCACHE_COORDINATOR_*`` environment variable
-    so the server can be configured either way (the env var is convenient for
-    the Kubernetes downward API); an explicit flag wins over the env var.
+    The registration flags fall back to their ``LMCACHE_COORDINATOR_*``
+    environment variables so the server can be configured either way (the env
+    var is convenient for the Kubernetes downward API); an explicit flag wins
+    over the env var. The event-transport and blend client flags have no env
+    fallback.
 
     Args:
         parser: The argument parser to add arguments to.
@@ -362,6 +738,83 @@ def add_coordinator_args(
         help="Seconds between heartbeats (must be > 0). Defaults to "
         "LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL, then 5.0.",
     )
+    group.add_argument(
+        "--coordinator-event-reporting",
+        action="store_true",
+        default=None,
+        help="Stream cache store/access/delete events to the coordinator, "
+        "feeding the key directory (placement tracking) and, for L2 "
+        "events, usage/quota tracking and eviction. Defaults to "
+        "LMCACHE_COORDINATOR_EVENT_REPORTING; unset disables.",
+    )
+    group.add_argument(
+        "--coordinator-event-flush-interval",
+        type=float,
+        default=None,
+        help="Seconds between cache-event flush attempts (must be > 0). "
+        "Defaults to LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL, then 1.0.",
+    )
+    group.add_argument(
+        "--coordinator-event-transport",
+        choices=("http", "kafka"),
+        default="http",
+        help="Cache-event transport: http posts batches to the coordinator, "
+        "kafka publishes them to a Kafka topic. Default is http.",
+    )
+    group.add_argument(
+        "--coordinator-kafka-bootstrap-servers",
+        type=str,
+        default="",
+        help="Comma-separated Kafka bootstrap servers. Required when the "
+        "cache-event transport is kafka.",
+    )
+    group.add_argument(
+        "--coordinator-kafka-topic",
+        type=str,
+        default=DEFAULT_KAFKA_CACHE_EVENT_TOPIC,
+        help="Kafka topic receiving cache events. Default is "
+        f"{DEFAULT_KAFKA_CACHE_EVENT_TOPIC}.",
+    )
+    group.add_argument(
+        "--coordinator-kafka-delivery-timeout",
+        type=float,
+        default=DEFAULT_KAFKA_DELIVERY_TIMEOUT,
+        help="Seconds to wait for Kafka broker acknowledgement (must be > 0). "
+        f"Default is {DEFAULT_KAFKA_DELIVERY_TIMEOUT}.",
+    )
+    group.add_argument(
+        "--coordinator-blend-timeout",
+        type=float,
+        default=DEFAULT_COORDINATOR_CONFIG.blend_timeout,
+        help="Seconds a fleet CacheBlend lookup to the coordinator may take, "
+        "used as both the HTTP timeout and the per-lookup match budget "
+        f"(default: {DEFAULT_COORDINATOR_CONFIG.blend_timeout}).",
+    )
+    group.add_argument(
+        "--coordinator-blend-match-concurrency",
+        type=int,
+        default=DEFAULT_COORDINATOR_CONFIG.blend_match_concurrency,
+        help="Max fleet CacheBlend match round-trips in flight at once "
+        f"(default: {DEFAULT_COORDINATOR_CONFIG.blend_match_concurrency}).",
+    )
+    # Deprecated pre-v0.5.3 aliases, hidden from --help. Released deployers
+    # (operator <= v0.5.2, charts) still render these names into server args,
+    # and rejecting them crashes the pod on startup. Remove once those
+    # deployers are out of the support matrix.
+    group.add_argument(
+        "--coordinator-l2-event-reporting",
+        dest="coordinator_l2_event_reporting",
+        action="store_true",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    group.add_argument(
+        "--coordinator-l2-event-flush-interval",
+        dest="coordinator_l2_event_flush_interval",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -370,9 +823,16 @@ def parse_args_to_coordinator_config(
 ) -> CoordinatorConfig:
     """Convert parsed command line arguments to a CoordinatorConfig.
 
-    A flag value takes precedence over its environment variable. The heartbeat
-    interval is validated here so a malformed value fails fast at startup
-    (runtime best-effort only covers coordinator *reachability*, not config).
+    For the registration settings a flag value takes precedence over its
+    environment variable; the event-transport and blend client settings come
+    from their flags alone. Timing values are validated here so a malformed
+    one fails fast at startup (runtime best-effort only covers coordinator
+    *reachability*, not config).
+
+    The event-reporting flags also accept their deprecated pre-v0.5.3
+    spellings (``--coordinator-l2-event-*``), logging a deprecation warning
+    when used. Precedence per setting: new flag > deprecated flag > env var
+    > default.
 
     Args:
         args: Parsed arguments from the argument parser.
@@ -381,7 +841,11 @@ def parse_args_to_coordinator_config(
         The configuration object.
 
     Raises:
-        ValueError: If the heartbeat interval is not a positive number.
+        ValueError: If the heartbeat interval, the event flush interval or the
+            blend timeout is not a positive finite number, if the blend match
+            concurrency is less than 1, or if the Kafka transport is selected
+            with empty bootstrap servers, an empty topic, or a non-positive
+            delivery timeout.
     """
     url = (
         args.coordinator_url
@@ -413,8 +877,78 @@ def parse_args_to_coordinator_config(
             "coordinator heartbeat interval must be a finite number > 0, "
             "got %s" % heartbeat_interval
         )
+    # Deprecated pre-v0.5.3 flag spellings. Precedence within each setting:
+    # new flag > deprecated flag > env var > default.
+    deprecated_reporting = getattr(args, "coordinator_l2_event_reporting", None)
+    if args.coordinator_event_reporting is not None:
+        event_reporting = args.coordinator_event_reporting
+    elif deprecated_reporting is not None:
+        logger.warning(
+            "--coordinator-l2-event-reporting is deprecated, "
+            "use --coordinator-event-reporting instead"
+        )
+        event_reporting = deprecated_reporting
+    else:
+        event_reporting = os.getenv(
+            "LMCACHE_COORDINATOR_EVENT_REPORTING", ""
+        ).lower() in ("1", "true", "yes")
+
+    deprecated_flush = getattr(args, "coordinator_l2_event_flush_interval", None)
+    if args.coordinator_event_flush_interval is not None:
+        event_flush_interval = args.coordinator_event_flush_interval
+    elif deprecated_flush is not None:
+        logger.warning(
+            "--coordinator-l2-event-flush-interval is deprecated, "
+            "use --coordinator-event-flush-interval instead"
+        )
+        event_flush_interval = deprecated_flush
+    else:
+        raw = os.getenv("LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL")
+        if raw:
+            try:
+                event_flush_interval = float(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    "LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL is not a number: %r" % raw
+                ) from exc
+        else:
+            event_flush_interval = 1.0
+    if not math.isfinite(event_flush_interval) or event_flush_interval <= 0:
+        raise ValueError(
+            "coordinator event flush interval must be a finite number > 0, "
+            "got %s" % event_flush_interval
+        )
+
+    event_sink_config: HttpCacheEventSinkConfig | KafkaCacheEventSinkConfig = (
+        HttpCacheEventSinkConfig()
+    )
+    if args.coordinator_event_transport == "kafka":
+        event_sink_config = KafkaCacheEventSinkConfig(
+            bootstrap_servers=args.coordinator_kafka_bootstrap_servers,
+            topic=args.coordinator_kafka_topic,
+            delivery_timeout=args.coordinator_kafka_delivery_timeout,
+        )
+
+    blend_timeout = args.coordinator_blend_timeout
+    if not math.isfinite(blend_timeout) or blend_timeout <= 0:
+        raise ValueError(
+            "coordinator blend timeout must be a finite number > 0, "
+            "got %s" % blend_timeout
+        )
+    blend_match_concurrency = args.coordinator_blend_match_concurrency
+    if blend_match_concurrency < 1:
+        raise ValueError(
+            "coordinator blend match concurrency must be >= 1, "
+            "got %s" % blend_match_concurrency
+        )
+
     return CoordinatorConfig(
         url=url,
         advertise_ip=advertise_ip,
         heartbeat_interval=heartbeat_interval,
+        event_reporting=event_reporting,
+        event_flush_interval=event_flush_interval,
+        event_sink_config=event_sink_config,
+        blend_timeout=blend_timeout,
+        blend_match_concurrency=blend_match_concurrency,
     )

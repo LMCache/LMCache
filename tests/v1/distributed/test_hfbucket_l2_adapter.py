@@ -14,7 +14,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters import hfbucket_l2_adapter as hfmod
 from lmcache.v1.distributed.l2_adapters.hfbucket_l2_adapter import (
@@ -33,6 +33,8 @@ from lmcache.v1.platform import consume_fd
 from lmcache.v1.storage_backend.connector.hfbucket_connector import (
     parse_hfbucket_handle,
 )
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 _TEST_BUCKET_HANDLE = "hf://buckets/test-org/test-bucket/prod"
 _TEST_BUCKET_LOCATION = parse_hfbucket_handle(_TEST_BUCKET_HANDLE)
@@ -195,7 +197,7 @@ class _RecordingListener(L2AdapterListener):
         self.accessed: list[list[ObjectKey]] = []
         self.deleted: list[list[ObjectKey]] = []
 
-    def on_l2_keys_stored(self, keys):
+    def on_l2_keys_stored(self, keys, sizes):
         self.stored.append(list(keys))
 
     def on_l2_keys_accessed(self, keys):
@@ -265,7 +267,7 @@ class TestStoreLookupLoad:
         assert wait_for_event_fd(adapter.get_store_event_fd())
         assert adapter.pop_completed_store_tasks()[tid].is_successful()
 
-        tid = adapter.submit_lookup_and_lock_task([key])
+        tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         bm = adapter.query_lookup_and_lock_result(tid)
         assert bm is not None and bm.test(0) is True
@@ -285,7 +287,7 @@ class TestStoreLookupLoad:
         adapter.pop_completed_store_tasks()
 
         keys = [create_object_key(i) for i in range(4)]
-        tid = adapter.submit_lookup_and_lock_task(keys)
+        tid = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         bm = adapter.query_lookup_and_lock_result(tid)
         assert bm is not None
@@ -322,7 +324,7 @@ class TestStoreLookupLoad:
         adapter: HFBucketL2Adapter,
     ) -> None:
         key = create_object_key(1)
-        tid = adapter.submit_lookup_and_lock_task([key])
+        tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         assert adapter.query_lookup_and_lock_result(tid) is not None
         assert adapter.query_lookup_and_lock_result(tid) is None
@@ -352,7 +354,7 @@ class TestEviction:
         adapter.pop_completed_store_tasks()
 
     def _lookup(self, adapter: HFBucketL2Adapter, key: ObjectKey):
-        tid = adapter.submit_lookup_and_lock_task([key])
+        tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         return adapter.query_lookup_and_lock_result(tid)
 
@@ -467,7 +469,7 @@ class TestListener:
         time.sleep(0.05)
         assert any(key in batch for batch in listener.stored)
 
-        tid = adapter.submit_lookup_and_lock_task([key])
+        tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         adapter.query_lookup_and_lock_result(tid)
         time.sleep(0.05)

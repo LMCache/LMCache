@@ -73,7 +73,7 @@ JSON spec passed to `--l2-adapter`:
 
 | Field               | Type    | Default | Description                                                     |
 |---------------------|---------|---------|-----------------------------------------------------------------|
-| `eviction_policy`   | string  | —       | Policy name: `"LRU"` or `"noop"`. Required.                    |
+| `eviction_policy`   | string  | —       | Policy name: `"LRU"`, `"ARC"`, `"IsolatedLRU"`, or `"noop"`. Required. |
 | `trigger_watermark` | float   | `0.8`   | Usage fraction [0, 1] above which eviction is triggered.        |
 | `eviction_ratio`    | float   | `0.2`   | Fraction of **used** capacity to evict each cycle.              |
 
@@ -156,11 +156,28 @@ to evict. It has no knowledge of adapters or listeners:
 ```
 EvictionPolicy (abstract)
   ├─ LRUEvictionPolicy   — evicts least-recently-used keys
+  ├─ ARCEvictionPolicy   — balances recent and frequently accessed keys
+  ├─ IsolatedLRUEvictionPolicy — maintains one LRU list per cache salt
   └─ NoOpEvictionPolicy  — never evicts
 ```
 
 Policies are created by `CreateEvictionPolicy(eviction_config)` in
 `eviction_policy/factory.py`.
+
+`ARCEvictionPolicy` maintains four ordered key indexes. `T1` and `T2` contain
+resident recent and frequent keys; `B1` and `B2` contain only the keys of
+completed policy evictions. A key recreated from `B1` increases the target
+size of `T1`, while a key recreated from `B2` decreases it. Explicit deletes
+do not enter ghost history. Since the policy interface exposes ratios and
+keys rather than byte sizes, ARC learns capacity from the largest observed
+resident-key count; fixed-size chunks and fixed-slot adapters are the closest
+fit.
+
+The original ARC paper's `REPLACE(x)` operation can use the incoming key to
+break a tie at the adaptive boundary. MP eviction runs later in an independent
+pressure loop, so there is no corresponding `x`. The MP policy follows the
+request-independent threshold used by vLLM's CPU-offload ARC variant: select
+from `T1` when `len(T1) >= int(p)`, otherwise select from `T2`.
 
 ## Adapter Implementation Guide
 
@@ -197,7 +214,7 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 | `MockL2Adapter`            | ✓        | ✓           | stored, deleted     |
 | `NixlStoreL2Adapter`       | ✓ (skips pinned) | ✓ (pool-based) | stored, deleted |
 | `RawBlockL2Adapter`        | ✓ (skips locked) | ✓ | stored, accessed, deleted |
-| `FSL2Adapter`              | no-op    | `(-1, -1)`  | none                |
+| `FSL2Adapter`              | ✓ (best-effort) | total only (no max cap) | stored, accessed, deleted |
 | `NativeConnectorL2Adapter` | ✓ (via `submit_batch_delete`) | ✓ (client-side, requires `max_capacity_gb`) | stored, deleted |
 
 **Note on `NativeConnectorL2Adapter`:** Eviction support requires two things:
@@ -208,6 +225,18 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 2. The adapter must be configured with `max_capacity_gb > 0` to enable client-side
    size tracking for `get_usage()`. Without it, `get_usage()` returns `(-1, -1)` and
    the eviction controller will not trigger.
+
+**Note on `FSL2Adapter`:** `delete()` and the listener events are implemented, so
+the base class tracks `total_bytes_used` from the store / delete notifications.
+Two caveats:
+
+1. The adapter declares no max capacity, so `usage_fraction == -1.0` and the
+   global (capacity-triggered) eviction controller skips it. `delete()` still runs
+   when invoked directly (e.g. via the per-user quota path).
+2. `delete()` is best-effort: the adapter tracks no per-key in-flight locks, so a
+   delete is not skipped when it races an in-flight load or store. A racing load
+   degrades to a miss (the load path treats the missing file as not-found); a
+   racing store may re-create the key, which a later cycle re-picks.
 
 Example configuration with eviction enabled:
 
@@ -259,8 +288,9 @@ for each L2AdapterEvictionState:
 ## Relationship to L1 Eviction
 
 L1 and L2 eviction share the same policy classes (`LRUEvictionPolicy`,
-`NoOpEvictionPolicy`) and the same listener-bridge pattern (composition over
-multi-inheritance). They differ in how they are wired:
+`ARCEvictionPolicy`, `IsolatedLRUEvictionPolicy`, `NoOpEvictionPolicy`) and the
+same listener-bridge pattern (composition over multi-inheritance). They differ
+in how they are wired:
 
 | Aspect              | L1                                   | L2                                    |
 |---------------------|--------------------------------------|---------------------------------------|

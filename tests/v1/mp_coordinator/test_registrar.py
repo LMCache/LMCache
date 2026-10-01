@@ -42,8 +42,61 @@ def test_register_returns_assigned_id():
     asyncio.run(run())
 
 
+def test_register_forwards_p2p_and_mq_fields():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Standard
+        import json
+
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"instance_id": "i1", "re_registered": False})
+
+    async def run():
+        async with _client(handler) as client:
+            await register(
+                client,
+                _BASE,
+                http_port=8080,
+                advertise_ip="10.0.0.1",
+                instance_id="i1",
+                p2p_advertised_url="10.0.0.1:7600",
+                mq_port=5555,
+            )
+
+    asyncio.run(run())
+    # The MQ server is reachable at the same advertised ip, so no separate
+    # mq_ip is sent -- only the port.
+    assert captured["ip"] == "10.0.0.1"
+    assert captured["p2p_advertised_url"] == "10.0.0.1:7600"
+    assert captured["mq_port"] == 5555
+
+
+def test_register_omits_mq_port_when_p2p_disabled():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Standard
+        import json
+
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"instance_id": "i1", "re_registered": False})
+
+    async def run():
+        async with _client(handler) as client:
+            await register(client, _BASE, http_port=8080, advertise_ip="10.0.0.1")
+
+    asyncio.run(run())
+    assert captured["mq_port"] == 0
+
+
 async def _run_loop_briefly(client: httpx.AsyncClient, **kwargs) -> None:
-    """Run keep_registered for a few ticks, then cancel it."""
+    """Run keep_registered for a few ticks, then cancel it.
+
+    Supplies a no-op ``on_registered`` unless the case under test overrides
+    it; the parameter is required, so only tests need the no-op.
+    """
+    kwargs.setdefault("on_registered", lambda: None)
     task = asyncio.create_task(
         keep_registered(
             client,
@@ -143,6 +196,7 @@ def test_keep_registered_survives_malformed_response():
                     http_port=8080,
                     advertise_ip="127.0.0.1",
                     heartbeat_interval=0.03,
+                    on_registered=lambda: None,
                 )
             )
             await asyncio.sleep(0.1)
@@ -167,6 +221,7 @@ def test_keep_registered_survives_unreachable_coordinator():
                     http_port=8080,
                     advertise_ip="127.0.0.1",
                     heartbeat_interval=0.03,
+                    on_registered=lambda: None,
                 )
             )
             await asyncio.sleep(0.1)
@@ -176,3 +231,45 @@ def test_keep_registered_survives_unreachable_coordinator():
                 await task
 
     asyncio.run(run())
+
+
+def test_on_registered_fires_for_every_registration():
+    """The hook must fire on re-registration, not just the first one.
+
+    A restarted coordinator keeps declarations in memory only, so without
+    this the fleet view loses every capacity denominator until some
+    unrelated topology change happens to resend one.
+    """
+    calls = {"register": 0, "hook": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            calls["register"] += 1
+            return httpx.Response(
+                200, json={"instance_id": "i1", "re_registered": False}
+            )
+        if request.method == "PUT":
+            # Coordinator forgot us: forces a re-registration next tick.
+            return httpx.Response(404, json={"error": "unknown"})
+        return httpx.Response(204)
+
+    def hook() -> None:
+        calls["hook"] += 1
+
+    async def run():
+        async with _client(handler) as client:
+            await _run_loop_briefly(client, instance_id="i1", on_registered=hook)
+
+    asyncio.run(run())
+    assert calls["register"] >= 2, "expected a re-registration after the 404"
+    assert calls["hook"] == calls["register"]
+
+
+def test_on_registered_is_required():
+    """No default hook: a caller that republishes nothing says so."""
+    # Standard
+    import inspect
+
+    parameter = inspect.signature(keep_registered).parameters["on_registered"]
+    assert parameter.default is inspect.Parameter.empty
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY

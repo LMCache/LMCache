@@ -6,7 +6,7 @@ from typing import Dict, Tuple
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import device_ops, torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.cachegen_basics import (
     CacheGenConfig,
@@ -17,7 +17,6 @@ from lmcache.storage_backend.serde.serde import Serializer
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
-import lmcache.c_ops as lmc_ops
 import lmcache.storage_backend.serde.cachegen_basics as CGBasics
 
 logger = init_logger(__name__)
@@ -264,7 +263,7 @@ def encode_ntokens(
 
     :return byte_tensor: the byte tensor
     """
-    lmc_ops.encode_fast_new(
+    device_ops.encode_fast_new(
         cdf_int,
         encode_input,
         output_buffer,
@@ -297,8 +296,8 @@ def encode_function(
         nlayers, chunk_size, nchannels
     )
 
-    new_cdf_key = lmc_ops.calculate_cdf(new_key, int(key_bins.max()))
-    new_cdf_value = lmc_ops.calculate_cdf(new_value, int(value_bins.max()))
+    new_cdf_key = device_ops.calculate_cdf(new_key, int(key_bins.max()))
+    new_cdf_value = device_ops.calculate_cdf(new_value, int(value_bins.max()))
     cdf_int = torch.cat([new_cdf_key, new_cdf_value])
 
     output_buffer = torch.zeros(

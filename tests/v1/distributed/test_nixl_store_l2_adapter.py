@@ -7,6 +7,9 @@ Tests only use public methods and do not access private fields.
 """
 
 # Standard
+from unittest.mock import call, patch
+import errno
+import os
 import select
 import shutil
 import tempfile
@@ -16,10 +19,23 @@ import time
 import pytest
 import torch
 
-nixl = pytest.importorskip("nixl")
-
 # First Party
-from lmcache.v1.distributed.api import ObjectKey  # noqa: E402
+from lmcache import torch_device_type
+
+nixl = pytest.importorskip("nixl")
+if torch_device_type == "xpu":
+    pytest.skip(
+        (
+            "Skip on XPU: in vllm/vllm-openai-xpu:v0.26.0, "
+            "NIXL dynamic store backends are unavailable at runtime "
+            "(including POSIX), adapter init can fail with "
+            "NIXL_ERR_NOT_FOUND, so this suite is not runnable "
+            "on XPU in the current test environment."
+        ),
+        allow_module_level=True,
+    )
+# First Party
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
 from lmcache.v1.distributed.internal_api import (  # noqa: E402
     L1MemoryDesc,
     L2AdapterListener,
@@ -38,7 +54,7 @@ class _RecordingListener(L2AdapterListener):
         self.accessed: list[list[ObjectKey]] = []
         self.deleted: list[list[ObjectKey]] = []
 
-    def on_l2_keys_stored(self, keys: list[ObjectKey]):
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]):
         self.stored.append(list(keys))
 
     def on_l2_keys_accessed(self, keys: list[ObjectKey]):
@@ -51,10 +67,13 @@ class _RecordingListener(L2AdapterListener):
 # First Party
 from lmcache.v1.memory_management import (  # noqa: E402
     MemoryFormat,
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd  # noqa: E402
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 # =============================================================================
 # Constants
@@ -317,6 +336,145 @@ class TestStoreInterface:
         assert task_id in completed
         assert completed[task_id].is_successful()
 
+    def test_failed_store_releases_handle_and_can_retry(
+        self, adapter: tuple[NixlStoreL2Adapter, torch.Tensor]
+    ) -> None:
+        """A failed transfer releases its handle and leaves the key retryable."""
+        adpt, buf = adapter
+        key = create_object_key(1)
+        obj = create_memory_obj(buf, page_index=0)
+        agent = adpt.nixl_agent
+
+        with (
+            patch.object(
+                agent,
+                "post_non_blocking",
+                side_effect=RuntimeError("injected transfer failure"),
+            ) as transfer,
+            patch.object(
+                agent, "release_handle", wraps=agent.release_handle
+            ) as release,
+        ):
+            task_id = adpt.submit_store_task([key], [obj])
+            assert wait_for_event_fd(adpt.get_store_event_fd())
+            result = adpt.pop_completed_store_tasks()[task_id]
+
+            assert not result.is_successful()
+            release.assert_called_once_with(transfer.call_args.args[0])
+
+        retry_task_id = adpt.submit_store_task([key], [obj])
+        assert wait_for_event_fd(adpt.get_store_event_fd())
+        retry_result = adpt.pop_completed_store_tasks()[retry_task_id]
+        assert retry_result.is_successful()
+
+    def test_store_fails_atomically_when_batch_exceeds_pool(
+        self, adapter: tuple[NixlStoreL2Adapter, torch.Tensor]
+    ) -> None:
+        """Pool exhaustion should roll back every allocation in the batch."""
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+        initial_status = adpt.report_status()
+
+        keys = [create_object_key(i) for i in range(POOL_SIZE + 1)]
+        objs: list[MemoryObj] = [
+            create_memory_obj(buf, page_index=i % NUM_BUFFER_PAGES)
+            for i in range(POOL_SIZE + 1)
+        ]
+        store_fd = adpt.get_store_event_fd()
+
+        task_id = adpt.submit_store_task(keys, objs)
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+
+        result = adpt.pop_completed_store_tasks()[task_id]
+        assert not result.is_successful()
+        assert result.bytes_transferred() == 0
+        assert (
+            adpt.report_status()["pool_free_slots"] == initial_status["pool_free_slots"]
+        )
+        assert adpt.get_usage().total_bytes_used == 0
+        assert listener.stored == []
+
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+        lookup_task_id = adpt.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
+        assert bitmap is not None
+        for index in range(len(keys)):
+            assert bitmap.test(index) is False
+
+    def test_store_fails_when_pool_is_full(
+        self, adapter: tuple[NixlStoreL2Adapter, torch.Tensor]
+    ) -> None:
+        """Pool exhaustion should preserve existing data and accounting."""
+        adpt, buf = adapter
+        existing_key = create_object_key(1)
+        existing_obj = create_memory_obj(buf, page_index=0, num_pages=POOL_SIZE)
+        store_fd = adpt.get_store_event_fd()
+
+        initial_task_id = adpt.submit_store_task([existing_key], [existing_obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        initial_result = adpt.pop_completed_store_tasks()[initial_task_id]
+        assert initial_result.is_successful()
+
+        status_before = adpt.report_status()
+        usage_before = adpt.get_usage()
+        new_key = create_object_key(2)
+        new_obj = create_memory_obj(buf, page_index=0)
+
+        task_id = adpt.submit_store_task([new_key], [new_obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+
+        result = adpt.pop_completed_store_tasks()[task_id]
+        assert not result.is_successful()
+        assert result.bytes_transferred() == 0
+        assert (
+            adpt.report_status()["pool_free_slots"] == status_before["pool_free_slots"]
+        )
+        assert adpt.get_usage() == usage_before
+
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+        lookup_task_id = adpt.submit_lookup_and_lock_task(
+            [existing_key, new_key], {0: _EMPTY_LAYOUT}
+        )
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
+        assert bitmap is not None
+        assert bitmap.test(0) is True
+        assert bitmap.test(1) is False
+        adpt.submit_unlock([existing_key])
+
+    def test_store_existing_keys_succeeds_without_allocating(
+        self, adapter: tuple[NixlStoreL2Adapter, torch.Tensor]
+    ) -> None:
+        """A no-op store should succeed without consuming pool slots."""
+        adpt, buf = adapter
+        key = create_object_key(1)
+        obj = create_memory_obj(buf, page_index=0)
+        store_fd = adpt.get_store_event_fd()
+
+        initial_task_id = adpt.submit_store_task([key], [obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        initial_result = adpt.pop_completed_store_tasks()[initial_task_id]
+        assert initial_result.is_successful()
+
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+        status_before = adpt.report_status()
+        usage_before = adpt.get_usage()
+
+        task_id = adpt.submit_store_task([key], [obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+
+        result = adpt.pop_completed_store_tasks()[task_id]
+        assert result.is_successful()
+        assert result.bytes_transferred() == 0
+        assert (
+            adpt.report_status()["pool_free_slots"] == status_before["pool_free_slots"]
+        )
+        assert adpt.get_usage() == usage_before
+        assert listener.stored == []
+
 
 # =============================================================================
 # Lookup and Lock Interface Tests
@@ -331,7 +489,7 @@ class TestLookupAndLockInterface:
         adpt, _ = adapter
         key = create_object_key(1)
 
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
 
         assert isinstance(task_id, int)
 
@@ -341,7 +499,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(1)
         lookup_fd = adpt.get_lookup_and_lock_event_fd()
 
-        adpt.submit_lookup_and_lock_task([key])
+        adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
 
         assert wait_for_event_fd(lookup_fd, timeout=5.0), (
             "Lookup event fd was not signaled within timeout"
@@ -353,7 +511,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(999)  # Never stored
         lookup_fd = adpt.get_lookup_and_lock_event_fd()
 
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adpt.query_lookup_and_lock_result(task_id)
@@ -375,7 +533,7 @@ class TestLookupAndLockInterface:
         adpt.pop_completed_store_tasks()
 
         # Now lookup
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adpt.query_lookup_and_lock_result(task_id)
@@ -398,7 +556,9 @@ class TestLookupAndLockInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup both keys
-        task_id = adpt.submit_lookup_and_lock_task([existing_key, nonexistent_key])
+        task_id = adpt.submit_lookup_and_lock_task(
+            [existing_key, nonexistent_key], {0: _EMPTY_LAYOUT}
+        )
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adpt.query_lookup_and_lock_result(task_id)
@@ -419,7 +579,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(1)
         lookup_fd = adpt.get_lookup_and_lock_event_fd()
 
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         # First query returns result
@@ -461,7 +621,7 @@ class TestUnlockInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(lookup_fd, timeout=5.0)
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -542,6 +702,97 @@ class TestLoadInterface:
         # Data should be copied
         assert torch.all(load_obj.raw_data == 42.0)
 
+    @pytest.mark.parametrize(
+        "failure_stage",
+        ["prepare", "create_handle", "transfer", "release_handle"],
+    )
+    def test_failed_load_reports_no_hits_and_can_retry(
+        self, adapter, failure_stage: str
+    ) -> None:
+        """Failed batches report no hits or accesses, release handles, and retry."""
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+        keys = [create_object_key(1), create_object_key(2)]
+        store_objs = [
+            create_memory_obj(buf, page_index=i, fill_value=float(i + 1))
+            for i in range(2)
+        ]
+        adpt.submit_store_task(keys, store_objs)
+        assert wait_for_event_fd(adpt.get_store_event_fd())
+        adpt.pop_completed_store_tasks()
+        lookup_id = adpt.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+        assert wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+        lookup = adpt.query_lookup_and_lock_result(lookup_id)
+        assert lookup is not None
+        assert all(lookup.test(i) for i in range(2))
+
+        # Keep a missing key between hits to verify result positions on retry.
+        load_keys = [keys[0], create_object_key(999), keys[1]]
+        load_objs = [
+            create_memory_obj(buf, page_index=i + 2, fill_value=0.0) for i in range(3)
+        ]
+        agent = adpt.nixl_agent
+        release_handle = agent.release_handle
+
+        def release_then_fail(handle: object) -> None:
+            release_handle(handle)
+            raise RuntimeError("injected handle release failure")
+
+        try:
+            with (
+                patch.object(
+                    agent, "get_memory_indices", wraps=agent.get_memory_indices
+                ) as prepare,
+                patch.object(
+                    agent,
+                    "get_storage_to_mem_handle",
+                    wraps=agent.get_storage_to_mem_handle,
+                ) as create_handle,
+                patch.object(
+                    agent, "post_non_blocking", wraps=agent.post_non_blocking
+                ) as transfer,
+                patch.object(agent, "release_handle", wraps=release_handle) as release,
+            ):
+                if failure_stage == "prepare":
+                    # Fail after the first object was prepared for loading.
+                    prepare.side_effect = [
+                        [2],
+                        RuntimeError("injected preparation failure"),
+                    ]
+                elif failure_stage == "create_handle":
+                    create_handle.side_effect = RuntimeError("injected handle failure")
+                elif failure_stage == "transfer":
+                    transfer.side_effect = RuntimeError("injected transfer failure")
+                else:
+                    release.side_effect = release_then_fail
+
+                task_id = adpt.submit_load_task(load_keys, load_objs)
+                assert wait_for_event_fd(adpt.get_load_event_fd())
+                result = adpt.query_load_result(task_id)
+                assert result is not None
+                assert not any(result.test(i) for i in range(3))
+                assert listener.accessed == []
+                assert adpt.query_load_result(task_id) is None
+                if failure_stage in ("transfer", "release_handle"):
+                    release.assert_called_once_with(transfer.call_args.args[0])
+                else:
+                    release.assert_not_called()
+                    transfer.assert_not_called()
+
+            # The failure must not poison metadata or prevent future loads.
+            task_id = adpt.submit_load_task(load_keys, load_objs)
+            assert wait_for_event_fd(adpt.get_load_event_fd())
+            result = adpt.query_load_result(task_id)
+            assert result is not None
+            assert [result.test(i) for i in range(3)] == [True, False, True]
+            assert listener.accessed == [keys]
+            assert torch.all(load_objs[0].raw_data == 1.0)
+            assert torch.all(load_objs[1].raw_data == 0.0)
+            assert torch.all(load_objs[2].raw_data == 2.0)
+        finally:
+            adpt.submit_unlock(keys)
+
     def test_query_load_result_returns_none_for_unknown_task(self, adapter):
         """Querying an unknown task ID should return None."""
         adpt, _ = adapter
@@ -592,7 +843,7 @@ class TestEndToEndWorkflow:
         assert completed[store_task_id].is_successful()
 
         # Step 2: Lookup and lock
-        lookup_task_id = adpt.submit_lookup_and_lock_task([key])
+        lookup_task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         lookup_bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_bitmap.test(0) is True
@@ -630,7 +881,7 @@ class TestEndToEndWorkflow:
         assert completed[store_task_id].is_successful()
 
         # Lookup
-        lookup_task_id = adpt.submit_lookup_and_lock_task([key])
+        lookup_task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         lookup_bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_bitmap.test(0) is True
@@ -671,7 +922,7 @@ class TestEndToEndWorkflow:
         assert completed[store_task_id].is_successful()
 
         # Lookup all
-        lookup_task_id = adpt.submit_lookup_and_lock_task(keys)
+        lookup_task_id = adpt.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         lookup_bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
         for i in range(num_objects):
@@ -697,6 +948,55 @@ class TestEndToEndWorkflow:
 
 class TestCloseInterface:
     """Test the close operation."""
+
+    def test_close_releases_nixl_resources(self, tmp_path):
+        """close() should release NIXL handles, registrations, and storage FDs."""
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        l1_memory = L1MemoryDesc(
+            ptr=buffer.data_ptr(),
+            size=buffer.numel(),
+            align_bytes=PAGE_SIZE,
+        )
+        config = NixlStoreL2AdapterConfig(
+            backend="POSIX",
+            backend_params={
+                "file_path": str(tmp_path),
+                "use_direct_io": "false",
+            },
+            pool_size=POOL_SIZE,
+        )
+        adpt = NixlStoreL2Adapter(config, l1_memory)
+        storage_agent = adpt.nixl_agent
+        storage_fds = list(storage_agent.storage_fds)
+
+        with (
+            patch.object(
+                storage_agent.nixl_agent,
+                "release_dlist_handle",
+                wraps=storage_agent.nixl_agent.release_dlist_handle,
+            ) as release_dlist_handle,
+            patch.object(
+                storage_agent.nixl_agent,
+                "deregister_memory",
+                wraps=storage_agent.nixl_agent.deregister_memory,
+            ) as deregister_memory,
+        ):
+            adpt.close()
+
+        assert release_dlist_handle.call_args_list == [
+            call(storage_agent.storage_xfer_handler),
+            call(storage_agent.mem_xfer_handler),
+        ]
+        assert deregister_memory.call_args_list == [
+            call(storage_agent.storage_reg_descs),
+            call(storage_agent.mem_reg_descs),
+        ]
+        for fd in storage_fds:
+            with pytest.raises(OSError) as exc_info:
+                os.fstat(fd)
+            assert exc_info.value.errno == errno.EBADF
 
     def test_close_does_not_raise(self):
         """close() should not raise an exception."""
@@ -843,10 +1143,6 @@ def _store_and_wait(adpt, key, obj):
     adpt.pop_completed_store_tasks()
 
 
-@pytest.mark.skip(
-    reason="Leaks file descriptors — "
-    "NixlStorageAgent.close() does not close os.open() FDs"
-)
 class TestEvictionInterface:
     """Tests for delete(), get_usage(), and listener notifications."""
 
@@ -861,7 +1157,7 @@ class TestEvictionInterface:
 
         adpt.delete([key])
 
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adpt.query_lookup_and_lock_result(task_id)
         assert bitmap.test(0) is False
@@ -878,31 +1174,30 @@ class TestEvictionInterface:
         obj = create_memory_obj(buf, page_index=0)
 
         _store_and_wait(adpt, key, obj)
-        usage_after_store, _ = adpt.get_usage()
-        assert usage_after_store > 0.0
+        free_slots_after_store = adpt.report_status()["pool_free_slots"]
 
         adpt.delete([key])
 
-        usage_after_delete, _ = adpt.get_usage()
-        assert usage_after_delete < usage_after_store
+        free_slots_after_delete = adpt.report_status()["pool_free_slots"]
+        assert free_slots_after_delete == free_slots_after_store + 1
 
     def test_get_usage_empty_adapter_is_zero(self, adapter):
-        """get_usage() on a fresh adapter should return (0.0, 0.0)."""
+        """get_usage() on a fresh adapter should report no used bytes."""
         adpt, _ = adapter
-        current, projected = adpt.get_usage()
-        assert current == 0.0
-        assert projected == 0.0
+        usage = adpt.get_usage()
+        assert usage.total_bytes_used == 0
+        assert usage.usage_fraction == 0.0
 
     def test_get_usage_increases_after_store(self, adapter):
-        """get_usage() current value should be > 0 after storing an object."""
+        """get_usage() should report positive utilization after a store."""
         adpt, buf = adapter
         key = create_object_key(1)
         obj = create_memory_obj(buf, page_index=0)
         _store_and_wait(adpt, key, obj)
 
-        current, _ = adpt.get_usage()
-        assert current > 0.0
-        assert current <= 1.0
+        usage = adpt.get_usage()
+        assert usage.usage_fraction > 0.0
+        assert usage.usage_fraction <= 1.0
 
     def test_get_usage_reflects_multiple_stores(self, adapter):
         """get_usage() should increase monotonically as more objects are stored."""
@@ -915,9 +1210,9 @@ class TestEvictionInterface:
         assert wait_for_event_fd(store_fd, timeout=5.0)
         adpt.pop_completed_store_tasks()
 
-        current, _ = adpt.get_usage()
+        usage = adpt.get_usage()
         # 3 out of POOL_SIZE slots used
-        assert current == pytest.approx(3 / POOL_SIZE)
+        assert usage.usage_fraction == pytest.approx(3 / POOL_SIZE)
 
     def test_delete_pinned_key_is_skipped(self, adapter):
         """delete() should skip a key that is pinned by an in-flight lookup."""
@@ -929,7 +1224,7 @@ class TestEvictionInterface:
         _store_and_wait(adpt, key, obj)
 
         # Pin the key via lookup_and_lock
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -975,7 +1270,7 @@ class TestEvictionInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock (required before load)
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -1008,7 +1303,7 @@ class TestEvictionInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock
-        task_id = adpt.submit_lookup_and_lock_task([real_key])
+        task_id = adpt.submit_lookup_and_lock_task([real_key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -1054,7 +1349,7 @@ class TestEvictionInterface:
         _store_and_wait(adpt, key, obj)
 
         # Pin via lookup
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         adpt.query_lookup_and_lock_result(task_id)
 

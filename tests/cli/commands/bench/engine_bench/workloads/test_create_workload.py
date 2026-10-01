@@ -4,6 +4,7 @@
 # Standard
 from unittest.mock import MagicMock
 import argparse
+import json
 
 # Third Party
 import pytest
@@ -13,6 +14,7 @@ from lmcache.cli.commands.bench.engine_bench.config import EngineBenchConfig
 from lmcache.cli.commands.bench.engine_bench.workloads import (
     BaseWorkload,
     create_workload,
+    validate_max_output_length_supported,
 )
 from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_qa import (
     LongDocQAWorkload,
@@ -22,6 +24,9 @@ from lmcache.cli.commands.bench.engine_bench.workloads.multi_round_chat import (
 )
 from lmcache.cli.commands.bench.engine_bench.workloads.prefix_suffix_tuner import (
     PrefixSuffixTunerWorkload,
+)
+from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
+    RagQaQualityWorkload,
 )
 from lmcache.cli.commands.bench.engine_bench.workloads.random_prefill import (
     RandomPrefillWorkload,
@@ -52,6 +57,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         ldqa_query_per_document=2,
         ldqa_shuffle_policy="random",
         ldqa_num_inflight_requests=3,
+        ldqa_max_output_length=128,
         # random-prefill defaults
         rp_request_length=10000,
         rp_num_requests=50,
@@ -66,6 +72,13 @@ def _make_args(**overrides) -> argparse.Namespace:
         psf_context_length=8000,
         psf_prefix_ratio=0.8,
         psf_thrash=20.0,
+        # rag-qa-quality defaults
+        rag_dataset=None,
+        rag_num_samples=50,
+        rag_max_output_length=1024,
+        rag_doc_align_tokens=256,
+        rag_template_kwargs=[],
+        rag_output=None,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -76,6 +89,23 @@ def _make_deps() -> tuple[MagicMock, MagicMock, MagicMock]:
     collector = MagicMock()
     monitor = MagicMock()
     return sender, collector, monitor
+
+
+class TestValidateMaxOutputLengthSupported:
+    @pytest.mark.parametrize(
+        "workload",
+        ["long-doc-permutator", "long-doc-qa", "multi-round-chat"],
+    )
+    def test_allowed_for_workloads_with_the_parameter(self, workload: str) -> None:
+        validate_max_output_length_supported(workload)
+
+    @pytest.mark.parametrize(
+        "workload",
+        ["random-prefill", "prefix-suffix-tuner", "rag-qa-quality"],
+    )
+    def test_rejected_for_workloads_without_the_parameter(self, workload: str) -> None:
+        with pytest.raises(ValueError, match="max output length cannot be specified"):
+            validate_max_output_length_supported(workload)
 
 
 class TestCreateWorkload:
@@ -105,6 +135,7 @@ class TestCreateWorkload:
             ldqa_document_length=5000,
             ldqa_query_per_document=4,
             ldqa_shuffle_policy="tile",
+            ldqa_max_output_length=1024,
         )
         sender, collector, monitor = _make_deps()
         result = create_workload(
@@ -118,6 +149,7 @@ class TestCreateWorkload:
         assert result._config.document_length == 5000
         assert result._config.query_per_document == 4
         assert result._config.shuffle_policy == "tile"
+        assert result._config.max_output_length == 1024
         assert result._config.num_documents == 20  # 10 * 10000 / 5000
 
     def test_multi_round_chat(self) -> None:
@@ -250,6 +282,68 @@ class TestCreateWorkload:
         # Sized by context_length=4000:
         # num_prefixes = 52.5 * 10000 / 4000 = 131.25 → 131
         assert result._config.num_prefixes == 131
+
+    def test_rag_qa_quality(self, tmp_path, monkeypatch) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.engine_bench.workloads import rag_qa_quality
+
+        # Local
+        from ..fake_tokenizer import make_fake_tokenizer
+
+        monkeypatch.setattr(rag_qa_quality, "_FILLER_VOCAB_SIZE", 200)
+        monkeypatch.setattr(
+            rag_qa_quality, "try_load_tokenizer", lambda _n: make_fake_tokenizer()
+        )
+        dataset = tmp_path / "qa.json"
+        dataset.write_text(
+            json.dumps(
+                [{"ctxs": [{"text": "body"}], "question": "who?", "answers": ["A"]}]
+            )
+        )
+
+        config = _make_config(workload="rag-qa-quality", output_dir=str(tmp_path))
+        args = _make_args(
+            rag_dataset=str(dataset),
+            rag_num_samples=5,
+            rag_max_output_length=256,
+            rag_template_kwargs=["enable_thinking=false"],
+        )
+        sender, collector, monitor = _make_deps()
+        result = create_workload(config, args, sender, collector, monitor)
+
+        assert isinstance(result, RagQaQualityWorkload)
+        assert result._config.num_samples == 5
+        assert result._config.max_output_length == 256
+        assert result._config.template_kwargs == {"enable_thinking": False}
+
+    def test_rag_qa_quality_defaults_the_output_path(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The results file is always written, so it needs a default path."""
+        # First Party
+        from lmcache.cli.commands.bench.engine_bench.workloads import rag_qa_quality
+
+        # Local
+        from ..fake_tokenizer import make_fake_tokenizer
+
+        monkeypatch.setattr(rag_qa_quality, "_FILLER_VOCAB_SIZE", 200)
+        monkeypatch.setattr(
+            rag_qa_quality, "try_load_tokenizer", lambda _n: make_fake_tokenizer()
+        )
+        dataset = tmp_path / "qa.json"
+        dataset.write_text(
+            json.dumps(
+                [{"ctxs": [{"text": "body"}], "question": "who?", "answers": ["A"]}]
+            )
+        )
+
+        config = _make_config(workload="rag-qa-quality", output_dir=str(tmp_path))
+        args = _make_args(rag_dataset=str(dataset))
+        sender, collector, monitor = _make_deps()
+        result = create_workload(config, args, sender, collector, monitor)
+
+        assert isinstance(result, RagQaQualityWorkload)
+        assert result._config.output_path == str(tmp_path / "rag_qa_quality.json")
 
     def test_unknown_workload_raises(self) -> None:
         config = _make_config(workload="unknown-workload")

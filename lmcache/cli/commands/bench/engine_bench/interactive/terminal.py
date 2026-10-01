@@ -7,10 +7,27 @@ Provides simple prompt functions for collecting user input:
 - ``prompt_number`` — numeric input with type validation
 - ``prompt_bool`` — Y/N confirmation
 - ``prompt_choice`` — arrow-key selection (falls back to numbered list on non-TTY)
+
+Every prompt accepts ``allow_back``.  When enabled, the user steps back to the
+previous question by typing ``<`` — in every prompt, typed or arrow-key — in
+which case the prompt returns the :data:`GO_BACK` sentinel instead of a value.
 """
 
 # Standard
 import sys
+
+
+class _GoBack:
+    """Sentinel type returned by prompts when the user asks to step back."""
+
+
+# Returned by any prompt (when ``allow_back=True``) to mean "go to the
+# previous question".  Compare with ``is`` — there is only one instance.
+GO_BACK = _GoBack()
+
+# Token the user types to go back, in any text/number/bool prompt and in the
+# non-TTY choice fallback.
+BACK_TOKEN = "<"
 
 # ---------------------------------------------------------------------------
 # ANSI helpers
@@ -30,6 +47,11 @@ def _is_tty() -> bool:
     return hasattr(sys.stdin, "fileno") and sys.stdin.isatty()
 
 
+def _print_back_hint() -> None:
+    """Print the dim 'type < to go back' hint used by typed prompts."""
+    print(f"  {DIM}(type {BACK_TOKEN} to go back){RESET}")
+
+
 # ---------------------------------------------------------------------------
 # prompt_text
 # ---------------------------------------------------------------------------
@@ -39,26 +61,33 @@ def prompt_text(
     label: str,
     description: str = "",
     default: str = "",
-) -> str:
+    allow_back: bool = False,
+) -> str | _GoBack:
     """Prompt for free-form text input.
 
     Args:
         label: The config item name shown as a heading.
         description: One-line explanation shown below the label.
         default: Default value; shown in brackets, returned on empty Enter.
+        allow_back: If True, typing ``<`` returns :data:`GO_BACK`.
 
     Returns:
-        The user's input, or the default if they pressed Enter.
+        The user's input, the default if they pressed Enter, or
+        :data:`GO_BACK` if they asked to step back.
     """
     print()
     print(f"{BOLD}{label}{RESET}")
     if description:
         print(f"  {description}")
+    if allow_back:
+        _print_back_hint()
     if default:
         prompt = f"  {DIM}[default: {default}]{RESET} {GREEN}>{RESET} "
     else:
         prompt = f"  {GREEN}>{RESET} "
     value = input(prompt).strip()
+    if allow_back and value == BACK_TOKEN:
+        return GO_BACK
     return value if value else default
 
 
@@ -72,7 +101,8 @@ def prompt_number(
     description: str = "",
     default: float | int | None = None,
     number_type: type = int,
-) -> float | int:
+    allow_back: bool = False,
+) -> float | int | _GoBack:
     """Prompt for a numeric value with validation.
 
     Args:
@@ -80,14 +110,17 @@ def prompt_number(
         description: One-line explanation.
         default: Default value; returned on empty Enter.  None means required.
         number_type: ``int`` or ``float``.
+        allow_back: If True, typing ``<`` returns :data:`GO_BACK`.
 
     Returns:
-        The parsed number.
+        The parsed number, or :data:`GO_BACK` if the user asked to step back.
     """
     print()
     print(f"{BOLD}{label}{RESET}")
     if description:
         print(f"  {description}")
+    if allow_back:
+        _print_back_hint()
 
     while True:
         if default is not None:
@@ -95,6 +128,8 @@ def prompt_number(
         else:
             prompt = f"  {GREEN}>{RESET} "
         raw = input(prompt).strip()
+        if allow_back and raw == BACK_TOKEN:
+            return GO_BACK
         if not raw and default is not None:
             return default
         try:
@@ -113,7 +148,8 @@ def prompt_bool(
     label: str,
     description: str = "",
     default: bool = True,
-) -> bool:
+    allow_back: bool = False,
+) -> bool | _GoBack:
     """Prompt for a yes/no confirmation.
 
     Shows ``[Y/n]`` or ``[y/N]`` depending on the default.
@@ -123,18 +159,24 @@ def prompt_bool(
         label: The config item name.
         description: One-line explanation.
         default: Default value when user presses Enter.
+        allow_back: If True, typing ``<`` returns :data:`GO_BACK`.
 
     Returns:
-        True for yes, False for no.
+        True for yes, False for no, or :data:`GO_BACK` if the user asked to
+        step back.
     """
     print()
     print(f"{BOLD}{label}{RESET}")
     if description:
         print(f"  {description}")
+    if allow_back:
+        _print_back_hint()
 
     hint = "[default: Y] (Y/n)" if default else "[default: N] (y/N)"
     while True:
         raw = input(f"  {DIM}{hint}{RESET} {GREEN}>{RESET} ").strip().lower()
+        if allow_back and raw == BACK_TOKEN:
+            return GO_BACK
         if not raw:
             return default
         if raw in ("y", "yes"):
@@ -164,6 +206,12 @@ def _read_key() -> str:
     try:
         tty.setraw(fd)
         ch = sys.stdin.read(1)
+        # Raw mode disables signal generation, so translate Ctrl-C / Ctrl-D
+        # into the usual exceptions the caller already expects.
+        if ch == "\x03":
+            raise KeyboardInterrupt
+        if ch == "\x04":
+            raise EOFError
         if ch == "\r" or ch == "\n":
             return "enter"
         if ch == "\x1b":
@@ -201,7 +249,8 @@ def prompt_choice(
     description: str = "",
     choices: list[tuple[str, str]] = [],  # noqa: B006
     default: str = "",
-) -> str:
+    allow_back: bool = False,
+) -> str | _GoBack:
     """Prompt user to select from a list using arrow keys.
 
     Each choice is a ``(value, description)`` tuple.  The description is
@@ -214,9 +263,11 @@ def prompt_choice(
         description: One-line explanation.
         choices: List of ``(value, one_line_description)`` tuples.
         default: Pre-selected value.  Defaults to the first choice.
+        allow_back: If True, pressing ``<`` returns :data:`GO_BACK`.
 
     Returns:
-        The selected value string.
+        The selected value string, or :data:`GO_BACK` if the user asked to
+        step back.
     """
     if not choices:
         raise ValueError("choices must not be empty")
@@ -235,9 +286,11 @@ def prompt_choice(
 
     # Non-TTY fallback: numbered list
     if not _is_tty():
-        return _prompt_choice_fallback(choices, selected)
+        return _prompt_choice_fallback(choices, selected, allow_back)
 
-    print(f"  {DIM}Use ↑↓ to navigate, Enter to select.{RESET}")
+    nav = "Use ↑↓ to navigate, Enter to select"
+    nav += f", {BACK_TOKEN} to go back." if allow_back else "."
+    print(f"  {DIM}{nav}{RESET}")
     print()
 
     # Initial render
@@ -251,14 +304,14 @@ def prompt_choice(
             selected = (selected - 1) % len(choices)
         elif key == "down":
             selected = (selected + 1) % len(choices)
-        elif key == "enter":
+        elif key == "enter" or (key == BACK_TOKEN and allow_back):
             # Clear and re-render final state
             num_lines = len(choices)
             sys.stdout.write(f"\r{CURSOR_UP * num_lines}")
             lines = _render_choices(choices, selected)
             for line in lines:
                 print(f"{CLEAR_LINE}{line}")
-            return choices[selected][0]
+            return GO_BACK if key == BACK_TOKEN else choices[selected][0]
         else:
             continue
 
@@ -273,13 +326,18 @@ def prompt_choice(
 def _prompt_choice_fallback(
     choices: list[tuple[str, str]],
     default_index: int,
-) -> str:
+    allow_back: bool = False,
+) -> str | _GoBack:
     """Numbered fallback for non-TTY environments."""
     for i, (val, desc) in enumerate(choices):
         marker = "*" if i == default_index else " "
         print(f"  {marker} {i + 1}) {val}  — {desc}")
+    if allow_back:
+        _print_back_hint()
     while True:
         raw = input(f"  [default: {default_index + 1}] {GREEN}>{RESET} ").strip()
+        if allow_back and raw == BACK_TOKEN:
+            return GO_BACK
         if not raw:
             return choices[default_index][0]
         try:

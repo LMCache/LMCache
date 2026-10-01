@@ -21,7 +21,7 @@ class LMServerConnectorAdapter(ConnectorAdapter):
         # Local
         from .lm_connector import LMCServerConnector
 
-        logger.info(f"Creating LM Server connector for URL: {context.url}")
+        logger.info("Creating LM Server connector for URL: %s", context.url)
         parse_url = parse_remote_url(context.url)
         return LMCServerConnector(
             host=parse_url.host,

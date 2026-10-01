@@ -18,18 +18,20 @@ import os
 import threading
 
 if TYPE_CHECKING:
+    # First Party
     from lmcache.v1.distributed.internal_api import (
         L1MemoryDesc,
     )
+    from lmcache.v1.memory_management import MemoryObj
 
 # Third Party
 import aiofiles
 import aiofiles.os
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -42,7 +44,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
@@ -252,6 +253,8 @@ class FSL2Adapter(L2AdapterInterface):
     thread.
     """
 
+    _DELETE_CONCURRENCY = 64
+
     def __init__(self, config: FSL2AdapterConfig):
         super().__init__()
         self._config = config
@@ -358,7 +361,9 @@ class FSL2Adapter(L2AdapterInterface):
     # Lookup and Lock Interface
     # ------------------------------------------------------------------
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
+    ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
 
@@ -373,8 +378,8 @@ class FSL2Adapter(L2AdapterInterface):
             return self._completed_lookup_tasks.pop(task_id, None)
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
-        # No-op: FS adapter has no eviction, so locking
-        # between lookup and load is unnecessary.
+        # No-op: the FS adapter tracks no per-key locks — a delete
+        # racing the lookup→load window degrades the load to a miss.
         pass
 
     # ------------------------------------------------------------------
@@ -418,14 +423,36 @@ class FSL2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def delete(self, keys: list[ObjectKey]) -> None:
-        # Not implemented for the filesystem adapter.
-        pass
+        """Delete each key's backing file and notify listeners.
 
-    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The FS
-    # adapter declares no max capacity (default 0) so ``supports_global_eviction``
-    # returns ``False`` and ``usage_fraction == -1.0`` — the eviction
-    # controller treats this as "no eviction signal" and skips the
-    # adapter entirely.
+        Args:
+            keys: The object keys to delete.
+
+        Note:
+            No per-key locks: a delete racing a load turns that load
+            into a miss; racing a store of the same key may leave the
+            key re-stored.
+        """
+        if not keys:
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                self._execute_delete(keys),
+                self._loop,
+            )
+            deleted_keys, deleted_sizes = fut.result(timeout=30.0)
+        except Exception as e:
+            logger.warning("FSL2Adapter delete failed: %s", e)
+            return
+        if deleted_keys:
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
+
+    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The base
+    # class maintains byte totals via ``_notify_keys_stored`` /
+    # ``_notify_keys_deleted``, but the FS adapter declares no max capacity
+    # (default 0) so ``supports_global_eviction`` returns ``False`` and
+    # ``usage_fraction == -1.0`` — the eviction controller treats this as
+    # "no eviction signal" and skips the adapter entirely.
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -578,6 +605,8 @@ class FSL2Adapter(L2AdapterInterface):
     ) -> None:
         success = True
         bytes_written = 0
+        stored_keys: list[ObjectKey] = []
+        stored_sizes: list[int] = []
         try:
             for key, obj in zip(keys, objects, strict=True):
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
@@ -617,6 +646,8 @@ class FSL2Adapter(L2AdapterInterface):
 
                     await aiofiles.os.replace(tmp_path, file_path)
                     bytes_written += size
+                    stored_keys.append(key)
+                    stored_sizes.append(size)
                     logger.debug(
                         "FSL2Adapter stored key %s (%d bytes)",
                         file_path.name,
@@ -636,6 +667,9 @@ class FSL2Adapter(L2AdapterInterface):
                 task_id,
             )
             success = False
+
+        if stored_keys:
+            self._notify_keys_stored(stored_keys, stored_sizes)
 
         with self._lock:
             self._completed_store_tasks[task_id] = L2StoreResult(success, bytes_written)
@@ -741,9 +775,48 @@ class FSL2Adapter(L2AdapterInterface):
                 )
                 continue
 
+        loaded_keys = [keys[i] for i in bitmap.get_indices_list()]
+        if loaded_keys:
+            self._notify_keys_accessed(loaded_keys)
+
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
         self._load_efd.notify()
+
+    # ---- delete ---------------------------------------------------------
+
+    async def _execute_delete(
+        self, keys: list[ObjectKey]
+    ) -> tuple[list[ObjectKey], list[int]]:
+        """Unlink each key's file concurrently; return removed keys + sizes."""
+        sem = asyncio.Semaphore(self._DELETE_CONCURRENCY)
+
+        async def _delete_one(key: ObjectKey) -> tuple[ObjectKey, int] | None:
+            file_path = self._key_to_path(key)
+            async with sem:
+                try:
+                    size = (await aiofiles.os.stat(file_path)).st_size
+                    await aiofiles.os.unlink(file_path)
+                except FileNotFoundError:
+                    return None
+                except Exception:
+                    logger.exception(
+                        "FSL2Adapter failed to delete %s",
+                        file_path,
+                    )
+                    return None
+            return key, size
+
+        results = await asyncio.gather(*(_delete_one(k) for k in keys))
+
+        deleted_keys: list[ObjectKey] = []
+        deleted_sizes: list[int] = []
+        for res in results:
+            if res is not None:
+                key, size = res
+                deleted_keys.append(key)
+                deleted_sizes.append(size)
+        return deleted_keys, deleted_sizes
 
 
 # Self-register config type and adapter factory

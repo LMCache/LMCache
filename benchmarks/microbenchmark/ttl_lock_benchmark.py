@@ -24,7 +24,7 @@ import threading
 import time
 
 # First Party
-from lmcache.native_storage_ops import TTLLock
+from lmcache.lmcache_native import TTLLock
 
 
 @dataclass

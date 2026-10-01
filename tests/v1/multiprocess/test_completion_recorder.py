@@ -11,36 +11,37 @@ import msgspec
 import pytest
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
 
-try:
-    # Third Party
-    import torch  # noqa: F401
+pytestmark = pytest.mark.cuda
 
-    _has_cuda = torch.cuda.is_available()
-except ImportError:
-    _has_cuda = False
+
+if not (torch_dev.is_available() and torch_device_type == "cuda"):
+    pytest.skip(
+        "requires available CUDA runtime",
+        allow_module_level=True,
+    )
 
 try:
     # First Party
-    import lmcache.c_ops as lmc_ops
-
-    _has_native_op = hasattr(lmc_ops, "record_completion_on_stream")
+    import lmcache.cuda_ops as cuda_ops
 except ImportError:
-    lmc_ops = None
-    _has_native_op = False
+    pytest.skip(
+        "requires lmcache.cuda_ops",
+        allow_module_level=True,
+    )
 
-native_only = pytest.mark.skipif(
-    not (_has_cuda and _has_native_op),
-    reason="requires CUDA and native record_completion_on_stream",
-)
+if not hasattr(cuda_ops, "record_completion_on_stream"):
+    pytest.skip(
+        "requires native record_completion_on_stream",
+        allow_module_level=True,
+    )
 
-if _has_cuda and _has_native_op:
-    # Third Party
-    import cupy  # noqa: E402
+cupy = pytest.importorskip("cupy", reason="requires cupy")
 
 
 @pytest.fixture()
@@ -58,22 +59,21 @@ def dispatcher():
     d.stop()
 
 
-@native_only
 class TestRecordAndDrain:
-    """Low-level tests on lmc_ops.record_completion_on_stream / drain."""
+    """Low-level tests on cuda_ops.record_completion_on_stream / drain."""
 
     def test_drain_empty(self):
-        completions = lmc_ops.drain_recorded_completions()
+        completions = cuda_ops.drain_recorded_completions()
         assert completions == []
 
     def test_single_completion_payload_is_bytes(self, stream):
         # drain must hand back py::bytes, not utf-8-decoded str — msgpack
         # output is arbitrary bytes including invalid utf-8.
         encoded = msgspec.msgpack.encode([b"key-1", b"key-2"])
-        lmc_ops.record_completion_on_stream(stream.ptr, "finish_write", encoded)
+        cuda_ops.record_completion_on_stream(stream.ptr, "finish_write", encoded)
         stream.synchronize()
 
-        completions = lmc_ops.drain_recorded_completions()
+        completions = cuda_ops.drain_recorded_completions()
         assert len(completions) == 1
         kind, payload = completions[0]
         assert kind == "finish_write"
@@ -85,19 +85,18 @@ class TestRecordAndDrain:
 
     def test_many_completions_in_order(self, stream):
         for i in range(50):
-            lmc_ops.record_completion_on_stream(
+            cuda_ops.record_completion_on_stream(
                 stream.ptr, "finish_write", msgspec.msgpack.encode(i)
             )
         stream.synchronize()
 
-        completions = lmc_ops.drain_recorded_completions()
+        completions = cuda_ops.drain_recorded_completions()
         assert len(completions) == 50
         for idx, (kind, payload) in enumerate(completions):
             assert kind == "finish_write"
             assert msgspec.msgpack.decode(payload, type=int) == idx
 
 
-@native_only
 class TestDispatcher:
     """Integration tests for DeviceHostFuncDispatcher (drain + dispatch)."""
 
@@ -152,7 +151,6 @@ class TestDispatcher:
         assert seen == [(42, "hello")]
 
 
-@native_only
 class TestDeadlockRegression:
     """Regression for the GIL deadlock: the legacy
     ``stream.launch_host_func(python_fn, ...)`` path stalls; the C++

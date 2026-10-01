@@ -23,7 +23,7 @@ def lmcache_get_config(config_file: str = "") -> LMCacheEngineConfig:
         A validated ``LMCacheEngineConfig``.
     """
     if config_file:
-        logger.info(f"Loading LMCache config file {config_file}")
+        logger.info("Loading LMCache config file %s", config_file)
         config = LMCacheEngineConfig.from_file(config_file)
     else:
         config = LMCacheEngineConfig.from_defaults()

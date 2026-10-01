@@ -11,6 +11,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
@@ -21,17 +22,19 @@ from tests.v1.utils import (
     generate_tokens,
 )
 
-DEVICE_PARAMS = ["xpu"]
+if not (torch_device_type == "xpu" and torch_dev.is_available()):
+    pytest.skip(
+        "Requires available xpu runtime",
+        allow_module_level=True,
+    )
+
 BACKENDS = ["cpu", "disk"]
+
+pytestmark = pytest.mark.xpu
 
 # Optional override for tempfile root; see tests/v1/test_cache_engine.py
 # for rationale.
 _TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
-
-
-def _skip_if_no_xpu():
-    if not hasattr(torch, "xpu") or not torch.xpu.is_available():
-        pytest.skip("torch.xpu is not available")
 
 
 def generate_random_slot_mapping(num_blocks, block_size, num_tokens, device):
@@ -44,12 +47,6 @@ def get_expected_count(token_len, save_unfull_chunk, chunk_size):
     if save_unfull_chunk:
         return token_len
     return (token_len // chunk_size) * chunk_size
-
-
-def _device_from_type(device_type):
-    if device_type == "xpu":
-        return torch.device("xpu")
-    raise ValueError(device_type)
 
 
 def _wait_for_store(engine, tokens, expected, timeout=60):
@@ -294,20 +291,17 @@ def _build_engine(
 # --------------------------
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="store")
-@pytest.mark.parametrize("device_type", DEVICE_PARAMS)
 @pytest.mark.parametrize("backend", ["cpu", "disk"])
 @pytest.mark.parametrize("use_gpu", [True])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_store_1GB(
     benchmark,
-    device_type,
     backend,
     use_gpu,
     save_unfull_chunk,
     create_config,
     autorelease_v1,
 ):
-    _skip_if_no_xpu()
     """
     Store benchmark for XPU layerwise connector.
 
@@ -323,7 +317,7 @@ def test_store_1GB(
     dtype = torch.bfloat16
 
     # lmcache / vllm configs
-    device = _device_from_type(device_type)
+    device = torch.device(torch_device_type)
 
     num_tokens = 2000
     num_blocks = 1000
@@ -409,26 +403,23 @@ def test_store_1GB(
 # --------------------------
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="retrieve")
-@pytest.mark.parametrize("device_type", DEVICE_PARAMS)
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("use_gpu", [True])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_retrieve_1GB_allhit(
     benchmark,
-    device_type,
     backend,
     use_gpu,
     save_unfull_chunk,
     create_config,
     autorelease_v1,
 ):
-    _skip_if_no_xpu()
     num_heads = 8
     head_dim = 128
     num_layers = 32
     dtype = torch.bfloat16
 
-    device = _device_from_type(device_type)
+    device = torch.device(torch_device_type)
 
     num_tokens = 2000
     num_blocks = 1000
@@ -512,26 +503,23 @@ def test_retrieve_1GB_allhit(
 # --------------------------
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="lookup")
-@pytest.mark.parametrize("device_type", DEVICE_PARAMS)
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("use_gpu", [True])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_lookup_20K_tokens(
     benchmark,
-    device_type,
     backend,
     use_gpu,
     save_unfull_chunk,
     create_config,
     autorelease_v1,
 ):
-    _skip_if_no_xpu()
     num_heads = 8
     head_dim = 128
     num_layers = 32
     dtype = torch.bfloat16
 
-    device = _device_from_type(device_type)
+    device = torch.device(torch_device_type)
 
     num_tokens = 2000
     num_blocks = 1000
