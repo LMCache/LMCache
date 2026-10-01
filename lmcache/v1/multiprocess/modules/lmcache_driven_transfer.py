@@ -20,6 +20,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.memory_allocators import pin_pacer
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import (
@@ -178,6 +179,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # ops -- never across context creation, layout-registry calls, or
         # empty_cache (leaf-lock invariant: no thread holds two locks).
         self._lock = threading.Lock()
+
+        # None for allocators without deferred host pinning: no pacing needed.
+        self._pin_pacer = ctx.storage_manager.pin_pacer
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
@@ -606,6 +610,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         ]
 
         with (
+            pin_pacer.submitting(self._pin_pacer),
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
@@ -888,6 +893,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         ]
 
         with (
+            pin_pacer.submitting(self._pin_pacer),
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):

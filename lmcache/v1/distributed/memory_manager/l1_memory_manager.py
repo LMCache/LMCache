@@ -17,6 +17,7 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.pin_pacer import PinPacer
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryObj,
@@ -234,6 +235,15 @@ class L1MemoryManager:
                 should run under.
         """
         self._allocator.warm_up(device)
+
+    @property
+    def pin_pacer(self) -> PinPacer | None:
+        """Forward the allocator's pacer; ``None`` without deferred pinning."""
+        return self._allocator.pin_pacer
+
+    def pin_status(self) -> tuple[int, int]:
+        """Forward the allocator's (pinned, total) deferred-pinning bytes."""
+        return self._allocator.pin_status()
 
     def close(self) -> None:
         """

@@ -83,6 +83,9 @@ if TYPE_CHECKING:
     # Third Party
     import torch
 
+    # First Party
+    from lmcache.v1.memory_allocators.pin_pacer import PinPacer
+
 logger = init_logger(__name__)
 
 # L1 write tag for every object reserved through this manager. Sharing one
@@ -211,6 +214,17 @@ class StorageManager:
                 should run under.
         """
         self._l1_manager.warm_up(device)
+
+    @property
+    def pin_pacer(self) -> "PinPacer | None":
+        """Pacer transfer submitters wrap GPU work in; ``None`` when the L1
+        tier does no deferred host pinning."""
+        return self._l1_manager.pin_pacer
+
+    def pin_status(self) -> tuple[int, int]:
+        """(pinned, total) bytes of deferred L1 host pinning; equal once the
+        pool is fully pinned, ``(0, 0)`` when nothing is pinned lazily."""
+        return self._l1_manager.pin_status()
 
     # External APIs for serving engine integration code to call
     @enable_tracing()

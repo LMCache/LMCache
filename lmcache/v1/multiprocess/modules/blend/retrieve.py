@@ -25,6 +25,7 @@ import torch
 from lmcache import device_ops, torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.memory_allocators import pin_pacer
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
@@ -625,6 +626,7 @@ class RetrieveMixin:
                 )
 
             with (
+                pin_pacer.submitting(self._ctx.storage_manager.pin_pacer),
                 torch_dev.device(gpu_context.device),
                 torch_dev.stream(gpu_context.stream),
             ):
@@ -812,6 +814,7 @@ class RetrieveMixin:
         retrieve_cupy_stream = self._cb_retrieve_cupy_streams[gpu_context]
 
         with (
+            pin_pacer.submitting(self._ctx.storage_manager.pin_pacer),
             torch_dev.device(gpu_context.device),
             torch_dev.stream(retrieve_stream),
         ):

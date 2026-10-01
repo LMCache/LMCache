@@ -10,6 +10,7 @@ import torch
 # First Party
 from lmcache import device_ops, torch_dev, torch_device_type
 from lmcache.logging import init_logger
+from lmcache.v1.memory_allocators.pin_pacer import PinPacer
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import (
     AddressManager,
@@ -62,7 +63,11 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
     the size to the required size in the background.
 
     Background expansion logic:
-    - After registering X GB memory, we call sbrk and updates _curr_size
+    - Chunks are registered one at a time; each is committed with sbrk until
+      the initial size is reached, then commits are batched by COMMIT_SIZE
+    - Before each chunk the thread yields to in-flight transfer submissions
+      (see :class:`PinPacer`): ``cudaHostRegister`` holds a driver lock that
+      would otherwise starve their kernel launches
     - Once everything is registered, the background thread stops
 
     Deferred pinning:
@@ -76,6 +81,13 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
     PIN_CHUNK_SIZE = 1 << 26  # 64 MB pin chunk
     COMMIT_SIZE = 1 << 30  # Do a commit every 1 GB
+    # cudaHostRegisterPortable | cudaHostRegisterMapped: pinned in every
+    # device context (workers on other GPUs), mapped for the transfer kernels.
+    PIN_FLAGS = 0x03
+    # Upper bound on how long a chunk pin waits for transfer submissions to
+    # drain. Under sustained load this becomes the gap between chunk pins:
+    # 20 ms keeps ~87% of transfer bandwidth while pinning at ~60% speed.
+    PIN_YIELD_MAX_WAIT_S = 0.02
     LOG_INTERVAL = 10 << 30  # Log expansion progress every 10 GB
 
     def __init__(
@@ -103,8 +115,12 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         # Whether using NUMA allocation
         self._use_numa = numa_mapping is not None
-        # Currently pinned size, only accessed by the expansion thread
-        self._curr_size = align_to(init_size, self.PIN_CHUNK_SIZE)
+        # Pin-ahead target: committed chunk by chunk so early allocations find
+        # space right away; beyond it commits are batched by COMMIT_SIZE.
+        self._init_size = align_to(init_size, self.PIN_CHUNK_SIZE)
+        # Currently pinned size, only written by ensure_pinning and the
+        # expansion thread
+        self._curr_size = 0
         # Final size of the allocation, only accessed by the expansion thread
         self._final_size = align_to(final_size, self.PIN_CHUNK_SIZE)
         # Underlying buffer for the memory allocation
@@ -153,7 +169,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._allocator = TensorMemoryAllocator(
             tensor=self._buffer,
             align_bytes=align_bytes,
-            init_address_space=self._curr_size,
+            init_address_space=0,
         )
 
         # Get the address manager
@@ -162,6 +178,9 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         # NOTE(ApostaC): this also assumes that the behavior of the allocation is
         # completely determined by the address manager.
         self._address_manager = self._allocator.address_manager
+        self._pacer = PinPacer()
+        # Bytes made allocatable so far; advanced by _commit_expansion.
+        self._committed_size = 0
 
         # Deferred-pinning state, all guarded by _init_lock:
         # _pin_device is bound once by the first ensure_pinning() and never
@@ -181,7 +200,11 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
     # Public methods
     def ensure_pinning(self, device: int | torch.device) -> None:
         """
-        Pin the initial chunk on ``device`` and start background expansion.
+        Pin the first chunk on ``device`` and start background expansion.
+
+        Only one chunk is pinned inline (tens of milliseconds); the expansion
+        thread pins the rest, committing chunk by chunk up to the configured
+        initial size so the pool is usable right away.
 
         Idempotent and thread-safe: only the first call pins and binds the
         device; subsequent calls (and calls after :meth:`close`) are no-ops.
@@ -195,7 +218,9 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             if self._pinning_started or self._closed:
                 return
             self._pin_device = device
-            self._pin_memory_chunk(0, self._curr_size)
+            self._pin_memory_chunk(0, self.PIN_CHUNK_SIZE)
+            self._curr_size = self.PIN_CHUNK_SIZE
+            self._commit_expansion(self.PIN_CHUNK_SIZE)
             self._pinning_started = True
             self._expand_thread.start()
 
@@ -222,6 +247,18 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             name="lazy-allocator-warm-up",
             daemon=True,
         ).start()
+
+    @property
+    def pin_pacer(self) -> PinPacer:
+        """Pacer transfer submitters use to keep pinning off their lock."""
+        return self._pacer
+
+    def pin_status(self) -> tuple[int, int]:
+        """Return (committed pinned bytes, final pool bytes).
+
+        The two are equal once background pinning has finished.
+        """
+        return self._committed_size, self._final_size
 
     def allocate(
         self,
@@ -407,9 +444,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         ptr = self._buffer.data_ptr() + offset
         # Pin inside the bound device's context so the CUDA context the
         # registration creates lands on that device, not the thread default.
-        # Use flag: cudaHostRegisterMapped (0x02)
         with torch_dev.device(self._pin_device):
-            pinned = current_device_spec.pin_memory(ptr, size, 2)
+            pinned = current_device_spec.pin_memory(ptr, size, self.PIN_FLAGS)
         if not pinned:
             logger.warning(
                 "pin_memory failed for chunk at ptr=%#x size=%d; "
@@ -425,6 +461,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         Call sbrk in the address manager to commit the expansion.
         """
         self._address_manager.sbrk(expand_size)
+        self._committed_size += expand_size
 
     def _log_expansion_progress(self, expanded_since_last_log: int) -> None:
         """
@@ -447,10 +484,18 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         last_commit_size = self._curr_size
         last_log_size = self._curr_size
         while self._curr_size < self._final_size and not self._stop_expand.is_set():
-            # Expand chunk by chunk and commit
-            for i in range(self.COMMIT_SIZE // self.PIN_CHUNK_SIZE):
-                if self._curr_size >= self._final_size:
+            # Commit every chunk until the initial size is pinned, then batch.
+            chunks_per_commit = (
+                1
+                if self._curr_size < self._init_size
+                else self.COMMIT_SIZE // self.PIN_CHUNK_SIZE
+            )
+            for _ in range(chunks_per_commit):
+                if self._curr_size >= self._final_size or self._stop_expand.is_set():
                     break
+                # Let in-flight transfer submissions take the driver lock
+                # first; back-to-back registration would starve them.
+                self._pacer.wait_idle(self.PIN_YIELD_MAX_WAIT_S)
                 self._pin_memory_chunk(self._curr_size, self.PIN_CHUNK_SIZE)
                 self._curr_size += self.PIN_CHUNK_SIZE
 

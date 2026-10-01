@@ -142,6 +142,15 @@ class GDSL1MemoryManager:
     def warm_up(self, device: "int | torch.device") -> None:
         """No-op: the GDS slab tier has no deferred host pinning."""
 
+    @property
+    def pin_pacer(self) -> None:
+        """GDS slab files are not host-pinned; nothing to pace."""
+        return None
+
+    def pin_status(self) -> tuple[int, int]:
+        """GDS slab files are not host-pinned; nothing to wait for."""
+        return (0, 0)
+
     def memcheck(self) -> bool:
         """For debug purposes; logs allocator state and checks consistency.
 

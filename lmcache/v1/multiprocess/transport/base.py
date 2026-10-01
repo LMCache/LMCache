@@ -154,6 +154,9 @@ class RequestClient(Protocol):
     def get_chunk_size(self) -> MessagingFuture[int]: ...
 
     @rpc_method
+    def pin_status(self) -> MessagingFuture[tuple[int, int]]: ...
+
+    @rpc_method
     def ping(self, instance_id: int | None) -> MessagingFuture[bool]: ...
 
     @rpc_method
