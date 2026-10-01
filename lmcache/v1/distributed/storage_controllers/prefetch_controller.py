@@ -35,7 +35,10 @@ from lmcache.v1.distributed.api import (
     PrefetchResult,
     PrefetchTaskSpec,
 )
-from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
+from lmcache.v1.distributed.bitmap_ops.fold import (
+    all_grouped,
+    fold_unfold_grouped,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -226,32 +229,27 @@ def _repack_whole_columns(
     """Release split columns, then retry whole columns in order with the
     freed staging, stopping at the first that no longer fits. Mutates
     ``success`` and ``objs``."""
-    requested_rows: dict[int, list[int]] = {}
-    for row_id, row in enumerate(cells):
-        for col in row.get_indices_list():
-            requested_rows.setdefault(col, []).append(row_id)
+    # A column is incomplete when any row misses it: OR-fold the misses.
+    incomplete_cols = Bitmap(cells.size()[1])
+    for row in cells - success:
+        incomplete_cols = incomplete_cols | row
 
     # Release the split columns' staging.
-    incomplete: list[int] = []
-    for col, row_ids in sorted(requested_rows.items()):
-        got = [rid for rid in row_ids if success[rid].test(col)]
-        if len(got) == len(row_ids):
-            continue
-        incomplete.append(col)
-        release_keys: list[ObjectKey] = []
-        for rid in got:
-            key = key_groups[rid].keys[col]
-            release_keys.append(key)
-            success[rid].clear(col)
+    drop = Bitmap2D([row & incomplete_cols for row in success])
+    release_keys = _gather_keys(key_groups, drop)
+    if release_keys:
+        l1_manager.finish_write_and_delete(release_keys, tag=tag)
+        for key in release_keys:
             objs.pop(key, None)
-        if release_keys:
-            l1_manager.finish_write_and_delete(release_keys, tag=tag)
+        success -= drop
 
     # Retry whole columns with the freed staging.
-    for col in incomplete:
+    for col in incomplete_cols.get_indices_list():
         col_objs: dict[ObjectKey, "MemoryObj"] = {}
         oom = False
-        for rid in requested_rows[col]:
+        for rid, requested in enumerate(cells):
+            if not requested.test(col):
+                continue
             group = key_groups[rid]
             key = group.keys[col]
             results = l1_manager.reserve_write(
@@ -266,8 +264,9 @@ def _repack_whole_columns(
                 break
             col_objs[key] = mem_obj
         else:
-            for rid in requested_rows[col]:
-                success[rid].set(col)
+            for rid, requested in enumerate(cells):
+                if requested.test(col):
+                    success[rid].set(col)
             objs.update(col_objs)
             continue
         if col_objs:
@@ -338,9 +337,7 @@ def _reserve_l1_cells(
 
     if whole_columns and failed_count > 0:
         _repack_whole_columns(l1_manager, key_groups, cells, retain, tag, success, objs)
-        failed_count = sum(row.popcount() for row in cells) - sum(
-            row.popcount() for row in success
-        )
+        failed_count = (cells - success).popcount()
         # The repack may have recovered keys the first pass failed.
         oom_keys = [k for k in oom_keys if k not in objs]
         contended_keys = [k for k in contended_keys if k not in objs]
@@ -1567,7 +1564,7 @@ class PrefetchController(StorageControllerInterface):
             hit_cells = Bitmap2D(retain_rows) & found
         elif request.require_whole_columns:
             # A split column is not a hit; the release below returns its rows.
-            hit_cells = found.whole_columns()
+            hit_cells = Bitmap2D(all_grouped(found.to_list()))
         else:
             hit_cells = found
 
