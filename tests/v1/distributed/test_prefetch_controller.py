@@ -104,7 +104,6 @@ def make_spec(
     num_kv_readers: int = 1,
     fetching_policy: FetchingPolicy = "prefix",
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK,
-    require_whole_columns: bool = False,
 ) -> PrefetchTaskSpec:
     """Build a request over the given rows."""
     return PrefetchTaskSpec(
@@ -112,7 +111,6 @@ def make_spec(
         num_kv_readers=num_kv_readers,
         fetching_policy=fetching_policy,
         lock_mode=lock_mode,
-        require_whole_columns=require_whole_columns,
     )
 
 
@@ -1203,7 +1201,7 @@ class TestReservationFailures:
             l1_manager.close()
 
     def test_out_of_memory_trims_to_whole_columns(self):
-        """With ``require_whole_columns`` the shortfall keeps only columns
+        """Under ``"all"`` the shortfall keeps only columns
         complete in every row. Batched reservation is all-or-nothing per
         row, so a row that cannot fully reserve empties the whole-column
         set; the released chunks stay loadable (found, no locks held)."""
@@ -1223,7 +1221,7 @@ class TestReservationFailures:
         ctrl.start()
         try:
             req_id = ctrl.submit_prefetch_request(
-                make_spec(rows, fetching_policy="full", require_whole_columns=True)
+                make_spec(rows, fetching_policy="all")
             )
             result = wait_for_result(ctrl, req_id, timeout=10.0)
 

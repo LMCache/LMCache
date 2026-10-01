@@ -148,7 +148,7 @@ class PrefetchPolicy(ABC):
                 manager that may appear in ``l1_locked_keys``.
             l2_adapter_descs: L2 adapter index -> descriptor, for every L2
                 adapter that may appear in ``l2_locked_keys``.
-            fetching_policy: ``"prefix"`` or ``"full"``.
+            fetching_policy: See :data:`FetchingPolicy`.
 
         Returns:
             The plan consists of the planned L1 and L2 keys.
@@ -224,7 +224,7 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
                 manager that may appear in ``l1_locked_keys``.
             l2_adapter_descs: L2 adapter index -> descriptor, for every L2
                 adapter that may appear in ``l2_locked_keys``.
-            fetching_policy: ``"prefix"`` or ``"full"``.
+            fetching_policy: See :data:`FetchingPolicy`.
 
         Returns:
             The plan. Every cell in it is locked in the tier it is planned
@@ -249,7 +249,7 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
             return empty
         found = l1_found + l2_found
 
-        if fetching_policy == "full":
+        if fetching_policy in ("full", "all"):
             if any(w > FULL_ATTENTION_WINDOW_CHUNKS for w in sliding_windows):
                 logger.error(
                     "plan_load: 'full' fetching does not support sliding-window "

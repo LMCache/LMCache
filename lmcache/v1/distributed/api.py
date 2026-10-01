@@ -24,13 +24,18 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-FetchingPolicy = Literal["prefix", "full"]
+FetchingPolicy = Literal["prefix", "full", "all"]
 """Which found objects a prefetch loads and reports.
 
 ``"prefix"`` -- only fetch the prefix hit and discard all non-prefix hits.
 
 ``"full"`` -- fetch all of the hit chunks, no matter whether they are in the
-prefix or not.
+prefix or not; the reported cells may carry per-row gaps.
+
+``"all"`` -- like ``"full"``, but a chunk (column) counts only when every row
+of it loads: staging is trimmed to whole columns, and the result reports what
+the lookup found (``found_cells``). For callers that consume a chunk across
+all rows at once (the blender).
 """
 
 FULL_ATTENTION_WINDOW_CHUNKS = -1
@@ -484,9 +489,6 @@ class PrefetchTaskSpec:
             reader that will retrieve it. Ignored under ``NO_LOCK``.
         fetching_policy: See :data:`FetchingPolicy`.
         lock_mode: See :class:`PrefetchLockMode`.
-        require_whole_columns: The caller uses a chunk only when every row of
-            its column loaded (the blender), so spend scarce L1 staging on
-            whole columns. Off: cells are reported with per-row gaps.
 
     Note:
         Every key group holds the same number of keys (``group_size``). The
@@ -498,7 +500,6 @@ class PrefetchTaskSpec:
     num_kv_readers: int = 1
     fetching_policy: FetchingPolicy = "prefix"
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
-    require_whole_columns: bool = False
 
     def __post_init__(self) -> None:
         if not self.key_groups:

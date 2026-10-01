@@ -201,8 +201,7 @@ class LookupMixin:
             PrefetchTaskSpec(
                 key_groups=key_groups,
                 num_kv_readers=key.require_num_kv_readers(),
-                fetching_policy="full",
-                require_whole_columns=True,
+                fetching_policy="all",
             ),
             external_request_id=key.request_id,
         )
