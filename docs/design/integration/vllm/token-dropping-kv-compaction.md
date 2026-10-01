@@ -7,10 +7,10 @@ transformations such as token dropping. It runs outside the vLLM worker, stages
 KV and Q through CPU memory, and needs external orchestration around the serving
 engine.
 
-The MVP moves the token-dropping algorithm and compaction into the vLLM worker.
-The R-KV algorithm reads post-RoPE query (Q) and KV directly on GPU. LMCache
-compacts the selected KV there, and the LMCache server stays off the compaction
-path. Only control metadata crosses the worker / scheduler boundary.
+The MVP moves the token-dropping algorithm and compaction into the vLLM worker
+through vLLM's existing KVConnector integration path. R-KV reads post-RoPE Q and
+KV directly on GPU; only control metadata crosses the scheduler / worker
+boundary, and the LMCache server stays off the compaction path.
 
 Dropped KV becomes reusable vLLM capacity for other requests.
 
@@ -34,37 +34,24 @@ length can be tracked as:
 ```text
 vLLM worker (GPU)
   post-RoPE Q + paged KV
-          |
-     R-KV algorithm
-          | retained KV indices
-          v
-  LMCache compaction
-          | rewrite KV in place on GPU
-          | report stepDropped
-          v
-  worker result
-          |
-          v
+        -> R-KV
+        -> LMCache compaction
+        -> stepDropped
+              |
+              | KVConnector
+              v
 vLLM scheduler
-  LMCache connector:
-    totalDropped += stepDropped
-    kvLen = logicalLen - totalDropped
-  vLLM allocator: return unused tail blocks
-                  run normal allocation
-          |
-          | next-step metadata
-          | kvLen + full block IDs if changed
-          v
-LMCache worker adapter
-  model positions use logicalLen
-  KV addressing uses kvLen + block IDs
-          |
-      next forward
+  totalDropped += stepDropped
+  kvLen = logicalLen - totalDropped
+  reclaim unused tail blocks
+  run normal allocation
+              |
+              | KVConnector: kvLen + block IDs
+              v
+vLLM worker (next step)
+  model positions: logicalLen
+  KV addressing:   kvLen + block IDs
 ```
-
-Both directions use vLLM's existing connector interface: the worker reports
-`stepDropped`, and the scheduler sends `kvLen` plus the full current block IDs
-when allocation changes.
 
 ## State and ownership
 
