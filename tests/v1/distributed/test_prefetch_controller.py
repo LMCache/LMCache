@@ -1202,10 +1202,11 @@ class TestReservationFailures:
             adapter.close()
             l1_manager.close()
 
-    def test_out_of_memory_repacks_into_whole_columns(self):
-        """With ``require_whole_columns`` the same shortfall loads whole
-        columns instead: room for 4 of 6 cells over two rows yields columns
-        0 and 1 complete, not row 0 complete and row 1 empty."""
+    def test_out_of_memory_trims_to_whole_columns(self):
+        """With ``require_whole_columns`` the shortfall keeps only columns
+        complete in every row. Batched reservation is all-or-nothing per
+        row, so a row that cannot fully reserve empties the whole-column
+        set; the released chunks stay loadable (found, no locks held)."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
         l1_manager = L1Manager(
@@ -1226,20 +1227,17 @@ class TestReservationFailures:
             )
             result = wait_for_result(ctrl, req_id, timeout=10.0)
 
-            assert [row_bits(result, 0), row_bits(result, 1)] == [[0, 1], [0, 1]]
-            # Everything was pinned in L2, so the capacity-dropped column 2
-            # is still reported found -- absent would mean evicted.
+            assert [row_bits(result, 0), row_bits(result, 1)] == [[], []]
+            # Capacity-dropped columns are still reported found -- absent
+            # would mean evicted.
             assert result is not None and result.found_cells is not None
             assert [row.get_indices_list() for row in result.found_cells] == [
                 [0, 1, 2],
                 [0, 1, 2],
             ]
-            held = [rows[r].keys[c] for r in range(2) for c in (0, 1)]
-            assert_read_locked(l1_manager, held)
-            assert_absent(l1_manager, [k for k in all_keys if k not in held])
+            assert_absent(l1_manager, all_keys)
             assert l1_manager.get_staging_memory_usage() == 0
             assert_l2_unlocked(adapter)
-            l1_manager.finish_read(held)
         finally:
             ctrl.stop()
             adapter.close()

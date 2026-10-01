@@ -217,65 +217,6 @@ def _scatter_bitmaps_full_global(
     return ret
 
 
-def _repack_whole_columns(
-    l1_manager: L1Manager,
-    key_groups: list[GroupedObjectKeys],
-    cells: Bitmap2D,
-    retain: dict[ObjectKey, bool],
-    tag: str,
-    success: Bitmap2D,
-    objs: dict[ObjectKey, "MemoryObj"],
-) -> None:
-    """Release split columns, then retry whole columns in order with the
-    freed staging, stopping at the first that no longer fits. Mutates
-    ``success`` and ``objs``."""
-    # A column is incomplete when any row misses it: OR-fold the misses.
-    incomplete_cols = Bitmap(cells.size()[1])
-    for row in cells - success:
-        incomplete_cols = incomplete_cols | row
-
-    # Release the split columns' staging.
-    drop = Bitmap2D([row & incomplete_cols for row in success])
-    release_keys = _gather_keys(key_groups, drop)
-    if release_keys:
-        l1_manager.finish_write_and_delete(release_keys, tag=tag)
-        for key in release_keys:
-            objs.pop(key, None)
-        success -= drop
-
-    # Retry whole columns with the freed staging.
-    for col in incomplete_cols.get_indices_list():
-        col_objs: dict[ObjectKey, "MemoryObj"] = {}
-        oom = False
-        for rid, requested in enumerate(cells):
-            if not requested.test(col):
-                continue
-            group = key_groups[rid]
-            key = group.keys[col]
-            results = l1_manager.reserve_write(
-                keys=[key],
-                is_temporary=[not retain[key]],
-                layout_desc=group.layout_desc,
-                tag=tag,
-            )
-            error, mem_obj = results[key]
-            if error != L1Error.SUCCESS or mem_obj is None:
-                oom = error == L1Error.OUT_OF_MEMORY
-                break
-            col_objs[key] = mem_obj
-        else:
-            for rid, requested in enumerate(cells):
-                if requested.test(col):
-                    success[rid].set(col)
-            objs.update(col_objs)
-            continue
-        if col_objs:
-            l1_manager.finish_write_and_delete(list(col_objs), tag=tag)
-        if oom:
-            # Columns are uniform in per-row size: nothing later fits either.
-            break
-
-
 def _reserve_l1_cells(
     l1_manager: L1Manager,
     key_groups: list[GroupedObjectKeys],
@@ -296,8 +237,8 @@ def _reserve_l1_cells(
         retain: Whether each key in ``cells`` stays resident after the
             reader is done.
         tag: The writer tag for the reservations.
-        whole_columns: On a shortfall, re-pack into whole columns
-            (:func:`_repack_whole_columns`).
+        whole_columns: On a shortfall, trim the reservation to whole
+            columns (:func:`all_grouped`) and release the rest.
 
     Returns:
         The tuple of (L1 reserve result, reserved objects, failed count).
@@ -336,11 +277,16 @@ def _reserve_l1_cells(
             objs[key] = mem_obj
 
     if whole_columns and failed_count > 0:
-        _repack_whole_columns(l1_manager, key_groups, cells, retain, tag, success, objs)
-        failed_count = (cells - success).popcount()
-        # The repack may have recovered keys the first pass failed.
-        oom_keys = [k for k in oom_keys if k not in objs]
-        contended_keys = [k for k in contended_keys if k not in objs]
+        # A split column is unusable to the caller: trim to whole columns
+        # and release the rest of the staging.
+        drop = success - Bitmap2D(all_grouped(success.to_list()))
+        release_keys = _gather_keys(key_groups, drop)
+        if release_keys:
+            l1_manager.finish_write_and_delete(release_keys, tag=tag)
+            for key in release_keys:
+                objs.pop(key, None)
+            success -= drop
+            failed_count = (cells - success).popcount()
 
     event_bus = get_event_bus()
     if oom_keys:
