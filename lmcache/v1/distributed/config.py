@@ -739,10 +739,14 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         None.
 
     Raises:
-        ValueError: If mutually exclusive L1 tiers are both configured, DRAM
-            managers share a shared-memory name, or a ``dax`` L2 adapter
-            maps the device range of a Device-DAX L1.
+        ValueError: If the notifier interval is not positive, mutually
+            exclusive L1 tiers are both configured, DRAM managers share a
+            shared-memory name, or a ``dax`` L2 adapter maps the device
+            range of a Device-DAX L1.
     """
+    if config.periodic_notifier_interval_ms <= 0:
+        raise ValueError("periodic_notifier_interval_ms must be greater than 0")
+
     by_tag = {c.tag: c for c in config.l1_manager_configs}
     shm_names = [
         c.memory_config.shm_name
