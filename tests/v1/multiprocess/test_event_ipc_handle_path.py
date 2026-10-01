@@ -73,14 +73,17 @@ class _FakeStorageManager:
     def finish_write(self, keys: list[object]) -> None:
         return None
 
+    def abort_write(self, keys: list[object]) -> dict[object, object]:
+        return {}
+
     def finish_read_prefetched(self, keys: list[object]) -> None:
         return None
 
-    def reserve_write(
+    def reserve_write_with_status(
         self,
         keys: list[object],
         layout: object,
-    ) -> dict[object, object]:
+    ) -> dict[object, tuple[object, object | None]]:
         return {}
 
     @contextmanager

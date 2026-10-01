@@ -18,6 +18,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
@@ -179,12 +180,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # empty_cache (leaf-lock invariant: no thread holds two locks).
         self._lock = threading.Lock()
 
-        # Route finish_write / finish_read_prefetched through a C++ host
+        # Route write completion/abort and read completion through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
         self._device_host_func_dispatcher = DeviceHostFuncDispatcher()
         self._device_host_func_dispatcher.register(
             "finish_write",
             self._ctx.storage_manager.finish_write,
+            payload_type=list[ObjectKey],
+        )
+        self._device_host_func_dispatcher.register(
+            "abort_write",
+            self._ctx.storage_manager.abort_write,
             payload_type=list[ObjectKey],
         )
         self._device_host_func_dispatcher.register(
@@ -701,10 +707,27 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         self._ctx.chunk_size,
                         object_group_id=obj_group_id,
                     )
-                    reserved_dict = self._ctx.storage_manager.reserve_write(
-                        keys_to_reserve, layout_desc
+                    reserve_result = (
+                        self._ctx.storage_manager.reserve_write_with_status(
+                            keys_to_reserve, layout_desc
+                        )
                     )
+                    reserved_dict = {
+                        obj_key: memory_obj
+                        for obj_key, (_, memory_obj) in reserve_result.items()
+                        if memory_obj is not None
+                    }
                     all_dict.update(reserved_dict)
+                    allocation_failures = [
+                        obj_key
+                        for obj_key, (error, _) in reserve_result.items()
+                        if error == L1Error.OUT_OF_MEMORY
+                    ]
+                    if allocation_failures:
+                        raise RuntimeError(
+                            "Failed to reserve all store objects: "
+                            f"{len(allocation_failures)} allocation failure(s)"
+                        )
                     if reserved_dict:
                         total_bytes += next(
                             iter(reserved_dict.values())
@@ -746,6 +769,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     )
                 else:
                     total_bytes = 0
+                    if all_dict:
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream,
+                            "abort_write",
+                            list(all_dict.keys()),
+                        )
                 num_tokens = num_chunks * self._ctx.chunk_size if stored_count else 0
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,
