@@ -105,10 +105,8 @@ class StoreMixin:
             # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.
             start_chunk_idx = 0 if key.start != 0 else 1
 
-            # Register only the chunks the transfer actually committed: a
-            # fingerprint for a chunk the storage manager skipped (out of
-            # memory, write conflict) would advertise content that was never
-            # persisted and can never be served.
+            # Register only committed chunks: a fingerprint for a skipped
+            # chunk would advertise content that was never persisted.
             def _stored(i: int) -> bool:
                 return stored_mask[i] if i < len(stored_mask) else False
 

@@ -217,19 +217,12 @@ class LookupMixin:
         hash_to_col: dict[bytes, int],
         avail_rows: list[Bitmap] | None = None,
     ) -> list[CBMatchResult]:
-        """Classify each prefetched chunk as found, skipped, or stale.
+        """Classify each prefetched chunk: found (every key loaded),
+        skipped (exists per ``avail_rows`` but not fully staged: no strike,
+        loaded keys released now), or stale (absent: eviction strike).
+        Without ``avail_rows``, any-key-loaded approximates existence.
 
-        Found: every (read group x rank) key loaded; obj_keys stashed for the
-        retrieve. Skipped: every key exists in storage (``avail_rows``, the
-        prefetch's L1+pinned-L2 view) but not all could be staged — no
-        strike, and any loaded keys' read locks are released now (the
-        retrieve cannot use them). Stale: some key is absent from storage;
-        takes an eviction strike. Without ``avail_rows`` (older producer),
-        any-key-loaded approximates existence.
-
-        Returns:
-            The found subset, in cur_st order.
-        """
+        Returns the found subset, in cur_st order."""
         found_cb_match_result: list[CBMatchResult] = []
         stale_hashes: list[bytes] = []
         partial_release_keys: list = []
@@ -261,8 +254,7 @@ class LookupMixin:
                 partial_release_keys,
                 read_locks=key.require_num_kv_readers(),
             )
-        # Stale and partial drops silently shrink coverage — log so it is
-        # diagnosable.
+        # Dropped chunks silently shrink coverage — log for diagnosis.
         if stale_hashes or partial_seen:
             logger.warning(
                 "CB sparse classify for %s: %d found, %d stale, %d partial "

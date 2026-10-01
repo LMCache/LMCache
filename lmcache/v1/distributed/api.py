@@ -484,10 +484,9 @@ class PrefetchTaskSpec:
             reader that will retrieve it. Ignored under ``NO_LOCK``.
         fetching_policy: See :data:`FetchingPolicy`.
         lock_mode: See :class:`PrefetchLockMode`.
-        require_whole_columns: The caller (the blender) can only use a chunk
-            when every row of its column loaded, so on an L1 shortfall spend
-            the staging on whole columns instead of split ones. Off by
-            default: cells are then reported with per-row gaps.
+        require_whole_columns: The caller uses a chunk only when every row of
+            its column loaded (the blender), so spend scarce L1 staging on
+            whole columns. Off: cells are reported with per-row gaps.
 
     Note:
         Every key group holds the same number of keys (``group_size``). The
@@ -571,10 +570,9 @@ class PrefetchResult:
         ``l1_hit_cells`` and ``l2_hit_cells`` are disjoint and their union is
         ``hit_cells``.
 
-    ``found_cells`` marks every cell that provably existed when the task
-    planned: resident in L1 or pinned by the L2 lookup. It is a superset of
-    ``hit_cells``; a cell found but not hit was dropped for capacity (no L1
-    staging), not evicted. ``None`` when the producer does not report it.
+    ``found_cells`` (superset of ``hit_cells``): what existed at plan time —
+    in L1 or pinned in L2. Found-but-not-hit means "didn't fit", not
+    "evicted". ``None`` when not reported.
     """
 
     hit_cells: list["Bitmap"]

@@ -223,13 +223,9 @@ def _repack_whole_columns(
     success: Bitmap2D,
     objs: dict[ObjectKey, "MemoryObj"],
 ) -> None:
-    """Re-pack a short reservation into whole columns, in place.
-
-    Releases every split column (reserved in some requested rows, not all),
-    then re-offers the freed staging to the incomplete columns in column
-    order, whole columns at a time, stopping at the first that no longer
-    fits. Mutates ``success`` and ``objs``.
-    """
+    """Release split columns, then retry whole columns in order with the
+    freed staging, stopping at the first that no longer fits. Mutates
+    ``success`` and ``objs``."""
     requested_rows: dict[int, list[int]] = {}
     for row_id, row in enumerate(cells):
         for col in row.get_indices_list():
@@ -301,9 +297,8 @@ def _reserve_l1_cells(
         retain: Whether each key in ``cells`` stays resident after the
             reader is done.
         tag: The writer tag for the reservations.
-        whole_columns: On a shortfall, re-pack the reservation into whole
-            columns (see :func:`_repack_whole_columns`) so the staging is
-            spent only on columns the caller can use.
+        whole_columns: On a shortfall, re-pack into whole columns
+            (:func:`_repack_whole_columns`).
 
     Returns:
         The tuple of (L1 reserve result, reserved objects, failed count).
@@ -429,9 +424,7 @@ class InFlightPrefetchRequest:
     num_kv_readers: int
     require_whole_columns: bool = False
 
-    # Cells the L2 lookups pinned, accumulated as each lookup completes.
-    # Unioned with the landed cells at finish to report found_cells: what
-    # provably existed, whether or not it could be staged.
+    # What the L2 lookups pinned; reported as found_cells at finish.
     l2_found_cells: "Bitmap2D | None" = None
 
     # The locked and reserved keys during the prefetch lifecycle.
@@ -1240,10 +1233,8 @@ class PrefetchController(StorageControllerInterface):
             l2_found_bitmap = _scatter_bitmaps_full_global(result, num_rows, num_cols)
             request.key_states.l2_locked_keys[adapter_idx] = l2_found_bitmap
 
-            # Whole-column callers classify on existence, so snapshot what
-            # the lookup pinned before the load plan trims it; the result
-            # then tells "found but not staged" from "absent". Other callers
-            # skip the snapshot and get found_cells=None.
+            # Snapshot before the load plan trims it, so the result can
+            # tell "found but not staged" from "absent".
             if request.require_whole_columns:
                 if request.l2_found_cells is None:
                     request.l2_found_cells = l2_found_bitmap.copy()
@@ -1575,9 +1566,7 @@ class PrefetchController(StorageControllerInterface):
         if request.fetching_policy == "prefix":
             hit_cells = Bitmap2D(retain_rows) & found
         elif request.require_whole_columns:
-            # A column split by a load failure is not a hit; the release
-            # below then returns its rows instead of read-locking them for a
-            # caller that cannot use them.
+            # A split column is not a hit; the release below returns its rows.
             hit_cells = found.whole_columns()
         else:
             hit_cells = found
@@ -1604,10 +1593,7 @@ class PrefetchController(StorageControllerInterface):
             l2_hit_cells = hit_cells.zeros_like()
         l1_hit_cells = hit_cells - l2_hit_cells
 
-        # Whole-column callers only: everything that provably existed --
-        # landed in L1 (before the whole-column trim) or pinned by an L2
-        # lookup even if it could not be staged. Lets the caller tell a
-        # capacity drop from an eviction.
+        # Whole-column callers only: landed-in-L1 union pinned-in-L2.
         found_cells = None
         if request.require_whole_columns:
             found_cells = found

@@ -562,9 +562,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             element indicates whether the store operation completed without a
             fatal error (not whether every requested chunk was stored; see
             Notes), and the third marks per chunk whether every object group
-            committed it — a chunk the storage manager skipped (out of
-            memory, write conflict) is False, so callers indexing stored
-            content do not advertise chunks that were never persisted. The
+            committed it (False for chunks the storage manager skipped). The
             event handle is empty when no device work was submitted.
 
         Raises:
@@ -793,8 +791,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 ed - st,
             )
 
-        # A chunk is stored only if every object group committed it (or is
-        # all-null and carries no state); a wholly-null chunk stored nothing.
+        # Stored = every object group committed it (all-null groups exempt);
+        # a wholly-null chunk stored nothing.
         if store_succeeded:
             stored_mask = [
                 any(not skipped_chunks[g][i] for g in range(num_object_groups))
