@@ -24,18 +24,15 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-FetchingPolicy = Literal["prefix", "full", "all"]
+FetchingPolicy = Literal["prefix", "full"]
 """Which found objects a prefetch loads and reports.
 
 ``"prefix"`` -- only fetch the prefix hit and discard all non-prefix hits.
 
-``"full"`` -- fetch all of the hit chunks, no matter whether they are in the
-prefix or not; the reported cells may carry per-row gaps.
-
-``"all"`` -- like ``"full"``, but a chunk (column) counts only when every row
-of it loads: staging is trimmed to whole columns, and the result reports what
-the lookup found (``found_cells``). For callers that consume a chunk across
-all rows at once (the blender).
+``"full"`` -- fetch every hit chunk, in or out of the prefix. A chunk
+(column) counts only when every row of it loads: staging is trimmed to whole
+columns, and the result also reports what the lookup found (``found_cells``)
+so callers can tell "did not fit" from "absent".
 """
 
 FULL_ATTENTION_WINDOW_CHUNKS = -1

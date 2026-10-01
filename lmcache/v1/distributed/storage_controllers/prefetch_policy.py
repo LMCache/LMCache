@@ -249,7 +249,7 @@ class DefaultPrefetchPolicy(PrefetchPolicy):
             return empty
         found = l1_found + l2_found
 
-        if fetching_policy in ("full", "all"):
+        if fetching_policy == "full":
             if any(w > FULL_ATTENTION_WINDOW_CHUNKS for w in sliding_windows):
                 logger.error(
                     "plan_load: 'full' fetching does not support sliding-window "

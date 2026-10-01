@@ -1158,12 +1158,13 @@ class EvictionRacingL1Manager:
 class TestReservationFailures:
     @pytest.mark.parametrize(
         ("fetching_policy", "expected_rows"),
-        [("full", [[0, 1, 2], []]), ("prefix", [[], []])],
+        [("full", [[], []]), ("prefix", [[], []])],
     )
     def test_out_of_memory_row_is_dropped(self, fetching_policy, expected_rows):
-        """An L1 with room for one row's buffers but not two loads what fits
-        and leaks nothing. Under "prefix" the row that could not be reserved
-        empties the servable prefix, so nothing is retained."""
+        """An L1 with room for one row's buffers but not two leaks nothing.
+        Under "prefix" the unreserved row empties the servable prefix; under
+        "full" a chunk counts only when every row loads, so the whole-column
+        trim releases the reserved row too."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
         l1_manager = L1Manager(
@@ -1201,7 +1202,7 @@ class TestReservationFailures:
             l1_manager.close()
 
     def test_out_of_memory_trims_to_whole_columns(self):
-        """Under ``"all"`` the shortfall keeps only columns
+        """Under ``"full"`` the shortfall keeps only columns
         complete in every row. Batched reservation is all-or-nothing per
         row, so a row that cannot fully reserve empties the whole-column
         set; the released chunks stay loadable (found, no locks held)."""
@@ -1221,7 +1222,7 @@ class TestReservationFailures:
         ctrl.start()
         try:
             req_id = ctrl.submit_prefetch_request(
-                make_spec(rows, fetching_policy="all")
+                make_spec(rows, fetching_policy="full")
             )
             result = wait_for_result(ctrl, req_id, timeout=10.0)
 

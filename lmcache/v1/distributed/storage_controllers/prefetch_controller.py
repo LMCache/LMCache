@@ -1161,7 +1161,7 @@ class PrefetchController(StorageControllerInterface):
 
             # Snapshot before the load plan trims it, so the result can
             # tell "found but not staged" from "absent".
-            if request.fetching_policy == "all":
+            if request.fetching_policy == "full":
                 if request.l2_found_cells is None:
                     request.l2_found_cells = l2_found_bitmap.copy()
                 else:
@@ -1211,7 +1211,7 @@ class PrefetchController(StorageControllerInterface):
 
         # Step 3.5: a whole-columns request can use a column only if every
         # row reserved; trim to whole columns and release the rest.
-        if request.fetching_policy == "all" and num_failed_reservations > 0:
+        if request.fetching_policy == "full" and num_failed_reservations > 0:
             merged = l1_reserved_keys.merge()
             if len(merged) > 0:
                 kept = Bitmap2D(all_grouped(merged.to_list()))
@@ -1502,7 +1502,7 @@ class PrefetchController(StorageControllerInterface):
         _hit_length, retain_rows = fold_unfold_grouped(found.to_list(), windows)
         if request.fetching_policy == "prefix":
             hit_cells = Bitmap2D(retain_rows) & found
-        elif request.fetching_policy == "all":
+        elif request.fetching_policy == "full":
             # A split column is not a hit; the release below returns its rows.
             hit_cells = Bitmap2D(all_grouped(found.to_list()))
         else:
@@ -1532,7 +1532,7 @@ class PrefetchController(StorageControllerInterface):
 
         # Whole-column callers only: landed-in-L1 union pinned-in-L2.
         found_cells = None
-        if request.fetching_policy == "all":
+        if request.fetching_policy == "full":
             found_cells = found
             if request.l2_found_cells is not None:
                 found_cells = found_cells + request.l2_found_cells
