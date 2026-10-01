@@ -287,6 +287,9 @@ class ReqMeta:
     disagg_spec: Optional[DisaggSpec] = None
     # the configs of the request
     request_configs: Optional[dict] = None
+    # vLLM block ids allocated to the request, used to report failed loads
+    # for token ranges the (chunk-truncated) slot mapping does not cover
+    block_ids: Optional[list[int]] = None
 
     @staticmethod
     def from_request_tracker(
@@ -426,6 +429,7 @@ class ReqMeta:
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
             request_configs=tracker.request_configs,
+            block_ids=list(tracker.allocated_block_ids),
         )
 
 
@@ -896,7 +900,36 @@ class LMCacheConnectorV1Impl:
                         ret_token_mask,
                         slot_mapping[:lmcache_cached_tokens],
                     )
+                    if not missing_blocks and request.block_ids:
+                        # The promised range lies beyond the load token list
+                        # (truncated to whole saved chunks), so the masks and
+                        # the slot mapping cannot name its blocks. Report them
+                        # from the request's block ids so vLLM recomputes them.
+                        missing_blocks = self._blocks_in_token_range(
+                            request.block_ids,
+                            request.load_spec.vllm_cached_tokens,
+                            lmcache_cached_tokens,
+                        )
+                        logger.warning(
+                            "Request %s: promised tokens [%d, %d) are past the "
+                            "%d-token load list; marking %d block(s) invalid",
+                            request.req_id,
+                            request.load_spec.vllm_cached_tokens,
+                            lmcache_cached_tokens,
+                            len(tokens),
+                            len(missing_blocks),
+                        )
                     self._invalid_block_ids.update(missing_blocks)
+
+    def _blocks_in_token_range(
+        self, block_ids: list[int], start: int, end: int
+    ) -> set[int]:
+        """vLLM block ids holding tokens [start, end) of a request."""
+        if end <= start:
+            return set()
+        first = start // self._block_size
+        last = cdiv(end, self._block_size)
+        return set(block_ids[first:last])
 
     def record_failed_blocks(
         self,

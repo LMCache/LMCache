@@ -16,6 +16,9 @@ This locks in:
 3. ``request_finished`` drops the mark.
 4. ``LMCacheEngine.lookup`` keeps the pins of an earlier lookup with the same
    id, so ``lookup_unpin`` releases all of them.
+5. A failed load can be reported for promised tokens past the load token list
+   (truncated to whole saved chunks): ``ReqMeta`` carries the request's block
+   ids and ``_blocks_in_token_range`` maps the promised range onto them.
 """
 
 # Standard
@@ -35,6 +38,7 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 # First Party
 from lmcache.integration.vllm.vllm_v1_adapter import (  # noqa: E402
     LMCacheConnectorV1Impl,
+    ReqMeta,
 )
 from lmcache.utils import CacheEngineKey  # noqa: E402
 from lmcache.v1.cache_engine import LMCacheEngine  # noqa: E402
@@ -158,3 +162,42 @@ def test_lookup_keeps_pins_of_an_earlier_lookup_with_the_same_id() -> None:
 
     # Every pin taken by contains() is recorded, so lookup_unpin releases all.
     assert engine.lookup_pins["req"]["LocalCPUBackend"] == [k0, k0, k1]
+
+
+def test_blocks_in_token_range() -> None:
+    connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+    connector._block_size = 64
+    block_ids = list(range(100, 140))
+
+    # [2880, 2944) is exactly block 45 -> out of range of 40 blocks: empty
+    assert connector._blocks_in_token_range(block_ids, 2880, 2944) == set()
+    # [192, 256) is block 3; [200, 300) touches blocks 3..4
+    assert connector._blocks_in_token_range(block_ids, 192, 256) == {103}
+    assert connector._blocks_in_token_range(block_ids, 200, 300) == {103, 104}
+    assert connector._blocks_in_token_range(block_ids, 256, 256) == set()
+
+
+def test_req_meta_carries_block_ids_past_the_truncated_token_list() -> None:
+    tracker = SimpleNamespace(
+        req_id="req-a",
+        token_ids=list(range(1000)),
+        prompt_len=1000,
+        num_saved_tokens=0,
+        skip_save=False,
+        is_decode_phase=False,
+        request_configs=None,
+        disagg_spec=None,
+        mm_hashes=None,
+        mm_positions=None,
+        allocated_block_ids=list(range(20, 36)),
+    )
+
+    meta = ReqMeta.from_request_tracker(
+        tracker, block_size=64, lmcache_chunk_size=256, discard_partial_chunks=True
+    )
+
+    # The load token list stops at the last whole chunk ...
+    assert len(meta.token_ids) == 768
+    assert meta.slot_mapping.shape[0] == 768
+    # ... but every allocated block is still known to the worker.
+    assert meta.block_ids == list(range(20, 36))
