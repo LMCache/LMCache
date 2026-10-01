@@ -533,6 +533,19 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
+        """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask."""
+        handle, ok, _ = self.store_with_chunk_mask(
+            key, instance_id, gpu_block_ids, event_ipc_handle
+        )
+        return handle, ok
+
+    def store_with_chunk_mask(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool, list[bool]]:
         """Store the GPU KV cache blocks to CPU.
 
         Args:
@@ -545,10 +558,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
         Returns:
             A tuple where the first element is the IPC handle of the event
-            that signals the completion of the store operation, and the second
+            that signals the completion of the store operation, the second
             element indicates whether the store operation completed without a
             fatal error (not whether every requested chunk was stored; see
-            Notes). The event handle is empty when no device work was submitted.
+            Notes), and the third marks per chunk whether every object group
+            committed it — a chunk the storage manager skipped (out of
+            memory, write conflict) is False, so callers indexing stored
+            content do not advertise chunks that were never persisted. The
+            event handle is empty when no device work was submitted.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -575,7 +592,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 "Rejecting STORE for unregistered GPU instance ID %d",
                 instance_id,
             )
-            return b"", False
+            return b"", False, []
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
@@ -626,7 +643,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     blocks_per_chunk,
                 )
                 event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+                return (
+                    event_backend.export_event(event, cache_context.device),
+                    False,
+                    [],
+                )
 
             # Chunks whose block ids are all the null block (e.g. align-mode
             # Mamba chunks holding no real state) carry no valid KV and must not
@@ -771,9 +792,24 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
+
+        # A chunk is stored only if every object group committed it (or is
+        # all-null and carries no state); a wholly-null chunk stored nothing.
+        if store_succeeded:
+            stored_mask = [
+                any(not skipped_chunks[g][i] for g in range(num_object_groups))
+                and all(
+                    skipped_chunks[g][i] or obj_keys_per_obj_group[g][i] in all_dict
+                    for g in range(num_object_groups)
+                )
+                for i in range(num_chunks)
+            ]
+        else:
+            stored_mask = [False] * num_chunks
         return (
             event_backend.export_event(event, cache_context.device),
             store_succeeded,
+            stored_mask,
         )
 
     @request_handler(
