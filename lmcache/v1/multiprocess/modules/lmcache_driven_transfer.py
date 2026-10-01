@@ -562,8 +562,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             element indicates whether the store operation completed without a
             fatal error (not whether every requested chunk was stored; see
             Notes), and the third marks per chunk whether every object group
-            committed it (False for chunks the storage manager skipped). The
-            event handle is empty when no device work was submitted.
+            committed it. The event handle is empty when no device work was
+            submitted.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -791,19 +791,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 ed - st,
             )
 
-        # Stored = every object group committed it (all-null groups exempt);
-        # a wholly-null chunk stored nothing.
-        if store_succeeded:
-            stored_mask = [
-                any(not skipped_chunks[g][i] for g in range(num_object_groups))
-                and all(
-                    skipped_chunks[g][i] or obj_keys_per_obj_group[g][i] in all_dict
-                    for g in range(num_object_groups)
-                )
-                for i in range(num_chunks)
-            ]
-        else:
-            stored_mask = [False] * num_chunks
+        # A chunk is stored only when every object group committed its key.
+        stored_mask = [
+            store_succeeded
+            and all(keys[i] in all_dict for keys in obj_keys_per_obj_group)
+            for i in range(num_chunks)
+        ]
         return (
             event_backend.export_event(event, cache_context.device),
             store_succeeded,
