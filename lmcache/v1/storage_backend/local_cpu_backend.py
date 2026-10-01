@@ -299,8 +299,12 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     memory_obj.unpin()
             memory_obj.ref_count_down()
 
-            if force:
-                self.cache_policy.update_on_force_evict(key)
+            # Notify the policy on every actual removal, not just forced ones.
+            # Policies whose state is ``cache_dict`` itself (LRU/FIFO/MRU) make
+            # this a no-op, but LFU keeps side bookkeeping that must drop the
+            # key here; otherwise an internal (``force=False``) eviction leaves
+            # LFU tracking a key that is no longer resident.
+            self.cache_policy.update_on_force_evict(key)
 
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.add_kv_op(
