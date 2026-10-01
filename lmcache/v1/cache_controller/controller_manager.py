@@ -171,7 +171,7 @@ class LMCacheControllerManager:
         elif isinstance(msg, FullSyncEndMsg):
             await self.kv_controller.handle_full_sync_end(msg)
         else:
-            logger.error(f"Unknown worker message type: {msg}")
+            logger.error("Unknown worker message type: %s", msg)
 
     async def handle_worker_req_message(
         self, msg: WorkerReqMsg
@@ -203,7 +203,7 @@ class LMCacheControllerManager:
         elif isinstance(msg, FullSyncStatusMsg):
             ret_msg = await self.kv_controller.handle_full_sync_status(msg)
         else:
-            logger.error(f"Unknown worker request message type: {msg}")
+            logger.error("Unknown worker request message type: %s", msg)
             ret_msg = ErrorMsg(error=f"Unknown message type: {type(msg)}")
         return ret_msg
 
@@ -245,7 +245,7 @@ class LMCacheControllerManager:
         elif isinstance(msg, QueryWorkerInfoMsg):
             return await self.reg_controller.query_worker_info(msg)
         else:
-            logger.error(f"Unknown orchestration message type: {msg}")
+            logger.error("Unknown orchestration message type: %s", msg)
             raise RuntimeError(f"Unknown orchestration message type: {msg}")
 
     def _setup_socket_metrics(self):
@@ -334,7 +334,7 @@ class LMCacheControllerManager:
             has_pending = 1 if (events & zmq.POLLIN) else 0  # type: ignore[attr-defined]
             return has_pending
         except Exception as e:
-            logger.error(f"Error checking socket pending status: {e}")
+            logger.error("Error checking socket pending status: %s", e)
             return 0
 
     async def handle_batched_push_request(self, socket) -> Optional[MsgBase]:
@@ -362,7 +362,7 @@ class LMCacheControllerManager:
                     elif isinstance(msg, OrchMsg):
                         await self.handle_orchestration_message(msg)
                     else:
-                        logger.error(f"Unknown message type: {type(msg)}")
+                        logger.error("Unknown message type: %s", type(msg))
 
     async def handle_batched_req_request(self, socket) -> Optional[MsgBase]:
         """Handle requests on ROUTER socket.

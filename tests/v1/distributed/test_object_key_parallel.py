@@ -153,8 +153,9 @@ def tp_lookup_hit_chunks(
     Returns ``(hit_chunks, rows)``: the number of leading chunks every worker
     has (the fold over the per-rank rows) and the per-rank found bitmaps.
     """
-    rows = storage_manager.query_prefetch_status(handle)
-    assert rows is not None
+    result = storage_manager.query_prefetch_status(handle)
+    assert result is not None
+    rows = result.hit_cells
     hit_chunks, _ = fold_unfold_grouped(rows, [-1] * world_size)
     return hit_chunks, rows
 
@@ -517,9 +518,11 @@ class TestTPEdgeCases:
         handle = storage_manager.submit_prefetch_task(
             single_row_spec(storage_keys, test_layout)
         )
-        found_count = storage_manager.query_prefetch_status(handle)[
-            0
-        ].count_leading_ones()
+        found_count = (
+            storage_manager.query_prefetch_status(handle)
+            .hit_cells[0]
+            .count_leading_ones()
+        )
         assert found_count == num_chunks
 
         # Retrieve should work
@@ -594,9 +597,11 @@ class TestTPEdgeCases:
         handle = storage_manager.submit_prefetch_task(
             single_row_spec(storage_keys, test_layout)
         )
-        found_count = storage_manager.query_prefetch_status(handle)[
-            0
-        ].count_leading_ones()
+        found_count = (
+            storage_manager.query_prefetch_status(handle)
+            .hit_cells[0]
+            .count_leading_ones()
+        )
         assert found_count == world_size
 
         # Retrieve each worker's key independently

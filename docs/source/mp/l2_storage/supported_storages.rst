@@ -52,6 +52,9 @@ target.
    * - :doc:`Aerospike <aerospike>`
      - ``aerospike``
      - Remote & Distributed
+   * - :doc:`WQS <wqs>`
+     - ``wqs_store``
+     - Remote & Distributed (vendor-provided)
    * - :doc:`DAX <dax>`
      - ``dax``
      - Byte-addressable memory

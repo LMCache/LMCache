@@ -77,8 +77,10 @@ class ObservabilityConfig:
     """Seconds between extra-stats log flushes."""
 
     trace_level: str | None = None
-    """If set, enables trace recording at the given level.  Currently
-    only ``"storage"`` is supported.  See
+    """If set, enables trace recording at the given level: ``"storage"``
+    records StorageManager calls for replay; ``"events"`` records the
+    cache-event stream the server emits for the coordinator, with or
+    without a coordinator configured.  See
     :mod:`lmcache.v1.mp_observability.trace` for details."""
 
     trace_output: str | None = None
@@ -270,10 +272,12 @@ def add_observability_args(
     trace_group.add_argument(
         "--trace-level",
         type=str,
-        choices=["storage"],
+        choices=["storage", "events"],
         default=None,
-        help="Enable trace recording at the given level. Currently only "
-        "'storage' is supported (records StorageManager public-API calls).",
+        help="Enable trace recording at the given level. 'storage' records "
+        "StorageManager public-API calls for replay. 'events' records the "
+        "cache-event stream this server emits for the coordinator, with or "
+        "without --coordinator-url, so a fleet can be captured for replay.",
     )
     trace_group.add_argument(
         "--trace-output",
