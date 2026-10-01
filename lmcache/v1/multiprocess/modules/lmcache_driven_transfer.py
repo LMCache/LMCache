@@ -18,6 +18,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
+from lmcache.v1.distributed.storage_manager import L1WriteCompletion
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
@@ -186,6 +187,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             "finish_write",
             self._ctx.storage_manager.finish_write,
             payload_type=list[ObjectKey],
+        )
+        self._device_host_func_dispatcher.register(
+            "finish_write_by_owner",
+            self._ctx.storage_manager.finish_write_by_owner,
+            payload_type=L1WriteCompletion,
         )
         self._device_host_func_dispatcher.register(
             "finish_read_prefetched",
@@ -741,8 +747,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 if stored_count:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
-                        "finish_write",
-                        list(all_dict.keys()),
+                        "finish_write_by_owner",
+                        self._ctx.storage_manager.prepare_write_completion(all_dict),
                     )
                 else:
                     total_bytes = 0

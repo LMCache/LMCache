@@ -82,7 +82,7 @@ class _StorageManagerStub:
         adapters: list[tuple[_FakeDescriptor, _FakeAdapter]],
     ) -> None:
         # A real config, so the stub exercises the actual L1 derivation.
-        self._l1_configs = [_config_yielding(l1)]
+        self._l1_config = _config_yielding(l1)
         self._adapters = adapters
         self._lifecycle_lock = threading.Lock()
         self._event_bus = _RecordingBus()
@@ -250,13 +250,6 @@ class TestConfiguredL1Capacity:
 
 
 class TestStorageManagerCapacities:
-    def test_multiple_l1s_sum_capacity_per_medium(self) -> None:
-        sm = _StorageManagerStub({L1BackendType.DRAM: GIB}, [])
-        sm._l1_configs.append(_config_yielding({L1BackendType.DRAM: 2 * GIB}))
-        capacities = sm._build_capacities()
-        assert len(capacities) == 1
-        assert capacities[0].capacity_bytes == 3 * GIB
-
     def test_reports_l1_per_medium(self) -> None:
         found = _capacities(
             {L1BackendType.DEVDAX: 100 * GIB, L1BackendType.DRAM: 10 * GIB}, []

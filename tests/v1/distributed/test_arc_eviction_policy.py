@@ -180,7 +180,6 @@ class TestARCConfiguration:
 
         config = parse_args_to_config(args)
 
-        assert config.eviction_config is not None
         assert config.eviction_config.eviction_policy == "ARC"
 
     def test_l2_adapter_config_accepts_arc(self) -> None:

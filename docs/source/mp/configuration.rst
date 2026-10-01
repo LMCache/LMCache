@@ -302,9 +302,6 @@ L1 Memory Manager
 
 Source: ``lmcache/v1/distributed/config.py``
 
-Use :doc:`multi_l1` for JSON fields, multiple-manager examples, L2 affinity,
-and migration from the legacy GDS flags. At least one L1 manager is required.
-
 .. list-table::
    :header-rows: 1
    :widths: 30 15 55
@@ -312,15 +309,10 @@ and migration from the legacy GDS flags. At least one L1 manager is required.
    * - Argument
      - Default
      - Description
-   * - ``--l1-manager``
-     - ``[]``
-     - Repeatable JSON object declaring a DRAM or GDS manager. Requires
-       ``type``, unique ``tag``, and ``size_gb``; eviction can inherit the
-       global CLI policy or be supplied in JSON.
    * - ``--l1-size-gb``
-     - *(not set)*
-     - Legacy DRAM size in GiB. Creates a manager tagged ``_default`` and
-       requires ``--eviction-policy``. Optional when using JSON managers.
+     - *required*
+     - Size of the L1 tier in GB. Sizes the pinned-DRAM L1 by default, or the
+       GDS slab file when ``--gds-l1-path`` is set (see *GDS L1 Tier* below).
    * - ``--l1-use-lazy`` / ``--no-l1-use-lazy``
      - ``True``
      - Enable or disable lazy allocation for L1 memory.
@@ -348,34 +340,33 @@ GDS L1 Tier
 
 Source: ``lmcache/v1/distributed/config.py``
 
-Configure GDS with ``--l1-manager '{"type":"GDS","tag":"nvme","size_gb":100,"path":"/mnt/nvme"}'``
-and an eviction policy. It uses an NVMe slab accessed via GPUDirect Storage
-DMA and may coexist with DRAM managers. Only one GDS manager is supported per
-process. Byte-array L2 adapters must target a DRAM manager through
-``affinity_tag`` because GDS exposes no registerable L1 memory buffer.
-See :doc:`multi_l1` for complete commands and migration instructions.
+Opt-in. Setting ``--gds-l1-path`` switches the L1 medium from pinned DRAM to
+an NVMe slab file accessed via GPUDirect Storage DMA. The CPU pinned-DRAM tier
+is then disabled, and ``--l1-size-gb`` sizes the slab. Disable byte-array L2
+adapters when this is on (the GDS tier exposes no L1 memory buffer for them to
+register).
 
 The DMA path is selected automatically by platform: **cuFile**
 (``libcufile.so``) on NVIDIA and **hipFile** (``libhipfile.so``,
 `ROCm/hipFile <https://github.com/ROCm/hipFile>`_) on AMD ROCm. The same
-JSON fields apply to both; no configuration change is needed to switch vendors.
+flags apply to both; no configuration change is needed to switch vendors.
 
 **uGDS** (``libugds.so``) is a third, opt-in backend selected with
-``"backend":"ugds"``. It is a user-space GPUDirect Storage library that
+``--gds-l1-backend ugds``. It is a user-space GPUDirect Storage library that
 builds NVMe commands and rings doorbells from user space, so its IO path issues
 no syscall. LMCache can use uGDS on either NVIDIA CUDA or AMD ROCm. Each
 deployment must use a ``libugds.so`` built for its active platform. Unlike
 cuFile and hipFile, uGDS does not use a filesystem: the slab is mapped directly
-onto a raw character device, and the JSON ``path`` must name that device (for
+onto a raw character device, and ``--gds-l1-path`` must name that device (for
 example ``/dev/ugds_drv0``) rather than a directory. The first
-``size_gb`` GiB of the device are the slab, so the device must be at
+``--l1-size-gb`` bytes of the device are the slab, so the device must be at
 least that large and must not hold anything else.
 
 **Phoenix** (``libphoenix.so``) is a fourth opt-in backend selected with
-``"backend":"phx"``. Phoenix (phxfs) provides a kernel-mediated
+``--gds-l1-backend phx``. Phoenix (phxfs) provides a kernel-mediated
 user-space NVMe-to-GPU DMA path with a very low software-stack overhead.
-Like cuFile and hipFile it uses a filesystem slab: ``path`` names
-an NVMe directory, ``direct_io`` applies, and the slab file
+Like cuFile and hipFile it uses a filesystem slab: ``--gds-l1-path`` names
+an NVMe directory, ``--gds-l1-use-direct-io`` applies, and the slab file
 can share the disk with other data. Each GPU staging buffer is registered with
 phxfs (``phxfs_regmem``, 64 KiB-aligned) and the slab is read and written
 with stream-ordered submissions (``phxfs_read_stream`` /
@@ -408,7 +399,7 @@ verify the installation.
    ``libugds.so``, and verify the installation.
 
    At startup LMCache queries the namespace capacity through
-   ``uGDSGetDeviceCapacity`` and rejects an aligned ``size_gb`` allocation larger
+   ``uGDSGetDeviceCapacity`` and rejects an aligned ``--l1-size-gb`` value larger
    than the device. The installed ``libugds.so`` must provide this API; LMCache
    fails closed with an upgrade message when an older library cannot report
    capacity.
@@ -430,20 +421,20 @@ verify the installation.
    :header-rows: 1
    :widths: 30 15 55
 
-   * - JSON field
+   * - Argument
      - Default
      - Description
-   * - ``path``
-     - Required
+   * - ``--gds-l1-path``
+     - Not set
      - NVMe directory for the GDS L1 slab, or the raw device path when
-       ``"backend":"ugds"`` is used. Setting this enables the GDS L1
+       ``--gds-l1-backend ugds`` is used. Setting this enables the GDS L1
        tier; with cuFile, hipFile, or phx one shared slab per process lives
        at ``<path>/lmcache_gds_slab.bin``.
-   * - ``backend``
+   * - ``--gds-l1-backend``
      - ``auto``
      - GDS implementation: ``auto``, ``cufile``, ``hipfile``, ``ugds``, or
        ``phx``. ``auto`` selects cuFile on CUDA and hipFile on ROCm.
-   * - ``direct_io``
+   * - ``--gds-l1-use-direct-io`` / ``--no-gds-l1-use-direct-io``
      - ``True``
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
        ext4). Ignored by ``ugds``, whose IO bypasses the kernel entirely.
@@ -462,10 +453,10 @@ Source: ``lmcache/v1/distributed/config.py``
      - Description
    * - ``--l1-write-ttl-seconds``
      - ``600``
-     - Default write-lock TTL in seconds; overridden by JSON ``write_ttl_seconds``.
+     - Time-to-live for each object's write lock (seconds).
    * - ``--l1-read-ttl-seconds``
      - ``300``
-     - Default read-lock TTL in seconds; overridden by JSON ``read_ttl_seconds``.
+     - Time-to-live for each object's read lock (seconds).
 
 Eviction Policy
 ---------------
@@ -480,9 +471,8 @@ Source: ``lmcache/v1/distributed/config.py``
      - Default
      - Description
    * - ``--eviction-policy``
-     - *(not set)*
-     - Default eviction policy. Required for legacy DRAM options; optional
-       when every JSON manager supplies its own policy.
+     - *required*
+     - Eviction policy.
        Choices: ``LRU``, ``ARC``, ``IsolatedLRU``, ``noop``.
        ``ARC`` adaptively balances recently created keys and frequently
        accessed keys. It keeps key-only ghost history for completed policy
@@ -812,8 +802,8 @@ All connector-level options are passed through
    * - ``lmcache.mp.autostart.server_args``
      - ``""``
      - Extra command-line arguments passed to the auto-started MP HTTP server
-       process. Supply the L1 configuration here, using ``--l1-manager`` or
-       the legacy ``--l1-size-gb`` and ``--eviction-policy`` pair. For example, pass
+       process. Required server settings such as ``--l1-size-gb`` and
+       ``--eviction-policy`` must be supplied here. For example, pass
        ``--l1-size-gb 20 --eviction-policy LRU``. Endpoint flags such as
        ``--host``, ``--port``, and ``--http-host`` are rejected because the
        auto-started ZMQ and HTTP listeners are bound to the local connector

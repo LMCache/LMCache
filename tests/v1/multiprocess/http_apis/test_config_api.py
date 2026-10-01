@@ -20,7 +20,6 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.distributed.config import parse_args
 from lmcache.v1.multiprocess.http_apis.config_api import router as config_router
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 
@@ -48,23 +47,6 @@ def _make_app(configs):
 
 
 class TestConfigEndpoint:
-    def test_l1_tags_and_l2_affinity_are_serialized(self) -> None:
-        config = parse_args(
-            [
-                "--l1-manager",
-                '{"type":"DRAM","tag":"pool","size_gb":1}',
-                "--eviction-policy",
-                "LRU",
-                "--l2-adapter",
-                '{"type":"mock","max_size_gb":1,"mock_bandwidth_gb":1,"affinity_tag":"pool"}',
-            ]
-        )
-        body = (
-            TestClient(_make_app({"storage": config})).get("/config").json()["storage"]
-        )
-        assert body["l1_manager_configs"][0]["tag"] == "pool"
-        assert body["l2_adapter_config"]["adapters"][0]["affinity_tag"] == "pool"
-
     def test_dataclass_configs_serialized(self):
         app = _make_app(
             {

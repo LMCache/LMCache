@@ -478,11 +478,9 @@ def _wire_capacity_publishing(sm: StorageManager) -> None:
     sm._lifecycle_lock = threading.Lock()
     sm._event_bus = cast(EventBus, _RecordingBus())
     # Declares no L1, keeping these tests about the L2 path.
-    sm._l1_configs = [
-        L1ManagerConfig(
-            memory_config=L1MemoryManagerConfig(size_in_bytes=0, use_lazy=True)
-        )
-    ]
+    sm._l1_config = L1ManagerConfig(
+        memory_config=L1MemoryManagerConfig(size_in_bytes=0, use_lazy=True)
+    )
     if not hasattr(sm, "_adapter_descriptors"):
         sm._adapter_descriptors = {
             adapter_id: cast(L2AdapterDescriptor, _FakeAdapterDescriptor("fake"))

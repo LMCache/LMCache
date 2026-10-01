@@ -8,7 +8,6 @@ manager wiring while keeping CI portable.
 
 # Standard
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 import argparse
 import gc
@@ -23,7 +22,6 @@ import torch
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
-    GdsL1Config,
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
@@ -78,8 +76,6 @@ def _parse_mp_storage_args(args: list[str]) -> StorageManagerConfig:
 
 
 class _FakeMooncakeL2Config:
-    affinity_tag = L2AdapterConfigBase.affinity_tag
-
     def __init__(self, setup_config: dict[str, str]) -> None:
         self.setup_config = setup_config
 
@@ -187,14 +183,8 @@ def test_devdax_config_accepts_explicit_lazy_and_shm_disable(tmp_path):
 @pytest.mark.parametrize(
     ("adapter_name", "adapter_config"),
     [
-        (
-            "nixl_store",
-            SimpleNamespace(affinity_tag=L2AdapterConfigBase.affinity_tag),
-        ),
-        (
-            "nixl_store_dynamic",
-            SimpleNamespace(affinity_tag=L2AdapterConfigBase.affinity_tag),
-        ),
+        ("nixl_store", object()),
+        ("nixl_store_dynamic", object()),
         ("mooncake_store", _FakeMooncakeL2Config({"protocol": "rdma"})),
     ],
 )
@@ -441,52 +431,24 @@ def test_cli_parses_l1_devdax_path(tmp_path):
     assert mem_cfg.shm_name == ""
 
 
-def test_cli_accepts_separate_devdax_and_gds_l1(tmp_path: Path) -> None:
+def test_cli_rejects_devdax_l1_with_gds_l1(tmp_path):
     path = _make_mmap_file(tmp_path)
-    config = _parse_mp_storage_args(
-        [
-            "--l1-size-gb",
-            "1",
-            "--eviction-policy",
-            "LRU",
-            "--no-l1-use-lazy",
-            "--shm-name",
-            "",
-            "--l1-devdax-path",
-            path,
-            "--l1-manager",
-            json.dumps(
-                {
-                    "type": "GDS",
-                    "tag": "gds",
-                    "size_gb": 1,
-                    "path": str(tmp_path),
-                }
-            ),
-        ]
-    )
-    devdax, gds = config.l1_manager_configs
-    assert devdax.memory_config.devdax_path == path
-    assert devdax.gds_l1_config is None
-    assert gds.memory_config.devdax_path is None
-    assert gds.gds_l1_config is not None
-    assert gds.gds_l1_config.file_location == str(tmp_path)
 
-
-def test_config_rejects_devdax_and_gds_in_same_l1(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="GDS L1 cannot be used with l1-devdax-path"):
-        StorageManagerConfig(
-            l1_manager_config=L1ManagerConfig(
-                memory_config=L1MemoryManagerConfig(
-                    size_in_bytes=1024 * 1024,
-                    use_lazy=False,
-                    shm_name="",
-                    devdax_path=_make_mmap_file(tmp_path),
-                ),
-                gds_l1_config=GdsL1Config(str(tmp_path), 1024 * 1024),
-                tag="mixed",
-            ),
-            eviction_config=EvictionConfig(eviction_policy="LRU"),
+    with pytest.raises(ValueError, match="gds-l1-path"):
+        _parse_mp_storage_args(
+            [
+                "--l1-size-gb",
+                "1",
+                "--eviction-policy",
+                "LRU",
+                "--no-l1-use-lazy",
+                "--shm-name",
+                "",
+                "--l1-devdax-path",
+                path,
+                "--gds-l1-path",
+                str(tmp_path),
+            ]
         )
 
 

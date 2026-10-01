@@ -4,10 +4,9 @@ Managing objects and memory for L1 cache
 """
 
 # Standard
-from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import count
 import threading
-import weakref
 
 # First Party
 from lmcache.lmcache_native import TTLLock
@@ -30,6 +29,7 @@ from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
+_l1_manager_ids = count()
 
 
 # Internal classes and helper functions
@@ -65,7 +65,6 @@ def l1_mgr_synchronized(func):
 
 
 L1OperationResult = tuple[L1Error, MemoryObj | None]
-
 
 # Upper bound for the count parameter in reserve_read / finish_read
 # to prevent a single call from holding the global lock for too long.
@@ -168,15 +167,16 @@ class L1Manager:
     For every operation on list of keys, the operation is atomic
     """
 
-    # OTel instruments are process-global; emit one observation per live L1.
+    # Singleton dispatch for ``lmcache_mp.l1_memory_usage_bytes``: tests may
+    # construct multiple L1Managers but the OTel SDK only honors the first
+    # gauge registration, so the callback reads from the most recently built
+    # instance via ``_gauge_target``.
     _gauge_registered: bool = False
-    _gauge_targets: weakref.WeakValueDictionary[str, "L1Manager"] = (
-        weakref.WeakValueDictionary()
-    )
+    _gauge_target: "L1Manager | None" = None
 
     def __init__(self, config: L1ManagerConfig):
+        self._l1_manager_id = next(_l1_manager_ids)
         self._lock = threading.Lock()
-        self._tag = config.tag
 
         # Resident objects: readable, never write-locked.
         self._objects: dict[ObjectKey, L1ObjectState] = {}
@@ -210,29 +210,36 @@ class L1Manager:
 
         self._event_bus = get_event_bus()
 
-        L1Manager._gauge_targets[config.tag] = self
+        L1Manager._gauge_target = self
         if not L1Manager._gauge_registered:
             L1Manager._gauge_registered = True
             register_gauge(
                 "lmcache.l1_manager",
                 "lmcache_mp.l1_memory_usage_bytes",
                 "Bytes currently held in L1 cache",
-                lambda: L1Manager._observations(
-                    lambda manager: manager.get_memory_usage()[0]
+                lambda: (
+                    L1Manager._gauge_target.get_memory_usage()[0]
+                    if L1Manager._gauge_target is not None
+                    else 0
                 ),
             )
             register_gauge(
                 "lmcache.l1_manager",
                 "lmcache_mp.l1_usage_ratio",
                 "L1 used/total ratio (0.0–1.0)",
-                lambda: L1Manager._observations(_l1_usage_ratio_or_zero),
+                lambda: _l1_usage_ratio_or_zero(L1Manager._gauge_target),
             )
             register_gauge(
                 "lmcache.l1_manager",
                 "lmcache_mp.l1_staging_bytes",
                 "Bytes held by L1 staging objects (write-reserved, not admitted)",
-                lambda: L1Manager._observations(_l1_staging_bytes_or_zero),
+                lambda: _l1_staging_bytes_or_zero(L1Manager._gauge_target),
             )
+
+    @property
+    def l1_manager_id(self) -> int:
+        """Return this manager's stable process-local memory-object owner tag."""
+        return self._l1_manager_id
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.
@@ -508,6 +515,7 @@ class L1Manager:
             for (key, is_temp), mem_obj in zip(
                 need_to_allocate, allocated_objs, strict=True
             ):
+                mem_obj.set_l1_manager(self._l1_manager_id)
                 entry = L1ObjectState(
                     memory_obj=mem_obj,
                     write_lock=TTLLock(self._write_ttl_seconds),
@@ -959,8 +967,6 @@ class L1Manager:
             self._staging_bytes = 0
 
         self._memory_manager.close()
-        if L1Manager._gauge_targets.get(self._tag) is self:
-            del L1Manager._gauge_targets[self._tag]
 
     # Status reporting
     @l1_mgr_synchronized
@@ -1186,13 +1192,3 @@ class L1Manager:
             size_bytes=memory_obj.get_size(),
             backend=self._memory_manager.get_backend_type(memory_obj),
         )
-
-    @classmethod
-    def _observations(
-        cls,
-        value: Callable[["L1Manager"], int | float],
-    ) -> list[tuple[int | float, dict[str, object]]]:
-        return [
-            (value(manager), {"l1_tag": tag})
-            for tag, manager in list(cls._gauge_targets.items())
-        ]

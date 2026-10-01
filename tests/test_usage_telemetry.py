@@ -808,7 +808,6 @@ class TestMPUsage:
     def test_mp_server_message_gds_l1(self, usage_env, tmp_path):
         storage_config = StorageManagerConfig(
             l1_manager_config=L1ManagerConfig(
-                tag="gds",
                 memory_config=L1MemoryManagerConfig(
                     size_in_bytes=1 << 30,
                     use_lazy=False,

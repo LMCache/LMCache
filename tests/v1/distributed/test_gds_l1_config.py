@@ -4,7 +4,6 @@
 # Standard
 from pathlib import Path
 import argparse
-import json
 
 # Third Party
 import pytest
@@ -35,23 +34,18 @@ def test_cli_passes_backend_name_to_config(
     config = parse_args_to_config(
         parser.parse_args(
             [
+                "--l1-size-gb",
+                "8",
                 "--eviction-policy",
                 "LRU",
-                "--l1-manager",
-                json.dumps(
-                    {
-                        "type": "GDS",
-                        "tag": "nvme",
-                        "size_gb": 8,
-                        "backend": backend,
-                        "path": "/dev/ugds_drv0",
-                    }
-                ),
+                "--gds-l1-backend",
+                backend,
+                "--gds-l1-path",
+                "/dev/ugds_drv0",
             ]
         )
     )
 
-    assert config.l1_manager_config is not None
     gds_config = config.l1_manager_config.gds_l1_config
     assert gds_config is not None
     assert gds_config.backend == backend

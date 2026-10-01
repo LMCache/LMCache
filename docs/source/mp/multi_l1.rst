@@ -1,174 +1,89 @@
-Multiple L1 Managers
-====================
+L1 Write Overflow and Ownership
+===============================
 
-An MP server can run several L1 managers, each with its own capacity, tag,
-eviction policy, and lock TTLs. Configure each manager with a separate
-``--l1-manager`` JSON argument. Supported types are ``DRAM`` and ``GDS``.
-The managers are peers; write and prefetch policies decide where data goes.
+This change adds two foundations for multi-L1 support: ordered write overflow
+and an owner tag on each L1 memory object. It does **not** enable multi-L1
+serving through the CLI.
 
-Start with DRAM
----------------
+What changes for users?
+-----------------------
 
-The existing DRAM command remains supported:
+Keep using the existing single-L1 configuration. No CLI migration is needed.
+The DRAM, Device-DAX, and GDS options in :doc:`configuration` remain unchanged,
+including the legacy ``--gds-l1-path`` options. There is no new public multi-L1
+configuration or L1--L2 affinity setting.
 
-.. code-block:: bash
+The internal construction path accepts an ordered set of existing L1 managers
+for allocation and ownership tests. It requires no L2 adapters and ``noop``
+eviction. Serving reads and prefetch are rejected with multiple managers.
+Multi-L1 read selection, cancellation, eviction, and L2 integration are deferred.
 
-   lmcache server --l1-size-gb 20 --eviction-policy LRU
+How overflow works
+------------------
 
-It creates a DRAM manager tagged ``_default``. The JSON interface lets you
-name the manager and configure it independently:
+``StorageManager.reserve_write()`` tries the primary L1 first. It retries only
+keys that returned ``OUT_OF_MEMORY`` on the next eligible L1, in explicit order.
+Calls are synchronous. Each candidate is visited at most once per reservation.
 
-.. code-block:: bash
+.. code-block:: text
 
-   lmcache server \
-       --eviction-policy LRU \
-       --l1-manager '{"type":"DRAM","tag":"_default","size_gb":20}'
+    Reserve a batch
+         |
+         v
+    Primary L1 ---- OUT_OF_MEMORY keys ----> Fallback L1 ----> Next L1
+         |                                       |
+         +-- keep successes                      +-- keep successes
+         +-- stop on other errors                +-- stop on other errors
 
-Tags must be unique, non-empty strings. Only a DRAM manager may use
-``_default``. You can combine ``--l1-size-gb`` with additional JSON managers,
-but do not also declare a JSON manager tagged ``_default``: the legacy
-option already creates one.
+Successful keys stay on their selected L1. They are not allocated again on a
+fallback. Conflicts and exceptions do not trigger overflow. If every candidate
+is full, failed keys are omitted from the returned object mapping, as before.
+This does not add cross-L1 deduplication.
 
-Configure capacity and eviction
--------------------------------
+Existing allocation batches are preserved. Overflow is **not perfect packing**.
+For example, a new two-object batch may fail when each L1 has space for only one
+object, even though their combined free space is sufficient. The allocator frees
+partial allocations before reporting that batch as out of memory; overflow
+passes the failed subset to the next L1 without splitting it into single-key
+allocations.
 
-Each JSON object requires ``type``, ``tag``, and ``size_gb``. Sizes use
-binary gigabytes (1 GiB = 2\ :sup:`30` bytes). Unknown fields and invalid
-values are rejected at startup.
+Why each object has an owner
+----------------------------
 
-.. list-table:: Common JSON fields
-   :header-rows: 1
-   :widths: 30 25 45
+Each L1 stamps its objects with a process-local integer identity. Objects
+created outside L1 start without an owner. The identity belongs to the manager,
+not its position in the placement order. It is separate from the writer tag
+and is not part of keys, hashes, or serialized KV metadata.
 
-   * - Field
-     - Default
-     - Meaning
-   * - ``size_gb``
-     - Required
-     - Positive capacity; must hold at least one aligned allocation.
-   * - ``align_bytes``
-     - ``4096``
-     - Positive power-of-two allocation alignment.
-   * - ``eviction.eviction_policy``
-     - ``--eviction-policy``
-     - ``LRU``, ``ARC``, ``IsolatedLRU``, or ``noop``. Required in JSON
-       when the CLI default is omitted.
-   * - ``eviction.trigger_watermark``
-     - ``--eviction-trigger-watermark`` (``0.8``)
-     - Used-memory ratio that triggers eviction; range 0--1.
-   * - ``eviction.eviction_ratio``
-     - ``--eviction-ratio`` (``0.2``)
-     - Fraction of allocated memory to evict; range 0--1.
-   * - ``read_ttl_seconds``
-     - ``--l1-read-ttl-seconds`` (``300``)
-     - Positive integer read-lock TTL in seconds.
-   * - ``write_ttl_seconds``
-     - ``--l1-write-ttl-seconds`` (``600``)
-     - Positive integer write-lock TTL in seconds.
+Completion captures owner identities from the objects returned by reservation.
+It never repeats placement or searches for another copy of the key.
 
-JSON eviction settings override the global eviction settings when
-``--eviction-policy`` is supplied. Without that CLI option, provide an
-eviction policy in every JSON manager; watermark and ratio then default to
-``0.8`` and ``0.2``. Lock TTLs can always be overridden per manager.
-These TTLs govern locks, not the lifetime of cached data.
+.. code-block:: text
 
-DRAM additionally accepts ``use_lazy`` (default ``true``), ``init_size_gb``
-(default ``20``, capped at ``size_gb``), ``devdax_path`` (default unset),
-and ``shm_name`` (default empty). ``init_size_gb`` controls lazy allocation
-only. A non-empty ``shm_name`` cannot coexist with lazy allocation or
-``devdax_path``. Device-DAX requires ``use_lazy:false``. The legacy DRAM
-size, alignment, and allocator flags configure the legacy manager only;
-set these fields in JSON for additional managers.
+    Reserved objects --> group keys by object owner
+                                  |
+                          GPU copy completes
+                                  |
+                                  v
+                         Stream-ordered callback
+                                  |
+                                  v
+                     Finish on each captured owner
 
-Bind L2 adapters to an L1
--------------------------
+The internal callback carries only owner integers and keys, not memory objects,
+tensors, or Python pointers. Existing L1 staging keeps allocations alive. An
+unknown or unset owner is an error; multi-manager completion does not guess the
+primary L1. Existing single-L1 callers can still finish writes using keys alone.
 
-An L2 adapter's ``affinity_tag`` names the L1 whose buffers it uses for
-stores and loads. It defaults to ``_default`` and must match a configured
-L1 tag. For example, give two filesystem adapters separate DRAM pools:
+The owner tag does not replace writer validation, read locks, reference counts,
+or GPU completion ordering. It is not a write generation or a crash-recovery
+token. Two copies of the same key can have different owners; finishing one
+does not publish the other.
 
-.. code-block:: bash
+Not included
+------------
 
-   lmcache server \
-       --eviction-policy LRU \
-       --l1-manager '{"type":"DRAM","tag":"_default","size_gb":20}' \
-       --l1-manager '{"type":"DRAM","tag":"archive","size_gb":8,"read_ttl_seconds":120,"eviction":{"eviction_policy":"ARC"}}' \
-       --l2-adapter '{"type":"fs","base_path":"/data/lmcache/local","affinity_tag":"_default"}' \
-       --l2-adapter '{"type":"fs","base_path":"/data/lmcache/archive","affinity_tag":"archive"}'
-
-This binds each adapter to its corresponding pool; it does not automatically
-distribute writes across both pools or replicate data between them.
-
-* **Writes:** the default placement policy selects the DRAM manager tagged
-  ``_default``, or the first configured DRAM manager if that tag is absent.
-  A single GDS-only deployment writes to its sole manager. There is no
-  automatic spillover to another L1 when the selected manager is full.
-* **Stores:** each L1 has its own store controller. The default store policy
-  sends its completed writes only to L2 adapters with the same affinity tag.
-* **Reads:** prefetch looks up all L1 managers concurrently. The default
-  prefetch policy prefers L1 over L2 and chooses the earliest configured
-  source within each tier. L2 loads allocate buffers in the adapter's
-  affinity L1. Overlapping reads of a duplicated key keep using the already
-  selected readable copy until their locks are released.
-
-Custom write placement is available through the Python
-``StorageManager(config, write_policy=...)`` interface. Its
-``select_write_targets(keys, managers)`` method returns a manager-index to
-keys mapping, with at most one target per key. There is no write-policy CLI
-flag. Store and prefetch policies use the existing ``--l2-store-policy``
-and ``--l2-prefetch-policy`` options; see :doc:`l2_storage/index`.
-
-Migrate GDS configuration
--------------------------
-
-The legacy ``--gds-l1-path``, ``--gds-l1-backend``, and
-``--gds-l1-use-direct-io`` / ``--no-gds-l1-use-direct-io`` flags have been
-removed. Use ``"type":"GDS"`` with ``path``, ``backend``, and ``direct_io`` in
-JSON. The GDS manager's ``size_gb`` replaces its previous ``--l1-size-gb``.
-
-For a GDS-only server:
-
-.. code-block:: bash
-
-   lmcache server \
-       --eviction-policy LRU \
-       --l1-manager '{"type":"GDS","tag":"nvme","size_gb":100,"path":"/mnt/nvme","backend":"auto","direct_io":true}'
-
-To configure DRAM and GDS together:
-
-.. code-block:: bash
-
-   lmcache server \
-       --eviction-policy LRU \
-       --l1-manager '{"type":"DRAM","tag":"_default","size_gb":20}' \
-       --l1-manager '{"type":"GDS","tag":"nvme","size_gb":100,"path":"/mnt/nvme"}'
-
-The second command still writes to DRAM by default; adding GDS does not
-automatically populate it. Only one GDS manager is supported per process.
-GDS requires its platform-specific libraries and storage setup, described
-under :ref:`mp/configuration:GDS L1 Tier`. Byte-array L2 adapters such as
-``fs`` must use a DRAM affinity L1, not the GDS slab.
-
-Inspect the configuration
--------------------------
-
-With the :doc:`HTTP server <http_api>` enabled, ``GET /config`` lists
-``l1_manager_configs`` and each L2 adapter's ``affinity_tag``. The storage
-manager section of ``GET /status`` contains ``l1_managers``,
-``l1_eviction_controllers``, and ``store_controllers``, each keyed by L1
-tag. The old singular status fields are retained only for single-L1 servers.
-
-The ``lmcache_mp.l1_memory_usage_bytes``, ``lmcache_mp.l1_usage_ratio``,
-and ``lmcache_mp.l1_staging_bytes`` gauges carry an ``l1_tag`` attribute.
-Coordinator capacity reporting sums L1 capacity by backing medium, while
-usage telemetry reports total L1 occupancy across all managers.
-
-Current limits
---------------
-
-Multiple L1 managers disable single-region SHM transfer advertising;
-the engine-driven transport falls back to its non-SHM path. P2P requires a
-single registerable L1 region and rejects multi-L1 configurations.
-
-Device-DAX remains an option on a DRAM configuration, not a separate JSON
-type. A remote shared CXL manager and its RPC service are not implemented.
+Backend rewiring, GPU L1, public multi-L1 configuration, L1--L2 affinity,
+per-L1 reporting, concurrent lookup, migration, and shared-CXL services remain
+follow-up work. CPU allocation tests do not qualify multi-L1 serving, GPU
+transfers, or cross-host sharing.
