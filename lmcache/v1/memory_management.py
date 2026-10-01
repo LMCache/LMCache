@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import cache, wraps
-from typing import Any, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 import abc
 import ctypes
 import os
@@ -22,6 +22,10 @@ from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.platform import current_device_spec as current_device_spec  # noqa: F401
 from lmcache.v1.system_detection import NUMAMapping
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.memory_allocators.pin_pacer import PinPacer
 
 logger = init_logger(__name__)
 
@@ -1213,6 +1217,24 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         :param device: Device whose context the deferred initialization
             should run under.
         """
+
+    @property
+    def pin_pacer(self) -> Optional["PinPacer"]:
+        """Pacer that transfer submitters use to keep deferred host pinning
+        off the driver lock while they enqueue GPU work.
+
+        Default is ``None``: the allocator does no deferred pinning, so
+        submitters need no pacing.
+        """
+        return None
+
+    def pin_status(self) -> Tuple[int, int]:
+        """Return (pinned bytes, total bytes to pin) for deferred pinning.
+
+        Default is ``(0, 0)``: nothing is pinned lazily, so there is
+        nothing to wait for.
+        """
+        return (0, 0)
 
     @abc.abstractmethod
     def allocate(

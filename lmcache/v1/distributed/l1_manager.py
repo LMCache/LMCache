@@ -38,6 +38,9 @@ if TYPE_CHECKING:
     # Third Party
     import torch
 
+    # First Party
+    from lmcache.v1.memory_allocators.pin_pacer import PinPacer
+
 logger = init_logger(__name__)
 _l1_manager_ids = count()
 
@@ -285,6 +288,15 @@ class L1Manager:
                 should run under.
         """
         self._memory_manager.warm_up(device)
+
+    @property
+    def pin_pacer(self) -> "PinPacer | None":
+        """Forward the L1 tier's pacer; ``None`` without deferred pinning."""
+        return self._memory_manager.pin_pacer
+
+    def pin_status(self) -> tuple[int, int]:
+        """Forward the L1 tier's (pinned, total) deferred-pinning bytes."""
+        return self._memory_manager.pin_status()
 
     @l1_mgr_synchronized
     def reserve_read(

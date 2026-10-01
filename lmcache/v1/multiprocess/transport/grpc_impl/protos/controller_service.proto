@@ -24,6 +24,13 @@ message GetExperimentalResponse {
   repeated string names = 1;
 }
 
+message PinStatusRequest {}
+
+message PinStatusResponse {
+  int64 pinned_bytes = 1;
+  int64 total_bytes = 2;
+}
+
 message PingRequest {
   optional int64 instance_id = 1;
 }
@@ -37,4 +44,5 @@ service ControllerService {
   rpc GetChunkSize(GetChunkSizeRequest) returns (GetChunkSizeResponse);
   rpc GetExperimental(GetExperimentalRequest) returns (GetExperimentalResponse);
   rpc Ping(PingRequest) returns (PingResponse);
+  rpc PinStatus(PinStatusRequest) returns (PinStatusResponse);
 }

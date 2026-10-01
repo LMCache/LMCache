@@ -8,6 +8,9 @@ if TYPE_CHECKING:
     # Third Party
     import torch
 
+    # First Party
+    from lmcache.v1.memory_allocators.pin_pacer import PinPacer
+
 # First Party
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
 from lmcache.v1.distributed.error import L1Error
@@ -54,6 +57,17 @@ class L1ManagerProtocol(Protocol):
 
         No-op for tiers without deferred initialization.
         """
+        ...
+
+    @property
+    def pin_pacer(self) -> Optional["PinPacer"]:
+        """Pacer for transfer submitters, or ``None`` when the tier does no
+        deferred host pinning."""
+        ...
+
+    def pin_status(self) -> tuple[int, int]:
+        """(pinned bytes, total bytes) of deferred host pinning; ``(0, 0)``
+        when the tier pins nothing lazily."""
         ...
 
     def close(self) -> None:

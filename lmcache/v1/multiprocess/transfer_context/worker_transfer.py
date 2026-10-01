@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any, Callable, Protocol, cast
 import os
 import threading
+import time
 
 # Third Party
 import torch
@@ -17,6 +18,7 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
@@ -215,6 +217,12 @@ class TransferContext(ABC):
     gather/scatter synchronously and return already-resolved futures.
     """
 
+    # Host-pinning wait: a server that lacks pin_status never replies, so
+    # the first probe is short; follow-up polls use the caller's timeout.
+    PIN_STATUS_PROBE_TIMEOUT_S = 5.0
+    PIN_STATUS_POLL_INTERVAL_S = 0.5
+    PIN_STATUS_LOG_INTERVAL_S = 10.0
+
     def __init__(self, instance_id: int, req_client: RequestClient) -> None:
         """Bind this context to a single worker and request client.
 
@@ -254,6 +262,39 @@ class TransferContext(ABC):
                 return None
             return submit()
 
+    def _wait_until_pinned(self, mq_timeout: float) -> None:
+        """Block until the server reports its L1 pool fully host-pinned.
+
+        Runs inside register(), so engine startup absorbs the pinning and
+        the first requests never overlap it. A server without ``pin_status``
+        drops the request without replying, so the first probe uses a short
+        timeout and a timeout skips the wait.
+
+        Args:
+            mq_timeout: Timeout for each follow-up status poll.
+        """
+        try:
+            pinned, total = self._req_client.pin_status().result(
+                timeout=self.PIN_STATUS_PROBE_TIMEOUT_S
+            )
+        except LMCacheTimeoutError:
+            logger.warning(
+                "LMCache server does not report pin status; "
+                "not waiting for host pinning"
+            )
+            return
+        last_log = time.monotonic()
+        while pinned < total and not self._is_closed():
+            if time.monotonic() - last_log >= self.PIN_STATUS_LOG_INTERVAL_S:
+                logger.info(
+                    "Waiting for LMCache server host pinning: %d / %d MB",
+                    pinned >> 20,
+                    total >> 20,
+                )
+                last_log = time.monotonic()
+            time.sleep(self.PIN_STATUS_POLL_INTERVAL_S)
+            pinned, total = self._req_client.pin_status().result(timeout=mq_timeout)
+
     def _is_closed(self) -> bool:
         """Return whether adapter shutdown closed this context."""
         with self._lifecycle_lock:
@@ -275,6 +316,7 @@ class TransferContext(ABC):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
+        wait_for_pinned: bool = False,
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -291,6 +333,9 @@ class TransferContext(ABC):
                 own :class:`EngineType` so this transport stays engine-
                 neutral. Defaults to :attr:`EngineType.VLLM` for
                 backwards compatibility.
+            wait_for_pinned: Block until the server's L1 pool is fully
+                host-pinned before returning, so engine startup rather
+                than the first requests absorbs deferred pinning.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -518,6 +563,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
+        wait_for_pinned: bool = False,
     ) -> None:
         """Register the worker KV cache with the LMCache server.
 
@@ -530,6 +576,8 @@ class LMCacheDrivenTransferContext(TransferContext):
             layout_hints: Optional KV-layout metadata.
             engine_group_infos: Optional engine KV-group metadata.
             engine_type: Serving engine that produced the caches.
+            wait_for_pinned: Block until the server's L1 pool is fully
+                host-pinned before returning.
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device.
@@ -553,6 +601,8 @@ class LMCacheDrivenTransferContext(TransferContext):
         future.result(timeout=mq_timeout)
         if self._is_closed():
             return
+        if wait_for_pinned:
+            self._wait_until_pinned(mq_timeout)
         self._device = device
         self._event_backend = event_backend
         self._mq_timeout = mq_timeout
@@ -802,6 +852,7 @@ class EngineDrivenTransferContext(TransferContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
+        wait_for_pinned: bool = False,
     ) -> None:
         """Register KV caches with the non-GPU context server.
 
@@ -857,6 +908,8 @@ class EngineDrivenTransferContext(TransferContext):
         response = future.result(timeout=mq_timeout)
         if self._is_closed():
             return
+        if wait_for_pinned:
+            self._wait_until_pinned(mq_timeout)
         shm_name = ""
         pool_size = 0
         if isinstance(response, RegisterEngineDrivenContextResponse):
