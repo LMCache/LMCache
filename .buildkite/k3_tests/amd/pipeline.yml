@@ -1,4 +1,4 @@
-# AMD bare-metal probe branch: only the IPC event lifetime reproducer.
+# AMD bare-metal: ROCm 10 IPC event lifetime probe and multi-writer stress.
 
 env:
   PATH: "$HOME/.local/bin:$PATH"
@@ -8,3 +8,10 @@ steps:
     key: "amd_ipc_event_probe"
     timeout_in_minutes: 30
     command: bash .buildkite/k3_tests/amd/run-ipc-event-probe.sh
+
+  - label: "MP multi-writer stress (ROCm 10 image, TP=8)"
+    key: "amd_rocm10_mp_stress"
+    timeout_in_minutes: 90
+    command: bash .buildkite/k3_tests/amd/run-rocm10-mp-stress.sh
+    artifact_paths:
+      - "rocm10-stress-results/*.log"
