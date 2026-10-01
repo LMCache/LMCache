@@ -587,6 +587,9 @@ class LMCacheConnectorV1Impl:
             )
         )
         self._invalid_block_ids: set[int] = set()
+        # Scheduler side: requests whose KV load from LMCache failed. They
+        # recompute instead of being promised the same chunks again.
+        self._load_failed_req_ids: set[str] = set()
 
     def _check_legacy_register_kv_caches(self) -> None:
         """Check for legacy connector without register_kv_caches implementation."""
@@ -1398,6 +1401,16 @@ class LMCacheConnectorV1Impl:
         if self.lookup_client is None:
             return 0
 
+        if req_id in self._load_failed_req_ids:
+            # A resumed request must have a load spec: record one that loads
+            # nothing.
+            self.load_specs[req_id] = LoadSpec(
+                vllm_cached_tokens=num_computed_tokens,
+                lmcache_cached_tokens=num_computed_tokens,
+                can_load=False,
+            )
+            return 0
+
         if (
             num_external_hit_tokens := self.lookup_client.lookup_cache(lookup_id=req_id)
         ) != -1:
@@ -1854,11 +1867,25 @@ class LMCacheConnectorV1Impl:
         return meta
 
     @_lmcache_nvtx_annotate
+    def record_load_failures(self, invalid_block_ids: set[int]) -> None:
+        """Scheduler side: mark the requests whose blocks failed to load."""
+        for req_id, tracker in self._request_trackers.items():
+            if req_id in self._load_failed_req_ids:
+                continue
+            if not invalid_block_ids.isdisjoint(tracker.allocated_block_ids):
+                self._load_failed_req_ids.add(req_id)
+                logger.warning(
+                    "Request %s: KV load from LMCache failed, recomputing "
+                    "instead of loading it again",
+                    req_id,
+                )
+
     def request_finished(
         self,
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
+        self._load_failed_req_ids.discard(request.request_id)
         # Layerwise save uses request-scoped generators. If request finishes
         # without entering wait_for_save (abort/error/evict path), make sure
         # we release the generator entry to avoid leaking state.
