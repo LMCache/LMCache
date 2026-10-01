@@ -6,10 +6,12 @@ from collections.abc import Callable, Iterator
 from unittest.mock import Mock
 
 # Third Party
+import msgspec
 import pytest
 import torch
 
 # First Party
+from lmcache.cli.commands.trace._dispatch import ReplayContext, build_default_dispatcher
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -23,6 +25,9 @@ from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.storage_controllers.write_policy import OrderedWritePolicy
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.mp_observability.event import Event
+from lmcache.v1.mp_observability.trace import codecs
+from lmcache.v1.mp_observability.trace import decorator as trace_decorator
 from tests.v1.distributed.utils import single_row_spec
 import lmcache.v1.memory_management as memory_management
 
@@ -300,6 +305,49 @@ def test_single_manager_legacy_finish_and_read(storage_factory: StorageFactory) 
         assert tensor is not None and torch.all(tensor == 7)
     store.finish_read_prefetched([key(1)])
     assert manager.report_status()["read_locked_count"] == 0
+
+
+@pytest.mark.parametrize("owner_completion", [False, True])
+def test_single_l1_completion_trace_replays_without_process_local_owners(
+    storage_factory: StorageFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_completion: bool,
+) -> None:
+    """Both completion entry points retain the existing key-only trace schema."""
+    source, (source_l1,), _ = storage_factory((4096,))
+    events: list[Event] = []
+    bus = Mock()
+    bus.publish.side_effect = events.append
+    monkeypatch.setattr(trace_decorator, "get_event_bus", lambda: bus)
+    trace_decorator.set_tracing_enabled(True)
+    try:
+        objects = source.reserve_write([key(1)], LAYOUT)
+        if owner_completion:
+            source.finish_write_by_owner(source.prepare_write_completion(objects))
+        else:
+            source.finish_write([key(1)])
+    finally:
+        trace_decorator.set_tracing_enabled(False)
+
+    prefix = "lmcache.v1.distributed.storage_manager.StorageManager."
+    assert [event.metadata["qualname"] for event in events] == [
+        prefix + "reserve_write",
+        prefix + "finish_write",
+    ]
+    assert events[-1].metadata["args"] == {"keys": [key(1)]}
+    target, (target_l1,), _ = storage_factory((4096,))
+    assert target_l1.l1_manager_id != source_l1.l1_manager_id
+    dispatcher = build_default_dispatcher()
+    for event in events:
+        qualname = event.metadata["qualname"]
+        assert dispatcher.has(qualname)
+        payload = msgspec.msgpack.encode(codecs.encode_args(event.metadata["args"]))
+        dispatcher.dispatch(
+            qualname,
+            ReplayContext(target),
+            codecs.decode_args(msgspec.msgpack.decode(payload)),
+        )
+    assert target_l1.get_object_state(key(1)) is not None
 
 
 def test_policy_rejects_repeated_or_unknown_candidates(

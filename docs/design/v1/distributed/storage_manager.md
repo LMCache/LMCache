@@ -136,6 +136,12 @@ legacy `finish_write(keys)` remains valid only with one L1. Existing staging and
 stream ordering retain allocations; the tag is neither a lifetime pin nor a write
 generation. It adds no stale-callback or crash-recovery guarantee.
 
+When tracing is enabled, both single-L1 completion entry points record one
+existing `finish_write(keys)` trace call. Process-local owner IDs are not written
+to the storage trace, so the unchanged dispatcher can replay it against a fresh
+manager. Multi-L1 serving and multi-L1 trace replay remain outside this internal
+write-only foundation.
+
 `test_multi_l1.py`, `test_l1_owner.py`, and `test_l1_owner_completion.py` cover
 overflow, batch cleanup, independent same-key copies, recycled ownership, and
 serialized completion. Read selection, affinity, backend rewiring, public

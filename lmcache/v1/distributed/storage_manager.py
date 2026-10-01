@@ -316,7 +316,6 @@ class StorageManager:
 
         return result
 
-    @enable_tracing()
     def finish_write(
         self,
         keys: list[ObjectKey],
@@ -360,7 +359,6 @@ class StorageManager:
             groups.setdefault(owner, []).append(key)
         return list(groups.items())
 
-    @enable_tracing()
     def finish_write_by_owner(self, completion: L1WriteCompletion) -> None:
         """Finish captured reservations without rerunning placement policy.
 
@@ -372,9 +370,17 @@ class StorageManager:
 
         The caller must wait for device writes. L1 staging, writer tags, and TTLs
         retain their existing lifetime rules; an owner tag is not a write epoch.
+        Single-L1 tracing retains the replayable finish_write(keys) record.
         """
         if any(owner not in self._l1_managers_by_id for owner, _ in completion):
             raise ValueError("write completion requires a registered L1 owner")
+        if is_tracing_enabled() and len(self._l1_managers_by_id) == 1:
+            # Replay creates fresh manager IDs; keep its existing key-only schema
+            # and emit once for both the legacy and owner-routed entry points.
+            publish_call_event(
+                "lmcache.v1.distributed.storage_manager.StorageManager.finish_write",
+                {"keys": [key for _, keys in completion for key in keys]},
+            )
         finish_result: dict[ObjectKey, L1Error] = {}
         for owner, keys in completion:
             finish_result.update(

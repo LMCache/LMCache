@@ -74,6 +74,8 @@ The internal callback carries only owner integers and keys, not memory objects,
 tensors, or Python pointers. Existing L1 staging keeps allocations alive. An
 unknown or unset owner is an error; multi-manager completion does not guess the
 primary L1. Existing single-L1 callers can still finish writes using keys alone.
+Single-L1 trace recording also keeps the existing key-only completion format,
+so traces can be replayed against a fresh manager with a different owner ID.
 
 The owner tag does not replace writer validation, read locks, reference counts,
 or GPU completion ordering. It is not a write generation or a crash-recovery
