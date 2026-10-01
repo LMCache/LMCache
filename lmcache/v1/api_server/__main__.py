@@ -78,7 +78,7 @@ def parse_extra_params(extra_args: list) -> Dict[str, Any]:
                     params[key] = value
             except ValueError:
                 params[key] = value
-            logger.info(f"Extra parameter: {key} = {params[key]}")
+            logger.info("Extra parameter: %s = %s", key, params[key])
     return params
 
 
@@ -517,19 +517,20 @@ def main():
         app = create_app(controller_urls, health_check_interval, lmcache_worker_timeout)
 
         logger.info(
-            f"Starting LMCache controller at "
-            f"{config.controller_host}:{config.controller_port}"
+            "Starting LMCache controller at %s:%s",
+            config.controller_host,
+            config.controller_port,
         )
         ports_message = f"Monitoring lmcache workers at ports {controller_urls}"
         logger.info(ports_message)
-        logger.info(f"Health check interval: {health_check_interval}s")
-        logger.info(f"Worker timeout: {lmcache_worker_timeout}s")
+        logger.info("Health check interval: %ss", health_check_interval)
+        logger.info("Worker timeout: %ss", lmcache_worker_timeout)
 
         uvicorn.run(app, host=config.controller_host, port=config.controller_port)
     except TimeoutError as e:
         logger.error(e)
     except Exception as e:
-        logger.error(f"Failed to start controller: {e}", exc_info=True)
+        logger.error("Failed to start controller: %s", e, exc_info=True)
         sys.exit(1)  # Exit with error code
 
 
