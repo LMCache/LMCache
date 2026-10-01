@@ -62,8 +62,8 @@ vLLM worker (next step)
 | Physical KV length `kvLen` | `logicalLen - totalDropped` (derived) | Allocation and worker KV addressing |
 | Block IDs | vLLM scheduler / allocator | Physical blocks owned by the request |
 
-After 1,000 logical tokens, 256 KV entries may remain; the model position is
-still 1,000 while attention reads those 256 entries.
+After 1,000 logical tokens, 256 KV entries may remain; the next model position
+is still 1,000 while attention reads those 256 entries.
 
 The worker reports `stepDropped` for a successful compaction, or a request-level
 failure otherwise. On success, the scheduler-side connector accumulates
