@@ -123,6 +123,7 @@ def test_store_owner_callback_round_trip(
     cache_context = MagicMock()
     cache_context.cupy_stream.ptr = 123
     cache_context.calculate_num_blocks.return_value = 1
+    cache_context.hold_imported_event.return_value = 7
     cache_context.kv_layer_groups_manager = SimpleNamespace(
         num_object_groups=2,
         num_kernel_groups=2,
@@ -152,13 +153,18 @@ def test_store_owner_callback_round_trip(
                 err == L1Error.KEY_NOT_EXIST
                 for err, _ in manager.reserve_read(keys).values()
             )
+        # The imported producer event is released by a callback queued right
+        # behind the stream wait, before any copy.
+        release_kind, release_encoded = queued[0]
+        assert release_kind == "release_imported_event"
+        assert msgspec.msgpack.decode(release_encoded, type=tuple[int, int]) == (1, 7)
         if failure != "none":
-            assert not queued
-            assert order == ["copy", "copy", "record"]
+            assert len(queued) == 1
+            assert order == ["callback", "copy", "copy", "record"]
             assert all(obj.is_valid() for obj in copied)
         else:
-            assert order == ["copy", "copy", "record", "callback"]
-            kind, encoded = queued[0]
+            assert order == ["callback", "copy", "copy", "record", "callback"]
+            kind, encoded = queued[1]
             assert kind == "finish_write_by_owner"
             payload = msgspec.msgpack.decode(encoded, type=L1WriteCompletion)
             assert payload == [
@@ -166,6 +172,7 @@ def test_store_owner_callback_round_trip(
                 for index, manager in enumerate(managers)
             ]
         module.close()
+        cache_context.release_imported_event.assert_called_once_with(7)
         for index, manager in enumerate(managers):
             found = manager.reserve_read(keys)
             expected = (

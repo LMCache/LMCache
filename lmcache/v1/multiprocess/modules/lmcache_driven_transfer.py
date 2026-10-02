@@ -198,7 +198,23 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             self._ctx.storage_manager.finish_read_prefetched,
             payload_type=list[ObjectKey],
         )
+        self._device_host_func_dispatcher.register(
+            "release_imported_event",
+            self._release_imported_event,
+            payload_type=tuple[int, int],
+        )
         self._device_host_func_dispatcher.start()
+
+    def _release_imported_event(self, payload: tuple[int, int]) -> None:
+        """Drop an imported worker event; the stream wait queued on it has run.
+
+        Args:
+            payload: ``(instance_id, import_token)`` of the imported event.
+        """
+        instance_id, import_token = payload
+        entry = self.get_and_touch_context_entry(instance_id)
+        if entry is not None:
+            entry.cache_context.release_imported_event(import_token)
 
     def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
         """Register *handler* for *kind* on the per-process device host-func
@@ -677,6 +693,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 event_ipc_handle, cache_context.device
             )
             event_backend.wait_event(producer_event, cache_context.stream)
+            import_token = cache_context.hold_imported_event(producer_event)
+            submit_callback_to_stream(
+                cache_context.cupy_stream,
+                "release_imported_event",
+                (instance_id, import_token),
+            )
 
             # CPU-synchronous sentinel: a GPU store is about to be enqueued.
             # Must be published via publish() (not publish_on_stream) so the
@@ -957,6 +979,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 event_ipc_handle, cache_context.device
             )
             event_backend.wait_event(producer_event, cache_context.stream)
+            import_token = cache_context.hold_imported_event(producer_event)
+            submit_callback_to_stream(
+                cache_context.cupy_stream,
+                "release_imported_event",
+                (instance_id, import_token),
+            )
 
             # Per object group, the prefetch only locked the in-window suffix
             # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
