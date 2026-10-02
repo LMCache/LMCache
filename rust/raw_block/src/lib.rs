@@ -2824,57 +2824,69 @@ impl RawBlockDevice {
             None
         };
 
-        let prepared_result = prepare_iouring_read_buffer(
-            ptr as usize,
-            cap,
-            payload_len,
-            total_len,
-            self.use_odirect,
-            self.use_uring_cmd,
-            align,
-            fixed_idx,
-        );
-        let prepared = match prepared_result {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                release_pybuffer(view);
-                return Err(error);
+        // Use bounce buffer if:
+        // Buffer is not aligned (O_DIRECT or io_uring_cmd PRP requirement)
+        // Buffer capacity is less than total_len
+        let use_bounce = !ptr_aligned || cap < total_len;
+
+        let res = if !use_bounce {
+            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
+            let comp = Arc::new(IoCompletion::new());
+            let sub = IoSubmission {
+                fd: self.fd,
+                offset,
+                len: total_len,
+                ptr_addr: ptr as usize,
+                is_write: false,
+                completion: comp.clone(),
+                fixed_buffer_idx: fixed_idx,
+                iovecs: None,
+                bounce: None,
+                original_ptr: None,
+                payload_len: None,
+                batch_id: 0,
+                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
+            };
+            {
+                let q = self.queue.as_ref().expect("queue must exist");
+                let mut q = q.lock().unwrap();
+                q.push(sub);
             }
-        };
-        let nvme_cmd_data = match self._build_nvme_cmd_data(0, 0) {
-            Ok(data) => data,
-            Err(error) => {
-                release_pybuffer(view);
-                return Err(error);
+            if let Some(batch_ready) = &self.batch_ready {
+                batch_ready.signal_producer();
             }
+            py.allow_threads(move || comp.wait())
+        } else {
+            let bounce = AlignedBuf::new(total_len, align)?;
+            let bounce_arc = std::sync::Arc::new(bounce);
+            let bounce_ptr = bounce_arc.as_mut_ptr();
+            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
+            let comp = Arc::new(IoCompletion::new());
+            let sub = IoSubmission {
+                fd: self.fd,
+                offset,
+                len: total_len,
+                ptr_addr: bounce_ptr as usize,
+                is_write: false,
+                completion: comp.clone(),
+                fixed_buffer_idx: None,
+                iovecs: None,
+                bounce: Some(bounce_arc),
+                original_ptr: Some(ptr as usize),
+                payload_len: Some(payload_len),
+                batch_id: 0,
+                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
+            };
+            {
+                let q = self.queue.as_ref().expect("queue must exist");
+                let mut q = q.lock().unwrap();
+                q.push(sub);
+            }
+            if let Some(batch_ready) = &self.batch_ready {
+                batch_ready.signal_producer();
+            }
+            py.allow_threads(move || comp.wait())
         };
-        self.in_flight_count.fetch_add(1, Ordering::Relaxed);
-        let comp = Arc::new(IoCompletion::new());
-        let sub = IoSubmission {
-            fd: self.fd,
-            offset,
-            len: total_len,
-            ptr_addr: prepared.ptr_addr,
-            is_write: false,
-            completion: comp.clone(),
-            fixed_buffer_idx: prepared.fixed_buffer_idx,
-            iovecs: prepared.iovecs,
-            bounce: prepared.bounce,
-            original_ptr: prepared.original_ptr,
-            payload_len: prepared.payload_len,
-            batch_id: 0,
-            nvme_cmd_data,
-        };
-        self.queue
-            .as_ref()
-            .expect("queue must exist")
-            .lock()
-            .unwrap()
-            .push(sub);
-        if let Some(batch_ready) = &self.batch_ready {
-            batch_ready.signal_producer();
-        }
-        let res = py.allow_threads(move || comp.wait());
 
         release_pybuffer(view);
         res?;

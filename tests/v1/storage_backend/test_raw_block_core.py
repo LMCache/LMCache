@@ -189,19 +189,27 @@ def test_raw_block_core_uring_cmd_read_copyback_uses_aligned_chunks(monkeypatch)
 
 
 @pytest.mark.parametrize("is_read", [False, True])
-@pytest.mark.parametrize("size", [17, 4000, 4095, 4096, 4097, 8191, 8192, 8193, 10000])
+@pytest.mark.parametrize(
+    "size",
+    [17, 4000, 4095, 4096, 4097, 5000, 8191, 8192, 8193, 10000, 131071, 131072, 131073],
+)
+@pytest.mark.parametrize("transfer_limit", [8192, 131072])
 @pytest.mark.parametrize("misalignment", [0, 1])
 def test_uring_cmd_padded_transfer_allocates_only_tail(
-    monkeypatch: pytest.MonkeyPatch, is_read: bool, size: int, misalignment: int
+    monkeypatch: pytest.MonkeyPatch,
+    is_read: bool,
+    size: int,
+    transfer_limit: int,
+    misalignment: int,
 ) -> None:
     # A device round trip cannot expose staging size; intercept the existing
     # chunk boundary to check allocation and direct-prefix ownership.
     core = RawBlockCore.__new__(RawBlockCore)
     core.block_align = 4096
-    core.max_data_transfer_size = 8192
+    core.max_data_transfer_size = transfer_limit
     raw_dev = _RecordingUringCmdRawDevice()
     monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
-    backing = bytearray(16384)
+    backing = bytearray(size + 4096)
     start = (-_buffer_address(memoryview(backing))) % 4096 + misalignment
     view = memoryview(backing)[start : start + size]
     view[:] = bytes([0xA5]) * len(view)
@@ -236,6 +244,13 @@ def test_uring_cmd_padded_transfer_allocates_only_tail(
         )
     expected = [] if size == total else [total if misalignment else 4096]
     assert allocated == expected
+    prefix = size // 4096 * 4096
+    if not misalignment and prefix and size != total:
+        expected_chunks = (prefix + transfer_limit - 1) // transfer_limit + 1
+    else:
+        expected_chunks = (total + transfer_limit - 1) // transfer_limit
+    assert len(chunks) == expected_chunks
+    assert all(len(chunk) <= transfer_limit for chunk in chunks)
     if size < core.block_align:
         assert prefix_checks == []
         assert len(chunks) == 1

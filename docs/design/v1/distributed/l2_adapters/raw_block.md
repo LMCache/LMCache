@@ -207,6 +207,7 @@ For aligned buffers with one partial final block:
   direct prefix and an owned aligned tail. A payload smaller than one block
   uses only the tail. The submission owns the iovec descriptors and tail until
   completion. Short vectored transfers fail without scalar resubmission.
+  The deprecated `read_uring()` API retains its scalar/full-bounce path.
 - NVMe passthrough keeps MDTS-bounded direct prefix chunks and adds an aligned
   tail command. The core retains the views until batch completion and copies
   a read tail back only after every chunk of that logical read succeeds.
