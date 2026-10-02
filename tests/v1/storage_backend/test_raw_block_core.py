@@ -187,6 +187,128 @@ def test_raw_block_core_uring_cmd_read_copyback_uses_aligned_chunks(monkeypatch)
     )
 
 
+@pytest.mark.parametrize("is_read", [False, True])
+@pytest.mark.parametrize("size", [17, 4096, 4097, 8191, 8192, 8193, 10000])
+@pytest.mark.parametrize("misalignment", [0, 1])
+def test_uring_cmd_padded_transfer_allocates_only_tail(
+    monkeypatch: pytest.MonkeyPatch, is_read: bool, size: int, misalignment: int
+) -> None:
+    # A device round trip cannot expose staging size; intercept the existing
+    # chunk boundary to check allocation and direct-prefix ownership.
+    core = RawBlockCore.__new__(RawBlockCore)
+    core.block_align = 4096
+    core.max_data_transfer_size = 8192
+    raw_dev = _RecordingUringCmdRawDevice()
+    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+    backing = bytearray(16384)
+    start = (-_buffer_address(memoryview(backing))) % 4096 + misalignment
+    view = memoryview(backing)[start : start + size]
+    view[:] = bytes([0xA5]) * len(view)
+    allocated: list[int] = []
+    allocate = core._allocate_aligned_buffer
+
+    def record_allocate(length: int) -> memoryview:
+        allocated.append(length)
+        return allocate(length)
+
+    monkeypatch.setattr(core, "_allocate_aligned_buffer", record_allocate)
+    total = (size + 4095) // 4096 * 4096
+    if is_read:
+        raw_dev.read_data = bytes([7]) * size + bytes(total - size)
+        assert core._read_uring_cmd_buffers([0], [view], [size], [total]) == [True]
+        assert bytes(view) == bytes([7]) * size
+        chunks = raw_dev.read_buffers
+    else:
+        core._write_uring_cmd_buffers([0], [view], [size], [total])
+        assert bytes(view) == bytes([0xA5]) * size
+        chunks = raw_dev.buffers
+        assert b"".join(bytes(chunk) for chunk in chunks) == bytes(view) + bytes(
+            total - size
+        )
+    expected = [] if size == total else [total if misalignment else 4096]
+    assert allocated == expected
+    if size == total or (not misalignment and size > 4096):
+        assert _buffer_address(chunks[0]) == _buffer_address(view)
+
+
+def test_uring_cmd_failed_prefix_does_not_copy_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = RawBlockCore.__new__(RawBlockCore)
+    core.block_align = 4096
+    core.max_data_transfer_size = 8192
+    raw_dev = _RecordingUringCmdRawDevice()
+    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+    destination = core._allocate_aligned_buffer(10000)
+    destination[:] = bytes([0xCC]) * len(destination)
+    raw_dev.read_data = bytes([7]) * 10000 + bytes(2288)
+    monkeypatch.setattr(
+        raw_dev, "wait_iouring", lambda batch: ([False, True], [(0, "injected")])
+    )
+    assert core._read_uring_cmd_buffers([0], [destination], [10000], [12288]) == [False]
+    assert bytes(destination[8192:]) == bytes([0xCC]) * 1808
+
+
+def test_uring_cmd_invalid_chunk_plan_submits_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = RawBlockCore.__new__(RawBlockCore)
+    core.block_align = 4096
+    # The first segment can be planned, but the padded tail fails validation.
+    core.max_data_transfer_size = 8192
+    raw_dev = _RecordingUringCmdRawDevice()
+    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+    destination = core._allocate_aligned_buffer(10000)
+    validate = core._validate_uring_cmd_chunk
+
+    def fail_tail(offset: int, length: int) -> None:
+        validate(offset, length)
+        if offset == 8192:
+            raise ValueError("injected tail validation failure")
+
+    monkeypatch.setattr(core, "_validate_uring_cmd_chunk", fail_tail)
+    assert core._read_uring_cmd_buffers([0], [destination], [10000], [12288]) == [False]
+    assert raw_dev.read_buffers == []
+    assert raw_dev.waited_batch_id is None
+
+
+@requires_rust_raw_block_io
+@pytest.mark.parametrize("engine", ["posix", "io_uring"])
+@pytest.mark.parametrize("destination_size", [4999, 5000, 6000, 8192])
+def test_load_preserves_capacity_beyond_stored_payload(
+    tmp_path: Path, engine: str, destination_size: int
+) -> None:
+    config = dataclasses.replace(
+        make_raw_block_core_config(make_raw_block_file(tmp_path)),
+        io_engine=engine,
+        use_odirect=True,
+        enable_zero_copy=True,
+        load_checkpoint_on_init=False,
+    )
+    try:
+        core = RawBlockCore(config, key_namespace="object")
+    except Exception as exc:
+        if is_skip_safe_io_error(exc):
+            pytest.skip(f"direct I/O unavailable: {exc}")
+        raise
+    try:
+        spec = encode_object_key(make_object_key(0))
+        source = make_memory_obj(bytes([7]) * 5000)
+        target = make_memory_obj(bytes([0xCC]) * destination_size)
+        assert core.put_many([spec], [source]).results == [True]
+        assert core.load_many_into([spec.encoded], [target]) == [
+            destination_size >= 5000
+        ]
+        actual = memory_obj_bytes(target)
+        if destination_size >= 5000:
+            assert actual[:5000] == bytes([7]) * 5000
+            assert actual[5000:] == bytes([0xCC]) * (destination_size - 5000)
+        else:
+            assert actual == bytes([0xCC]) * destination_size
+    finally:
+        core.close()
+
+
 @requires_rust_raw_block_io
 def test_raw_block_core_store_load_and_exists(tmp_path):
     path = make_raw_block_file(tmp_path)
