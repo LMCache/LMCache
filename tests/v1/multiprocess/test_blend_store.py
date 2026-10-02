@@ -26,7 +26,6 @@ from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _cb_chunk_major_object_keys,
     _classify_cb_read_groups,
-    _narrow_attn_desc,
 )
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
 
@@ -515,26 +514,6 @@ def test_classify_read_groups_rejects_two_aux_groups():
         _classify_cb_read_groups(3, ("attention", "aux", "aux"))
 
 
-def test_narrow_attn_desc_selects_the_leg_gids():
-    """The fold stride is groups x ranks, so each leg's descriptor must cover
-    exactly its own gids."""
-    # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
-
-    full = AttnWindowDesc(
-        num_chunks_in_sw=[1, -1, -1],
-        world_size=2,
-        group_kinds=("recurrent", "attention", "aux"),
-    )
-    prefix = _narrow_attn_desc(full, (0, 1))
-    assert prefix.num_chunks_in_sw == [1, -1]
-    assert prefix.group_kinds == ("recurrent", "attention")
-    assert prefix.world_size == 2
-    blend = _narrow_attn_desc(full, (1, 2))
-    assert blend.num_chunks_in_sw == [-1, -1]
-    assert blend.group_kinds == ("attention", "aux")
-
-
 def test_classify_read_groups_rejects_unresolvable_layouts():
     """Multi-group layouts without kinds, with several attention buckets, or
     with several aux groups are refused loudly (silent mis-addressing
@@ -585,3 +564,86 @@ def test_classify_read_groups_recurrent_first_layout():
     assert read.attn_gid == 1
     # Read set ascending, recurrent excluded.
     assert read.blend_gids == (1, 2)
+
+
+# ---------------------------------------------------------------------------
+# STORE hook: fingerprints registered only for chunks the transfer committed
+# ---------------------------------------------------------------------------
+
+
+def _store_hook_engine(stored_mask):
+    """Engine with the real ``store`` bound; transfer and session mocked.
+    No GPU context -> fingerprint jobs land on the plain queue."""
+    # Standard
+    from queue import Queue
+
+    eng = MagicMock(spec=BlendModule)
+    eng.store = BlendModule.store.__get__(eng)
+    eng._transfer_module = MagicMock()
+    eng._transfer_module.store_with_chunk_mask.return_value = (
+        b"evt",
+        True,
+        stored_mask,
+    )
+    eng._transfer_module.get_and_touch_context_entry.return_value = None
+    eng._ctx = MagicMock()
+    eng._ctx.chunk_size = 4
+    session = MagicMock()
+    session.get_hashes.return_value = list(range(100, 100 + len(stored_mask)))
+    eng._ctx.session_manager.get_or_create.return_value = session
+    eng._pending_fp_lock = threading.Lock()
+    eng._pending_fp_hashes = set()
+    eng._fingerprint_queue = Queue()
+    return eng
+
+
+def _store_hook_key(num_chunks: int, chunk_size: int = 4):
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+    n = num_chunks * chunk_size
+    return IPCCacheServerKey(
+        model_name="m",
+        world_size=1,
+        num_kv_readers=1,
+        worker_id=0,
+        token_ids=tuple(range(1000, 1000 + n)),
+        start=0,
+        end=n,
+        request_id="req-store-mask",
+    )
+
+
+def test_store_registers_fingerprints_only_for_committed_chunks():
+    """A chunk the storage manager skipped (hole in the stored mask) gets no
+    fingerprint: one registration job per contiguous stored run, offsets
+    preserved, chunk 0 still owned by the prefix leg."""
+    # First Party
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
+    eng = _store_hook_engine([True, True, False, True])
+    key = _store_hook_key(4)
+
+    result = eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
+
+    assert result == (b"evt", True)
+    jobs = []
+    while not eng._fingerprint_queue.empty():
+        jobs.append(eng._fingerprint_queue.get_nowait())
+    # Runs: chunks [0,2) with chunk 0 skipped (prefix leg), and chunk [3,4).
+    assert [(j[2], j[3], len(j[1])) for j in jobs] == [(1, 0, 2), (0, 12, 1)]
+    expected = {TokenHasher.hash_to_bytes(101), TokenHasher.hash_to_bytes(103)}
+    assert eng._pending_fp_hashes == expected
+
+
+def test_store_registers_nothing_when_no_chunk_committed():
+    """A store whose every chunk was skipped (or that failed) must not
+    advertise any fingerprint -- those entries could never be served."""
+    eng = _store_hook_engine([False, False, False])
+    key = _store_hook_key(3)
+
+    result = eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
+
+    assert result == (b"evt", True)
+    assert eng._fingerprint_queue.empty()
+    assert eng._pending_fp_hashes == set()

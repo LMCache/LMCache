@@ -1,0 +1,2 @@
+# `lmcache[kafka]` extra: Kafka cache-event transport for the MP server
+confluent-kafka>=2.3.0

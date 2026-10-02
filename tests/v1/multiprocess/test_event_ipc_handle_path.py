@@ -73,6 +73,10 @@ class _FakeStorageManager:
     def finish_write(self, keys: list[object]) -> None:
         return None
 
+    def finish_write_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
+        """Accept the owner-tagged callback registered by the transfer module."""
+        return None
+
     def finish_read_prefetched(self, keys: list[object]) -> None:
         return None
 
@@ -80,7 +84,6 @@ class _FakeStorageManager:
         self,
         keys: list[object],
         layout: object,
-        mode: str,
     ) -> dict[object, object]:
         return {}
 
@@ -223,6 +226,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     storage_manager = _FakeStorageManager()
     server_context = SimpleNamespace(
         chunk_size=1,
+        null_block_id=0,
         storage_manager=storage_manager,
         event_bus=SimpleNamespace(
             publish=lambda event: None,
@@ -291,5 +295,5 @@ def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
 
     for module in (futures, lmcache_driven_transfer, worker_transfer):
         source = inspect.getsource(module)
-        assert "lmcache.v1.platform.musa" not in source
+        assert "lmcache.v1.platform.devices.musa" not in source
         assert 'device.type == "musa"' not in source

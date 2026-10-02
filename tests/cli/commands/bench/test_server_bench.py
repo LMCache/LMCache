@@ -35,9 +35,9 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_lookup,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.transport.zmq_impl.wire import decode_operation
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
@@ -474,14 +474,8 @@ class TestQueryChecksum:
 
 @pytest.fixture
 def router_endpoint() -> str:
-    """Allocate an ephemeral inproc/tcp endpoint for the ROUTER."""
-    # Use tcp with port=0 so the OS assigns a free port.
-    ctx = zmq.Context.instance()
-    probe = ctx.socket(zmq.ROUTER)
-    probe.bind("tcp://127.0.0.1:0")
-    endpoint = probe.getsockopt_string(zmq.LAST_ENDPOINT)
-    probe.close(linger=0)
-    return endpoint
+    """Request an ephemeral TCP port when the ROUTER binds."""
+    return "tcp://127.0.0.1:0"
 
 
 # ------------------------------------------------------------------ #
@@ -615,6 +609,7 @@ class _LookupRouter:
         self._ctx = zmq.Context.instance()
         self._router = self._ctx.socket(zmq.ROUTER)
         self._router.bind(endpoint)
+        self.endpoint = self._router.getsockopt_string(zmq.LAST_ENDPOINT)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -632,11 +627,11 @@ class _LookupRouter:
                 continue
             frames = self._router.recv_multipart()
             identity, uid_f, type_f, *payload = frames
-            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
-            if req_type == RequestType.LOOKUP:
+            operation = decode_operation(type_f)
+            if operation == "lookup":
                 # Void reply: no payload frame.
                 self._router.send_multipart([identity, uid_f, type_f])
-            elif req_type == RequestType.QUERY_PREFETCH_STATUS:
+            elif operation == "query_prefetch_status":
                 req_id = msgspec.msgpack.decode(payload[0], type=str)
                 self.last_query_request_id = req_id
                 if self._in_progress_left > 0:
@@ -660,7 +655,7 @@ class TestLookupProtocol:
         router = _LookupRouter(router_endpoint)
         router.start()
         try:
-            client = self._make_client(router_endpoint)
+            client = self._make_client(router.endpoint)
             key = _make_key((1, 9906, 9906), request_id="req-void")
             assert _send_lookup(client, key) is True
             client.close()
@@ -679,7 +674,7 @@ class TestLookupProtocol:
         )
         router.start()
         try:
-            client = self._make_client(router_endpoint)
+            client = self._make_client(router.endpoint)
             hit = _poll_prefetch_status(
                 client,
                 "req-42",

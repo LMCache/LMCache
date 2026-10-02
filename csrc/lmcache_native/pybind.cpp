@@ -45,7 +45,8 @@ PYBIND11_MODULE(lmcache_native, m) {
       .value("NL_X_TWO_NB_NH_ONE_BS_HS",
              EngineKVFormat::NL_X_TWO_NB_NH_ONE_BS_HS)
       .value("NL_X_TWO_X_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS)
-      .value("NL_X_NP_X_NB_BS_ONE_HS", EngineKVFormat::NL_X_NP_X_NB_BS_ONE_HS);
+      .value("NL_X_NP_X_NB_BS_ONE_HS", EngineKVFormat::NL_X_NP_X_NB_BS_ONE_HS)
+      .value("NL_X_NB_BS_NH_HS", EngineKVFormat::NL_X_NB_BS_NH_HS);
 
   m.attr("GPUKVFormat") = m.attr("EngineKVFormat");
 
@@ -110,6 +111,16 @@ PYBIND11_MODULE(lmcache_native, m) {
       py::arg("num_chunks"), py::arg("num_ranks"), py::arg("group_windows"),
       "Expand a model-wide hit length into the per-group retain mask over the "
       "group x chunk x kv_rank layout.");
+  m.def("fold_grouped", &lmcache::lmcache_native::fold_grouped, py::arg("rows"),
+        py::arg("windows"),
+        "Fold per-row presence bitmaps (rows[i] with window windows[i], all "
+        "of size num_chunks) into a servable-prefix-lengths bitmap; bit j set "
+        "iff every row can serve a length-(j + 1) prefix. Raises ValueError "
+        "if rows and windows differ in length or the rows differ in size.");
+  m.def("unfold_grouped", &lmcache::lmcache_native::unfold_grouped,
+        py::arg("hit_length"), py::arg("num_chunks"), py::arg("windows"),
+        "Expand a model-wide hit length into one retain bitmap of size "
+        "num_chunks per window, parallel to windows.");
 
   py::class_<TTLLock>(m, "TTLLock")
       .def(py::init<uint32_t>(), py::arg("ttl_second") = 300,
@@ -137,7 +148,11 @@ PYBIND11_MODULE(lmcache_native, m) {
            "Clear the bit at the specified index to 0.")
       .def("test", &Bitmap::test, py::arg("index"),
            "Test the bit at the specified index.")
+      .def("copy", &Bitmap::copy,
+           "Return an independent copy with the same size and bits.")
       .def("popcount", &Bitmap::popcount, "Count the number of bits set to 1.")
+      .def("size", &Bitmap::size, "Number of bits in the bitmap.")
+      .def("__len__", &Bitmap::size, "Number of bits in the bitmap.")
       .def("count_leading_zeros", &Bitmap::clz,
            "Count the number of leading zeros.")
       .def("count_leading_ones", &Bitmap::clo,

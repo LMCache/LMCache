@@ -9,6 +9,7 @@ rows, both in one engine group.
 # Standard
 from types import SimpleNamespace
 from typing import cast
+import inspect
 
 # Third Party
 import pytest
@@ -37,6 +38,10 @@ INDEXER_KERNEL_ROWS = 32
 INDEXER_TOKENS_PER_STATE = 4
 
 
+def _supports_declared_slot_compression() -> bool:
+    return "tokens_per_state" in inspect.signature(MLAAttentionSpec).parameters
+
+
 def _mla_spec() -> MLAAttentionSpec:
     return MLAAttentionSpec(
         block_size=BLOCK_SIZE,
@@ -48,6 +53,8 @@ def _mla_spec() -> MLAAttentionSpec:
 
 
 def _indexer_spec() -> MLAAttentionSpec:
+    if not _supports_declared_slot_compression():
+        pytest.skip("MLAAttentionSpec does not expose tokens_per_state")
     return MLAAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=1,

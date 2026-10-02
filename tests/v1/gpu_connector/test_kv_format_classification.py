@@ -11,6 +11,9 @@ format or an edit cannot silently break the contract the per-layer detection
 relies on.
 """
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.gpu_connector.kv_format import get_spec_class
 import lmcache.lmcache_native as lmcache_native
@@ -37,6 +40,7 @@ EXPECTED = {
     F.NL_X_NBBS_ONE_HS: (False, False, True, True, False),
     F.NL_X_NB_BSV_BSS: (False, False, True, True, False),
     F.NL_X_TWO_X_NB_BS_NH_HS: (False, False, True, False, True),
+    F.NL_X_NB_BS_NH_HS: (False, False, True, False, False),
     F.NB_NL_TWO_NH_BS_HS: (True, False, False, False, False),
     F.TWO_X_NL_X_NBBS_NH_HS: (False, True, False, False, False),
     F.TWO_X_NL_X_NB_BS_NH_HS: (False, True, False, False, False),
@@ -76,7 +80,46 @@ EXPECTED_SPEC_FACTS = {
     F.NL_X_NB_BSV_BSS: (False, False, False, False),
     F.NL_X_TWO_X_NB_BS_NH_HS: (False, False, False, False),
     F.NL_X_NP_X_NB_BS_ONE_HS: (False, False, False, False),
+    F.NL_X_NB_BS_NH_HS: (False, False, False, False),
 }
+
+
+@pytest.mark.parametrize(
+    ("engine_kv_format", "expected_shape"),
+    [
+        (F.NL_X_NBBS_ONE_HS, (6, 1, 7)),
+        (F.NL_X_NB_BS_HS, (2, 3, 7)),
+        (F.NL_X_NB_NH_BS_CS, (2, 5, 3, 7)),
+        (F.NL_X_NB_BS_NH_CS, (2, 3, 5, 7)),
+        (F.NL_X_TWO_NB_NH_BS_HS, (2, 2, 5, 3, 7)),
+        (F.NL_X_TWO_NB_BS_NH_HS, (2, 2, 3, 5, 7)),
+        (F.NL_X_NB_TWO_NH_BS_HS, (2, 2, 5, 3, 7)),
+        (F.NL_X_NB_TWO_BS_NH_HS, (2, 2, 3, 5, 7)),
+    ],
+)
+def test_paged_layer_shape_from_format_spec(
+    engine_kv_format: lmcache_native.EngineKVFormat,
+    expected_shape: tuple[int, ...],
+) -> None:
+    """Derive a pointer-backed layer shape from static format facts."""
+    got_shape = get_spec_class(engine_kv_format).paged_layer_shape(2, 3, 5, 7)
+    assert got_shape == expected_shape
+
+
+@pytest.mark.parametrize(
+    "engine_kv_format",
+    [
+        F.NB_NL_TWO_BS_NH_HS,
+        F.TWO_X_NL_X_NB_BS_NH_HS,
+        F.NL_X_TWO_X_NB_BS_NH_HS,
+    ],
+)
+def test_paged_layer_shape_rejects_non_single_layer_tensor_formats(
+    engine_kv_format: lmcache_native.EngineKVFormat,
+) -> None:
+    """Reject formats whose pointer structure is not one tensor per layer."""
+    with pytest.raises(ValueError, match="one paged tensor per layer"):
+        get_spec_class(engine_kv_format).paged_layer_shape(2, 3, 5, 7)
 
 
 def _all_formats():
@@ -122,6 +165,13 @@ def test_spec_only_facts_match_golden():
         spec = get_spec_class(fmt)
         got = (spec.is_hnd, spec.is_fused_packed, spec.is_two_major, spec.is_pbs_fused)
         assert got == expected, f"{fmt}: got {got}, expected {expected}"
+
+
+def test_single_kv_fact_is_unique() -> None:
+    component_formats = {
+        fmt for fmt in _all_formats() if get_spec_class(fmt).is_single_kv
+    }
+    assert component_formats == {F.NL_X_NB_BS_NH_HS}
 
 
 def test_every_format_is_pinned():

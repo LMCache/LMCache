@@ -61,7 +61,7 @@ previously cached multimodal entries miss (safe) rather than collide.
 
 Passing the full `mm_hash` through `TokenDatabase._hash_tokens(extra_keys=...)`
 (the channel reserved for this) is the vLLM-aligned design, but requires
-extending every token-carrying interface (lookup ZMQ protocol, MP metadata,
+extending every token-carrying interface (lookup request protocol, MP metadata,
 SDK) to carry per-chunk extra keys. The substitution approach achieves
 equivalent collision resistance with no interface changes and fixes all
 existing substitution call sites at once. `extra_keys` remains the right
