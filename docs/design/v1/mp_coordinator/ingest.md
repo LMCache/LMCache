@@ -122,8 +122,10 @@ group no progress.
 Because the restored view and the resume point cannot disagree, nothing
 here measures lag or gates startup on catching up. A partition
 `StreamPosition` has never seen -- a first start, one added since, or
-any start with no checkpoint path configured -- falls back to
-`auto.offset.reset` (`earliest`).
+any start with no checkpoint path configured -- is read from its
+beginning (`OFFSET_BEGINNING`), not left to the consumer's default: a
+group that an older coordinator committed offsets for would otherwise
+resume from that commit and skip what the restored state lacks.
 
 Kafka partition offsets are a separate coordinate system from the gate's
 per-emitter seq cursors; both ride in the checkpoint, independently.
@@ -183,8 +185,8 @@ follow-up below.
   resumes correctly on its own. Replaying from further back --
   reprocessing retained history the checkpoint has already moved past --
   is still manual: an operator clears the `kafka_stream_position`
-  section from the checkpoint, and the source falls back to
-  `auto.offset.reset`.
+  section from the checkpoint, and the source replays each partition
+  from its beginning.
 - **Registry integration**: calling `EventGate.drop_instance` from
   deregistration / heartbeat-timeout eviction.
 - **Allocation generations** for shared pools (deterministic

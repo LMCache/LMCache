@@ -18,8 +18,9 @@ view that was restored. Records applied after that capture are simply
 read again, and the gate's sequence dedup absorbs them.
 
 A partition :class:`StreamPosition` has never seen -- a first start, or
-a partition added since -- has no checkpointed cursor, and falls back to
-``auto.offset.reset``.
+a partition added since -- has no checkpointed cursor, and is read from
+its beginning, even if the group holds an offset an older coordinator
+committed.
 
 See ``docs/design/v1/mp_coordinator/ingest.md``.
 """
@@ -155,22 +156,26 @@ class KafkaCacheEventSource(CacheEventSource):
 
         Runs on the poll thread, during ``poll()``. A partition
         :attr:`_position` has recorded an offset for is repositioned
-        there; one it has never seen keeps whatever confluent-kafka
-        assigned by default, which with no committed offset to find is
-        ``auto.offset.reset``. Calling ``assign`` here is what makes the
-        override take effect -- without it, the default assignment
+        there; one it has never seen starts from its beginning. Leaving
+        that one at confluent-kafka's default would resume from the
+        group's committed offset whenever one exists -- one an older
+        coordinator committed, say -- which can sit past what the
+        restored state contains. Calling ``assign`` here is what makes
+        the override take effect -- without it, the default assignment
         stands.
 
         Args:
             consumer: The consumer being assigned to.
             partitions: The partitions assigned to this member.
         """
+        # Third Party
+        from confluent_kafka import OFFSET_BEGINNING
+
         for partition in partitions:
             next_offset = self._position.next_offset(
                 partition.topic, partition.partition
             )
-            if next_offset is not None:
-                partition.offset = next_offset
+            partition.offset = OFFSET_BEGINNING if next_offset is None else next_offset
         consumer.assign(partitions)
         logger.info(
             "Kafka ingest assigned %d partition(s): %s",
