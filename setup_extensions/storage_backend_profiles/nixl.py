@@ -70,7 +70,12 @@ class NixlStorageBackend(StorageBackendProfile):
                 ],
                 library_dirs=library_dirs,
                 libraries=["nixl"],
-                runtime_library_dirs=list(library_dirs),
+                # A published wheel resolves libnixl from the already-imported
+                # nixl wheel, and the build-time SDK path does not exist on
+                # user hosts, so cibuildwheel builds carry no RUNPATH.
+                runtime_library_dirs=(
+                    [] if os.environ.get("CIBUILDWHEEL") == "1" else list(library_dirs)
+                ),
                 extra_compile_args={
                     "cxx": extra_cxx_flags + ["-O3", "-std=c++20"],
                 },

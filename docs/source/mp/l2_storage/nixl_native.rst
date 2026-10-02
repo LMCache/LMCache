@@ -26,8 +26,10 @@ The published ``lmcache`` wheels and the ``lmcache/vllm-openai`` images ship the
 extension, compiled against NIXL 1.3.1. Install the runtime with
 ``pip install lmcache[nixl]``: the ``nixl`` wheel bundles ``libnixl`` and its
 plugins, and the adapter loads them from there, so no build flags or
-environment variables are needed. The rest of this section is for source
-installations.
+environment variables are needed. The ``nixl`` wheel does require the system
+OpenSSL 3 libraries (``libssl.so.3``): present on Ubuntu 22.04+ and RHEL 9, but
+on RHEL/Alma/Rocky 8 install ``openssl3-libs`` from EPEL; Ubuntu 20.04 ships
+only OpenSSL 1.1. The rest of this section is for source installations.
 
 The minimum supported NIXL version is 1.3.0. A source installation must install
 the public C++ headers as well as ``libnixl``. Build LMCache with:
@@ -279,6 +281,11 @@ Troubleshooting
 ``lmcache_nixl`` cannot be imported
    Rebuild with ``BUILD_WITH_NIXL=1`` and verify that ``NIXL_INCLUDE_DIR``
    contains ``nixl.h`` and ``NIXL_LIBRARY_DIR`` contains ``libnixl.so``.
+
+``import nixl`` fails with ``libssl.so.3: cannot open shared object file``
+   The host lacks OpenSSL 3, which the ``nixl`` wheel links but does not
+   bundle. Install it (``openssl3-libs`` from EPEL on RHEL-family 8) or use a
+   newer base OS.
 
 Plugin discovery or backend creation fails
    Verify NIXL 1.3 or newer, set ``NIXL_PLUGIN_DIR`` to the installed plugin
