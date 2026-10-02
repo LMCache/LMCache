@@ -236,26 +236,6 @@ class _LookupAck:
     """``time.monotonic()`` timestamp taken when the LOOKUPs were sent."""
 
 
-@dataclass(frozen=True)
-class LookupOutcome:
-    """Result of an aggregated LMCache lookup across all servers.
-
-    Attributes:
-        hit_tokens: Longest prefix (in tokens) LMCache can serve, min across
-            servers. Includes the APC-covered prefix (engine-resident), so it
-            drives ``need_to_load`` and the lock-release range unchanged.
-        stored_tokens: Contiguous prefix (in tokens) treated as already
-            persisted in LMCache for store-skip. Currently equals
-            ``hit_tokens``; once the LOOKUP reply carries the covered-present
-            count (a proto follow-up) this will shorten to the first
-            covered-range hole so the store path re-stores from the gap instead
-            of leaving a hole.
-    """
-
-    hit_tokens: int
-    stored_tokens: int
-
-
 def get_lmcache_chunk_size(
     req_client: RequestClient,
     timeout: float = DEFAULT_MQ_TIMEOUT,
@@ -730,7 +710,7 @@ class LMCacheMPSchedulerAdapter:
         #   Per-server hit counts, used to detect disagreement and free tail locks.
         self._pending_lookups: set[str] = set()
         self._unacked_lookups: dict[str, _LookupAck] = {}
-        self._finished_lookup_results: dict[str, LookupOutcome] = {}
+        self._finished_lookup_results: dict[str, int] = {}
         self._per_server_hits: dict[str, dict[str, int]] = {}
         # request_id -> server URL -> (in-flight status future, submission time).
         self._lookup_status: dict[
@@ -739,8 +719,6 @@ class LMCacheMPSchedulerAdapter:
         self._lookup_params: dict[
             str, tuple[list[int], str, dict[str, Any] | None]
         ] = {}
-        # skip_covered_lookup bookkeeping: request_id -> covered boundary in chunks.
-        self._lookup_covered: dict[str, int] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -921,8 +899,6 @@ class LMCacheMPSchedulerAdapter:
         )
         self._pending_lookups.add(request_id)
         self._lookup_params[request_id] = (token_ids, cache_salt, request_configs)
-        # Remember the covered boundary (chunks) for the stored-prefix computation.
-        self._lookup_covered[request_id] = covered_chunks
 
     def _free_inconsistent_lookup_locks(
         self,
@@ -963,7 +939,7 @@ class LMCacheMPSchedulerAdapter:
                 self.req_clients[url].free_lookup_locks(tail_key, self.tp_size)
 
     @_lmcache_nvtx_annotate
-    def check_lookup_result(self, request_id: str) -> "LookupOutcome | None":
+    def check_lookup_result(self, request_id: str) -> int | None:
         """
         Check the result of a previously submitted lookup request.
 
@@ -972,37 +948,31 @@ class LMCacheMPSchedulerAdapter:
         outstanding this returns None. Once all servers have acked, polls one
         outstanding QUERY_PREFETCH_STATUS future per unresolved server without
         waiting by default. Setting ``lmcache.mp.nonblocking_lookup_status`` to
-        False instead waits for each reply in the current callback. Returns a
-        :class:`LookupOutcome` (hit + stored tokens) when the prefetch is
-        complete, or None if still in progress.
-
-        ``LookupOutcome.stored_tokens`` currently equals the hit; the
-        covered-present store-hole signal is a proto follow-up (see the design
-        doc).
+        False instead waits for each reply in the current callback. Returns the
+        matched token count when the prefetch is complete, or None if still
+        in progress.
 
         A LOOKUP that is not acknowledged within the MQ timeout marks that
-        server unhealthy and makes this return an empty result, matching the
-        behaviour of a timed-out synchronous submit.
+        server unhealthy and makes this return 0, matching the behaviour of
+        a timed-out synchronous submit.
 
         Args:
             request_id: The ID of the lookup request submitted in
                 `maybe_submit_lookup_request`
 
         Returns:
-            A :class:`LookupOutcome` with the total matched tokens and the
-            contiguous stored-prefix tokens, or None if the lookup request is
-            not finished yet.
+            An integer representing the total number of tokens matched
+            in LMCache (prefix matching), or
+            None if the lookup request is not finished yet.
         """
         if request_id not in self._pending_lookups:
             # No job — either unhealthy at submit time or already cleaned up.
-            # Return the cached aggregate if any, otherwise empty.
-            return self._finished_lookup_results.get(
-                request_id, LookupOutcome(hit_tokens=0, stored_tokens=0)
-            )
+            # Return the cached aggregate if any, otherwise 0.
+            return self._finished_lookup_results.get(request_id, 0)
 
         if not self.is_healthy:
             # Server went down — give up on this lookup
-            return LookupOutcome(hit_tokens=0, stored_tokens=0)
+            return 0
 
         if request_id in self._finished_lookup_results:
             # Aggregation already done; return the cached value.
@@ -1023,7 +993,7 @@ class LMCacheMPSchedulerAdapter:
                     for url in ack.futures:
                         self._mark_lookup_timed_out(url)
                     del self._unacked_lookups[request_id]
-                    return LookupOutcome(hit_tokens=0, stored_tokens=0)
+                    return 0
                 # Acknowledgement still in flight; poll again next step.
                 return None
             del self._unacked_lookups[request_id]
@@ -1047,7 +1017,7 @@ class LMCacheMPSchedulerAdapter:
             if self._nonblocking_lookup_status and not fut.query():
                 if time.monotonic() - submitted_at >= self._mq_timeout:
                     self._mark_lookup_timed_out(url)
-                    return LookupOutcome(hit_tokens=0, stored_tokens=0)
+                    return 0
                 continue
             del futures[url]
             try:
@@ -1060,7 +1030,7 @@ class LMCacheMPSchedulerAdapter:
                     url,
                 )
                 self._health_events[url].clear()
-                return LookupOutcome(hit_tokens=0, stored_tokens=0)
+                return 0
             if r is None:
                 continue
             per_server[url] = int(r)
@@ -1081,10 +1051,8 @@ class LMCacheMPSchedulerAdapter:
 
         token_count = min_chunks * self.lmcache_tokens_per_chunk
 
-        # stored_tokens == hit until covered-present is wired (proto follow-up).
-        result = LookupOutcome(hit_tokens=token_count, stored_tokens=token_count)
-        self._finished_lookup_results[request_id] = result
-        return result
+        self._finished_lookup_results[request_id] = token_count
+        return token_count
 
     def num_blocks_per_chunk(self) -> int:
         """
@@ -1105,7 +1073,6 @@ class LMCacheMPSchedulerAdapter:
         self._finished_lookup_results.pop(request_id, None)
         self._per_server_hits.pop(request_id, None)
         self._lookup_params.pop(request_id, None)
-        self._lookup_covered.pop(request_id, None)
 
     def reset_cache(self) -> bool:
         """Ask every backing LMCache server to best-effort clear idle cache.
@@ -1162,7 +1129,7 @@ class LMCacheMPSchedulerAdapter:
         request_id: str,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> dict[str, "MessagingFuture[None]"]:
         """Release read locks acquired during lookup without a full retrieve.
 
         Use this when some chunks matched by lookup overlap with blocks that
@@ -1184,9 +1151,14 @@ class LMCacheMPSchedulerAdapter:
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+
+        Returns:
+            Per-server-url release futures (empty when unhealthy). Callers that
+            do not need to wait may ignore them; ``free_lookup_locks_blocking``
+            awaits them.
         """
         if not self.is_healthy:
-            return
+            return {}
 
         # Free [start, end) on every server.
         base_key = self._create_key(
@@ -1197,8 +1169,10 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         ).no_worker_id_version()
-        for url in self._server_urls:
-            self.req_clients[url].free_lookup_locks(base_key, self.tp_size)
+        return {
+            url: self.req_clients[url].free_lookup_locks(base_key, self.tp_size)
+            for url in self._server_urls
+        }
 
     def free_lookup_locks_blocking(
         self,
@@ -1209,34 +1183,20 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
     ) -> None:
-        """Release read locks like ``free_lookup_locks`` but block until every
+        """Release read locks via ``free_lookup_locks`` but block until every
         server has processed the release.
 
-        The covered-lookup shrink path must guarantee the stale lookup's locks
-        are released before it submits the replacement full lookup for the same
-        request. On a server with ``max_cpu_workers > 1``, ``LOOKUP`` and
-        ``FREE_LOOKUP_LOCKS`` share the normal thread pool, so a fire-and-forget
-        release could be reordered after the replacement's ``begin_lookup``,
-        which resets the session state the release reads -- over-releasing the
-        covered prefix and leaking the stale locks. Blocking here serializes the
-        two. Args mirror ``free_lookup_locks``.
+        The covered-lookup shrink path must release the stale lookup's locks
+        before it submits the replacement full lookup for the same request: on a
+        server with ``max_cpu_workers > 1`` a fire-and-forget release could be
+        reordered after the replacement's ``begin_lookup`` (both share the normal
+        thread pool), over-releasing the covered prefix and leaking the stale
+        locks. Args mirror ``free_lookup_locks``.
         """
-        if not self.is_healthy:
-            return
-
-        base_key = self._create_key(
-            token_ids,
-            start=start,
-            end=end,
-            request_id=request_id,
-            cache_salt=cache_salt,
-            request_configs=request_configs,
-        ).no_worker_id_version()
+        futures = self.free_lookup_locks(
+            token_ids, start, end, request_id, cache_salt, request_configs
+        )
         deadline = time.monotonic() + self._mq_timeout
-        futures = {
-            url: self.req_clients[url].free_lookup_locks(base_key, self.tp_size)
-            for url in self._server_urls
-        }
         for url, future in futures.items():
             try:
                 future.result(timeout=max(0.0, deadline - time.monotonic()))

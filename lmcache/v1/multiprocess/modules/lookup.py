@@ -169,19 +169,11 @@ class LookupModule:
         """Submit a prefix lookup.
 
         The covered chunk count is read from ``request_configs`` under
-        ``COVERED_CHUNKS_CONFIG_KEY``. Hashes the key, submits a prefetch task to
-        the storage manager over the uncovered sub-range
-        ``chunk_hashes[covered_chunks:]``, and registers the job under
-        ``key.request_id`` for later polling via query_prefetch_status. The
-        APC-covered prefix ``chunk_hashes[:covered_chunks]`` is touched (to keep
-        it warm) but neither read-locked nor L2-prefetched.
-
-        The covered-present count (contiguous L1-resident covered prefix) is
-        computed for the touch side effect but not returned: transmitting it as
-        the store-hole signal needs a proto field + regen and is a follow-up
-        (see the design doc). Until then the connector treats the whole hit as
-        stored (a covered chunk evicted while covered is re-stored on the next
-        request via the normal store path once observed).
+        ``COVERED_CHUNKS_CONFIG_KEY``: that leading prefix is touched (kept warm)
+        but neither read-locked nor L2-prefetched. Hashes the key, submits a
+        prefetch over the uncovered sub-range ``chunk_hashes[covered_chunks:]``,
+        and registers the job under ``key.request_id`` for later polling via
+        query_prefetch_status.
 
         Args:
             key: Cache key with request_id embedded.
@@ -380,7 +372,6 @@ class LookupModule:
                 cache_salt=key.cache_salt,
             )
         )
-        return
 
     def _touch_covered_prefix(
         self,

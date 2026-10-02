@@ -1165,23 +1165,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         tracker: "LMCacheMPRequestTracker",
     ) -> "tuple[int | None, bool] | None":
-        """Re-look-up the full prefix when the APC hit shrank below the covered
-        boundary.
+        """Fall back to a full lookup from token 0 when the APC hit shrank below
+        the frozen covered boundary (see the design doc for the full rationale).
 
-        The non-pin method does not hold the covered blocks, so the APC hit can
-        shrink while the lookup is in flight. When it drops below the frozen
-        covered boundary, the completed lookup skipped a now-uncovered gap in
-        ``[new_hit, old_covered)``. Rather than chase the moving boundary, drop
-        the stale lookup and fall back to a full lookup from token 0: free the
-        stale lookup's ``[old_covered, ret)`` read locks (the fresh full lookup
-        would otherwise re-lock that overlap and leak one refcount), mark the
-        request ``covered_skip_disabled`` so the next poll submits with
-        ``covered_chunks=0``, and reset the per-lookup state. LMCache then loads
-        full coverage ``[0, ret')`` from the beginning (the covered prefix is
-        kept retrievable by the covered-range touch), and its read locks release
-        through the normal ``update_state_after_alloc`` path because
-        ``lookup_covered_tokens`` is now 0 (no covered-skip elision). Returns
-        ``(None, True)`` so the scheduler re-polls.
+        Frees the stale lookup's ``[c0, ret)`` locks (blocking, so the re-lookup
+        cannot race the release), sets the sticky ``covered_skip_disabled`` so the
+        next poll submits ``covered_chunks=0``, and resets the per-lookup state.
+        Returns ``(None, True)`` to make the scheduler re-poll, or ``None`` when
+        no shrink occurred.
         """
         if not self._skip_covered_lookup or tracker.lookup_covered_tokens <= 0:
             return None
@@ -1196,7 +1187,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         # Blocking free of the stale [c0, ret) locks before the covered=0 re-lookup.
         cached = self.scheduler_adapter.check_lookup_result(request.request_id)
-        hit_tokens = cached.hit_tokens if cached is not None else 0
+        hit_tokens = cached if cached is not None else 0
         if hit_tokens > 0:
             self.scheduler_adapter.free_lookup_locks_blocking(
                 token_ids=tracker.get_token_ids(),
@@ -1309,18 +1300,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             covered_chunks=covered_chunks,
         )
 
-        result = self.scheduler_adapter.check_lookup_result(request.request_id)
-        if result is None:
+        ret = self.scheduler_adapter.check_lookup_result(request.request_id)
+        if ret is None:
             return None, True
         assert tracker.lookup_started_at is not None
         self._connector_stats.record_lookup(
             time.monotonic() - tracker.lookup_started_at
         )
         tracker.lookup_started_at = None
-
-        # hit_tokens: servable prefix (need_to_load); stored_tokens: persisted prefix.
-        ret = result.hit_tokens
-        stored = result.stored_tokens
 
         # Save the vLLM hit count even when LMCache misses. It is rounded
         # down to a boundary aligned for every engine group (a full-prompt
@@ -1342,8 +1329,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
-        # Contiguous persisted prefix (currently equals the hit).
-        tracker.num_stored_tokens = stored
+        tracker.num_stored_tokens = ret
         tracker.num_lmcache_hit_tokens = ret
 
         need_to_load = max(0, ret - num_computed_tokens)
