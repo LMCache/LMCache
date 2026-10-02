@@ -46,6 +46,18 @@ class Session:
     prefetch_locked_gids: tuple = ()
     prefetch_group_windows: tuple[int, ...] = ()
     extras: dict[str, Any] = field(default_factory=dict)
+    # End token offset of the last range the engine actually looked up, i.e.
+    # the prompt. Set only by ``begin_lookup``; ``lookup_ipc_key`` cannot serve
+    # here because a session that stores before it ever looks up gets that
+    # field filled from a store key, whose range is one 2048-token slice
+    # rather than the whole prefix.
+    lookup_end: int = 0
+    # Furthest token offset this session has resolved object keys for, i.e.
+    # how far its KV actually reached L1. Stores advance it as the answer is
+    # generated, so at ``end_session`` it marks the end of the last full chunk
+    # the request committed to the cache -- the only place a commit may anchor
+    # a window, since nothing past it exists to copy.
+    resolved_end: int = 0
     _lookup_generation: int = field(default=0, repr=False)
     _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
         default_factory=set, repr=False
@@ -60,6 +72,20 @@ class Session:
         """
         with self._lock:
             self.token_ids = full_token_ids
+
+    def note_resolved(self, end: int) -> None:
+        """Record that object keys were resolved up to ``end``.
+
+        Monotonic: several workers resolve the same request's ranges
+        concurrently and in any order, and a repeated or older range must not
+        pull the mark back.
+
+        Args:
+            end: Token offset just past the resolved range.
+        """
+        with self._lock:
+            if end > self.resolved_end:
+                self.resolved_end = end
 
     @overload
     def get_hashes(self, start: int, end: int) -> list: ...
@@ -149,6 +175,7 @@ class Session:
         """Record a new lookup and reset its per-lookup release state."""
         with self._lock:
             self.lookup_ipc_key = key
+            self.lookup_end = key.end
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
             self.prefetch_group_windows = group_windows
