@@ -11,6 +11,10 @@ a workload owns its requests and assertions.
 - `high-concurrency.sh`: concurrent random-prefill completion validation.
 - `deadlock.sh`: high-concurrency deadlock regression.
 - `long-doc-qa-l2.sh`: L2 restart, data-flow, and performance validation.
+  Its checks live in `long-doc-qa-l2-verify.sh`, which is not a workload: it
+  runs every check before exiting so a threshold failure still leaves the
+  `/metrics` snapshot and a per-check summary in `RESULTS_DIR`, and it runs
+  on CPU with stub inputs (`tests/tools/test_long_doc_qa_l2_verify.py`).
 - `restart-recovery.sh`: LMCache server restart and worker re-registration.
 - `http-api.sh`: LMCache HTTP API and CLI coverage with a live engine.
 
