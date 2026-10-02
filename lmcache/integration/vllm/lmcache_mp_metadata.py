@@ -77,6 +77,12 @@ class LMCacheMPRequestTracker:
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
+    # APC-covered boundary in tokens, frozen at lookup submit.
+    lookup_covered_tokens: int = 0
+
+    # Sticky: after a shrink, the request looks up the full prefix from token 0.
+    covered_skip_disabled: bool = False
+
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
     def __init__(self, request: "Request"):
@@ -92,6 +98,8 @@ class LMCacheMPRequestTracker:
         self.num_stored_tokens = 0
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
+        self.lookup_covered_tokens = 0
+        self.covered_skip_disabled = False
         self.state = LMCacheMPRequestState.PREFETCHING
         self.mm_adjusted_prompt_ids = []
         mm_hashes, mm_positions = extract_mm_features(request)
