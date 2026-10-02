@@ -1394,6 +1394,9 @@ class L1Manager:
                     "l1_tag": m.config.tag,
                     "backend": "gds"
                     if m.config.gds_l1_config
+                    else "dram+devdax"
+                    if m.config.memory_config.devdax_path
+                    and m.config.memory_config.devdax_size_in_bytes
                     else "devdax"
                     if m.config.memory_config.devdax_path
                     else "dram",
