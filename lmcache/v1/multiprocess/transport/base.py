@@ -249,6 +249,35 @@ class RequestClient(Protocol):
         self, request: ServerModuleCallRequest
     ) -> MessagingFuture[ServerModuleCallResponse]: ...
 
+    @rpc_method
+    def register_hidden_state(
+        self,
+        instance_id: int,
+        model_name: str,
+        world_size: int,
+        num_layers: int,
+        hidden_size: int,
+        dtype_name: str,
+    ) -> MessagingFuture[bool]: ...
+
+    @rpc_method
+    def unregister_hidden_state(self, instance_id: int) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def lookup_hidden_state(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> MessagingFuture[int]: ...
+
+    @rpc_method
+    def store_hidden_state(
+        self, key: IPCCacheServerKey, instance_id: int, cpu_data: bytes
+    ) -> MessagingFuture[bool]: ...
+
+    @rpc_method
+    def retrieve_hidden_state(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> MessagingFuture[tuple[bytes, int]]: ...
+
     # Deprecated alias (#4878), frozen: new params go on cb_register_rope.
     def cb_register_rope_v3(
         self,
