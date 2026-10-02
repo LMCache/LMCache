@@ -215,6 +215,7 @@ The operator always injects these into the pod spec:
 - **`NVIDIA_VISIBLE_DEVICES=all`** — gives the engine access to all GPUs on the node for CUDA IPC and custom data transfer kernels without claiming any via `nvidia.com/gpu` resource requests (which would make those GPUs unavailable to the serving engine). The combination of `runtimeClassName: nvidia` + `NVIDIA_VISIBLE_DEVICES=all` lets the container see all GPUs without consuming device-plugin resources, so the serving engine (e.g., vLLM) can still request all GPUs on the node. On most clusters this is sufficient; on some, the engine cannot see the GPUs unless the pod is also privileged — set `spec.privileged: true` to run the engine container privileged (default `false`).
 - **`NVIDIA_VISIBLE_DEVICES=all`** and **`NVIDIA_DRIVER_CAPABILITIES=all`** — env vars that instruct the NVIDIA container runtime to expose all GPUs and all driver capabilities to the container.
 - **`--host 0.0.0.0`** — always passed as a container arg. The server defaults to `--host localhost` which only binds to loopback; the server must bind to all interfaces so the node-local Service can route traffic to it.
+- **`--http-host 0.0.0.0`** — always passed, for the same reason: the server binds its HTTP frontend (`/status`, `/metrics`, cache admin) to `127.0.0.1` by default, which would leave the Service's `http` port unreachable. That frontend is unauthenticated; to keep it pod-local, set `extraArgs: ["--http-host", "127.0.0.1"]` (extra args are appended last and win).
 - **No `hostNetwork`** — the operator does **not** use `hostNetwork`. Instead, it creates a ClusterIP Service with `internalTrafficPolicy=Local`. kube-proxy ensures that traffic to the service is routed only to the LMCache pod on the same node. This avoids occupying host ports and reduces the privileged surface area.
 - **No `/dev/shm` emptyDir mount on the engine** — in legacy mode (`isolatedIPC: false`) the operator intentionally never mounts an emptyDir at `/dev/shm`: it would shadow the host's `/dev/shm` with a private tmpfs, breaking CUDA IPC (`cudaIpcOpenMemHandle` fails because IPC handles written by one pod are invisible to others). Under isolated IPC the engine pod simply has no `/dev/shm` volume; only webhook-injected vLLM pods get a private emptyDir there (their own workers need it).
 
@@ -384,7 +385,7 @@ OnEvent(LMCacheEngine create/update/delete):
    - memoryLimit = ceil(memoryRequest * 1.5) Gi
    - containerArgs from all spec fields
 3. RECONCILE DaemonSet (CreateOrUpdate, ownerRef)
-   - Always inject: the lmcache-dev-shm hostPath mount (or hostIPC when spec.hostIPC=true), runtimeClassName: nvidia, NVIDIA_VISIBLE_DEVICES=all, --host 0.0.0.0 (privileged only when spec.privileged=true)
+   - Always inject: the lmcache-dev-shm hostPath mount (or hostIPC when spec.hostIPC=true), runtimeClassName: nvidia, NVIDIA_VISIBLE_DEVICES=all, --host 0.0.0.0, --http-host 0.0.0.0 (privileged only when spec.privileged=true)
 4. RECONCILE node-local lookup Service (internalTrafficPolicy=Local)
 5. RECONCILE headless Service for metrics
 6. RECONCILE connection ConfigMap

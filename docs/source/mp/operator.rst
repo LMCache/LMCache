@@ -831,6 +831,10 @@ The operator always injects these into the pod spec:
   for ``gpuVendor: amd``); the mount is then omitted.
 - **--host 0.0.0.0** -- Binds the server to all interfaces so the node-local
   Service can route to it.
+- **--http-host 0.0.0.0** -- Binds the HTTP frontend (``/status``, ``/metrics``,
+  cache admin) to all interfaces so the Service's ``http`` port reaches it. The
+  frontend is unauthenticated; to keep it pod-local, pass
+  ``--http-host 127.0.0.1`` in ``spec.extraArgs``.
 - **NVIDIA_VISIBLE_DEVICES=all** -- Ensures GPU access for IPC-based memory
   transfers.
 - **NVIDIA_DRIVER_CAPABILITIES=all** -- Exposes all driver capabilities

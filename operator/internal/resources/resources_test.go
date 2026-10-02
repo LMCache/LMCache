@@ -248,6 +248,7 @@ func TestBuildContainerArgs_Defaults(t *testing.T) {
 	args := BuildContainerArgs(spec)
 
 	assertArg(t, args, "--host", "0.0.0.0")
+	assertArg(t, args, "--http-host", "0.0.0.0")
 	assertArg(t, args, "--port", "5555")
 	assertArg(t, args, "--l1-size-gb", "10.0")
 	assertArg(t, args, "--chunk-size", "256")

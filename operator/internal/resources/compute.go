@@ -54,6 +54,7 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 	args := []string{
 		"--host", "0.0.0.0",
 		"--port", fmt.Sprintf("%d", derefInt32(getServerPort(spec), 5555)),
+		"--http-host", "0.0.0.0",
 		"--http-port", fmt.Sprintf("%d", getHTTPPort(spec)),
 		"--l1-size-gb", fmt.Sprintf("%.1f", spec.L1.SizeGB),
 		"--chunk-size", fmt.Sprintf("%d", getChunkSize(spec)),

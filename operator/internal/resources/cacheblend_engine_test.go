@@ -64,6 +64,7 @@ func TestBuildCBEngineArgs_BlendFlags(t *testing.T) {
 
 	// Standard server args carried over.
 	assertArg(t, args, "--host", "0.0.0.0")
+	assertArg(t, args, "--http-host", "0.0.0.0")
 	assertArg(t, args, "--port", "5555")
 	assertArg(t, args, "--hash-algorithm", "blake3")
 }
