@@ -88,7 +88,42 @@ class DeviceIPCWrapper:
 
     @classmethod
     def _get_device_index_from_uuid(cls, device_uuid: str) -> int:
-        """Get the physical device ordinal from its UUID."""
+        """Get the physical device ordinal from its UUID.
+
+        Args:
+            device_uuid: the UUID of the device to resolve, as carried in an
+                inter-process device handle received from a peer process.
+
+        Returns:
+            The physical device ordinal for ``device_uuid`` on this host.
+
+        Raises:
+            RuntimeError: if this process has no accelerator devices available
+                (e.g. a device-incapable process that received an IPC handle
+                from an accelerator worker); the message points at the two
+                supported topologies -- giving the receiving process visibility
+                of the same devices, or using ``engine_driven`` transfer so the
+                sending client does the device-side copy. Also raised if a
+                device is available but ``device_uuid`` is not among the
+                discovered devices.
+        """
+        # A device-incapable process (e.g. one started without accelerator
+        # visibility) can never resolve a peer's device IPC handle. Fail with
+        # actionable guidance instead of the generic "not found" below, which
+        # misleads operators into checking device visibility when the real fix
+        # may be the transfer mode. This layer is engine-agnostic, so the
+        # message names neither a specific engine, process role, nor config
+        # keys. See #4186.
+        if not torch_dev.is_available():
+            raise RuntimeError(
+                "This process cannot access the accelerator device "
+                f"referenced by this IPC handle (device {device_uuid}); "
+                "no accelerator devices are available. Ensure the receiving "
+                "process can see the same accelerator devices, or configure "
+                "the MP deployment to use engine_driven transfer so the "
+                "sending client performs the device-side copy."
+            )
+
         cls._discover_devices()
 
         with DeviceIPCWrapper._device_mapping_lock:
