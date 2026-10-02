@@ -2732,10 +2732,11 @@ def _make_raw_block_backend(
 
 
 @pytest.mark.no_shared_allocator
-def test_rust_raw_block_backend_rejects_worker_failure_without_retaining_objects(
+def test_rust_raw_block_backend_skips_failed_worker_without_retaining_objects(
     monkeypatch: pytest.MonkeyPatch,
     loop_in_thread: asyncio.AbstractEventLoop,
 ) -> None:
+    """Skipping a failed worker preserves the caller's object references."""
     _install_fake_raw_block_device(monkeypatch, size_bytes=64 * 1024 * 1024)
     allocator = AdHocMemoryAllocator(device="cpu")
     backend = _make_raw_block_backend(
@@ -2750,8 +2751,7 @@ def test_rust_raw_block_backend_rejects_worker_failure_without_retaining_objects
             "worker_error",
             return_value="io_uring worker submission failed: test error",
         ):
-            with pytest.raises(RuntimeError, match="worker submission failed"):
-                backend.batched_submit_put_task([key], [memory_obj])
+            assert backend.batched_submit_put_task([key], [memory_obj]) is None
             assert not backend.contains(key)
             assert not backend.exists_in_put_tasks(key)
             assert memory_obj.get_ref_count() == ref_count

@@ -2,8 +2,8 @@
 
 use super::{
     check_nvme_ioctl_result, fail_submissions, placement_id_to_u16, prepare_iouring_write_buffer,
-    record_submission_result, RawBlockDevice, SubmissionRetry, UringNotify, SUBMISSION_RETRY_INITIAL_DELAY,
-    SUBMISSION_RETRY_MAX_DELAY, SUBMISSION_STALL_TIMEOUT,
+    record_submission_result, RawBlockDevice, SubmissionRetry, UringNotify,
+    SUBMISSION_RETRY_INITIAL_DELAY, SUBMISSION_RETRY_MAX_DELAY, SUBMISSION_STALL_TIMEOUT,
 };
 use pyo3::prelude::*;
 use std::collections::VecDeque;
