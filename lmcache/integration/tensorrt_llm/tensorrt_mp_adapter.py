@@ -382,7 +382,19 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             )
 
     def start_load_kv(self, stream: torch_dev.Stream) -> None:
-        """Send ``RETRIEVE`` requests for each pending load."""
+        """Retrieve complete LMCache chunks for each pending load.
+
+        Block IDs are trimmed to the key's aligned token range without changing
+        the bound metadata. Requests without a complete chunk are skipped;
+        undersized block lists still reach the server's validation.
+
+        Args:
+            stream: Device stream recorded in the transfer synchronization event.
+
+        Raises:
+            RuntimeError: KV caches are not registered, or a retrieve fails or
+                reports that the requested blocks were not loaded.
+        """
         meta: Optional[LMCacheMPConnectorMetadata] = self._metadata
         if meta is None or not meta.loads:
             return
@@ -446,7 +458,19 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         pass
 
     def wait_for_save(self, stream: torch_dev.Stream) -> None:
-        """Send ``STORE`` requests for each pending save."""
+        """Store complete LMCache chunks for each pending save.
+
+        Block IDs are trimmed to the key's aligned token range without changing
+        the bound metadata. Requests without a complete chunk are skipped;
+        undersized block lists still reach the server's validation. Store
+        failures are logged so inference can continue without cached blocks.
+
+        Args:
+            stream: Device stream recorded in the transfer synchronization event.
+
+        Raises:
+            RuntimeError: KV caches are not registered for a pending save.
+        """
         meta: Optional[LMCacheMPConnectorMetadata] = self._metadata
         if meta is None or not meta.saves:
             return

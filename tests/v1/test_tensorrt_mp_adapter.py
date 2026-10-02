@@ -3,19 +3,34 @@
 
 # Standard
 from types import ModuleType, SimpleNamespace
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Iterator, cast
 from unittest.mock import MagicMock
 import importlib
 import sys
 
 # Third Party
+from transformers import AutoConfig
 import pytest
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.integration.tensorrt_llm.tensorrt_mp_adapter import (
+        LMCacheMPKvConnectorWorker,
+    )
 
 
 def _make_worker(
-    trt_mp_module: Any, monkeypatch: pytest.MonkeyPatch
-) -> tuple[Any, MagicMock, MagicMock, MagicMock]:
-    """Register a worker through public APIs with stubbed device IPC."""
+    trt_mp_module: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> tuple["LMCacheMPKvConnectorWorker", MagicMock, MagicMock, MagicMock]:
+    """Register a worker through public APIs with stubbed device IPC.
+
+    Args:
+        trt_mp_module: Adapter module imported with the optional TRT-LLM API stubbed.
+        monkeypatch: Fixture that restores the request client and device IPC patches.
+
+    Returns:
+        The registered worker, request client, event backend, and transfer event.
+    """
     module = trt_mp_module
     monkeypatch.setenv("LMCACHE_MQ_TIMEOUT", "5")
     monkeypatch.setattr(
@@ -35,10 +50,9 @@ def _make_worker(
         pipeline_parallel_size=1,
         model="test-model",
     )
-    worker = module.LMCacheMPKvConnectorWorker(llm_args)
-    # Third Party
-    from transformers import AutoConfig
-
+    worker = cast(
+        "LMCacheMPKvConnectorWorker", module.LMCacheMPKvConnectorWorker(llm_args)
+    )
     monkeypatch.setattr(
         AutoConfig,
         "from_pretrained",
@@ -73,7 +87,7 @@ def _successful_transfer_future(name: str) -> MagicMock:
 
 
 @pytest.fixture
-def trt_mp_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+def trt_mp_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[ModuleType]:
     """Import the adapter with its optional TensorRT-LLM API stubbed."""
 
     class _ConnectorBase:
@@ -120,7 +134,7 @@ def trt_mp_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
 
 
 def test_failed_retrieve_waits_for_device_result_and_fails_closed(
-    trt_mp_module: Any,
+    trt_mp_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A False device transfer result cannot be treated as a loaded KV hit."""
@@ -152,7 +166,7 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
 
 
 def test_store_wait_retains_event_on_raw_future(
-    trt_mp_module: Any,
+    trt_mp_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A timed store keeps its exported event alive on the raw future."""
@@ -195,7 +209,7 @@ def test_store_wait_retains_event_on_raw_future(
     ],
 )
 def test_transfer_block_ids_match_key_range(
-    trt_mp_module: Any,
+    trt_mp_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
     token_count: int,
     block_count: int,
