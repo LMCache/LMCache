@@ -1080,10 +1080,11 @@ class TestStorageManagerGroupedRows:
         assert sm.delete_l1_keys(retained) == (len(retained), 0)
         sm.close()
 
-    def test_full_policy_two_groups_keep_gaps_per_group(
+    def test_full_policy_two_groups_whole_columns_only(
         self, basic_storage_manager_config, basic_layout
     ):
-        """``"full"`` reports every resident key per group, gaps included."""
+        """``"full"`` counts a chunk only when every group holds it; the
+        gapped residents are reported in ``found_cells``, not as hits."""
         sm = StorageManager(basic_storage_manager_config)
         g0_keys = [make_object_key(c) for c in range(3)]
         g1_keys = [make_object_key(10 + c) for c in range(3)]
@@ -1107,9 +1108,10 @@ class TestStorageManagerGroupedRows:
         )
         found = sm.query_prefetch_status(handle)
         assert found is not None
-        assert [row.get_indices_list() for row in found.hit_cells] == [[1], [0, 2]]
+        assert [row.get_indices_list() for row in found.hit_cells] == [[], []]
+        assert found.found_cells is not None
+        assert [row.get_indices_list() for row in found.found_cells] == [[1], [0, 2]]
 
-        sm.finish_read_prefetched(resident)
         sm.close()
 
 
