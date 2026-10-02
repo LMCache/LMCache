@@ -10,6 +10,7 @@ import time
 # Third Party
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
+    BlockRemoved,
     BlockStored,
     KVCacheEvent,
     KVConnectorKVEvents,
@@ -72,6 +73,7 @@ from lmcache.integration.vllm.utils import (
     mla_only,
     vllm_layout_hints,
 )
+from lmcache.utils import CacheRemoveEvent
 from lmcache.utils import init_logger as lmcache_init_logger
 
 try:
@@ -137,16 +139,23 @@ class LMCacheMPKVEvents(KVConnectorKVEvents):
 
     def __init__(self, num_workers: int) -> None:
         self._aggregator = KVEventAggregator(num_workers)
+        self._batches: list[list[KVCacheEvent]] = []
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
         """Add events from one worker."""
         self._aggregator.add_events(events)
+        self._batches.append(list(events))
 
     def aggregate(self) -> "LMCacheMPKVEvents":
-        """Retain only events seen from every contributing worker."""
-        common_events = self._aggregator.get_common_events()
+        """Keep all pollers' events, preserving transitions within each batch."""
+        remaining = set(self._aggregator.get_all_events())
+        merged: list[KVCacheEvent] = []
+        for events in self._batches:
+            merged.extend(event for event in events if event in remaining)
+            remaining.difference_update(events)
+        self._batches = [merged] if merged else []
         self._aggregator.clear_events()
-        self._aggregator.add_events(common_events)
+        self._aggregator.add_events(merged)
         self._aggregator.reset_workers()
         return self
 
@@ -155,8 +164,8 @@ class LMCacheMPKVEvents(KVConnectorKVEvents):
         self._aggregator.increment_workers(count)
 
     def get_all_events(self) -> list[KVCacheEvent]:
-        """Return all buffered events."""
-        return self._aggregator.get_all_events()
+        """Return all buffered events in worker order."""
+        return [event for batch in self._batches for event in batch]
 
     def get_number_of_workers(self) -> int:
         """Return the number of contributing workers."""
@@ -166,6 +175,7 @@ class LMCacheMPKVEvents(KVConnectorKVEvents):
         """Clear buffered events and reset the worker count."""
         self._aggregator.clear_events()
         self._aggregator.reset_workers()
+        self._batches.clear()
 
 
 # Helper functions
@@ -704,7 +714,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
-            self._kv_cache_events: LMCacheMPKVEvents | None = None
+            # Worker events aggregated per step, awaiting take_events().
+            self._kv_cache_events: list[KVCacheEvent] = []
 
             # Align-mode Mamba keeps one speculative block per draft token at
             # the tail of a request's block list.
@@ -1073,8 +1084,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """Return worker-side KV cache events collected since the last step.
 
         Returns:
-            A vLLM KV event container with completed LMCache store events, or
-            None when disabled or when no store completed.
+            A vLLM KV event container with ``BlockStored`` events for LMCache
+            stores (own completed stores and stores learned from the MP
+            server) and ``BlockRemoved`` events for CPU evictions, or None
+            when disabled or when nothing happened.
         """
         if not self._enable_kv_events:
             return None
@@ -1082,21 +1095,27 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if not events:
             return None
 
-        blocks = [
-            BlockStored(
-                block_hashes=[
-                    _convert_kv_event_hash(block_hash)
-                    for block_hash in event.block_hashes
-                ],
-                parent_block_hash=_convert_kv_event_hash(event.parent_block_hash),
-                token_ids=event.token_ids,
-                lora_id=event.lora_id,
-                block_size=event.block_size,
-                medium=event.medium,
-                lora_name=event.lora_name,
+        blocks: list[KVCacheEvent] = []
+        for event in events:
+            block_hashes = [
+                _convert_kv_event_hash(block_hash) for block_hash in event.block_hashes
+            ]
+            if isinstance(event, CacheRemoveEvent):
+                blocks.append(
+                    BlockRemoved(block_hashes=block_hashes, medium=event.medium)
+                )
+                continue
+            blocks.append(
+                BlockStored(
+                    block_hashes=block_hashes,
+                    parent_block_hash=_convert_kv_event_hash(event.parent_block_hash),
+                    token_ids=event.token_ids,
+                    lora_id=event.lora_id,
+                    block_size=event.block_size,
+                    medium=event.medium,
+                    lora_name=event.lora_name,
+                )
             )
-            for event in events
-        ]
         kv_events = LMCacheMPKVEvents(num_workers=1)
         kv_events.add_events(blocks)
         return kv_events
@@ -1436,13 +1455,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         kv_cache_events = connector_output.kv_cache_events
         if kv_cache_events and isinstance(kv_cache_events, LMCacheMPKVEvents):
-            if self._kv_cache_events is None:
-                self._kv_cache_events = kv_cache_events
-            else:
-                self._kv_cache_events.add_events(kv_cache_events.get_all_events())
-                self._kv_cache_events.increment_workers(
-                    kv_cache_events.get_number_of_workers()
-                )
+            # One aggregated batch per step keeps the workers' event order.
+            self._kv_cache_events.extend(kv_cache_events.aggregate().get_all_events())
 
         if not self.lazy_offload:
             return
@@ -1526,14 +1540,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         Take the KV cache events from the connector.
 
-        Yields:
-            New KV cache events since the last call.
+        Returns:
+            The KV cache events collected since the last call, in the order
+            the workers reported them. The buffer is cleared.
         """
-        if self._kv_cache_events is not None:
-            self._kv_cache_events.aggregate()
-            yield from self._kv_cache_events.get_all_events()
-            self._kv_cache_events.clear_events()
-            self._kv_cache_events = None
+        events = self._kv_cache_events
+        self._kv_cache_events = []
+        return events
 
     def has_pending_push_work(self) -> bool:
         """Return whether vLLM should keep stepping for pending push work.

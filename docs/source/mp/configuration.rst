@@ -166,6 +166,15 @@ Source: ``lmcache/v1/multiprocess/config.py``
        ``""`` (empty string, default): SHM disabled; KV transfer uses
        the pickle path.  Any other value: create a SHM pool and use
        that exact name for its segment.
+   * - ``--kv-event-log-size``
+     - ``32768``
+     - CPU store-completion and eviction records retained for subscriptions
+       and reconnects. Workers receive pushes over ZMQ or gRPC and republish
+       them as KV events. ``0`` disables the channel and its capability
+       advertisement. Requires the observability event
+       bus, which ``--disable-observability`` turns off. Workers subscribe
+       automatically when vLLM KV events are enabled and the server advertises
+       support; otherwise they report only their own completed stores.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at

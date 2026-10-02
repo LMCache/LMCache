@@ -125,6 +125,9 @@ class MPServerConfig:
     """List of experimental transfer modules to enable. Options: transfer_query
     (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
 
+    kv_event_log_size: int = 32768
+    """CPU store/eviction records retained for KV-event subscribers; 0 disables it."""
+
     null_block_id: int = 0
     """Engine block ID that denotes absent KV data. The default ``0`` keeps
     compatibility with vLLM; engines where block zero is valid can select a
@@ -523,6 +526,13 @@ def add_mp_server_args(
         "Options: transfer_query (see lmcache.v1.multiprocess.modules."
         "experimental.__init___.py).",
     )
+    mp_group.add_argument(
+        "--kv-event-log-size",
+        type=int,
+        default=MPServerConfig.kv_event_log_size,
+        help="CPU store/eviction records retained for KV-event subscribers. "
+        "0 disables the channel. Default is %(default)s.",
+    )
     return parser
 
 
@@ -574,6 +584,7 @@ def parse_args_to_mp_server_config(
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
+        kv_event_log_size=args.kv_event_log_size,
     )
 
 

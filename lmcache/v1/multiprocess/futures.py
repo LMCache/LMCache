@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Callable, Iterator
 from typing import Any, Generic, Optional, TypeVar, cast
 import threading
 
@@ -13,6 +14,46 @@ from lmcache.v1.platform.base.event_ipc import (
 )
 
 T = TypeVar("T")
+
+
+class MessagingStream(Iterator[T]):
+    """A cancellable response iterator with transport-provided blocking reads.
+
+    ``read`` waits for a response or raises StopIteration. ``close`` wakes
+    that read through the supplied cancellation callback; it is idempotent.
+    No timer or polling thread is owned by this object.
+    """
+
+    def __init__(
+        self, read: Callable[[threading.Event], T], cancel: Callable[[], None]
+    ) -> None:
+        self._read = read
+        self._closed = threading.Event()
+        self._lock = threading.Lock()
+        self._callbacks = [cancel]
+
+    def __next__(self) -> T:
+        if self._closed.is_set():
+            raise StopIteration
+        return self._read(self._closed)
+
+    def add_close_callback(self, callback: Callable[[], None]) -> None:
+        """Run callback on cancellation, or immediately if already closed."""
+        with self._lock:
+            if not self._closed.is_set():
+                self._callbacks.append(callback)
+                return
+        callback()
+
+    def close(self) -> None:
+        """Cancel the stream and unblock its reader without waiting for data."""
+        with self._lock:
+            if self._closed.is_set():
+                return
+            self._closed.set()
+            callbacks, self._callbacks = self._callbacks, []
+        for callback in callbacks:
+            callback()
 
 
 class MessagingFuture(Generic[T]):

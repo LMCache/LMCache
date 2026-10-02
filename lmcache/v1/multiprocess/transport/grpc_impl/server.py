@@ -16,6 +16,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
+from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import (
     BoundRequestHandler,
     HandlerType,
@@ -71,11 +72,49 @@ class _GeneratedServicer:
         self._affinity_submit_lock = affinity_submit_lock
         self._sync_handler_lock = sync_handler_lock
 
-    def __getattr__(self, method_name: str) -> Callable[[Any, Any], Any]:
+    def __getattr__(self, method_name: str) -> Callable[..., Any]:
         full_name = f"{self._binding.descriptor.full_name}.{method_name}"
         handler = self._handlers.get(full_name)
         if handler is None:
             raise AttributeError(method_name)
+
+        if self._binding.descriptor.methods_by_name[method_name].server_streaming:
+
+            def subscribe(
+                request: Any, context: grpc.ServicerContext, send: Callable
+            ) -> None:
+                try:
+                    stream = self._dispatch(handler, request, context)
+                except ValueError as exc:
+                    context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+                    return
+                if not context.add_callback(stream.close):
+                    stream.close()
+                    return
+
+                def forward() -> None:
+                    try:
+                        for response in stream:
+                            send(handler.response_encoder(response))
+                    except Exception as exc:
+                        if context.is_active():
+                            logger.exception(
+                                "Error in streaming handler %s", handler.operation
+                            )
+                            context.set_code(grpc.StatusCode.INTERNAL)
+                            context.set_details(str(exc))
+                    finally:
+                        stream.close()
+                        send(None)
+
+                # The same nonblocking hook used by grpc.health.v1.Health.Watch:
+                # an idle stream must not occupy the unary request executor.
+                threading.Thread(
+                    target=forward, daemon=True, name="grpc-event-stream"
+                ).start()
+
+            subscribe.experimental_non_blocking = True  # type: ignore[attr-defined]
+            return subscribe
 
         def invoke(request: Any, context: grpc.ServicerContext) -> Any:
             return self._dispatch(handler, request, context)
@@ -118,6 +157,8 @@ class _GeneratedServicer:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"
                 )
+            if isinstance(result, MessagingStream):
+                return result
             return registered.response_encoder(result)
         except NotImplementedError as exc:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))

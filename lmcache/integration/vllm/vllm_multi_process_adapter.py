@@ -26,6 +26,8 @@ from lmcache.integration.vllm.mp_server_launcher import (
 )
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import (
+    CacheEvent,
+    CacheRemoveEvent,
     CacheStoreEvent,
     EngineType,
     _lmcache_nvtx_annotate,
@@ -33,10 +35,15 @@ from lmcache.utils import (
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
+    KV_EVENT_CAPABILITY,
+    KV_EVENT_KIND_REMOVED,
+    KV_EVENT_KIND_STORED,
     BlockAllocationRecord,
     IPCCacheServerKey,
+    KVEventBatch,
+    KVEventRecord,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
@@ -60,20 +67,34 @@ logger = init_logger(__name__)
 # Export through vLLM's multiprocess Prometheus registry, independently of drains.
 _KV_EVENTS_BUFFERED = Gauge(
     "vllm:lmcache_mp_kv_events_buffered",
-    "Completed MP store events waiting for vLLM to drain them.",
+    "MP KV events waiting for vLLM to drain them.",
     ["model_name", "worker_id"],
     multiprocess_mode="livesum",
 )
 _KV_EVENTS_GENERATED = Counter(
     "vllm:lmcache_mp_kv_events_generated_total",
-    "Completed MP store events added to the worker buffer.",
+    "KV events (own completed stores, and store/removal records streamed from "
+    "the MP server) added to the worker buffer.",
     ["model_name", "worker_id"],
 )
 _KV_EVENTS_DRAINED = Counter(
     "vllm:lmcache_mp_kv_events_drained_total",
-    "MP store events drained from the worker buffer by vLLM.",
+    "KV events drained from the worker buffer by vLLM.",
     ["model_name", "worker_id"],
 )
+_KV_EVENT_BATCHES = Counter(
+    "vllm:lmcache_mp_kv_event_batches_total",
+    "Batches received from the MP server's cache-event stream.",
+    ["model_name", "worker_id"],
+)
+_KV_EVENT_RESYNCS = Counter(
+    "vllm:lmcache_mp_kv_event_resyncs_total",
+    "Times the worker withdrew every announced LMCache placement because the "
+    "server's cache-event log could not be followed exactly.",
+    ["model_name", "worker_id", "reason"],
+)
+# Maximum records in each pushed batch.
+_KV_EVENT_BATCH_SIZE = 1024
 
 
 class ExtraConfigDefault(enum.Enum):
@@ -409,6 +430,16 @@ class ParallelStrategy:
     def kv_tp_size(self) -> int:
         """Tensor-parallel size as seen from a single LMCache server."""
         return self.tp_size // self.n_servers
+
+    @property
+    def ranks_per_server(self) -> int:
+        """Workers assigned to one MP server in a contiguous rank block."""
+        return max(1, self.vllm_world_size // self.n_servers)
+
+    @property
+    def is_kv_event_subscriber(self) -> bool:
+        """Whether this is the first rank attached to its MP server."""
+        return self.vllm_worker_id % self.ranks_per_server == 0
 
     @property
     def is_kv_writer(self) -> bool:
@@ -1441,13 +1472,27 @@ class LMCacheMPWorkerAdapter:
             else None
         )
         self._pending_store_kv_events: dict[str, list[CacheStoreEvent]] = {}
-        self._kv_events: list[CacheStoreEvent] = []
+        self._kv_events: list[CacheEvent] = []
+        self._kv_event_lock = threading.RLock()
+        self._kv_event_server_source = False
+        self._kv_event_subscriber = False
+        self._kv_event_incarnation: int | None = None
+        self._kv_event_stream: MessagingStream[KVEventBatch] | None = None
+        self._kv_event_receiver: threading.Thread | None = None
+        self._kv_event_stop = threading.Event()
+        # CPU chunks this worker has announced and not withdrawn.
+        self._announced_kv_hashes: set[bytes] = set()
         if enable_kv_events:
             labels = (model_name, parallel_strategy.vllm_worker_id)
             self._kv_events_buffered = _KV_EVENTS_BUFFERED.labels(*labels)
             self._kv_events_generated = _KV_EVENTS_GENERATED.labels(*labels)
             self._kv_events_drained = _KV_EVENTS_DRAINED.labels(*labels)
             self._kv_events_buffered.set(0)
+            self._kv_event_batches = _KV_EVENT_BATCHES.labels(*labels)
+            self._kv_event_resyncs = {
+                reason: _KV_EVENT_RESYNCS.labels(*labels, reason)
+                for reason in ("server_restart", "events_lost", "stream_closed")
+            }
         if lmcache_tokens_per_chunk % vllm_block_size != 0:
             raise ValueError(
                 f"LMCache chunk size {lmcache_tokens_per_chunk} must be a "
@@ -1461,6 +1506,7 @@ class LMCacheMPWorkerAdapter:
         self.experimental: set[str] = get_experimental(
             self.req_client, timeout=self._mq_timeout
         )
+        self._resolve_kv_event_source(enable_kv_events, parallel_strategy)
         self.dispatcher: "Dispatcher | None" = None
 
         # Health state (shared with heartbeat thread)
@@ -1631,7 +1677,7 @@ class LMCacheMPWorkerAdapter:
             ) from None
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat thread on first store/retrieve.
+        """Lazily start the heartbeat on first store, retrieve, or event poll.
 
         The heartbeat starts healthy (the event was set at construction). A
         live worker pings every interval, refreshing its server-side
@@ -1804,7 +1850,13 @@ class LMCacheMPWorkerAdapter:
         self.store_futures[request_id] = future
         if event is not None:
             self.store_events[request_id] = event
-        if self._kv_events_enabled:
+        if self._kv_events_enabled and not self._kv_event_server_source:
+            # Own completion events are the fallback when the server's
+            # cache-event log is not the source. A successful store result
+            # only means the request completed without a fatal error: chunks
+            # the server could not reserve are skipped silently, so when the
+            # log is the source, its write-finished records announce exactly
+            # the chunks written.
             self._pending_store_kv_events.setdefault(request_id, []).extend(
                 self._build_store_kv_events(key)
             )
@@ -2255,21 +2307,27 @@ class LMCacheMPWorkerAdapter:
         self._completed_store_requests = {}
         return completed_store_requests
 
-    def get_kv_events(self) -> list[CacheStoreEvent]:
-        """Return completed store events since the last call.
+    def get_kv_events(self) -> list[CacheEvent]:
+        """Drain buffered CPU events in order, starting the subscription if needed.
 
-        Returns:
-            A list of LMCache cache-store events for stores that completed
-            successfully. Returns an empty list when KV events are disabled or
-            no new store completed.
+        Server events arrive independently of vLLM model steps. vLLM still
+        controls when this buffer is drained and published to the router.
         """
-        if not self._kv_events_enabled or not self._kv_events:
+        if not self._kv_events_enabled:
             return []
-        events = self._kv_events
-        self._kv_events = []
-        self._kv_events_drained.inc(len(events))
-        self._kv_events_buffered.set(0)
-        return events
+        self._ensure_heartbeat_started()
+        with self._kv_event_lock:
+            if self._kv_event_subscriber and self._kv_event_receiver is None:
+                self._kv_event_receiver = threading.Thread(
+                    target=self._receive_kv_events,
+                    daemon=True,
+                    name="lmcache-kv-events",
+                )
+                self._kv_event_receiver.start()
+            events, self._kv_events = self._kv_events, []
+            self._kv_events_drained.inc(len(events))
+            self._kv_events_buffered.set(0)
+            return events
 
     def get_failed_store_requests(self) -> set[str] | None:
         """Return the requests whose store failed since the last call.
@@ -2373,6 +2431,13 @@ class LMCacheMPWorkerAdapter:
         on the closing request client, and a straggler in-flight cycle cannot
         re-register or flip the health event after unregistration.
         """
+        self._kv_event_stop.set()
+        with self._kv_event_lock:
+            if self._kv_event_stream is not None:
+                self._kv_event_stream.close()
+        if self._kv_event_receiver is not None:
+            self._kv_event_receiver.join()
+
         with self._heartbeat_lock:
             if self._heartbeat is not None:
                 self._heartbeat.stop()
@@ -2403,11 +2468,154 @@ class LMCacheMPWorkerAdapter:
     # Helper functions
     def _publish_store_kv_events(self, request_id: str) -> None:
         """Buffer successful store events and update metrics without a drain."""
-        events = self._pending_store_kv_events.pop(request_id, [])
-        if events:
+        self._buffer_kv_events(self._pending_store_kv_events.pop(request_id, []))
+
+    def _buffer_kv_events(self, events: Sequence[CacheEvent]) -> None:
+        """Append events to the buffer vLLM drains and update its metrics."""
+        if not events:
+            return
+        with self._kv_event_lock:
             self._kv_events.extend(events)
             self._kv_events_generated.inc(len(events))
             self._kv_events_buffered.set(len(self._kv_events))
+
+    def _receive_kv_events(self) -> None:
+        """Receive pushes; reconnect after disconnect without periodic fetches."""
+        while not self._kv_event_stop.is_set():
+            stream = None
+            try:
+                stream = self.req_client.subscribe_kv_events(
+                    self.instance_id,
+                    self.model_name,
+                    0,
+                    _KV_EVENT_BATCH_SIZE,
+                )
+                with self._kv_event_lock:
+                    if self._kv_event_stop.is_set():
+                        return
+                    self._kv_event_stream = stream
+                for batch in stream:
+                    with self._kv_event_lock:
+                        if self._kv_event_stop.is_set():
+                            return
+                        self._apply_kv_event_batch(batch)
+                        if not self._kv_event_server_source:
+                            return
+                raise ConnectionError("KV event subscription ended")
+            except ConnectionError as exc:
+                if not self._kv_event_stop.is_set():
+                    with self._kv_event_lock:
+                        logger.warning("Reconnecting KV event subscription: %s", exc)
+                        self._resync_kv_events("stream_closed")
+            except Exception as exc:
+                if not self._kv_event_stop.is_set():
+                    with self._kv_event_lock:
+                        self._disable_kv_event_stream(str(exc))
+                return
+            finally:
+                if stream is not None:
+                    stream.close()
+                with self._kv_event_lock:
+                    self._kv_event_stream = None
+
+    def _disable_kv_event_stream(self, reason: str) -> None:
+        """Withdraw placements and resume completed-store reporting after failure."""
+        logger.warning(
+            "Disabling server KV event subscription (%s): this worker falls "
+            "back to reporting its own completed stores, so the router no "
+            "longer learns LMCache host-cache evictions from it",
+            reason,
+        )
+        self._kv_event_subscriber = False
+        self._kv_event_server_source = False
+        self._resync_kv_events("stream_closed")
+
+    def _resolve_kv_event_source(
+        self, enable_kv_events: bool, parallel_strategy: ParallelStrategy
+    ) -> None:
+        """Use server records when advertised; elect one subscriber per server."""
+        if not enable_kv_events:
+            return
+        if KV_EVENT_CAPABILITY not in self.experimental:
+            logger.warning(
+                "The LMCache server does not advertise the '%s' capability, "
+                "so this worker reports only its own completed stores and the "
+                "router will not learn LMCache host-cache evictions from it. "
+                "Check the server version and KV event configuration.",
+                KV_EVENT_CAPABILITY,
+            )
+            return
+        self._kv_event_server_source = True
+        self._kv_event_subscriber = parallel_strategy.is_kv_event_subscriber
+
+    def _apply_kv_event_batch(self, result: KVEventBatch) -> None:
+        """Buffer one pushed batch; the caller holds the event lock."""
+        self._kv_event_batches.inc()
+        if not result.enabled:
+            self._disable_kv_event_stream(
+                "the LMCache server records no cache events; see the server's "
+                "--kv-event-log-size and --disable-observability"
+            )
+            return
+        if self._kv_event_incarnation is None:
+            # First contact: nothing was announced from this log yet, so a
+            # trimmed log is not a loss.
+            self._kv_event_incarnation = result.incarnation
+        elif result.incarnation != self._kv_event_incarnation:
+            self._kv_event_incarnation = result.incarnation
+            self._resync_kv_events("server_restart")
+        elif result.lost:
+            self._resync_kv_events("events_lost")
+        for record in result.events:
+            self._apply_kv_event_record(record)
+
+    def _apply_kv_event_record(self, record: KVEventRecord) -> None:
+        """Publish CPU changes once, removing only previously announced hashes."""
+        if record.medium != "CPU":
+            return
+        announced = self._announced_kv_hashes
+        if record.kind == KV_EVENT_KIND_REMOVED:
+            hashes = [h for h in record.block_hashes if h in announced]
+            if not hashes:
+                return
+            announced.difference_update(hashes)
+            self._buffer_kv_events(
+                [CacheRemoveEvent(block_hashes=list(hashes), medium=record.medium)]
+            )
+        elif record.kind == KV_EVENT_KIND_STORED:
+            hashes = [h for h in record.block_hashes if h not in announced]
+            if not hashes or not record.token_ids:
+                return
+            announced.update(hashes)
+            self._buffer_kv_events(
+                [
+                    CacheStoreEvent(
+                        block_hashes=list(hashes),
+                        parent_block_hash=record.parent_block_hash,
+                        token_ids=list(record.token_ids),
+                        block_size=self.lmcache_tokens_per_chunk,
+                        lora_id=None,
+                        medium=record.medium,
+                        lora_name=None,
+                    )
+                ]
+            )
+        else:
+            logger.warning("Ignoring KV event record of unknown kind %r", record.kind)
+
+    def _resync_kv_events(self, reason: str) -> None:
+        """Withdraw announced CPU placements after loss, restart, or stream failure."""
+        self._kv_event_resyncs[reason].inc()
+        logger.warning("Resynchronizing CPU KV events after %s", reason)
+        if self._announced_kv_hashes:
+            self._buffer_kv_events(
+                [
+                    CacheRemoveEvent(
+                        block_hashes=sorted(self._announced_kv_hashes), medium="CPU"
+                    )
+                ]
+            )
+            self._announced_kv_hashes.clear()
 
     def _update_and_get_finished_store(
         self,
