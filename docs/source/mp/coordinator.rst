@@ -309,7 +309,8 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - Kafka event topic (default ``lmcache-cache-events``).
    * - ``--coordinator-kafka-delivery-timeout``
      - (none)
-     - Seconds to wait for Kafka broker acknowledgement (default ``10``).
+     - Seconds the Kafka producer retries a record before dropping it
+       (default ``300``).
 
 With the Kafka transport, start the coordinator with
 ``--event-transport kafka`` and the same topic so it consumes the stream
