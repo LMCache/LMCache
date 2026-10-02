@@ -23,9 +23,9 @@ echo "=== IPC event lifetime probe on ${VLLM_ROCM_IMAGE}, HIP_VISIBLE_DEVICES=${
 sudo -n dmesg -C >/dev/null 2>&1 || true
 
 run_mode() {
-    local mode="$1"
+    local mode="$1" name="lmcache-ipc-probe-${mode}-${BUILDKITE_BUILD_ID:-local}" rc
     echo "--- mode: ${mode} ---"
-    timeout 600 "${DOCKER[@]}" run --rm \
+    timeout 300 "${DOCKER[@]}" run --rm --name "${name}" \
         --network host --ipc host --group-add video \
         --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
         --device /dev/kfd --device /dev/dri \
@@ -33,7 +33,12 @@ run_mode() {
         --env "HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES}" \
         --entrypoint python3 "${VLLM_ROCM_IMAGE}" \
         .buildkite/k3_tests/amd/imported_event_lifetime.py "--${mode}" 2>&1 | tee "probe-${mode}.log"
-    echo "mode=${mode} exit=${PIPESTATUS[0]}"
+    rc=${PIPESTATUS[0]}
+    if [[ ${rc} -eq 124 ]]; then
+        echo "mode=${mode} timed out; a wait on a freed event hangs on this runtime"
+        "${DOCKER[@]}" rm -f "${name}" >/dev/null 2>&1 || true
+    fi
+    echo "mode=${mode} exit=${rc}"
 }
 
 run_mode hold

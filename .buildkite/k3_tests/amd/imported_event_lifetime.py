@@ -1,22 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 """Two-process reproducer for the imported-event lifetime hazard.
 
-Exporter: records an interprocess event behind a producer kernel that runs
-for several seconds, ships the handle. Importer: opens the handle, makes its
-own stream wait on it, queues work behind the wait, then either drops the
-import while the wait is still pending (--drop, what the MP server did at
-handler return) or holds it until the stream has drained (--hold, what the
-fix does).
+Exporter (the worker): records an interprocess event behind a producer
+kernel that runs for several seconds, ships the handle, and once the importer
+has queued its wait, releases its own event. That is what the worker side
+does in practice: exported events live in a bounded ring and get evicted by
+later steps while the server may still be waiting on them.
+
+Importer (the server): opens the handle, makes its own stream wait on it,
+queues work behind the wait, then either drops the import while the wait is
+still pending (--drop, what the MP server did at handler return) or holds it
+until the stream has drained (--hold, what the fix does). With --hold the
+import is the only reference left to the event, which is exactly what the
+fix relies on.
 
 The run is only meaningful if the wait really was pending at the drop point,
-so the importer initializes its device context first and signals the exporter
-to start the producer; the producer length is calibrated at runtime instead
-of assuming a clock rate. The process exits non-zero if the wait was not
-pending.
+so the importer initializes its device context and loads its kernels first,
+then signals the exporter to start the producer; the producer length is
+calibrated at runtime instead of assuming a clock rate. The process exits
+non-zero if the wait was not pending.
 
 Expected: --hold completes everywhere. --drop is where runtimes differ; a
 runtime that frees the event's signal under the queued wait faults or hangs
-here, which shows up as a crash before the PROBE_RESULT line is printed.
+here, which shows up as no PROBE_RESULT line.
 
 Usage: python imported_event_lifetime.py --drop|--hold [--seconds N]
 """
@@ -33,14 +39,21 @@ import torch.multiprocessing as mp
 
 
 def _cycles_for(seconds: float) -> int:
-    """Calibrate torch.cuda._sleep so the producer runs for about `seconds`."""
-    probe_cycles = 100_000_000
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    torch.cuda._sleep(probe_cycles)
-    torch.cuda.synchronize()
-    per_cycle = max(time.perf_counter() - t0, 1e-6) / probe_cycles
-    return int(seconds / per_cycle)
+    """Calibrate torch.cuda._sleep so the producer runs for about `seconds`.
+
+    Doubles the probe length until one sleep takes long enough to measure,
+    so launch overhead and clock granularity do not skew the estimate.
+    """
+    cycles = 10_000_000
+    while True:
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        torch.cuda._sleep(cycles)
+        torch.cuda.synchronize()
+        elapsed = time.perf_counter() - t0
+        if elapsed >= 0.5 or cycles >= 1 << 40:
+            return int(cycles * seconds / max(elapsed, 1e-6))
+        cycles *= 4
 
 
 def exporter(conn, seconds):
@@ -53,6 +66,9 @@ def exporter(conn, seconds):
         torch.cuda._sleep(cycles)  # long-running producer work
         event.record(stream)
     conn.send(event.ipc_handle())
+    conn.recv()  # importer has queued its wait on the import
+    del event  # the worker's ring evicted it; only the import remains
+    gc.collect()
     conn.recv()  # importer finished
     stream.synchronize()
 
@@ -90,6 +106,7 @@ def main():
     with torch.cuda.stream(stream):
         stream.wait_event(imported)  # queued wait referencing the import
         y = x * 2  # consumer work behind the wait
+    parent.send("waiting")  # exporter now releases its own event
     if args.drop:
         del imported  # what the server did at handler return
         gc.collect()
