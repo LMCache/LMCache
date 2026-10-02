@@ -33,10 +33,10 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 |---|---|
 | `GroupedObjectKeys` | One row: `keys` (chunk-ordered, `keys[i]` covers tokens `[i*chunk, (i+1)*chunk)`), `object_group_id`, `layout_desc` (L1 write-buffer layout for L2 loads), `sliding_window_size` (`-1` full attention, `w >= 1` window). |
 | `PrefetchTaskSpec` | `key_groups` (one `GroupedObjectKeys` per `(object group, kv rank)`, in any order; all of the same `group_size`), `num_kv_readers`, `fetching_policy`, `lock_mode`. |
-| `FetchingPolicy` | `"prefix"`: only the longest prefix every row can serve under its window. `"full"`: every found object, gaps included; sliding-window rows are refused. |
+| `FetchingPolicy` | `"prefix"`: only the longest prefix every row can serve under its window. `"full"`: complete columns across all rows, with gaps between columns allowed; sliding-window rows are refused. |
 | `PrefetchLockMode` | `LOCK`: the caller reads the objects and releases them with `finish_read_prefetched`. `NO_LOCK`: warm-up, nothing stays locked; loaded objects are permanent. |
 | `PrefetchHandle` | Opaque; carries `prefetch_request_id` (`-1` for an already-complete empty request), `external_request_id`, `total_requested_keys`, `submit_time` and the per-row `sliding_windows`. |
-| `PrefetchResult` | `hit_cells`, `l1_hit_cells`, `l2_hit_cells`: one bitmap per row, in `key_groups` order; `l1_hit_count` / `l2_hit_count` properties. |
+| `PrefetchResult` | `hit_cells`, `l1_hit_cells`, `l2_hit_cells`: one bitmap per row, in `key_groups` order; `l1_hit_count` / `l2_hit_count` properties. `found_cells` reports availability before staging; `l1_owners` identifies the managers holding retained locks. |
 | `ipc_key_to_grouped_object_keys` | Builds the rows of a request from an `IPCCacheServerKey`, the chunk hashes, the object groups to read, the per-group layouts and the registration's `AttnWindowDesc`. |
 
 ### Contract
@@ -146,13 +146,11 @@ write-TTL behavior because queued device writes can still reference the buffers.
 When tracing is enabled, both single-L1 completion entry points record one
 existing `finish_write(keys)` trace call. Process-local owner IDs are not written
 to the storage trace, so the unchanged dispatcher can replay it against a fresh
-manager. Multi-L1 serving and multi-L1 trace replay remain outside this internal
-owner-routed multi-L1 path.
+manager. Multi-L1 trace replay remains unsupported.
 
 `test_multi_l1.py`, `test_l1_owner.py`, and `test_l1_owner_completion.py` cover
 overflow, batch cleanup, independent same-key copies, recycled ownership, and
-serialized completion. Read selection, affinity, backend rewiring, public
-configuration, per-L1 reporting, and sharing services remain separate work.
+serialized completion.
 
 ## Configured peer L1 serving
 
@@ -160,12 +158,6 @@ configuration, per-L1 reporting, and sharing services remain separate work.
 configurations. The legacy singular config aliases the first entry. Each manager
 owns its allocator, eviction controller, and store controller. Initialization
 rolls back already-created managers, adapters, and controllers on failure.
-
-The immutable write order is resolved once at construction. Only allocation OOM
-advances to a peer; allocation batches and writer tags retain their existing
-semantics. `MemoryObj` carries a process-local manager identity outside serialized
-metadata. `prepare_write_completion` captures that identity before GPU work, and
-`finish_write_by_owner` admits each staging object on the captured manager.
 
 L2 affinity is a fixed mapping from `L2AdapterConfigBase.affinity_tag` to an L1
 identity. Stores and serde use that L1, and prefetch reloads allocate there. There

@@ -16,7 +16,6 @@ Validated models
 - `Qwen/Qwen3.8-27B <https://huggingface.co/Qwen/Qwen3.8-27B>`_ (1 GPU)
 - `Qwen/Qwen3.6-27B <https://huggingface.co/Qwen/Qwen3.6-27B>`_ (1 GPU)
 - `Qwen/Qwen3.5-0.8B <https://huggingface.co/Qwen/Qwen3.5-0.8B>`_ (1 GPU)
-- `Qwen/Qwen3.5-4B <https://huggingface.co/Qwen/Qwen3.5-4B>`_ (see engine-specific settings below)
 
 .. tab-set::
    :sync-group: engine
@@ -51,12 +50,6 @@ Validated models
          * - ``Qwen/Qwen3.5-0.8B``
            - 544
            - 1
-         * - ``Qwen/Qwen3.5-4B``
-           - 528
-           - 1, 2, 4
-         * - ``Qwen/Qwen3.5-4B``
-           - 272
-           - 8
 
       Set the LMCache server's ``--chunk-size`` to that ``N`` (or a multiple of
       it) and enable ``--separate-object-groups``, then set vLLM's
@@ -92,10 +85,6 @@ Validated models
       **Qwen3.5-0.8B** (1 GPU, ``N = 544`` → ``2N-1 = 1087``): identical to the
       above, with ``--chunk-size 544`` and ``--max-num-batched-tokens 1087``.
 
-      **Qwen3.5-4B** with vLLM 0.30.0 uses ``N = 528`` at TP1/TP2/TP4
-      (``--max-num-batched-tokens 1055``) and ``N = 272`` at TP8
-      (``--max-num-batched-tokens 543``). Set the server chunk size accordingly.
-
       ``--mamba-cache-mode align`` is required (GDN does not support the
       ``all`` mode). ``--separate-object-groups`` (server) is required for
       hybrid models so the Mamba layers get their own cache objects; it is also
@@ -124,34 +113,11 @@ Validated models
 
    .. tab-item:: SGLang
 
-      Qwen3.5-4B requires reusable recurrent-state checkpoints as well as
-      attention KV. With SGLang 0.5.21, enable checkpoint buffers and use
-      512-token prefill chunks:
-
-      .. code-block:: bash
-
-         lmcache server --chunk-size 256 --separate-object-groups \
-             --l1-manager '{"type":"DRAM","tag":"_default","size_gb":8}' \
-             --eviction-policy LRU
-
-      Point the existing SGLang LMCache YAML configuration at that server,
-      then launch:
-
-      .. code-block:: bash
-
-         python -m sglang.launch_server --model-path Qwen/Qwen3.5-4B \
-             --enable-lmcache --lmcache-config-file lmcache.yaml \
-             --chunked-prefill-size 512 \
-             --mamba-radix-cache-strategy extra_buffer
-
-      These settings create checkpoints at prefill boundaries. Without a
-      reusable checkpoint, matching attention KV alone does not establish a
-      hybrid cache hit. See :doc:`../mp/multi_l1` for mixed storage profiles.
+      **Status:** Not validated with LMCache.
 
    .. tab-item:: TRT-LLM
 
-      Multi-L1 serving validation is future work. See
-      :doc:`../getting_started/quickstart` for the existing integration.
+      **Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-LLM + LMCache setup.
 
 CacheBlend support
 ------------------

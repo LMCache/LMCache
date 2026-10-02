@@ -148,35 +148,3 @@ Storage profiles alone do not qualify an engine/model/TP combination. Validate
 external-cache hits after clearing engine-local prefix state, token outputs,
 per-tag writes and reads, and zero remaining locks. Exercise every configured
 backend under pressure, and restart the engine and server for a second run.
-
-Validated serving matrix
-------------------------
-
-The following versions were checked with all six profiles above, at
-TP1, TP2, TP4, and TP8, with two fresh-process repetitions per configuration:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 30 35 35
-
-   * - Engine
-     - Dense: ``Qwen/Qwen3-8B``
-     - Hybrid: ``Qwen/Qwen3.5-4B``
-   * - vLLM 0.30.0
-     - Passed at every TP size
-     - Passed at every TP size
-   * - SGLang 0.5.21
-     - Passed at every TP size
-     - Passed at every TP size
-
-These are 192 completed serving runs, with 32 independent uncached reference
-runs. TensorRT-LLM integration changes and multi-L1 validation are future work.
-Testing used eight RTX PRO 6000 Blackwell GPUs, BF16 model caches,
-LMCache-driven IPC transfers, eager DRAM pools, physical Device-DAX, and
-cuFile compatibility-mode GDS. Small fixed pools forced overflow into every
-configured manager. Token IDs were compared with independent uncached
-references; checks also covered partial prefixes, concurrent requests,
-stream cancellation, fixed-affinity filesystem reloads, status/metrics, and
-lock cleanup. This validates cache serving for the stated setups; it does
-not measure native GDS DMA performance. Hybrid setup flags and the
-TP-dependent vLLM chunk sizes are in :doc:`../recipes/qwen3_5`.
