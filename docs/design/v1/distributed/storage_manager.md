@@ -104,7 +104,9 @@ reads, prefetch, key-only completion, and runtime Device-DAX management are
 rejected in that mode. This is not a multi-L1 serving configuration.
 
 `OrderedWritePolicy` supplies stable manager IDs in explicit order, primary first
-by default. `reserve_write` visits each candidate synchronously and retries only
+by default. Construction validates and captures that order; later mutations of
+the supplied policy do not reconfigure the manager. `reserve_write` visits each
+candidate synchronously and retries only
 its `OUT_OF_MEMORY` subset. Successful keys and terminal conflicts do not advance;
 exceptions propagate. Each L1 retains its allocation and staging rules. A failed
 batch is not split: two 4 KiB objects can fail on two L1s with 4 KiB free each,

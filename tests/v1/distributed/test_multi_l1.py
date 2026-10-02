@@ -353,14 +353,34 @@ def test_single_l1_completion_trace_replays_without_process_local_owners(
 def test_policy_rejects_repeated_or_unknown_candidates(
     storage_factory: StorageFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store, managers, policy = storage_factory((4096, 4096))
+    _, managers, _ = storage_factory((4096, 4096))
+    config = StorageManagerConfig(
+        L1ManagerConfig(L1MemoryManagerConfig(4096, False, shm_name="")),
+        EvictionConfig("noop"),
+    )
     attempt = Mock(wraps=managers[0].reserve_write)
     monkeypatch.setattr(managers[0], "reserve_write", attempt)
     for candidates in [(managers[0].l1_manager_id,) * 2, (2**62,)]:
-        policy.manager_ids = candidates
         with pytest.raises(ValueError, match="distinct registered"):
-            store.reserve_write([key(1)], LAYOUT)
+            StorageManager(
+                config,
+                _l1_managers=managers,
+                _write_policy=OrderedWritePolicy(candidates),
+            )
     attempt.assert_not_called()
+
+
+def test_write_order_is_captured_at_construction(
+    storage_factory: StorageFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, (primary, _), policy = storage_factory((4096, 4096))
+    policy.manager_ids = (2**62,)
+    selection = Mock(side_effect=AssertionError("policy called on write path"))
+    monkeypatch.setattr(policy, "select_write_targets", selection)
+    objects = store.reserve_write([key(1)], LAYOUT)
+    assert objects[key(1)].get_l1_manager() == primary.l1_manager_id
+    store.finish_write_by_owner(store.prepare_write_completion(objects))
+    selection.assert_not_called()
 
 
 @pytest.mark.parametrize("with_l2", [False, True])

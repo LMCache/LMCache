@@ -108,10 +108,13 @@ class StorageManager:
             config: Existing single-L1 service settings.
             _l1_managers: Internal ordered candidates; None constructs one L1.
             _write_policy: Internal candidate order; defaults to the supplied order.
+                Validated and captured once. Later policy mutations do not
+                reconfigure this manager.
 
         Raises:
             ValueError: Candidates are empty/repeated, or multiple managers are
-                combined with L2 adapters or eviction.
+                combined with L2 adapters or eviction, or the policy names
+                repeated or unregistered managers.
         """
         if _l1_managers is not None:
             if not _l1_managers or len({m.l1_manager_id for m in _l1_managers}) != len(
@@ -132,8 +135,17 @@ class StorageManager:
         )
         self._l1_manager = managers[0]
         self._l1_managers_by_id = {m.l1_manager_id: m for m in managers}
-        self._write_policy = _write_policy or OrderedWritePolicy(
-            tuple(self._l1_managers_by_id)
+        policy = _write_policy or OrderedWritePolicy(tuple(self._l1_managers_by_id))
+        candidates = policy.select_write_targets()
+        if len(set(candidates)) != len(candidates) or any(
+            owner not in self._l1_managers_by_id for owner in candidates
+        ):
+            if _l1_managers is None:
+                self._l1_manager.close()
+            raise ValueError("write policy must select distinct registered L1 managers")
+        # Topology is fixed; resolve the validated order outside the write path.
+        self._write_managers = tuple(
+            self._l1_managers_by_id[owner] for owner in candidates
         )
         self._event_bus = get_event_bus()
 
@@ -262,24 +274,19 @@ class StorageManager:
 
         Only OUT_OF_MEMORY keys advance to the next candidate. Each L1 receives
         the whole pending subset; overflow does not split allocation batches.
+        Candidate managers and their order are captured at construction.
 
         Raises:
-            ValueError: The policy names repeated or unregistered managers.
             Exception: Allocation exceptions propagate; they are not overflow.
         """
-        candidates = self._write_policy.select_write_targets()
-        if len(set(candidates)) != len(candidates) or any(
-            owner not in self._l1_managers_by_id for owner in candidates
-        ):
-            raise ValueError("write policy must select distinct registered L1 managers")
         reserve_result: dict[ObjectKey, L1OperationResult] = {
             key: (L1Error.OUT_OF_MEMORY, None) for key in keys
         }
         pending = keys
-        for owner in candidates:
+        for manager in self._write_managers:
             if not pending:
                 break
-            results = self._l1_managers_by_id[owner].reserve_write(
+            results = manager.reserve_write(
                 keys=pending,
                 is_temporary=[False] * len(pending),
                 layout_desc=layout_desc,

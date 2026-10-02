@@ -24,6 +24,8 @@ How overflow works
 ``StorageManager.reserve_write()`` tries the primary L1 first. It retries only
 keys that returned ``OUT_OF_MEMORY`` on the next eligible L1, in explicit order.
 Calls are synchronous. Each candidate is visited at most once per reservation.
+The candidate order is validated and captured at construction, so later changes
+to the supplied policy object do not change an existing manager's write order.
 
 .. code-block:: text
 
