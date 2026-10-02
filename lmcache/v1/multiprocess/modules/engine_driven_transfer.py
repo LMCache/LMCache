@@ -296,6 +296,23 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             # Compatibility with clients from before the physical-slot field
             # was added. Those clients require one slot per logical token.
             num_physical_slots = self._ctx.chunk_size
+            logger.warning(
+                "Instance %d registered without num_physical_slots (client "
+                "predates the field); assuming one slot per logical token, so "
+                "each object is sized %d x %d x %d. This is only correct when "
+                "the engine's block_size (%d) is its real tokens-per-block. An "
+                "engine that registers opaque pages -- one entry per block, "
+                "with the per-token extent folded into hidden_dim_size -- "
+                "reports block_size=1, and every stored object is then "
+                "oversized by a factor of chunk_size. Upgrade the client, or "
+                "expect no external hits and a tier that fills with a handful "
+                "of whole-pool objects.",
+                payload.instance_id,
+                payload.num_layers,
+                num_physical_slots,
+                payload.hidden_dim_size,
+                payload.block_size,
+            )
         elif num_physical_slots <= 0:
             raise ValueError(
                 f"num_physical_slots must be positive, got {num_physical_slots}"
@@ -340,10 +357,17 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             self._strategies[payload.instance_id] = strategy
 
         logger.info(
-            "Registered non-GPU context for instance %d (model=%s, world_size=%d)",
+            "Registered non-GPU context for instance %d (model=%s, "
+            "world_size=%d, shape=%s, dtype=%s, block_size=%d, "
+            "num_physical_slots=%d, use_mla=%s)",
             payload.instance_id,
             payload.model_name,
             payload.world_size,
+            tuple(shape),
+            payload.dtype_str,
+            payload.block_size,
+            num_physical_slots,
+            payload.use_mla,
         )
 
         self._ctx.layout_desc_registry.register(
