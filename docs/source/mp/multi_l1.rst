@@ -16,6 +16,9 @@ configuration or L1--L2 affinity setting.
 The internal construction path accepts an ordered set of existing L1 managers
 for allocation and ownership tests. It requires no L2 adapters and ``noop``
 eviction. Serving reads and prefetch are rejected with multiple managers.
+``memcheck()``, ``get_l1_usage()``, ``report_status()``, and
+``publish_capacity()`` also raise ``ValueError`` in this internal mode rather
+than report only the primary L1.
 Multi-L1 read selection, cancellation, eviction, and L2 integration are deferred.
 
 How overflow works

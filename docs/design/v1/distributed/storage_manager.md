@@ -102,6 +102,8 @@ accepts existing managers for write-allocation tests; `StorageManager` owns thei
 lifetime. Multiple managers require no L2 adapters and `noop` eviction. Serving
 reads, prefetch, key-only completion, and runtime Device-DAX management are
 rejected in that mode. This is not a multi-L1 serving configuration.
+`memcheck`, `get_l1_usage`, `report_status`, and `publish_capacity` also require
+one L1, so the write-only harness cannot report partial health or capacity.
 
 `OrderedWritePolicy` supplies stable manager IDs in explicit order, primary first
 by default. Construction validates and captures that order; later mutations of

@@ -772,7 +772,11 @@ class StorageManager:
         Called after every coordinator registration, so a restarted
         coordinator relearns this server's capacities even if nothing is
         ever reconfigured. Later changes announce themselves.
+
+        Raises:
+            ValueError: Multiple managers are configured in the write-only harness.
         """
+        self._require_single_l1()
         self._publish_capacity_changed()
 
     def _build_capacities(self) -> list[ModuleMemoryCapacity]:
@@ -819,7 +823,11 @@ class StorageManager:
 
         Returns:
             Tuple of ``(used_bytes, total_bytes)``.
+
+        Raises:
+            ValueError: Multiple managers are configured in the write-only harness.
         """
+        self._require_single_l1()
         return self._l1_manager.get_memory_usage()
 
     # L1 reconfiguration APIs
@@ -1215,7 +1223,17 @@ class StorageManager:
             manager.close()
 
     def report_status(self) -> dict:
-        """Return a status dict aggregating all sub-component statuses."""
+        """Return the single-L1 service's sub-component status snapshot.
+
+        Returns:
+            Overall is_healthy, statuses for l1_manager, store_controller,
+            prefetch_controller, l1_eviction_controller, l2_eviction_controller,
+            and the l2_adapters list with its num_l2_adapters count.
+
+        Raises:
+            ValueError: Multiple managers are configured in the write-only harness.
+        """
+        self._require_single_l1()
         l1 = self._l1_manager.report_status()
         store = self._store_controller.report_status()
         prefetch = self._prefetch_controller.report_status()
@@ -1251,11 +1269,15 @@ class StorageManager:
     # Functions for debugging and testing
     def memcheck(self) -> bool:
         """
-        Perform memory check for all storage tiers.
+        Check the single L1 manager's memory consistency.
 
         Returns:
             True if memory is consistent, False otherwise.
+
+        Raises:
+            ValueError: Multiple managers are configured in the write-only harness.
         """
+        self._require_single_l1()
         return self._l1_manager.memcheck()
 
     def _require_single_l1(self) -> None:

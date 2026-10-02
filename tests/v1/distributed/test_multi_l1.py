@@ -287,6 +287,14 @@ def test_multi_manager_harness_rejects_unsupported_serving(
         store.add_l1_devdax_device("/unused", 4096)
     with pytest.raises(ValueError, match="owner-routed writes only"):
         store.remove_l1_devdax_device("/unused")
+    for report in (
+        store.memcheck,
+        store.get_l1_usage,
+        store.report_status,
+        store.publish_capacity,
+    ):
+        with pytest.raises(ValueError, match="owner-routed writes only"):
+            report()
 
 
 def test_single_manager_legacy_finish_and_read(storage_factory: StorageFactory) -> None:
@@ -305,6 +313,10 @@ def test_single_manager_legacy_finish_and_read(storage_factory: StorageFactory) 
         assert tensor is not None and torch.all(tensor == 7)
     store.finish_read_prefetched([key(1)])
     assert manager.report_status()["read_locked_count"] == 0
+    assert store.memcheck()
+    assert store.get_l1_usage() == (4096, 4096)
+    assert store.report_status()["l1_manager"] == manager.report_status()
+    store.publish_capacity()
 
 
 @pytest.mark.parametrize("owner_completion", [False, True])
