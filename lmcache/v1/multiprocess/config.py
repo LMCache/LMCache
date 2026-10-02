@@ -227,7 +227,7 @@ class HTTPFrontendConfig:
 DEFAULT_HTTP_FRONTEND_CONFIG = HTTPFrontendConfig()
 
 DEFAULT_KAFKA_CACHE_EVENT_TOPIC = "lmcache-cache-events"
-DEFAULT_KAFKA_DELIVERY_TIMEOUT = 10.0
+DEFAULT_KAFKA_DELIVERY_TIMEOUT = 300.0
 
 
 @dataclass(frozen=True)
@@ -242,7 +242,8 @@ class KafkaCacheEventSinkConfig:
     Attributes:
         bootstrap_servers: Comma-separated Kafka bootstrap servers.
         topic: Topic receiving cache-event records.
-        delivery_timeout: Seconds to wait for broker acknowledgement.
+        delivery_timeout: Seconds the producer retries a record before
+            dropping it.
     """
 
     bootstrap_servers: str
@@ -779,8 +780,9 @@ def add_coordinator_args(
         "--coordinator-kafka-delivery-timeout",
         type=float,
         default=DEFAULT_KAFKA_DELIVERY_TIMEOUT,
-        help="Seconds to wait for Kafka broker acknowledgement (must be > 0). "
-        f"Default is {DEFAULT_KAFKA_DELIVERY_TIMEOUT}.",
+        help="Seconds the Kafka producer keeps retrying a cache-event record "
+        "before dropping it (must be > 0). Default is "
+        f"{DEFAULT_KAFKA_DELIVERY_TIMEOUT}.",
     )
     group.add_argument(
         "--coordinator-blend-timeout",
