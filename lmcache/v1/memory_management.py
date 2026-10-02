@@ -752,6 +752,38 @@ class TensorMemoryObj(MemoryObj):
         with self.lock:
             self._used_size_override = n
 
+    def reset_used_size(self) -> None:
+        """Restore the logical size derived from the current metadata.
+
+        For allocator / pool reuse paths that recycle a buffer for a
+        new allocation. The allocator must restore ``meta.shape`` /
+        ``meta.shapes`` / ``meta.dtypes`` before calling this method;
+        this method then rebuilds the derived group byte offsets and
+        clears the narrowing override atomically.
+
+        Raises:
+            ValueError: If the current metadata has mismatched shape and
+                dtype group counts.
+        """
+        with self.lock:
+            if self.meta.shapes is not None and self.meta.dtypes is not None:
+                if len(self.meta.shapes) != len(self.meta.dtypes):
+                    raise ValueError(
+                        "reset_used_size: metadata shape/dtype group counts "
+                        "do not match"
+                    )
+                size_in_bytes = 0
+                group_prefix_sum = [0]
+                for shape, dtype in zip(
+                    self.meta.shapes, self.meta.dtypes, strict=True
+                ):
+                    size_in_bytes += shape.numel() * dtype.itemsize
+                    group_prefix_sum.append(size_in_bytes)
+                self.group_prefix_sum = group_prefix_sum
+            else:
+                self.group_prefix_sum = [0, self.meta.get_size()]
+            self._used_size_override = None
+
     # TODO(chunxiaozheng): use get_shapes and get_dtypes to replace
     #  get_shape and get_dtype
     def get_shape(self) -> torch.Size:
