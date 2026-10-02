@@ -188,7 +188,7 @@ def test_raw_block_core_uring_cmd_read_copyback_uses_aligned_chunks(monkeypatch)
 
 
 @pytest.mark.parametrize("is_read", [False, True])
-@pytest.mark.parametrize("size", [17, 4096, 4097, 8191, 8192, 8193, 10000])
+@pytest.mark.parametrize("size", [17, 4000, 4095, 4096, 4097, 8191, 8192, 8193, 10000])
 @pytest.mark.parametrize("misalignment", [0, 1])
 def test_uring_cmd_padded_transfer_allocates_only_tail(
     monkeypatch: pytest.MonkeyPatch, is_read: bool, size: int, misalignment: int
@@ -212,6 +212,14 @@ def test_uring_cmd_padded_transfer_allocates_only_tail(
         return allocate(length)
 
     monkeypatch.setattr(core, "_allocate_aligned_buffer", record_allocate)
+    prefix_checks: list[int] = []
+    tail_prefix = core._uring_cmd_tail_prefix
+
+    def record_prefix(view: memoryview, payload: int, total: int) -> int | None:
+        prefix_checks.append(payload)
+        return tail_prefix(view, payload, total)
+
+    monkeypatch.setattr(core, "_uring_cmd_tail_prefix", record_prefix)
     total = (size + 4095) // 4096 * 4096
     if is_read:
         raw_dev.read_data = bytes([7]) * size + bytes(total - size)
@@ -227,6 +235,9 @@ def test_uring_cmd_padded_transfer_allocates_only_tail(
         )
     expected = [] if size == total else [total if misalignment else 4096]
     assert allocated == expected
+    if size < core.block_align:
+        assert prefix_checks == []
+        assert len(chunks) == 1
     if size == total or (not misalignment and size > 4096):
         assert _buffer_address(chunks[0]) == _buffer_address(view)
 

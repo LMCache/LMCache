@@ -1371,7 +1371,12 @@ class RawBlockCore:
             view = self._byte_view(buf)
             if len(view) < payload_len or total_len < payload_len:
                 raise ValueError("input buffer or transfer shorter than payload_len")
-            prefix = self._uring_cmd_tail_prefix(view, payload_len, total_len)
+            # Sub-block payloads have no direct prefix to inspect or split.
+            prefix = (
+                self._uring_cmd_tail_prefix(view, payload_len, total_len)
+                if payload_len > self.block_align
+                else None
+            )
             segments: list[tuple[int, memoryview]]
             if prefix is not None:
                 tail = self._allocate_aligned_buffer(total_len - prefix)
@@ -1463,7 +1468,11 @@ class RawBlockCore:
                     raise ValueError(
                         "output buffer or transfer shorter than payload_len"
                     )
-                prefix = self._uring_cmd_tail_prefix(dst, payload_len, total_len)
+                prefix = (
+                    self._uring_cmd_tail_prefix(dst, payload_len, total_len)
+                    if payload_len > self.block_align
+                    else None
+                )
                 if prefix is not None:
                     target = self._allocate_aligned_buffer(total_len - prefix)
                     segments = [(0, dst[:prefix]), (prefix, target)]
