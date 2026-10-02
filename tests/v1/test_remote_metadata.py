@@ -99,3 +99,53 @@ def test_remote_metadata_roundtrip_sub4d(shape):
     )
     restored = RemoteMetadata.deserialize(original.serialize())
     assert restored.shapes[0] == shape
+
+
+# ---- Byte-buffer (None dtype) parallel-cardinality regression ----
+#
+# BytesBufferMemoryObj.get_shapes() returns one shape but get_dtypes()
+# used to return []. RemoteMetadata._prepare_params() zips shapes and
+# dtypes with strict=True, so a byte-buffer serde (e.g. cachegen) over a
+# remote connector such as fs raised "zip() argument 2 is shorter than
+# argument 1" on every put. The fix makes get_dtypes() report [None]
+# (one dtype per shape); None encodes via DTYPE_TO_INT[None] == 0 and
+# round-trips through INT_TO_DTYPE[0].
+
+
+def test_bytes_buffer_metadata_cardinality_matches():
+    """get_shapes() and get_dtypes() must be the same length for the
+    byte-buffer object the remote metadata path zips together."""
+    # First Party
+    from lmcache.v1.memory_management import BytesBufferMemoryObj
+
+    obj = BytesBufferMemoryObj(b"lmcache-bytes-buffer")
+    shapes = obj.get_shapes()
+    dtypes = obj.get_dtypes()
+    assert len(shapes) == len(dtypes) == 1
+    assert dtypes == [None]
+
+
+def test_remote_metadata_serialize_none_dtype_roundtrip():
+    """A None dtype (binary buffer) round-trips through RemoteMetadata,
+    exercising the exact construction the fs connector performs on put."""
+    # First Party
+    from lmcache.v1.memory_management import BytesBufferMemoryObj
+
+    obj = BytesBufferMemoryObj(b"lmcache-bytes-buffer")
+    init_remote_metadata_info(len(obj.get_shapes()))
+
+    # Mirrors fs_connector.put(): RemoteMetadata(len, get_shapes(),
+    # get_dtypes(), get_memory_format()). This raised before the fix.
+    original = RemoteMetadata(
+        len(obj.byte_array),
+        obj.get_shapes(),
+        obj.get_dtypes(),
+        obj.get_memory_format(),
+    )
+    restored = RemoteMetadata.deserialize(original.serialize())
+
+    assert restored.dtypes == [None]
+    assert restored.fmt == MemoryFormat.BINARY_BUFFER
+    # Binary formats intentionally preserve the 4D zero-padded shape
+    # (strip_shape_padding skips BINARY/BINARY_BUFFER).
+    assert restored.shapes[0] == torch.Size([len(obj.byte_array), 0, 0, 0])
