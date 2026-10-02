@@ -48,9 +48,16 @@ class EngineDrivenContextPickle(EngineDrivenContext):
         return None
 
     def commit_store(
-        self, key: IPCCacheServerKey, instance_id: int, chunks: list[torch.Tensor]
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        chunks: "list[torch.Tensor] | list[list[torch.Tensor]]",
     ) -> bool:
         """Serialize chunks and send via COMMIT_STORE.
+
+        Single-group callers pass a flat chunk list; multi-group callers pass
+        a group-major ``chunks[group][chunk]`` list (the server side picks the
+        shape from its registered group count).
 
         Returns:
             ``True`` on success, ``False`` on failure or timeout.
@@ -79,6 +86,29 @@ class EngineDrivenContextPickle(EngineDrivenContext):
             return None
         chunks: list[torch.Tensor] = pickle.loads(response.data)
         return chunks
+
+    def prepare_retrieve_multigroup(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> list[list[torch.Tensor]] | None:
+        """Send PREPARE_RETRIEVE and deserialize a group-major payload.
+
+        The server responds with ``chunks[group][chunk]`` covering every chunk
+        of every group (all-or-nothing), or a miss. Named apart from the SHM
+        ``prepare_retrieve_grouped`` because the result is the chunk data
+        itself, not slot views.
+
+        Returns:
+            Group-major chunk lists on hit, or None on miss/timeout.
+        """
+        future = self.req_client.prepare_retrieve(key, instance_id)
+        try:
+            response = future.result(timeout=self.mq_timeout)
+        except TimeoutError:
+            return None
+        if not response.success or not response.data:
+            return None
+        group_chunks: list[list[torch.Tensor]] = pickle.loads(response.data)
+        return group_chunks
 
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
         """Send COMMIT_RETRIEVE (no-op for pickle path)."""
