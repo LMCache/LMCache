@@ -73,6 +73,10 @@ class _FakeStorageManager:
     def finish_write(self, keys: list[object]) -> None:
         return None
 
+    def finish_write_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
+        """Accept the owner-tagged callback registered by the transfer module."""
+        return None
+
     def finish_read_prefetched(self, keys: list[object]) -> None:
         return None
 

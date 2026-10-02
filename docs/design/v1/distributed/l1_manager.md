@@ -31,7 +31,7 @@ default is `""`. Writers sharing a tag exclude each other on a key
 (`KEY_NOT_WRITABLE`), which keeps the de-duplication engine stores rely on;
 writers with different tags never block each other.
 
-**Admission.** `finish_write`, `finish_write_and_reserve_read` and
+**Admission.** `finish_write`, `finish_prefetch`, `finish_write_and_reserve_read` and
 `finish_write_and_delete` take the tag used at reservation and act on the
 staging object `(key, tag)`:
 
@@ -44,6 +44,12 @@ staging object `(key, tag)`:
   resident object and returns *that* `MemoryObj`, so the caller always ends
   up holding what readers see.
 - `finish_write_and_delete` never admits; it frees the staging object.
+
+`finish_prefetch` admits a completed load without acquiring read locks. It
+notifies `on_l1_keys_prefetch_finished`, whose default uses the existing
+prefetch callback. Retained keys are tracked by eviction and counted as L1
+writes, but do not enter the StoreController queue. Ordinary `finish_write`
+continues to notify the store pipeline.
 
 **Expiry and eviction.** A staging object keeps its write TTL lock. Once the
 lock expires the reservation is abandoned:
@@ -92,7 +98,7 @@ A prefetch request still aborts its L2 load when a key becomes resident
 between its L1 lock pass and its `reserve_write`
 (`KEY_NOT_WRITABLE`, reported as `L2_PREFETCH_FAILED{reason="l1_contended"}`).
 That window is the L2 lookup latency, not the L2 load time as before; see
-`storage_controllers/prefetch_l1_lock_pass.md`.
+`storage_controllers/prefetch_controller.md`.
 
 ## Contract-anchoring tests
 

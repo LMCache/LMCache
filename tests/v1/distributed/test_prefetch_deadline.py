@@ -45,6 +45,10 @@ from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
+    RetainPrefetchPolicy,
+)
+from lmcache.v1.distributed.storage_controllers.store_controller import (
+    StoreListener,
 )
 from lmcache.v1.distributed.storage_controllers.utils import (
     L1ManagerDescriptor,
@@ -292,17 +296,21 @@ def l1_manager():
     mgr.close()
 
 
-def make_controller(l1_manager, adapter, clock, timeout, max_in_flight=8):
-    return make_controller_multi(l1_manager, [adapter], clock, timeout, max_in_flight)
+def make_controller(l1_manager, adapter, clock, timeout, max_in_flight=8, policy=None):
+    return make_controller_multi(
+        l1_manager, [adapter], clock, timeout, max_in_flight, policy
+    )
 
 
-def make_controller_multi(l1_manager, adapters, clock, timeout, max_in_flight=8):
+def make_controller_multi(
+    l1_manager, adapters, clock, timeout, max_in_flight=8, policy=None
+):
     return PrefetchController(
         l1_managers=[l1_manager],
         l1_manager_descriptors=[L1ManagerDescriptor(index=0, config=make_l1_config())],
         l2_adapters=list(adapters),
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
-        policy=DefaultPrefetchPolicy(),
+        policy=DefaultPrefetchPolicy() if policy is None else policy,
         max_in_flight=max_in_flight,
         l2_load_timeout=timeout,
         clock=clock,
@@ -334,7 +342,6 @@ def event_capture():
     cap = _EventCapture()
     for et in (
         EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
-        EventType.L2_PREFETCH_LOOKUP_COMPLETED,
         EventType.L2_PREFETCH_DEADLINE,
     ):
         bus.subscribe(et, cap.record)
@@ -474,7 +481,7 @@ class TestLoadDeadline:
 
     @pytest.mark.parametrize(
         "policy, expected",
-        [("prefix", [{0}, {0}]), ("full", [{0, 1, 2}, {0}])],
+        [("prefix", [{0}, {0}]), ("full", [{0}, {0}])],
     )
     def test_grouped_deadline_preserves_rank_rows(self, l1_manager, policy, expected):
         """A partially loaded rank must not borrow another rank's ready cells."""
@@ -511,6 +518,12 @@ class TestLoadDeadline:
             assert [set(row.get_indices_list()) for row in result.hit_cells] == expected
             assert result.l1_hit_count == 0
             assert result.l2_hit_count == sum(len(row) for row in expected)
+            if policy == "full":
+                assert result.found_cells is not None
+                assert [set(row.get_indices_list()) for row in result.found_cells] == [
+                    {0, 1, 2},
+                    {0, 1, 2},
+                ]
             for keys, kept in zip(rows, expected, strict=True):
                 l1_manager.finish_read([keys[i] for i in sorted(kept)])
             slow.release_loads()
@@ -579,6 +592,64 @@ class TestLoadDeadline:
         finally:
             ctrl.stop()
             adapter.close()
+
+    @pytest.mark.parametrize("timed_out", [False, True])
+    @pytest.mark.parametrize("fetching_policy", ["prefix", "full"])
+    def test_retained_prefetch_does_not_enqueue_l2_store(
+        self, l1_manager, timed_out, fetching_policy
+    ):
+        """Retained loads stay in L1 without being queued for another L2 store."""
+        listener = StoreListener()
+        l1_manager.register_listener(listener)
+        adapter = make_gated_adapter()
+        clock = FakeClock()
+        ctrl = make_controller(
+            l1_manager, adapter, clock, timeout=5.0, policy=RetainPrefetchPolicy()
+        )
+        keys = [make_object_key(i) for i in range(2)]
+        layout = make_layout()
+        ctrl.start()
+        try:
+            store_keys_in_l2(adapter, keys, layout)
+            req = submit(ctrl, keys, layout, policy=fetching_policy)
+            assert adapter.load_entered.wait(10.0)
+            if timed_out:
+                clock.advance(10.0)
+                assert wait_until(lambda: result_ready(ctrl, req))
+                fallback = ctrl.query_prefetch_result(req)
+                assert fallback is not None
+                assert fallback.hit_cells[0].get_indices_list() == []
+                assert wait_until(lambda: draining_count(ctrl) == 1)
+            adapter.release_loads()
+            assert wait_until(lambda: in_flight_count(ctrl) == 0)
+            if timed_out:
+                assert ctrl.query_prefetch_result(req) is None
+            else:
+                result = ctrl.query_prefetch_result(req)
+                assert result is not None
+                assert result.hit_cells[0].get_indices_list() == [0, 1]
+                l1_manager.finish_read(keys)
+            assert l1_manager.report_status()["read_locked_count"] == 0
+            assert listener.pop_pending_keys() == []
+            for key in keys:
+                state = l1_manager.get_object_state(key)
+                assert state is not None
+                assert not state.is_temporary
+            assert all(
+                result[0] == L1Error.SUCCESS
+                for result in l1_manager.reserve_read(keys).values()
+            )
+            l1_manager.finish_read(keys)
+            ordinary_key = make_object_key(10)
+            reserved = l1_manager.reserve_write([ordinary_key], [False], layout)
+            assert reserved[ordinary_key][0] == L1Error.SUCCESS
+            l1_manager.finish_write([ordinary_key])
+            assert listener.pop_pending_keys() == [ordinary_key]
+        finally:
+            adapter.release_loads()
+            ctrl.stop()
+            adapter.close()
+            listener.close()
 
     def test_lookup_hits_are_not_served_before_load_completion(self, l1_manager):
         """A successful L2 lookup cannot make an unfinished load a cache hit."""
@@ -858,7 +929,7 @@ class TestLoadDeadline:
         self, l1_manager, event_capture
     ):
         """A queue-expired request emits LOOKUP_SUBMITTED (to zero adapters)
-        before LOOKUP_COMPLETED, and one L2_PREFETCH_DEADLINE with phase=queued."""
+        before one L2_PREFETCH_DEADLINE with phase=queued."""
         adapter = make_gated_adapter()  # drainers hold the single slot
         clock = FakeClock()
         ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0, max_in_flight=1)
@@ -894,7 +965,7 @@ class TestLoadDeadline:
             ]
             completed = [
                 e
-                for e in event_capture.of_type(EventType.L2_PREFETCH_LOOKUP_COMPLETED)
+                for e in event_capture.of_type(EventType.L2_PREFETCH_DEADLINE)
                 if e.metadata["request_id"] == r1
             ]
             assert submitted and completed

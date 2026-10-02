@@ -324,6 +324,12 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--l1-align-bytes``
      - ``4096``
      - Alignment size in bytes (default 4 KB).
+   * - ``--l1-use-hugepages`` / ``--no-l1-use-hugepages``
+     - ``False``
+     - Allocate the L1 pool from the 2 MiB hugepage pool instead of regular
+       pinned memory. It requires pre-allocated hugepages
+       (``sysctl vm.nr_hugepages``). Mutually exclusive with ``--shm-name``
+       and ``--l1-use-lazy`` (enabling it auto-disables lazy).
    * - ``--l1-devdax-path``
      - *(not set)*
      - Optional ``/dev/dax*`` device or mmap-able file to use as the L1

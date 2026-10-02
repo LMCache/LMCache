@@ -43,6 +43,10 @@ per-adapter completion path: active requests admit successful cells with reader
 locks, while draining requests admit them resident but unlocked; failed cells
 are deleted in both cases.
 
+Draining admission uses `L1Manager.finish_prefetch`, so a retained late load
+does not trigger another L2 store. Eviction and L1 write accounting still
+receive the admission notification.
+
 ## Scheduling (single loop thread)
 
 Deadlines are stamped under the submission lock, so the *armed* entries of the
@@ -76,7 +80,9 @@ deadline in:      (a)        (b)          (c)
 - **(c) Plan-and-load:** usable = L1 hits ∪ loads already completed. Under
   `prefix`, `fold_unfold_grouped` applies the attention window of every key-group
   row, so a pending cell can truncate the common prefix. Under `full`, every
-  completed cell is reported, including non-prefix cells. Pending adapters keep
+  column completed by every row is reported, including non-prefix columns.
+  `found_cells` reports the L1/L2 discovery grid separately from usable hits.
+  Pending adapters keep
   their write buffers and L2 locks until they complete.
 
 ## Observability
