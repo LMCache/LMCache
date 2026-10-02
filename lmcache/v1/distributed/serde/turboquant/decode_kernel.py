@@ -71,6 +71,7 @@ def _tq_full_dequant_kv(
     BLOCK_D: tl.constexpr,
     NORM_CORRECTION: tl.constexpr = 0,
     FP8_E4B15: tl.constexpr = 0,  # 1 = use e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
+    KEY_PASSTHROUGH_FP8: tl.constexpr = 0,  # 1 = K_out_ptr is uint8; store raw fp8 bits
 ):
     """Full dequant: reconstruct K (MSE centroids * norm or FP8) and V to fp16."""
     pos = tl.program_id(0)
@@ -94,11 +95,15 @@ def _tq_full_dequant_kv(
     ko_base = bid * stride_ko_b + hid * stride_ko_h + pos * stride_ko_s
     if KEY_FP8:
         k_raw = tl.load(KV_cache_ptr + slot_base + d_offs, mask=d_mask, other=0)
-        if FP8_E4B15:
+        if KEY_PASSTHROUGH_FP8:
+            # vLLM fp8 -- raw bits already correct, skip dequant
+            tl.store(K_out_ptr + ko_base + d_offs, k_raw, mask=d_mask)
+        elif FP8_E4B15:
             k_recon = k_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
+            tl.store(K_out_ptr + ko_base + d_offs, k_recon.to(tl.float16), mask=d_mask)
         else:
             k_recon = k_raw.to(tl.float8e4nv, bitcast=True).to(tl.float32)
-        tl.store(K_out_ptr + ko_base + d_offs, k_recon.to(tl.float16), mask=d_mask)
+            tl.store(K_out_ptr + ko_base + d_offs, k_recon.to(tl.float16), mask=d_mask)
     else:
         # MSE unpack (3-bit or 4-bit) + norms
         mse_bit_off = d_offs * MSE_BITS
