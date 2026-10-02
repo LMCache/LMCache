@@ -240,6 +240,17 @@ def serialize_header(enc: EncodedKV) -> bytes:
     last field.  Caller is responsible for ensuring `enc.payload`
     matches `expected_payload_len()`.
     """
+    payload_lengths = (
+        enc.k_payload_len,
+        enc.v_payload_len,
+        enc.scale_payload_len,
+    )
+    if any(length < 0 for length in payload_lengths):
+        raise UnsupportedConfigError(
+            "payload lengths must be non-negative: "
+            f"K={enc.k_payload_len}, V={enc.v_payload_len}, "
+            f"scales={enc.scale_payload_len}"
+        )
     if len(enc.payload) != enc.expected_payload_len():
         raise UnsupportedConfigError(
             f"payload length {len(enc.payload)} does not match "
@@ -340,6 +351,11 @@ def deserialize_header(buf: bytes) -> EncodedKV:
         raise CorruptEncodedKVError("truncated payload-lengths field")
     k_len, v_len, s_len = struct.unpack_from("<qqq", mv, off)
     off += 24
+    if k_len < 0 or v_len < 0 or s_len < 0:
+        raise CorruptEncodedKVError(
+            "negative payload length in encoded header: "
+            f"K={k_len}, V={v_len}, scales={s_len}"
+        )
 
     if off + 2 > len(mv):
         raise CorruptEncodedKVError("truncated hashes-count field")
