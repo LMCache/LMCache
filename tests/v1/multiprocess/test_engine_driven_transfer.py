@@ -17,10 +17,13 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheServerKey,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.posix_shm import (
     shm_create_readwrite,
     shm_munmap,
@@ -31,8 +34,14 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
     create_engine_driven_context,
 )
+from lmcache.v1.multiprocess.transfer_context.mixed import MixedTransferContext
 from lmcache.v1.multiprocess.transfer_context.pickle import EngineDrivenContextPickle
 from lmcache.v1.multiprocess.transfer_context.shm import EngineDrivenContextShm
+from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
+    IPCEvent,
+    LMCacheDrivenTransferContext,
+    create_transfer_context,
+)
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -40,7 +49,6 @@ if TYPE_CHECKING:
     from lmcache.v1.distributed.config import StorageManagerConfig
     from lmcache.v1.gpu_connector.utils import LayoutHints
     from lmcache.v1.multiprocess.custom_types import (
-        IPCCacheServerKey,
         RegisterEngineDrivenContextPayload,
     )
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -1864,3 +1872,125 @@ def test_engine_driven_context_shm_close_is_idempotent() -> None:
     finally:
         shm_munmap(addr, 4096)
         shm_unlink(shm_name)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("heads_dim", [False, True])
+@pytest.mark.parametrize("retrieve_ok", [False, True])
+def test_mixed_mla_staging_preserves_block_mapping_and_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    heads_dim: bool,
+    retrieve_ok: bool,
+) -> None:
+    """Two chunks reuse staging without rebinding host storage or overwriting APC."""
+    if not torch.cuda.is_available():
+        pytest.skip("Mixed transfer requires CUDA")
+
+    def done(value: bool | int | None) -> MessagingFuture[bool | int | None]:
+        future: MessagingFuture[bool | int | None] = MessagingFuture()
+        future.set_result(value)
+        return future
+
+    host = torch.arange(96, dtype=torch.float32).reshape(12, 2, 4).pin_memory()
+    if heads_dim:
+        host = host.unsqueeze(1)
+    gpu = torch.arange(96, dtype=torch.uint8, device="cuda").reshape(12, 2, 4)
+    caches = {"mla": host, "indexer": gpu}
+    original_ptr = host.data_ptr()
+    client = MagicMock()
+    client.get_chunk_size.return_value = done(4)
+    client.register_kv_cache.return_value = done(None)
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.transfer_context.worker_transfer.wrap_kv_caches",
+        lambda kv: [MagicMock(shape=t.shape) for t in kv.values()],
+    )
+    context = create_transfer_context(caches, instance_id=7, req_client=client)
+    assert isinstance(context, MixedTransferContext)
+    infos = [
+        EngineGroupInfo(0, (0,), 2),
+        EngineGroupInfo(2, (1,), 2),
+    ]
+    context.register(caches, "mixed-test", 1, 2, 10, engine_group_infos=infos)
+    assert host.data_ptr() == original_ptr
+    assert client.register_kv_cache.call_args.args[1][0].shape[0] == 3
+    chunks: dict[int, list[torch.Tensor]] = {}
+
+    def store(
+        _self: LMCacheDrivenTransferContext,
+        _request: str,
+        key: IPCCacheServerKey,
+        staged: dict[str, torch.Tensor],
+        ids: list[list[int]],
+        _event: IPCEvent | None,
+        _blocks: int,
+    ) -> MessagingFuture[bool | int | None]:
+        assert ids[0] == [1, 2]
+        chunks[key.start] = [
+            t[blocks].cpu().clone()
+            for t, blocks in zip(staged.values(), ids, strict=True)
+        ]
+        return done(True)
+
+    def retrieve(
+        _self: LMCacheDrivenTransferContext,
+        _request: str,
+        key: IPCCacheServerKey,
+        staged: dict[str, torch.Tensor],
+        ids: list[list[int]],
+        _event: IPCEvent | None,
+        _blocks: int,
+        skip: int,
+    ) -> MessagingFuture[bool | int | None]:
+        if retrieve_ok:
+            for layer, (tensor, blocks) in enumerate(
+                zip(staged.values(), ids, strict=True)
+            ):
+                for i, block in enumerate(blocks):
+                    if i >= skip // 2:
+                        tensor[block].copy_(chunks[key.start][layer][i])
+        return done(retrieve_ok)
+
+    monkeypatch.setattr(LMCacheDrivenTransferContext, "submit_store", store)
+    monkeypatch.setattr(LMCacheDrivenTransferContext, "submit_retrieve", retrieve)
+    key = IPCCacheServerKey("mixed-test", 1, 0, tuple(range(8)), 0, 8, "request")
+    source_ids = [[5, 2, 6, 3], [7, 4, 1, 6]]
+    expected = [
+        t[ids].cpu().clone() for t, ids in zip(caches.values(), source_ids, strict=True)
+    ]
+    try:
+        assert context.submit_store(
+            "request",
+            key,
+            caches,
+            source_ids,
+            context.create_recorded_event(),
+            2,
+        ).result()
+        assert list(chunks) == [0, 4]
+        host.fill_(-1)
+        gpu.fill_(255)
+        target_ids = [[1, 4, 7, 2], [3, 5, 2, 1]]
+        assert (
+            context.submit_retrieve(
+                "request",
+                key,
+                caches,
+                target_ids,
+                context.create_recorded_event(),
+                2,
+                skip_first_n_tokens=2,
+            ).result()
+            is retrieve_ok
+        )
+        assert torch.all(host[target_ids[0][0]] == -1)
+        assert torch.all(gpu[target_ids[1][0]] == 255)
+        if retrieve_ok:
+            for tensor, ids, want in zip(
+                caches.values(), target_ids, expected, strict=True
+            ):
+                assert torch.equal(tensor[ids[1:]].cpu(), want[1:])
+        else:
+            assert torch.all(host == -1)
+        assert host.data_ptr() == original_ptr
+    finally:
+        context.close()

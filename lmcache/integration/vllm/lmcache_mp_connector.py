@@ -50,6 +50,7 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 )
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
+    get_cache_group_ids,
     get_tokens_per_block,
     is_scratch_spec,
 )
@@ -225,7 +226,8 @@ def get_group_tokens_per_block(
     Attention pages are local DCP shards and therefore cover
     ``spec.block_size * dcp_size`` global tokens. Recurrent-state pages are
     replicated and retain their physical ``spec.block_size`` span. Scratch
-    groups cover no tokens and report ``0``. When vLLM does not provide
+    and unselected groups report ``0``; HiSparse selects MLA and indexer.
+    Group positions retain the original vLLM IDs. When vLLM does not provide
     group metadata, preserve the legacy single-group rule.
 
     Args:
@@ -233,7 +235,7 @@ def get_group_tokens_per_block(
         kv_cache_config: vLLM's resolved KV cache group configuration.
 
     Returns:
-        The effective token span of each KV cache group, ``0`` for scratch
+        The effective token span of each KV cache group, ``0`` for excluded
         groups that never store or retrieve.
     """
     dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
@@ -242,8 +244,12 @@ def get_group_tokens_per_block(
         if kv_cache_config is not None
         else ()
     )
+    selected_ids = get_cache_group_ids(groups)
     return [
-        get_tokens_per_block(group.kv_cache_spec, dcp_size) for group in groups
+        get_tokens_per_block(group.kv_cache_spec, dcp_size)
+        if group_id in selected_ids
+        else 0
+        for group_id, group in enumerate(groups)
     ] or [vllm_config.cache_config.block_size * dcp_size]
 
 
@@ -254,8 +260,8 @@ def get_vllm_scheduler_block_size(
     """Return vLLM's scheduler block size for the resolved cache groups.
 
     The scheduler boundary must align with every cache group, so vLLM uses the
-    least common multiple of their effective block spans. Scratch groups
-    (span ``0``) do not take part.
+    least common multiple of their effective block spans. Excluded groups
+    (span ``0``) do not take part in LMCache's transfer alignment.
 
     Args:
         vllm_config: The active vLLM configuration.
@@ -575,6 +581,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, kv_cache_config
         )
         cache_model_name = get_dcp_decorated_model_name(vllm_config, kv_cache_config)
+        if kv_cache_config is not None and any(
+            getattr(group, "role", None) == "hisparse_indexer"
+            for group in kv_cache_config.kv_cache_groups
+        ):
+            # Keep complete HiSparse objects separate from indexer-only caches.
+            cache_model_name += "##lmcache-hisparse-v1"
 
         assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
@@ -822,16 +834,33 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         assert self._connector_metadata is not None
         return self._connector_metadata
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """
-        Initialize with the KV caches. Useful for pre-registering the
-        KV Caches in the KVConnector (e.g. for NIXL).
+        Register selected KV caches, preserving their tensor views.
+
+        HiSparse registers its CPU MLA source and GPU indexer pools.
+        Scratch pools are removed before format detection and transport
+        selection. vLLM group IDs remain unchanged.
 
         Args:
             kv_caches: dictionary of layer names, kv cache
         """
         logger.info("Registering kv caches!")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
+        if kv_cache_config is not None:
+            groups = kv_cache_config.kv_cache_groups
+            selected_ids = get_cache_group_ids(groups)
+            excluded_layers = {
+                name
+                for group_id, group in enumerate(groups)
+                if group_id not in selected_ids
+                for name in group.layer_names
+            }
+            kv_caches = {
+                name: cache
+                for name, cache in kv_caches.items()
+                if name not in excluded_layers
+            }
         # Must precede both group-info creation and transfer registration so
         # they see the same edited views.
         layout_hints = vllm_layout_hints(self._vllm_config)

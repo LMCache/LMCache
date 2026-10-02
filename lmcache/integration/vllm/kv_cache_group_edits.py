@@ -50,6 +50,7 @@ from vllm.v1.kv_cache_interface import (
 import torch
 
 # First Party
+from lmcache.integration.vllm.kv_cache_groups import get_cache_group_ids
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
@@ -642,10 +643,12 @@ def apply_kv_cache_group_edits(
 ) -> dict[str, RegisteredKVCache]:
     """Apply all KV cache group metadata edits for LMCache registration.
 
-    Each layer is checked against the ``_EDITS`` rules (first match wins) and
+    Each selected layer is checked against ``_EDITS`` (first match wins) and
     re-viewed by the matching rule; layers matching no rule pass through
     unchanged. ``None`` configs and configs without Mamba groups are returned
     as-is (as a dict): all current rules only apply to Mamba-hybrid models.
+    Excluded groups are skipped; their tensors may already have been filtered
+    out by the connector.
 
     Args:
         kv_cache_config: vLLM ``KVCacheConfig`` (read for per-group specs).
@@ -668,7 +671,8 @@ def apply_kv_cache_group_edits(
 
     edited = dict(kv_caches)
     counts: Counter[str] = Counter()
-    for group in kv_cache_config.kv_cache_groups:
+    for group_id in get_cache_group_ids(kv_cache_config.kv_cache_groups):
+        group = kv_cache_config.kv_cache_groups[group_id]
         per_layer_specs = getattr(group.kv_cache_spec, "kv_cache_specs", None)
         for name in group.layer_names:
             spec = per_layer_specs[name] if per_layer_specs else group.kv_cache_spec
