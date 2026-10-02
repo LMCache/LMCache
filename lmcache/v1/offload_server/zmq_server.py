@@ -23,14 +23,25 @@ class ZMQOffloadServer(OffloadServerInterface):
     def __init__(
         self,
         lmcache_engine: LMCacheEngine,
-        tp_rank: int,
-    ):
+        rank: int,
+    ) -> None:
+        """Create the worker's offload socket and request thread.
+
+        Args:
+            lmcache_engine: LMCacheEngine receiving the offloaded KV cache.
+            rank: Integer worker rank, unique within the engine's IPC
+                namespace. vLLM callers must pass ``parallel_config.rank``
+                because TP-local ranks repeat across pipeline stages.
+
+        Raises:
+            zmq.ZMQError: If the socket cannot be created or bound.
+        """
         metadata = lmcache_engine.metadata
         self.ctx = get_zmq_context(use_asyncio=False)
         offload_rpc_port = int(os.environ.get("LMCACHE_OFFLOAD_RPC_PORT", 100))
         engine_id = metadata.engine_id or "default"
         socket_path = get_zmq_rpc_path_lmcache(
-            engine_id, "offload", offload_rpc_port, tp_rank
+            engine_id, "offload", offload_rpc_port, rank
         )
         self.socket = get_zmq_socket(
             self.ctx,
