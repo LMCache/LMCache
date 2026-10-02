@@ -562,10 +562,13 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         Notes:
             All-or-nothing. If ``gpu_block_ids`` do not fully cover every chunk
             ``key`` resolves to for every LMCache group (e.g. a caller/protocol
-            bug), or a copy fails, the whole store is skipped and nothing is
-            committed (logged at WARNING); a subsequent retrieve simply misses
+            bug), a copy fails, or completion ownership is invalid, the whole
+            store is skipped and nothing is committed; a subsequent retrieve misses
             and the engine recomputes. The boolean result reports whether the
             store completed without such a failure.
+            Failed copies or completion preparation retain staging reservations
+            under the existing write-TTL rules; queued GPU writes may still
+            reference those buffers.
         """
         st = time.perf_counter()
 
@@ -736,6 +739,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         block_ids_host=gpu_block_ids,
                     )
 
+                completion = (
+                    self._ctx.storage_manager.prepare_write_completion(all_dict)
+                    if all_dict
+                    else []
+                )
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
@@ -748,7 +756,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
                         "finish_write_by_owner",
-                        self._ctx.storage_manager.prepare_write_completion(all_dict),
+                        completion,
                     )
                 else:
                     total_bytes = 0

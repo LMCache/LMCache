@@ -3,7 +3,7 @@
 
 # Standard
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import MagicMock
 
 # Third Party
@@ -25,14 +25,17 @@ from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, StorageManager
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess import native_completion
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
 
 
 @pytest.mark.parametrize("owner_count", [1, 2])
-@pytest.mark.parametrize("copy_fails", [False, True])
+@pytest.mark.parametrize("failure", ["none", "copy", "owner"])
 def test_store_owner_callback_round_trip(
-    monkeypatch: pytest.MonkeyPatch, owner_count: int, copy_fails: bool
+    monkeypatch: pytest.MonkeyPatch,
+    owner_count: int,
+    failure: Literal["none", "copy", "owner"],
 ) -> None:
     """Real reservations survive serialization and finish only after dispatch.
 
@@ -100,8 +103,10 @@ def test_store_owner_callback_round_trip(
     def copy(*args: Any, **kwargs: Any) -> None:
         order.append("copy")
         copied.extend(args[2])
-        if copy_fails and len(copied) == 2:
+        if failure == "copy" and len(copied) == 2:
             raise RuntimeError("device copy failed")
+        if failure == "owner" and len(copied) == 2:
+            copied[-1].reset_l1_manager()
 
     monkeypatch.setattr(transfer, "transfer_kv_per_object_group", copy)
     keys = [ObjectKey(b"chunk", "model", 0, gid) for gid in range(2)]
@@ -134,14 +139,20 @@ def test_store_owner_callback_round_trip(
             [[1], [2]],
             b"producer",
         )
-        assert succeeded is not copy_fails
+        assert succeeded is (failure == "none")
         assert len(copied) == 2
+        end_event = ctx.event_bus.publish_on_stream.call_args.args[1]
+        assert end_event.event_type == EventType.MP_STORE_END
+        assert end_event.metadata["stored_count"] == (2 if succeeded else 0)
+        if not succeeded:
+            assert end_event.metadata["total_bytes"] == 0
+            assert end_event.metadata["num_tokens"] == 0
         for manager in managers:
             assert all(
                 err == L1Error.KEY_NOT_EXIST
                 for err, _ in manager.reserve_read(keys).values()
             )
-        if copy_fails:
+        if failure != "none":
             assert not queued
             assert order == ["copy", "copy", "record"]
             assert all(obj.is_valid() for obj in copied)
@@ -157,7 +168,9 @@ def test_store_owner_callback_round_trip(
         module.close()
         for index, manager in enumerate(managers):
             found = manager.reserve_read(keys)
-            expected = [] if copy_fails else keys if owner_count == 1 else [keys[index]]
+            expected = (
+                [] if failure != "none" else keys if owner_count == 1 else [keys[index]]
+            )
             assert [
                 key for key, (err, _) in found.items() if err == L1Error.SUCCESS
             ] == expected
