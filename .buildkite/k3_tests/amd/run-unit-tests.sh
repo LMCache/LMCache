@@ -31,6 +31,10 @@ uv pip install -r requirements/test.txt
 uv pip install -e . --no-build-isolation
 uv pip freeze
 
+# Keep uv's package cache from growing unbounded across builds (pruned here,
+# before tests run, so a test failure doesn't skip it).
+uv cache prune
+
 LMCACHE_TRACK_USAGE="false" \
 pytest --maxfail=1 --cov=lmcache \
     --cov-report term --cov-report=html:coverage-test \

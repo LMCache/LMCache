@@ -8,6 +8,8 @@ VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-vllm/vllm-openai-rocm:nightly-rocm100}"
 DOCKER=(docker)
 docker info >/dev/null 2>&1 || DOCKER=(sudo docker)
 cd "${REPO_ROOT}"
+# shellcheck source=.buildkite/scripts/amd-disk-guard.sh
+source .buildkite/scripts/amd-disk-guard.sh
 source .buildkite/scripts/pick-free-gpu-amd.sh 70000 8
 echo "=== ROCm 10 MP stress on ${VLLM_ROCM_IMAGE}, HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES} ==="
 "${DOCKER[@]}" pull "${VLLM_ROCM_IMAGE}" >/dev/null

@@ -30,6 +30,8 @@ cd "${REPO_ROOT}"
 # shellcheck source=.buildkite/k3_tests/common_scripts/helpers.sh
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 merge_pr_base_branch
+# shellcheck source=.buildkite/scripts/amd-disk-guard.sh
+source "${REPO_ROOT}/.buildkite/scripts/amd-disk-guard.sh"
 
 echo "AMD kernel mode: ${MODE}"
 
@@ -99,6 +101,7 @@ cleanup() {
     # The image runs as root so compiled extensions and artifacts in the
     # mounted checkout must be returned to the Buildkite agent user.
     sudo chown -R "$(id -u):$(id -g)" "${REPO_ROOT}" 2>/dev/null || true
+    amd_disk_guard
 }
 trap cleanup EXIT
 
