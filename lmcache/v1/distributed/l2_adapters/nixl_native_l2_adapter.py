@@ -143,13 +143,26 @@ def _create_nixl_native_l2_adapter(
         raise ValueError("nixl_native requires a positive L1 alignment")
 
     try:
+        # Third Party
+        # Importing the nixl wheel loads libnixl (and lets it find its plugins
+        # next to itself); the extension below links libnixl by SONAME and
+        # resolves it from that already-loaded copy, so a wheel install needs
+        # no rpath or LD_LIBRARY_PATH. Best effort: a source build may already
+        # have libnixl on the loader path, and the extension import below is
+        # the real gate either way.
+        import nixl  # noqa: F401
+    except ImportError:
+        pass
+
+    try:
         # First Party
         from lmcache.lmcache_nixl import LMCacheNixlClient
     except ImportError as exc:
         raise RuntimeError(
-            "nixl_native requires the optional C++ extension built with NIXL "
-            ">= 1.3 development files. Set BUILD_WITH_NIXL=1, "
-            "NIXL_INCLUDE_DIR, and NIXL_LIBRARY_DIR, then reinstall LMCache."
+            "nixl_native requires the nixl package (pip install lmcache[nixl]) "
+            "and LMCache's C++ NIXL extension. The published wheels include "
+            "the extension; a source build needs BUILD_WITH_NIXL=1, "
+            "NIXL_INCLUDE_DIR, and NIXL_LIBRARY_DIR set before installing."
         ) from exc
 
     # First Party

@@ -121,6 +121,9 @@ FROM base AS image-release
 ARG CUDA_VERSION
 
 ARG LMCACHE_VERSION
+# The lmcache wheel's native NIXL connector was compiled against this NIXL
+# release; keep the runtime on the same one rather than whatever is newest.
+ARG NIXL_VERSION=1.3.1
 
 RUN . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
@@ -133,8 +136,7 @@ RUN . /opt/venv/bin/activate && \
     uv pip install "lmcache${VER:+==${VER}}" \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match --verbose && \
-  
-    uv pip install --reinstall-package nixl nixl
+    uv pip install --reinstall-package nixl "nixl==${NIXL_VERSION}"
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
@@ -148,6 +150,7 @@ FROM base AS image-release-cu129
 
 ARG CUDA_VERSION=12.9
 ARG LMCACHE_VERSION
+ARG NIXL_VERSION=1.3.1
 
 RUN . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
@@ -162,8 +165,7 @@ RUN . /opt/venv/bin/activate && \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \
         --index-strategy unsafe-best-match --verbose && \
-    
-    uv pip install --reinstall-package nixl nixl
+    uv pip install --reinstall-package nixl "nixl==${NIXL_VERSION}"
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
