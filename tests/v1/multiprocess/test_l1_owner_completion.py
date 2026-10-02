@@ -2,6 +2,7 @@
 """Owner-tagged STORE callbacks use the production MessagePack dispatcher."""
 
 # Standard
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 from unittest.mock import MagicMock
@@ -61,7 +62,9 @@ def test_store_owner_callback_round_trip(
             shm_name="",
         )
     )
-    managers = tuple(L1Manager(config) for _ in range(owner_count))
+    managers = tuple(
+        L1Manager(replace(config, tag=f"l1-{index}")) for index in range(owner_count)
+    )
     storage = StorageManager(
         StorageManagerConfig(
             l1_manager_config=config,

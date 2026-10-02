@@ -9,7 +9,6 @@
 """
 
 # Standard
-from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock
@@ -162,18 +161,20 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         [f"g{g}c{c}" for c in range(num_chunks)] for g in range(num_object_groups)
     ]
     ctx = MagicMock()
+    ctx.get_read_owners.return_value = None
     ctx.chunk_size = 256
     ctx.null_block_id = 0
     ctx.resolve_obj_keys.return_value = obj_keys
 
     read_calls: list[list[str]] = []
 
-    @contextmanager
-    def fake_read(keys):
+    def fake_read(keys, l1_owners=None):
         read_calls.append(list(keys))
-        yield [MagicMock(get_size=MagicMock(return_value=10)) for _ in keys]
+        return list(keys), [
+            MagicMock(get_size=MagicMock(return_value=10)) for _ in keys
+        ]
 
-    ctx.storage_manager.read_prefetched_results = MagicMock(side_effect=fake_read)
+    ctx.storage_manager.unsafe_read = MagicMock(side_effect=fake_read)
     module._ctx = ctx
 
     transfer_calls: list[tuple[int, list]] = []
@@ -326,3 +327,35 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
     # the aux group is read by NOBODY and transferred by nobody.
     assert read_calls == [["g0c2"], [f"g1c{c}" for c in range(3)]]
     assert [g for g, _ in transfer_calls] == [0, 1]
+
+
+def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
+    module, reads, _ = _make_module(monkeypatch, 2, [-1, 1])
+    owners = {"g0c0": 10, "g0c1": 10, "g1c1": 20}
+    completion = [(10, ["g0c0", "g0c1"]), (20, ["g1c1"])]
+    module.context.get_read_owners.return_value = owners
+    module.context.storage_manager.prepare_read_completion.return_value = completion
+    callback = MagicMock()
+    monkeypatch.setattr(mod, "submit_callback_to_stream", callback)
+    monkeypatch.setattr(
+        mod,
+        "transfer_kv_per_object_group",
+        MagicMock(side_effect=RuntimeError("partly enqueued transfer")),
+    )
+    _, ok = module.retrieve(
+        SimpleNamespace(request_id="req", cache_salt="salt"),
+        1,
+        [[1, 2], [0, 3]],
+        b"producer",
+    )
+    assert not ok
+    assert reads == [["g0c0", "g0c1"]]
+    module.context.storage_manager.prepare_read_completion.assert_called_once_with(
+        ["g0c0", "g0c1", "g1c1"], owners
+    )
+    callback.assert_called_once_with(
+        module.get_and_touch_context_entry(1).cache_context.cupy_stream,
+        "finish_read_by_owner",
+        completion,
+    )
+    module.context.storage_manager.finish_read_prefetched.assert_not_called()

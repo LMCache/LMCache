@@ -368,6 +368,7 @@ class LookupModule:
         session.record_prefetch_result(
             found_count,
             tuple(range(job.attn_desc.num_object_groups)),
+            result.l1_owners,
         )
 
         # L1 is credited with the prefix its own cells serve under the same
@@ -479,7 +480,9 @@ class LookupModule:
             return
 
         self._ctx.storage_manager.finish_read_prefetched(
-            obj_keys, read_locks=key.require_num_kv_readers()
+            obj_keys,
+            read_locks=key.require_num_kv_readers(),
+            l1_owners=self._ctx.get_read_owners(key.request_id),
         )
 
     @request_handler(HandlerType.BLOCKING)

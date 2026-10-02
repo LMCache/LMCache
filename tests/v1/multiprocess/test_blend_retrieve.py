@@ -631,7 +631,7 @@ class _LockCountingStorageManager:
             l2_hit_cells=rows(),
         )
 
-    def finish_read_prefetched(self, keys, read_locks: int = 1) -> None:
+    def finish_read_prefetched(self, keys, read_locks: int = 1, l1_owners=None) -> None:
         for key in keys:
             held = self.locks.get(key, 0)
             if held < read_locks:

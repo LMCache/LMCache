@@ -570,6 +570,8 @@ class PrefetchResult:
     hit_cells: list["Bitmap"]
     l1_hit_cells: list["Bitmap"]
     l2_hit_cells: list["Bitmap"]
+    l1_owners: dict[ObjectKey, int] = field(default_factory=dict)
+    """Exact manager IDs holding this request's retained read locks."""
     _l1_hit_count: int = field(init=False, repr=False, compare=False)
     _l2_hit_count: int = field(init=False, repr=False, compare=False)
 

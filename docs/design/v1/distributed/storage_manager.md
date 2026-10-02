@@ -97,13 +97,11 @@ controller's decision.
 
 ## Internal write overflow and object ownership
 
-The normal CLI constructs one L1. An internal `_l1_managers` constructor input
-accepts existing managers for write-allocation tests; `StorageManager` owns their
-lifetime. Multiple managers require no L2 adapters and `noop` eviction. Serving
-reads, prefetch, key-only completion, and runtime Device-DAX management are
-rejected in that mode. This is not a multi-L1 serving configuration.
-`memcheck`, `get_l1_usage`, `report_status`, and `publish_capacity` also require
-one L1, so the write-only harness cannot report partial health or capacity.
+The CLI configures one or more L1 managers. The internal `_l1_managers`
+constructor input also accepts existing managers for tests; `StorageManager`
+owns their lifetime. Key-only completion and legacy single-region/runtime
+Device-DAX APIs require a single manager. Serving reads carry exact owners;
+reporting and memory checks include every configured manager.
 
 `OrderedWritePolicy` supplies stable manager IDs in explicit order, primary first
 by default. Construction validates and captures that order; later mutations of
@@ -149,9 +147,49 @@ When tracing is enabled, both single-L1 completion entry points record one
 existing `finish_write(keys)` trace call. Process-local owner IDs are not written
 to the storage trace, so the unchanged dispatcher can replay it against a fresh
 manager. Multi-L1 serving and multi-L1 trace replay remain outside this internal
-write-only foundation.
+owner-routed multi-L1 path.
 
 `test_multi_l1.py`, `test_l1_owner.py`, and `test_l1_owner_completion.py` cover
 overflow, batch cleanup, independent same-key copies, recycled ownership, and
 serialized completion. Read selection, affinity, backend rewiring, public
 configuration, per-L1 reporting, and sharing services remain separate work.
+
+## Configured peer L1 serving
+
+`StorageManagerConfig.l1_manager_configs` lists tagged DRAM, Device-DAX, or GDS
+configurations. The legacy singular config aliases the first entry. Each manager
+owns its allocator, eviction controller, and store controller. Initialization
+rolls back already-created managers, adapters, and controllers on failure.
+
+The immutable write order is resolved once at construction. Only allocation OOM
+advances to a peer; allocation batches and writer tags retain their existing
+semantics. `MemoryObj` carries a process-local manager identity outside serialized
+metadata. `prepare_write_completion` captures that identity before GPU work, and
+`finish_write_by_owner` admits each staging object on the captured manager.
+
+L2 affinity is a fixed mapping from `L2AdapterConfigBase.affinity_tag` to an L1
+identity. Stores and serde use that L1, and prefetch reloads allocate there. There
+is no pluggable affinity policy. Unknown targets and GDS targets for host-buffer
+adapters are rejected. Runtime adapter attachment updates the controller's
+mapping on its own loop thread; removal drops it after draining.
+
+Prefetch uses synchronous L1 calls and the existing per-manager lock maps. Its
+policy discards redundant copies and returns `PrefetchResult.l1_owners` for retained
+keys. Each session keeps its own owner map. Multi-L1 reads and releases require
+that map; they do not search for another copy by key. Stream callbacks carry
+owner/key groups captured before enqueue. A failed peer lookup releases earlier
+reservations, and a failed GPU retrieve releases all retained groups after
+already-enqueued work finishes.
+
+GDS slab context lifetime belongs to its L1. GPU buffers register after L1
+construction, transfers resolve the slab by object owner, and shutdown drains
+GPU work before freeing the slab. One active GDS slab per process remains a hard
+limit because native stream registration is shared. Device-DAX peers own disjoint
+mappings; duplicate device ownership is rejected.
+
+Status exposes manager and controller dictionaries keyed by tag. Capacity is
+summed by physical backing medium, while usage is the sum of allocator usage.
+Prometheus gauges distinguish managers by `l1_tag` and `backend`; L1 operation
+counters include `l1_tag`. Single-L1 status aliases and key-only completion remain
+compatible. Single-region descriptors, P2P, shared-memory transfer, and legacy
+Device-DAX hotplug remain guarded for multi-L1 configurations.
