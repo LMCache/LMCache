@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit tests for NixlStoreL2Adapter with POSIX backend.
+Unit tests for NixlStoreL2Adapter and NixlStorageAgent.
 
-Tests are written based on the L2AdapterInterface contract defined in base.py.
-Tests only use public methods and do not access private fields.
+The adapter contract tests use a POSIX backend. Focused memory-registration
+tests mock NIXL to verify the OBJ and non-OBJ descriptor policies directly.
 """
 
 # Standard
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 import errno
 import os
 import select
@@ -41,6 +41,7 @@ from lmcache.v1.distributed.internal_api import (  # noqa: E402
     L2AdapterListener,
 )
 from lmcache.v1.distributed.l2_adapters.nixl_store_l2_adapter import (  # noqa: E402
+    NixlStorageAgent,
     NixlStoreL2Adapter,
     NixlStoreL2AdapterConfig,
 )
@@ -82,6 +83,84 @@ _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 PAGE_SIZE = 4096  # 4 KB per page
 NUM_BUFFER_PAGES = 20  # pages in the registered memory buffer
 POOL_SIZE = 20  # number of storage descriptors to pre-allocate
+
+
+class TestNixlStorageAgentMemoryRegistration:
+    """Verify backend-specific L1 registration granularity."""
+
+    @staticmethod
+    def _agent(
+        backend: str, backend_params: dict[str, str] | None = None
+    ) -> NixlStorageAgent:
+        agent = object.__new__(NixlStorageAgent)
+        agent.backend = backend
+        agent.backend_params = backend_params or {}
+        agent.nixl_agent = Mock()
+        agent.nixl_agent.register_memory.return_value = "registrations"
+        agent.nixl_agent.get_xfer_descs.return_value = "transfer-descs"
+        agent.nixl_agent.prep_xfer_dlist.return_value = "transfer-handler"
+        return agent
+
+    @pytest.mark.parametrize(
+        "backend_params",
+        [
+            {},
+            {"accelerated": "false"},
+            {"accelerated": "true", "type": "provider"},
+        ],
+    )
+    def test_obj_registers_each_l1_page_separately(self, backend_params):
+        agent = self._agent("OBJ", backend_params)
+
+        agent.init_mem_handlers("cpu", 0x10000, 3 * PAGE_SIZE, PAGE_SIZE, 0)
+
+        pages = [
+            (0x10000, PAGE_SIZE, 0),
+            (0x11000, PAGE_SIZE, 0),
+            (0x12000, PAGE_SIZE, 0),
+        ]
+        agent.nixl_agent.register_memory.assert_called_once_with(
+            [(*page, "") for page in pages], mem_type="DRAM"
+        )
+        agent.nixl_agent.get_xfer_descs.assert_called_once_with(pages, mem_type="DRAM")
+        assert agent.mem_reg_descs == "registrations"
+        assert agent.mem_xfer_handler == "transfer-handler"
+
+    def test_non_obj_registers_the_complete_l1_arena(self):
+        agent = self._agent("POSIX")
+
+        agent.init_mem_handlers("cpu", 0x10000, 3 * PAGE_SIZE, PAGE_SIZE, 0)
+
+        agent.nixl_agent.register_memory.assert_called_once_with(
+            [(0x10000, 3 * PAGE_SIZE, 0, "")], mem_type="DRAM"
+        )
+
+    def test_obj_accepts_lmcache_page_unaligned_base(self):
+        agent = self._agent("OBJ")
+
+        agent.init_mem_handlers("cpu", 0x10001, PAGE_SIZE, PAGE_SIZE, 0)
+
+        agent.nixl_agent.register_memory.assert_called_once_with(
+            [(0x10001, PAGE_SIZE, 0, "")], mem_type="DRAM"
+        )
+
+    @pytest.mark.parametrize(
+        ("buffer_size", "page_size", "message"),
+        [
+            (PAGE_SIZE + 1, PAGE_SIZE, "size"),
+            (PAGE_SIZE, 0, "page_size"),
+        ],
+    )
+    def test_rejects_invalid_l1_arena(
+        self, buffer_size: int, page_size: int, message: str
+    ):
+        agent = self._agent("OBJ")
+
+        with pytest.raises(ValueError, match=message):
+            agent.init_mem_handlers("cpu", 0x10000, buffer_size, page_size, 0)
+
+        agent.nixl_agent.register_memory.assert_not_called()
+
 
 # =============================================================================
 # Test Helpers
