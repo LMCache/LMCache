@@ -72,8 +72,9 @@ caller-provided load buffers during prefetch.
   the prefix by its transfer limit and submits the tail separately. Sources
   are not modified; disk padding is zero-filled. Misaligned buffers retain
   the existing full-buffer fallback.
-- Loads preserve destination bytes beyond the stored payload. A failed load
-  may partially modify the payload range and must not be published as valid.
+- Loads may overwrite bytes beyond the stored payload up to the padded transfer
+  length within the supplied destination buffer. A failed load may partially
+  modify the destination and must not be published as valid.
 
 - ``raw_block`` is a server-owned MP adapter. It does **not** support
   per-TP device-path mappings in MP mode.

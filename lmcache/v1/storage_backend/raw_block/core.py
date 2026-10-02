@@ -863,8 +863,8 @@ class RawBlockCore:
     ) -> list[bool]:
         """Load raw-block payloads into caller-provided memory objects.
 
-        Only the stored payload range is written; extra destination capacity
-        is preserved. Failed reads may partially change that range. Callers
+        Loads may overwrite destination bytes up to the padded transfer length,
+        within the supplied buffer. Failed reads may partially change it. Callers
         must retain exclusive access until completion and publish only successes.
 
         Args:
@@ -918,9 +918,20 @@ class RawBlockCore:
 
                     if len(buf) < payload_len:
                         raise ValueError("output buffer shorter than stored payload")
-                    # batched_read infers its logical length from the view.
-                    read_buffer = buf[:payload_len]
-                    read_payload_len = payload_len
+                    direct_view = self._build_direct_odirect_view(
+                        memory_obj=objs[i],
+                        payload_len=payload_len,
+                        total_len=total_len,
+                        buffer_len=len(buf),
+                    )
+                    if direct_view is not None:
+                        read_buffer = direct_view
+                        read_payload_len = (
+                            total_len if len(direct_view) >= total_len else payload_len
+                        )
+                    else:
+                        read_buffer = buf
+                        read_payload_len = payload_len
 
                     read_indices.append(i)
                     read_offsets.append(entry.offset + self.header_bytes)
@@ -1457,6 +1468,7 @@ class RawBlockCore:
         for logical_idx, (offset, buf, payload_len, total_len) in enumerate(
             zip(offsets, buffers, payload_lens, total_lens, strict=True)
         ):
+            chunk_start = len(chunk_offsets)
             try:
                 offset = int(offset)
                 payload_len = int(payload_len)
@@ -1468,27 +1480,43 @@ class RawBlockCore:
                     raise ValueError(
                         "output buffer or transfer shorter than payload_len"
                     )
+                needs_staging = len(dst) < total_len
                 prefix = (
                     self._uring_cmd_tail_prefix(dst, payload_len, total_len)
-                    if payload_len > self.block_align
+                    if needs_staging and self.block_align < payload_len
                     else None
                 )
-                if prefix is not None:
-                    target = self._allocate_aligned_buffer(total_len - prefix)
-                    segments = [(0, dst[:prefix]), (prefix, target)]
-                    copy_target = (
-                        dst[prefix:payload_len],
-                        target,
-                        payload_len - prefix,
+                if prefix is None:
+                    if needs_staging:
+                        target = self._allocate_aligned_buffer(total_len)
+                    else:
+                        target = dst
+                    cursor = 0
+                    max_chunk_len = (
+                        self.max_data_transfer_size
+                        if self.max_data_transfer_size > 0
+                        else total_len
                     )
-                elif len(dst) < total_len:
-                    target = self._allocate_aligned_buffer(total_len)
-                    segments = [(0, target)]
-                    copy_target = (dst, target, payload_len)
-                else:
-                    target = dst[:total_len]
-                    segments = [(0, target)]
-                    copy_target = None
+                    while cursor < total_len:
+                        chunk_len = min(max_chunk_len, total_len - cursor)
+                        chunk_offset = offset + cursor
+                        self._validate_uring_cmd_chunk(chunk_offset, chunk_len)
+                        chunk_offsets.append(chunk_offset)
+                        chunk_buffers.append(target[cursor : cursor + chunk_len])
+                        chunk_lens.append(chunk_len)
+                        chunk_logical_indices.append(logical_idx)
+                        cursor += chunk_len
+                    # chunk_buffers owns the views through submission and wait.
+                    if needs_staging:
+                        copy_back_targets[logical_idx] = (dst, target, payload_len)
+                    continue
+                target = self._allocate_aligned_buffer(total_len - prefix)
+                segments = [(0, dst[:prefix]), (prefix, target)]
+                copy_target = (
+                    dst[prefix:payload_len],
+                    target,
+                    payload_len - prefix,
+                )
 
                 max_chunk_len = (
                     self.max_data_transfer_size
@@ -1518,9 +1546,13 @@ class RawBlockCore:
                     chunk_lens.append(chunk_len)
                     chunk_logical_indices.append(logical_idx)
                     keepalive.append(chunk)
-                if copy_target is not None:
-                    copy_back_targets[logical_idx] = copy_target
+                copy_back_targets[logical_idx] = copy_target
             except Exception:
+                # No submission occurs until all logical requests are prepared.
+                del chunk_offsets[chunk_start:]
+                del chunk_buffers[chunk_start:]
+                del chunk_lens[chunk_start:]
+                del chunk_logical_indices[chunk_start:]
                 continue
 
         if not chunk_offsets:

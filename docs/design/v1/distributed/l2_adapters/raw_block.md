@@ -194,8 +194,10 @@ Important validation rules:
 
 The core passes logical byte views without expanding them into allocation
 padding. Stores leave the source unchanged and write zeroes for disk padding.
-Loads expose only the stored payload length to the device layer, preserving
-extra destination capacity. A failed load may still modify its payload range;
+Loads retain the supplied buffer capacity so an aligned buffer covering the
+padded transfer can be read directly. Bytes beyond the stored payload, up to
+the transfer length within that buffer, may be overwritten. Hidden allocation
+padding is not exposed. A failed load may partially modify the destination;
 callers must retain exclusive access until completion and publish only successes.
 
 For aligned buffers with one partial final block:

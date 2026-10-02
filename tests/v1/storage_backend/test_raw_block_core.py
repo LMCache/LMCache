@@ -90,6 +90,7 @@ class _RecordingUringCmdRawDevice:
         buffers: list[memoryview],
         lengths: list[int],
     ) -> int:
+        self.offsets = offsets
         for target, total_len in zip(buffers, lengths, strict=True):
             self.read_buffers.append(target)
             end = self.read_cursor + total_len
@@ -283,10 +284,56 @@ def test_uring_cmd_invalid_chunk_plan_submits_nothing(
     assert raw_dev.waited_batch_id is None
 
 
+@pytest.mark.parametrize("staged", [False, True])
+def test_uring_cmd_single_buffer_plan_failure_preserves_other_reads(
+    monkeypatch: pytest.MonkeyPatch, staged: bool
+) -> None:
+    core = RawBlockCore.__new__(RawBlockCore)
+    core.block_align = 4096
+    core.max_data_transfer_size = 4096
+    raw_dev = _RecordingUringCmdRawDevice()
+    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+    destinations = [core._allocate_aligned_buffer(8192) for _ in range(3)]
+    if staged:
+        destinations = [view[1:] for view in destinations]
+    for view in destinations:
+        view[:] = bytes([0xCC]) * len(view)
+    raw_dev.read_data = bytes(16384)
+    validate = core._validate_uring_cmd_chunk
+
+    def fail_second_chunk(offset: int, length: int) -> None:
+        validate(offset, length)
+        if offset == 12288:
+            raise ValueError("injected validation failure")
+
+    monkeypatch.setattr(core, "_validate_uring_cmd_chunk", fail_second_chunk)
+    assert core._read_uring_cmd_buffers(
+        [0, 8192, 16384], destinations, [len(destinations[0])] * 3, [8192] * 3
+    ) == [True, False, True]
+    assert raw_dev.offsets == [0, 4096, 16384, 20480]
+    assert bytes(destinations[1]) == bytes([0xCC]) * len(destinations[1])
+
+
+def test_uring_cmd_small_read_failure_does_not_copy_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = RawBlockCore.__new__(RawBlockCore)
+    core.block_align = 4096
+    core.max_data_transfer_size = 8192
+    destination = core._allocate_aligned_buffer(4000)
+    destination[:] = bytes([0xCC]) * 4000
+    raw_dev = _RecordingUringCmdRawDevice()
+    raw_dev.read_data = bytes(4096)
+    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+    monkeypatch.setattr(raw_dev, "wait_iouring", lambda batch: ([False], []))
+    assert core._read_uring_cmd_buffers([0], [destination], [4000], [4096]) == [False]
+    assert bytes(destination) == bytes([0xCC]) * 4000
+
+
 @requires_rust_raw_block_io
 @pytest.mark.parametrize("engine", ["posix", "io_uring"])
 @pytest.mark.parametrize("destination_size", [4999, 5000, 6000, 8192])
-def test_load_preserves_capacity_beyond_stored_payload(
+def test_load_respects_destination_capacity(
     tmp_path: Path, engine: str, destination_size: int
 ) -> None:
     config = dataclasses.replace(
@@ -313,11 +360,36 @@ def test_load_preserves_capacity_beyond_stored_payload(
         actual = memory_obj_bytes(target)
         if destination_size >= 5000:
             assert actual[:5000] == bytes([7]) * 5000
-            assert actual[5000:] == bytes([0xCC]) * (destination_size - 5000)
+            if engine == "io_uring" and destination_size >= 8192:
+                assert actual[5000:8192] == bytes(3192)
         else:
             assert actual == bytes([0xCC]) * destination_size
     finally:
         core.close()
+
+
+@pytest.mark.parametrize("size", [4000, 5000])
+def test_uring_cmd_read_uses_available_transfer_capacity(
+    monkeypatch: pytest.MonkeyPatch, size: int
+) -> None:
+    core = RawBlockCore.__new__(RawBlockCore)
+    core.block_align = 4096
+    core.max_data_transfer_size = 8192
+    total = (size + 4095) // 4096 * 4096
+    destination = core._allocate_aligned_buffer(total + 4096)
+    destination[:] = bytes([0xCC]) * len(destination)
+    raw_dev = _RecordingUringCmdRawDevice()
+    raw_dev.read_data = bytes([7]) * size + bytes(total - size)
+    monkeypatch.setattr(core, "_rawdev", lambda: raw_dev)
+    allocate = Mock(side_effect=AssertionError("full-capacity read must not stage"))
+    monkeypatch.setattr(core, "_allocate_aligned_buffer", allocate)
+
+    assert core._read_uring_cmd_buffers([0], [destination], [size], [total]) == [True]
+    allocate.assert_not_called()
+    assert len(raw_dev.read_buffers) == 1
+    assert _buffer_address(raw_dev.read_buffers[0]) == _buffer_address(destination)
+    assert bytes(destination[:total]) == raw_dev.read_data
+    assert bytes(destination[total:]) == bytes([0xCC]) * 4096
 
 
 @requires_rust_raw_block_io
