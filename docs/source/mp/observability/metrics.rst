@@ -191,9 +191,6 @@ L2 Metrics
      - Counter (attr: ``cache_salt``)
      - Number of chunks submitted for L2 prefetch lookup, grouped by
        tenant.
-   * - ``lmcache_mp.l2_prefetch_hit``
-     - Counter
-     - Number of prefix chunks found in L2 lookup.
    * - ``lmcache_mp.l2_prefetch_load_submitted``
      - Counter
      - Number of L2 prefetch load requests submitted.
@@ -287,10 +284,34 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Total tokens found in L1 or L2 during lookup (numerator of the
        L1+L2 token-level hit rate). Counts the contiguous prefix hit only.
+   * - ``lmcache_mp.lookup_hit_l1``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Of ``lookup_hit``: tokens L1 could serve on its own under each
+       object group's attention-window rule.
+   * - ``lmcache_mp.lookup_hit_l2``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Of ``lookup_hit``: tokens L2 added beyond the L1-servable prefix.
+       ``l1 + l2 == lookup_hit`` per event.
+   * - ``lmcache_mp.lookup_hit_l1_keys``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Hit keys L1 already held. One key per object group, kv rank and
+       chunk, so the count is not divided by the TP world size.
+   * - ``lmcache_mp.lookup_hit_l2_keys``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Hit keys loaded from L2 into L1.
+   * - ``lmcache_mp.lookups``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Completed lookups (denominator for ``lookup_early_exit``).
+   * - ``lmcache_mp.lookup_early_exit``
+     - Counter (attrs: ``model_name``, ``cache_salt``, ``reason``)
+     - Lookups that exited before a cache probe; ``reason`` is one of
+       ``no_gpu_context``, ``empty_chunk_hashes``, ``no_group_layout_descs``.
 
-Both counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
+All lookup counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
 so they always advance together per completed lookup. Early-exit lookups
-contribute ``0`` to both, and abandoned lookups contribute to neither.
+contribute ``0`` tokens to all four token counters, ``0`` keys to both
+key counters, and ``+1`` to
+``lookups`` / ``lookup_early_exit``, and abandoned lookups contribute to neither.
 
 The ``model_name`` and ``cache_salt`` attributes are captured at lookup
 time from ``IPCCacheServerKey`` so dashboards can compute per-model or
@@ -309,6 +330,28 @@ per tenant or isolation domain); drop it at scrape time with
     # Per-model:
     sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
     / sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
+
+    # Share of hit tokens L1 could serve on its own:
+    rate(lmcache_mp_lookup_hit_l1_tokens_total[5m])
+    / rate(lmcache_mp_lookup_hit_tokens_total[5m])
+
+    # Fraction of lookups that early-exited, by reason:
+    sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)
+    / sum(rate(lmcache_mp_lookups_requests_total[5m]))
+
+    # Share of hit keys L1 already held:
+    rate(lmcache_mp_lookup_hit_l1_keys_total[5m])
+    / (rate(lmcache_mp_lookup_hit_l1_keys_total[5m])
+       + rate(lmcache_mp_lookup_hit_l2_keys_total[5m]))
+
+**Tokens vs. keys on hybrid models.** The token split credits L1 only with
+the prefix L1 could serve without L2. On a hybrid model (full attention plus
+sliding-window or linear-attention layers), L1 may hold every full-attention
+key while L2 supplies only the few sliding-window keys that complete the
+prefix. The token counters then report the whole hit as L2, while the key
+counters show that most of the data came from L1. Use the token counters for
+"how much of the hit depends on L2" and the key counters for "how much data
+L2 actually moved".
 
 L0 (GPU) Block Lifecycle Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -760,3 +803,29 @@ In **push mode** (``--otlp-endpoint`` set), the server does not expose
 ``/metrics`` itself; scrape the OpenTelemetry Collector's Prometheus exporter
 instead. The bundled stack in ``examples/observability/`` wires this up for
 you — see :doc:`index`.
+
+Coordinator Metrics
+~~~~~~~~~~~~~~~~~~~
+
+The Coordinator Key Directory gauges always emit one observation for each
+``tier`` value, ``l1`` and ``l2``, including zero-valued observations for an
+empty tier.  They describe the directory's current placements.  Placement
+bytes are the sum of the logical object sizes reported for those placements,
+not unique-object bytes, physical allocation, or storage capacity.  The same
+object is therefore included once for every placement recorded for it.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_mp.key_directory_placement_count``
+     - ObservableGauge (attr: ``tier``)
+     - Placements currently recorded in the Coordinator Key Directory for
+       each cache tier.
+   * - ``lmcache_mp.key_directory_placement_size_bytes``
+     - ObservableGauge (attr: ``tier``)
+     - Reported logical object bytes summed across the placements currently
+       recorded in each cache tier.

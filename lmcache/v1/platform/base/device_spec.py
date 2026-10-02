@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Base class for platform device specification.
 
-Each built-in accelerator sub-package (``platform/cuda``, ``platform/musa``,
-...) provides a concrete :class:`DeviceSpec` subclass that describes how to
-detect the device and which ops backend to load. External packages can expose
-the same class through the ``lmcache.device_plugins`` Python entry-point group.
+Each built-in accelerator sub-package under ``platform/devices`` (for example,
+``cuda`` or ``musa``) provides a concrete :class:`DeviceSpec` subclass that
+describes how to detect the device and which ops backend to load. External
+packages can expose the same class through the ``lmcache.device_plugins``
+Python entry-point group.
 
-The :mod:`~lmcache.v1.platform` module discovers these
-subclasses automatically at import time via ``pkgutil.iter_modules``:
-it imports each sub-package, inspects its module namespace for
+The :mod:`~lmcache.v1.platform` module discovers these subclasses automatically
+from :mod:`lmcache.v1.platform.devices` at import time via
+``pkgutil.iter_modules``: it imports each backend sub-package, inspects its
+module namespace for
 :class:`DeviceSpec` subclasses, instantiates them, and uses the
 resulting objects for device detection and backend selection.
 
@@ -21,7 +23,7 @@ implementation used when no accelerator sub-package matches the
 detected device: all capabilities default to a safe "no-op / False"
 behaviour, and ``device_type`` / ``torch_module_name`` default to an
 empty string (concrete backends -- including CPU via
-:class:`~lmcache.v1.platform.cpu.CpuDeviceSpec` -- override them).
+:class:`~lmcache.v1.platform.devices.cpu.CpuDeviceSpec` -- override them).
 """
 
 # Future
@@ -46,7 +48,7 @@ class DeviceSpec:
 
     Subclasses override the properties / methods below to describe a
     concrete accelerator. Built-in subclasses are auto-discovered from the
-    platform package, while external subclasses are registered as Python
+    ``platform.devices`` package, while external subclasses are registered as Python
     entry points.
 
     Instantiating :class:`DeviceSpec` directly yields the fallback
@@ -66,7 +68,7 @@ class DeviceSpec:
         Concrete backends override this; the base returns an empty
         string so a bare ``DeviceSpec()`` instance is never mistaken
         for a real accelerator (CPU is represented by
-        :class:`~lmcache.v1.platform.cpu.CpuDeviceSpec`).
+        :class:`~lmcache.v1.platform.devices.cpu.CpuDeviceSpec`).
         """
         return ""
 
@@ -92,7 +94,7 @@ class DeviceSpec:
 
         For example, ``"cuda"`` corresponds to ``torch.cuda``.  The
         base returns an empty string; concrete backends (including
-        :class:`~lmcache.v1.platform.cpu.CpuDeviceSpec`) override it.
+        :class:`~lmcache.v1.platform.devices.cpu.CpuDeviceSpec`) override it.
         """
         return ""
 
@@ -143,6 +145,38 @@ class DeviceSpec:
         """Return ``True`` when the device is usable for handle transfer."""
         # TODO(chunxiaozheng): implement on subclasses
         return True
+
+    def current_stream(self, device: object) -> object:
+        """Return the current stream for ``device`` on the active platform."""
+        return self._get_torch_module().current_stream(device)
+
+    def get_stream_handle(self, stream: object) -> int:
+        """Return a native stream handle; platforms must override this method."""
+        raise NotImplementedError(
+            f"DeviceSpec for device_type={self.device_type!r} does not provide "
+            "a native stream handle."
+        )
+
+    def synchronize_stream(self, stream: Any) -> None:
+        """Wait until work already enqueued on ``stream`` has completed."""
+        stream.synchronize()
+
+    def synchronize_device(self, device: object) -> None:
+        """Wait until work already enqueued on ``device`` has completed."""
+        self._get_torch_module().synchronize(device=device)
+
+    def create_stream_event(self, device: object) -> object:
+        """Create an event used to observe completion on ``device``'s stream."""
+        return self._get_torch_module().Event()
+
+    def record_stream_event(self, event: Any, stream: object) -> None:
+        """Record ``event`` after work already queued on ``stream``."""
+        event.record(stream)
+
+    def is_stream_event_complete(self, event: object) -> bool:
+        """Return whether a previously recorded stream event has completed."""
+        event_object: Any = event
+        return event_object.query()
 
     @property
     def event_ipc_backend(self) -> "EventIPCBackend | None":
@@ -246,3 +280,16 @@ class DeviceSpec:
             "DeviceSpec for device_type=%r does not provide a "
             "BaseCacheContext implementation." % self.device_type
         )
+
+    def _get_torch_module(self) -> Any:
+        """Return the active torch device module, rejecting mismatched types."""
+        # First Party
+        from lmcache.v1.platform._device_detect import get_torch_device
+
+        torch_module, active_device_type = get_torch_device()
+        if active_device_type != self.device_type:
+            raise RuntimeError(
+                "Cannot use stream execution for device type "
+                f"{self.device_type!r} while {active_device_type!r} is active."
+            )
+        return torch_module

@@ -35,10 +35,19 @@ from lmcache.v1.multiprocess.modules.blend.store import (
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.protocols.blend import handshake_response
+from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.multiprocess.session import Session
 
 logger = init_logger(__name__)
+
+_BLEND_PROTOCOL_VERSION = 1
+
+
+def _handshake_response(client_version: int) -> tuple[int, bool]:
+    return (
+        _BLEND_PROTOCOL_VERSION,
+        client_version == _BLEND_PROTOCOL_VERSION,
+    )
 
 
 class BlendModule(
@@ -146,8 +155,9 @@ class BlendModule(
     def context(self) -> MPCacheServerContext:
         return self._ctx
 
+    @request_handler()
     def cb_protocol_handshake(self, client_version: int) -> tuple[int, bool]:
-        return handshake_response(client_version)
+        return _handshake_response(client_version)
 
     def report_status(self) -> dict:
         cache_contexts = self._transfer_module.context_entries_snapshot()

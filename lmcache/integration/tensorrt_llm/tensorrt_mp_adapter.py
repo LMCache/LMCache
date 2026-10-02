@@ -16,7 +16,7 @@ because TRT-LLM's pool is allocated outside PyTorch's caching allocator
 
 # Standard
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, cast
 import os
 import time
 
@@ -35,8 +35,10 @@ import zmq
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
+    KVCache,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
@@ -44,7 +46,7 @@ from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
-from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
+from lmcache.v1.platform.devices.cuda.ipc_wrapper import RawCudaIPCWrapper
 
 logger = init_logger(__name__)
 
@@ -342,7 +344,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
         wrapped = [RawCudaIPCWrapper(kv_cache_tensor)]
 
-        layout_hints = {
+        layout_hints: LayoutHints = {
             "kv_layout": "HND",
             "num_kv_heads": num_kv_heads,
             "tokens_per_block": tokens_per_block,
@@ -354,7 +356,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
         future = self._req_client.register_kv_cache(
             self._instance_id,
-            wrapped,
+            cast(KVCache, wrapped),
             self._model_name,
             self._world_size,
             EngineType.TRTLLM,

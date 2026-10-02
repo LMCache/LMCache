@@ -24,6 +24,11 @@ from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
 
+# 2 MiB hugepage size (MAP_HUGE_2MB). MP-mode L1 memory is shared across
+# processes, so when hugepages are requested the bytes must come from the
+# pre-allocated 2 MiB pool rather than regular 4 KiB pinned memory.
+HUGEPAGE_SIZE_BYTES = 2 * 1024 * 1024
+
 
 _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS = {
     "nixl_store",
@@ -31,9 +36,30 @@ _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS = {
 }
 
 
-def _requires_single_l1_memory_region(
+def unwrap_l2_adapter_config(
+    adapter_config: L2AdapterConfigBase,
+) -> L2AdapterConfigBase:
+    """Return the innermost L2 adapter config.
+
+    Args:
+        adapter_config: Config whose ``inner_config`` wrappers to follow.
+
+    Returns:
+        The innermost config, or the input if it has no wrapper.
+    """
+    while isinstance(
+        inner_config := getattr(adapter_config, "inner_config", None),
+        L2AdapterConfigBase,
+    ):
+        adapter_config = inner_config
+    return adapter_config
+
+
+def requires_single_l1_memory_region(
     adapter_config: L2AdapterConfigBase,
 ) -> str | None:
+    """Return the adapter type requiring a single L1 memory region, if any."""
+    adapter_config = unwrap_l2_adapter_config(adapter_config)
     type_name = get_type_name_for_config(adapter_config)
     if type_name in _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS:
         return type_name
@@ -43,6 +69,43 @@ def _requires_single_l1_memory_region(
     ):
         return type_name
     return None
+
+
+def _check_hugepage_availability(size_in_bytes: int) -> None:
+    """Config-time check that the 2 MiB hugepage pool has enough *free* pages
+    to back an L1 buffer of ``size_in_bytes``.
+
+    We only use 2 MiB hugepages rather than the system default pool reported
+    in ``/proc/meminfo`` (which can be 1 GiB on some hosts). Mirrors
+    ``_read_hugepage_info`` from ``lmcache.v1.memory_management``.
+
+    Args:
+        size_in_bytes: Byte size of the hugepage-backed L1 buffer.
+
+    Raises:
+        RuntimeError: If the pool has fewer free pages than required.
+    """
+    try:
+        with open("/sys/kernel/mm/hugepages/hugepages-2048kB/free_hugepages") as f:
+            available_pages = int(f.read().strip())
+    except (FileNotFoundError, ValueError, OSError) as e:
+        logger.warning(
+            "Could not read /sys/kernel/mm/hugepages/hugepages-2048kB/"
+            "free_hugepages: %s. Skipping hugepage availability check; "
+            "allocation will fail with a clear message if the 2 MiB pool is "
+            "short.",
+            e,
+        )
+        return
+
+    required_pages = -(-size_in_bytes // HUGEPAGE_SIZE_BYTES)
+    if available_pages < required_pages:
+        raise RuntimeError(
+            f"Insufficient hugepages: {available_pages} free, "
+            f"{required_pages} required for a {size_in_bytes} byte L1 buffer. "
+            "Grow the 2 MiB hugepage pool (e.g. "
+            f"sysctl vm.nr_hugepages={required_pages})."
+        )
 
 
 def _infer_l1_devdax_overflow_from_dax_adapter(
@@ -123,6 +186,9 @@ class L1MemoryManagerConfig:
     shm_name: str = field(default_factory=lambda: f"lmcache_l1_pool_{os.getpid()}")
     """ POSIX shared-memory segment name for L1 pool. Empty disables SHM. """
 
+    use_hugepages: bool = False
+    """ Allocate the L1 pool from the pre-allocated 2 MiB hugepage pool. """
+
     devdax_path: str | None = None
     """ Optional Device-DAX path to use as the L1 backing arena. """
 
@@ -148,6 +214,17 @@ class L1MemoryManagerConfig:
         if self.devdax_path and self.shm_name:
             raise ValueError(
                 'l1-devdax-path requires SHM to be disabled. Please set --shm-name "".'
+            )
+        if self.use_hugepages and self.shm_name:
+            raise ValueError(
+                "l1-use-hugepages is incompatible with shared memory. "
+                'Please set --shm-name "" to disable SHM when enabling hugepages.'
+            )
+        if self.use_hugepages and self.use_lazy:
+            raise ValueError(
+                "l1-use-hugepages requires eager pre-allocation and is "
+                "incompatible with lazy allocation. Please set "
+                "--no-l1-use-lazy when enabling hugepages."
             )
 
         # LazyMemoryAllocator requires pinned memory support.
@@ -185,7 +262,7 @@ class GdsL1Config:
     use_direct_io: bool = True
     """Use ``O_DIRECT`` for cuFile/hipFile. Ignored by uGDS."""
 
-    backend: Literal["auto", "cufile", "hipfile", "ugds", "phx"] = "auto"
+    backend: str = "auto"
     """GPU storage backend. ``auto`` selects cuFile on CUDA and hipFile on
     ROCm; ``ugds`` can be used on either platform with a matching
     ``libugds.so`` and treats ``file_location`` as a character-device path;
@@ -219,14 +296,15 @@ class L1ManagerConfig:
 def get_configured_capacity_bytes(
     config: L1ManagerConfig,
 ) -> dict[L1BackendType, int]:
-    """Return the configured L1 capacity of each backing medium.
+    """Return the boot-configured L1 capacity of each backing medium.
 
-    The single source for "how large is L1". Unlike
+    The boot-time source for "how large is L1". Unlike
     ``L1Manager.get_memory_usage()``, whose total is the grown heap on the
     lazy tier, this is stable from boot. Keyed per medium because a hybrid
     Device-DAX tier spans two, matching how L1 events tag placements.
     Reports the *configured* topology, so devices added later via
-    ``add_device`` are not counted.
+    ``add_device`` are not counted. ``L1Manager`` overlays live Device-DAX
+    arena capacity when it builds a runtime declaration.
 
     Expects a **normalized** config: ``normalize_storage_manager_config``
     back-fills ``devdax_size_in_bytes`` from a matching DAX L2 adapter,
@@ -268,7 +346,7 @@ class EvictionConfig:
     The configuration for eviction policies (L1 and optionally L2).
     """
 
-    eviction_policy: Literal["LRU", "IsolatedLRU", "noop"]
+    eviction_policy: Literal["LRU", "ARC", "IsolatedLRU", "noop"]
     """ The eviction policy to use. """
 
     trigger_watermark: float = field(default=0.8)
@@ -366,7 +444,7 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     incompatible_adapters = [
         adapter_name
         for adapter_config in config.l2_adapter_config.adapters
-        if (adapter_name := _requires_single_l1_memory_region(adapter_config))
+        if (adapter_name := requires_single_l1_memory_region(adapter_config))
         is not None
     ]
     if incompatible_adapters:
@@ -420,6 +498,9 @@ def add_storage_manager_args(
         >>> args = parser.parse_args()
         >>> config = parse_args_to_config(args)
     """
+    # First Party
+    from lmcache.v1.gpu_connector._gds_backends import available_backends
+
     # L1 Memory Manager Config
     memory_group = parser.add_argument_group(
         "L1 Memory Manager", "Configuration for L1 memory manager"
@@ -447,6 +528,18 @@ def add_storage_manager_args(
         type=int,
         default=4096,
         help="The alignment size in bytes. Default is 4KB (4096 bytes).",
+    )
+    memory_group.add_argument(
+        "--l1-use-hugepages",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Allocate the L1 pool from the pre-allocated 2 MiB hugepage pool "
+            "instead of regular pinned memory. Requires pre-allocated "
+            "hugepages (sysctl vm.nr_hugepages) and is incompatible with "
+            "shared memory (--shm-name) and lazy allocation (--l1-use-lazy). "
+            "Default is False."
+        ),
     )
     memory_group.add_argument(
         "--l1-devdax-path",
@@ -487,12 +580,9 @@ def add_storage_manager_args(
     )
     gds_group.add_argument(
         "--gds-l1-backend",
-        choices=("auto", "cufile", "hipfile", "ugds", "phx"),
         default="auto",
-        help="GDS implementation. auto selects cuFile on CUDA or hipFile on ROCm; "
-        "ugds can be used on either platform with a matching libugds.so and "
-        "treats --gds-l1-path as /dev/ugds_drvX; phx uses the Phoenix phxfs "
-        "DMA path with a matching libphoenix.so.",
+        choices=("auto", *available_backends()),
+        help="GDS backend. auto selects the default for this environment.",
     )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
@@ -518,9 +608,10 @@ def add_storage_manager_args(
     eviction_group.add_argument(
         "--eviction-policy",
         type=str,
-        choices=["LRU", "IsolatedLRU", "noop"],
+        choices=["LRU", "ARC", "IsolatedLRU", "noop"],
         required=True,
-        help="The eviction policy to use ('LRU', 'IsolatedLRU', or 'noop'). "
+        help="The eviction policy to use ('LRU', 'ARC', 'IsolatedLRU', or 'noop'). "
+        "'ARC' balances recent and frequently reused keys adaptively. "
         "'IsolatedLRU' maintains one LRU list per cache_salt and requires "
         "quotas keyed by cache_salt to be configured via the HTTP API.",
     )
@@ -623,21 +714,40 @@ def parse_args_to_config(
         StorageManagerConfig: The configuration object.
     """
     shm_name = getattr(args, "shm_name", None)
+    use_hugepages = getattr(args, "l1_use_hugepages", False)
+
+    use_lazy = args.l1_use_lazy and not use_hugepages
+    if use_hugepages and args.l1_use_lazy:
+        logger.info(
+            "Disabling lazy allocation (--no-l1-use-lazy) because hugepage "
+            "allocation requires pre-allocated memory"
+        )
+
+    if use_hugepages:
+        l1_size_bytes = int(args.l1_size_gb * (1 << 30))
+        try:
+            _check_hugepage_availability(l1_size_bytes)
+        except RuntimeError as e:
+            logger.error("Hugepage availability check failed: %s", e)
+            raise
+
     if shm_name is None:
         memory_config = L1MemoryManagerConfig(
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
-            use_lazy=args.l1_use_lazy,
+            use_lazy=use_lazy,
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
+            use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
         )
     else:
         memory_config = L1MemoryManagerConfig(
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
-            use_lazy=args.l1_use_lazy,
+            use_lazy=use_lazy,
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
             shm_name=shm_name,
+            use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
         )
 
