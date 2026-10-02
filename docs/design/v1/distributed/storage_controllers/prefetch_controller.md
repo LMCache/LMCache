@@ -71,7 +71,11 @@ background loop and admitted up to `max_in_flight` at a time.
 `PrefetchResult` carries `hit_cells` (one bitmap per key group, in
 `key_groups` order), split into the disjoint `l1_hit_cells` (L1 already held
 them) and `l2_hit_cells` (loaded by this request). Under `LOCK` every hit cell
-is read-locked `num_kv_readers` times for the caller.
+is read-locked `num_kv_readers` times for the caller. `full` fetching also
+reports `found_cells`: a superset of `hit_cells` that captures what existed
+at plan time (L1-resident or pinned in L2), so a caller can tell a cell that
+was absent apart from one that was found but did not fit on this request.
+`found_cells` is `None` for other policies.
 
 ## Flow
 
@@ -96,7 +100,11 @@ afterwards.
    Reservation failure is **per cell**: `L2_PREFETCH_FAILED` is published with
    reason `l1_oom` or `l1_contended`, the affected L2 locks are returned, and
    the request is re-planned on what was reserved. Staging buffers the replan
-   drops are deleted (`finish_write_and_delete`).
+   drops are deleted (`finish_write_and_delete`). For `full` fetching, if any
+   reservation failed the step then trims the merged reserved grid to whole
+   columns (`all_grouped`) — a blended chunk needs every row — and releases the
+   torn columns' reserved rows via `finish_write_and_delete` so partial-column
+   rows do not consume L1 for a caller that cannot use them.
 5. **Load** (`_submit_load_tasks`). One load task per adapter in the plan,
    carrying the reserved buffers.
 6. **Admit** (`_poll_load_results`), per adapter as its result arrives. Loaded
@@ -106,10 +114,14 @@ afterwards.
    adapter's L2 locks are returned and its entries leave `l2_locked_keys` and
    `l1_reserved_keys`.
 7. **Finish** (`_finish_request`), once no load task is outstanding. Fold the
-   merged `l1_locked_keys` (`fold_unfold_grouped`, prefix fetching only; `full`
-   keeps every locked cell). Release every L1 lock outside the hit, or every L1
-   lock under `NO_LOCK`. Touch the hit keys. Publish the `PrefetchResult` with
-   the L1/L2 split taken from `l2_loaded_cells`.
+   merged `l1_locked_keys`: `fold_unfold_grouped` for `prefix` fetching;
+   `all_grouped` (AND across rows) for `full` so a column is a hit only when
+   every row loaded, and a split column is **not** a hit. Release every L1
+   lock outside the hit, or every L1 lock under `NO_LOCK`. Touch the hit keys.
+   Publish the `PrefetchResult` with the L1/L2 split taken from
+   `l2_loaded_cells`, and — for `full` — `found_cells = found ∪ l2_found_cells`
+   (what was in L1 at the lock pass unioned with what every L2 lookup pinned,
+   independent of what the reservation then dropped).
 
 Per-segment view of the locks for one key group under `prefix` fetching and
 `LOCK` mode. "L1 hit" is what the lock pass found, "planned" is what the
@@ -125,8 +137,10 @@ policy assigned to an L2 adapter, "hit" is the final folded prefix:
 | finish | L1 read lock if in hit, else released | L1 read lock if in hit, else released | - | - |
 
 Under `NO_LOCK` the finish row releases every L1 lock; loaded objects stay
-resident and evictable. Under `full` fetching there is no fold: every locked
-cell is a hit cell.
+resident and evictable. Under `full` fetching a column is a hit cell only
+when every row loaded (`all_grouped`): a torn column's rows are released at
+reserve and so are released again at finish; `found_cells` still reports the
+torn column as found so a caller can tell "did not fit" from "evicted".
 
 **Errors.** Any exception while advancing a request aborts it
 (`_abort_request`): the three maps are walked to return L2 locks, delete
