@@ -12,7 +12,13 @@
 # never touched. The same check runs again when the job exits so the next job
 # can at least start; the agent cannot even initialize a job on a full disk.
 #
+# The exit handler also hands the checkout back to the agent account. Jobs
+# here run containers as root with the checkout bind-mounted, which leaves
+# root-owned build output behind; the next job's `git clean` cannot remove it
+# and the agent's fallback of deleting the checkout fails the same way.
+#
 # Usage: source .buildkite/scripts/amd-disk-guard.sh
+# Scripts that install their own EXIT trap must call amd_job_cleanup from it.
 
 AMD_DISK_GUARD_MIN_FREE_GB="${AMD_DISK_GUARD_MIN_FREE_GB:-60}"
 
@@ -43,6 +49,10 @@ amd_disk_guard() {
     echo "${free}G -> $(amd_disk_free_gb)G free on /"
 }
 
+amd_job_cleanup() {
+    sudo -n chown -R "$(id -u):$(id -g)" "${REPO_ROOT:-$PWD}" 2>/dev/null || true
+    amd_disk_guard
+}
+
 amd_disk_guard
-# Scripts that install their own EXIT trap must call amd_disk_guard from it.
-trap 'rc=$?; amd_disk_guard; exit $rc' EXIT
+trap 'rc=$?; amd_job_cleanup; exit $rc' EXIT

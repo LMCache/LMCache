@@ -98,10 +98,9 @@ print_selected_amd_gpu_info
 
 cleanup() {
     "${DOCKER[@]}" rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
-    # The image runs as root so compiled extensions and artifacts in the
-    # mounted checkout must be returned to the Buildkite agent user.
-    sudo chown -R "$(id -u):$(id -g)" "${REPO_ROOT}" 2>/dev/null || true
-    amd_disk_guard
+    # Returns the root-owned build output in the mounted checkout to the
+    # agent account and frees disk if it is low.
+    amd_job_cleanup
 }
 trap cleanup EXIT
 

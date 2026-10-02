@@ -6,6 +6,9 @@ export AMD_SERIALIZE_KERNEL=1
 echo "AMD kernel mode: serialized"
 echo "$PWD" # for debugging
 
+# shellcheck source=.buildkite/scripts/amd-disk-guard.sh
+source .buildkite/scripts/amd-disk-guard.sh
+
 # Keep the AMD pod aligned with the PR + latest target branch, matching the
 # k3 harness behavior used by the other test suites.
 source .buildkite/k3_tests/common_scripts/helpers.sh
