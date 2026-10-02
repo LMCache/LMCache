@@ -23,7 +23,9 @@ echo "=== IPC event lifetime probe on ${VLLM_ROCM_IMAGE}, HIP_VISIBLE_DEVICES=${
 sudo -n dmesg -C >/dev/null 2>&1 || true
 
 run_mode() {
-    local mode="$1" name="lmcache-ipc-probe-${mode}-${BUILDKITE_BUILD_ID:-local}" rc
+    local mode="$1"
+    local name="lmcache-ipc-probe-${mode}-${BUILDKITE_BUILD_ID:-local}"
+    local rc
     echo "--- mode: ${mode} ---"
     timeout 300 "${DOCKER[@]}" run --rm --name "${name}" \
         --network host --ipc host --group-add video \
