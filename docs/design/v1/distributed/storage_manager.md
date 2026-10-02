@@ -94,3 +94,64 @@ controller's decision.
   `test_warm_prefetch.py`, blend tests: the rows each caller submits.
 - `tests/v1/mp_observability/trace/test_codecs.py`: trace round-trips of the
   request types and of `PrefetchHandle.sliding_windows`.
+
+## Internal write overflow and object ownership
+
+The normal CLI constructs one L1. An internal `_l1_managers` constructor input
+accepts existing managers for write-allocation tests; `StorageManager` owns their
+lifetime. Multiple managers require no L2 adapters and `noop` eviction. Serving
+reads, prefetch, key-only completion, and runtime Device-DAX management are
+rejected in that mode. This is not a multi-L1 serving configuration.
+`memcheck`, `get_l1_usage`, `report_status`, and `publish_capacity` also require
+one L1, so the write-only harness cannot report partial health or capacity.
+
+`OrderedWritePolicy` supplies stable manager IDs in explicit order, primary first
+by default. Construction validates and captures that order; later mutations of
+the supplied policy do not reconfigure the manager. `reserve_write` visits each
+candidate synchronously and retries only
+its `OUT_OF_MEMORY` subset. Successful keys and terminal conflicts do not advance;
+exceptions propagate. Each L1 retains its allocation and staging rules. A failed
+batch is not split: two 4 KiB objects can fail on two L1s with 4 KiB free each,
+even though their combined free space is sufficient. Failed keys remain omitted
+from the returned object mapping.
+
+`L1Manager.reserve_write` stamps each new object with its process-local integer
+`l1_manager_id`, including direct and prefetch reservations. `MemoryObj` starts
+unowned, rejects a different live owner, and resets ownership when an allocator
+reuses an object for a new lifetime. The tag is not a writer tag, key field, or
+serialized `MemoryObjMetadata` field. The manager registry is O(managers); there
+is no second object-to-owner table.
+
+```text
+reserve_write -> objects with owner IDs -> prepare_write_completion(objects)
+                                                |
+                                     [(owner_id, [ObjectKey, ...]), ...]
+                                                |
+                                     GPU copy completes on stream
+                                                |
+                                     finish_write_by_owner(payload)
+```
+
+The native callback uses that MessagePack-compatible payload, never Python
+objects or pointers. Its handler resolves the captured IDs and passes the
+original StorageManager writer tag to each L1's `finish_write`. Changing placement
+order cannot redirect completion. Unknown or unset owners fail explicitly; the
+legacy `finish_write(keys)` remains valid only with one L1. Existing staging and
+stream ordering retain allocations; the tag is neither a lifetime pin nor a write
+generation. It adds no stale-callback or crash-recovery guarantee.
+
+Completion preparation runs inside the store's failure boundary before success
+is recorded. Invalid ownership skips admission and reports `MP_STORE_END` with
+zero stored objects. As with copy failures, staging reservations retain their
+write-TTL behavior because queued device writes can still reference the buffers.
+
+When tracing is enabled, both single-L1 completion entry points record one
+existing `finish_write(keys)` trace call. Process-local owner IDs are not written
+to the storage trace, so the unchanged dispatcher can replay it against a fresh
+manager. Multi-L1 serving and multi-L1 trace replay remain outside this internal
+write-only foundation.
+
+`test_multi_l1.py`, `test_l1_owner.py`, and `test_l1_owner_completion.py` cover
+overflow, batch cleanup, independent same-key copies, recycled ownership, and
+serialized completion. Read selection, affinity, backend rewiring, public
+configuration, per-L1 reporting, and sharing services remain separate work.
