@@ -247,10 +247,11 @@ class HiddenStateModule(InstanceLivenessTarget):
         row = self._prefetch_row(key, instance_id)
         if row is None:
             return b"", 0
+        # One lock, not key.num_kv_readers: this call takes the lock and
+        # releases it before returning, so it is its own only reader. Each of
+        # the other ranks retrieving the same object does the same.
         handle = self._ctx.storage_manager.submit_prefetch_task(
-            PrefetchTaskSpec(
-                key_groups=[row], num_kv_readers=max(key.num_kv_readers, 1)
-            ),
+            PrefetchTaskSpec(key_groups=[row], num_kv_readers=1),
             external_request_id=key.request_id,
         )
         if not self._ctx.storage_manager.wait_prefetch_status(

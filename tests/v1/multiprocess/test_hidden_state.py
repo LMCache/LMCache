@@ -68,6 +68,9 @@ class _FakeStorageManager:
 
     def __init__(self) -> None:
         self.committed: dict[ObjectKey, torch.Tensor] = {}
+        # Outstanding read locks per key. A retrieve that takes more than it
+        # releases pins the object forever, so tests assert this drains.
+        self.read_locks: dict[ObjectKey, int] = {}
         self._reserved: dict[ObjectKey, _MemoryObj] = {}
         self._handles: dict[int, list[ObjectKey]] = {}
         self._next_handle = 0
@@ -89,9 +92,19 @@ class _FakeStorageManager:
             self.committed[key] = self._reserved.pop(key).tensor
 
     def submit_prefetch_task(self, spec: Any, external_request_id: str = "") -> int:
+        # First Party
+        from lmcache.v1.distributed.api import PrefetchLockMode
+
         handle = self._next_handle
         self._next_handle += 1
-        self._handles[handle] = list(spec.key_groups[0].keys)
+        keys = list(spec.key_groups[0].keys)
+        self._handles[handle] = keys
+        if spec.lock_mode is PrefetchLockMode.LOCK:
+            for key in keys:
+                if key in self.committed:
+                    self.read_locks[key] = (
+                        self.read_locks.get(key, 0) + spec.num_kv_readers
+                    )
         return handle
 
     def wait_prefetch_status(self, handle: int, timeout: float) -> bool:
@@ -109,8 +122,11 @@ class _FakeStorageManager:
             return
         yield [_MemoryObj(self.committed[key]) for key in keys]
 
-    def finish_read_prefetched(self, keys: list[ObjectKey]) -> None:
-        return
+    def finish_read_prefetched(
+        self, keys: list[ObjectKey], read_locks: int = 1
+    ) -> None:
+        for key in keys:
+            self.read_locks[key] = self.read_locks.get(key, 0) - read_locks
 
 
 class _FakeSession:
@@ -299,3 +315,82 @@ def test_registered_layout_is_one_object_per_chunk(stub_lmcache_native: Any) -> 
     assert layout is not None
     assert layout.shapes == [torch.Size([CHUNK_SIZE, NUM_LAYERS, HIDDEN_SIZE])]
     assert layout.dtypes == [torch.float32]
+
+
+TP_SIZE = 4
+
+
+def _make_tp_module(ctx: _FakeContext) -> Any:
+    """Register every rank of a TP_SIZE engine against one server."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.hidden_state import HiddenStateModule
+
+    module = HiddenStateModule(ctx)  # type: ignore[arg-type]
+    for rank in range(TP_SIZE):
+        assert module.register_hidden_state(
+            instance_id=rank,
+            model_name=MODEL,
+            world_size=TP_SIZE,
+            num_layers=NUM_LAYERS,
+            hidden_size=HIDDEN_SIZE,
+            dtype_name="float32",
+        )
+    return module
+
+
+def _make_tp_key(num_chunks: int, rank: int) -> IPCCacheServerKey:
+    return replace(
+        _make_key(num_chunks, f"req-{rank}"), world_size=TP_SIZE, worker_id=rank
+    )
+
+
+def test_every_rank_shares_one_stored_copy(stub_lmcache_native: Any) -> None:
+    ctx = _FakeContext()
+    module = _make_tp_module(ctx)
+
+    assert module.store_hidden_state(_make_tp_key(2, 0), 0, pickle.dumps(_chunks(2)))
+
+    # Hidden states are replicated across ranks, so TP_SIZE ranks cost one copy.
+    assert len(ctx.storage_manager.committed) == 2
+    for rank in range(TP_SIZE):
+        data, num_tokens = module.retrieve_hidden_state(_make_tp_key(2, rank), rank)
+        assert num_tokens == 2 * CHUNK_SIZE
+        for restored, original in zip(pickle.loads(data), _chunks(2)):
+            assert torch.equal(restored, original)
+
+
+def test_a_store_from_every_rank_still_stores_one_copy(
+    stub_lmcache_native: Any,
+) -> None:
+    ctx = _FakeContext()
+    module = _make_tp_module(ctx)
+
+    for rank in range(TP_SIZE):
+        assert module.store_hidden_state(
+            _make_tp_key(2, rank), rank, pickle.dumps(_chunks(2))
+        )
+
+    assert len(ctx.storage_manager.committed) == 2
+
+
+def test_retrieve_releases_every_read_lock_it_takes(stub_lmcache_native: Any) -> None:
+    ctx = _FakeContext()
+    module = _make_tp_module(ctx)
+    assert module.store_hidden_state(_make_tp_key(2, 0), 0, pickle.dumps(_chunks(2)))
+
+    for rank in range(TP_SIZE):
+        module.retrieve_hidden_state(_make_tp_key(2, rank), rank)
+
+    # A retrieve that reserved one lock per reader but released one lock total
+    # would leave the object pinned and unevictable.
+    assert all(count == 0 for count in ctx.storage_manager.read_locks.values())
+
+
+def test_lookup_takes_no_read_locks(stub_lmcache_native: Any) -> None:
+    ctx = _FakeContext()
+    module = _make_tp_module(ctx)
+    assert module.store_hidden_state(_make_tp_key(2, 0), 0, pickle.dumps(_chunks(2)))
+
+    assert module.lookup_hidden_state(_make_tp_key(2, 1), 1) == 2 * CHUNK_SIZE
+
+    assert all(count == 0 for count in ctx.storage_manager.read_locks.values())
