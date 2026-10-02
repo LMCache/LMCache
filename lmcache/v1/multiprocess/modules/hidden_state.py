@@ -42,6 +42,15 @@ _OBJECT_GROUP_ID = 0
 """Hidden states are a single object group: one tensor per chunk, no kernel
 groups and no sliding windows."""
 
+_SESSION_SUFFIX = "##hidden"
+"""Appended to the request id so the hidden path gets its own session.
+
+``Session.set_tokens`` replaces the token list while ``get_hashes``
+memoizes the rolling hashes it has already computed, so two callers
+sharing one session and passing different token lists would silently
+serve each other's chunk hashes. The hidden path passes its own list, so
+it gets its own session. Sessions expire on the manager's TTL."""
+
 _PREFETCH_TIMEOUT_S = 5.0
 
 
@@ -320,16 +329,18 @@ class HiddenStateModule(InstanceLivenessTarget):
         replicated across tensor-parallel ranks, so they are stored once under
         rank 0 rather than once per rank.
 
-        Unlike ``MPCacheServerContext.resolve_obj_keys`` this never touches
-        ``session.lookup_ipc_key`` -- that field belongs to the KV lookup, and
-        a hidden-state request may well arrive first.
+        The hashes are computed in a session of this path's own, never the
+        KV path's (see ``_SESSION_SUFFIX``). Same hasher and same tokens, so
+        the values match what KV would compute for the same prefix.
         """
         with self._lock:
             entry = self._registrations.get(instance_id)
         if entry is None:
             return []
         name, _ = entry
-        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session = self._ctx.session_manager.get_or_create(
+            f"{key.request_id}{_SESSION_SUFFIX}"
+        )
         session.set_tokens(list(key.token_ids))
         chunk_hashes = [
             self._ctx.token_hasher.hash_to_bytes(h)

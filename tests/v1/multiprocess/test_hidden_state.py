@@ -166,6 +166,10 @@ class _FakeContext:
     def _get_or_create_session(self, request_id: str) -> _FakeSession:
         return self._sessions.setdefault(request_id, _FakeSession())
 
+    @property
+    def session_ids(self) -> set[str]:
+        return set(self._sessions)
+
 
 def _make_module(ctx: _FakeContext) -> Any:
     # First Party
@@ -394,3 +398,18 @@ def test_lookup_takes_no_read_locks(stub_lmcache_native: Any) -> None:
     assert module.lookup_hidden_state(_make_tp_key(2, 1), 1) == 2 * CHUNK_SIZE
 
     assert all(count == 0 for count in ctx.storage_manager.read_locks.values())
+
+
+def test_the_kv_session_is_never_touched(stub_lmcache_native: Any) -> None:
+    ctx = _FakeContext()
+    module = _make_module(ctx)
+    key = _make_key(2)
+
+    assert module.store_hidden_state(key, 0, pickle.dumps(_chunks(2)))
+    module.retrieve_hidden_state(key, 0)
+    module.lookup_hidden_state(key, 0)
+
+    # Session.set_tokens replaces the token list and get_hashes memoizes the
+    # rolling hashes, so sharing the KV path's session would let one path
+    # serve the other's chunk hashes.
+    assert ctx.session_ids == {f"{key.request_id}##hidden"}
