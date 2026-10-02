@@ -190,6 +190,8 @@ mappings; duplicate device ownership is rejected.
 Status exposes manager and controller dictionaries keyed by tag. Capacity is
 summed by physical backing medium, while usage is the sum of allocator usage.
 Prometheus gauges distinguish managers by `l1_tag` and `backend`; L1 operation
-counters include `l1_tag`. Single-L1 status aliases and key-only completion remain
+counters and optional lifecycle histograms include `l1_tag`. Lifecycle sampling
+tracks `(tag, key)` so one copy's eviction cannot end another copy's lifetime.
+Single-L1 status aliases and key-only completion remain
 compatible. Single-region descriptors, P2P, shared-memory transfer, and legacy
 Device-DAX hotplug remain guarded for multi-L1 configurations.
