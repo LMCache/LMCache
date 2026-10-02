@@ -1259,7 +1259,8 @@ class LMCacheEngine:
                     assert lookup_id is not None, (
                         "lookup_id is required when pin is True"
                     )
-                    self.lookup_pins[lookup_id] = block_mapping
+                    for location, pinned_keys in block_mapping.items():
+                        self.lookup_pins[lookup_id][location].extend(pinned_keys)
                 for idx, (start, end, key) in enumerate(chunk_info_list):
                     if idx < hit_chunks:
                         res = end
