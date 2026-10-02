@@ -17,10 +17,6 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.v1.gpu_connector.gds_context import (
-    get_gds_context,
-    initialize_gds_context,
-)
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
@@ -214,10 +210,6 @@ class MPCacheServerContext:
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
 
-        # Initialize the process-global GDS context.
-        # No-op when GDS L1 is disabled (config is None).
-        initialize_gds_context(storage_manager_config.l1_manager_config.gds_l1_config)
-
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
         )
@@ -231,13 +223,10 @@ class MPCacheServerContext:
 
     def close(self) -> None:
         """
-        Tear down the session manager, storage manager, and the process-global
-        GDS context.
+        Tear down sessions and every storage manager, including its GDS context.
         """
         self._session_manager.close()
         self._storage_manager.close()
-        # Tear down the GDS cuFile context (the shared slab + its handle).
-        get_gds_context().close()
 
     @property
     def chunk_size(self) -> int:
@@ -263,6 +252,22 @@ class MPCacheServerContext:
     def storage_manager(self) -> StorageManager:
         """The storage manager instance."""
         return self._storage_manager
+
+    def get_read_owners(self, request_id: str) -> dict[ObjectKey, int] | None:
+        """Get the exact prefetch owners for a request, or None for legacy single L1.
+
+        Args:
+            request_id: Request whose lookup acquired the read locks.
+
+        Raises:
+            ValueError: A multi-L1 retrieve has no live lookup session.
+        """
+        if not self._storage_manager.is_multi_l1:
+            return None
+        session = self._session_manager.get(request_id)
+        if session is None:
+            raise ValueError("Multi-L1 retrieve requires a live prefetch session")
+        return session.get_prefetch_owners()
 
     @property
     def token_hasher(self) -> TokenHasher:
@@ -324,6 +329,8 @@ class MPCacheServerContext:
         empty or lazy memory mode is enabled. Otherwise strips any leading ``/``
         and ensures the name starts with ``lmcache_l1_pool_``.
         """
+        if len(storage_manager_config.l1_manager_configs) != 1:
+            return {"shm_name": "", "pool_size": 0}
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
         shm_name = mem_cfg.shm_name or ""
         if not shm_name or mem_cfg.use_lazy or mem_cfg.devdax_path:

@@ -302,6 +302,11 @@ L1 Memory Manager
 
 Source: ``lmcache/v1/distributed/config.py``
 
+Use repeatable ``--l1-manager '<JSON>'`` for tagged DRAM, Device-DAX, and
+GDS managers. See :doc:`multi_l1` for the schema, placement order, fixed
+L2 affinity, and per-manager reporting. The flags below remain the legacy
+single-L1 interface.
+
 .. list-table::
    :header-rows: 1
    :widths: 30 15 55
@@ -310,7 +315,7 @@ Source: ``lmcache/v1/distributed/config.py``
      - Default
      - Description
    * - ``--l1-size-gb``
-     - *required*
+     - *required without* ``--l1-manager``
      - Size of the L1 tier in GB. Sizes the pinned-DRAM L1 by default, or the
        GDS slab file when ``--gds-l1-path`` is set (see *GDS L1 Tier* below).
    * - ``--l1-use-lazy`` / ``--no-l1-use-lazy``
@@ -548,6 +553,8 @@ Source: ``lmcache/v1/distributed/l2_adapters/config.py``
 
 L2 adapters are configured via repeatable ``--l2-adapter <JSON>`` arguments.
 Each JSON object must include a ``"type"`` field that selects the adapter type.
+The optional ``"affinity_tag"`` field (default ``"_default"``) names the
+host-backed L1 used for both stores and reloads; see :doc:`multi_l1`.
 The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
 Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,

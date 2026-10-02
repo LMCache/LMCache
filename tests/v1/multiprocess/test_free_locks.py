@@ -110,6 +110,7 @@ def _make_free_locks_ctx(
         The configured MagicMock context.
     """
     ctx = MagicMock()
+    ctx.get_read_owners.return_value = None
     ctx.chunk_size = 256
     ctx.token_hasher.chunk_size = 256
     ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
@@ -143,7 +144,7 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
         module.free_lookup_locks(key, 1)
 
     module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
-        sentinel_obj_keys, read_locks=1
+        sentinel_obj_keys, read_locks=1, l1_owners=None
     )
 
 
@@ -164,7 +165,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
 def _released_chunks(finish_read_mock: MagicMock) -> set[tuple[int, bytes]]:
     """Collect (object_group_id, chunk_hash) pairs released by the module."""
     (obj_keys,), kwargs = finish_read_mock.call_args
-    assert kwargs == {"read_locks": 1}
+    assert kwargs == {"read_locks": 1, "l1_owners": None}
     return {(k.object_group_id, k.chunk_hash) for k in obj_keys}
 
 
@@ -255,6 +256,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
     ctx = MagicMock()
+    ctx.get_read_owners.return_value = None
     ctx.token_hasher.chunk_size = 256
     ctx.token_hasher.compute_chunk_hashes.return_value = []
 
