@@ -224,6 +224,68 @@ def test_resp_connector_batch_operations(
         close_asyncio_loop(async_loop, async_thread)
 
 
+def test_resp_connector_partially_hit_batch(
+    resp_url, local_backend, resp_config, autorelease_v1
+):
+    """A batch where only some keys are stored must report misses as None.
+
+    Every slot is allocated up front, so a miss that is not reported would hand
+    back an untouched staging buffer as if it were cached data.
+    """
+    async_loop, async_thread = init_asyncio_loop()
+
+    try:
+        connector = autorelease_v1(
+            CreateConnector(resp_url, async_loop, local_backend, resp_config)
+        )
+
+        num_keys = 5
+        keys = [dumb_cache_engine_key(i) for i in range(num_keys)]
+        stored_indices = [0, 2, 4]
+
+        mem_obj_shape = torch.Size([2, 32, 256, 1024])
+        dtype = torch.bfloat16
+        stored_objs = []
+        for i in stored_indices:
+            memory_obj = local_backend.allocate(mem_obj_shape, dtype)
+            memory_obj.ref_count_up()
+            torch.manual_seed(7 + i)
+            test_tensor = torch.randint(
+                0, 100, memory_obj.raw_data.shape, dtype=torch.int64
+            )
+            memory_obj.raw_data.copy_(test_tensor.to(torch.float32).to(dtype))
+            stored_objs.append(memory_obj)
+
+        future = asyncio.run_coroutine_threadsafe(
+            connector.batched_put([keys[i] for i in stored_indices], stored_objs),
+            async_loop,
+        )
+        future.result()
+
+        future = asyncio.run_coroutine_threadsafe(
+            connector.batched_get(keys), async_loop
+        )
+        retrieved_objs = future.result()
+
+        assert len(retrieved_objs) == num_keys
+        # Misses are None; hits are real data, not uninitialised staging memory.
+        assert [obj is not None for obj in retrieved_objs] == [
+            i in stored_indices for i in range(num_keys)
+        ]
+        check_mem_obj_equal([retrieved_objs[i] for i in stored_indices], stored_objs)
+
+        # The non-blocking variant returns only the consecutive prefix of hits.
+        future = asyncio.run_coroutine_threadsafe(
+            connector.batched_get_non_blocking("test_lookup", keys), async_loop
+        )
+        prefix = future.result()
+        assert len(prefix) == 1
+        check_mem_obj_equal(prefix, stored_objs[:1])
+
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
 def test_resp_connector_different_chunk_sizes(resp_url, autorelease_v1):
     """Test that different operations can use different chunk sizes."""
     async_loop, async_thread = init_asyncio_loop()
@@ -308,18 +370,11 @@ def test_resp_connector_nonexistent_key(
         )
         assert not future.result()
 
-        # Test get returns None (RESP protocol should handle this gracefully)
-        # Note: This might throw an error depending on how RESP handles missing keys
+        # Test get returns None: a miss is a normal cache outcome, not an error
         future = asyncio.run_coroutine_threadsafe(
             connector.get(nonexistent_key), async_loop
         )
-
-        try:
-            result = future.result()
-            assert result is None, "Getting non-existent key should return None"
-        except Exception:
-            # RESP might throw an error for missing keys, which is also acceptable
-            pass
+        assert future.result() is None, "Getting non-existent key should return None"
 
     finally:
         close_asyncio_loop(async_loop, async_thread)
