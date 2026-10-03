@@ -3,10 +3,14 @@
 KV Cache Events
 ===============
 
-.. warning::
+.. note::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/observability/index`.
-
+   The step-by-step example on this page uses LMCache's in-process
+   ``LMCacheConnectorV1`` (deprecated). :doc:`LMCache MP mode </mp/index>`
+   now publishes the same vLLM ``BlockStored`` events through
+   ``LMCacheMPConnector``, so the router-facing contract described here
+   applies to MP mode as well; see the "MP mode notes" subsection under
+   the vLLM tab below for the runtime requirements specific to MP.
 
 KV cache events are actions or lifecycle events that occur when managing the KV cache during inference. These events can be used for KV-cache-aware routing.
 
@@ -15,6 +19,11 @@ LMCache supports KV cache events as follows:
 - Generates storage KV cache events
 - The events format is defined as per the `BlockStored class <https://github.com/vllm-project/vllm/blob/main/vllm/distributed/kv_events.py>`_ in vLLM
 - LMCache passes the events to SGLang or vLLM to publish them using their messaging system
+- Both the in-process ``LMCacheConnectorV1`` and the multiprocess
+  ``LMCacheMPConnector`` publish ``BlockStored`` events on successful
+  store; ``BlockRemoved`` / ``AllBlocksCleared`` are not published today
+  (the MP connector is a **store-only** integration; see the "MP mode
+  notes" subsection under the vLLM tab below).
 
 Prerequisites
 -------------
@@ -88,6 +97,36 @@ How to Generate KV Cache events
         - BlockStored(block_hashes=[b'\x96\x95[h6\x1dE$v\x03\xe8\xf0\xc20\xcd\xe8\xa7#\x9cS\xe0\x16\xba\xab7\xf7z\x10P]\xfaT'], parent_block_hash=None, token_ids=[27, 91, 7265, 3575, 4326, 91, 1784, 91, 8948, 91, 397, 2610, 525, 264, 10950, 15235, 17847, 624, 27, 91, 872, 91, 397, 3838, 374, 279, 16158, 1685, 1370, 276, 5267, 27, 91, 77091, 91, 29], block_size=36, lora_id=None, medium='CPU')
 
       This is the event generated after the cache store operation.
+
+      MP mode notes
+      ^^^^^^^^^^^^^
+
+      The multiprocess ``LMCacheMPConnector`` (see :doc:`/mp/index`)
+      publishes vLLM ``BlockStored`` events through the same
+      ``--kv-events-config`` mechanism; no LMCache-side ``enable_kv_events``
+      flag is needed in MP mode. The connector reads
+      ``vllm_config.kv_events_config.enable_kv_cache_events`` and, when
+      set, records store events only after the MP store future succeeds
+      (failed or degraded-mode stores are discarded). Event hashes are
+      computed with the MP server's configured
+      ``--hash-algorithm`` (see :doc:`/mp/configuration`).
+
+      For KV-cache-aware routing in MP mode, the runtime requirements are:
+
+      - Enable vLLM KV events via ``--kv-events-config`` as above.
+      - Match LMCache's ``--chunk-size`` to the vLLM / Dynamo routing
+        block size so event block boundaries align with router lookups.
+      - Set ``lmcache.mp.hash_algorithm`` on the connector to match the
+        MP server's ``--hash-algorithm``.
+      - Use the same ``PYTHONHASHSEED`` for the coordinator, MP
+        servers, and workers, so chunk hashes are stable across
+        processes.
+
+      MP mode is a **store-only** integration today: it emits
+      ``BlockStored`` for successful stores but does not emit
+      ``BlockRemoved`` or ``AllBlocksCleared`` on host-cache eviction.
+      Use it only where host-cache entries are not evicted during the
+      routing window.
 
    .. tab-item:: SGLang
 
