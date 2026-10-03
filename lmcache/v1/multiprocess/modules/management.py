@@ -40,6 +40,10 @@ class ManagementModule:
             0 disables reaping (no thread is started).
         worker_registration_grace_seconds: Silence budget for a worker that
             registered but never pinged.
+        worker_disconnect_grace_seconds: Countdown after a ping-proven
+            worker's connection closes before it is reaped, unless it
+            reconnects first; 0 disables connection-loss reclaim. Requires
+            reaping to be enabled.
         experimental_transfer: Types of experimental intermediate tensor
             transfer built in the server.
     """
@@ -50,6 +54,7 @@ class ManagementModule:
         liveness_targets: Sequence[InstanceLivenessTarget] = (),
         worker_reap_timeout_seconds: float = 0.0,
         worker_registration_grace_seconds: float = 0.0,
+        worker_disconnect_grace_seconds: float = 0.0,
         experimental_transfer: Sequence[str] = (),
     ) -> None:
         self._ctx = ctx
@@ -57,16 +62,22 @@ class ManagementModule:
         self._liveness_targets = tuple(liveness_targets)
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
+        self._disconnect_grace = worker_disconnect_grace_seconds
         self._experimental_transfer = tuple(experimental_transfer)
 
         # Periodic reaper, started only when reaping is enabled and there is
         # something to scan. Scans every reap_timeout/4, so an instance is
         # reaped between timeout and timeout + interval after its last signal.
+        # With connection-loss reclaim on, it also scans at least three times
+        # per disconnect grace so that countdown is not overshot by much.
         self._reaper: PeriodicThread | None = None
         if self._reap_timeout > 0 and self._liveness_targets:
+            interval = self._reap_timeout / 4
+            if self._disconnect_grace > 0:
+                interval = min(interval, self._disconnect_grace / 3)
             reaper = create_periodic_thread(
                 name="lmcache-mp-worker-reaper",
-                interval=self._reap_timeout / 4,
+                interval=interval,
                 execute_fn=self._reap_cycle,
                 level=ThreadLevel.MEDIUM,
             )
@@ -93,9 +104,33 @@ class ManagementModule:
                 "enabled": self._reaper is not None,
                 "reap_timeout_seconds": self._reap_timeout,
                 "registration_grace_seconds": self._reap_grace,
+                "disconnect_grace_seconds": (
+                    self._disconnect_grace if self.reclaims_on_disconnect else 0.0
+                ),
                 "tracked_instances": tracked,
             }
         }
+
+    @property
+    def reclaims_on_disconnect(self) -> bool:
+        """Whether a closed worker connection starts a reap countdown."""
+        return self._reaper is not None and self._disconnect_grace > 0
+
+    def on_peer_disconnected(self, peer: bytes) -> None:
+        """Start the reap countdown for workers registered over ``peer``.
+
+        Invoked by the request transport when a client connection closes.
+        Only marks the affected instances; the reaper releases them later.
+
+        Args:
+            peer: The closed connection's opaque id.
+        """
+        if not self.reclaims_on_disconnect:
+            return
+        for target in self._liveness_targets:
+            target.mark_peer_disconnected(
+                peer, self._disconnect_grace, self._reap_timeout
+            )
 
     def close(self) -> None:
         """Stop the reaper, if one is running."""

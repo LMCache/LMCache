@@ -5,7 +5,10 @@
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
+
+# First Party
+from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
@@ -13,16 +16,22 @@ if TYPE_CHECKING:
     from lmcache.v1.multiprocess.engine_module import EngineModule
     from lmcache.v1.multiprocess.transport.base import RequestServer
 
+logger = init_logger(__name__)
+
 
 def create_request_server(
     modules: list[EngineModule],
     mp_config: MPServerConfig,
+    on_peer_disconnected: Callable[[bytes], None] | None = None,
 ) -> RequestServer:
     """Create a configured request server for the selected transport.
 
     Args:
         modules: Ordered business modules composing the cache server.
         mp_config: Multiprocess server configuration selecting ZMQ or gRPC.
+        on_peer_disconnected: Optional callback receiving the connection id
+            (see ``current_request_peer``) of each client connection that
+            closes. Only the ZMQ transport reports connection loss.
 
     Returns:
         Configured, but not yet started, request server.
@@ -33,6 +42,12 @@ def create_request_server(
             build_grpc_request_server,
         )
 
+        if on_peer_disconnected is not None:
+            logger.info(
+                "The grpc transport does not report closed client "
+                "connections; dead workers are reclaimed by the heartbeat "
+                "timeout only"
+            )
         return build_grpc_request_server(modules, mp_config)
 
     # First Party
@@ -40,4 +55,4 @@ def create_request_server(
         build_zmq_request_server,
     )
 
-    return build_zmq_request_server(modules, mp_config)
+    return build_zmq_request_server(modules, mp_config, on_peer_disconnected)

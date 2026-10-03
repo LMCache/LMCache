@@ -121,6 +121,15 @@ class MPServerConfig:
     sent a PING (model warmup, or death before its first request). Must be
     >= worker_reap_timeout_seconds."""
 
+    worker_disconnect_grace_seconds: float = 30.0
+    """Countdown (seconds) started when a ping-proven worker's connection
+    closes (e.g. the process was killed); the worker is reaped when it expires
+    unless it reconnects first. A never-pinged worker gets
+    worker_reap_timeout_seconds instead of the registration grace. 0 disables
+    this; otherwise it must be >= 30 (keep it above the engine adapter's
+    heartbeat interval) and <= worker_reap_timeout_seconds. Only the zmq
+    transport reports closed connections; ignored when reaping is disabled."""
+
     enable: list[str] = field(default_factory=list)
     """List of experimental transfer modules to enable. Options: transfer_query
     (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
@@ -135,8 +144,9 @@ class MPServerConfig:
 
         Raises:
             ValueError: If a timeout is non-finite, the reap timeout is
-                negative or a non-zero value below the 30 s floor, or the
-                registration grace is below the reap timeout.
+                negative or a non-zero value below the 30 s floor, the
+                registration grace is below the reap timeout, or a non-zero
+                disconnect grace is below 30 s or above the reap timeout.
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
@@ -154,6 +164,17 @@ class MPServerConfig:
             raise ValueError(
                 "worker registration grace must be >= the worker reap timeout "
                 f"({reap}s); got {grace}"
+            )
+        disconnect = self.worker_disconnect_grace_seconds
+        if (
+            not math.isfinite(disconnect)
+            or disconnect < 0
+            or (disconnect != 0 and disconnect < 30.0)
+            or (reap != 0 and disconnect > reap)
+        ):
+            raise ValueError(
+                "worker disconnect grace must be 0 (disabled) or between 30s "
+                f"and the worker reap timeout ({reap}s); got {disconnect}"
             )
 
 
@@ -501,6 +522,16 @@ def add_mp_server_args(
         "timeout. Default is 3600.",
     )
     mp_group.add_argument(
+        "--worker-disconnect-grace-seconds",
+        type=float,
+        default=30.0,
+        help="Countdown (s) after a ping-proven worker's connection closes "
+        "before its KV cache registration is reaped, unless it reconnects. "
+        "A never-pinged worker gets the reap timeout instead of the "
+        "registration grace. 0 disables. Must be >= 30 and <= the worker "
+        "reap timeout. zmq transport only. Default is 30.",
+    )
+    mp_group.add_argument(
         "--enable-segmented-prefix",
         action="store_true",
         help="CacheBlend (--engine-type blend) only: on a mid-prefix L2 "
@@ -573,6 +604,7 @@ def parse_args_to_mp_server_config(
         run_script_api_enabled=args.run_script_api_enabled,
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
+        worker_disconnect_grace_seconds=args.worker_disconnect_grace_seconds,
         enable=args.enable or [],
     )
 
