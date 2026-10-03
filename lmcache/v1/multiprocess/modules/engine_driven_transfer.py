@@ -353,26 +353,34 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             shm_name=shm_name, pool_size=pool_size
         )
 
-    @request_handler(operation="unregister_kv_cache_engine_driven_context")
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister a non-GPU KV cache context for the given instance ID.
 
         Args:
             instance_id: The worker instance identifier.
         """
+        if not self._drop_instance_state(instance_id):
+            logger.warning(
+                "No registered non-GPU context found for instance ID %d",
+                instance_id,
+            )
+
+    def drop_instance_state(self, instance_id: int) -> None:
+        """Release this module's state during unified instance cleanup."""
+        self._drop_instance_state(instance_id)
+
+    def _drop_instance_state(self, instance_id: int) -> bool:
+        """Pop and release one non-GPU registration if present."""
         with self._lock:
             entry = self._engine_driven_contexts.pop(instance_id, None)
             if entry is not None:
                 self._strategies.pop(instance_id, None)
         if entry is None:
-            logger.warning(
-                "No registered non-GPU context found for instance ID %d",
-                instance_id,
-            )
-            return
+            return False
 
         self._release_entry(instance_id, entry)
         logger.info("Unregistered non-CUDA context for instance ID %d", instance_id)
+        return True
 
     @request_handler(
         HandlerType.BLOCKING,
