@@ -70,6 +70,32 @@ class TestKVLayerGroupsManager:
         assert group.shape_desc.bs == 256
         assert group.dtype == torch.float16
 
+    @pytest.mark.parametrize(
+        "engine_kv_format, heads_first",
+        [
+            (lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS, True),
+            (lmcache_native.EngineKVFormat.NB_NL_TWO_BS_NH_HS, False),
+        ],
+    )
+    def test_build_cross_layer_tensor(self, engine_kv_format, heads_first):
+        """A cross-layer format registers one fused tensor, not a per-layer
+        list, so the group's block count must be read from that tensor."""
+        nb, nl, nh, bs, hs = 4, 3, 8, 16, 64
+        inner = (nh, bs, hs) if heads_first else (bs, nh, hs)
+        fused = torch.zeros(nb, nl, 2, *inner, dtype=torch.bfloat16)
+
+        manager = KVLayerGroupsManager(fused, engine_kv_formats=[engine_kv_format] * nl)
+
+        assert len(manager.kernel_groups) == 1
+        group = manager.kernel_groups[0]
+        assert group.layer_indices == list(range(nl))
+        assert group.shape_desc.nb == nb
+        assert group.shape_desc.nl == nl
+        assert group.shape_desc.bs == bs
+        assert group.shape_desc.nh == nh
+        assert group.shape_desc.hs == hs
+        assert group.dtype == torch.bfloat16
+
     def test_build_mixed_formats_per_group(self):
         """Mixed-format shape: a K+V group and a key-only MLA group are shaped
         with their own per-layer formats (kv_size 2 and 1), not one shared

@@ -405,7 +405,14 @@ class KVLayerGroupsManager:
             group_format = identity.engine_kv_format
             # Block count is per engine group (each is its own block-id space), so
             # read it from this group's own tensor rather than a context-wide value.
-            group_num_blocks = get_num_blocks([kv_caches[indices[0]]], group_format)
+            # A cross-layer format registers one fused tensor rather than a
+            # per-layer list, so indexing it by layer would slice the block axis.
+            block_count_probe = (
+                kv_caches
+                if lmcache_native.is_cross_layer(group_format)
+                else [kv_caches[indices[0]]]
+            )
+            group_num_blocks = get_num_blocks(block_count_probe, group_format)
             block_stride_elems = resolve_block_stride_and_log_layout(
                 kv_caches,
                 group_format,
