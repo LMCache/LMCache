@@ -256,7 +256,7 @@ class UserSession:
             prompt = self._build_system_prompt() + prompt
         self.chat_history.on_user_query(prompt)
         logger.debug(
-            f"User {self.user_config.user_id} issues request {self.question_id}"
+            "User %d issues request %d", self.user_config.user_id, self.question_id
         )
         if self.use_sharegpt:
             if self.start_with_gpt:
@@ -287,9 +287,10 @@ class UserSession:
         self.chat_history.on_system_response(response.body)
         self.has_unfinished_request = False
         logger.debug(
-            f"User {self.user_config.user_id} finished one request. "
-            f"Prompt tokens: {response.prompt_tokens}, "
-            f"generation tokens: {response.generation_tokens}"
+            "User %d finished one request. Prompt tokens: %d, generation tokens: %d",
+            self.user_config.user_id,
+            response.prompt_tokens,
+            response.generation_tokens,
         )
         self._update_result(response)
 
@@ -306,9 +307,10 @@ class UserSession:
         self.last_request_time = timestamp - offset + passed_time
         self.question_id = num_passed_questions
         logger.debug(
-            f"Set internal state for user {self.user_config.user_id}, "
-            f"question_id: {self.question_id}, "
-            f"last_request_time: {self.last_request_time}"
+            "Set internal state for user %d, question_id: %d, last_request_time: %s",
+            self.user_config.user_id,
+            self.question_id,
+            self.last_request_time,
         )
 
     def step(self, timestamp: float, request_executor: RequestExecutor):
@@ -327,8 +329,9 @@ class UserSession:
             if self.has_unfinished_request:
                 if timestamp - self.last_unfinished_log > 10:
                     logger.warning(
-                        f"User {self.user_config.user_id} has an unfinished "
-                        "request and unable to fit the QPS requirement."
+                        "User %d has an unfinished request and unable to fit the QPS "
+                        "requirement.",
+                        self.user_config.user_id,
                     )
                     self.last_unfinished_log = timestamp
                 return
@@ -367,9 +370,12 @@ class UserSessionManager:
         self.ramp_up_time = workload_config.num_users * self.gap_between_users
 
         logger.info(
-            f"Gap between users: {self.gap_between_users} secs.\n"
-            f"Gap between user reqs: {gap_between_requests_per_user} secs.\n"
-            f"Expected length of user session: {session_alive_time} secs."
+            "Gap between users: %s secs.\n"
+            "Gap between user reqs: %s secs.\n"
+            "Expected length of user session: %s secs.",
+            self.gap_between_users,
+            gap_between_requests_per_user,
+            session_alive_time,
         )
 
         self.user_id = init_user_id
@@ -395,7 +401,7 @@ class UserSessionManager:
             for d in self.sharegpt_data
             if d["num_round"] > 2 * self.workload_config.num_rounds
         ]
-        logger.info(f"There are {len(self.sharegpt_data)} users satisfying ")
+        logger.info("There are %d users satisfying ", len(self.sharegpt_data))
         assert len(self.sharegpt_data) >= self.workload_config.num_users, (
             "Not enough data! Reduce --num-users or --num-rounds"
         )
@@ -425,8 +431,9 @@ class UserSessionManager:
         sessions_to_remove = [s for s in self.sessions if s.finished]
         if len(sessions_to_remove) > 0:
             logger.info(
-                f"Removing {len(sessions_to_remove)} finished sessions, now "
-                f"active users: {len(self.sessions) - len(sessions_to_remove)}"
+                "Removing %d finished sessions, now active users: %d",
+                len(sessions_to_remove),
+                len(self.sessions) - len(sessions_to_remove),
             )
             for session in sessions_to_remove:
                 self.session_summaries.append(session.summary())
@@ -457,8 +464,9 @@ class UserSessionManager:
             self._create_user_session()
             self.last_user_join = timestamp
             logger.info(
-                f"Joined a new user {self.user_id}, "
-                f"now active users: {len(self.sessions)}"
+                "Joined a new user %d, now active users: %d",
+                self.user_id,
+                len(self.sessions),
             )
 
         for session in self.sessions:
@@ -483,9 +491,10 @@ class UserSessionManager:
             launched_queries = len(df)
 
         logger.debug(
-            f"Launched queries: {launched_queries}, "
-            f"pending queries: {pending_queries}, "
-            f"finished queries: {len(df)}"
+            "Launched queries: %d, pending queries: %d, finished queries: %d",
+            launched_queries,
+            pending_queries,
+            len(df),
         )
 
         if config_qps is None:
@@ -688,8 +697,8 @@ def parse_process_summary():
 
 def process_output(filename):
     logger.warning(
-        f"Processing the existing summary file {filename}"
-        ", ignoring all the other arguments"
+        "Processing the existing summary file %s, ignoring all the other arguments",
+        filename,
     )
     UserSessionManager.ProcessSummary(pd.read_csv(filename), pending_queries=0)
 
@@ -755,7 +764,7 @@ def main():
 
     AsyncLoopWrapper.StopLoop()
 
-    logger.info(f"Finished benchmarking, dumping summary to {args.output}")
+    logger.info("Finished benchmarking, dumping summary to %s", args.output)
     summary = manager.summary(0, time.time())
     summary.to_csv(args.output, index=False)
 
