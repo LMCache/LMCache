@@ -3,8 +3,9 @@
 File-system based L2 adapter using aiofiles for async I/O.
 
 Stores KV cache objects as raw tensor bytes on disk (no metadata
-header).  Each ObjectKey maps to a separate ``.data`` file whose
-name encodes all key fields so it can be reversed on startup.
+header). Each ObjectKey maps to a separate ``.data`` file. Names that
+fit the filesystem limit encode all key fields; oversized names use a
+deterministic digest of that encoding.
 """
 
 # Future
@@ -14,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 import asyncio
+import hashlib
 import os
 import threading
 
@@ -55,6 +57,8 @@ _KEY_SEP = "@"
 # csrc/storage_backends/fs/connector.cpp.
 _PATH_SLASH_REPLACEMENT = "-SEP-"
 _FILE_EXT = ".data"
+# Keep ObjectKey-to-filename mapping independent of local filesystem settings.
+_LEGACY_FILENAME_MAX_BYTES = 255
 
 
 def _readinto_full(
@@ -124,12 +128,13 @@ def _object_key_to_filename(key: ObjectKey) -> str:
 def _filename_to_object_key(
     filename: str,
 ) -> Optional[ObjectKey]:
-    """Reverse ``_object_key_to_filename``.
+    """Reverse legacy filenames produced by ``_object_key_to_filename``.
 
     Accepts both the 4-field unsalted shape and the 5-field salted
     shape (trailing ``cache_salt``). Returns ``None`` for anything
     else. Since ``model_name`` is guaranteed not to contain ``@``,
-    plain ``split`` suffices — no marker, no rsplit.
+    plain ``split`` suffices — no marker, no rsplit. Digest filenames
+    used by ``FSL2Adapter`` for oversized keys are not reversible.
     """
     if not filename.endswith(_FILE_EXT):
         return None
@@ -245,8 +250,9 @@ class FSL2Adapter(L2AdapterInterface):
     File-system backed L2 adapter with async I/O via *aiofiles*.
 
     Each file stores **only** the raw tensor bytes (no metadata
-    header), which gives maximum I/O throughput.  The file name
-    itself encodes the full ``ObjectKey`` so it is reversible.
+    header), which gives maximum I/O throughput. Representable file
+    names encode the full ``ObjectKey``; oversized names use a stable
+    digest and are addressed again using the caller-supplied key.
 
     Thread safety is ensured via a lock for shared bookkeeping
     and an asyncio event loop running on a dedicated daemon
@@ -275,6 +281,22 @@ class FSL2Adapter(L2AdapterInterface):
                 raise ValueError("Invalid relative_tmp_dir: " + config.relative_tmp_dir)
             (self._base_path / self._relative_tmp_dir).mkdir(
                 parents=False, exist_ok=True
+            )
+
+        try:
+            self._name_max = os.pathconf(self._base_path, "PC_NAME_MAX")
+            if self._relative_tmp_dir is not None:
+                tmp_path = self._base_path / self._relative_tmp_dir
+                tmp_name_max = os.pathconf(tmp_path, "PC_NAME_MAX")
+                self._name_max = min(self._name_max, tmp_name_max)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"Failed to determine PC_NAME_MAX for FS L2 adapter: {exc}"
+            ) from exc
+        if self._name_max < _LEGACY_FILENAME_MAX_BYTES:
+            raise ValueError(
+                "FS L2 adapter requires PC_NAME_MAX >= "
+                f"{_LEGACY_FILENAME_MAX_BYTES}, got {self._name_max}"
             )
 
         # I/O tuning options aligned with FSConnector
@@ -500,7 +522,7 @@ class FSL2Adapter(L2AdapterInterface):
         return tid
 
     def _key_to_path(self, key: ObjectKey) -> Path:
-        return self._base_path / _object_key_to_filename(key)
+        return self._base_path / self._key_to_filename(key)
 
     async def _key_exists_on_disk(
         self,
@@ -523,13 +545,21 @@ class FSL2Adapter(L2AdapterInterface):
         ``FSConnector._get_file_and_tmp_path``).  Otherwise a
         ``.tmp`` suffix is used.
         """
-        fname = _object_key_to_filename(key)
+        fname = self._key_to_filename(key)
         final = self._base_path / fname
         if self._relative_tmp_dir is not None:
             tmp = self._base_path / self._relative_tmp_dir / fname
         else:
             tmp = final.with_suffix(".tmp")
         return final, tmp
+
+    def _key_to_filename(self, key: ObjectKey) -> str:
+        legacy_filename = _object_key_to_filename(key)
+        canonical_bytes = legacy_filename.encode("utf-8", errors="surrogatepass")
+        if len(canonical_bytes) <= _LEGACY_FILENAME_MAX_BYTES:
+            return legacy_filename
+        digest = hashlib.sha256(canonical_bytes).hexdigest()
+        return f"{digest}{_FILE_EXT}"
 
     # ---- O_DIRECT helpers -----------------------------------------------
 
