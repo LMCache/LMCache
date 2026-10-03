@@ -8,6 +8,21 @@ Definition of errors for class APIs.
 import enum
 
 
+class L1ReconfigureError(RuntimeError):
+    """HTTP-mappable runtime L1 reconfiguration error."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        """Create a runtime error with an ``{"error": message}`` payload.
+
+        Args:
+            status_code: HTTP status code the API should return.
+            message: Human-readable error message.
+        """
+        super().__init__(message)
+        self.status_code = status_code
+        self.payload: dict[str, object] = {"error": message}
+
+
 class L1Error(enum.Enum):
     """Errors for L1Manager class APIs."""
 

@@ -34,11 +34,6 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'full')
         uses: ./.github/workflows/build_main_artifacts.yml
 
-    build-main-arm64:
-        name: Build main (arm64)
-        if: contains(github.event.pull_request.labels.*.name, 'full')
-        uses: ./.github/workflows/build_main_artifacts_arm64.yml
-
     build-cli:
         name: Build CLI
         if: contains(github.event.pull_request.labels.*.name, 'full')
@@ -55,7 +50,8 @@ jobs:
         uses: ./.github/workflows/build_cu129_artifacts.yml
         # Fork PRs won't expose DOCKERHUB_TOKEN even with `inherit`; the login
         # step in build_cu129_artifacts.yml guards on the token being non-empty.
-        secrets: inherit
+        secrets:
+            dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
     build-rocm:
         name: Build ROCm
