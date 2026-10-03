@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Optional, Tuple, Union
+from typing import List, NamedTuple, Optional, Tuple, Union
 import abc
 
 # Third Party
@@ -32,7 +32,7 @@ from lmcache.v1.gpu_connector.utils import (
     normalize_kv_and_discover_format,
     resolve_block_stride_and_log_layout,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+from lmcache.v1.kv_layer_groups import KernelGroupInfo, KVLayerGroupsManager
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
@@ -429,6 +429,39 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         return torch.Size([kv_size, self.num_layers, num_tokens, self.hidden_dim_size])
 
 
+class _GroupTransferParams(NamedTuple):
+    """Per-kernel-group arguments for ``multi_layer_kv_transfer``."""
+
+    engine_kv_format: "lmcache_native.EngineKVFormat"
+    page_buffer_size: int
+    block_size: int
+    head_size: int
+    block_stride_elems: int
+    num_layers: int
+    hidden_dim_size: int
+
+    @classmethod
+    def from_kernel_group(
+        cls,
+        group: KernelGroupInfo,
+        default_format: "lmcache_native.EngineKVFormat",
+    ) -> "_GroupTransferParams":
+        sd = group.shape_desc
+        return cls(
+            engine_kv_format=(
+                group.engine_kv_format
+                if group.engine_kv_format is not None
+                else default_format
+            ),
+            page_buffer_size=int(sd.nb) * int(sd.bs),
+            block_size=int(sd.bs),
+            head_size=int(sd.hs),
+            block_stride_elems=int(sd.block_stride_elems or 0),
+            num_layers=group.num_layers,
+            hidden_dim_size=group.hidden_dim_size,
+        )
+
+
 class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
     def __init__(
         self,
@@ -448,6 +481,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
 
         self.init = False
         self.group_kv_cache_pointers_on_gpu: Optional[list[torch.Tensor]] = None
+        self.group_transfer_params: list[_GroupTransferParams] = []
         self.group_tmp_buffer: Optional[list[torch.Tensor]] = None
 
         self.store_stream = torch.cuda.Stream()
@@ -498,31 +532,6 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             )
         klg_manager = self.metadata.kv_layer_groups_manager
 
-        # Heterogeneous-block_size sanity check.
-        #
-        # ``self.block_size`` is a single scalar sampled from the first
-        # layer's ``bs`` and is forwarded to ``multi_layer_kv_transfer``
-        # as a *global* kernel parameter below (see ``to_gpu`` /
-        # ``from_gpu`` / layerwise paths). That works only when every
-        # group shares the same ``shape_desc.bs``. Mixed-compression
-        # deployments (e.g. DeepSeek V4 with compressed + dense groups
-        # in the same model) violate this assumption and will silently
-        # corrupt transfers on this non-MP path. Log loudly so the
-        # mismatch surfaces before it turns into a data-corruption bug;
-        # the MP path (see ``GPUCacheContext`` / mp server) handles
-        # per-group ``bs`` correctly and should be used instead.
-        heterogeneous_bs = {g.shape_desc.bs for g in klg_manager.kernel_groups}
-        if len(heterogeneous_bs) > 1:
-            logger.warning(
-                "VLLMPagedMemGPUConnectorV3 detected heterogeneous per-group "
-                "block_size %s but forwards a single scalar block_size=%d to "
-                "multi_layer_kv_transfer. This non-MP path is NOT adapted for "
-                "mixed-compression KV layouts and may corrupt transfers. Use "
-                "the multi-process connector path for such models.",
-                sorted(heterogeneous_bs),
-                self.block_size,
-            )
-
         if self.use_gpu:
             tmp_buf_shapes = self.metadata.get_shapes(self.chunk_size)
             tmp_buf_dtypes = self.metadata.get_dtypes()
@@ -532,19 +541,82 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 for shape, dtype in zip(tmp_buf_shapes, tmp_buf_dtypes, strict=True)
             ]
 
+        # Kernel groups can differ in engine KV format, head size and block
+        # stride (e.g. a DSA indexer cache stored as NL_X_NB_BSV_BSS next to
+        # an MLA latent cache stored as NL_X_NB_BS_HS). The scalars above are
+        # sampled from layer 0 and are only valid for the group containing it,
+        # so each group's transfers use that group's own layout, the same way
+        # the MP path (``GPUCacheContext``) does.
         self.group_kv_cache_pointers_on_gpu = []
+        self.group_transfer_params = []
         for group in klg_manager.kernel_groups:
+            params = _GroupTransferParams.from_kernel_group(
+                group, self.engine_kv_format
+            )
             ptrs = get_group_data_ptrs(
-                self.kvcaches, self.engine_kv_format, group.layer_indices
+                self.kvcaches, params.engine_kv_format, group.layer_indices
             )
             cpu = torch.empty(len(ptrs), dtype=torch.int64, device="cpu")
             cpu.numpy()[:] = ptrs
             gpu = torch.empty(len(ptrs), dtype=torch.int64, device=self.device)
             gpu.copy_(cpu)
             self.group_kv_cache_pointers_on_gpu.append(gpu)
+            self.group_transfer_params.append(params)
 
+        if len(self.group_transfer_params) > 1:
+            logger.info(
+                "VLLMPagedMemGPUConnectorV3 using per-kernel-group layouts: %s",
+                self.group_transfer_params,
+            )
         self.init = True
         logger.info("init kv cache pointers success in VLLMPagedMemGPUConnectorV3")
+
+    def build_kv_layer_groups(self, kvcaches: List[torch.Tensor]) -> None:
+        """Discover the KV-cache layout and build the KV layer groups now.
+
+        Normally this happens lazily on the first ``to_gpu``/``from_gpu``.
+        Calling it when the KV caches are registered makes
+        ``LMCacheMetadata.get_shapes()`` return the per-kernel-group shapes
+        before any memory object is allocated. Otherwise the first stored
+        chunks are allocated with the legacy single-group shape, which is
+        wrong for models whose layers have different layouts.
+        """
+        self.initialize_kvcaches_ptr(kvcaches=kvcaches)
+        self._initialize_kv_cache_pointers()
+
+    def _check_memory_obj_layout(self, memory_obj: MemoryObj) -> None:
+        """Raise if ``memory_obj`` does not have one tensor per kernel group
+        with that group's ``(num_layers, hidden_dim)``.
+
+        A mismatch means the object was allocated with a different layout
+        (e.g. before the KV layer groups were built); copying into it would
+        corrupt the KV cache, so fail loudly instead.
+        """
+        params = self.group_transfer_params
+        shapes = memory_obj.metadata.shapes
+        if shapes is None and len(params) == 1:
+            # Single-group objects predating per-group shapes: nothing to
+            # disambiguate.
+            return
+        expected = [(p.num_layers, p.hidden_dim_size) for p in params]
+        if shapes is None or len(shapes) != len(params):
+            raise RuntimeError(
+                "VLLMPagedMemGPUConnectorV3: memory object has shapes "
+                f"{shapes}, expected {len(params)} kernel group(s) with "
+                f"(num_layers, hidden_dim) = {expected}"
+            )
+        for i, (shape, p) in enumerate(zip(shapes, params, strict=True)):
+            if (
+                len(shape) != 4
+                or shape[1] != p.num_layers
+                or shape[3] != p.hidden_dim_size
+            ):
+                raise RuntimeError(
+                    f"VLLMPagedMemGPUConnectorV3: memory object tensor {i} "
+                    f"has shape {tuple(shape)}, expected (num_layers, "
+                    f"hidden_dim) = ({p.num_layers}, {p.hidden_dim_size}) "
+                    f"for kernel group {i}"
+                )
 
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -568,20 +640,22 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         vllm_cached = kwargs.get("vllm_cached_tokens", 0)
         skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
 
+        self._check_memory_obj_layout(memory_obj)
         for i, kv_cache_pointer in enumerate(self.group_kv_cache_pointers_on_gpu):
             memory_obj_tensor = memory_obj.get_tensor(i)
             assert memory_obj_tensor is not None
+            params = self.group_transfer_params[i]
             device_ops.multi_layer_kv_transfer(
                 memory_obj_tensor,
                 kv_cache_pointer,
                 slot_mapping[start:end],
                 self.device,
-                self.page_buffer_size,
+                params.page_buffer_size,
                 lmcache_native.TransferDirection.H2D,
-                self.engine_kv_format,
-                block_size=self.block_size,
-                head_size=self.head_size,
-                block_stride_elems=self.block_stride_elems,
+                params.engine_kv_format,
+                block_size=params.block_size,
+                head_size=params.head_size,
+                block_stride_elems=params.block_stride_elems,
                 skip_prefix_n_tokens=skip_prefix_n_tokens,
             )
 
@@ -596,6 +670,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert self.kvcaches[0].device == self.device
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
+        self._check_memory_obj_layout(memory_obj)
         with torch.cuda.stream(self.store_stream):
             if not self.use_gpu or end - start != self.chunk_size:
                 for i, kv_cache_pointer in enumerate(
@@ -603,17 +678,18 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 ):
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None
+                    params = self.group_transfer_params[i]
                     device_ops.multi_layer_kv_transfer(
                         memory_obj_tensor,
                         kv_cache_pointer,
                         slot_mapping[start:end],
                         self.device,
-                        self.page_buffer_size,
+                        params.page_buffer_size,
                         lmcache_native.TransferDirection.D2H,
-                        self.engine_kv_format,
-                        block_size=self.block_size,
-                        head_size=self.head_size,
-                        block_stride_elems=self.block_stride_elems,
+                        params.engine_kv_format,
+                        block_size=params.block_size,
+                        head_size=params.head_size,
+                        block_stride_elems=params.block_stride_elems,
                     )
             else:
                 # kvcaches -> gpu_buffer -> memobj
@@ -622,17 +698,18 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                     self.group_kv_cache_pointers_on_gpu
                 ):
                     tmp_gpu_buffer = self.group_tmp_buffer[i][:, :, : end - start, :]
+                    params = self.group_transfer_params[i]
                     device_ops.multi_layer_kv_transfer(
                         tmp_gpu_buffer,
                         kv_cache_pointer,
                         slot_mapping[start:end],
                         self.device,
-                        self.page_buffer_size,
+                        params.page_buffer_size,
                         lmcache_native.TransferDirection.D2H,
-                        self.engine_kv_format,
-                        block_size=self.block_size,
-                        head_size=self.head_size,
-                        block_stride_elems=self.block_stride_elems,
+                        params.engine_kv_format,
+                        block_size=params.block_size,
+                        head_size=params.head_size,
+                        block_stride_elems=params.block_stride_elems,
                     )
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None
