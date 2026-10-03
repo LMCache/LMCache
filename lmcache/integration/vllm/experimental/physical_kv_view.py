@@ -37,6 +37,11 @@ def apply_physical_kv_view(
         metadata.max_seq_len = max_seq_len
         metadata.block_table = block_table
         metadata.slot_mapping = slot_mapping[layer_name]
+        # FA3 AOT scheduling was built from vLLM's logical sequence lengths.
+        # After presenting shorter physical lengths, let FlashAttention
+        # schedule from the updated metadata instead of reusing a stale plan.
+        if hasattr(metadata, "scheduler_metadata"):
+            metadata.scheduler_metadata = None
 
     # vLLM's separate KV-update path reads slot mapping from ForwardContext,
     # while attention reads the fields above from its per-layer metadata.

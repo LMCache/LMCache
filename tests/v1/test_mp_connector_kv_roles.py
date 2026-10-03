@@ -589,3 +589,47 @@ def test_multi_connector_child_role_and_completion(
     mock_io.scheduler.end_session.assert_called_once_with("request")
     worker.shutdown()
     scheduler.shutdown()
+
+
+def test_rkv_finish_marks_final_worker_update_stale() -> None:
+    scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    scheduler._rkv_budget = 32
+    scheduler._rkv_allocations = {"request": object()}
+    scheduler._rkv_finished_before_output = set()
+    scheduler.request_trackers = {}
+    scheduler.scheduler_adapter = MagicMock()
+    scheduler.lazy_offload = False
+    scheduler._can_store = False
+
+    scheduler.request_finished(_request(), [])
+
+    assert scheduler._rkv_allocations == {}
+    assert scheduler._rkv_finished_before_output == {"request"}
+    scheduler.scheduler_adapter.end_session.assert_called_once_with("request")
+
+
+def test_rkv_ignores_final_update_after_request_finished() -> None:
+    scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    scheduler._rkv_budget = 32
+    scheduler._rkv_finished_before_output = {"finished"}
+    scheduler._kv_cache_events = None
+    scheduler.lazy_offload = False
+    scheduler._commit_rkv_resident_updates = MagicMock()
+
+    meta = LMCacheMPWorkerMetadata(
+        completed_store_requests={},
+        resident_kv_updates={"finished": 32, "live": 32},
+    )
+
+    output = cast(
+        KVConnectorOutput,
+        SimpleNamespace(
+            kv_cache_events=None,
+            kv_connector_worker_meta=meta,
+        ),
+    )
+
+    scheduler.update_connector_output(output)
+
+    scheduler._commit_rkv_resident_updates.assert_called_once_with({"live": 32})
+    assert scheduler._rkv_finished_before_output == set()

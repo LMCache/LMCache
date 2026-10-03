@@ -750,6 +750,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
             self._rkv_allocations: dict[str, "KVCacheBlocks"] = {}
+            self._rkv_finished_before_output: set[str] = set()
         elif self.role == KVConnectorRole.WORKER:
             # Node routing: a worker connects only to its local LMCache server.
             # Global ranks are assigned to nodes in contiguous blocks:
@@ -1545,6 +1546,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     kv_cache_events.get_number_of_workers()
                 )
 
+        finished_rkv_requests: set[str] = set()
+        if self._rkv_budget is not None:
+            # vLLM calls request_finished() for requests that stop in this
+            # model step before it delivers this step's worker metadata.
+            # Their final resident update is stale: vLLM already freed the
+            # request's KV blocks, so there is nothing left to reclaim.
+            finished_rkv_requests = self._rkv_finished_before_output
+            self._rkv_finished_before_output = set()
+
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, LMCacheMPWorkerMetadata):
             return None
@@ -1558,7 +1568,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self.scheduler_adapter.end_session(request_id)
 
         if self._rkv_budget is not None and meta.resident_kv_updates:
-            self._commit_rkv_resident_updates(meta.resident_kv_updates)
+            updates = {
+                request_id: num_tokens
+                for request_id, num_tokens in meta.resident_kv_updates.items()
+                if request_id not in finished_rkv_requests
+            }
+            if updates:
+                self._commit_rkv_resident_updates(updates)
         return None
 
     def _commit_rkv_resident_updates(self, updates: dict[str, int]) -> None:
@@ -1623,6 +1639,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if self._rkv_budget is not None:
             clear_resident_kv_tokens(request.request_id)
             self._rkv_allocations.pop(request.request_id, None)
+            self._rkv_finished_before_output.add(request.request_id)
 
         params: dict[str, Any] | None = getattr(request, "kv_transfer_params", None)
         return_params: dict[str, Any] | None = {} if params is not None else None

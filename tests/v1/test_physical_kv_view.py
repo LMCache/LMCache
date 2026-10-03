@@ -28,6 +28,7 @@ def test_apply_physical_kv_view_updates_attention_consumers(
         max_seq_len=8,
         block_table=old_block_table,
         slot_mapping=old_slot_mapping,
+        scheduler_metadata=torch.tensor([123], dtype=torch.int32),
     )
     layer = SimpleNamespace(kv_cache=torch.empty(0))
     context = SimpleNamespace(
@@ -53,6 +54,7 @@ def test_apply_physical_kv_view_updates_attention_consumers(
     assert metadata.max_seq_len == 4
     assert metadata.block_table is physical_block_table
     assert metadata.slot_mapping is physical_slot_mapping["layer"]
+    assert metadata.scheduler_metadata is None
 
     # vLLM's separate KV-update path reads slot mapping from ForwardContext.
     monkeypatch.setattr(attention_mod, "get_forward_context", lambda: context)
