@@ -740,13 +740,16 @@ class LocalDiskBackend(StorageBackendInterface):
             buffer = mem_obj.byte_array
             self.read_file(key, buffer, path)
 
-            # TODO(Jiayi): Please recover the metadata in a more
-            # elegant way in the future.
-            cached_positions = self.dict[key].cached_positions
-            mem_obj.metadata.cached_positions = cached_positions
-
+            # read_file() can pop `key` out of self.dict on a FileNotFoundError
+            # (a concurrent force=True remove() raced the unlocked read); treat
+            # a vanished key as a miss instead of indexing straight into it.
             with self.disk_lock:
-                self.dict[key].unpin()
+                disk_meta = self.dict.get(key)
+                if disk_meta is None:
+                    mem_obj.ref_count_down()
+                    continue
+                mem_obj.metadata.cached_positions = disk_meta.cached_positions
+                disk_meta.unpin()
 
         return memory_objs
 
