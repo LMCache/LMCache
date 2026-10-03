@@ -59,6 +59,9 @@ from lmcache.v1.mp_observability.config import (
     init_observability,
 )
 from lmcache.v1.mp_observability.trace import codecs
+from lmcache.v1.mp_observability.trace.format import (
+    STORAGE_REPLAYABLE_TRACE_SCHEMA_VERSIONS,
+)
 from lmcache.v1.mp_observability.trace.reader import TraceReader
 from lmcache.v1.mp_observability.trace.recorder import safe_storage_config_dict
 
@@ -158,6 +161,12 @@ class StorageReplayDriver:
                 installs this config as the global singleton via
                 :func:`init_observability` and stops the resulting
                 bus on :meth:`close`.
+
+        Raises:
+            ValueError: If the trace is not storage-level or its schema does
+                not preserve enough information for faithful storage replay.
+                Schema version 1 may have omitted ``ObjectKey.cache_salt``.
+                Both checks precede EventBus and StorageManager initialization.
         """
         self._sm_config = sm_config
         self._trace_path = trace_path
@@ -174,6 +183,24 @@ class StorageReplayDriver:
         bus: EventBus | None = None
         try:
             reader = TraceReader(trace_path)
+            if reader.header.level != "storage":
+                raise ValueError(
+                    f"trace {reader.path!r} is level {reader.header.level!r}; "
+                    "StorageReplayDriver replays 'storage' traces only. Use "
+                    "'lmcache trace replay-events' for an events trace."
+                )
+            schema_version = reader.header.trace_schema_version
+            if schema_version not in STORAGE_REPLAYABLE_TRACE_SCHEMA_VERSIONS:
+                replayable_versions = ", ".join(
+                    str(version)
+                    for version in sorted(STORAGE_REPLAYABLE_TRACE_SCHEMA_VERSIONS)
+                )
+                raise ValueError(
+                    f"trace_schema_version {schema_version} is not replay-safe "
+                    "for storage traces: "
+                    "schema version 1 may have omitted ObjectKey.cache_salt; "
+                    f"replayable versions: {replayable_versions}"
+                )
             bus = init_observability(obs_config)
             self._sm = StorageManager(sm_config)
         except BaseException:
@@ -267,12 +294,6 @@ class StorageReplayDriver:
         stats = ReplayStatsCollector()
         context = ReplayContext(sm=self._sm)
         header = self._reader.header
-        if header.level != "storage":
-            raise ValueError(
-                f"trace {self._reader.path!r} is level {header.level!r}; "
-                "StorageReplayDriver replays 'storage' traces only. An "
-                "'events' trace holds the cache-event stream for a coordinator."
-            )
         t_start = time.time()
         stats.mark_start(t_start)
 
