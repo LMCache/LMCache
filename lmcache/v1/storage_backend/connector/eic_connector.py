@@ -66,11 +66,11 @@ class PerformanceTimer:
         return self.elapsed_times
 
     def debug_all_elapsed_times(self):
-        logger.debug(f"== Perf key:{self.key} =========")
-        logger.debug(f"== Perf op {self.op} size {self.size} =========")
+        logger.debug("== Perf key:%s =========", self.key)
+        logger.debug("== Perf op %s size %s =========", self.op, self.size)
         for op, item in self.elapsed_times.items():
-            logger.debug(f"Step: {op} cost {item:.2f} us")
-        logger.debug(f"== Perf op {self.op} size {self.size} =========")
+            logger.debug("Step: %s cost %.2f us", op, item)
+        logger.debug("== Perf op %s size %s =========", self.op, self.size)
 
 
 class FlexibleDRAMMemoryPool:
@@ -82,16 +82,16 @@ class FlexibleDRAMMemoryPool:
     def allocate(self, size):
         ptr = self.connection.allocate_managed_buffer(size)
         if ptr == 0:
-            logger.error(f"fail to allocate dram pool, ptr {ptr}, size {size}")
+            logger.error("fail to allocate dram pool, ptr %s, size %s", ptr, size)
             return ptr
-        logger.debug(f"allocate dram pool: ptr {ptr}, size {size}")
+        logger.debug("allocate dram pool: ptr %s, size %s", ptr, size)
         self.used_mem[ptr] = size
         return ptr
 
     def deallocate(self, ptr):
         size = self.used_mem.get(ptr)
         if size is not None:
-            logger.debug(f"deallocate dram pool: ptr {ptr}, size {size}")
+            logger.debug("deallocate dram pool: ptr %s, size %s", ptr, size)
             self.connection.free_managed_buffer(ptr, size)
             del self.used_mem[ptr]
 
@@ -100,9 +100,9 @@ def _make_dir(path: str):
     try:
         if not os.path.exists(path):
             os.makedirs(path)
-        logger.info(f"create dir '{path}' success")
+        logger.info("create dir '%s' success", path)
     except OSError as e:
-        logger.error(f"create dir '{path}' error {e}")
+        logger.error("create dir '%s' error %s", path, e)
 
 
 class EICConnector(RemoteConnector):
@@ -120,7 +120,7 @@ class EICConnector(RemoteConnector):
         super().__init__(memory_allocator.config, memory_allocator.metadata)
 
         logger.info("init EICConnector")
-        logger.info(f"try connect to eic: {endpoint}")
+        logger.info("try connect to eic: %s", endpoint)
 
         self.loop = loop
         self.memory_allocator = memory_allocator
@@ -130,7 +130,7 @@ class EICConnector(RemoteConnector):
             self.pq_executor = AsyncPQExecutor(loop)
             logger.info("AsyncPQExecutor initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize AsyncPQExecutor: {e}")
+            logger.error("Failed to initialize AsyncPQExecutor: %s", e)
             raise
 
         self.cudaError_t = ctypes.c_int
@@ -154,31 +154,31 @@ class EICConnector(RemoteConnector):
             config = yaml.safe_load(fin)
 
         remote_url = config.get("remote_url", None)
-        logger.info(f"eic remote_url: {remote_url}")
+        logger.info("eic remote_url: %s", remote_url)
 
         eic_instance_id = config.get("eic_instance_id", None)
-        logger.info(f"eic instance_id: {eic_instance_id}")
+        logger.info("eic instance_id: %s", eic_instance_id)
 
         eic_thread_num = config.get("eic_thread_num", 6)
-        logger.info(f"eic thread_num: {eic_thread_num}")
+        logger.info("eic thread_num: %s", eic_thread_num)
 
         eic_log_dir = config.get("eic_log_dir", None)
-        logger.info(f"eic log_dir: {eic_log_dir}")
+        logger.info("eic log_dir: %s", eic_log_dir)
 
         eic_log_level = config.get("eic_log_level", 1)
-        logger.info(f"eic log_level: {eic_log_level}")
+        logger.info("eic log_level: %s", eic_log_level)
 
         eic_trans_type = config.get("eic_trans_type", 3)
-        logger.info(f"eic trans_type: {eic_trans_type}")
+        logger.info("eic trans_type: %s", eic_trans_type)
 
         self.eic_kv_ttl = config.get("eic_kv_ttl", -1)
-        logger.info(f"eic eic_kv_ttl: {self.eic_kv_ttl}")
+        logger.info("eic eic_kv_ttl: %s", self.eic_kv_ttl)
 
         self.eic_kv_ns = config.get("eic_kv_ns", "")
-        logger.info(f"eic eic_kv_ns: {self.eic_kv_ns}")
+        logger.info("eic eic_kv_ns: %s", self.eic_kv_ns)
 
         eic_flag_file = config.get("eic_flag_file", None)
-        logger.info(f"eic flag_file: {eic_flag_file}")
+        logger.info("eic flag_file: %s", eic_flag_file)
 
         _make_dir(eic_log_dir)
 
@@ -191,12 +191,12 @@ class EICConnector(RemoteConnector):
         endpoint = endpoint.removeprefix("eic://").removesuffix("/")
         ret = self.connection.init(eic_instance_id, endpoint, init_option)
         if ret != 0:
-            logger.error(f"fail to init eic client, ret: {ret}")
+            logger.error("fail to init eic client, ret: %s", ret)
             raise RuntimeError(
                 f"Failed to initialize eic client with error code: {ret}"
             )
         else:
-            logger.info(f"init eic client success, ret: {ret}")
+            logger.info("init eic client success, ret: %s", ret)
 
         self.trans_type = eic.TransportType(eic_trans_type)
 
@@ -247,14 +247,14 @@ class EICConnector(RemoteConnector):
                 self._exists_sync(key)
             logger.info("eic prebuilt connection finish")
         except Exception as e:
-            logger.error(f"Error in prebuilt connection thread: {e}")
+            logger.error("Error in prebuilt connection thread: %s", e)
 
     def delete_sync(self, key: str) -> bool:
         keys = eic.StringVector()
         keys.append(key)
         status_code, _ = self.connection.mdel(keys)
         if status_code != eic.StatusCode.SUCCESS:
-            logger.debug(f"eic delete {key} failed, status_code {status_code}")
+            logger.debug("eic delete %s failed, status_code %s", key, status_code)
             return False
         return True
 
@@ -264,17 +264,19 @@ class EICConnector(RemoteConnector):
         exist_option = eic.ExistOption()
         status_code, exist_outcome = self.connection.mexist(keys, exist_option)
         if status_code != eic.StatusCode.SUCCESS:
-            logger.debug(f"eic exists {key_str} failed, status_code {status_code}")
+            logger.debug("eic exists %s failed, status_code %s", key_str, status_code)
             return False
 
         err_code = exist_outcome.status_codes[0]
         success = err_code == eic.StatusCode.SUCCESS
         if success:
-            logger.debug(f"eic exists {key_str} success")
+            logger.debug("eic exists %s success", key_str)
         else:
             logger.debug(
-                f"eic exists {key_str} failed, status_code {status_code} "
-                "err_code {err_code}"
+                "eic exists %s failed, status_code %s err_code %s",
+                key_str,
+                status_code,
+                err_code,
             )
         return success
 
@@ -325,17 +327,21 @@ class EICConnector(RemoteConnector):
         if status_code != eic.StatusCode.SUCCESS or err_code != eic.StatusCode.SUCCESS:
             if err_code == eic.StatusCode.KEY_NOT_EXIST:
                 logger.debug(
-                    f"eic mget meta {key_str} failed, status_code {status_code}"
-                    " err_code {err_code}"
+                    "eic mget meta %s failed, status_code %s err_code %s",
+                    key_str,
+                    status_code,
+                    err_code,
                 )
             else:
                 logger.error(
-                    f"eic mget meta {key_str} failed, status_code {status_code}"
-                    " err_code {err_code}"
+                    "eic mget meta %s failed, status_code %s err_code %s",
+                    key_str,
+                    status_code,
+                    err_code,
                 )
             return None
         else:
-            logger.debug(f"eic mget meta {key_str} success")
+            logger.debug("eic mget meta %s success", key_str)
 
         perf_timer.stop("eic_mget")
 
@@ -359,8 +365,9 @@ class EICConnector(RemoteConnector):
         )
         if memory_obj is None:
             logger.error(
-                f"fail to allocate memory during remote receive key {key_str} length"
-                " {meta.length}"
+                "fail to allocate memory during remote receive key %s length %s",
+                key_str,
+                meta.length,
             )
             return None
         perf_timer.stop("alloc_obj")
@@ -393,16 +400,18 @@ class EICConnector(RemoteConnector):
                 or err_code != eic.StatusCode.SUCCESS
             ):
                 logger.error(
-                    f"eic mget data {key_str} failed, status_code {status_code} "
-                    f"err_code {err_code}"
+                    "eic mget data %s failed, status_code %s err_code %s",
+                    key_str,
+                    status_code,
+                    err_code,
                 )
                 memory_obj.ref_count_down()
                 return None
             else:
-                logger.debug(f"eic mget data {key_str} success")
+                logger.debug("eic mget data %s success", key_str)
         except Exception as e:
             logger.error(
-                f"eic mget data {key_str} raised exception: {e}", exc_info=True
+                "eic mget data %s raised exception: %s", key_str, e, exc_info=True
             )
             memory_obj.ref_count_down()
             return None
@@ -444,7 +453,7 @@ class EICConnector(RemoteConnector):
 
     def _put_sync(self, key: CacheEngineKey, memory_obj: MemoryObj):
         key_str = key.to_string()
-        logger.debug(f"eic put {key_str}")
+        logger.debug("eic put %s", key_str)
 
         perf_timer = PerformanceTimer(key_str, "put_data")
         perf_timer.start("total_cost")
@@ -456,11 +465,11 @@ class EICConnector(RemoteConnector):
         value_size = memory_obj.get_physical_size()
 
         logger.debug(
-            f"eic put {key_str} data len {len(kv_bytes)} value_size {value_size}"
+            "eic put %s data len %s value_size %s", key_str, len(kv_bytes), value_size
         )
 
         if kv_tensor is None:
-            logger.error(f"Memory object tensor is None for key {key_str}")
+            logger.error("Memory object tensor is None for key %s", key_str)
             return
 
         perf_timer.start("serialize")
@@ -470,7 +479,7 @@ class EICConnector(RemoteConnector):
             self.remote_metadata_bytes, kv_shapes, kv_dtypes, memory_format
         )
 
-        logger.debug(f"eic meta {key_str} remote_meta{remote_meta}")
+        logger.debug("eic meta %s remote_meta%s", key_str, remote_meta)
 
         meta_bytes = remote_meta.serialize()
 
@@ -486,8 +495,12 @@ class EICConnector(RemoteConnector):
         perf_timer.stop("trans_address")
 
         logger.debug(
-            f"eic put {key_str} meta ptr {meta_ptr} len {meta_size} data ptr {data_ptr}"
-            " len {data_size}"
+            "eic put %s meta ptr %s len %s data ptr %s len %s",
+            key_str,
+            meta_ptr,
+            meta_size,
+            data_ptr,
+            data_size,
         )
 
         perf_timer.start("eic_mset")
@@ -513,19 +526,19 @@ class EICConnector(RemoteConnector):
 
         status_code, set_outcome = self.connection.mset(keys, vals, set_option)
         if status_code != eic.StatusCode.SUCCESS:
-            logger.error(f"eic mset {key_str} failed, status_code {status_code}")
+            logger.error("eic mset %s failed, status_code %s", key_str, status_code)
 
         err_code = set_outcome.status_codes[0]
         if err_code == eic.StatusCode.SUCCESS:
-            logger.debug(f"eic put meta key {meta_key} success")
+            logger.debug("eic put meta key %s success", meta_key)
         else:
-            logger.error(f"eic put meta key {meta_key} failed, err_code {err_code}")
+            logger.error("eic put meta key %s failed, err_code %s", meta_key, err_code)
 
         err_code = set_outcome.status_codes[1]
         if err_code == eic.StatusCode.SUCCESS:
-            logger.debug(f"eic put data key {key_str} success")
+            logger.debug("eic put data key %s success", key_str)
         else:
-            logger.error(f"eic put data key {key_str} failed, err_code {err_code}")
+            logger.error("eic put data key %s failed, err_code %s", key_str, err_code)
 
         perf_timer.stop("eic_mset")
         perf_timer.stop("total_cost")
@@ -544,7 +557,7 @@ class EICConnector(RemoteConnector):
         meta_list = []
         for key, memory_obj in zip(keys, memory_objs, strict=False):
             key_str = key.to_string()
-            logger.debug(f"eic batched_put processing {key_str}")
+            logger.debug("eic batched_put processing %s", key_str)
 
             # Get memory object data
             kv_bytes = memory_obj.byte_array
@@ -553,7 +566,7 @@ class EICConnector(RemoteConnector):
             kv_dtypes = memory_obj.get_dtypes()
             memory_format = memory_obj.get_memory_format()
             if kv_tensor is None:
-                logger.error(f"Memory object tensor is None for key {key_str}")
+                logger.error("Memory object tensor is None for key %s", key_str)
                 return
 
             remote_meta = RemoteMetadata(
@@ -595,7 +608,7 @@ class EICConnector(RemoteConnector):
 
         if set_status_code != eic.StatusCode.SUCCESS:
             logger.error(
-                f"eic batched_put mset data failed, status_code {set_status_code}"
+                "eic batched_put mset data failed, status_code %s", set_status_code
             )
             return
         for i, key_str in enumerate(eic_keys):
@@ -604,10 +617,10 @@ class EICConnector(RemoteConnector):
             outcome_err_code = set_outcome.status_codes[i]
             log_key = meta_key if i % 2 == 0 else key_str
             if outcome_err_code == eic.StatusCode.SUCCESS:
-                logger.debug(f"eic batched_put {log_key} success")
+                logger.debug("eic batched_put %s success", log_key)
             else:
                 logger.error(
-                    f"eic batched_put {log_key} failed, err_code {outcome_err_code}"
+                    "eic batched_put %s failed, err_code %s", log_key, outcome_err_code
                 )
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
@@ -659,7 +672,7 @@ class EICConnector(RemoteConnector):
 
         if status_code != eic.StatusCode.SUCCESS:
             logger.error(
-                f"eic batched_async_contains mexist failed, status_code {status_code}"
+                "eic batched_async_contains mexist failed, status_code %s", status_code
             )
             return 0
 
@@ -669,8 +682,9 @@ class EICConnector(RemoteConnector):
             status_code = exist_outcome.status_codes[i]
             if status_code != eic.StatusCode.SUCCESS:
                 logger.debug(
-                    f"eic batched_async_contains {key.to_string()} miss,"
-                    " err_code {status_code}"
+                    "eic batched_async_contains %s miss, err_code %s",
+                    key.to_string(),
+                    status_code,
                 )
                 break
             num_hit_counts += 1

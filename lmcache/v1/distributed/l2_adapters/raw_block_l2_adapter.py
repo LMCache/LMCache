@@ -561,10 +561,11 @@ class RawBlockL2Adapter(L2AdapterInterface):
         Args:
             config: Validated raw-block adapter configuration.
             l1_memory_desc: Optional L1 allocation descriptor used to validate
-                O_DIRECT alignment compatibility.
+                O_DIRECT or NVMe io_uring_cmd alignment compatibility.
 
         Raises:
-            ValueError: If O_DIRECT is enabled and L1 alignment is insufficient.
+            ValueError: If O_DIRECT or io_uring_cmd is enabled and L1 alignment
+                is insufficient.
             RuntimeError: If the shared core cannot open or recover the raw
                 device.
 
@@ -574,13 +575,13 @@ class RawBlockL2Adapter(L2AdapterInterface):
         """
         super().__init__()
         if (
-            (config.use_odirect or config.io_engine == "io_uring")
+            (config.use_odirect or config.use_uring_cmd)
             and l1_memory_desc is not None
             and l1_memory_desc.align_bytes < config.block_align
         ):
             raise ValueError(
                 "raw_block requires l1_align_bytes >= block_align when "
-                "use_odirect=true or io_engine=io_uring"
+                "use_odirect=true or use_uring_cmd=true"
             )
 
         self._closed = False
