@@ -11,7 +11,7 @@ import pytest
 from lmcache import torch_device_type
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.event_ipc import (
-    _EXPORTED_EVENT_RING_SIZE,
+    _EXPORTED_EVENT_SWEEP_INTERVAL,
     DefaultEventIPCBackend,
     EventIPCBackend,
     get_event_ipc_backend,
@@ -23,6 +23,7 @@ from lmcache.v1.platform.devices.cuda.timeline_semaphore_event_ipc import (
 )
 from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
 import lmcache.v1.platform as platform
+import lmcache.v1.platform.base.event_ipc as event_ipc
 
 pytestmark = pytest.mark.skipif(
     torch_device_type == "xpu",
@@ -118,15 +119,61 @@ def test_export_event_retains_event_while_handle_is_usable():
     assert alive() is not None
 
 
-def test_exported_event_retention_is_bounded():
-    """Retention must not grow without limit on a long-lived backend."""
+class _InFlightEvent(_FakeEvent):
+    def query(self) -> bool:
+        return False
+
+
+class _InFlightEventModule:
+    Event = _InFlightEvent
+
+
+def _export_n(backend, n):
+    for _ in range(n):
+        backend.export_event(backend.create_event(_Device("fake")), _Device("fake"))
+
+
+def test_exported_event_retention_is_bounded(monkeypatch):
+    """Completed events past the min age are swept, so retention is bounded."""
+    clock = [0.0]
+    monkeypatch.setattr(event_ipc.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(event_ipc, "_EXPORTED_EVENT_MIN_AGE_S", 10.0)
     backend = DefaultEventIPCBackend(
         event_module=_FakeEventModule(), device_type="fake"
     )
-    for _ in range(_EXPORTED_EVENT_RING_SIZE + 64):
-        backend.export_event(backend.create_event(_Device("fake")), _Device("fake"))
+    _export_n(backend, _EXPORTED_EVENT_SWEEP_INTERVAL - 1)
+    clock[0] = 100.0
+    _export_n(backend, 1)  # triggers a sweep; only the fresh event survives
 
-    assert len(backend._exported_events) == _EXPORTED_EVENT_RING_SIZE
+    assert len(backend._exported_events) == 1
+
+
+def test_completed_event_retained_within_min_age(monkeypatch):
+    """A completed event may not be imported yet, so keep it for the min age."""
+    clock = [0.0]
+    monkeypatch.setattr(event_ipc.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(event_ipc, "_EXPORTED_EVENT_MIN_AGE_S", 10.0)
+    backend = DefaultEventIPCBackend(
+        event_module=_FakeEventModule(), device_type="fake"
+    )
+    _export_n(backend, _EXPORTED_EVENT_SWEEP_INTERVAL)
+
+    assert len(backend._exported_events) == _EXPORTED_EVENT_SWEEP_INTERVAL
+
+
+def test_in_flight_event_retained_past_min_age(monkeypatch):
+    """An incomplete event is never swept, however old it is."""
+    clock = [0.0]
+    monkeypatch.setattr(event_ipc.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(event_ipc, "_EXPORTED_EVENT_MIN_AGE_S", 10.0)
+    backend = DefaultEventIPCBackend(
+        event_module=_InFlightEventModule(), device_type="fake"
+    )
+    _export_n(backend, _EXPORTED_EVENT_SWEEP_INTERVAL - 1)
+    clock[0] = 100.0
+    _export_n(backend, 1)
+
+    assert len(backend._exported_events) == _EXPORTED_EVENT_SWEEP_INTERVAL
 
 
 def test_default_backend_record_wait_query_synchronize_delegate():

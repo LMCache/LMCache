@@ -41,6 +41,10 @@ class Session:
     last_prefix_hash: Any = None
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
+    # Idle-based reaping: refreshed on every session access (store/
+    # retrieve/lookup) so a slow-but-progressing request is not reaped
+    # while its transfers are still in flight under a deep backlog.
+    last_active: float = field(default_factory=time.time)
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
@@ -289,12 +293,17 @@ class SessionManager:
                     request_id=request_id, hasher=self._hasher
                 )
                 logger.debug("Created session for request_id=%s", request_id)
-            return self._sessions[request_id]
+            session = self._sessions[request_id]
+            session.last_active = time.time()
+            return session
 
     def get(self, request_id: str) -> Optional[Session]:
         """Return an existing session without creating ownership state."""
         with self._lock:
-            return self._sessions.get(request_id)
+            session = self._sessions.get(request_id)
+            if session is not None:
+                session.last_active = time.time()
+            return session
 
     def remove(self, request_id: str) -> Optional[Session]:
         """Remove a session by request_id.
@@ -324,7 +333,7 @@ class SessionManager:
         expired: list[Session] = []
         with self._lock:
             for session in self._sessions.values():
-                if now - session.created_at > self._ttl:
+                if now - session.last_active > self._ttl:
                     expired.append(session)
             for session in expired:
                 del self._sessions[session.request_id]
