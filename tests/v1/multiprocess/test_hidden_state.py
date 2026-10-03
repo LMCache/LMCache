@@ -145,16 +145,46 @@ class _FakeSession:
         ]
 
 
+class _FakeLayoutDescRegistry:
+    """Ref-counted (model, world_size) -> layout, like the real registry.
+
+    Stood in rather than imported so these tests need only the pure-Python
+    MP modules, not the storage stack behind the real engine context.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple[str, int], list[Any]] = {}
+
+    def register(
+        self, model_name: str, world_size: int, layout_desc: MemoryLayoutDesc
+    ) -> None:
+        entry = self._entries.get((model_name, world_size))
+        if entry is None:
+            self._entries[(model_name, world_size)] = [layout_desc, 1]
+            return
+        entry[0] = layout_desc
+        entry[1] += 1
+
+    def unregister(self, model_name: str, world_size: int) -> None:
+        entry = self._entries.get((model_name, world_size))
+        if entry is None:
+            return
+        entry[1] -= 1
+        if entry[1] <= 0:
+            del self._entries[(model_name, world_size)]
+
+    def find(self, model_name: str, world_size: int) -> MemoryLayoutDesc | None:
+        entry = self._entries.get((model_name, world_size))
+        return entry[0] if entry else None
+
+
 class _FakeContext:
     """The slice of MPCacheServerContext the hidden-state module touches."""
 
     def __init__(self) -> None:
-        # First Party
-        from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
-
         self.chunk_size = CHUNK_SIZE
         self.storage_manager = _FakeStorageManager()
-        self.layout_desc_registry = LayoutDescRegistry()
+        self.layout_desc_registry = _FakeLayoutDescRegistry()
         self.token_hasher = types.SimpleNamespace(
             hash_to_bytes=lambda value: str(value).encode()
         )
@@ -250,10 +280,13 @@ def test_hidden_objects_never_collide_with_kv_objects(
 
     assert module.store_hidden_state(key, 0, pickle.dumps(_chunks(2)))
 
+    # Replicated across ranks, so every rank resolves to the one rank-0 shard.
+    collapsed = ObjectKey.ComputeKVRank(
+        world_size=1, global_rank=0, local_world_size=1, local_rank=0
+    )
     for obj_key in ctx.storage_manager.committed:
         assert obj_key.model_name == f"{MODEL}##hidden"
-        # Replicated across ranks, so a single rank-0 copy is stored.
-        assert obj_key.kv_rank == 0
+        assert obj_key.kv_rank == collapsed
 
 
 def test_a_different_prefix_is_a_different_object(stub_lmcache_native: Any) -> None:
@@ -344,7 +377,10 @@ def _make_tp_module(ctx: _FakeContext) -> Any:
 
 def _make_tp_key(num_chunks: int, rank: int) -> IPCCacheServerKey:
     return replace(
-        _make_key(num_chunks, f"req-{rank}"), world_size=TP_SIZE, worker_id=rank
+        _make_key(num_chunks, f"req-{rank}"),
+        world_size=TP_SIZE,
+        worker_id=rank,
+        num_kv_readers=TP_SIZE,
     )
 
 
