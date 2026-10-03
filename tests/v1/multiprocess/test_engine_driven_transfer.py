@@ -1534,7 +1534,7 @@ def test_server_unregister_engine_driven_context_releases_pending_shm_locks(
     stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
-    """Ensure unregister releases pending SHM read/write reservations."""
+    """Ensure unregister aborts pending SHM writes and releases pending reads."""
     mock_storage = MagicMock()
     mock_memory_obj = MagicMock()
     mock_memory_obj.tensor = torch.zeros(2, 2, 8, 16)
@@ -1566,8 +1566,80 @@ def test_server_unregister_engine_driven_context_releases_pending_shm_locks(
 
     module.unregister_kv_cache(4)
 
-    mock_storage.finish_write.assert_called_once()
+    # An uncommitted write must be discarded, never admitted to the cache.
+    mock_storage.abort_write.assert_called_once()
+    mock_storage.finish_write.assert_not_called()
     mock_storage.finish_read_prefetched.assert_called_once()
+
+
+@pytest.mark.parametrize("departure", ["unregister", "reap"])
+def test_worker_departure_before_commit_store_caches_nothing(departure: str) -> None:
+    """A worker that leaves between prepare_store and commit_store must not
+    leave its never-written SHM slots behind as cached KV.
+
+    Runs against a real StorageManager: a later request for the same prompt
+    must miss, and a new store must be handed every chunk again.
+    """
+    # Standard
+    import time
+
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+    from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+        EngineDrivenTransferModule,
+    )
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    tokens = [1] * 16  # two 8-token chunks
+
+    def make_key(request_id: str) -> IPCCacheServerKey:
+        return IPCCacheServerKey.from_token_ids(
+            "m", 1, 0, tokens, start=0, end=len(tokens), request_id=request_id
+        )
+
+    ctx = MPCacheServerContext(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name=f"lmcache_test_departure_{os.getpid()}", pool_size=1 << 22
+        ),
+        chunk_size=8,
+    )
+    try:
+        module = EngineDrivenTransferModule(ctx)
+        lookup = LookupModule(ctx)
+        module.register_kv_cache_engine_driven_context(
+            _default_register_payload(instance_id=1)
+        )
+        prepared = module.prepare_store(make_key("dying"), 1)
+        assert prepared.context["chunk_indices"] == [0, 1]
+
+        # The worker never gathers into its slots and never commits.
+        if departure == "unregister":
+            module.unregister_kv_cache(1)
+        else:
+            time.sleep(0.01)
+            assert module.reap_stale_instances(0.0, 0.0) == [1]
+
+        # A surviving worker keeps the model's layout registered, so the
+        # lookup below really probes the cache instead of exiting early.
+        module.register_kv_cache_engine_driven_context(
+            _default_register_payload(instance_id=2)
+        )
+
+        # Another request for the same prompt must not hit the unwritten slots.
+        lookup.lookup(make_key("next").no_worker_id_version(), 1)
+        deadline = time.monotonic() + 5.0
+        hit_chunks = lookup.query_prefetch_status("next")
+        while hit_chunks is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+            hit_chunks = lookup.query_prefetch_status("next")
+        assert hit_chunks == 0
+
+        # The chunks were never cached, so a new store must write them all.
+        retried = module.prepare_store(make_key("retry"), 2)
+        assert retried.context["chunk_indices"] == [0, 1]
+    finally:
+        ctx.close()
 
 
 def test_gather_paged_kv_with_chunk_indices_subset() -> None:

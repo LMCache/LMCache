@@ -407,6 +407,29 @@ class StorageManager:
 
         # TODO: global key states update
 
+    @enable_tracing()
+    def abort_write(
+        self,
+        keys: list[ObjectKey],
+    ) -> None:
+        """
+        Discard objects reserved by :meth:`reserve_write` without admitting them.
+
+        Use this instead of :meth:`finish_write` when the reserved buffers were
+        never (fully) written, e.g. the writer failed or went away. The
+        reserved objects are freed without ever becoming visible to readers,
+        and no ``SM_WRITE_FINISHED`` event is published, so the discarded
+        keys are not counted as writes. Keys with no live reservation are
+        left untouched: a key never reserved is a no-op, and a reservation
+        whose write lock already expired stays staged until L1 eviction
+        reclaims it.
+
+        Args:
+            keys (list[ObjectKey]): Keys previously returned by
+                :meth:`reserve_write` whose writes are abandoned.
+        """
+        self._l1_manager.finish_write_and_delete(keys, tag=_L1_WRITE_TAG)
+
     @contextmanager
     def read_prefetched_results(
         self,
