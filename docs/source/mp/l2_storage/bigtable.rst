@@ -24,13 +24,20 @@ Cloud Bigtable is an excellent choice as an L2 storage backend for enterprise-sc
 - ``bigtable_family_name`` (str, default ``"cf"``): Column family name. Must be pre-created in the Bigtable table.
 - ``bigtable_column_name`` (str, default ``"data"``): Column qualifier name to use when sharding is disabled.
 - ``layer_group_size`` (int, default ``10``): Number of layers per column group. Set to ``0`` to disable Layer-Group Sharding.
-- ``bigtable_max_chunk_size_mb`` (float, default ``90.0``): The maximum allowed write limit when sharding is disabled (or when using CacheGen). Writes exceeding this are safely skipped to avoid database exceptions.
+- ``bigtable_max_chunk_size_mb`` (float, default ``90.0``): The maximum allowed write limit when sharding is disabled (or when using CacheGen). Writes exceeding this are skipped and the store task reports failure.
 - ``credentials_path`` (str, default ``None``): Absolute path to a GCP Service Account JSON key file. If omitted, it defaults to Application Default Credentials (ADC).
 - ``exists_cache_ttl_seconds`` (float, default ``10.0``): TTL in seconds for the internal cache that shields Bigtable from redundant lookup requests.
 - ``bigtable_write_timeout_ms`` (float, default ``10000.0``): Maximum timeout for database writes.
 - ``bigtable_read_timeout_ms`` (float, default ``5000.0``): Maximum timeout for database reads.
 
 **Environment variable fallbacks.** When the corresponding config value is empty, these environment variables are used: ``BT_PROJECT_ID``, ``BT_INSTANCE_ID``, ``BT_TABLE_NAME``.
+
+If any payload exceeds the configured unsharded limit or the adapter's 240 MiB
+sharded row limit, the entire store task reports failure. Other valid payloads
+in that task are still written and counted in cache usage. This prevents the
+buffer-only store policy from deleting L1 data on the assumption that every
+payload reached Bigtable. For example, with ``layer_group_size=0`` and
+``bigtable_max_chunk_size_mb=1``, a 2 MiB payload is rejected and the task fails.
 
 Tutorials & Configuration Examples
 ----------------------------------
