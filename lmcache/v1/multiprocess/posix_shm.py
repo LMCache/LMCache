@@ -70,6 +70,16 @@ _ADDR_TO_MMAP: dict[int, _mmap.mmap] = {}
 _OWNED_NAMES: set[str] = set()
 
 
+def _after_fork_in_child() -> None:
+    """Fence parent unlink ownership from a forked child."""
+    global _REGISTRY_LOCK
+    _REGISTRY_LOCK = threading.Lock()
+    _OWNED_NAMES.clear()
+
+
+os.register_at_fork(after_in_child=_after_fork_in_child)
+
+
 def _open_and_mmap(name: str, nbytes: int, *, create: bool) -> tuple[_mmap.mmap, int]:
     """Open (or create) a POSIX SHM segment and ``mmap`` it.
 
