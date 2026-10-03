@@ -10,6 +10,7 @@ context -- there is no paged device-side buffer to point at.
 
 # Standard
 from dataclasses import replace
+from typing import TYPE_CHECKING
 import pickle
 import threading
 
@@ -28,9 +29,14 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+
+if TYPE_CHECKING:
+    # Importing the context at runtime would drag the whole storage stack in
+    # for a type annotation.
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 
 logger = init_logger(__name__)
 
@@ -70,7 +76,7 @@ class HiddenStateModule(InstanceLivenessTarget):
         ctx: The shared engine context.
     """
 
-    def __init__(self, ctx: MPCacheServerContext) -> None:
+    def __init__(self, ctx: "MPCacheServerContext") -> None:
         self._ctx = ctx
         # instance_id -> (hidden model name, world size), so unregister can
         # drop the right layout-registry entry without the worker resending it.
@@ -78,7 +84,7 @@ class HiddenStateModule(InstanceLivenessTarget):
         self._lock = threading.Lock()
 
     @property
-    def context(self) -> MPCacheServerContext:
+    def context(self) -> "MPCacheServerContext":
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
