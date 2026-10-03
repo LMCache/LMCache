@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Any, Callable
 
 # First Party
 from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
-from lmcache.sdk.qringbuffer import QRingBufferAdapter, QRingBufferCapture
+from lmcache.sdk.qringbuffer import (
+    QPipelineMetricsSnapshot,
+    QRingBufferAdapter,
+    QRingBufferCapture,
+)
 from lmcache.utils import init_logger
 from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 
@@ -39,6 +43,8 @@ logger = init_logger(__name__)
 
 class QTensorFeature:
     """Captures per-layer query tensors into a paged-Q ring and stores them."""
+
+    name = TRANSFER_QUERY
 
     def __init__(self, ctx: FeatureContext) -> None:
         self._q_ring_adapter = QRingBufferAdapter(
@@ -70,6 +76,13 @@ class QTensorFeature:
 
     def reclaim(self) -> None:
         self._q_ring_adapter.reclaim_finished_q_stores()
+
+    def metrics_snapshot(self) -> QPipelineMetricsSnapshot:
+        """Return capture, ring-pressure, and asynchronous-store metrics."""
+        return QPipelineMetricsSnapshot(
+            capture=self._capture.metrics_snapshot(),
+            store=self._q_ring_adapter.metrics_snapshot(),
+        )
 
     def reregister(self) -> bool:
         try:
@@ -197,6 +210,10 @@ class Dispatcher:
         """Fan out ``reclaim`` (adapter ``get_finished``)."""
         for feature in self._features:
             feature.reclaim()
+
+    def metrics_snapshot(self) -> dict[str, QPipelineMetricsSnapshot]:
+        """Return immutable metrics snapshots keyed by feature name."""
+        return {feature.name: feature.metrics_snapshot() for feature in self._features}
 
     def reregister(self) -> bool:
         """Fan out ``reregister`` (adapter heartbeat recovery)."""

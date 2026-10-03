@@ -86,6 +86,17 @@ def test_every_dispatcher_hook_has_a_matching_feature_hook() -> None:
         assert callable(getattr(QTensorFeature, hook, None)), hook
 
 
+def test_metrics_snapshot_is_keyed_by_bounded_feature_name() -> None:
+    """Metric aggregation exposes one immutable snapshot per feature."""
+    feature = MagicMock()
+    feature.name = TRANSFER_QUERY
+    feature.metrics_snapshot.return_value = object()
+
+    snapshots = Dispatcher([feature]).metrics_snapshot()
+
+    assert snapshots == {TRANSFER_QUERY: feature.metrics_snapshot.return_value}
+
+
 @pytest.mark.parametrize("feature_ok", [True, False])
 def test_reregister_reports_the_feature_result(feature_ok) -> None:
     """Check that reregister returns the result, True if the feature
