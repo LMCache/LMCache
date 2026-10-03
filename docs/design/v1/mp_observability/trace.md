@@ -337,7 +337,7 @@ Both flags flow through `ObservabilityConfig` and are consumed by
 When `--trace-level` is unset, the helper returns `None` and no
 recorder is registered — true zero overhead.
 
-`lmcache trace info|replay|record` reads the format defined here;
+`lmcache trace info|replay|replay-events` reads the format defined here;
 see §9 for details. `replay` accepts `storage` traces only and refuses an
 `events` file with a message saying so; `replay-events` delivers an
 `events` file to a coordinator (§12).
@@ -449,12 +449,13 @@ into non-deterministic retrieve misses.
 
 | Command | Purpose |
 |---------|---------|
-| `lmcache trace info FILE` | Header metadata + per-qualname record counts + total duration. |
-| `lmcache trace replay FILE <storage-manager flags> [--verbose] [--jsonl-out PATH] [--output-dir DIR] [--no-csv] [--json] [-q]` | Replay the trace, always honoring the recorded inter-call timings (see §9.4). Logs progress (`[N/total] qualname ...`) per record. Emits a terminal metrics table (unless `-q`) with count / mean / p50 / p99 per qualname, and writes `trace_replay_ops.csv` / `trace_replay_summary.json` in `--output-dir` (CSV by default; JSON with `--json`). `--verbose` and `--jsonl-out` stream per-record output for post-hoc analysis. |
+| `lmcache trace info FILE` | Header metadata + per-qualname record counts + total duration. Works for both `storage` and `events` files. |
+| `lmcache trace replay FILE <storage-manager flags> [--verbose] [--jsonl-out PATH] [--output-dir DIR] [--no-csv] [--json] [-q]` | Replay the trace, always honoring the recorded inter-call timings (see §9.4). Logs progress (`[N/total] qualname ...`) per record. Emits a terminal metrics table (unless `-q`) with count / mean / p50 / p99 per qualname, and writes `trace_replay_ops.csv` / `trace_replay_summary.json` in `--output-dir` (CSV by default; JSON with `--json`). `--verbose` and `--jsonl-out` stream per-record output for post-hoc analysis. Accepts `storage` files only; refuses an `events` file with a message. |
+| `lmcache trace replay-events FILE [FILE ...] --coordinator-url URL [--speed N] [--heartbeat-interval SECONDS] [-q]` | Deliver the cache-event stream from one or more `events`-level files to a coordinator, merged by wall-clock time. Registers each recorded server, heartbeats it, `POST /events` per batch, deregisters at `stop`. See §12 for the full model. |
 
 Trace *capture* is intentionally not a `trace` subcommand: recording
 is bound to a live process, so it is enabled via
-`lmcache server --trace-level storage [--trace-output ...]`.  A
+`lmcache server --trace-level {storage,events} [--trace-output ...]`.  A
 separate `trace record` stub would only duplicate that flag while
 suggesting a runtime-capture CLI that does not yet exist.
 
