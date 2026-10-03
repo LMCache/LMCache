@@ -436,6 +436,34 @@ def test_trivial_interleave_preserves_legacy_cache_identity():
     )
 
 
+@requires_vllm
+@pytest.mark.parametrize("gated", [False, True])
+def test_dcp_cache_identity_ignores_worker_mutated_interleave(gated):
+    """Workers adjust the interleave, the scheduler does not; names must match."""
+    _, get_dcp_decorated_model_name, _, _ = _import_connector_geometry_helpers()
+
+    def config(interleave):
+        cfg = _geometry_config(dcp_size=8, interleave=interleave, base_block_size=1536)
+
+        def adjust(kv_cache_config):
+            # ``gated`` mimics vLLM main, which aligns only for NixlConnector.
+            if not gated:
+                cfg.parallel_config.cp_kv_cache_interleave_size = min(
+                    g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
+                )
+
+        cfg.adjust_dcp_kv_cache_interleave_size = adjust
+        return cfg
+
+    kv_cache_config = _hybrid_kv_cache_config(1536, 1536)
+    scheduler = config(1)
+    worker = config(1 if gated else 1536)
+    assert get_dcp_decorated_model_name(
+        scheduler, kv_cache_config
+    ) == get_dcp_decorated_model_name(worker, kv_cache_config)
+    assert scheduler.parallel_config.cp_kv_cache_interleave_size == 1
+
+
 # --------------------------------------------------------------------------- #
 # validate_dcp_support: fail closed on unproven topologies                     #
 # --------------------------------------------------------------------------- #
@@ -645,3 +673,30 @@ def test_num_kv_readers_never_under_reserves_any_shard(
         assert declared >= max(readers_per_shard.values()), (
             f"server {server} shard readers {readers_per_shard} exceed {declared}"
         )
+
+
+@dataclass
+class CircularBufferSpec(AttentionSpec):
+    """Scratch ring double: vLLM marks it non-prefix-cacheable."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
+@requires_vllm
+def test_scratch_group_spans_zero_and_skips_alignment():
+    (
+        get_group_tokens_per_block,
+        _,
+        get_vllm_scheduler_block_size,
+        _,
+    ) = _import_connector_geometry_helpers()
+    config = _geometry_config(dcp_size=1)
+    kv_config = _hybrid_kv_cache_config(1600, 1600)
+    kv_config.kv_cache_groups.append(
+        SimpleNamespace(kv_cache_spec=CircularBufferSpec(block_size=8))
+    )
+
+    assert get_group_tokens_per_block(config, kv_config) == [1600, 1600, 0]
+    assert get_vllm_scheduler_block_size(config, kv_config) == 1600

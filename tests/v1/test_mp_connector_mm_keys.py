@@ -22,6 +22,7 @@ pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
     KVConnectorRole,
 )
+from vllm.v1.request import RequestStatus  # noqa: E402
 from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
@@ -33,7 +34,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
 )
-from lmcache.integration.vllm.utils import hex_hash_to_int16  # noqa: E402
+from lmcache.integration.vllm.utils import mm_hash_to_token_values  # noqa: E402
 
 IMAGE_PLACEHOLDER_ID = 99
 
@@ -67,6 +68,7 @@ class _FakeRequest:
     ):
         self.request_id = "req-0"
         self.resumable = False
+        self.status = RequestStatus.WAITING
         self.cache_salt = cache_salt
         self.prompt_token_ids = list(prompt_token_ids)
         self._live_token_ids = list(prompt_token_ids)
@@ -75,6 +77,8 @@ class _FakeRequest:
         self.sampling_params = _FakeSamplingParams(
             extra_args=sampling_params_extra_args
         )
+        # Read by the version-pinned (vendored) tracker variants only.
+        self.block_hashes: list = []
 
     def append_decode_token(self, token_id: int):
         """Simulate vLLM appending a decode token to the live token list."""
@@ -110,8 +114,8 @@ def test_mm_request_overwrites_placeholder_span():
     tracker = LMCacheMPRequestTracker(
         _make_mm_request(prompt, identifier="0xabcd", offset=2, length=3)
     )
-    fill = hex_hash_to_int16("0xabcd")
-    assert tracker.get_token_ids() == [1, 2, fill, fill, fill, 3, 4, 5]
+    v = list(mm_hash_to_token_values("0xabcd", 3))
+    assert tracker.get_token_ids() == [1, 2, *v, 3, 4, 5]
 
 
 def test_different_images_produce_different_key_tokens():
@@ -131,8 +135,8 @@ def test_decode_tokens_appended_unchanged():
     tracker = LMCacheMPRequestTracker(request)
     request.append_decode_token(500)
     request.append_decode_token(501)
-    fill = hex_hash_to_int16("0xabcd")
-    assert tracker.get_token_ids() == [1, 2, fill, fill, 3, 500, 501]
+    v = list(mm_hash_to_token_values("0xabcd", 2))
+    assert tracker.get_token_ids() == [1, 2, *v, 3, 500, 501]
 
 
 def test_tracker_extracts_request_configs():
@@ -142,6 +146,7 @@ def test_tracker_extracts_request_configs():
             sampling_params_extra_args={
                 "kv_transfer_params": {
                     "lmcache.skip_save": True,
+                    "lmcache.max_offload_tokens": 4,
                     "lmcache.priority": "high",
                     "temperature": 0.8,
                 }
@@ -151,8 +156,28 @@ def test_tracker_extracts_request_configs():
 
     assert tracker.request_configs == {
         "lmcache.skip_save": True,
+        "lmcache.max_offload_tokens": 4,
         "lmcache.priority": "high",
     }
+    assert tracker.max_offload_tokens == 4
+
+
+def test_tracker_ignores_max_offload_tokens_outside_request_configs():
+    request = _FakeRequest(
+        [1, 2, 3, 4],
+        sampling_params_extra_args={
+            "kv_transfer_params": {
+                "max_offload_tokens": 4,
+                "lmcache.skip_save": True,
+            }
+        },
+    )
+    request.kv_transfer_params = {"lmcache.max_offload_tokens": 4}
+
+    tracker = LMCacheMPRequestTracker(request)
+
+    assert tracker.max_offload_tokens is None
+    assert tracker.request_configs == {"lmcache.skip_save": True}
 
 
 def test_eager_prefetch_forwards_request_configs():
@@ -167,6 +192,7 @@ def test_eager_prefetch_forwards_request_configs():
     connector = SimpleNamespace(
         role=KVConnectorRole.SCHEDULER,
         _eager_prefetch=True,
+        _reserve_last_token_for_lookup=False,
         scheduler_adapter=scheduler_adapter,
         _get_or_create_request_tracker=MagicMock(return_value=tracker),
     )
@@ -178,7 +204,37 @@ def test_eager_prefetch_forwards_request_configs():
         token_ids=[1, 2, 3],
         cache_salt="",
         request_configs={"lmcache.skip_save": True},
+        reserve_last_token=False,
     )
+    assert tracker.lookup_started_at is not None
+
+
+def test_recurrent_lookup_reserves_final_prompt_token() -> None:
+    """A recurrent full hit stops at the preceding checkpoint boundary."""
+    request = _FakeRequest(list(range(128)))
+    scheduler_adapter = MagicMock()
+    scheduler_adapter.lmcache_tokens_per_chunk = 64
+    scheduler_adapter.check_lookup_result.return_value = 64
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector.request_trackers = {}
+    connector.scheduler_adapter = scheduler_adapter
+    connector._reserve_last_token_for_lookup = True
+    connector._hit_alignment_tokens = 64
+    connector._connector_stats = MagicMock()
+    connector.lazy_offload = False
+
+    matched_tokens, load_async = connector.get_num_new_matched_tokens(request, 0)
+
+    assert (matched_tokens, load_async) == (64, True)
+    scheduler_adapter.maybe_submit_lookup_request.assert_called_once_with(
+        request.request_id,
+        token_ids=list(range(128)),
+        cache_salt="",
+        request_configs=None,
+        reserve_last_token=True,
+    )
+    tracker = connector.request_trackers[request.request_id]
+    assert tracker.num_lmcache_hit_tokens == 64
 
 
 def _prepare_storable_tracker(request: _FakeRequest) -> LMCacheMPRequestTracker:
@@ -200,8 +256,8 @@ def test_store_metadata_uses_mm_adjusted_token_ids():
     )
 
     assert metadata is not None
-    fill = hex_hash_to_int16("0xabcd")
-    assert metadata.op.token_ids == [1, 2, fill, fill, 3, 4, 5, 6]
+    v = list(mm_hash_to_token_values("0xabcd", 2))
+    assert metadata.op.token_ids == [1, 2, *v, 3, 4, 5, 6]
     assert metadata.op.start == 0
     assert metadata.op.end == 8
 
@@ -224,6 +280,32 @@ def test_store_metadata_preserves_request_configs():
     assert metadata.request_configs == {"lmcache.skip_save": True}
 
 
+def test_store_metadata_respects_max_offload_tokens():
+    tracker = _prepare_storable_tracker(
+        _FakeRequest(
+            list(range(8)),
+            sampling_params_extra_args={
+                "kv_transfer_params": {"lmcache.max_offload_tokens": 4}
+            },
+        )
+    )
+
+    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker, lmcache_tokens_per_chunk=4, group_tokens_per_block=[4]
+    )
+
+    assert metadata is not None
+    assert metadata.op.start == 0
+    assert metadata.op.end == 4
+    assert tracker.num_stored_tokens == 4
+    assert (
+        LMCacheMPRequestMetadata.GetStoreMetadata(
+            tracker, lmcache_tokens_per_chunk=4, group_tokens_per_block=[4]
+        )
+        is None
+    )
+
+
 def test_retrieve_metadata_uses_mm_adjusted_token_ids():
     prompt = [1, 2] + [IMAGE_PLACEHOLDER_ID] * 2 + [3, 4, 5, 6]
     request = _make_mm_request(prompt, identifier="0xabcd", offset=2, length=2)
@@ -237,7 +319,25 @@ def test_retrieve_metadata_uses_mm_adjusted_token_ids():
     )
 
     assert metadata is not None
-    fill = hex_hash_to_int16("0xabcd")
-    assert metadata.op.token_ids == [1, 2, fill, fill, 3, 4, 5, 6]
+    v = list(mm_hash_to_token_values("0xabcd", 2))
+    assert metadata.op.token_ids == [1, 2, *v, 3, 4, 5, 6]
     assert metadata.op.start == 0
     assert metadata.op.end == 8
+
+
+def test_store_metadata_ignores_scratch_groups():
+    """Qwen3.8-Flash-Next geometry: the one-block QSA ring (group 1) must
+    not cap the storable prefix at its eight slots."""
+    tracker = LMCacheMPRequestTracker(_FakeRequest(list(range(3200))))
+    tracker.allocated_block_ids = {0: [0, 1], 1: [9], 2: [2, 3], 3: [4, 5]}
+    tracker.num_scheduled_tokens = 3200
+
+    metadata = LMCacheMPRequestMetadata.GetStoreMetadata(
+        tracker,
+        lmcache_tokens_per_chunk=1600,
+        group_tokens_per_block=[1600, 0, 1600, 1600],
+    )
+
+    assert metadata is not None
+    assert (metadata.op.start, metadata.op.end) == (0, 3200)
+    assert metadata.op.block_ids == [[0, 1], [], [2, 3], [4, 5]]

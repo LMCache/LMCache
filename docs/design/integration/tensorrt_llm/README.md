@@ -42,7 +42,7 @@ The two modes share the lifecycle but differ in where state lives.
 
 | Aspect | In-process (`lmcache`) | Multi-process (`lmcache-mp`) |
 |---|---|---|
-| LMCache engine | Singleton inside the TRT-LLM process | Standalone ZMQ server |
+| LMCache engine | Singleton inside the TRT-LLM process | Standalone request server (ZMQ or gRPC) |
 | Tensor sharing | Direct (same process) | `RawCudaIPCWrapper` (cudaIpc + cupy DLPack) |
 | Lookup | `engine.lookup(tokens)` returns chunk count | `LOOKUP` enqueues prefetch; `QUERY_PREFETCH_STATUS` reads result keyed by `request_id` |
 | Configuration | `LMCACHE_CONFIG_FILE` env var | Same; plus `server_url` in connector config (or `LMCACHE_SERVER_URL` env) |
