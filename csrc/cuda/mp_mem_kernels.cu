@@ -783,6 +783,12 @@ bool batch_memcpy_supported() {
     if (hipGetDevice(&device) != hipSuccess) {
       return false;
     }
+    // Some ROCm builds report 0 here even though the registered host VA is
+    // device-addressable; allow an explicit opt-in after the parity tests.
+    const char* force = std::getenv("LMCACHE_ROCM_FORCE_BATCH_MEMCPY");
+    if (force != nullptr && force[0] != '\0' && force[0] != '0') {
+      return true;
+    }
     int can_use_host_ptr = 0;
     if (hipDeviceGetAttribute(&can_use_host_ptr,
                               hipDeviceAttributeCanUseHostPointerForRegisteredMem,

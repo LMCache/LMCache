@@ -38,6 +38,12 @@ engine dereferences the `hipHostRegister`'d host operand directly, so on
 configs where a registered host VA is not device-addressable (attribute `0`,
 observed on some MI300/MI355 ROCm builds) the batched D2H/H2D copy faults with a
 GPU memory access fault, and the connector must fall back to the staging kernel.
+Some ROCm builds report the attribute as `0` even though the registered host VA
+is device-addressable (e.g. MI355X, ROCm 10 / HIP 7.15). On such platforms,
+after `tests/v1/multiprocess/test_direct_copy_transfer_gpu.py` and
+`test_direct_copy_planner_gpu.py` pass, set `LMCACHE_ROCM_FORCE_BATCH_MEMCPY`
+to a non-zero value (together with `LMCACHE_ROCM_ENABLE_BATCH_MEMCPY`) to skip
+the attribute check.
 CUDA behaviour is unchanged (gated purely on the 12.8 runtime/driver check).
 
 Every eligible format is affine in (kv plane, layer, block):
