@@ -397,6 +397,10 @@ class FaultInjectL2Adapter(L2AdapterInterface):
         """Return the inner adapter's usage; this layer holds no data of its own."""
         return self._inner.get_usage()
 
+    def recover_persisted_objects(self) -> int:
+        """Forward persisted-object recovery to the inner adapter."""
+        return self._inner.recover_persisted_objects()
+
     @property
     def supports_global_eviction(self) -> bool:
         """Whether the inner adapter supports aggregate usage-based eviction."""
