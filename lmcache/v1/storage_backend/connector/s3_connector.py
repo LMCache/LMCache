@@ -82,6 +82,8 @@ class S3Connector(RemoteConnector):
         disable_tls: bool,
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
+        s3_addressing_style: str = "virtual",
+        s3_managed_upload: bool = True,
     ):
         # initialize base class, which includes some common attributes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
@@ -92,6 +94,22 @@ class S3Connector(RemoteConnector):
         self.s3_part_size = self.full_chunk_size_bytes
 
         self.s3_endpoint = s3_endpoint.removeprefix("s3://")
+        # Addressing style. AWS S3 uses virtual-hosted style (the bucket is part
+        # of the endpoint host, e.g. ``bucket.s3.amazonaws.com``) so the request
+        # path carries only the object key. Many S3-compatible stores (MinIO /
+        # Ceph RGW in path-style, on-prem gateways, Alluxio) instead expect
+        # path-style requests: ``Host: host:port`` and ``/{bucket}/{key}``. When
+        # path-style is selected the bucket is split out of the endpoint here and
+        # re-added to the request path in ``_format_safe_path``; virtual-hosted
+        # (the default) preserves the previous behavior.
+        self.s3_addressing_style = s3_addressing_style
+        self.s3_managed_upload = s3_managed_upload
+        if self.s3_addressing_style == "path":
+            host, _, bucket = self.s3_endpoint.partition("/")
+            self.s3_endpoint = host
+            self.s3_bucket = bucket.strip("/")
+        else:
+            self.s3_bucket = ""
         self.loop = loop
         self.local_cpu_backend = local_cpu_backend
 
@@ -173,7 +191,11 @@ class S3Connector(RemoteConnector):
         any special characters.
         """
         flat_key_str = key_str.replace("/", "_")
-        return "/" + url_quote(flat_key_str)
+        path = "/" + url_quote(flat_key_str)
+        # Path-style endpoints require the bucket in the request path.
+        if self.s3_bucket:
+            path = "/" + self.s3_bucket + path
+        return path
 
     # TODO(Jiayi): optimize this with async
     def _get_object_size(self, key_str: str) -> int:
@@ -532,14 +554,30 @@ class S3Connector(RemoteConnector):
             if done["err"] or done["status"] not in (200, 201):
                 raise RuntimeError(f"Upload failed in S3Connector: {done}")
 
-        s3_req = s3.S3Request(
-            client=self.s3_client,
-            type=s3.S3RequestType.PUT_OBJECT,
-            request=req,
-            credential_provider=self.credentials_provider,
-            region=self.s3_region,
-            on_done=on_done,
-        )
+        # PUT_OBJECT uses awscrt's managed transfer (automatic multipart + trailing
+        # checksum). Many S3-compatible endpoints do not implement managed multipart
+        # uploads and answer such a request with ``501 Not Implemented``. When
+        # ``s3_managed_upload`` is disabled the object is sent as a single plain
+        # ``PutObject`` (DEFAULT request type) instead, which those endpoints accept.
+        if self.s3_managed_upload:
+            s3_req = s3.S3Request(
+                client=self.s3_client,
+                type=s3.S3RequestType.PUT_OBJECT,
+                request=req,
+                credential_provider=self.credentials_provider,
+                region=self.s3_region,
+                on_done=on_done,
+            )
+        else:
+            s3_req = s3.S3Request(
+                client=self.s3_client,
+                type=s3.S3RequestType.DEFAULT,
+                operation_name="PutObject",
+                request=req,
+                credential_provider=self.credentials_provider,
+                region=self.s3_region,
+                on_done=on_done,
+            )
         return s3_req
 
     async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
