@@ -33,6 +33,7 @@ from lmcache.utils import (
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
+    COVERED_CHUNKS_CONFIG_KEY,
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
@@ -233,6 +234,26 @@ class _LookupAck:
 
     submitted_at: float
     """``time.monotonic()`` timestamp taken when the LOOKUPs were sent."""
+
+
+@dataclass(frozen=True)
+class LookupOutcome:
+    """Result of an aggregated LMCache lookup across all servers.
+
+    Attributes:
+        hit_tokens: Longest prefix (in tokens) LMCache can serve, min across
+            servers. Includes the APC-covered prefix (engine-resident), so it
+            drives ``need_to_load`` and the lock-release range unchanged.
+        stored_tokens: Contiguous prefix (in tokens) treated as already
+            persisted in LMCache for store-skip. Currently equals
+            ``hit_tokens``; once the LOOKUP reply carries the covered-present
+            count (a proto follow-up) this will shorten to the first
+            covered-range hole so the store path re-stores from the gap instead
+            of leaving a hole.
+    """
+
+    hit_tokens: int
+    stored_tokens: int
 
 
 def get_lmcache_chunk_size(
@@ -709,7 +730,7 @@ class LMCacheMPSchedulerAdapter:
         #   Per-server hit counts, used to detect disagreement and free tail locks.
         self._pending_lookups: set[str] = set()
         self._unacked_lookups: dict[str, _LookupAck] = {}
-        self._finished_lookup_results: dict[str, int] = {}
+        self._finished_lookup_results: dict[str, LookupOutcome] = {}
         self._per_server_hits: dict[str, dict[str, int]] = {}
         # request_id -> server URL -> (in-flight status future, submission time).
         self._lookup_status: dict[
@@ -718,6 +739,9 @@ class LMCacheMPSchedulerAdapter:
         self._lookup_params: dict[
             str, tuple[list[int], str, dict[str, Any] | None]
         ] = {}
+        # APC-covered-lookup bookkeeping (skip_covered_lookup feature):
+        # request_id -> covered boundary in chunks (sent on the LOOKUP key).
+        self._lookup_covered: dict[str, int] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -817,6 +841,7 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
+        covered_chunks: int = 0,
     ) -> None:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
@@ -835,6 +860,10 @@ class LMCacheMPSchedulerAdapter:
                 the IPC key.
             reserve_last_token: Whether to exclude the final token before
                 aligning the lookup range.
+            covered_chunks: Leading LMCache chunks the serving engine's prefix
+                cache already covers. The server touches them (keeps them warm)
+                but skips read-locking / L2-prefetching them. 0 disables the
+                optimization for this request.
 
         Returns:
             None
@@ -860,6 +889,17 @@ class LMCacheMPSchedulerAdapter:
             lookup_tokens // self.lmcache_tokens_per_chunk
         ) * self.lmcache_tokens_per_chunk
 
+        # Clamp covered_chunks to the aligned lookup range (server clamps too).
+        covered_chunks = max(
+            0, min(covered_chunks, aligned_end // self.lmcache_tokens_per_chunk)
+        )
+        # Carry covered_chunks in request_configs only when non-zero (copied dict).
+        if covered_chunks > 0:
+            request_configs = {
+                **(request_configs or {}),
+                COVERED_CHUNKS_CONFIG_KEY: covered_chunks,
+            }
+
         key = self._create_key(
             token_ids,
             start=0,
@@ -882,6 +922,8 @@ class LMCacheMPSchedulerAdapter:
         )
         self._pending_lookups.add(request_id)
         self._lookup_params[request_id] = (token_ids, cache_salt, request_configs)
+        # Remember the covered boundary (chunks) for the stored-prefix computation.
+        self._lookup_covered[request_id] = covered_chunks
 
     def _free_inconsistent_lookup_locks(
         self,
@@ -922,7 +964,7 @@ class LMCacheMPSchedulerAdapter:
                 self.req_clients[url].free_lookup_locks(tail_key, self.tp_size)
 
     @_lmcache_nvtx_annotate
-    def check_lookup_result(self, request_id: str) -> int | None:
+    def check_lookup_result(self, request_id: str) -> "LookupOutcome | None":
         """
         Check the result of a previously submitted lookup request.
 
@@ -931,31 +973,37 @@ class LMCacheMPSchedulerAdapter:
         outstanding this returns None. Once all servers have acked, polls one
         outstanding QUERY_PREFETCH_STATUS future per unresolved server without
         waiting by default. Setting ``lmcache.mp.nonblocking_lookup_status`` to
-        False instead waits for each reply in the current callback. Returns the
-        matched token count when the prefetch is complete, or None if still
-        in progress.
+        False instead waits for each reply in the current callback. Returns a
+        :class:`LookupOutcome` (hit + stored tokens) when the prefetch is
+        complete, or None if still in progress.
+
+        ``LookupOutcome.stored_tokens`` currently equals the hit; the
+        covered-present store-hole signal is a proto follow-up (see the design
+        doc).
 
         A LOOKUP that is not acknowledged within the MQ timeout marks that
-        server unhealthy and makes this return 0, matching the behaviour of
-        a timed-out synchronous submit.
+        server unhealthy and makes this return an empty result, matching the
+        behaviour of a timed-out synchronous submit.
 
         Args:
             request_id: The ID of the lookup request submitted in
                 `maybe_submit_lookup_request`
 
         Returns:
-            An integer representing the total number of tokens matched
-            in LMCache (prefix matching), or
-            None if the lookup request is not finished yet.
+            A :class:`LookupOutcome` with the total matched tokens and the
+            contiguous stored-prefix tokens, or None if the lookup request is
+            not finished yet.
         """
         if request_id not in self._pending_lookups:
             # No job — either unhealthy at submit time or already cleaned up.
-            # Return the cached aggregate if any, otherwise 0.
-            return self._finished_lookup_results.get(request_id, 0)
+            # Return the cached aggregate if any, otherwise empty.
+            return self._finished_lookup_results.get(
+                request_id, LookupOutcome(hit_tokens=0, stored_tokens=0)
+            )
 
         if not self.is_healthy:
             # Server went down — give up on this lookup
-            return 0
+            return LookupOutcome(hit_tokens=0, stored_tokens=0)
 
         if request_id in self._finished_lookup_results:
             # Aggregation already done; return the cached value.
@@ -976,7 +1024,7 @@ class LMCacheMPSchedulerAdapter:
                     for url in ack.futures:
                         self._mark_lookup_timed_out(url)
                     del self._unacked_lookups[request_id]
-                    return 0
+                    return LookupOutcome(hit_tokens=0, stored_tokens=0)
                 # Acknowledgement still in flight; poll again next step.
                 return None
             del self._unacked_lookups[request_id]
@@ -1000,7 +1048,7 @@ class LMCacheMPSchedulerAdapter:
             if self._nonblocking_lookup_status and not fut.query():
                 if time.monotonic() - submitted_at >= self._mq_timeout:
                     self._mark_lookup_timed_out(url)
-                    return 0
+                    return LookupOutcome(hit_tokens=0, stored_tokens=0)
                 continue
             del futures[url]
             try:
@@ -1013,7 +1061,7 @@ class LMCacheMPSchedulerAdapter:
                     url,
                 )
                 self._health_events[url].clear()
-                return 0
+                return LookupOutcome(hit_tokens=0, stored_tokens=0)
             if r is None:
                 continue
             per_server[url] = int(r)
@@ -1034,8 +1082,14 @@ class LMCacheMPSchedulerAdapter:
 
         token_count = min_chunks * self.lmcache_tokens_per_chunk
 
-        self._finished_lookup_results[request_id] = token_count
-        return token_count
+        # ``stored_tokens`` currently equals the hit: the covered-present signal
+        # that would shorten it on a covered-range hole needs the LOOKUP reply
+        # to carry a value (a proto field + regen), which is a follow-up. Until
+        # then a covered chunk evicted while covered is re-stored via the normal
+        # store path once a later request observes it as a miss.
+        result = LookupOutcome(hit_tokens=token_count, stored_tokens=token_count)
+        self._finished_lookup_results[request_id] = result
+        return result
 
     def num_blocks_per_chunk(self) -> int:
         """
@@ -1056,6 +1110,7 @@ class LMCacheMPSchedulerAdapter:
         self._finished_lookup_results.pop(request_id, None)
         self._per_server_hits.pop(request_id, None)
         self._lookup_params.pop(request_id, None)
+        self._lookup_covered.pop(request_id, None)
 
     def reset_cache(self) -> bool:
         """Ask every backing LMCache server to best-effort clear idle cache.
@@ -1229,7 +1284,8 @@ class LMCacheMPSchedulerAdapter:
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
-                the IPC key.
+                the IPC key. The APC-covered chunk count (if any) is carried
+                here under ``COVERED_CHUNKS_CONFIG_KEY``.
 
         Returns:
             IPCCacheServerKey: The constructed key.

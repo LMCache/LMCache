@@ -22,6 +22,9 @@ Key Types:
   - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
 
+# APC-covered chunk count for a LOOKUP, carried in request_configs (no proto change).
+COVERED_CHUNKS_CONFIG_KEY = "lmcache.mp._covered_chunks"
+
 
 @dataclass(order=True, frozen=True)
 class IPCCacheServerKey:
