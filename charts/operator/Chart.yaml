@@ -1,0 +1,18 @@
+apiVersion: v2
+name: lmcache-operator
+description: Kubernetes operator that automates deployment and lifecycle management of LMCache multiprocess cache servers
+type: application
+version: 0.1.0
+appVersion: "0.1.1"
+keywords:
+  - lmcache
+  - kv-cache
+  - llm
+  - operator
+  - vllm
+home: https://lmcache.ai
+sources:
+  - https://github.com/LMCache/LMCache
+maintainers:
+  - name: LMCache Maintainers
+    url: https://github.com/LMCache/LMCache
