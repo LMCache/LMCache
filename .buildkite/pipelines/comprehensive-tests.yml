@@ -6,6 +6,9 @@ steps:
     key: "test"
     timeout_in_minutes: 60
     commands:
+      - |
+        source .buildkite/k3_tests/common_scripts/ci-mode.sh
+        if should_skip_ci_mode inprocess; then exit 0; fi
       - .buildkite/scripts/should-run-comprehensive.sh || exit 0 # Skip comprehensive tests for safe-path-only PRs.
       - chmod +x .buildkite/scripts/vllm-integration-tests.sh
       - |

@@ -12,6 +12,8 @@ steps:
     env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
     command: |
       set -euo pipefail
+      source .buildkite/k3_tests/common_scripts/ci-mode.sh
+      if should_skip_ci_mode mp; then exit 0; fi
       source .buildkite/k3_tests/common_scripts/helpers.sh
       if should_skip_multiprocess_for_good_first_issue; then
         echo "Skipping multiprocessing tests for good first issue PR. Add force-ci to run the full suite."
