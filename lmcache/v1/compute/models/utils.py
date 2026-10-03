@@ -52,7 +52,8 @@ class VLLMModelTracker:
             cls._vllm_models[instance_id] = vllm_model
         else:
             logger.warning(
-                f"vllm model for {instance_id} already registered, doing nothing."
+                "vllm model for %s already registered, doing nothing.",
+                instance_id,
             )
 
     @classmethod

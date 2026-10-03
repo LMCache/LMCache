@@ -280,7 +280,7 @@ class EncodedObjectKey:
 
 @dataclass(frozen=True)
 class ModuleMemoryCapacity:
-    """One compartment's configured capacity: an L1 medium or an L2 adapter.
+    """One compartment's declared capacity: an L1 medium or an L2 adapter.
 
     Keyed on the same ``(tier, backend)`` axis cache events use.
 
@@ -288,7 +288,7 @@ class ModuleMemoryCapacity:
         tier: ``Tier.L1`` or ``Tier.L2``.
         backend: Medium within the tier (``"dram"``, ``"devdax"``,
             ``"gds"``, or an L2 adapter type such as ``"s3"``).
-        capacity_bytes: Configured capacity. ``0`` means undeclared --
+        capacity_bytes: Declared usable capacity. ``0`` means undeclared --
             reported as unknown, not as full.
         shared: Set when instances mount this pool, so its capacity must
             not be summed across them.
@@ -565,11 +565,16 @@ class PrefetchResult:
     Note:
         ``l1_hit_cells`` and ``l2_hit_cells`` are disjoint and their union is
         ``hit_cells``.
+
+    ``found_cells`` (superset of ``hit_cells``): what existed at plan time —
+    in L1 or pinned in L2. Found-but-not-hit means "didn't fit", not
+    "evicted". ``None`` when not reported.
     """
 
     hit_cells: list["Bitmap"]
     l1_hit_cells: list["Bitmap"]
     l2_hit_cells: list["Bitmap"]
+    found_cells: "list[Bitmap] | None" = None
     _l1_hit_count: int = field(init=False, repr=False, compare=False)
     _l2_hit_count: int = field(init=False, repr=False, compare=False)
 
