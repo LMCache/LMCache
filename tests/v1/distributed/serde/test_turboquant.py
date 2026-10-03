@@ -36,6 +36,7 @@ from lmcache.v1.distributed.serde import (
     get_registered_serde_types,
 )
 from lmcache.v1.distributed.serde.turboquant import (
+    TurboQuantDeserializer,
     TurboQuantSerdeConfig,
     TurboQuantSerializer,
 )
@@ -164,6 +165,48 @@ def test_estimate_serialized_size_rejects_invalid_kv_size() -> None:
 
     with pytest.raises(ValueError, match="kv_size=2"):
         serializer.estimate_serialized_size(layout)
+
+
+def test_multi_group_rejects_layout_without_viewing_whole_buffer() -> None:
+    """A multi-group object must not be reshaped as the first group's shape."""
+    # First Party
+    from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
+
+    shape = torch.Size([1, 2, 4, 128])
+    shapes = [shape, shape]
+    dtypes = [torch.bfloat16, torch.bfloat16]
+    nbytes = sum(s.numel() * d.itemsize for s, d in zip(shapes, dtypes))
+    src = TensorMemoryObj(
+        torch.empty(nbytes, dtype=torch.uint8),
+        MemoryObjMetadata(
+            shape=shape,
+            dtype=torch.bfloat16,
+            address=0,
+            phy_size=nbytes,
+            ref_count=1,
+            shapes=shapes,
+            dtypes=dtypes,
+        ),
+        None,
+    )
+    with pytest.raises(RuntimeError, match="invalid"):
+        _ = src.tensor
+
+    cfg = TurboQuantSerdeConfig(preset="turboquant_k8v4", head_dim=128, block_size=16)
+    dst_n = 64
+    dst = TensorMemoryObj(
+        torch.empty(dst_n, dtype=torch.uint8),
+        MemoryObjMetadata(
+            shape=torch.Size([dst_n]),
+            dtype=torch.uint8,
+            address=0,
+            phy_size=dst_n,
+            ref_count=1,
+        ),
+        None,
+    )
+    with pytest.raises(ValueError, match="kv_size=2"):
+        TurboQuantSerializer(cfg).serialize(src, dst, _make_turboquant_object_key(0))
 
 
 def test_estimate_serialized_size_rejects_bad_head_dim() -> None:
@@ -543,6 +586,90 @@ def test_turboquant_direct_roundtrip_cuda(
     assert corr > corr_lower_bound, (
         f"low corr for preset={preset}: corr={corr}, mae={mae}, mse={mse}"
     )
+
+
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason="Requires torch_device_type",
+)
+def test_turboquant_multi_group_roundtrip_cuda() -> None:
+    """Two valid KV groups compress independently and restore in order."""
+    device = torch.device(f"{torch_device_type}:0")
+    shape = torch.Size([2, 4, 32, 128])
+    groups = [
+        torch.randn(shape, dtype=torch.float16, device=device),
+        torch.randn(shape, dtype=torch.float16, device=device) * 0.5,
+    ]
+    # First Party
+    from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
+
+    nbytes = sum(group.numel() * group.element_size() for group in groups)
+    raw = torch.empty(nbytes, dtype=torch.uint8, device=device)
+    src = TensorMemoryObj(
+        raw,
+        MemoryObjMetadata(
+            shape=shape,
+            dtype=torch.float16,
+            address=0,
+            phy_size=nbytes,
+            ref_count=1,
+            shapes=[shape, shape],
+            dtypes=[torch.float16, torch.float16],
+        ),
+        None,
+    )
+    for index, group in enumerate(groups):
+        src.get_tensor(index).copy_(group)
+
+    cfg = TurboQuantSerdeConfig(
+        preset="turboquant_k8v4",
+        head_dim=128,
+        block_size=16,
+        skip_first_layers=0,
+        skip_last_layers=0,
+    )
+    serializer = TurboQuantSerializer(cfg)
+    layout = MemoryLayoutDesc(
+        shapes=[shape, shape],
+        dtypes=[torch.float16, torch.float16],
+    )
+    n_bytes = serializer.estimate_serialized_size(layout)
+    dst = TensorMemoryObj(
+        torch.empty(n_bytes, dtype=torch.uint8, device=device),
+        MemoryObjMetadata(
+            shape=torch.Size([n_bytes]),
+            dtype=torch.uint8,
+            address=0,
+            phy_size=n_bytes,
+            ref_count=1,
+        ),
+        None,
+    )
+    written = serializer.serialize(src, dst, _make_turboquant_object_key(1))
+    assert written == n_bytes
+
+    restored_raw = torch.empty(nbytes, dtype=torch.uint8, device=device)
+    restored = TensorMemoryObj(
+        restored_raw,
+        MemoryObjMetadata(
+            shape=shape,
+            dtype=torch.float16,
+            address=0,
+            phy_size=nbytes,
+            ref_count=1,
+            shapes=[shape, shape],
+            dtypes=[torch.float16, torch.float16],
+        ),
+        None,
+    )
+    TurboQuantDeserializer(cfg).deserialize(
+        dst, restored, _make_turboquant_object_key(1)
+    )
+    for index, group in enumerate(groups):
+        got = restored.get_tensor(index).float().flatten()
+        exp = group.float().flatten()
+        corr = torch.corrcoef(torch.stack([exp, got]))[0, 1].item()
+        assert corr > 0.95
 
 
 # =============================================================================
