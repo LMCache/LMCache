@@ -5,12 +5,14 @@ from contextlib import ExitStack, contextmanager
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
+import logging
 import os
 import pickle
 import sys
 
 # Third Party
 import pytest
+
 import torch
 
 # First Party
@@ -1361,6 +1363,35 @@ def test_server_register_uses_worker_physical_slots(
     layout = ctx.layout_desc_registry.find("m", 1)
     assert layout is not None
     assert layout.shapes[0] == torch.Size([2, 2, 128, 16])
+
+
+def test_server_warns_when_client_omits_physical_slots(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+    caplog: Any,
+) -> None:
+    """The pre-field compatibility path must not be silent.
+
+    Falling back to one slot per logical token is only correct when the
+    engine's block_size is its real tokens-per-block.  An engine that
+    registers opaque pages reports block_size=1, and every object is then
+    oversized by a factor of chunk_size -- with no error anywhere, just an
+    empty hit rate.  Say so.
+    """
+    module, _, _, ctx = server_module_factory(chunk_size=256)
+    payload = _default_register_payload(instance_id=12, num_physical_slots=None)
+
+    with caplog.at_level(logging.WARNING):
+        module.register_kv_cache_engine_driven_context(payload)
+
+    assert any(
+        "num_physical_slots" in r.getMessage()
+        for r in caplog.records
+        if r.levelno >= logging.WARNING
+    )
+    layout = ctx.layout_desc_registry.find("m", 1)
+    assert layout is not None
+    assert layout.shapes[0] == torch.Size([2, 2, 256, 16])
 
 
 def test_server_store_and_retrieve_cpu_chunks(
