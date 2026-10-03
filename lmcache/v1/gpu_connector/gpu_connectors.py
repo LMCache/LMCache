@@ -352,6 +352,11 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
              with -1s until the end of the matched prefix. The start and end
              should NEVER overlap with the prefix caching (which means the
              underlying CUDA kernel will never see -1 in slot_mapping)
+          3. This function blocks until the transfer into memory_obj is
+             complete, regardless of the destination device. It is safe for
+             the caller to read or hand off memory_obj as soon as this
+             function returns, including to a non-torch consumer (e.g. a
+             NIXL/UCX RDMA read from another thread).
 
         :raises ValueError: If 'kvcaches' is not provided in kwargs,
         :raises AssertionError: If the memory object does not have a tensor.
@@ -403,11 +408,15 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
-        if not memory_obj.tensor.is_cuda:
-            # Force a synchronize if the target buffer is NOT CUDA device
-            # NOTE: for better performance, we may not want to sync for every
-            # memory object
-            self.store_stream.synchronize()
+        # The D2H/D2D transfer above (and the copy_ in the gpu_buffer branch)
+        # is launched on store_stream with non_blocking=True. Callers read
+        # memory_obj.tensor right after this function returns -- on the CPU
+        # (host offload), on the default CUDA stream (compute), or via a
+        # non-torch consumer such as a NIXL/UCX RDMA read issued from a
+        # background thread (PD disaggregation with a GPU buffer). None of
+        # those wait on store_stream on their own, so we must always
+        # synchronize here regardless of the target device.
+        self.store_stream.synchronize()
 
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
@@ -587,6 +596,19 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
+        """Load KV data for tokens [start, end) from the engine's paged GPU
+        KV cache into memory_obj, one tensor per layer group.
+
+        This function blocks until the transfer into memory_obj is complete,
+        regardless of the destination device. It is safe for the caller to
+        read or hand off memory_obj as soon as this function returns,
+        including to a non-torch consumer (e.g. a NIXL/UCX RDMA read from
+        another thread).
+
+        :raises AssertionError: If memory_obj has no raw tensor, if
+            'slot_mapping' is missing from kwargs, or if the connector has
+            not been initialized with matching kvcaches.
+        """
         assert memory_obj.raw_tensor is not None
         assert "slot_mapping" in kwargs
 
@@ -638,11 +660,13 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                     assert memory_obj_tensor is not None
                     memory_obj_tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
-        if not memory_obj.raw_tensor.is_cuda:
-            # Force a synchronize if the target buffer is NOT CUDA device
-            # NOTE: for better performance, we may not want to sync for every
-            # memory object
-            self.store_stream.synchronize()
+        # See the matching comment in VLLMPagedMemGPUConnectorV2.from_gpu:
+        # the transfer above is async on store_stream, and callers may
+        # consume memory_obj_tensor through a path that never waits on
+        # store_stream (host reads, a different CUDA stream, or a NIXL/UCX
+        # RDMA read from a background thread under PD disaggregation with a
+        # GPU buffer). Always synchronize here, regardless of target device.
+        self.store_stream.synchronize()
 
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
@@ -1594,6 +1618,11 @@ class SGLangGPUConnector(GPUConnectorInterface):
              with -1s until the end of the matched prefix. The start and end
              should NEVER overlap with the prefix caching (which means the
              underlying CUDA kernel will never see -1 in slot_mapping)
+          3. This function blocks until the transfer into memory_obj is
+             complete, regardless of the destination device. It is safe for
+             the caller to read or hand off memory_obj as soon as this
+             function returns, including to a non-torch consumer (e.g. a
+             NIXL/UCX RDMA read from another thread).
 
         :raises ValueError: If 'kvcaches' is not provided in kwargs,
         :raises AssertionError: If the memory object does not have a tensor.
@@ -1637,11 +1666,13 @@ class SGLangGPUConnector(GPUConnectorInterface):
             )
             memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
-        if not memory_obj.tensor.is_cuda:
-            # Force a synchronize if the target buffer is NOT CUDA device
-            # NOTE: for better performance, we may not want to sync for every
-            # memory object
-            torch.cuda.synchronize()
+        # See the matching comment in VLLMPagedMemGPUConnectorV2.from_gpu:
+        # the transfer above is async, and callers may consume memory_obj.tensor
+        # through a path that never waits on the issuing stream (host reads, a
+        # different CUDA stream, or a NIXL/UCX RDMA read from a background
+        # thread under PD disaggregation with a GPU buffer). Always
+        # synchronize here, regardless of target device.
+        torch.cuda.synchronize()
 
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
