@@ -2,7 +2,7 @@
 # Standard
 from asyncio import CancelledError
 from concurrent.futures import Future
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, cast
 import asyncio
 import itertools
 
@@ -52,7 +52,8 @@ class AsyncPQExecutor(BaseJobExecutor):
         await self._queue.put((priority, next(self._counter), fn, args, kwargs, done))
         return await done
 
-    async def _worker(self):
+    async def _worker(self) -> None:
+        """Run queued jobs without completing cancelled submitters' futures."""
         while True:
             try:
                 item = await self._queue.get()
@@ -76,11 +77,17 @@ class AsyncPQExecutor(BaseJobExecutor):
                 break
 
             _, _, fn, args, kwargs, done = item
+            # Sentinel entries have already been handled above.
+            fn = cast(Callable[..., Awaitable[Any]], fn)
+            assert done is not None
             try:
                 result = await fn(*args, **kwargs)
-                done.set_result(result)
+                # The submitter may have been cancelled while the job was running.
+                if not done.done():
+                    done.set_result(result)
             except Exception as e:
-                done.set_exception(e)
+                if not done.done():
+                    done.set_exception(e)
             finally:
                 # decrement task count
                 # join needs to wait until task count is zero
@@ -156,7 +163,8 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
             )
         self._closed = False
 
-    async def _worker(self):
+    async def _worker(self) -> None:
+        """Run sync jobs in threads and deliver results to pending submitters."""
         while True:
             try:
                 item = await self._queue.get()
@@ -180,11 +188,17 @@ class AsyncPQThreadPoolExecutor(AsyncPQExecutor):
                 break
 
             _, _, fn, args, kwargs, done = item
+            # Sentinel entries have already been handled above.
+            fn = cast(Callable[..., Any], fn)
+            assert done is not None
             try:
                 result = await asyncio.to_thread(fn, *args, **kwargs)
-                done.set_result(result)
+                # The submitter may have been cancelled while the job was running.
+                if not done.done():
+                    done.set_result(result)
             except Exception as e:
-                done.set_exception(e)
+                if not done.done():
+                    done.set_exception(e)
             finally:
                 # decrement task count
                 # join needs to wait until task count is zero
