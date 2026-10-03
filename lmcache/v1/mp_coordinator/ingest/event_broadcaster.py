@@ -12,7 +12,10 @@ See ``docs/design/v1/mp_coordinator/ingest.md``.
 from typing import Protocol, runtime_checkable
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
+
+logger = init_logger(__name__)
 
 
 @runtime_checkable
@@ -47,7 +50,9 @@ class CacheEventConsumer(Protocol):
 class CacheEventBroadcaster:
     """Fans one gate-admitted cache-event batch out to every consumer.
 
-    Keeps no locks: fan-out is thread-safe as long as each consumer is.
+    A consumer that raises is logged, and the rest still run,
+    so only that consumer misses the batch. Keeps no locks: fan-out is
+    thread-safe as long as each consumer is.
     """
 
     def __init__(self) -> None:
@@ -72,7 +77,16 @@ class CacheEventBroadcaster:
             batch: The admitted batch.
         """
         for consumer in self._consumers:
-            consumer.consume(batch)
+            try:
+                consumer.consume(batch)
+            except Exception:
+                logger.exception(
+                    "Cache-event consumer %s failed on batch %s/%d/%d",
+                    type(consumer).__name__,
+                    batch.instance_id,
+                    batch.incarnation,
+                    batch.seq,
+                )
 
     def fence_instance(self, instance_id: str) -> None:
         """Tell every consumer that ``instance_id``'s L1 state is void.
@@ -81,4 +95,11 @@ class CacheEventBroadcaster:
             instance_id: The restarted or departed instance.
         """
         for consumer in self._consumers:
-            consumer.fence_instance(instance_id)
+            try:
+                consumer.fence_instance(instance_id)
+            except Exception:
+                logger.exception(
+                    "Cache-event consumer %s failed to fence %s",
+                    type(consumer).__name__,
+                    instance_id,
+                )

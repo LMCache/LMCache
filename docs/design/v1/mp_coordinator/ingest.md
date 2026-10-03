@@ -95,8 +95,8 @@ duplicate it never was.
   record's batches to `ingest_batches`. A record's offset is recorded
   into `StreamPosition` (see below) only after the gate has seen it, so
   delivery is at-least-once; the gate's dedup absorbs any redelivery. A
-  record that does not decode, or that makes a consumer raise, is logged
-  and skipped -- and still recorded, so it cannot stall its partition. It
+  record that does not decode is logged and skipped -- and still
+  recorded, so it cannot stall its partition. It
   reports `replay_capability=seekable` because the topic retains the
   stream: rewinding `StreamPosition` replays it.
 
@@ -150,6 +150,11 @@ Consumers implement two hooks:
   proportional to that instance's keys, not a full scan);
   `FleetEvictionController` no-ops, because the L2 bytes it accounts
   outlive the process and leave only via `DELETE`.
+
+A consumer that raises is logged with the batch's instance, incarnation
+and `seq`; the consumers after it still run. Only the one that raised misses the batch, and it is not retried:
+consumers are in-memory, so the same batch would fail the same way, and
+re-sending it to all of them would apply it twice to the rest.
 
 Registration order is invocation order. Today: the key directory
 (placements and token bindings, the source of truth), then the eviction
