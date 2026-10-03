@@ -77,7 +77,10 @@ class Bitmap {
    *
    * @return true if the bit is set to 1, false otherwise.
    */
-  bool test(size_t index) const;
+  bool test(size_t index) const {
+    if (index >= size_) return false;
+    return (data_[index / 8] >> (index % 8)) & 1u;
+  }
 
   /**
    * @brief count the number of bits set to 1 in the bitmap.
