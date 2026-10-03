@@ -7,8 +7,9 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
 
 **Required fields:**
 
-- ``s3_endpoint``: Bucket URL -- either ``"s3://<bucket>"`` or the bare host form
-  (used for non-AWS endpoints).
+- ``s3_endpoint``: Virtual-hosted bucket URL by default -- either
+  ``"s3://<bucket>"`` or the bare host form. With path-style addressing, this
+  is the S3 service host without a bucket prefix.
 - ``s3_region``: AWS region string (e.g. ``"us-west-2"``).
 
 **Optional fields:**
@@ -19,6 +20,13 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
   for S3 Express One Zone buckets.
 - ``disable_tls`` (bool, default ``false``): Bypass TLS when pointing at a
   plain-HTTP endpoint (e.g. a local MinIO).
+- ``s3_addressing_style`` (string, default ``"virtual"``): Request addressing
+  style. Set to ``"path"`` for S3-compatible services that require
+  ``/<bucket>/<object-key>`` requests.
+- ``s3_bucket`` (string): Required with ``s3_addressing_style="path"``. The
+  bucket placed in each request path.
+- ``s3_ca_bundle`` (string): Optional PEM CA bundle used by AWS CRT to verify
+  a private S3 endpoint's TLS certificate.
 - ``aws_access_key_id`` / ``aws_secret_access_key`` (string): Static
   credentials; omit both to use the AWS default credential provider chain
   (environment, EC2 instance profile, etc.).
@@ -38,3 +46,6 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
 
     # Local MinIO over plain HTTP
     --l2-adapter '{"type": "s3", "s3_endpoint": "minio.local:9000", "s3_region": "us-east-1", "disable_tls": true, "aws_access_key_id": "minio", "aws_secret_access_key": "minio123"}'
+
+    # Private S3-compatible service with path-style access and a custom CA
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3.internal:8111", "s3_region": "us-east-1", "s3_addressing_style": "path", "s3_bucket": "lmcache", "s3_ca_bundle": "/etc/ssl/private-s3-ca.pem"}'
