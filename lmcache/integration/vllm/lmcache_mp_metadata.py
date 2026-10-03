@@ -51,6 +51,7 @@ class LMCacheMPRequestTracker:
 
     # Read-only list to track the token ids
     all_token_ids: ConstantList[int]
+    num_prompt_tokens: int = 0
 
     # Block ids will be updated at update_states_after_alloc and
     # during generation. Keyed by engine_group_idx; non-HMA models use 0.
@@ -88,6 +89,7 @@ class LMCacheMPRequestTracker:
         )
         self.lookup_started_at = None
         self.all_token_ids = request.all_token_ids
+        self.num_prompt_tokens = len(request.prompt_token_ids)
         self.allocated_block_ids = {}
         self.num_stored_tokens = 0
         self.num_vllm_hit_tokens = 0
@@ -399,6 +401,8 @@ class LMCacheMPRKVRequestState:
     request_id: str
     block_ids: list[int]
     resident_kv_tokens: int | None = None
+    is_genuine_decode: bool = False
+    should_compress: bool = False
 
 
 class LMCacheMPConnectorMetadata(KVConnectorMetadata):

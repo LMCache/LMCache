@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Minimal vLLM runtime shim for LMCache-owned resident KV allocation."""
+"""Minimal vLLM runtime adapter for LMCache-owned resident KV allocation."""
 
 from __future__ import annotations
 
@@ -131,7 +131,7 @@ def _allocate_with_resident_frontier(
     return result
 
 
-def install_rkv_vllm_allocator_shim() -> None:
+def install_rkv_allocator_adapter() -> None:
     """Install the resident-KV allocation wrapper for pinned vLLM 0.25.1."""
     # Third Party
     from vllm.version import __version__ as vllm_version
@@ -143,7 +143,7 @@ def install_rkv_vllm_allocator_shim() -> None:
         )
 
     original = KVCacheManager.allocate_slots
-    if getattr(original, "_lmcache_rkv_allocator_shim", False):
+    if getattr(original, "_lmcache_rkv_allocator_adapter", False):
         return
 
     params = tuple(signature(original).parameters)
@@ -183,5 +183,5 @@ def install_rkv_vllm_allocator_shim() -> None:
             has_scheduled_reqs,
         )
 
-    wrapped._lmcache_rkv_allocator_shim = True  # type: ignore[attr-defined]
+    wrapped._lmcache_rkv_allocator_adapter = True  # type: ignore[attr-defined]
     KVCacheManager.allocate_slots = wrapped

@@ -9,6 +9,7 @@ import time
 
 # Third Party
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_events import (
     BlockStored,
     KVCacheEvent,
@@ -63,10 +64,10 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPRequestTracker,
     LMCacheMPWorkerMetadata,
 )
-from lmcache.integration.vllm.rkv_vllm_shim import (
+from lmcache.integration.vllm.rkv_allocator_adapter import (
     clear_resident_kv_tokens,
     get_resident_kv_tokens,
-    install_rkv_vllm_allocator_shim,
+    install_rkv_allocator_adapter,
     set_resident_kv_tokens,
 )
 from lmcache.integration.vllm.lmcache_mp_metrics import (
@@ -209,6 +210,33 @@ def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
         return True
 
     return False
+
+
+def _rkv_step_flags(
+    *,
+    num_computed: int,
+    num_new_tokens: int,
+    num_tokens: int,
+    num_prompt_tokens: int,
+    buffer: int,
+) -> tuple[bool, bool]:
+    """Return (is_genuine_decode, should_compress) for one scheduler step."""
+    prev_computed = num_computed - num_new_tokens
+    is_prefill_chunk = num_computed < num_tokens
+    is_genuine_decode = (
+        num_new_tokens > 0
+        and num_computed >= num_tokens
+        and prev_computed >= num_prompt_tokens
+    )
+    num_decoded = num_computed - num_prompt_tokens
+    prev_decoded = prev_computed - num_prompt_tokens
+    should_compress = (
+        buffer > 0
+        and not is_prefill_chunk
+        and num_decoded > 0
+        and num_decoded // buffer > prev_decoded // buffer
+    )
+    return is_genuine_decode, should_compress
 
 
 def _iter_kv_cache_specs(kv_cache_config: "KVCacheConfig | None") -> Iterable[Any]:
@@ -602,10 +630,50 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             "lmcache.mp.rkv_budget", None
         )
         self._rkv_budget = int(rkv_budget) if rkv_budget is not None else None
+        self._rkv_buffer = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.rkv_buffer", 128
+            )
+        )
+        self._rkv_mix_lambda = float(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.rkv_mix_lambda", 0.1
+            )
+        )
+        self._rkv_window_size = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.rkv_window_size", 8
+            )
+        )
+        self._rkv_kernel_size = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.rkv_kernel_size", 7
+            )
+        )
+        self._rkv_retain_ratio = float(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.rkv_retain_ratio", 0.1
+            )
+        )
+        self._rkv_retain_direction = str(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.rkv_retain_direction", "last"
+            )
+        )
+        self._rkv_score_mode = str(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.rkv_score_mode", "batched"
+            )
+        )
+        self._rkv_score_chunk_bytes = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.rkv_score_chunk_bytes", 512 * 1024 * 1024
+            )
+        )
         self._rkv: RKVWorker | None = None
         if self._rkv_budget is not None:
             if role == KVConnectorRole.SCHEDULER:
-                install_rkv_vllm_allocator_shim()
+                install_rkv_allocator_adapter()
             self._can_store = False
             if vllm_config.cache_config.enable_prefix_caching:
                 raise ValueError("R-KV MVP requires prefix caching disabled")
@@ -616,7 +684,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if getattr(vllm_config.scheduler_config, "async_scheduling", False):
                 raise ValueError("R-KV MVP requires synchronous scheduling")
             if not getattr(vllm_config.model_config, "enforce_eager", False):
-                raise ValueError("R-KV MVP requires enforce_eager=True")
+                cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+                if cudagraph_mode != CUDAGraphMode.PIECEWISE:
+                    raise ValueError(
+                        "R-KV requires either enforce_eager=True or "
+                        "cudagraph_mode=PIECEWISE"
+                    )
             if vllm_config.parallel_config.world_size != 1:
                 raise ValueError("R-KV MVP requires a single GPU")
             if len(group_tokens_per_block) != 1:
@@ -771,7 +844,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             self._pending_resident_kv_updates: dict[str, int] = {}
             if self._rkv_budget is not None:
-                self._rkv = RKVWorker(self._rkv_budget)
+                assert self._rkv_buffer is not None
+                self._rkv = RKVWorker(
+                    self._rkv_budget,
+                    buffer=self._rkv_buffer,
+                    window_size=self._rkv_window_size,
+                    kernel_size=self._rkv_kernel_size,
+                    mix_lambda=self._rkv_mix_lambda,
+                    retain_ratio=self._rkv_retain_ratio,
+                    retain_direction=self._rkv_retain_direction,
+                    score_mode=self._rkv_score_mode,
+                    score_chunk_bytes=self._rkv_score_chunk_bytes,
+                )
             if self.transfer_intermediate_tensors:
                 # First Party
                 from lmcache.integration.vllm.experimental import (
@@ -1520,11 +1604,22 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if not block_ids:
                 raise RuntimeError(f"Missing R-KV blocks for {request_id}")
 
+            num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
+            is_genuine_decode, should_compress = _rkv_step_flags(
+                num_computed=tracker.num_scheduled_tokens,
+                num_new_tokens=num_new_tokens,
+                num_tokens=len(tracker.all_token_ids),
+                num_prompt_tokens=tracker.num_prompt_tokens,
+                buffer=self._rkv_buffer,
+            )
+
             metadata.rkv_requests.append(
                 LMCacheMPRKVRequestState(
                     request_id=request_id,
                     block_ids=block_ids,
                     resident_kv_tokens=get_resident_kv_tokens(request_id),
+                    is_genuine_decode=is_genuine_decode,
+                    should_compress=should_compress,
                 )
             )
 
