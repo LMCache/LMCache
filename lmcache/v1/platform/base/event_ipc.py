@@ -18,7 +18,9 @@ from __future__ import annotations
 # Standard
 from typing import Protocol, runtime_checkable
 import inspect
+import os
 import threading
+import time
 
 # First Party
 from lmcache import torch_dev, torch_device_type
@@ -164,7 +166,14 @@ class EventIPCBackend(Protocol):
 # Persist the reference to the IPC events for a while so that the inference engine
 # won't access the dangling references to the events.
 # Amortised sweep interval for completion-based retention (see export_event).
-_EXPORTED_EVENT_SWEEP_INTERVAL = 4096
+# Kept at 2048: larger values can cause OOM on NVIDIA GPUs.
+_EXPORTED_EVENT_SWEEP_INTERVAL = 2048
+# A completed event may still be awaiting import by its peer (the importer
+# polls between engine steps, which can be seconds apart under load), so only
+# events that are both completed and older than this are dropped.
+_EXPORTED_EVENT_MIN_AGE_S = float(
+    os.environ.get("LMCACHE_EXPORTED_EVENT_MIN_AGE_S", "120")
+)
 
 
 class DefaultEventIPCBackend(EventIPCBackend):
@@ -191,12 +200,14 @@ class DefaultEventIPCBackend(EventIPCBackend):
         self._event_module = event_module if event_module is not None else torch_dev
         self.device_type = device_type if device_type is not None else torch_device_type
         # Completion-based retention: keep every exported event alive until it
-        # COMPLETES, so a backlogged peer can always import an in-flight
-        # handle. A fixed-size ring evicted by age can drop an in-flight
-        # event under a deep DCP/high-concurrency backlog -> peer import
-        # fails -> source freed mid-copy. Retention is bounded by the
-        # number of outstanding (incomplete) transfers.
-        self._exported_events: list[object] = []
+        # COMPLETES and is older than _EXPORTED_EVENT_MIN_AGE_S, so a
+        # backlogged peer can always import an in-flight handle, and a lazy
+        # importer still has a grace window after completion. A fixed-size
+        # ring evicted by age can drop an in-flight event under a deep
+        # DCP/high-concurrency backlog -> peer import fails -> source freed
+        # mid-copy. Retention is bounded by the number of outstanding
+        # (incomplete) transfers plus events exported within the min age.
+        self._exported_events: list[tuple[float, object]] = []
         self._exported_events_lock = threading.Lock()
         self._exported_events_next_sweep = _EXPORTED_EVENT_SWEEP_INTERVAL
 
@@ -244,16 +255,17 @@ class DefaultEventIPCBackend(EventIPCBackend):
         """
         handle = event.ipc_handle()  # type: ignore[attr-defined]
         with self._exported_events_lock:
-            self._exported_events.append(event)
+            now = time.monotonic()
+            self._exported_events.append((now, event))
             if len(self._exported_events) >= self._exported_events_next_sweep:
                 self._exported_events = [
-                    e
-                    for e in self._exported_events
-                    if not self._is_event_completed(e)
+                    (t, e)
+                    for t, e in self._exported_events
+                    if now - t < _EXPORTED_EVENT_MIN_AGE_S
+                    or not self._is_event_completed(e)
                 ]
                 self._exported_events_next_sweep = (
-                    len(self._exported_events)
-                    + _EXPORTED_EVENT_SWEEP_INTERVAL
+                    len(self._exported_events) + _EXPORTED_EVENT_SWEEP_INTERVAL
                 )
         return handle
 
