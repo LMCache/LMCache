@@ -7,10 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 import importlib
+import queue
 import subprocess
 import sys
+import threading
 
 # Third Party
+import grpc
 import pytest
 import torch
 
@@ -529,3 +532,46 @@ def test_generated_grpc_services_communicate_end_to_end(
     assert client.p2p_query_lookup_results(task_id).result(5) == [
         TransferChannelAddress(offset=8, size=16)
     ]
+
+
+@pytest.mark.parametrize("max_cpu_workers", [1, 2])
+def test_grpc_normal_worker_limit_and_error_release(max_cpu_workers: int) -> None:
+    """Normal handlers honor capacity and release it even on exceptions."""
+    entered: queue.Queue[None] = queue.Queue()
+    release = threading.Event()
+
+    class BlockingModule:
+        @request_handler(HandlerType.BLOCKING)
+        def ping(self, instance_id: int | None) -> bool:
+            entered.put(None)
+            assert release.wait(10)
+            if instance_id == 0:
+                raise RuntimeError("handler failed")
+            return True
+
+    server = GrpcMultiprocessServer(
+        "grpc://127.0.0.1:0",
+        max_cpu_workers=max_cpu_workers,
+        max_gpu_workers=1,
+        grpc_server_workers=4,
+    )
+    server.add_modules([BlockingModule()])
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    try:
+        futures = [client.ping(i) for i in range(max_cpu_workers + 1)]
+        for _ in range(max_cpu_workers):
+            entered.get(timeout=5)
+        with pytest.raises(queue.Empty):
+            entered.get(timeout=0.1)
+        release.set()
+        with pytest.raises(grpc.RpcError, match="handler failed"):
+            futures[0].result(5)
+        assert all(future.result(5) for future in futures[1:])
+        assert client.ping(1).result(5) is True
+    finally:
+        release.set()
+        client.close()
+        server.close()
