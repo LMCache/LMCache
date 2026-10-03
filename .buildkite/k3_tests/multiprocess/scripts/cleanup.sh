@@ -58,6 +58,12 @@ if [[ -d "${RESULTS_DIR:-}" ]]; then
     cp -a "$RESULTS_DIR" "${REPO_ROOT}/ci_results_${BUILD_ID}"
 fi
 
+# Preserve the comparison manifest as a top-level artifact for easy access
+if [[ -f "${RESULTS_DIR:-}/vllm_bench/comparison_manifest.json" ]]; then
+    cp "${RESULTS_DIR}/vllm_bench/comparison_manifest.json" \
+        "${REPO_ROOT}/ci_results_${BUILD_ID}/vllm_bench_comparison_manifest.json"
+fi
+
 # Wait for GPU memory to be fully released
 echo "Waiting 5 seconds for GPU memory to be released..."
 sleep 5
