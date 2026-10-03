@@ -93,18 +93,18 @@ layout (`get_kv_cache_stride_order`, `vllm/v1/worker/gpu/attn_utils.py`), so it
 is generally *not* contiguous in logical dim order — under NHD the 0.26.0
 rank-4 stride order `(0, 2, 1, 3)` is a transpose. Pages only tile by byte
 range in memory order, so the **rank-4** branch re-views in descending-stride
-order.
+order. It remains rank 4 after the edit: NHD emits `[NB, BS, 1, CS]`, while
+HND emits `[NB, 1, BS, CS]`. This preserves the layout identity needed by the
+fused-K/V detector to read the logical block size from the correct axis.
 
 **Rank 5 deliberately keeps the stricter logical-order contiguity guard.** The
 edited view is NHD-shaped by construction, so under an HND hint the detector
 selects `NL_X_NB_TWO_NH_BS_HS`, whose `block_size()` reads the synthetic
-`num_heads` axis and resolves 1 — extending the rank-4 memory-order
-normalization to rank 5 would replace a loud startup failure with exactly that
-silent wrong block size. This is a **general limitation** of the edits, not a
-rank-5 one: under an explicit `VLLM_KV_CACHE_LAYOUT=HND` every edited group,
-Mamba included, resolves `block_size` to 1. Not reached by default
-(`get_required_kvcache_layout` returns `None`, so vLLM falls back to NHD);
-tracked separately.
+`num_heads` axis and resolves 1. Extending memory-order normalization to a
+permuted legacy rank-5 HND tensor would therefore replace a loud startup
+failure with silent wrong addressing. Rank-4 fused attention avoids that
+ambiguity by retaining rank and placing its token axis from the resolved
+layout hint; legacy rank-5 HND remains fail-loud rather than silently wrong.
 
 ### 3. Sub-paged MLA
 
@@ -163,10 +163,12 @@ rather than being transferred wrongly.
 
 An edited view's dims are addressing metadata only (block id → byte range).
 The named dims are **not** semantic: a Mamba view's "K plane" is conv/ssm
-bytes, and a sub-paged attention view's "K plane" interleaves true K and V at
-kernel-page granularity (true K is not contiguous across kernel pages, so no
-logical-block view can have a pure-K plane). The synthetic head shape
-`(1, page_bytes / (2 * block_size * elem))` signals this deliberately.
+bytes, and a rank-5 sub-paged attention view's "K plane" interleaves true K
+and V at kernel-page granularity (true K is not contiguous across kernel
+pages, so no logical-block view can have a pure-K plane). Rank 4 keeps K/V
+fused in its trailing content axis. Its single synthetic head absorbs all
+physical heads while its token axis follows NHD/HND, preserving layout
+identity without changing byte order.
 
 Byte transport round-trips correctly because store and retrieve share the same
 bijective block-id → bytes mapping. Consequences:
