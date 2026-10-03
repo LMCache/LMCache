@@ -5,7 +5,10 @@ Example: Share KV cache across multiple LLMs
 
 .. warning::
 
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+   This page documents the behavior of LMCache's in-process mode (deprecated).
+   For the recommended walkthrough — one ``lmcache server`` shared by two
+   engines, with a prompt that actually produces a cache hit — see
+   :doc:`share_kv_cache_mp`. The MP overview is at :doc:`/mp/index`.
 
 
 LMCache should be able to reduce the generation time of the second and following calls.
@@ -94,11 +97,11 @@ Wait until both engines are ready.
 
     curl -X POST http://localhost:8000/v1/completions \
         -H "Content-Type: application/json" \
-        -d '{
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "prompt": "Explain the significance of KV cache in language models.",
-            "max_tokens": 10
-        }'
+        -d "{
+            \"model\": \"meta-llama/Meta-Llama-3.1-8B-Instruct\",
+            \"prompt\": \"$(printf 'Explain the significance of KV cache in language models.%.0s' {1..100})\",
+            \"max_tokens\": 10
+        }"
 
 4. Send the same request to the engine at port 8001,
 
@@ -106,13 +109,32 @@ Wait until both engines are ready.
 
     curl -X POST http://localhost:8001/v1/completions \
         -H "Content-Type: application/json" \
-        -d '{
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "prompt": "Explain the significance of KV cache in language models.",
-            "max_tokens": 10
-        }'
+        -d "{
+            \"model\": \"meta-llama/Meta-Llama-3.1-8B-Instruct\",
+            \"prompt\": \"$(printf 'Explain the significance of KV cache in language models.%.0s' {1..100})\",
+            \"max_tokens\": 10
+        }"
 
-The second request will automatically retrieve and reuse the KV cache from the first instance, significantly reducing generation time.
+The second request retrieves and reuses the KV cache stored by the first
+instance, which cuts prefill work on the second engine.
+
+.. note::
+
+   Prompts shorter than ``chunk_size`` (256 tokens in the config above) are
+   not stored unless ``save_unfull_chunk: true`` is set. A one-sentence
+   prompt is only ~12 tokens, so the second engine would log
+   ``LMCache hit tokens: 0`` and never demonstrate reuse. The requests
+   above repeat the sentence to exceed one full chunk, matching the P2P
+   example below. See :doc:`/api_reference/configurations` for
+   ``save_unfull_chunk``.
+
+On the second engine you should see a **non-zero** hit, for example::
+
+    LMCache hit tokens: 768
+
+If you see ``LMCache hit tokens: 0``, the prompt did not fill a chunk,
+``PYTHONHASHSEED`` differs across processes, or the remote server was not
+reachable.
 
 P2P KV cache sharing
 --------------------

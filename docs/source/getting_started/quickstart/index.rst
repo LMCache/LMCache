@@ -8,7 +8,9 @@ More Examples
    This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
 
 
-This section provides quick examples to help you get started with LMCache's key features.
+This section provides quick examples to help you get started with
+LMCache's key features. Prefer the MP-mode pages (for example
+:doc:`share_kv_cache_mp`) — the in-process pages below are deprecated.
 
 KV Cache Offloading
 -------------------
@@ -32,7 +34,9 @@ KV cache sharing enables sharing the KV cache across different LLM instances. Th
 
 Sharing KV caches also reduces TTFT and GPU computation by eliminating redundant calculations across different LLM instances.
 
-See :ref:`share_kv_cache` for more details.
+See :doc:`share_kv_cache_mp` for the recommended MP-mode walkthrough
+(one ``lmcache server``, two engines). The deprecated in-process
+version is at :ref:`share_kv_cache`.
 
 Disaggregated Prefill
 ---------------------
@@ -66,7 +70,8 @@ Detailed Examples
    :maxdepth: 1
 
    offload_kv_cache
+   share_kv_cache_mp
    share_kv_cache
-   disaggregated_prefill 
+   disaggregated_prefill
    multimodality
    standalone_starter
