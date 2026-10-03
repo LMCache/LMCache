@@ -414,10 +414,10 @@ func (r *CacheBlendEngineReconciler) reconcileRESPAuthSecret(ctx context.Context
 	}
 
 	// Update existing — apply ownerRef, data, and labels.
+	patch := client.MergeFrom(existing.DeepCopy())
 	if err := ctrl.SetControllerReference(engine, existing, r.Scheme); err != nil {
 		return err
 	}
-	patch := client.MergeFrom(existing.DeepCopy())
 	existing.Data = desired.Data
 	existing.Labels = desired.Labels
 	return r.Patch(ctx, existing, patch)
