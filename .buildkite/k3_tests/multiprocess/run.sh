@@ -7,11 +7,12 @@
 #              | fault_tolerance | deadlock | mp_autostart_tp2
 #              | restart_recovery | gds_smoke | p2p | kimi_linear_tp
 #              | dsv4_flash_tp | lazy_offload
+#              | eviction_aware_lazy_offload
 # Thin wrapper: sets up environment, then delegates to scripts/.
 # No Docker -- all processes run natively in the pod.
 set -euo pipefail
 
-TEST_NAME="${1:?Usage: $0 <test_name>  (lm_eval|lm_eval_preemption|preemption_correctness|hma_lm_eval_gemma4|vllm_bench|long_doc_qa|high_concurrency|long_doc_qa_l2|fault_tolerance|deadlock|mp_autostart_tp2|restart_recovery|cache_stats|lazy_offload|http_api|gds_smoke|p2p|kimi_linear_tp|dsv4_flash_tp)}"
+TEST_NAME="${1:?Usage: $0 <test_name>  (lm_eval|lm_eval_preemption|preemption_correctness|hma_lm_eval_gemma4|vllm_bench|long_doc_qa|high_concurrency|long_doc_qa_l2|fault_tolerance|deadlock|mp_autostart_tp2|restart_recovery|cache_stats|lazy_offload|eviction_aware_lazy_offload|http_api|gds_smoke|p2p|kimi_linear_tp|dsv4_flash_tp)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 INFERENCE_ENGINE="${INFERENCE_ENGINE:-vllm}"

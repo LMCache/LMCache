@@ -130,8 +130,10 @@ engine_kv_transfer_config() {
     LMCACHE_REQUEST_SCHEME="${LMCACHE_REQUEST_SCHEME}" \
     LMCACHE_MP_MQ_TIMEOUT="${LMCACHE_MP_MQ_TIMEOUT:-10}" \
     LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
+    LMCACHE_MP_LAZY_OFFLOAD_POLICY="${LMCACHE_MP_LAZY_OFFLOAD_POLICY:-FIFO}" \
     LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD="${LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD:-2}" \
     LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT="${LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT:-1}" \
+    LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS="${LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS:-2.5}" \
         python3 - <<'PY'
 import json
 import os
@@ -142,18 +144,29 @@ extra_config = {
     "lmcache.mp.mq_timeout": int(os.environ["LMCACHE_MP_MQ_TIMEOUT"]),
 }
 if os.environ["LMCACHE_MP_LAZY_OFFLOAD"].lower() in {"1", "true"}:
-    extra_config.update(
-        {
-            "lmcache.mp.lazy_offload": True,
-            "lmcache.mp.lazy_offload_policy": "FIFO",
-            "lmcache.mp.lazy_offload_threshold": int(
-                os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
-            ),
-            "lmcache.mp.lazy_offload_select_count": int(
-                os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
-            ),
-        }
-    )
+    # The policy is selectable so a test can exercise one other than FIFO. It
+    # stays FIFO unless a test asks otherwise.
+    policy = os.environ["LMCACHE_MP_LAZY_OFFLOAD_POLICY"]
+    extra_config["lmcache.mp.lazy_offload"] = True
+    extra_config["lmcache.mp.lazy_offload_policy"] = policy
+    if policy == "FIFO":
+        extra_config.update(
+            {
+                "lmcache.mp.lazy_offload_threshold": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
+                ),
+                "lmcache.mp.lazy_offload_select_count": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
+                ),
+            }
+        )
+    else:
+        # EVICTION_AWARE ignores those two and reads its own tunables. Only
+        # the horizon is set here: it is what decides how early a buffered
+        # store comes due ahead of its blocks reaching the eviction head.
+        extra_config["lmcache.mp.lazy_offload_horizon_steps"] = float(
+            os.environ["LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS"]
+        )
 
 print(
     json.dumps(
