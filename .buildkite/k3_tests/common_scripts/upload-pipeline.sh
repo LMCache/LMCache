@@ -54,7 +54,7 @@ fi
 
 merge_pr_base_branch
 
-if should_skip_ci "${PIPELINE_FILE}"; then
+if [[ "${XPU_CANDIDATE_VALIDATION:-0}" != "1" ]] && should_skip_ci "${PIPELINE_FILE}"; then
     echo "+++ :fast_forward: Skipping CI — no relevant files changed for ${PIPELINE_FILE}"
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent annotate \
@@ -67,9 +67,17 @@ if should_skip_ci "${PIPELINE_FILE}"; then
 fi
 
 if [[ "${PIPELINE_FILE}" == */xpu/*/pipeline.yml ]]; then
-    # The XPU template interpolates this into its Kubernetes pod image.
-    # shellcheck source=.buildkite/k3_harness/resolve-pinned-vllm.sh
-    source "${SCRIPT_DIR}/../../k3_harness/resolve-pinned-vllm.sh"
+    if [[ "${PIPELINE_FILE}" == */xpu/multiprocess/pipeline.yml ]]; then
+        export XPU_RELEASE_IMAGE="${XPU_RELEASE_IMAGE:-public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:ee0da84ab9e04ac7610e28580af62c365e898389-xpu}"
+    fi
+    if [[ "${XPU_CANDIDATE_VALIDATION:-0}" == "1" ]]; then
+        XPU_CI_IMAGE="${XPU_CANDIDATE_IMAGE:?Candidate validation requires XPU_CANDIDATE_IMAGE}"
+    else
+        # shellcheck source=.buildkite/k3_harness/resolve-pinned-vllm.sh
+        source "${SCRIPT_DIR}/../../k3_harness/resolve-pinned-vllm.sh"
+        XPU_CI_IMAGE="${PINNED_XPU_IMAGE}"
+    fi
+    export XPU_CI_IMAGE
 fi
 
 echo "--- :pipeline: Uploading ${PIPELINE_FILE}"

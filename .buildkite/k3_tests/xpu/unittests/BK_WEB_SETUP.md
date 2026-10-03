@@ -7,10 +7,41 @@
 - Rebuild on PR label change: Yes
 - Skip queued / cancel running branch builds: Yes
 
-This pipeline now has a single step: it runs the XPU unit tests directly in the
-upstream vLLM XPU nightly image and installs LMCache from source inside the job
-pod. It is the device-level validation for XPU wheels; GitHub Actions only
-builds and smoke-checks the wheel without an Intel GPU.
+The scheduled nightly builds an XPU CI candidate from the current
+`vllm/vllm-openai-xpu:nightly` digest. Its Dockerfile installs DPC++ using
+`.buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh`, but does not install
+LMCache. During nightly validation, both XPU pipelines install the wheel
+built by this run. They download the GitHub Actions artifact by ID, verify
+its SHA-256, and install it with its declared runtime dependencies using
+`uv pip install` in the same immutable candidate image. Dependency resolution
+may change installed package versions, as with source installs.
+Wheel validation uses a temporary import directory linking the repository's
+`tests`, `benchmarks`, and `setup_extensions`, followed by site-packages;
+the checkout itself is not on `PYTHONPATH`. Spawned workers can import test
+helpers without importing source `lmcache` instead of the installed wheel.
+The Buildkite checkout must match the GitHub Actions source commit; candidate
+validation refuses PR-base pre-merges so tests and wheel use the same revision.
+The temporary directory remains available for the lifetime of the job pod.
+Ordinary Buildkite runs still install LMCache from source. Only when
+both nightly Buildkite builds pass does the nightly record its digest on
+`buildkite_latest_tested_vllm`; failures keep the previous pin.
+The same verified run also records the upstream vLLM XPU base image digest on
+`github_nightly_tested_vllm` for provenance; it is distinct from the CI image.
+Candidate builds pass `XPU_CANDIDATE_IMAGE` to the XPU pod; ordinary builds
+resolve the previously promoted image from the pin branch.
+The image keeps the upstream `vllm serve` entrypoint. `BASH_ENV` loads oneAPI
+in noninteractive Bash jobs (including those launched by Buildkite); a
+non-Bash command must source `/opt/intel/oneapi/setvars.sh` separately if it
+needs the compiler environment.
+
+The verifier triggers the existing `unit-tests-xpu` and `xpu-mp-test` Buildkite
+pipelines. Configure `BUILD_KITE_API_TOKEN` as a secret with `read_builds` and
+`write_builds` scopes. The existing
+`DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` must be able to push to the public
+`lmcache/vllm-openai-xpu-ci` repository; XPU nodes must be able to pull it.
+The `buildkite-git-creds` Kubernetes secret on the XPU queue must contain
+`GITHUB_TOKEN` with GitHub Actions artifact read permission for `LMCache/LMCache`.
+GitHub Actions must be able to update `buildkite_latest_tested_vllm`.
 
 ### Trigger strategy
 
@@ -58,14 +89,12 @@ steps:
 
 - Runs the XPU smoke test on the `intel-xpu` queue
 - Uses the latest Buildkite-verified XPU `image@sha256:...` from
-  `tested_runtimes.jsonl`; when none is available it falls back to the stable XPU release image
-  `vllm/vllm-openai-xpu:v0.29.0`
+  `tested_runtimes.jsonl`; until the first pin, UT uses
+  `vllm/vllm-openai-xpu:v0.26.0` and MP retains its previous public ECR image.
 - Installs LMCache from source via `setup-lmcache-only-env.sh`
 - Verifies `torch.xpu.is_available()` inside the job pod
 
 ## TODO
-
-- Enable vLLM/LMCache nightly build to catch up latest code changes
 
 - Refine the XPU path filter if additional XPU-only subtrees need to be excluded
 

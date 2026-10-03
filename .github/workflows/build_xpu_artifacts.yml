@@ -34,6 +34,12 @@ on:
             xpu_version:
                 description: Resolved LMCache version baked into the XPU wheel.
                 value: ${{ jobs.build-xpu-artifacts.outputs.xpu_version }}
+            wheel_artifact_id:
+                description: Artifact ID for the tested XPU wheel.
+                value: ${{ jobs.build-xpu-artifacts.outputs.wheel_artifact_id }}
+            wheel_artifact_digest:
+                description: SHA-256 of the XPU wheel artifact archive.
+                value: ${{ jobs.build-xpu-artifacts.outputs.wheel_artifact_digest }}
 
 env:
     LC_ALL: en_US.UTF-8
@@ -51,6 +57,8 @@ jobs:
         runs-on: ubuntu-latest
         outputs:
             xpu_version: ${{ steps.prepare.outputs.version }}
+            wheel_artifact_id: ${{ steps.upload.outputs.artifact-id }}
+            wheel_artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
         steps:
             - name: "Harden Runner"
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
@@ -76,27 +84,6 @@ jobs:
                 version_environment_variable: XPU_VERSION
                 dev_version: ${{ inputs.dev_version }}
 
-            - name: Record XPU runtime metadata
-              env:
-                XPU_IMAGE: ${{ inputs.xpu_image }}
-              run: |
-                mkdir -p dist
-                docker run --rm \
-                  --entrypoint bash "${XPU_IMAGE}" -lc \
-                  'python3 -c "import json, platform, torch, vllm; print(json.dumps({\"python\": platform.python_version(), \"torch\": torch.__version__, \"vllm\": getattr(vllm, \"__version__\", \"unknown\")}, indent=2, sort_keys=True))"' \
-                  > dist/xpu-runtime.json
-                python3 - <<'PY'
-                import json
-                import os
-                from pathlib import Path
-
-                metadata_path = Path("dist/xpu-runtime.json")
-                metadata = json.loads(metadata_path.read_text())
-                metadata["image"] = os.environ["XPU_IMAGE"]
-                metadata["lmcache_version"] = os.environ["XPU_VERSION"]
-                metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
-                PY
-
             # Build inside oneAPI image. No GPU required for compiling the
             # extension itself.
             - name: Build XPU wheel
@@ -117,18 +104,15 @@ jobs:
                     set -euxo pipefail
                     WHEEL=$(ls /work/LMCache/dist/*.whl | head -n 1)
                     python3 -m pip install --no-deps "$WHEEL"
-                    python3 /work/LMCache/.github/scripts/assert_native_ops.py lmcache.xpu_ops
-                    python3 -c "import lmcache.xpu_ops as ops; required = (\"TransferDirection\", \"EngineKVFormat\", \"multi_layer_kv_transfer\"); missing = [name for name in required if not hasattr(ops, name)]; assert not missing, f\"lmcache.xpu_ops is missing {', '.join(missing)}\"; print(\"LMCache XPU extension API surface OK\")"
-                    python3 -c "import lmcache, torch; print(\"LMCache import OK\"); print(\"Torch:\", torch.__version__)"
+                    python3 -c "import lmcache; print(\"LMCache import OK\")"
                   '
 
             - name: Upload XPU release artifacts to GHA
+              id: upload
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
               with:
                 name: release-xpu-artifacts
-                path: |
-                  dist/*.whl
-                  dist/xpu-runtime.json
+                path: dist/*.whl
 
 # On-device validation requires Intel GPU hardware and is not available on
 # GitHub-hosted runners. Run manual validation by installing this wheel in an
