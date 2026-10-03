@@ -190,6 +190,34 @@ Important validation rules:
   that are not aligned to `block_align`; misaligned write buffers use an
   aligned bounce buffer
 
+## Padded payload I/O
+
+The core passes logical byte views without expanding them into allocation
+padding. Stores leave the source unchanged and write zeroes for disk padding.
+Loads retain the supplied buffer capacity so an aligned buffer covering the
+padded transfer can be read directly. Bytes beyond the stored payload, up to
+the transfer length within that buffer, may be overwritten. Hidden allocation
+padding is not exposed. A failed load may partially modify the destination;
+callers must retain exclusive access until completion and publish only successes.
+
+For aligned buffers with one partial final block:
+
+- POSIX retains its direct-prefix and tail-bounce implementation.
+- Regular O_DIRECT io_uring uses one READV or WRITEV submission containing the
+  direct prefix and an owned aligned tail. A payload smaller than one block
+  uses only the tail. The submission owns the iovec descriptors and tail until
+  completion. Short vectored transfers fail without scalar resubmission.
+  The deprecated `read_uring()` API retains its scalar/full-bounce path.
+- NVMe passthrough keeps MDTS-bounded direct prefix chunks and adds an aligned
+  tail command. The core retains the views until batch completion and copies
+  a read tail back only after every chunk of that logical read succeeds.
+
+Unaligned addresses and nonstandard padding retain the full-bounce fallback.
+Aligned payloads retain their scalar paths, including existing fixed-buffer
+selection. Mixed prefix/tail vectors do not use a fixed-buffer index. These
+changes do not add MP fixed-buffer registration or change the on-device format,
+FDP placement policy, batch rollback, or durability guarantees.
+
 ## Relationship to Non-MP Mode
 
 The legacy `RustRawBlockBackend` now acts as a thin facade over `RawBlockCore`.

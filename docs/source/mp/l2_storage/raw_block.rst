@@ -67,6 +67,15 @@ caller-provided load buffers during prefetch.
 
 **Notes:**
 
+- Aligned padded payloads use direct prefix I/O and a small tail buffer:
+  regular O_DIRECT io_uring uses vectored I/O, while NVMe passthrough splits
+  the prefix by its transfer limit and submits the tail separately. Sources
+  are not modified; disk padding is zero-filled. Misaligned buffers retain
+  the existing full-buffer fallback.
+- Loads may overwrite bytes beyond the stored payload up to the padded transfer
+  length within the supplied destination buffer. A failed load may partially
+  modify the destination and must not be published as valid.
+
 - ``raw_block`` is a server-owned MP adapter. It does **not** support
   per-TP device-path mappings in MP mode.
 - ``raw_block`` remains ``"type": "raw_block"`` for all supported engines.
