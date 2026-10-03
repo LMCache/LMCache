@@ -11,6 +11,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Optional, cast
 import asyncio
 import threading
+import time
 
 if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import L1MemoryDesc
@@ -189,6 +190,8 @@ class BigtableL2AdapterConfig(L2AdapterConfigBase):
         layer_group_size: int = 10,
         num_layers: int = 32,
         kv_size: int = 2,
+        breaker_initial_cooldown_s: float = 5.0,
+        breaker_max_cooldown_s: float = 300.0,
     ):
         super().__init__()
         self.project_id = project_id
@@ -209,6 +212,8 @@ class BigtableL2AdapterConfig(L2AdapterConfigBase):
         self.layer_group_size = layer_group_size
         self.num_layers = num_layers
         self.kv_size = kv_size
+        self.breaker_initial_cooldown_s = breaker_initial_cooldown_s
+        self.breaker_max_cooldown_s = breaker_max_cooldown_s
 
     @classmethod
     def from_dict(cls, d: dict) -> BigtableL2AdapterConfig:
@@ -224,7 +229,7 @@ class BigtableL2AdapterConfig(L2AdapterConfigBase):
             The parsed BigtableL2AdapterConfig instance.
 
         Raises:
-            ValueError: If max_capacity_gb is invalid.
+            ValueError: If max_capacity_gb or a breaker cooldown is invalid.
         """
         # Resolve config via BigtablePluginConfig helper, which also handles env vars
         cfg = BigtablePluginConfig.from_extra_config(d)
@@ -232,6 +237,19 @@ class BigtableL2AdapterConfig(L2AdapterConfigBase):
         max_capacity_gb = d.get("max_capacity_gb", 0)
         if not isinstance(max_capacity_gb, (int, float)) or max_capacity_gb < 0:
             raise ValueError("max_capacity_gb must be a non-negative number")
+
+        def _pos_float(key: str, default: float) -> float:
+            v = d.get(key, default)
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
+                raise ValueError(f"{key} must be a positive number")
+            return float(v)
+
+        initial_cooldown = _pos_float("breaker_initial_cooldown_s", 5.0)
+        max_cooldown = _pos_float("breaker_max_cooldown_s", 300.0)
+        if max_cooldown < initial_cooldown:
+            raise ValueError(
+                "breaker_max_cooldown_s must be >= breaker_initial_cooldown_s"
+            )
 
         row_key_template = (
             d.get("row_key_template")
@@ -261,6 +279,8 @@ class BigtableL2AdapterConfig(L2AdapterConfigBase):
             layer_group_size=int(d.get("layer_group_size", 10)),
             num_layers=int(d.get("num_layers", 32)),
             kv_size=int(d.get("kv_size", 2)),
+            breaker_initial_cooldown_s=initial_cooldown,
+            breaker_max_cooldown_s=max_cooldown,
         )
 
     @classmethod
@@ -287,7 +307,11 @@ class BigtableL2AdapterConfig(L2AdapterConfigBase):
             "- row_key_template (str): row key template configuration\n"
             "- layer_group_size (int): number of layers per shard (default 10)\n"
             "- num_layers (int): total layers in the KV cache model (default 32)\n"
-            "- kv_size (int): kv size dimension multiplier (default 2)"
+            "- kv_size (int): kv size dimension multiplier (default 2)\n"
+            "- breaker_initial_cooldown_s (float): circuit-breaker open time "
+            "before re-probing Bigtable (default 5.0)\n"
+            "- breaker_max_cooldown_s (float): cap for the doubled cooldown "
+            "(default 300.0)"
         )
 
 
@@ -298,7 +322,11 @@ class BigtableL2Adapter(L2AdapterInterface):
     daemon thread.
 
     Locking: client-side refcount in ``_locked_keys``.
-    Circuit breaker: disables the adapter after consecutive connection failures.
+    Circuit breaker: disables the adapter after consecutive connection
+    failures, then re-arms itself once ``breaker_initial_cooldown_s`` has
+    elapsed so a transient outage does not disable L2 for the lifetime of
+    the process. A backend that is still broken re-trips and the cooldown
+    doubles up to ``breaker_max_cooldown_s``.
     """
 
     max_connection_failures = 3
@@ -345,9 +373,13 @@ class BigtableL2Adapter(L2AdapterInterface):
         self._key_sizes: dict[ObjectKey, int] = {}
         self._object_size_cache: dict[str, int] = {}
 
-        # Circuit breaker
+        # Circuit breaker. ``_breaker_reopen_at`` is a ``time.monotonic()``
+        # deadline; once it passes, the next submit re-arms the breaker and
+        # probes Bigtable again.
         self._connection_failures = 0
         self._connection_disabled = False
+        self._breaker_cooldown_s = config.breaker_initial_cooldown_s
+        self._breaker_reopen_at = 0.0
 
         self._lock = threading.Lock()
 
@@ -431,7 +463,7 @@ class BigtableL2Adapter(L2AdapterInterface):
         with self._lock:
             task_id = self._next_task_id
             self._next_task_id += 1
-            if self._connection_disabled:
+            if self._breaker_blocks_locked():
                 self._completed_store_tasks[task_id] = L2StoreResult(False, 0)
                 disabled = True
             else:
@@ -467,7 +499,7 @@ class BigtableL2Adapter(L2AdapterInterface):
         with self._lock:
             task_id = self._next_task_id
             self._next_task_id += 1
-            if self._connection_disabled:
+            if self._breaker_blocks_locked():
                 self._completed_lookup_tasks[task_id] = Bitmap(len(keys))
                 disabled = True
             else:
@@ -512,7 +544,7 @@ class BigtableL2Adapter(L2AdapterInterface):
         with self._lock:
             task_id = self._next_task_id
             self._next_task_id += 1
-            if self._connection_disabled:
+            if self._breaker_blocks_locked():
                 self._completed_load_tasks[task_id] = Bitmap(len(keys))
                 disabled = True
             else:
@@ -543,7 +575,7 @@ class BigtableL2Adapter(L2AdapterInterface):
             return
 
         with self._lock:
-            if self._connection_disabled:
+            if self._breaker_blocks_locked():
                 return
             deletable = [k for k in keys if self._locked_keys.get(k, 0) == 0]
 
@@ -572,6 +604,11 @@ class BigtableL2Adapter(L2AdapterInterface):
         with self._lock:
             failures = self._connection_failures
             disabled = self._connection_disabled
+            retry_in = (
+                max(0.0, self._breaker_reopen_at - time.monotonic())
+                if disabled
+                else 0.0
+            )
         usage = self.get_usage()
         return {
             "is_healthy": self._loop_thread.is_alive() and not disabled,
@@ -581,6 +618,7 @@ class BigtableL2Adapter(L2AdapterInterface):
             "table_name": self._config.table_name,
             "connection_failures": failures,
             "connection_disabled": disabled,
+            "breaker_retry_in_seconds": retry_in,
             "current_size_bytes": usage.total_bytes_used,
             "max_capacity_bytes": usage.total_capacity_bytes,
         }
@@ -634,6 +672,32 @@ class BigtableL2Adapter(L2AdapterInterface):
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
+    def _breaker_blocks_locked(self) -> bool:
+        """Whether the circuit breaker should reject a new request.
+
+        The caller must hold ``self._lock``. When the breaker is open but
+        its cooldown has elapsed, this re-arms the adapter (clearing the
+        failure count) and returns False so the request that triggered the
+        check probes Bigtable. A backend that is still broken re-trips
+        after ``max_connection_failures`` further errors, with the cooldown
+        doubled by ``_record_connection_outcome``.
+
+        Returns:
+            True to short-circuit the request, False to let it through.
+        """
+        if not self._connection_disabled:
+            return False
+        if time.monotonic() < self._breaker_reopen_at:
+            return True
+        self._connection_disabled = False
+        self._connection_failures = 0
+        logger.info(
+            "BigtableL2Adapter re-arming after %.1fs cooldown; probing %s",
+            self._breaker_cooldown_s,
+            self._config.table_name,
+        )
+        return False
+
     def _record_connection_outcome(self, exc: Optional[BaseException]) -> None:
         """Update circuit breaker status based on operation outcome."""
         with self._lock:
@@ -641,8 +705,15 @@ class BigtableL2Adapter(L2AdapterInterface):
                 if self._connection_failures > 0:
                     logger.info("BigtableL2Adapter connection recovered")
                 self._connection_failures = 0
+                self._breaker_cooldown_s = self._config.breaker_initial_cooldown_s
                 return
             if not _is_connection_error(exc):
+                return
+            if self._connection_disabled:
+                # Outcome of a request that was already in flight when the
+                # breaker tripped. Counting it would inflate the failure
+                # tally and re-arm the cooldown for an outage already
+                # accounted for.
                 return
             self._connection_failures += 1
             logger.error(
@@ -653,9 +724,16 @@ class BigtableL2Adapter(L2AdapterInterface):
             )
             if self._connection_failures >= self.max_connection_failures:
                 self._connection_disabled = True
+                self._breaker_reopen_at = time.monotonic() + self._breaker_cooldown_s
                 logger.error(
-                    "BigtableL2Adapter disabled after %d consecutive failures",
+                    "BigtableL2Adapter disabled after %d consecutive "
+                    "failures; re-probing in %.1fs",
                     self.max_connection_failures,
+                    self._breaker_cooldown_s,
+                )
+                self._breaker_cooldown_s = min(
+                    self._breaker_cooldown_s * 2.0,
+                    self._config.breaker_max_cooldown_s,
                 )
 
     # ------------------------------------------------------------------
