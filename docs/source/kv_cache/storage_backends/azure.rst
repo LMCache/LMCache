@@ -74,5 +74,12 @@ Notes
 -----
 
 * Only full chunks are stored; set ``save_unfull_chunk: False``.
-* Keys are flattened into one blob per chunk (same flat layout as the S3
-  backend).
+* Each chunk uses the name
+  ``lmcache-v2/<SHA-256 hex digest of the UTF-8 CacheEngineKey string>``.
+  Hashing the complete key prevents the previous slash-to-underscore aliasing
+  between model names such as ``a/b_c`` and ``a_b/c``. Names are 75 ASCII bytes.
+* Upgrading starts a cold remote cache. Legacy blobs are neither read nor
+  modified, because their names cannot reliably identify the original model.
+  Old and new clients can use the same container but do not share these chunks.
+  Allow ``lmcache-v2/`` in any prefix-scoped access policies or lifecycle rules.
+  No automatic migration or deletion is performed.
