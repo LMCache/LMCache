@@ -532,6 +532,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
       enters vLLM's waiting queue. Disabled by default.
+    - lmcache.mp.enable_lookup: when False, the connector skips all LMCache
+      lookups and only stores KV caches (default True). Useful in
+      MultiConnector topologies where another connector handles KV loading
+      and LMCache is only used as an offload/distributed store.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -690,6 +694,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "lmcache.mp.lazy_offload requires vLLM prefix caching "
                 "(enable_prefix_caching=True)"
             )
+
+        # When False, the connector skips all LMCache lookups and only stores
+        # KV caches. Useful in MultiConnector topologies where another
+        # connector (e.g. Mooncake) handles PD transfer and LMCache is only
+        # used as an offload/distributed store.
+        self.enable_lookup: bool = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.enable_lookup", True
+            )
+        )
 
         if self.role == KVConnectorRole.SCHEDULER:
             # Banner from the scheduler role only, so tensor-parallel
@@ -1186,6 +1200,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         tracker = self._get_or_create_request_tracker(request)
 
+        if not self.enable_lookup:
+            return 0, False
+
         # A failed asynchronous load is bypassed until vLLM admits the request
         # for local computation via update_state_after_alloc().  The scheduler
         # may poll this method repeatedly before that admission; do not submit
@@ -1288,7 +1305,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         if self.role != KVConnectorRole.SCHEDULER:
             return
-        if not self._eager_prefetch or request.resumable:
+        if not self.enable_lookup or not self._eager_prefetch or request.resumable:
             return
 
         tracker = self._get_or_create_request_tracker(request)
