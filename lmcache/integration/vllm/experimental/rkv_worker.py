@@ -283,13 +283,42 @@ class RKVWorker:
 
         for layer_name in self._layer_names:
             layer = no_compile_layers[layer_name]
+            impl = getattr(layer, "impl", None)
+            original_forward = getattr(impl, "forward", None)
+            if original_forward is None:
+                raise RuntimeError(
+                    f"R-KV attention backend is missing for {layer_name}"
+                )
 
-            def capture(_module: Any, args: tuple[Any, ...], name: str = layer_name):
-                if not args:
-                    raise RuntimeError("R-KV attention hook did not receive query")
-                self.capture_query(name, args[0])
+            def forward_with_query_capture(
+                attn_layer: Any,
+                query: torch.Tensor,
+                key: torch.Tensor,
+                value: torch.Tensor,
+                kv_cache: torch.Tensor,
+                attn_metadata: Any,
+                *args: Any,
+                _forward: Any = original_forward,
+                **kwargs: Any,
+            ) -> Any:
+                # CUDA uses the opaque unified-attention custom op. Under
+                # PIECEWISE cudagraph this backend call remains outside the
+                # graph and therefore executes on every model step.
+                self.capture_query(attn_layer.layer_name, query)
+                return _forward(
+                    attn_layer,
+                    query,
+                    key,
+                    value,
+                    kv_cache,
+                    attn_metadata,
+                    *args,
+                    **kwargs,
+                )
 
-            layer.register_forward_pre_hook(capture)
+            # Assign on the implementation instance (not its class) so only
+            # this engine's R-KV attention path is observed.
+            impl.forward = forward_with_query_capture
 
         self._query_hooks_installed = True
 

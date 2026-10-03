@@ -18,6 +18,27 @@ HEAD_DIM = 8
 LAYER_NAMES = ["layer.0", "layer.1"]
 
 
+class _FakeAttentionImpl:
+    def forward(
+        self,
+        attn_layer,
+        query,
+        key,
+        value,
+        kv_cache,
+        attn_metadata,
+        *args,
+        **kwargs,
+    ):
+        return None
+
+
+class _FakeAttention:
+    def __init__(self, layer_name: str):
+        self.layer_name = layer_name
+        self.impl = _FakeAttentionImpl()
+
+
 def _policy():
     return R1KV(
         budget=BUDGET,
@@ -83,7 +104,7 @@ def test_prepare_forward_builds_physical_view_and_captures_queries():
         )
         for name in LAYER_NAMES
     }
-    layers = {name: torch.nn.Identity() for name in LAYER_NAMES}
+    layers = {name: _FakeAttention(name) for name in LAYER_NAMES}
     context = SimpleNamespace(
         attn_metadata=attn_metadata,
         no_compile_layers=layers,
@@ -130,7 +151,14 @@ def test_prepare_forward_builds_physical_view_and_captures_queries():
             device="cuda",
             dtype=torch.bfloat16,
         )
-        layers[name](query)
+        layers[name].impl.forward(
+            layers[name],
+            query,
+            None,
+            None,
+            None,
+            None,
+        )
 
     for request_id in ("req-a", "req-b"):
         for name in LAYER_NAMES:
