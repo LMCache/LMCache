@@ -77,6 +77,7 @@ def _schedule(
     block_ids: tuple[list[int], ...] = (),
     *,
     new: bool = False,
+    finished_req_ids: list[str] | None = None,
 ) -> SchedulerOutput:
     return cast(
         SchedulerOutput,
@@ -93,6 +94,7 @@ def _schedule(
             ),
             num_scheduled_tokens={request_id: num_tokens} if num_tokens else {},
             total_num_scheduled_tokens=num_tokens,
+            finished_req_ids=finished_req_ids or [],
         ),
     )
 
@@ -323,7 +325,10 @@ def test_lookup_retrieve_and_cleanup(
     assert not any(worker.get_finished(set()))
     mock_io.scheduler.cleanup_lookup_result.reset_mock()
     delay_free, params = scheduler.request_finished(request, [1, 2])
-    assert delay_free is (kv_role != "kv_consumer" and not lazy_offload)
+    # This request only retrieved KV; no STORE was ever submitted, so per the
+    # vLLM KVConnector contract the connector must not delay-free its blocks
+    # (request_finished True is reserved for requests with an async save).
+    assert delay_free is False
     assert params == {
         "cached_token_stats": {
             "num_vllm_cached_tokens": 4,
@@ -335,7 +340,7 @@ def test_lookup_retrieve_and_cleanup(
     mock_io.scheduler.cleanup_lookup_result.assert_called_once_with("request")
     mock_io.scheduler.end_session.assert_called_once_with("request")
     sending, receiving = worker.get_finished({"request"})
-    assert (sending or set()) == ({"request"} if delay_free else set())
+    assert not sending
     assert not receiving
 
 
@@ -420,3 +425,30 @@ def test_multi_connector_child_role_and_completion(
     mock_io.scheduler.end_session.assert_called_once_with("request")
     worker.shutdown()
     scheduler.shutdown()
+
+
+def test_request_finished_without_store_never_delays_free(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+) -> None:
+    """Requests without STORE metadata must not delay-free nor be reported.
+
+    A request can finish with no async save in flight (aborted before decode,
+    GetStoreMetadata returning None, or a MultiConnector deployment where
+    another connector owns the save). Per the vLLM KVConnector contract,
+    request_finished returns True only for requests with an async store, and
+    get_finished must not report finished_sending for the others.
+    """
+    scheduler, worker = connectors
+    request = _request()
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    scheduler.update_state_after_alloc(
+        request, MagicMock(get_block_ids=lambda: ([],)), 0
+    )
+
+    delay_free, params = scheduler.request_finished(request, [])
+    assert delay_free is False
+    assert params is None
+
+    sending, receiving = worker.get_finished({"request"})
+    assert not sending
+    assert not receiving

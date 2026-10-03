@@ -714,6 +714,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 if mamba_cache_mode == "align" and spec_config is not None
                 else 0
             )
+            # Request IDs for which the scheduler created STORE metadata.
+            # Used by request_finished to decide delay_free: only requests
+            # with an async store should delay block freeing.
+            self._stored_requests: set[str] = set()
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
@@ -1407,6 +1411,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         metadata = LMCacheMPConnectorMetadata()
         metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
 
+        # Clean up _stored_requests for requests that finished in the
+        # previous step (request_finished was already called for them).
+        for finished_req_id in scheduler_output.finished_req_ids:
+            self._stored_requests.discard(finished_req_id)
+
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
         self._process_cached_requests(scheduler_output, metadata)
@@ -1512,7 +1521,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
-        return self._can_store, (return_params or None)
+        has_store = request.request_id in self._stored_requests
+        return has_store, (return_params or None)
 
     def request_finished_all_groups(
         self,
@@ -1650,6 +1660,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     self._lazy_offload_manager.add_store_candidate(r_meta)
                 else:
                     metadata.add_request_metadata(r_meta)
+                self._stored_requests.add(new_request.req_id)
 
     def _process_cached_requests(
         self,
@@ -1689,6 +1700,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     self._lazy_offload_manager.add_store_candidate(r_meta)
                 else:
                     metadata.add_request_metadata(r_meta)
+                self._stored_requests.add(request_id)
 
     def _report_block_allocation_deltas(
         self,

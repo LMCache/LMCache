@@ -1694,3 +1694,31 @@ def test_recovery_reports_the_ring_re_registration_result(fake_adapter, ring_ok)
     adapter.register_kv_caches({"layer.0": fake_tensor})
 
     assert adapter._reregister_kv_caches_callback() is ring_ok
+
+
+def test_process_finished_stores_reports_only_delay_freed_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """finished_sending pairs with request_finished's delay-free decision.
+
+    - a request with a store future in flight waits (previously_finished);
+    - a request whose STORE metadata was seen but has no future (MLA
+      kv_writer=False ranks) reports immediately;
+    - a request that never carried STORE metadata (e.g. MultiConnector saves
+      owned by another connector) must not be reported at all.
+    """
+    adapter = LMCacheMPWorkerAdapter.__new__(LMCacheMPWorkerAdapter)
+    adapter.finished_stores = set()
+    adapter.store_futures = {"inflight-req": MagicMock(name="store_future")}
+    adapter.previously_finished = set()
+    adapter._returned_finished = set()
+    adapter._submitted_stores = {"mla-req"}
+    monkeypatch.setattr(adapter, "_update_and_get_finished_store", lambda: set())
+
+    reported = adapter._process_finished_stores(
+        set(), {"inflight-req", "mla-req", "never-submitted"}
+    )
+
+    assert reported == {"mla-req"}
+    assert adapter.previously_finished == {"inflight-req"}
+    assert adapter._submitted_stores == set()
