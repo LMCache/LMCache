@@ -1,0 +1,283 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/recipes/kimi_linear.rst:4
+msgid "Kimi-Linear"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:6
+msgid ""
+"A hybrid architecture from Moonshot AI that interleaves **Kimi Delta "
+"Attention (KDA)** linear-attention layers with **Multi-head Latent "
+"Attention (MLA)** full-attention layers. Like other Mamba / linear-"
+"attention hybrids, the KDA layers keep a recurrent **state cache** (a "
+"convolution + delta-net state) instead of a paged key/value cache; "
+"LMCache reinterprets that state as an opaque page at registration time, "
+"so prefix caching and KV reuse work end to end. See "
+":doc:`../mp/hybrid_models` for the general handling of Mamba / linear-"
+"attention models."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:16
+msgid "Validated models"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:18
+msgid ""
+"`moonshotai/Kimi-Linear-48B-A3B-Instruct "
+"<https://huggingface.co/moonshotai/Kimi-Linear-48B-A3B-Instruct>`_ (48B-"
+"parameter MoE, 3B active; 2 GPUs)"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst
+msgid "vLLM"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:27
+msgid ""
+"**Engine documentation:** `Kimi-Linear in vLLM supported models "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
+"generation>`_ (architecture ``KimiLinearForCausalLM``)."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:32
+msgid "**Status:** Validated with LMCache."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:34
+msgid ""
+"As a Mamba / linear-attention hybrid, Kimi-Linear needs the same three "
+"settings as the other GDN hybrids: the ``align`` Mamba cache mode, prefix"
+" caching, and a chunk size matched to vLLM's *unified block size* ``N``. "
+"That block size is model- and parallelism-specific — vLLM logs ``Setting "
+"attention block size to N tokens`` at startup. Because the KDA state is "
+"sharded across tensor-parallel ranks (while the MLA cache is not), ``N`` "
+"depends on ``--tensor-parallel-size``; read it from the log for your own "
+"configuration:"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:47
+msgid "Model"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:48
+msgid "Unified block size ``N``"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:49
+msgid "GPUs (TP)"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:50
+msgid "``moonshotai/Kimi-Linear-48B-A3B-Instruct``"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:51
+msgid "944"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:52
+msgid "2"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:54
+msgid ""
+"Set the LMCache server's ``--chunk-size`` to that ``N`` (or a multiple of"
+" it) and enable ``--separate-object-groups``, then set vLLM's ``--max-"
+"num-batched-tokens`` to at least ``N``. Keeping it below ``2N`` (e.g. "
+"``2N-1``) snapshots the KDA state at every block boundary for the finest "
+"cache reuse; larger values raise prefill throughput at the cost of "
+"coarser reuse (see *Why these settings*)."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:63
+msgid ""
+"``N`` **scales inversely with the tensor-parallel size** for this model, "
+"so changing ``--tensor-parallel-size`` changes both derived flags. The "
+"MLA cache is *replicated* across TP ranks (its per-rank size is fixed), "
+"while the KDA state is *sharded* (its per-rank size is divided by the TP "
+"degree). vLLM picks ``N`` so an attention page is at least as large as a "
+"KDA state page, so a smaller per-rank KDA state yields a smaller ``N`` — "
+"and vice versa. Concretely, going from **TP=2 → TP=1** doubles the per-"
+"rank KDA state, so ``N`` doubles from ``944`` to ``1888``; ``--chunk-"
+"size`` (``= N``) and the recommended ``--max-num-batched-tokens`` "
+"(``2N-1``, i.e. ``3775``) both double to match. Always re-read ``N`` from"
+" the startup log after changing the TP degree — do not scale it by hand."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:76
+msgid "Start the LMCache MP server (``N = 944``):"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:85
+msgid ""
+"Start vLLM with the LMCache MP connector (2 GPUs, ``N = 944`` → ``2N-1 = "
+"1887``):"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:101
+msgid "**Why these settings:**"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:103
+msgid ""
+"``--mamba-cache-mode align`` and ``--enable-prefix-caching`` are "
+"**required**. ``align`` is the only Mamba cache mode the KDA backend "
+"supports, and prefix caching must be on for LMCache to store and reuse "
+"the recurrent state."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:107
+msgid ""
+"``--separate-object-groups`` (server) is **required** for hybrid Mamba / "
+"linear-attention models: it gives the KDA layers their own cache objects "
+"so their recurrent state is stored and loaded independently of the MLA "
+"layers. It is what allows ``--max-num-batched-tokens`` to exceed ``2N``; "
+"without it the budget must stay in ``[N, 2N)``."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:113
+msgid ""
+"``--chunk-size`` (server) must be a multiple of the unified block size "
+"``N`` — ``--chunk-size N`` is the simplest choice and gives the finest "
+"cache granularity. LMCache raises at engine startup if it is not."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:116
+msgid ""
+"``--max-num-batched-tokens`` must be **at least** ``N``: a scheduler step"
+" must advance at least one whole block, since ``align`` snapshots the KDA"
+" state only at the *end* of each step, on a block boundary, and the "
+"scheduler splits prefills into whole ``N``-token blocks. Two regimes:"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:121
+msgid ""
+"**``[N, 2N)`` (e.g. ``2N-1``)** — every step advances exactly one block, "
+"so LMCache snapshots the state at *every* block boundary: the finest "
+"partial-prefix reuse. ``2N-1`` also leaves ``N-1`` spare budget so "
+"decodes co-schedule with a prefill block instead of serializing behind it"
+" (exactly ``N`` blocks new prefills once any request is decoding)."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:127
+msgid ""
+"**``≥ 2N``** (requires ``--separate-object-groups``) — larger prefill "
+"steps raise throughput, but a step now spans several blocks and only its "
+"last block gets a snapshot, so reuse is coarser: cached prefixes align to"
+" step boundaries rather than to every block."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:131
+msgid "``--trust-remote-code`` loads Kimi-Linear's custom modeling code."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:132
+msgid ""
+"``--tensor-parallel-size 2`` shards the weights across two GPUs. Adjust "
+"it to your hardware — but note it changes ``N`` and the two derived flags"
+" (see the note above)."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:136
+msgid ""
+"No attention-backend or ``--no-disable-hybrid-kv-cache-manager`` flag is "
+"needed; ``LMCacheMPConnector`` advertises hybrid support and vLLM auto-"
+"selects the KDA and MLA backends. For the generic LMCache + vLLM wiring "
+"(ports, remote hosts), see :doc:`../getting_started/quickstart`."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst
+msgid "SGLang"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:143
+#: ../../source/recipes/kimi_linear.rst:147
+msgid "**Status:** Not validated with LMCache."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst
+msgid "TRT-LLM"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:150
+msgid "CacheBlend support"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:152
+msgid ""
+"Not supported: the hybrid groups' cached pages are byte-opaque (see "
+"Caveats)."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:155
+msgid "Compression support"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:161
+msgid "Method"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:162
+msgid "Status"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:163
+msgid "Notes"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:164
+msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:165
+msgid "Not supported"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:166
+msgid "Hybrid groups' cached pages are byte-opaque."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:169
+msgid "Caveats"
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:171
+msgid ""
+"Generation is **not guaranteed bit-exact** between a cached and a fresh "
+"run under concurrent load: KDA / GDN linear-attention backends do not "
+"support vLLM's batch-invariant mode, so kernel results can vary with "
+"batch composition. Validate with a score-level comparison, not a token-"
+"level diff."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:175
+msgid ""
+"Cached pages for the KDA and MLA groups are byte-opaque views, so "
+"content-aware processing (CacheGen, CacheBlend) does not apply, and cache"
+" entries must not be shared across engines with different attention "
+"backends or kernel block sizes."
+msgstr ""
+
+#: ../../source/recipes/kimi_linear.rst:179
+msgid "vLLM's Mamba prefix caching in ``align`` mode is experimental upstream."
+msgstr ""
+

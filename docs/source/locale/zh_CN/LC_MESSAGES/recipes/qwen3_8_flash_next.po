@@ -1,0 +1,234 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-28 09:40+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:4
+msgid "Qwen3.8-Flash-Next"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:6
+msgid ""
+"A hybrid architecture interleaving **Gated-DeltaNet (GDN) linear-"
+"attention** layers with **Qwen Sparse Attention (QSA)** full-attention "
+"layers (architecture ``Qwen4ExpForConditionalGeneration``, one full-"
+"attention layer every four). QSA picks its history from compressed keys, "
+"so while a compression group is still open its raw keys sit in a small "
+"per-request scratch ring that LMCache skips; see "
+":doc:`../mp/hybrid_models` for the general handling of Mamba / linear-"
+"attention models."
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:16
+msgid ""
+"Despite the name, this model does **not** share the "
+"``Qwen3_5ForConditionalGeneration`` architecture used by the "
+":doc:`Qwen3.5 / Qwen3.6 / Qwen3.8 series <qwen3_5>`; it has its own "
+"architecture and its own unified block size."
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:22
+msgid "Validated models"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:24
+msgid ""
+"`Qwen/Qwen3.8-Flash-Next <https://huggingface.co/Qwen/Qwen3.8-Flash-"
+"Next>`_ (8 GPUs)"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst
+msgid "vLLM"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:31
+msgid ""
+"**Engine documentation:** `Qwen3.8-Flash-Next in vLLM supported models "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
+"generation>`_ (architecture ``Qwen4ExpForConditionalGeneration``)."
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:36
+msgid "**Status:** Validated with LMCache."
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:38
+msgid ""
+"Like the other GDN hybrids, this model needs three matched settings: the "
+"``align`` Mamba cache mode, prefix caching, and a chunk size equal to "
+"vLLM's *unified block size*. vLLM logs that block size at startup as "
+"``Setting attention block size to N tokens``:"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:47
+msgid "Model"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:48
+msgid "Unified block size ``N``"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:49
+msgid "GPUs"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:50
+msgid "``Qwen/Qwen3.8-Flash-Next``"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:51
+msgid "400"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:52
+msgid "8"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:54
+msgid "Start the LMCache MP server (``--chunk-size`` = ``N``):"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:66
+msgid ""
+"Start vLLM with the LMCache MP connector (8 GPUs, ``N = 400`` → ``2N-1 = "
+"799``):"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:81
+msgid ""
+"``--mamba-cache-mode align`` is required (GDN does not support the "
+"``all`` mode). ``--separate-object-groups`` (server) is required for "
+"hybrid models so the linear-attention layers get their own cache objects."
+" ``--max-num-batched-tokens`` must be **at least** ``N``; prefer "
+"``2N-1``, whose spare ``N-1`` budget lets decodes co-schedule with a "
+"prefill block — setting it to exactly ``N`` serializes execution to one "
+"request at a time. Values ``>= 2N`` raise prefill throughput but snapshot"
+" only the last block of each step. See the :doc:`Qwen3.5 recipe "
+"<qwen3_5>` for the full discussion of this trade-off, which applies "
+"unchanged here."
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:91
+msgid ""
+"Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
+" LMCache + vLLM wiring (ports, remote hosts), see "
+":doc:`../getting_started/quickstart`."
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst
+msgid "SGLang"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:97
+#: ../../source/recipes/qwen3_8_flash_next.rst:101
+msgid "**Status:** Not validated with LMCache."
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst
+msgid "TRT-LLM"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:104
+msgid "CacheBlend support"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:106
+msgid ""
+"Not supported: the hybrid groups' cached pages are byte-opaque (see "
+"Caveats)."
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:109
+msgid "Compression support"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:115
+msgid "Method"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:116
+msgid "Status"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:117
+msgid "Notes"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:118
+msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:119
+msgid "Not supported"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:120
+msgid "Hybrid groups' cached pages are byte-opaque."
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:123
+msgid "MTP (speculative decoding) support"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:125
+msgid ""
+"The checkpoint ships multi-token-prediction layers (``mtp``, "
+"``mtp_num_hidden_layers``). **Status:** Not yet validated with LMCache."
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:129
+msgid "Caveats"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:131
+msgid ""
+"**QSA scratch state is not cached.** The per-request QSA compressor ring "
+"(``CircularBufferSpec``) is marked non-prefix-cacheable by vLLM and is "
+"skipped by LMCache end to end, so it is recomputed rather than restored. "
+"It shows up as a ``0`` entry in the connector's logged "
+"``group_tokens_per_block``, which is expected."
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:136
+msgid ""
+"Cached pages for the linear-attention and full-attention groups are byte-"
+"opaque views, so content-aware processing does not apply, and cache "
+"entries must not be shared across engines with different attention "
+"backends or kernel block sizes."
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:140
+msgid "vLLM's Mamba prefix caching in ``align`` mode is experimental."
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:141
+msgid ""
+"Generation is not guaranteed bit-exact between a cached and a fresh run, "
+"since GDN backends do not support vLLM's batch-invariant mode. (The "
+"validation run for this recipe did reproduce the cold output exactly, but"
+" treat score-level equivalence as the contract.)"
+msgstr ""
+
+#: ../../source/recipes/qwen3_8_flash_next.rst:145
+msgid ""
+"``Qwen/Qwen3.8-Flash-Next`` is a vision-language checkpoint; the LMCache "
+"validation covers **text** generation. Caching of image/video KV is not "
+"validated."
+msgstr ""
+
