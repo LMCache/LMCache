@@ -2,6 +2,9 @@
 """Tests for the cache-event broadcaster (consumer registration plus
 batch and fence fan-out)."""
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
@@ -10,6 +13,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
+import lmcache.v1.mp_coordinator.ingest.event_broadcaster as event_broadcaster
 
 
 class _RecordingConsumer:
@@ -22,6 +26,14 @@ class _RecordingConsumer:
 
     def fence_instance(self, instance_id: str) -> None:
         self._log.append((self._name, instance_id))
+
+
+class _RaisingConsumer:
+    def consume(self, batch: CacheEventBatch) -> None:
+        raise RuntimeError("consume bug")
+
+    def fence_instance(self, instance_id: str) -> None:
+        raise RuntimeError("fence bug")
 
 
 def _batch(seq: int = 1) -> CacheEventBatch:
@@ -77,3 +89,47 @@ def test_consumer_registered_later_sees_only_later_batches():
     broadcaster.broadcast(second)
 
     assert log == [("late", second)]
+
+
+def _capture_exceptions(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the module logger's exception lines; it does not propagate."""
+    lines: list[str] = []
+    monkeypatch.setattr(
+        event_broadcaster.logger,
+        "exception",
+        lambda msg, *args: lines.append(msg % args),
+    )
+    return lines
+
+
+def test_a_consumer_that_raises_does_not_stop_the_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log: list[tuple[str, object]] = []
+    broadcaster = CacheEventBroadcaster()
+    broadcaster.register_consumer(_RaisingConsumer())
+    broadcaster.register_consumer(_RecordingConsumer("after", log))
+    errors = _capture_exceptions(monkeypatch)
+
+    batch = _batch()
+    broadcaster.broadcast(batch)
+
+    assert log == [("after", batch)]
+    assert errors == [
+        "Cache-event consumer _RaisingConsumer failed on batch node-a/1/1"
+    ]
+
+
+def test_a_fence_that_raises_does_not_stop_the_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log: list[tuple[str, object]] = []
+    broadcaster = CacheEventBroadcaster()
+    broadcaster.register_consumer(_RaisingConsumer())
+    broadcaster.register_consumer(_RecordingConsumer("after", log))
+    errors = _capture_exceptions(monkeypatch)
+
+    broadcaster.fence_instance("node-a")
+
+    assert log == [("after", "node-a")]
+    assert errors == ["Cache-event consumer _RaisingConsumer failed to fence node-a"]
