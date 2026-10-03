@@ -67,7 +67,7 @@ if [[ -z "$INSTALLED_TORCH" || "$INSTALLED_TORCH" != "$REQUESTED_TORCH" ]]; then
 fi
 
 $PY -m pip install --no-cache-dir \
-    ninja "setuptools>=77.0.3,<81.0.0" setuptools_scm wheel pybind11 auditwheel patchelf
+    ninja "setuptools>=77.0.3,<81.0.0" setuptools_scm grpcio==1.78.0 grpcio-tools==1.78.0 wheel pybind11 auditwheel patchelf
 $PY -c 'import torch; print("BUILD TORCH:", torch.__version__, "xpu:", hasattr(torch, "xpu"), "cxx11abi:", torch._C._GLIBCXX_USE_CXX11_ABI)'
 
 cd /work/LMCache

@@ -46,13 +46,12 @@ def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
 
     chunks = [_unpinned_chunk()]
 
-    # Pin the ptr-only path: only that branch pins temporaries, and whether the
-    # compiled op takes tensors varies by build. scatter imports device_ops
-    # inside the function, so patch it at source.
+    # An unannotated mock op models the ptr-only backend. Keep the capability
+    # check real, and substitute only the platform resolver's selected ops.
+    ops = MagicMock()
     with (
-        patch.object(base, "_LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR", False),
         patch.object(base, "torch_dev") as dev,
-        patch("lmcache.device_ops") as ops,
+        patch.object(base, "resolve_device_ops", return_value=ops),
     ):
         # cast: the mocks stand in for tensors on purpose (see above).
         base.scatter_cpu_to_paged_kv(
@@ -79,7 +78,7 @@ def test_pickle_store_syncs_before_commit_serializes() -> None:
     from lmcache.v1.multiprocess.transfer_context import worker_transfer
 
     order: list[str] = []
-    ctx = worker_transfer.EngineDrivenTransferContext()
+    ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())
     ctx._engine_driven_context = MagicMock()
     ctx._engine_driven_context.prepare_store.return_value = None  # pickle mode
 
@@ -103,7 +102,6 @@ def test_pickle_store_syncs_before_commit_serializes() -> None:
         ctx.submit_store(
             "req",
             MagicMock(),  # key
-            1,  # instance_id
             {"layer_0": torch.zeros(2, 4, 4, 2, 8)},
             [[0, 1, 2, 3]],
             MagicMock(),  # event (unused on this transport)

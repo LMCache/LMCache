@@ -11,11 +11,29 @@ module keeps placeholder stubs for those names.
 # Future
 from __future__ import annotations
 
+# Standard
+from enum import IntEnum
+
 # First Party
 import lmcache.lmcache_native as _native
 
 PageBufferShapeDesc = _native.PageBufferShapeDesc
 KernelGroupSpec = _native.KernelGroupSpec
+
+
+class TransferPhase(IntEnum):
+    """Timed sections of the native object-group transfer plan executor.
+
+    Mirrors the C++ ``TransferPhase`` enum in
+    ``csrc/cuda/phase_timing_recorder.cuh``;
+    values appear in ``device_ops.pop_completed_phase_timings()`` samples.
+    Python-only: unlike ``TransferDirection`` (in
+    :mod:`lmcache.lmcache_native`), this enum is not exposed by a native
+    module.
+    """
+
+    KERNEL = 0
+    STAGING = 1
 
 
 class _NativePlanType:

@@ -2,8 +2,8 @@
 
 # Standard
 from collections import deque
-import threading
 from typing import List, Optional, Union
+import threading
 
 # Third Party
 import torch
@@ -163,6 +163,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         # owner of this block, so get_size() returns the layout-derived
         # size for the fresh allocation.
         free_block._used_size_override = None
+        free_block.reset_l1_manager()
 
         if shapes != self.shapes:
             size_in_bytes = get_size_bytes(shapes, dtypes)
@@ -217,6 +218,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             free_block.meta.ref_count = 1
             # Reset narrowed-size override (see notes in ``allocate``).
             free_block._used_size_override = None
+            free_block.reset_l1_manager()
 
             if shapes != self.shapes:
                 size_in_bytes = get_size_bytes(shapes, dtypes)

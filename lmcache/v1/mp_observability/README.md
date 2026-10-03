@@ -24,6 +24,9 @@ EventBus  (async queue + drain thread)
     │
     ├──► L1MetricsSubscriber          → OTel counter.add(...)
     ├──► SMMetricsSubscriber          → OTel counter.add(...)
+    ├──► TransferPhaseMetricsSubscriber → DMA staging throughput per step
+    ├──► TransferPhaseSampler         → on MP_*_END: pops finished GPU phase
+    │                                    timings → MP_TRANSFER_PHASE_SAMPLES
     ├──► EventBusSelfMetricsSubscriber → OTel observable gauges/counters
     │                                    (bus health: queue depth, drain
     │                                    lag, drops, subscriber exceptions)
@@ -32,7 +35,9 @@ EventBus  (async queue + drain thread)
     ├──► MPServerLoggingSubscriber    → logger.debug(...)
     ├──► ExtraStatsLoggingSubscriber  → logger.info(...) (opt-in periodic
     │                                    per-GPU L0<->L1 transfer stats)
-    └──► MPServerTracingSubscriber    → OTel span start/end
+    ├──► MPServerTracingSubscriber    → OTel span start/end
+    └──► TransferPhaseTracingSubscriber → transfer phase child spans
+                                          under mp.store / mp.retrieve
 
 OTel SDK  (configured at startup)
     │
@@ -96,7 +101,9 @@ CLI, pass the flags below; when embedding programmatically, construct an
 
 Tracing is opt-in (`--enable-tracing`).  When enabled, `MPServerTracingSubscriber`
 creates OTel spans from MP server START/END event pairs (store, retrieve,
-lookup/prefetch).  Trace export requires an OTLP endpoint — there is no local
+lookup/prefetch), and ``TransferPhaseTracingSubscriber`` nests a per-phase
+breakdown of each transfer under its store/retrieve span (see
+``docs/source/mp/observability/traces.rst``).  Trace export requires an OTLP endpoint — there is no local
 fallback.  `--enable-tracing` **requires** `--otlp-endpoint`; the server will
 raise a `ValueError` at startup if the endpoint is missing.
 

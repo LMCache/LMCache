@@ -14,11 +14,18 @@ these events see [METRICS.md](METRICS.md).
 |---|---|---|
 | `L1_READ_RESERVED` | `keys` | `list[ObjectKey]` |
 | `L1_READ_FINISHED` | `keys` | `list[ObjectKey]` |
-| `L1_WRITE_RESERVED` | `keys` | `list[ObjectKey]` |
+| `L1_WRITE_RESERVED` | `keys`, `tag` | `list[ObjectKey]`, `str` |
 | `L1_WRITE_FINISHED` | `keys` | `list[ObjectKey]` |
 | `L1_WRITE_FINISHED_AND_READ_RESERVED` | `keys` | `list[ObjectKey]` |
 | `L1_KEYS_EVICTED` | `keys` | `list[ObjectKey]` |
 | `L1_EVICTION_LOOP_TICK` | `usage`, `watermark`, `triggered` | `float`, `float`, `bool` |
+
+`L1_WRITE_RESERVED.tag` names the writer that staged the keys (e.g.
+`prefetch:<request_id>`, `storage_manager`); see
+`../../distributed/l1_manager.md`. A staging object that is discarded or
+reclaimed without becoming resident publishes **no** event (it is logged at
+debug level): `L1_KEYS_EVICTED` is reserved for admitted objects, which is
+what the coordinator cache-event reporter and the L1 byte metrics assume.
 
 `L1_EVICTION_LOOP_TICK` fires once per `L1EvictionController.eviction_loop`
 iteration (default ~1Hz).  `triggered` is `True` when `usage >= watermark`
@@ -59,10 +66,13 @@ Producers:
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `SM_READ_PREFETCHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
 | `SM_READ_PREFETCHED_FINISHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
 | `SM_WRITE_RESERVED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
 | `SM_WRITE_FINISHED` | `succeeded_keys`, `failed_keys` | `list[ObjectKey]`, `list[ObjectKey]` |
+| `SM_CAPACITY_CHANGED` | `snapshot` | `CapacitySnapshot` |
+
+`SM_CAPACITY_CHANGED` carries a whole L1/L2 capacity snapshot, not a delta, and
+is emitted on registration and capacity-changing reconfiguration.
 
 ---
 
@@ -87,7 +97,6 @@ On the failure path of `L2_STORE_COMPLETED`, `key_count_per_salt` is absent
 | EventType | Metadata keys | Types |
 |---|---|---|
 | `L2_PREFETCH_LOOKUP_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
-| `L2_PREFETCH_LOOKUP_COMPLETED` | `request_id`, `prefix_hit_count` | `int`, `int` |
 | `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
 | `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
 | `L2_LOAD_TASK_SUBMITTED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `int`, `str`, `int`, `int` |
@@ -124,11 +133,12 @@ Health-monitoring event for the L2 prefetch path. See LM-291.
 
 | EventType | Metadata keys | Types | Vocabulary |
 |---|---|---|---|
-| `L2_PREFETCH_FAILED` | `reason`, `keys` | `str`, `list[ObjectKey]` | `reason` ∈ {`l1_oom`, `not_found`} |
+| `L2_PREFETCH_FAILED` | `reason`, `keys` | `str`, `list[ObjectKey]` | `reason` ∈ {`l1_oom`, `l1_contended`, `not_found`} |
 
-Producers (both in `PrefetchController`):
-- `reason=l1_oom` — emitted when `reserve_write` into L1 returns `OUT_OF_MEMORY` during the transition-to-load phase. Published in parallel with `L1_ALLOCATION_FAILED(during=l2_prefetch)`.
-- `reason=not_found` — emitted in `_finalize_load` for keys reserved in L1 but missing from the adapter's load bitmap (L2 reported the key present at lookup but produced no data).
+Producers (all in `PrefetchController`):
+- `reason=l1_oom` — emitted when `reserve_write` of a load's L1 staging buffer returns `OUT_OF_MEMORY`. The affected cells drop their L2 lock and the request is re-planned on what was reserved.
+- `reason=l1_contended` — emitted when `reserve_write` returns `KEY_NOT_WRITABLE` because the key became resident in L1 between the lookup and the reserve step. The cell is treated like an out-of-memory cell.
+- `reason=not_found` — emitted in `_poll_load_results` for keys reserved in L1 but missing from the adapter's load bitmap (L2 reported the key present at lookup but produced no data).
 
 The third reason `serde_failure` will be added as an additive, non-breaking
 extension once the serde PR lands and adapters can distinguish
@@ -184,15 +194,33 @@ to correlate START/END pairs.
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `MP_STORE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
-| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `int`, `int` |
-| `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name` | `str`, `int`, `str` |
-| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens` | `str`, `int`, `int`, `str`, `str`, `int`, `int` |
+| `MP_STORE_START` | `device`, `engine_id`, `model_name`, `transfer_key` | `str`, `int`, `str`, `str` |
+| `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `int`, `int`, `str` |
+| `MP_TRANSFER_PHASE_SAMPLES` | `samples`, `ended_transfer_key` | `list[tuple[int, int, int, float, int, str, float, float]]` — `(phase, direction, device_index, elapsed_ms, nbytes, session_id, start_time_s, end_time_s)` per finished executor section, plus the `transfer_key` (`str`) of the transfer whose END published this event -- its authoritative completion signal, present even when `samples` is empty; `phase` is a `TransferPhase` value (0 = kernel, 1 = staging), `direction` a `TransferDirection` value, the `session_id` slot carries the `transfer_key` of the store/retrieve operation (see `next_transfer_key`), `start_time_s`/`end_time_s` its bounds on the EventRecorder wall clock (empty / `0.0` only if the call's anchor event could not be recorded) |
+| `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name`, `transfer_key` | `str`, `int`, `str`, `str` |
+| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `str`, `int`, `int`, `str` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
-| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `str`, `str`, `str` |
+| `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `l1_hit_keys`, `l2_hit_keys`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `int`, `int`, `str`, `str`, `str` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
 | `MP_VLLM_BLOCK_ALLOCATION` | `instance_id`, `model_name`, `records` | `int`, `str`, `list[BlockAllocationRecord]` (each has `req_id: str`, `new_block_ids: list[int]`, `new_token_ids: list[int]`) |
 | `MP_VLLM_END_SESSION` | `request_id` | `str` |
+
+### `MP_TRANSFER_PHASE_SAMPLES`
+
+Published by `TransferPhaseSampler` while dispatching `MP_STORE_END` /
+`MP_RETRIEVE_END`: those are stream-published, so every section of the
+ending transfer has completed and `device_ops.pop_completed_phase_timings()`
+returns its full sample set (plus any other transfer's sections that have
+finished meanwhile). Each sample carries its own `session_id`,
+`device_index` and `direction`.
+
+Timing is on when the bus is enabled and this event has a subscriber
+(`EventBus.has_subscribers`), i.e. with metrics or tracing on. Besides the per-section event pairs the
+executor records one anchor event per call plus a host callback stamping the
+EventRecorder wall clock, which gives each sample its `session_id` and
+`start_time_s`/`end_time_s`. `TransferPhaseTracingSubscriber` folds them into
+per-transfer `transfer.kernel_interval` / `transfer.staging` child spans (see
+`docs/design/observability/request-event-span.md`, Example 3).
 
 ### `num_tokens` on `MP_STORE_END` / `MP_RETRIEVE_END`
 
@@ -214,13 +242,20 @@ know `chunk_size`:
   cannot hit at chunk granularity.
 - `hit_tokens = found_count * chunk_size`.
 - `l1_hit_tokens` and `l2_hit_tokens` split `hit_tokens` by the tier that
-  served it.  `l1_hit_tokens` comes from `PrefetchHandle.l1_hit_chunks` —
-  the prefix L1 alone could serve under each object group's attention
+  served it.  `l1_hit_tokens` is the fold of `PrefetchResult.l1_hit_cells`
+  — the prefix L1 alone could serve under each object group's attention
   window rule — so a chunk whose out-of-window keys were never fetched is
   still an L1 hit.  `l2_hit_tokens` is the remainder: how much further
   `found_count` reached once L2 completed.  **Invariant:
   `l1_hit_tokens + l2_hit_tokens == hit_tokens`, exactly, on every path**,
   so a dashboard summing the two can never exceed 100%.
+- `l1_hit_keys` and `l2_hit_keys` count the hit keys (one per object group,
+  kv rank and chunk) L1 already held and L2 loaded:
+  `PrefetchResult.l1_hit_count` and `l2_hit_count`.  They are not divided by
+  `world_size` and are `0` on the early-exit paths.  On hybrid models they
+  complement the token split: when L1 holds the full-attention keys but L2
+  serves the sliding-window keys, `l1_hit_tokens` is `0` while `l1_hit_keys`
+  is most of the hit.
 - `early_exit_reason` names the branch of `lookup()` that returned before a
   prefetch task was submitted.  Always present; `""` on the normal path.
   Vocabulary:
