@@ -44,8 +44,8 @@ import (
 //
 // Why this changed: a no-op finalizer blocks CR deletion whenever the
 // controller pod isn't running (e.g. during cluster issues or a
-// `kubectl delete -k config/default` that takes down the operator
-// alongside the CRDs), with no upside since GC already does the work.
+// full cleanup that takes down the operator alongside the CRDs),
+// with no upside since GC already does the work.
 // See discussion in https://github.com/LMCache/LMCache/issues/2693.
 //
 // We may re-introduce a finalizer in the future for state K8s GC

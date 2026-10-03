@@ -1,5 +1,4 @@
 //go:build e2e
-// +build e2e
 
 /*
 Copyright 2026.
@@ -31,6 +30,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -81,7 +81,7 @@ var _ = BeforeSuite(func() {
 	_, _ = fmt.Fprintf(GinkgoWriter, "manager image: %s (skipImageLoad=%v)\n",
 		managerImage, skipImageLoad)
 
-	// cert-manager must exist before `make deploy` applies the operator's
+	// cert-manager must exist before `make helm-deploy` applies the operator's
 	// Issuer/Certificate and the CA-injected mutating webhook. Install it up
 	// front (before the slow image build/load) so its webhook endpoints are
 	// warm by the time we deploy. Skip when the cluster already ships it.
@@ -110,25 +110,17 @@ var _ = BeforeSuite(func() {
 		Expect(err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 	}
 
-	By("installing CRDs")
-	_, err := utils.RunMake("install")
-	Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
-
-	By("deploying the controller-manager")
-	_, err = utils.RunMake("deploy", fmt.Sprintf("IMG=%s", managerImage))
-	Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+	By("installing the operator Helm release, including its CRDs")
+	_, err := utils.RunMake("helm-deploy", fmt.Sprintf("IMG=%s", managerImage))
+	Expect(err).NotTo(HaveOccurred(), "Failed to install the operator Helm release")
 
 	By("labeling the operator namespace with the restricted Pod Security profile")
-	labelCmd := exec.Command("kubectl", "label", "--overwrite", "ns",
-		"lmcache-operator-system",
-		"pod-security.kubernetes.io/enforce=restricted",
-	)
-	_, err = labelCmd.CombinedOutput()
-	Expect(err).NotTo(HaveOccurred(), "Failed to label operator namespace")
+	Expect(labelOperatorNamespace()).To(Succeed())
 
 	By("registering custom types in the scheme")
 	Expect(lmcachev1alpha1.AddToScheme(scheme.Scheme)).To(Succeed())
 	Expect(monitoringv1.AddToScheme(scheme.Scheme)).To(Succeed())
+	Expect(apiextensionsv1.AddToScheme(scheme.Scheme)).To(Succeed())
 
 	By("building the typed Kubernetes client")
 	cfg, err := ctrl.GetConfig()
@@ -145,9 +137,9 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
-	By("undeploying the controller-manager")
-	if _, err := utils.RunMake("undeploy", "ignore-not-found=true"); err != nil {
-		_, _ = fmt.Fprintf(GinkgoWriter, "warning: undeploy failed: %v\n", err)
+	By("uninstalling the operator Helm release")
+	if _, err := utils.RunMake("helm-undeploy", "ignore-not-found=true"); err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "warning: helm-undeploy failed: %v\n", err)
 	}
 
 	By("uninstalling CRDs")
@@ -160,6 +152,12 @@ var _ = AfterSuite(func() {
 		utils.UninstallCertManager()
 	}
 })
+
+func labelOperatorNamespace() error {
+	_, err := utils.RunFromOperator(exec.Command("kubectl", "label", "--overwrite", "ns",
+		"lmcache-operator-system", "pod-security.kubernetes.io/enforce=restricted"))
+	return err
+}
 
 // waitDeploymentAvailable polls a Deployment's status until the
 // Available condition is True, or until ctx is cancelled / timeout
