@@ -9,8 +9,8 @@ two variants:
 
 | Adapter | Type name | Storage mode | Persist | Backends |
 |---|---|---|---|---|
-| `NixlStoreL2Adapter` | `nixl_store` | Static (pre-allocated files) | Not supported | GDS, GDS_MT, POSIX, HF3FS, OBJ, AZURE_BLOB |
-| `DynamicNixlStoreL2Adapter` | `nixl_store_dynamic` | Dynamic (per-operation files) | Supported (default on) | GDS, GDS_MT, POSIX, HF3FS |
+| `NixlStoreL2Adapter` | `nixl_store` | Static (pre-allocated files) | Not supported | GDS, GDS_MT, POSIX, HF3FS, IBM_SCALE, OBJ, AZURE_BLOB |
+| `DynamicNixlStoreL2Adapter` | `nixl_store_dynamic` | Dynamic (per-operation files) | Supported (default on) | GDS, GDS_MT, POSIX, HF3FS, IBM_SCALE |
 
 The **static** adapter pre-allocates all storage files at init and registers
 them with Nixl as a single prepped descriptor list. The **dynamic** adapter
