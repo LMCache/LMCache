@@ -348,6 +348,7 @@ def test_rkv_worker_compacts_two_requests_independently():
     }
 
     assert worker.compact() == {"req-a": BUDGET, "req-b": BUDGET}
+    assert worker._n_compactions == 2
 
     for req_index, request_id in enumerate(request_ids):
         slots = _slots(request_blocks[req_index], length)[:BUDGET]

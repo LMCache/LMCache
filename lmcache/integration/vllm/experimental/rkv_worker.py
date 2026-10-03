@@ -81,6 +81,7 @@ class RKVWorker:
         self._is_genuine_decode: list[bool] | None = None
         self._should_compress: list[bool] | None = None
         self._compacted_requests: set[str] = set()
+        self._n_compactions = 0
         self._query_hooks_installed = False
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
@@ -490,6 +491,7 @@ class RKVWorker:
             for _, request_id, _ in members:
                 updates[request_id] = self.budget
                 self._compacted_requests.add(request_id)
+                self._n_compactions += 1
 
         return updates
 
