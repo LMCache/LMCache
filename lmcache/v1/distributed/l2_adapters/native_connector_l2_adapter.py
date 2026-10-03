@@ -372,8 +372,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         Submits a batch delete to the native connector and blocks
         until the demux thread signals completion (up to 30s timeout).
-        Fires ``_notify_keys_deleted`` on success so eviction policy
-        tracking stays in sync.
+        Fires ``_notify_keys_deleted`` for every key the backend removed,
+        including keys this process never stored (with size 0), so
+        eviction policy tracking and cache-event consumers stay in sync.
 
         No-op if the connector does not expose ``submit_batch_delete``
         or if the key list is empty.
@@ -589,11 +590,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 if not deleted:
                                     continue
                                 key = lookup_keys[i]
-                                # Only notify (with size) for keys we've
-                                # actually accounted for via a prior store.
-                                if key in self._key_sizes:
-                                    sizes_deleted.append(self._key_sizes.pop(key))
-                                    keys_deleted.append(key)
+                                # Keys another process stored (a shared pool, a
+                                # previous run) count here as size 0.
+                                sizes_deleted.append(self._key_sizes.pop(key, 0))
+                                keys_deleted.append(key)
                         evt = self._pending_delete_events.pop(task_id, None)
                         if evt is not None:
                             delete_done_events.append(evt)
