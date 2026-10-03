@@ -109,15 +109,19 @@ def test_wake_during_execute_schedules_next_cycle():
         t.stop(timeout=2.0)
 
 
-def test_thread_can_restart_after_irrecoverable_exception() -> None:
-    """A terminated thread can be restarted through its public API."""
+def test_thread_restart_waits_for_previous_worker_to_exit() -> None:
+    """A replacement starts only after the previous worker terminates."""
     attempts = 0
+    first_started = threading.Event()
+    release_first = threading.Event()
     restarted = threading.Event()
 
     def execute() -> ThreadRunSummary:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
+            first_started.set()
+            release_first.wait(timeout=5.0)
             raise IrrecoverableException("stop first run")
         restarted.set()
         return ThreadRunSummary()
@@ -130,14 +134,31 @@ def test_thread_can_restart_after_irrecoverable_exception() -> None:
     )
 
     first_worker = periodic_thread.start()
-    assert first_worker is not None
-    first_worker.join(timeout=1.0)
-    assert not first_worker.is_alive()
-    assert not periodic_thread.is_running
-
-    second_worker = periodic_thread.start()
+    second_worker = None
     try:
+        assert first_worker is not None
+        assert first_started.wait(timeout=1.0)
+
+        periodic_thread.stop(timeout=0.0)
+        assert not periodic_thread.is_running
+        assert periodic_thread.stop_requested
+
+        second_worker = periodic_thread.start()
+        assert second_worker is None
+        assert periodic_thread.stop_requested
+
+        release_first.set()
+        periodic_thread.stop(timeout=1.0)
+        assert not first_worker.is_alive()
+
+        second_worker = periodic_thread.start()
         assert second_worker is not None
         assert restarted.wait(timeout=1.0)
+        assert periodic_thread.is_running
     finally:
-        periodic_thread.stop()
+        release_first.set()
+        periodic_thread.stop(timeout=1.0)
+        if first_worker is not None:
+            first_worker.join(timeout=1.0)
+        if second_worker is not None:
+            second_worker.join(timeout=1.0)
