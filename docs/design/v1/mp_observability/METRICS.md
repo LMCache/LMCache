@@ -21,6 +21,15 @@ mode, or when coordinator metrics are disabled, that route returns 404. The
 coordinator provider carries `service.name=lmcache-mp-coordinator`; concrete
 coordinator instruments are registered separately from this transport setup.
 
+When `ObservabilityConfig.grpc_metrics_enabled` resolves to true,
+`init_otel_metrics()` also registers gRPC Python's official OpenTelemetry
+observability plugin with the same `MeterProvider`. The MP server resolves the
+default (`None`) from the request transport: enabled for gRPC, disabled for
+ZMQ. These metrics come from gRPC Core rather than the LMCache EventBus and
+therefore use the upstream `grpc.*` namespace instead of the `lmcache_mp.*`
+prefix. The integration depends on `grpcio-observability`, which upstream
+currently distributes for Linux.
+
 All metrics use the `lmcache_mp.` prefix (mp = multiprocess), distinct from the main
 engine's `lmcache.` namespace. On Prometheus, `.` is converted to `_` and counters get
 a `_total` suffix (e.g., `lmcache_mp.l1_read` with `unit="chunks"` is exposed as
@@ -44,6 +53,21 @@ the `target_info` series rather than on each time-series.
 
 Per-metric attributes (e.g. `cache_salt`) remain on the individual
 datapoints and are orthogonal to these Resource attributes.
+
+---
+
+## gRPC Runtime Metrics
+
+| OTel metric name | Prometheus name | Type | Source | Description |
+|---|---|---|---|---|
+| `grpc.client.attempt.started` | `grpc_client_attempt_started_total` | Counter | gRPC Python observability plugin | Number of client call attempts started |
+| `grpc.client.attempt.duration` | `grpc_client_attempt_duration_seconds` | Histogram | gRPC Python observability plugin | End-to-end time to complete a client call attempt |
+| `grpc.client.attempt.sent_total_compressed_message_size` | `grpc_client_attempt_sent_total_compressed_message_size_bytes` | Histogram | gRPC Python observability plugin | Compressed bytes sent per client call attempt |
+| `grpc.client.attempt.rcvd_total_compressed_message_size` | `grpc_client_attempt_rcvd_total_compressed_message_size_bytes` | Histogram | gRPC Python observability plugin | Compressed bytes received per client call attempt |
+| `grpc.server.call.started` | `grpc_server_call_started_total` | Counter | gRPC Python observability plugin | Number of server calls started |
+| `grpc.server.call.duration` | `grpc_server_call_duration_seconds` | Histogram | gRPC Python observability plugin | End-to-end time to complete a server transport call |
+| `grpc.server.call.sent_total_compressed_message_size` | `grpc_server_call_sent_total_compressed_message_size_bytes` | Histogram | gRPC Python observability plugin | Compressed bytes sent per server call |
+| `grpc.server.call.rcvd_total_compressed_message_size` | `grpc_server_call_rcvd_total_compressed_message_size_bytes` | Histogram | gRPC Python observability plugin | Compressed bytes received per server call |
 
 ---
 
