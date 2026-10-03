@@ -571,10 +571,13 @@ class StorageManager:
             convert each tier's per-key result count back to chunk units.
         """
         assert self.async_lookup_server is not None
+        # Resolve the result before marking the event DONE. If ``task.result()``
+        # raises, the event must not be advertised as DONE, otherwise a later
+        # ``cleanup_memory_objs`` pops a future that re-raises when awaited.
+        res = task.result()
         self.event_manager.update_event_status(
             EventType.LOADING, lookup_id, status=EventStatus.DONE
         )
-        res = task.result()
 
         # Calculate total retrieved chunks across all tiers based on actual results
         # from batched_get_non_blocking, not the batched_async_contains results.
@@ -803,13 +806,28 @@ class StorageManager:
         #  Tuple(loading_task_keys[1][0] : MemoryObj2)
         #  Tuple(loading_task_keys[1][1] : MemoryObj3)
         async def gather_with_keys() -> list[list[tuple[CacheEngineKey, MemoryObj]]]:
-            loading_results = await asyncio.gather(*loading_tasks)
-            return [
-                list(zip(keys, results, strict=False))
-                for keys, results in zip(
-                    loading_task_keys, loading_results, strict=False
-                )
-            ]
+            # A single failed loading task must not abort the whole gather:
+            # otherwise prefetch_all_done_callback never reaches
+            # send_response_to_scheduler and the pins taken for the other tiers
+            # leak (see #5391). Treat a failed tier as an empty result so the
+            # caller responds with the contiguous prefix and releases the rest.
+            loading_results = await asyncio.gather(
+                *loading_tasks, return_exceptions=True
+            )
+            gathered: list[list[tuple[CacheEngineKey, MemoryObj]]] = []
+            for tier_keys, results in zip(
+                loading_task_keys, loading_results, strict=False
+            ):
+                if isinstance(results, BaseException):
+                    logger.error(
+                        "Prefetch loading task failed for lookup id %s: %r",
+                        lookup_id,
+                        results,
+                    )
+                    gathered.append([])
+                else:
+                    gathered.append(list(zip(tier_keys, results, strict=False)))
+            return gathered
 
         all_done = asyncio.create_task(gather_with_keys())
         # Register the event before adding the callback to avoid race conditions
