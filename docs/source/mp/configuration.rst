@@ -181,6 +181,18 @@ Source: ``lmcache/v1/multiprocess/config.py``
        sent a PING (still warming up, or died before its first request).
        Must be >= ``--worker-reap-timeout-seconds``. Generous by default so
        slow model warmup is never mistaken for a dead worker.
+   * - ``--worker-disconnect-grace-seconds``
+     - ``30.0``
+     - Countdown (seconds) started when the connection of a worker that has
+       sent at least one PING closes, e.g. because the process was killed.
+       The registration is reaped when it expires unless the worker
+       reconnects first (any request over a new connection cancels it). A
+       worker that never pinged gets ``--worker-reap-timeout-seconds``
+       instead of the registration grace. ``0`` disables this; otherwise it
+       must be >= 30 and <= ``--worker-reap-timeout-seconds``, and should stay
+       above the adapter's ``lmcache.mp.heartbeat_interval``. Only the
+       ``zmq`` transport reports closed connections; ignored when reaping is
+       disabled.
    * - ``--enable-segmented-prefix``
      - ``False``
      - CacheBlend (``--engine-type blend``) only: on a mid-prefix L2 retrieve

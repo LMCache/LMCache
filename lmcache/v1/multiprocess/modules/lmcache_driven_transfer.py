@@ -39,7 +39,11 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
     transfer_kv_per_object_group,
 )
-from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.request_handler import (
+    HandlerType,
+    current_request_peer,
+    request_handler,
+)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -150,6 +154,10 @@ class ContextEntry:
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
         event_backend: Cached event backend selected for this context's device.
+        peer: Client connection the instance's requests arrive on, or None
+            when the transport cannot report connection loss.
+        reclaim_at: ``time.monotonic()`` deadline set when ``peer`` closed;
+            the instance is reaped once it passes. None while connected.
     """
 
     cache_context: BaseCacheContext
@@ -158,6 +166,23 @@ class ContextEntry:
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
+    peer: bytes | None = None
+    reclaim_at: float | None = None
+
+
+def _follow_request_peer(entry: ContextEntry) -> None:
+    """Rebind ``entry`` to the connection the current request arrived on.
+
+    A request over a different connection than the bound one means the
+    worker reconnected, which also cancels a pending disconnect countdown.
+    Requests still queued from a closed connection carry that connection and
+    change nothing, nor do calls without a known connection (e.g. HTTP APIs).
+    The caller holds the module lock.
+    """
+    peer = current_request_peer()
+    if peer is not None and peer != entry.peer:
+        entry.peer = peer
+        entry.reclaim_at = None
 
 
 class LMCacheDrivenTransferModule(InstanceLivenessTarget):
@@ -245,6 +270,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             entry = self._cache_contexts.get(instance_id)
             if entry is not None:
                 entry.last_seen = now
+                _follow_request_peer(entry)
             return entry
 
     def _release_failed_retrieve_locks(
@@ -316,6 +342,36 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
                 entry.has_liveness_signal = True
+                _follow_request_peer(entry)
+
+    def mark_peer_disconnected(
+        self, peer: bytes, proven_grace_s: float, unproven_grace_s: float
+    ) -> None:
+        """Start the reap countdown for instances registered over ``peer``.
+
+        Args:
+            peer: The closed connection's opaque id.
+            proven_grace_s: Countdown for a ping-proven instance.
+            unproven_grace_s: Countdown for a never-pinged instance.
+        """
+        now = time.monotonic()
+        marked: list[tuple[int, float]] = []
+        with self._lock:
+            for iid, entry in self._cache_contexts.items():
+                if entry.peer != peer or entry.reclaim_at is not None:
+                    continue
+                grace = (
+                    proven_grace_s if entry.has_liveness_signal else unproven_grace_s
+                )
+                entry.reclaim_at = now + grace
+                marked.append((iid, grace))
+        for iid, grace in marked:
+            logger.info(
+                "Connection of GPU instance %d closed; reclaiming its KV cache "
+                "in %.1fs unless it reconnects",
+                iid,
+                grace,
+            )
 
     def tracked_instance_count(self) -> int:
         """Return the number of currently registered instances."""
@@ -325,10 +381,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
     ) -> list[int]:
-        """Reap GPU registrations that have gone silent.
+        """Reap GPU registrations that have gone silent or disconnected.
 
         A ping-proven instance is judged against ``reap_timeout_s``; one
         that has never pinged against the larger ``registration_grace_s``.
+        An instance whose connection closed is also reaped once its
+        disconnect countdown (see ``mark_peer_disconnected``) expires.
 
         Args:
             reap_timeout_s: Silence budget for ping-proven instances.
@@ -349,6 +407,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     if entry.has_liveness_signal
                     else registration_grace_s
                 )
+                or (entry.reclaim_at is not None and now >= entry.reclaim_at)
             ]
             for iid in stale_ids:
                 reaped.append((iid, self._cache_contexts.pop(iid)))
@@ -356,10 +415,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         entries: list[ContextEntry] = []
         for iid, e in reaped:
             logger.warning(
-                "Reaped GPU instance %d: silent for %.1fs (pinged=%s)",
+                "Reaped GPU instance %d: silent for %.1fs (pinged=%s, "
+                "connection closed=%s)",
                 iid,
                 now - e.last_seen,
                 e.has_liveness_signal,
+                e.reclaim_at is not None,
             )
             reaped_ids.append(iid)
             entries.append(e)
@@ -410,6 +471,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 "model_name": entry.model_name,
                 "world_size": entry.world_size,
                 "kv_cache_layout": ctx.report_status(),
+                "connection_closed": entry.reclaim_at is not None,
             }
 
         return {
@@ -463,6 +525,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             existing = self._cache_contexts.get(instance_id)
             if existing is not None:
                 existing.last_seen = now
+                _follow_request_peer(existing)
                 logger.info(
                     "Instance %d already registered; refreshing liveness",
                     instance_id,
@@ -511,6 +574,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+                peer=current_request_peer(),
             )
 
         logger.info(

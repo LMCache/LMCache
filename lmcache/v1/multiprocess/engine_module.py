@@ -80,6 +80,27 @@ class InstanceLivenessTarget(Protocol):
         """
         return []
 
+    def mark_peer_disconnected(
+        self, peer: bytes, proven_grace_s: float, unproven_grace_s: float
+    ) -> None:
+        """Start a reap countdown for instances registered over ``peer``.
+
+        Called when the request transport reports that a client connection
+        closed. Nothing is released here: ``reap_stale_instances`` reaps a
+        marked instance once its countdown expires, unless a request for it
+        arrives over another connection first (the worker reconnected).
+        A no-op for a target that does not track connections.
+
+        Args:
+            peer: Opaque connection id, as seen by handlers through
+                ``current_request_peer()``.
+            proven_grace_s: Countdown for an instance that has pinged; a live
+                one reconnects and pings within its heartbeat interval.
+            unproven_grace_s: Countdown for an instance that never pinged; a
+                live one sends nothing until its first transfer.
+        """
+        return
+
     def tracked_instance_count(self) -> int:
         """Return the number of currently tracked instances (0 if none)."""
         return 0

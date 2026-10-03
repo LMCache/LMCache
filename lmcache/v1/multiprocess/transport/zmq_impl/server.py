@@ -99,12 +99,15 @@ def get_zmq_handler_specs(module: object) -> list[HandlerSpec]:
 def build_zmq_request_server(
     modules: list[EngineModule],
     mp_config: MPServerConfig,
+    on_peer_disconnected: Callable[[bytes], None] | None = None,
 ) -> MessageQueueServer:
     """Build a ZMQ request server for the supplied business modules.
 
     Args:
         modules: Ordered business modules composing the cache server.
         mp_config: Multiprocess server configuration.
+        on_peer_disconnected: Optional callback receiving the connection id
+            of each client connection that closes.
 
     Returns:
         Configured, but not yet started, ZMQ message queue server.
@@ -112,6 +115,7 @@ def build_zmq_request_server(
     server = MessageQueueServer(
         bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
         context=zmq.Context.instance(),
+        on_peer_disconnected=on_peer_disconnected,
     )
     all_specs = [spec for module in modules for spec in get_zmq_handler_specs(module)]
     for spec in all_specs:
