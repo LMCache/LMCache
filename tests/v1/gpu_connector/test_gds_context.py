@@ -40,7 +40,7 @@ from lmcache.v1.memory_management import GDSMemoryObject
 
 
 def _fake_stream(handle: int):
-    """A stand-in for ``torch_dev.current_stream()`` (no CUDA needed)."""
+    """A stand-in for a platform stream (no accelerator needed)."""
     return SimpleNamespace(cuda_stream=handle, synchronize=lambda: None)
 
 
@@ -244,6 +244,41 @@ class TestRegisterGpuBuffer:
         ctx.register_gpu_buffer(buf)
 
         assert sizes == [16 << 20, 16 << 20, 8 << 20]
+
+    def test_rolls_back_regions_when_registration_fails(self, monkeypatch):
+        backend = Mock(spec=GDSBackend)
+        ctx = GDSContext(backend)
+        ctx.initialized = True
+        registered_sizes: list[int] = []
+        deregistered_sizes: list[int] = []
+        stream_registrations: list[int] = []
+        stream_deregistrations: list[int] = []
+
+        def register_buffer(region):
+            registered_sizes.append(region.numel() * region.element_size())
+            if len(registered_sizes) == 2:
+                raise RuntimeError("registration failed")
+
+        monkeypatch.setattr(backend, "register_buffer", register_buffer)
+        monkeypatch.setattr(
+            backend,
+            "deregister_buffer",
+            lambda region: deregistered_sizes.append(
+                region.numel() * region.element_size()
+            ),
+        )
+        monkeypatch.setattr(backend, "register_stream", stream_registrations.append)
+        monkeypatch.setattr(backend, "deregister_stream", stream_deregistrations.append)
+        _use_fake_stream(monkeypatch, 7)
+
+        with pytest.raises(RuntimeError, match="registration failed"):
+            ctx.register_gpu_buffer(torch.empty(40 << 20, dtype=torch.uint8))
+
+        assert registered_sizes == [16 << 20, 16 << 20]
+        assert deregistered_sizes == [16 << 20]
+        assert stream_registrations == [7]
+        assert stream_deregistrations == [7]
+        assert ctx._base_ptrs == []
 
 
 class TestResolveBuffer:
