@@ -55,7 +55,7 @@ each instance is the sole writer of its own facts, so there is no
 global order and no cross-instance arbitration. `instance_id` is really
 the *emitter stream id* — a shared medium's controller sends under its
 own stable id and gets an ordinary deduplicated, fenced stream with no
-special-casing (see [key_directory.md](key_directory.md), Shared pools).
+special-casing (see [key_directory.md](views/key_directory.md), Shared pools).
 
 The gate's lock is held across the fan-out, so an emitter's batches
 reach the consumers in admission order. Consumers must therefore not

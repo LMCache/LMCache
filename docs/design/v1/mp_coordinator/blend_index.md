@@ -5,7 +5,7 @@ HTTP surface: `POST /directory/blend-lookup`
 (`http_apis/directory_api.py`)
 
 The fragment counterpart to the key directory's prefix lookup, and the
-follow-up [key_directory.md](key_directory.md) names as "fragment tokens
+follow-up [key_directory.md](views/key_directory.md) names as "fragment tokens
 → keys". It answers: **given a request's tokens, which cached chunks does
 it contain, and where?** — the query behind fleet-wide CacheBlend reuse,
 where a request assembled from documents cached anywhere in the fleet
@@ -44,7 +44,7 @@ directory removes:
 
 The cost is coordinator memory: verification needs the tokens resident,
 `O(m)` rather than `O(m/C)`. See
-[key_directory.md](key_directory.md) — Token index for the
+[key_directory.md](views/key_directory.md) — Token index for the
 representation that keeps that affordable.
 
 ## Identity and scope
@@ -235,4 +235,4 @@ thread rather than on the event loop.
   directory is eventually consistent, so a match is still a hint the
   owner validates. Filtering on placements would tighten this, at the
   cost of taking the directory lock on the serving path (see
-  [key_directory.md](key_directory.md)).
+  [key_directory.md](views/key_directory.md)).
