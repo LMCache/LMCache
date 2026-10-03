@@ -339,6 +339,37 @@ def test_lookup_retrieve_and_cleanup(
     assert not receiving
 
 
+def test_new_store_uses_scheduler_blocks_after_empty_alloc_update(
+    mock_io: SimpleNamespace,
+) -> None:
+    """A writer still needs blocks when MultiConnector did not select it to load."""
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+        )
+    )
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+    try:
+        request = _request()
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+
+        # MultiConnector gives non-selected loaders no blocks here.
+        scheduler.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([],)), 0
+        )
+
+        metadata = scheduler.build_connector_meta(
+            _schedule(num_tokens=4, block_ids=([1],), new=True)
+        )
+        assert [
+            (meta.direction, meta.op.block_ids) for meta in metadata.requests
+        ] == [("STORE", [[1]])]
+    finally:
+        scheduler.shutdown()
+
+
 @pytest.mark.parametrize("mp_role", ["kv_both", "kv_consumer"])
 @pytest.mark.parametrize("peer_delays_free", [False, True])
 def test_multi_connector_child_role_and_completion(
