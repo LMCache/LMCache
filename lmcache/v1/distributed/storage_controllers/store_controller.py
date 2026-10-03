@@ -251,7 +251,7 @@ class StoreController(StorageControllerInterface):
         self._adapter_ctrl_efd = create_event_notifier()
 
         self._listener = StoreListener()
-        self._l1_manager.register_listener(self._listener)
+        self._l1_manager.register_write_back_listener(self._listener)
         self._event_bus = get_event_bus()
 
         # (adapter_index, task_id) -> InFlightStoreTask
@@ -317,6 +317,9 @@ class StoreController(StorageControllerInterface):
         self._listener.notify()
         self._thread.join()
         self._cleanup_in_flight_tasks()
+        leftover_keys = self._listener.pop_pending_keys()
+        if leftover_keys:
+            self._l1_manager.release_write_back_holds(leftover_keys)
         self._listener.close()
         self._adapter_ctrl_efd.close()
 
@@ -565,10 +568,17 @@ class StoreController(StorageControllerInterface):
 
         Args:
             keys (list[ObjectKey]): Keys that finished writing to L1.
-        """
 
-        for group in _group_keys_by_shape(keys).values():
-            self._submit_store_for_single_shape(group)
+        Note:
+            Each key arrives with an L1 write-back hold, so it cannot be
+            evicted before step 2. The holds are released once every target
+            adapter has taken its own read lock.
+        """
+        try:
+            for group in _group_keys_by_shape(keys).values():
+                self._submit_store_for_single_shape(group)
+        finally:
+            self._l1_manager.release_write_back_holds(keys)
 
     def _submit_store_for_single_shape(self, keys: list[ObjectKey]) -> None:
         """Submit ``keys`` (all same shape) to their target adapters."""
