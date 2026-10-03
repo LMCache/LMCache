@@ -674,8 +674,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 raise ValueError("R-KV MVP requires prefix caching disabled")
             if getattr(vllm_config, "speculative_config", None) is not None:
                 raise ValueError("R-KV MVP does not support speculative decoding")
-            if getattr(vllm_config.scheduler_config, "enable_chunked_prefill", False):
-                raise ValueError("R-KV MVP requires chunked prefill disabled")
             if getattr(vllm_config.scheduler_config, "async_scheduling", False):
                 raise ValueError("R-KV MVP requires synchronous scheduling")
             if not getattr(vllm_config.model_config, "enforce_eager", False):
