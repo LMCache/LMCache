@@ -4,6 +4,11 @@
 #include <string>
 #include <vector>
 
+// Allocate size bytes of CUDA-pinned host memory; throws std::runtime_error on
+// allocation/registration failure. At >=512 GiB, Default/Portable/Mapped use
+// mmap with <=64 GiB registrations. Other flags retain cudaHostAlloc semantics.
+// Release only with free_pinned_ptr. Allocation bookkeeping may throw
+// bad_alloc.
 uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags);
 uintptr_t alloc_numa_ptr(size_t size, int node);
 uintptr_t alloc_pinned_numa_ptr(size_t size, int node);
