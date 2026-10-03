@@ -362,6 +362,7 @@ class EICConnector(RemoteConnector):
             meta.shapes,
             meta.dtypes,
             meta.fmt,
+            busy_loop=False,
         )
         if memory_obj is None:
             logger.error(
