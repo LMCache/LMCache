@@ -8,7 +8,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
+from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -45,13 +45,32 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         Returns a dummy MemoryObj for testing purposes.
         """
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
-        size = get_size_bytes(shapes, dtypes)
 
-        # Return a dummy object with no actual memory allocation
+        # Real (if arbitrary) finite content per group, not torch.empty()'s
+        # uninitialized bytes: those can decode to a NaN/Inf bit pattern for
+        # a floating dtype, which makes callers' round-trip torch.equal()
+        # assertions spuriously fail (NaN != NaN, even for otherwise
+        # bit-identical tensors) depending on whatever happened to be in
+        # that memory beforehand.
+        parts = [
+            (
+                torch.randn(shape, dtype=torch.float32, device=self.device).to(dtype)
+                if dtype.is_floating_point
+                else torch.zeros(shape, dtype=dtype, device=self.device)
+            )
+            .reshape(-1)
+            .view(torch.uint8)
+            for shape, dtype in zip(shapes, dtypes, strict=False)
+        ]
+        raw_data = (
+            torch.cat(parts)
+            if parts
+            else torch.empty(torch.Size([0]), dtype=torch.uint8, device=self.device)
+        )
+
+        # Return a dummy object with no real (pinned/registered) allocation
         return TensorMemoryObj(
-            raw_data=torch.empty(
-                torch.Size([size]), dtype=torch.uint8, device=self.device
-            ),
+            raw_data=raw_data,
             metadata=MemoryObjMetadata(
                 shape=shapes[0],
                 dtype=dtypes[0],
