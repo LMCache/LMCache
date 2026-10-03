@@ -1180,6 +1180,10 @@ class TestFSNativeL2AdapterConfig:
             def event_fd(self) -> int:
                 return self.read_fd
 
+            def read_budget_bytes(self) -> int:
+                """Report what the real client does with no read pool."""
+                return 0
+
             def close(self) -> None:
                 os.close(self.read_fd)
                 os.close(self.write_fd)
