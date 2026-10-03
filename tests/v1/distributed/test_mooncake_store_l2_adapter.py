@@ -308,6 +308,42 @@ class TestMooncakeStoreL2AdapterConfig:
         assert config.per_op_workers == {"lookup": 4, "retrieve": 16}
         assert "store" not in config.per_op_workers
 
+    @pytest.mark.parametrize(
+        "replica_counts,expected",
+        [
+            ({}, {}),
+            (
+                {"replica_num": 0, "nof_replica_num": 1},
+                {"replica_num": "0", "nof_replica_num": "1"},
+            ),
+            (
+                {"replica_num": "0", "nof_replica_num": "1"},
+                {"replica_num": "0", "nof_replica_num": "1"},
+            ),
+            ({"replica_num": 3}, {"replica_num": "3"}),
+            ({"nof_replica_num": 1}, {"nof_replica_num": "1"}),
+        ],
+    )
+    def test_from_dict_preserves_replica_counts(
+        self, replica_counts: dict[str, object], expected: dict[str, str]
+    ) -> None:
+        """Separate explicit replica counts from connection setup settings.
+
+        Args:
+            replica_counts: User-supplied replica counts, including unset fields.
+            expected: String replica counts forwarded to the native connector.
+        """
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "localhost",
+                **replica_counts,
+            }
+        )
+
+        assert config.setup_config == {"local_hostname": "localhost"}
+        assert config.replicate_config == expected
+
     def test_constructor_copies_setup_config(self):
         """Constructor should copy the setup_config dict."""
         original = {"key": "value"}
@@ -385,7 +421,7 @@ class TestMooncakeStoreL1RegistrationFactory:
 
     def test_factory_passes_disabled_l1_registration_for_tcp(
         self, monkeypatch: pytest.MonkeyPatch
-    ):
+    ) -> None:
         # First Party
         from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
 
@@ -396,13 +432,15 @@ class TestMooncakeStoreL1RegistrationFactory:
                 self,
                 config: dict[str, str],
                 num_workers: int,
-                l1_registration,
-                per_op_workers=None,
-            ):
+                l1_registration: Any,
+                per_op_workers: dict[str, int] | None = None,
+                replicate_config: dict[str, str] | None = None,
+            ) -> None:
                 captured["config"] = config
                 captured["num_workers"] = num_workers
                 captured["l1_registration"] = l1_registration
                 captured["per_op_workers"] = per_op_workers
+                captured["replicate_config"] = replicate_config
 
         _install_fake_mooncake_extension(monkeypatch, FakeClient)
         monkeypatch.setattr(
@@ -418,6 +456,8 @@ class TestMooncakeStoreL1RegistrationFactory:
                 "metadata_server": "P2PHANDSHAKE",
                 "num_workers": 3,
                 "protocol": "tcp",
+                "replica_num": 0,
+                "nof_replica_num": 1,
             }
         )
         l1_desc = L1MemoryDesc(ptr=123456, size=65536, align_bytes=4096)
@@ -430,6 +470,10 @@ class TestMooncakeStoreL1RegistrationFactory:
 
         assert wrapped_adapter[0] == "wrapped"
         assert captured["config"] == config.setup_config
+        assert captured["replicate_config"] == {
+            "replica_num": "0",
+            "nof_replica_num": "1",
+        }
         assert captured["num_workers"] == 3
         registration = captured["l1_registration"]
         assert registration.enabled is False
@@ -449,9 +493,10 @@ class TestMooncakeStoreL1RegistrationFactory:
                 self,
                 config: dict[str, str],
                 num_workers: int,
-                l1_registration,
-                per_op_workers=None,
-            ):
+                l1_registration: Any,
+                per_op_workers: dict[str, int] | None = None,
+                replicate_config: dict[str, str] | None = None,
+            ) -> None:
                 captured["config"] = config
                 captured["num_workers"] = num_workers
                 captured["l1_registration"] = l1_registration
@@ -500,9 +545,10 @@ class TestMooncakeStoreL1RegistrationFactory:
                 self,
                 config: dict[str, str],
                 num_workers: int,
-                l1_registration,
-                per_op_workers=None,
-            ):
+                l1_registration: Any,
+                per_op_workers: dict[str, int] | None = None,
+                replicate_config: dict[str, str] | None = None,
+            ) -> None:
                 captured["config"] = config
                 captured["num_workers"] = num_workers
                 captured["l1_registration"] = l1_registration
