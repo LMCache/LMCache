@@ -917,7 +917,9 @@ forms -- supply exactly one:
   from ``GET /directory/keys``).
 * **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
   ..., "cache_salt": ...}``: resolve a request's tokens to the keys of its
-  complete chunks (the same fan-out the pin APIs use).
+  complete chunks, per-rank fan-out, expanded to every stored object group
+  via the chunk-hash index (so under ``--separate-object-groups`` a chunk
+  stored in *G* groups contributes *G* keys per rank).
 
 .. important::
 
@@ -976,11 +978,15 @@ forms -- supply exactly one:
 
 ``chunks`` is the number of complete chunks the tokens resolved to (keys form:
 the number of keys requested); ``results`` has one entry per resolved key, in
-request order (tokens form: ``chunks`` x the per-rank fan-out). ``placements``
-is empty for keys the directory does not know; ``token_ids`` is empty when the
-directory has no tokens for the key's chunk (never stored with token reporting
-on, or not yet re-reported after an event gap). ``access_count`` is the number
-of ``access`` events applied to the key, ``0`` for unknown keys.
+request order (tokens form: ``chunks`` x the per-rank fan-out x the number of
+object groups each chunk is actually stored in -- one under the default
+single-group layout, more under ``--separate-object-groups``, and groups the
+directory has not seen a store event for are not counted).
+``placements`` is empty for keys the directory does not know; ``token_ids`` is
+empty when the directory has no tokens for the key's chunk (never stored with
+token reporting on, or not yet re-reported after an event gap).
+``access_count`` is the number of ``access`` events applied to the key, ``0``
+for unknown keys.
 
 **HTTP status codes:**
 
@@ -1338,8 +1344,12 @@ coordinator's L2 pin set).
 ``skipped`` are **totals across the tiers acted on**: ``affected`` counts L1 keys
 removed by the node plus L2 keys removed by the coordinator, and ``skipped``
 counts L1 keys the node refused plus L2 keys held back for an L2 pin (non-force
-only). A chunk resident in both tiers (``tier=all``) contributes to both counts,
-so ``affected`` may be up to ``2 x requested x world_size``. A sub-chunk
+only). The coordinator expands each resolved chunk to every stored object
+group via the chunk-hash index before dispatching the delete, so under
+``--separate-object-groups`` a chunk stored in *G* groups contributes
+*G* times its per-rank fan-out to each tier it is resident in. A chunk
+resident in both tiers (``tier=all``) therefore contributes to both counts,
+and ``affected`` may be up to ``2 x requested x world_size x G``. A sub-chunk
 sequence returns ``status`` ``"noop"``.
 
 **HTTP status codes:**
