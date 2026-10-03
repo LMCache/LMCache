@@ -12,7 +12,6 @@ import sys
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -66,20 +65,24 @@ class ReplayEventsCommand(BaseCommand):
         )
 
     def execute(self, args: argparse.Namespace) -> None:
-        run_events_replay(args)
+        run_events_replay(self, args)
 
 
-def run_events_replay(args: argparse.Namespace) -> None:
+def run_events_replay(command: BaseCommand, args: argparse.Namespace) -> None:
     """Load the files in *args* and deliver their stream to the coordinator.
 
-    Every record is logged as it goes; unless ``--quiet``, a summary follows:
-    files, servers, records, batches and how the coordinator counted them.
+    Every record is logged as it goes, then a summary follows: files,
+    servers, records, batches and how the coordinator counted them. The
+    summary is printed in ``--format`` unless ``--quiet``, and saved to
+    ``--output`` when set.
     Exits with status 2 if a file is not an events trace this build replays,
     and with status 1 if the coordinator cannot be reached or refuses a
     call, at which point the replay stops: a partly delivered stream would
     leave views that look complete and are not.
 
     Args:
+        command: The replay command; its ``create_metrics`` builds the
+            summary handlers.
         args: Parsed CLI arguments.
     """
     # Third Party
@@ -125,22 +128,27 @@ def run_events_replay(args: argparse.Namespace) -> None:
             e,
         )
         sys.exit(1)
-    if not getattr(args, "quiet", False):
-        _emit_metrics(trace.files, trace.instances, result)
+    _emit_metrics(command, args, trace.files, trace.instances, result)
 
 
 def _emit_metrics(
-    files: list[str], instances: list[str], result: EventsReplayResult
+    command: BaseCommand,
+    args: argparse.Namespace,
+    files: list[str],
+    instances: list[str],
+    result: EventsReplayResult,
 ) -> None:
-    """Print the summary with the shared :class:`Metrics` renderer.
+    """Emit the summary with the shared :class:`Metrics` renderer.
 
     Args:
+        command: The replay command; its ``create_metrics`` honours
+            ``--format``, ``--output`` and ``--quiet``.
+        args: Parsed CLI arguments.
         files: The files replayed.
         instances: The servers the stream named.
         result: What the replay delivered.
     """
-    metrics = Metrics(title="Events Replay Result")
-    metrics.add_handler(StreamHandler(get_formatter("terminal", width=64)))
+    metrics = command.create_metrics("Events Replay Result", args, width=64)
     overall = metrics.add_section("overall", "Overall")
     overall.add("files", "Files", len(files))
     overall.add("servers", "Servers", len(instances))
