@@ -660,11 +660,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "lmcache.mp.rkv_retain_direction", "last"
             )
         )
-        self._rkv_score_mode = str(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.rkv_score_mode", "batched"
-            )
-        )
         self._rkv_score_chunk_bytes = int(
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "lmcache.mp.rkv_score_chunk_bytes", 512 * 1024 * 1024
@@ -853,7 +848,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     mix_lambda=self._rkv_mix_lambda,
                     retain_ratio=self._rkv_retain_ratio,
                     retain_direction=self._rkv_retain_direction,
-                    score_mode=self._rkv_score_mode,
                     score_chunk_bytes=self._rkv_score_chunk_bytes,
                 )
             if self.transfer_intermediate_tensors:

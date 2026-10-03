@@ -40,7 +40,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRKVRequestState,
     LMCacheMPWorkerMetadata,
 )
-from lmcache.integration.vllm.rkv_vllm_shim import (  # noqa: E402
+from lmcache.integration.vllm.rkv_allocator_adapter import (  # noqa: E402
     clear_resident_kv_tokens,
     get_resident_kv_tokens,
     set_resident_kv_tokens,
@@ -70,6 +70,7 @@ def _request(request_id: str = "request") -> Request:
         SimpleNamespace(
             request_id=request_id,
             cache_salt="",
+            prompt_token_ids=list(range(8)),
             all_token_ids=list(range(12)),
             status=RequestStatus.WAITING,
             num_computed_tokens=0,
@@ -253,12 +254,19 @@ def test_scheduler_builds_authoritative_rkv_state() -> None:
 
     scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
     scheduler._rkv_allocations = {"request": object()}
+    scheduler._rkv_buffer = 128
     scheduler.request_trackers = {
-        "request": SimpleNamespace(allocated_block_ids={0: [10, 11, 18]})
+        "request": SimpleNamespace(
+            allocated_block_ids={0: [10, 11, 18]},
+            num_scheduled_tokens=33,
+            all_token_ids=list(range(33)),
+            num_prompt_tokens=32,
+        )
     }
     scheduler_output = SimpleNamespace(
         scheduled_new_reqs=[],
         scheduled_cached_reqs=SimpleNamespace(req_ids=["request"]),
+        num_scheduled_tokens={"request": 1},
     )
     metadata = LMCacheMPConnectorMetadata()
 
@@ -269,6 +277,8 @@ def test_scheduler_builds_authoritative_rkv_state() -> None:
             request_id="request",
             block_ids=[10, 11, 18],
             resident_kv_tokens=33,
+            is_genuine_decode=True,
+            should_compress=False,
         )
     ]
     clear_resident_kv_tokens("request")
@@ -633,3 +643,33 @@ def test_rkv_ignores_final_update_after_request_finished() -> None:
 
     scheduler._commit_rkv_resident_updates.assert_called_once_with({"live": 32})
     assert scheduler._rkv_finished_before_output == set()
+
+
+@pytest.mark.parametrize(
+    ("num_computed", "num_new", "num_tokens", "expected"),
+    [
+        (512, 512, 512, (False, False)),  # initial prefill
+        (513, 1, 513, (True, False)),
+        (639, 1, 639, (True, False)),
+        (640, 1, 640, (True, True)),  # 128th decode token
+        (300, 100, 700, (False, False)),  # preemption replay / prefill
+        (639, 1, 700, (False, False)),  # replaying generated history
+        (640, 1, 640, (True, True)),  # catch-up may arm; worker gates on window
+    ],
+)
+def test_rkv_step_flags_match_upstream_decode_cadence(
+    num_computed: int,
+    num_new: int,
+    num_tokens: int,
+    expected: tuple[bool, bool],
+) -> None:
+    assert (
+        connector_mod._rkv_step_flags(
+            num_computed=num_computed,
+            num_new_tokens=num_new,
+            num_tokens=num_tokens,
+            num_prompt_tokens=512,
+            buffer=128,
+        )
+        == expected
+    )

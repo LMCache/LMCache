@@ -27,7 +27,6 @@ class RKVWorker:
         mix_lambda: float = 0.1,
         retain_ratio: float = 0.1,
         retain_direction: str = "last",
-        score_mode: str = "batched",
         score_chunk_bytes: int = 512 * 1024 * 1024,
     ) -> None:
         if window_size <= 0:
@@ -44,10 +43,15 @@ class RKVWorker:
             raise ValueError("R-KV retain_ratio must be in (0, 1]")
         if retain_direction not in ("last", "first"):
             raise ValueError("R-KV retain_direction must be 'last' or 'first'")
-        if score_mode not in ("batched", "reference"):
-            raise ValueError("R-KV score_mode must be 'batched' or 'reference'")
         if score_chunk_bytes <= 0:
             raise ValueError("R-KV score_chunk_bytes must be positive")
+
+        try:
+            from rkv import R1KV
+        except ImportError as exc:
+            raise ImportError(
+                "R-KV is enabled but the optional 'rkv' package is not installed"
+            ) from exc
 
         self.budget = budget
         self.buffer = buffer
@@ -56,9 +60,8 @@ class RKVWorker:
         self.mix_lambda = mix_lambda
         self.retain_ratio = retain_ratio
         self.retain_direction = retain_direction
-        self.score_mode = score_mode
         self.score_chunk_bytes = score_chunk_bytes
-        self._policy = create_rkv_score_policy(
+        self._policy = R1KV(
             budget=budget,
             window_size=window_size,
             kernel_size=kernel_size,
@@ -335,21 +338,20 @@ class RKVWorker:
         block_ids = self._block_table[row, positions // self._block_size].long()
         return block_ids * self._block_size + positions % self._block_size
 
-    def _score_group_batched(
+    def _compact_group_batched(
         self,
-        rows: list[int],
-        slots_list: list[torch.Tensor],
-    ) -> torch.Tensor:
-        """Score same-length requests in layer/request batches."""
-        num_reqs = len(rows)
+        members: list[tuple[int, str, torch.Tensor]],
+    ) -> None:
+        """Run canonical R1KV on contiguous Q/K/V and write compacted K/V back."""
+        num_reqs = len(members)
         num_layers = len(self._layer_names)
-        seq_len = slots_list[0].numel()
+        seq_len = members[0][2].numel()
         first_cache = self._kv_caches[self._layer_names[0]][:, 0]
         kv_heads = first_cache.shape[2]
         head_dim = first_cache.shape[3]
         elt = first_cache.element_size()
 
-        # Match the upstream vLLM port's conservative score-memory bound.
+        # Bound the same quadratic score working set as the upstream vLLM port.
         per_unit = max(
             1,
             2 * (2 * elt + 1 + 4) * kv_heads * seq_len * seq_len,
@@ -358,18 +360,23 @@ class RKVWorker:
         req_chunk = max(1, min(num_reqs, units_cap))
         layer_chunk = max(1, min(num_layers, units_cap // req_chunk))
 
-        acc_parts: list[torch.Tensor] = []
         for r0 in range(0, num_reqs, req_chunk):
-            chunk_rows = rows[r0 : r0 + req_chunk]
-            rc = len(chunk_rows)
-            slots_cat = torch.cat(slots_list[r0 : r0 + rc])
+            chunk_members = members[r0 : r0 + req_chunk]
+            rc = len(chunk_members)
+            slots_cat = torch.cat([member[2] for member in chunk_members])
             blocks = slots_cat // self._block_size
             offsets = slots_cat % self._block_size
-            part: torch.Tensor | None = None
+
+            destination_slots = torch.cat(
+                [member[2][: self.budget] for member in chunk_members]
+            )
+            destination_blocks = destination_slots // self._block_size
+            destination_offsets = destination_slots % self._block_size
 
             for l0 in range(0, num_layers, layer_chunk):
                 layer_names = self._layer_names[l0 : l0 + layer_chunk]
                 lc = len(layer_names)
+
                 keys = (
                     torch.stack(
                         [
@@ -382,12 +389,24 @@ class RKVWorker:
                     .reshape(lc * rc, kv_heads, seq_len, head_dim)
                     .contiguous()
                 )
+                values = (
+                    torch.stack(
+                        [
+                            self._kv_caches[name][:, 1][blocks, offsets]
+                            for name in layer_names
+                        ]
+                    )
+                    .view(lc, rc, seq_len, kv_heads, head_dim)
+                    .permute(0, 1, 3, 2, 4)
+                    .reshape(lc * rc, kv_heads, seq_len, head_dim)
+                    .contiguous()
+                )
                 queries = torch.stack(
                     [
                         torch.stack(
                             [
-                                self._recent_queries[self._request_ids[row]][name]
-                                for row in chunk_rows
+                                self._recent_queries[request_id][name]
+                                for _, request_id, _ in chunk_members
                             ]
                         )
                         for name in layer_names
@@ -399,20 +418,40 @@ class RKVWorker:
                     .reshape(lc * rc, q_heads, self.window_size, head_dim)
                     .contiguous()
                 )
-                layer_scores = self._policy.compute_scores(keys, queries).mean(dim=1)
-                layer_scores = layer_scores.view(
-                    lc, rc, seq_len - self.window_size
-                )
-                for li in range(lc):
-                    part = (
-                        layer_scores[li]
-                        if part is None
-                        else part + layer_scores[li]
-                    )
-            assert part is not None
-            acc_parts.append(part)
 
-        return torch.cat(acc_parts, dim=0)
+                compacted_keys, compacted_values = self._policy.update_kv(
+                    keys,
+                    queries,
+                    values,
+                )
+                compacted_keys = (
+                    compacted_keys.view(
+                        lc, rc, kv_heads, self.budget, head_dim
+                    )
+                    .permute(0, 1, 3, 2, 4)
+                    .contiguous()
+                )
+                compacted_values = (
+                    compacted_values.view(
+                        lc, rc, kv_heads, self.budget, head_dim
+                    )
+                    .permute(0, 1, 3, 2, 4)
+                    .contiguous()
+                )
+
+                for li, name in enumerate(layer_names):
+                    key_cache = self._kv_caches[name][:, 0]
+                    value_cache = self._kv_caches[name][:, 1]
+                    key_cache[destination_blocks, destination_offsets] = (
+                        compacted_keys[li].reshape(
+                            rc * self.budget, kv_heads, head_dim
+                        )
+                    )
+                    value_cache[destination_blocks, destination_offsets] = (
+                        compacted_values[li].reshape(
+                            rc * self.budget, kv_heads, head_dim
+                        )
+                    )
 
     def compact(self) -> dict[str, int]:
         if self._seq_lens is None or self._block_table is None:
@@ -445,65 +484,12 @@ class RKVWorker:
         if not groups:
             return {}
 
-        all_copies: list[torch.Tensor] = []
         updates: dict[str, int] = {}
-        for seq_len, members in groups.items():
-            rows = [member[0] for member in members]
-            slots_list = [member[2] for member in members]
-
-            if self.score_mode == "batched":
-                scores = self._score_group_batched(rows, slots_list)
-                past = scores.topk(
-                    self.budget - self.window_size, dim=-1
-                ).indices
-                recent = torch.arange(
-                    seq_len - self.window_size,
-                    seq_len,
-                    device=scores.device,
-                ).expand(len(members), self.window_size)
-                retained_rows = torch.sort(
-                    torch.cat([past, recent], dim=-1), dim=-1
-                ).values
-            else:
-                retained_rows = torch.stack(
-                    [
-                        select_rkv_retained_indices(
-                            [
-                                (
-                                    self._kv_caches[name][:, 0],
-                                    self._recent_queries[request_id][name],
-                                )
-                                for name in self._layer_names
-                            ],
-                            slots,
-                            self.budget,
-                            self._policy,
-                        )
-                        for _, request_id, slots in members
-                    ]
-                )
-
-            for member, retained in zip(members, retained_rows, strict=True):
-                _, request_id, slots = member
-                source_slots = slots[retained]
-                destination_slots = slots[: self.budget]
-                moving = source_slots != destination_slots
-                if moving.any():
-                    all_copies.append(
-                        torch.stack(
-                            (source_slots[moving], destination_slots[moving]), dim=1
-                        )
-                    )
+        for members in groups.values():
+            self._compact_group_batched(members)
+            for _, request_id, _ in members:
                 updates[request_id] = self.budget
                 self._compacted_requests.add(request_id)
-
-        if all_copies:
-            copies = torch.cat(all_copies, dim=0)
-            for layer_name in self._layer_names:
-                apply_kv_compaction_moves(
-                    self._kv_caches[layer_name].transpose(1, 2),
-                    copies,
-                )
 
         return updates
 

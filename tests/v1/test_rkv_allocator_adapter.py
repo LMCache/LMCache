@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lmcache.integration.vllm.rkv_vllm_shim import (
+from lmcache.integration.vllm.rkv_allocator_adapter import (
     _allocate_with_resident_frontier,
     clear_resident_kv_tokens,
     get_resident_kv_tokens,

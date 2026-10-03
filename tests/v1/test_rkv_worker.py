@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lmcache.integration.vllm.experimental.rkv import select_rkv_retained_indices
+from rkv import R1KV
+
 from lmcache.integration.vllm.experimental.rkv_worker import RKVWorker
 
 BLOCK_SIZE = 16
@@ -15,6 +16,18 @@ KV_HEADS = 2
 Q_HEADS = 4
 HEAD_DIM = 8
 LAYER_NAMES = ["layer.0", "layer.1"]
+
+
+def _policy():
+    return R1KV(
+        budget=BUDGET,
+        window_size=WINDOW,
+        kernel_size=7,
+        mix_lambda=0.1,
+        retain_ratio=0.1,
+        retain_direction="last",
+    )
+
 
 
 def _slots(block_ids: list[int], length: int) -> torch.Tensor:
@@ -51,7 +64,7 @@ def _new_cache(num_blocks: int) -> dict[str, torch.Tensor]:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_prepare_forward_builds_physical_view_and_captures_queries():
     caches = _new_cache(8)
-    worker = RKVWorker(BUDGET)
+    worker = RKVWorker(BUDGET, buffer=WINDOW)
     worker.register_kv_caches(caches)
 
     block_table = torch.tensor([[1, 3, 5], [2, 4, 6]], device="cuda")
@@ -84,11 +97,15 @@ def test_prepare_forward_builds_physical_view_and_captures_queries():
             request_id="req-b",
             block_ids=[2, 4, 6],
             resident_kv_tokens=None,
+            is_genuine_decode=True,
+            should_compress=False,
         ),
         SimpleNamespace(
             request_id="req-a",
             block_ids=[1, 3, 5],
             resident_kv_tokens=33,
+            is_genuine_decode=True,
+            should_compress=False,
         ),
     ]
 
@@ -125,7 +142,7 @@ def test_prepare_forward_builds_physical_view_and_captures_queries():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_rkv_worker_compacts_all_layers_to_selected_survivors():
+def test_rkv_worker_compacts_all_layers_matches_upstream_update_kv():
     length = BUDGET + WINDOW
     block_ids = [1, 3, 5]
     caches = _new_cache(8)
@@ -142,47 +159,67 @@ def test_rkv_worker_compacts_all_layers_to_selected_survivors():
     }
 
     slots = _slots(block_ids, length)
-    expected_retained = select_rkv_retained_indices(
-        [(original[name][:, 0], queries[name][-WINDOW:]) for name in LAYER_NAMES],
-        slots,
-        BUDGET,
-    )
-    source_slots = slots[expected_retained]
     destination_slots = slots[:BUDGET]
+    expected = {}
+    for name in LAYER_NAMES:
+        keys = (
+            original[name][:, 0][slots // BLOCK_SIZE, slots % BLOCK_SIZE]
+            .permute(1, 0, 2)
+            .unsqueeze(0)
+            .contiguous()
+        )
+        values = (
+            original[name][:, 1][slots // BLOCK_SIZE, slots % BLOCK_SIZE]
+            .permute(1, 0, 2)
+            .unsqueeze(0)
+            .contiguous()
+        )
+        recent_queries = (
+            queries[name][-WINDOW:].permute(1, 0, 2).unsqueeze(0).contiguous()
+        )
+        expected[name] = _policy().update_kv(keys, recent_queries, values)
 
-    worker = RKVWorker(BUDGET)
+    worker = RKVWorker(BUDGET, buffer=WINDOW)
     worker.register_kv_caches(caches)
     metadata = _metadata(block_ids, length, length)
     worker.begin_step(["req"], metadata)
-    for name in LAYER_NAMES:
-        worker.capture_query(name, queries[name])
+    worker._recent_queries["req"] = {
+        name: queries[name][-WINDOW:].clone() for name in LAYER_NAMES
+    }
 
     assert worker.compact() == {"req": BUDGET}
 
     for name in LAYER_NAMES:
-        for kv_index in (0, 1):
-            expected = original[name][:, kv_index][
-                source_slots // BLOCK_SIZE,
-                source_slots % BLOCK_SIZE,
-            ]
-            actual = caches[name][:, kv_index][
-                destination_slots // BLOCK_SIZE,
-                destination_slots % BLOCK_SIZE,
-            ]
-            assert torch.equal(actual, expected)
+        actual_k = caches[name][:, 0][
+            destination_slots // BLOCK_SIZE,
+            destination_slots % BLOCK_SIZE,
+        ].permute(1, 0, 2).unsqueeze(0)
+        actual_v = caches[name][:, 1][
+            destination_slots // BLOCK_SIZE,
+            destination_slots % BLOCK_SIZE,
+        ].permute(1, 0, 2).unsqueeze(0)
+        expected_k, expected_v = expected[name]
+        assert torch.equal(actual_k, expected_k)
+        assert torch.equal(actual_v, expected_v)
+
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_rkv_worker_recompacts_after_one_fresh_query_window():
+def test_rkv_worker_recompacts_on_decode_buffer_boundaries():
     block_ids = [1, 3, 5]
     caches = _new_cache(8)
-    worker = RKVWorker(BUDGET)
+    worker = RKVWorker(BUDGET, buffer=WINDOW)
     worker.register_kv_caches(caches)
 
-    # First compaction can use the trailing query window from the prompt.
+    # Initial prefill never contributes to the observation window or compacts.
     prompt_len = BUDGET + WINDOW
     prompt_metadata = _metadata(block_ids, prompt_len, prompt_len)
-    worker.begin_step(["req"], prompt_metadata)
+    worker.begin_step(
+        ["req"],
+        prompt_metadata,
+        is_genuine_decode=[False],
+        should_compress=[False],
+    )
     for name in LAYER_NAMES:
         query = torch.randn(
             prompt_len,
@@ -192,28 +229,56 @@ def test_rkv_worker_recompacts_after_one_fresh_query_window():
             dtype=torch.bfloat16,
         )
         worker.capture_query(name, query)
-    assert worker.compact() == {"req": BUDGET}
+    assert worker._recent_queries == {}
+    assert worker.compact() == {}
 
-    # After reclaim, eight new one-token decode steps rebuild a fresh window.
+    # First compaction fires after exactly one full buffer of decode tokens.
     for step in range(1, WINDOW + 1):
-        length = BUDGET + step
-        metadata = _metadata(block_ids, length, 1)
-        worker.begin_step(["req"], metadata)
+        metadata = _metadata(block_ids, prompt_len + step, 1)
+        worker.begin_step(
+            ["req"],
+            metadata,
+            is_genuine_decode=[True],
+            should_compress=[step == WINDOW],
+        )
         for name in LAYER_NAMES:
-            query = torch.randn(
-                1,
-                Q_HEADS,
-                HEAD_DIM,
-                device="cuda",
-                dtype=torch.bfloat16,
+            worker.capture_query(
+                name,
+                torch.randn(
+                    1,
+                    Q_HEADS,
+                    HEAD_DIM,
+                    device="cuda",
+                    dtype=torch.bfloat16,
+                ),
             )
-            worker.capture_query(name, query)
+        assert worker.compact() == (
+            {"req": BUDGET} if step == WINDOW else {}
+        )
 
-        updates = worker.compact()
-        if step < WINDOW:
-            assert updates == {}
-        else:
-            assert updates == {"req": BUDGET}
+    # After reclaim, the next buffer boundary compacts again.
+    for step in range(1, WINDOW + 1):
+        metadata = _metadata(block_ids, BUDGET + step, 1)
+        worker.begin_step(
+            ["req"],
+            metadata,
+            is_genuine_decode=[True],
+            should_compress=[step == WINDOW],
+        )
+        for name in LAYER_NAMES:
+            worker.capture_query(
+                name,
+                torch.randn(
+                    1,
+                    Q_HEADS,
+                    HEAD_DIM,
+                    device="cuda",
+                    dtype=torch.bfloat16,
+                ),
+            )
+        assert worker.compact() == (
+            {"req": BUDGET} if step == WINDOW else {}
+        )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -234,50 +299,111 @@ def test_rkv_worker_compacts_two_requests_independently():
         )
         for name in LAYER_NAMES
     }
-    block_table = torch.tensor(request_blocks, device="cuda")
     metadata = SimpleNamespace(
         use_cascade=False,
         query_start_loc=torch.tensor([0, length, 2 * length], device="cuda"),
         seq_lens=torch.tensor([length, length], device="cuda"),
-        block_table=block_table,
+        block_table=torch.tensor(request_blocks, device="cuda"),
     )
 
-    expected: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    expected = {}
     for req_index, request_id in enumerate(request_ids):
         slots = _slots(request_blocks[req_index], length)
         start = req_index * length
         end = start + length
-        retained = select_rkv_retained_indices(
-            [
-                (
-                    original[name][:, 0],
-                    queries_by_layer[name][start:end][-WINDOW:],
-                )
-                for name in LAYER_NAMES
-            ],
-            slots,
-            BUDGET,
-        )
-        expected[request_id] = (slots[retained], slots[:BUDGET])
+        for name in LAYER_NAMES:
+            keys = (
+                original[name][:, 0][slots // BLOCK_SIZE, slots % BLOCK_SIZE]
+                .permute(1, 0, 2)
+                .unsqueeze(0)
+                .contiguous()
+            )
+            values = (
+                original[name][:, 1][slots // BLOCK_SIZE, slots % BLOCK_SIZE]
+                .permute(1, 0, 2)
+                .unsqueeze(0)
+                .contiguous()
+            )
+            recent_queries = (
+                queries_by_layer[name][start:end][-WINDOW:]
+                .permute(1, 0, 2)
+                .unsqueeze(0)
+                .contiguous()
+            )
+            expected[(request_id, name)] = _policy().update_kv(
+                keys, recent_queries, values
+            )
 
-    worker = RKVWorker(BUDGET)
+    worker = RKVWorker(BUDGET, buffer=WINDOW)
     worker.register_kv_caches(caches)
     worker.begin_step(request_ids, metadata)
-    for name in LAYER_NAMES:
-        worker.capture_query(name, queries_by_layer[name])
+    worker._recent_queries = {
+        request_id: {
+            name: queries_by_layer[name][
+                req_index * length : (req_index + 1) * length
+            ][-WINDOW:].clone()
+            for name in LAYER_NAMES
+        }
+        for req_index, request_id in enumerate(request_ids)
+    }
 
     assert worker.compact() == {"req-a": BUDGET, "req-b": BUDGET}
 
     for req_index, request_id in enumerate(request_ids):
-        source_slots, destination_slots = expected[request_id]
+        slots = _slots(request_blocks[req_index], length)[:BUDGET]
         for name in LAYER_NAMES:
-            for kv_index in (0, 1):
-                expected_values = original[name][:, kv_index][
-                    source_slots // BLOCK_SIZE,
-                    source_slots % BLOCK_SIZE,
-                ]
-                actual_values = caches[name][:, kv_index][
-                    destination_slots // BLOCK_SIZE,
-                    destination_slots % BLOCK_SIZE,
-                ]
-                assert torch.equal(actual_values, expected_values)
+            actual_k = caches[name][:, 0][
+                slots // BLOCK_SIZE, slots % BLOCK_SIZE
+            ].permute(1, 0, 2).unsqueeze(0)
+            actual_v = caches[name][:, 1][
+                slots // BLOCK_SIZE, slots % BLOCK_SIZE
+            ].permute(1, 0, 2).unsqueeze(0)
+            expected_k, expected_v = expected[(request_id, name)]
+            assert torch.equal(actual_k, expected_k)
+            assert torch.equal(actual_v, expected_v)
+
+
+
+def test_rkv_worker_defaults_match_upstream_vllm_config():
+    worker = RKVWorker(BUDGET)
+    assert worker.buffer == 128
+    assert worker.window_size == 8
+    assert worker.kernel_size == 7
+    assert worker.mix_lambda == 0.1
+    assert worker.retain_ratio == 0.1
+    assert worker.retain_direction == "last"
+    assert worker.score_chunk_bytes == 512 * 1024 * 1024
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_rkv_worker_records_only_genuine_decode_frontier_query():
+    length = BUDGET + WINDOW
+    block_ids = [1, 3, 5]
+    caches = _new_cache(8)
+    worker = RKVWorker(BUDGET, buffer=WINDOW)
+    worker.register_kv_caches(caches)
+
+    metadata = _metadata(block_ids, length, 4)
+    worker.begin_step(
+        ["req"],
+        metadata,
+        is_genuine_decode=[False],
+        should_compress=[True],
+    )
+    prefill = torch.randn(
+        4, Q_HEADS, HEAD_DIM, device="cuda", dtype=torch.bfloat16
+    )
+    for name in LAYER_NAMES:
+        worker.capture_query(name, prefill)
+    assert worker._recent_queries == {}
+    assert worker.compact() == {}
+
+    worker.begin_step(
+        ["req"],
+        metadata,
+        is_genuine_decode=[True],
+        should_compress=[False],
+    )
+    for name in LAYER_NAMES:
+        worker.capture_query(name, prefill)
+        assert torch.equal(worker._recent_queries["req"][name], prefill[-1:])
