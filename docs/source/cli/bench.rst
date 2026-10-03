@@ -17,7 +17,8 @@ three sub-commands, each targeting a different layer of the stack:
        exercise different KV-cache reuse patterns.
    * - ``server``
      - End-to-end sanity test against a running LMCache MP cache server
-       (ZMQ + HTTP). Requires the full ``lmcache`` install and a GPU.
+       (ZMQ + HTTP). Requires the full ``lmcache`` install; only
+       ``--mode gpu`` requires a CUDA-capable device.
    * - ``l2``
      - Throughput / latency benchmark against an L2 cache adapter
        (store / lookup / load).
