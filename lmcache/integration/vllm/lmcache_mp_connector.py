@@ -44,6 +44,7 @@ import zmq
 # First Party
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.experimental import dispatch
+from lmcache.integration.vllm.experimental.rkv_worker import RKVWorker
 from lmcache.integration.vllm.kv_cache_group_edits import (
     apply_kv_cache_group_edits,
     validate_kv_cache_groups,
@@ -56,10 +57,17 @@ from lmcache.integration.vllm.kv_cache_groups import (
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
+    LMCacheMPRKVRequestState,
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
     LMCacheMPWorkerMetadata,
+)
+from lmcache.integration.vllm.rkv_vllm_shim import (
+    clear_resident_kv_tokens,
+    get_resident_kv_tokens,
+    install_rkv_vllm_allocator_shim,
+    set_resident_kv_tokens,
 )
 from lmcache.integration.vllm.lmcache_mp_metrics import (
     LMCacheMPConnectorStats,
@@ -590,6 +598,30 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
         )
 
+        rkv_budget = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.rkv_budget", None
+        )
+        self._rkv_budget = int(rkv_budget) if rkv_budget is not None else None
+        self._rkv: RKVWorker | None = None
+        if self._rkv_budget is not None:
+            if role == KVConnectorRole.SCHEDULER:
+                install_rkv_vllm_allocator_shim()
+            self._can_store = False
+            if vllm_config.cache_config.enable_prefix_caching:
+                raise ValueError("R-KV MVP requires prefix caching disabled")
+            if getattr(vllm_config, "speculative_config", None) is not None:
+                raise ValueError("R-KV MVP does not support speculative decoding")
+            if getattr(vllm_config.scheduler_config, "enable_chunked_prefill", False):
+                raise ValueError("R-KV MVP requires chunked prefill disabled")
+            if getattr(vllm_config.scheduler_config, "async_scheduling", False):
+                raise ValueError("R-KV MVP requires synchronous scheduling")
+            if not getattr(vllm_config.model_config, "enforce_eager", False):
+                raise ValueError("R-KV MVP requires enforce_eager=True")
+            if vllm_config.parallel_config.world_size != 1:
+                raise ValueError("R-KV MVP requires a single GPU")
+            if len(group_tokens_per_block) != 1:
+                raise ValueError("R-KV MVP requires exactly one KV cache group")
+
         # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
         # string) over the single-server lmcache.mp.host / lmcache.mp.port.
         server_urls_cfg = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -717,6 +749,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
+            self._rkv_allocations: dict[str, "KVCacheBlocks"] = {}
         elif self.role == KVConnectorRole.WORKER:
             # Node routing: a worker connects only to its local LMCache server.
             # Global ranks are assigned to nodes in contiguous blocks:
@@ -735,6 +768,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
                 enable_kv_events=self._enable_kv_events,
             )
+            self._pending_resident_kv_updates: dict[str, int] = {}
+            if self._rkv_budget is not None:
+                self._rkv = RKVWorker(self._rkv_budget)
             if self.transfer_intermediate_tensors:
                 # First Party
                 from lmcache.integration.vllm.experimental import (
@@ -849,6 +885,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             engine_group_infos=engine_group_infos,
             layout_hints=layout_hints,
         )
+        if self._rkv is not None:
+            self._rkv.register_kv_caches(kv_caches)
         if self.dispatcher is not None:
             dispatch(
                 self.dispatcher,
@@ -876,6 +914,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+
+        if self._rkv is not None:
+            if metadata.need_flush_before_forward:
+                self._rkv.reset()
+            if metadata.requests:
+                raise RuntimeError(
+                    "R-KV MVP does not support LMCache STORE/RETRIEVE in the "
+                    "same request stream"
+                )
+            self._rkv.prepare_forward(forward_context, metadata.rkv_requests)
 
         request_ids = []
         ops = []
@@ -957,6 +1005,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
+        if self._rkv is not None:
+            self._pending_resident_kv_updates.update(self._rkv.compact())
+
         request_ids = []
         ops = []
         cache_salts = []
@@ -1025,6 +1076,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
+        if self._rkv is not None and finished_req_ids:
+            self._rkv.drop_requests(finished_req_ids)
+            for request_id in finished_req_ids:
+                self._pending_resident_kv_updates.pop(request_id, None)
+
         if self.lazy_offload:
             val = self.worker_adapter.get_finished_with_lazy_offload()
         else:
@@ -1037,17 +1093,26 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         return val
 
     def build_connector_worker_meta(self):
-        if not self.lazy_offload:
-            return None
-        completed_store_requests = self.worker_adapter.get_completed_store_requests()
-        failed_store_requests = self.worker_adapter.get_failed_store_requests()
-        if completed_store_requests or failed_store_requests:
-            return LMCacheMPWorkerMetadata(
-                completed_store_requests=completed_store_requests or {},
-                failed_store_requests=failed_store_requests or set(),
+        resident_kv_updates = self._pending_resident_kv_updates
+        self._pending_resident_kv_updates = {}
+
+        completed_store_requests = {}
+        failed_store_requests = set()
+        if self.lazy_offload:
+            completed_store_requests = (
+                self.worker_adapter.get_completed_store_requests() or {}
             )
-        else:
-            return None
+            failed_store_requests = (
+                self.worker_adapter.get_failed_store_requests() or set()
+            )
+
+        if completed_store_requests or failed_store_requests or resident_kv_updates:
+            return LMCacheMPWorkerMetadata(
+                completed_store_requests=completed_store_requests,
+                failed_store_requests=failed_store_requests,
+                resident_kv_updates=resident_kv_updates,
+            )
+        return None
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
@@ -1185,6 +1250,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             into account.
         """
         tracker = self._get_or_create_request_tracker(request)
+        if self._rkv_budget is not None:
+            tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
+            return 0, False
 
         # A failed asynchronous load is bypassed until vLLM admits the request
         # for local computation via update_state_after_alloc().  The scheduler
@@ -1288,6 +1356,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         if self.role != KVConnectorRole.SCHEDULER:
             return
+        if self._rkv_budget is not None:
+            return
         if not self._eager_prefetch or request.resumable:
             return
 
@@ -1330,6 +1400,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # to avoid duplication, which would corrupt the store path's block indexing.
         tracker = self._get_request_tracker(request.request_id)
         block_ids = blocks.get_block_ids() or ()
+        if self._rkv_budget is not None:
+            self._rkv_allocations[request.request_id] = blocks
 
         # Only append blocks beyond what's already tracked, per engine group.
         existing_counts = tracker.num_allocated_blocks()
@@ -1410,6 +1482,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
         self._process_cached_requests(scheduler_output, metadata)
+        if self._rkv_budget is not None:
+            self._add_rkv_request_states(scheduler_output, metadata)
 
         if self.lazy_offload:
             actions = self._lazy_offload_manager.on_scheduler_step(scheduler_output)
@@ -1425,6 +1499,33 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._report_block_allocation_deltas(scheduler_output)
 
         return metadata
+
+    def _add_rkv_request_states(
+        self,
+        scheduler_output: SchedulerOutput,
+        metadata: LMCacheMPConnectorMetadata,
+    ) -> None:
+        request_ids = [
+            request.req_id for request in scheduler_output.scheduled_new_reqs
+        ]
+        request_ids.extend(scheduler_output.scheduled_cached_reqs.req_ids)
+
+        for request_id in request_ids:
+            allocation = self._rkv_allocations.get(request_id)
+            if allocation is None:
+                raise RuntimeError(f"Missing R-KV allocation for {request_id}")
+            tracker = self._get_request_tracker(request_id)
+            block_ids = list(tracker.allocated_block_ids.get(0, []))
+            if not block_ids:
+                raise RuntimeError(f"Missing R-KV blocks for {request_id}")
+
+            metadata.rkv_requests.append(
+                LMCacheMPRKVRequestState(
+                    request_id=request_id,
+                    block_ids=block_ids,
+                    resident_kv_tokens=get_resident_kv_tokens(request_id),
+                )
+            )
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
@@ -1444,17 +1545,60 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     kv_cache_events.get_number_of_workers()
                 )
 
-        if not self.lazy_offload:
-            return
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, LMCacheMPWorkerMetadata):
-            return
-        actions = self._lazy_offload_manager.on_store_results(
-            meta.failed_store_requests,
-            meta.completed_store_requests,
-        )
-        for request_id in actions.sessions_to_end:
-            self.scheduler_adapter.end_session(request_id)
+            return None
+
+        if self.lazy_offload:
+            actions = self._lazy_offload_manager.on_store_results(
+                meta.failed_store_requests,
+                meta.completed_store_requests,
+            )
+            for request_id in actions.sessions_to_end:
+                self.scheduler_adapter.end_session(request_id)
+
+        if self._rkv_budget is not None and meta.resident_kv_updates:
+            self._commit_rkv_resident_updates(meta.resident_kv_updates)
+        return None
+
+    def _commit_rkv_resident_updates(self, updates: dict[str, int]) -> None:
+        if self._gpu_block_pool is None:
+            raise RuntimeError("R-KV requires the vLLM GPU block pool")
+
+        block_size = self._group_tokens_per_block[0]
+        for request_id, num_tokens in updates.items():
+            allocation = self._rkv_allocations.get(request_id)
+            if allocation is None:
+                raise RuntimeError(f"Missing R-KV allocation for {request_id}")
+
+            blocks = allocation
+            tracker = self._get_request_tracker(request_id)
+            current_tokens = get_resident_kv_tokens(request_id)
+            if current_tokens is None:
+                current_tokens = tracker.num_scheduled_tokens
+            if not 0 < num_tokens <= current_tokens:
+                raise ValueError(
+                    f"Invalid R-KV resident length {num_tokens} for "
+                    f"{request_id}: current={current_tokens}"
+                )
+
+            if len(blocks.blocks) != 1:
+                raise ValueError("R-KV MVP requires exactly one KV cache group")
+            row = blocks.blocks[0]
+            keep_blocks = (num_tokens + block_size - 1) // block_size
+            if keep_blocks > len(row):
+                raise ValueError("R-KV resident length exceeds allocated KV capacity")
+
+            freed = row[keep_blocks:]
+            if any(block.ref_cnt != 1 for block in freed):
+                raise ValueError("R-KV MVP requires private KV blocks")
+
+            del row[keep_blocks:]
+            if freed:
+                self._gpu_block_pool.free_blocks(reversed(freed))
+
+            set_resident_kv_tokens(request_id, num_tokens)
+            tracker.allocated_block_ids[0] = [block.block_id for block in row]
 
     def request_finished(
         self,
@@ -1475,6 +1619,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
+
+        if self._rkv_budget is not None:
+            clear_resident_kv_tokens(request.request_id)
+            self._rkv_allocations.pop(request.request_id, None)
 
         params: dict[str, Any] | None = getattr(request, "kv_transfer_params", None)
         return_params: dict[str, Any] | None = {} if params is not None else None

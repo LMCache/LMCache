@@ -37,6 +37,13 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
+    LMCacheMPRKVRequestState,
+    LMCacheMPWorkerMetadata,
+)
+from lmcache.integration.vllm.rkv_vllm_shim import (  # noqa: E402
+    clear_resident_kv_tokens,
+    get_resident_kv_tokens,
+    set_resident_kv_tokens,
 )
 
 pytestmark = pytest.mark.no_shared_allocator
@@ -172,6 +179,168 @@ def connectors(
     finally:
         worker.shutdown()
         scheduler.shutdown()
+
+
+def test_worker_reports_resident_kv_update_once() -> None:
+    worker = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    worker._pending_resident_kv_updates = {"request": 17}
+    worker.lazy_offload = False
+
+    worker_meta = worker.build_connector_worker_meta()
+
+    assert isinstance(worker_meta, LMCacheMPWorkerMetadata)
+    assert worker_meta.resident_kv_updates == {"request": 17}
+    assert worker.build_connector_worker_meta() is None
+
+
+def test_resident_kv_update_aggregation_requires_agreement() -> None:
+    left = LMCacheMPWorkerMetadata(
+        completed_store_requests={},
+        resident_kv_updates={"request": 17},
+    )
+    right = LMCacheMPWorkerMetadata(
+        completed_store_requests={},
+        resident_kv_updates={"request": 17},
+    )
+
+    merged = left.aggregate(right)
+    assert isinstance(merged, LMCacheMPWorkerMetadata)
+    assert merged.resident_kv_updates == {"request": 17}
+
+    mismatched = LMCacheMPWorkerMetadata(
+        completed_store_requests={},
+        resident_kv_updates={"request": 18},
+    )
+    with pytest.raises(ValueError, match="different resident KV lengths"):
+        left.aggregate(mismatched)
+
+
+class _FakeBlockPool:
+    def __init__(self) -> None:
+        self.freed_ids: list[int] = []
+
+    def free_blocks(self, blocks) -> None:
+        self.freed_ids.extend(block.block_id for block in blocks)
+
+
+def test_scheduler_commits_resident_kv_and_reclaims_tail() -> None:
+    clear_resident_kv_tokens("request")
+    scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    scheduler._gpu_block_pool = _FakeBlockPool()
+    scheduler._group_tokens_per_block = [16]
+    row = [SimpleNamespace(block_id=block_id, ref_cnt=1) for block_id in range(10, 17)]
+    scheduler._rkv_allocations = {
+        "request": SimpleNamespace(blocks=[row]),
+    }
+    tracker = SimpleNamespace(
+        num_scheduled_tokens=104,
+        allocated_block_ids={0: list(range(10, 17))},
+    )
+    scheduler.request_trackers = {"request": tracker}
+
+    scheduler._commit_rkv_resident_updates({"request": 32})
+
+    assert [block.block_id for block in row] == [10, 11]
+    assert scheduler._gpu_block_pool.freed_ids == [16, 15, 14, 13, 12]
+    assert tracker.allocated_block_ids[0] == [10, 11]
+    assert get_resident_kv_tokens("request") == 32
+    clear_resident_kv_tokens("request")
+
+
+def test_scheduler_builds_authoritative_rkv_state() -> None:
+    clear_resident_kv_tokens("request")
+    set_resident_kv_tokens("request", 33)
+
+    scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    scheduler._rkv_allocations = {"request": object()}
+    scheduler.request_trackers = {
+        "request": SimpleNamespace(allocated_block_ids={0: [10, 11, 18]})
+    }
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["request"]),
+    )
+    metadata = LMCacheMPConnectorMetadata()
+
+    scheduler._add_rkv_request_states(scheduler_output, metadata)
+
+    assert metadata.rkv_requests == [
+        LMCacheMPRKVRequestState(
+            request_id="request",
+            block_ids=[10, 11, 18],
+            resident_kv_tokens=33,
+        )
+    ]
+    clear_resident_kv_tokens("request")
+
+
+def _rkv_worker_connector(
+    metadata: LMCacheMPConnectorMetadata,
+) -> tuple[LMCacheMPConnector, MagicMock]:
+    worker = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    rkv = MagicMock()
+    rkv.compact.return_value = {"request": 17}
+    worker._rkv = rkv
+    worker._pending_resident_kv_updates = {}
+    worker._connector_metadata = metadata
+    worker.dispatcher = None
+    worker.lazy_offload = False
+    worker._can_store = False
+    worker.worker_adapter = MagicMock()
+    worker.worker_adapter.get_finished.return_value = (None, None)
+    return worker, rkv
+
+
+def test_rkv_worker_connector_lifecycle() -> None:
+    metadata = LMCacheMPConnectorMetadata()
+    metadata.need_flush_before_forward = True
+    metadata.rkv_requests.append(
+        LMCacheMPRKVRequestState(
+            request_id="request",
+            block_ids=[1],
+            resident_kv_tokens=None,
+        )
+    )
+    worker, rkv = _rkv_worker_connector(metadata)
+    forward_context = SimpleNamespace()
+
+    worker.start_load_kv(forward_context)
+    rkv.reset.assert_called_once_with()
+    rkv.prepare_forward.assert_called_once_with(
+        forward_context,
+        metadata.rkv_requests,
+    )
+
+    worker.wait_for_save()
+    rkv.compact.assert_called_once_with()
+    worker_meta = worker.build_connector_worker_meta()
+    assert isinstance(worker_meta, LMCacheMPWorkerMetadata)
+    assert worker_meta.resident_kv_updates == {"request": 17}
+
+    worker._pending_resident_kv_updates["request"] = 17
+    worker.get_finished({"request"})
+    rkv.drop_requests.assert_called_once_with({"request"})
+    assert worker._pending_resident_kv_updates == {}
+
+
+def test_rkv_no_forward_step_clears_step_state() -> None:
+    metadata = LMCacheMPConnectorMetadata()
+    worker, rkv = _rkv_worker_connector(metadata)
+    forward_context = SimpleNamespace()
+
+    worker.start_load_kv(forward_context)
+
+    rkv.prepare_forward.assert_called_once_with(forward_context, [])
+
+
+def test_rkv_rejects_lmcache_transfer_in_same_stream() -> None:
+    metadata = LMCacheMPConnectorMetadata()
+    metadata.requests.append(cast(Any, object()))
+    worker, rkv = _rkv_worker_connector(metadata)
+
+    with pytest.raises(RuntimeError, match="STORE/RETRIEVE"):
+        worker.start_load_kv(SimpleNamespace())
+    rkv.prepare_forward.assert_not_called()
 
 
 def test_chunked_prefill_stores_and_completion(
