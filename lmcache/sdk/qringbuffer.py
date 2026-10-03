@@ -617,22 +617,23 @@ class QRingBufferAdapter:
             RuntimeError: if the Q ring or transfer context is not initialized.
             ConnectionError: if the server does not respond within mq_timeout.
         """
-        if (
-            self.q_ring is None
-            or self._adapter.transfer_ctx is None
-            or self.q_engine_group_infos is None
-        ):
+        if self.q_ring is None or self.q_engine_group_infos is None:
             raise RuntimeError("Q ring is not initialized yet.")
         try:
-            self._adapter.transfer_ctx.register_q(
-                self.q_ring.tensors,
-                self.q_model_name,
-                self._adapter.world_size,
-                self._adapter.blocks_in_chunk,
-                self._adapter._mq_timeout,
-                layout_hints=vllm_layout_hints(),
-                engine_group_infos=self.q_engine_group_infos,
-            )
+            with self._adapter.use_transfer_context(
+                blocking=True, require_healthy=False
+            ) as transfer_ctx:
+                if transfer_ctx is None:
+                    raise RuntimeError("Worker adapter is closing")
+                transfer_ctx.register_q(
+                    self.q_ring.tensors,
+                    self.q_model_name,
+                    self._adapter.world_size,
+                    self._adapter.blocks_in_chunk,
+                    self._adapter._mq_timeout,
+                    layout_hints=vllm_layout_hints(),
+                    engine_group_infos=self.q_engine_group_infos,
+                )
         except TimeoutError:
             raise ConnectionError(
                 "LMCache server did not respond to Q ring registration within "
@@ -687,7 +688,7 @@ class QRingBufferAdapter:
             event: The IPC event to signal when the store is complete.
             cache_salt: Per-user isolation salt.
         """
-        if not self.q_ring or not self._adapter.transfer_ctx:
+        if not self.q_ring:
             return
         self._adapter._ensure_heartbeat_started()
         if not self._adapter.is_healthy:
@@ -705,14 +706,18 @@ class QRingBufferAdapter:
             cache_salt=cache_salt,
         )
         key = replace(key, model_name=self.q_model_name)
-        future = self._adapter.transfer_ctx.submit_q_store(
-            request_id,
-            key,
-            self.q_ring.tensors,
-            [ring_block_ids],
-            event,
-            self._adapter.blocks_in_chunk,
-        )
+        with self._adapter.use_transfer_context() as transfer_ctx:
+            if transfer_ctx is None:
+                self.q_ring.free(ring_block_ids)
+                return
+            future = transfer_ctx.submit_q_store(
+                request_id,
+                key,
+                self.q_ring.tensors,
+                [ring_block_ids],
+                event,
+                self._adapter.blocks_in_chunk,
+            )
         seq = self._q_store_seq
         self._q_store_seq += 1
         self.q_store_futures[seq] = (future, ring_block_ids)

@@ -147,8 +147,8 @@ class ContextEntry:
         last_seen: ``time.monotonic()`` of the most recent activity from
             this instance (register, PING, store, or retrieve). Drives reaping.
         has_liveness_signal: True once the instance has sent at least one
-            PING. Selects the reap window (timeout vs registration grace).
-            Latched only by PING, never by traffic.
+            PING. Latched only by PING, never by traffic.
+        has_transfer_activity: True after a real store or retrieve.
         event_backend: Cached event backend selected for this context's device.
     """
 
@@ -157,6 +157,7 @@ class ContextEntry:
     world_size: int
     last_seen: float = 0.0
     has_liveness_signal: bool = False
+    has_transfer_activity: bool = False
     event_backend: EventIPCBackend | None = None
 
 
@@ -227,15 +228,18 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
-    def get_and_touch_context_entry(self, instance_id: int) -> ContextEntry | None:
+    def get_and_touch_context_entry(
+        self, instance_id: int, *, transfer_activity: bool = False
+    ) -> ContextEntry | None:
         """Return the entry for ``instance_id``, refreshing its last-seen time.
 
         The refresh keeps an actively transferring worker from being reaped
-        even if its PINGs are briefly delayed. Does not latch the
-        ping-proven flag -- only PINGs do that.
+        even if its PINGs are briefly delayed. ``transfer_activity`` is latched
+        only for real transfers.
 
         Args:
             instance_id: The worker instance ID.
+            transfer_activity: Whether this is a real transfer request.
 
         Returns:
             The entry, or None if the instance is not (or no longer) tracked.
@@ -245,6 +249,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             entry = self._cache_contexts.get(instance_id)
             if entry is not None:
                 entry.last_seen = now
+                if transfer_activity:
+                    entry.has_transfer_activity = True
             return entry
 
     def _release_failed_retrieve_locks(
@@ -302,13 +308,16 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         with self._lock:
             return dict(self._cache_contexts)
 
-    def touch_instance(self, instance_id: int) -> None:
+    def touch_instance(self, instance_id: int) -> bool:
         """Refresh the worker's last-seen time and mark it ping-proven.
 
         A no-op if the instance is not tracked.
 
         Args:
             instance_id: The worker instance ID.
+
+        Returns:
+            True if the Context exists and was refreshed; otherwise False.
         """
         now = time.monotonic()
         with self._lock:
@@ -316,6 +325,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
                 entry.has_liveness_signal = True
+            return entry is not None
 
     def tracked_instance_count(self) -> int:
         """Return the number of currently registered instances."""
@@ -327,12 +337,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
     ) -> list[int]:
         """Reap GPU registrations that have gone silent.
 
-        A ping-proven instance is judged against ``reap_timeout_s``; one
-        that has never pinged against the larger ``registration_grace_s``.
+        A PING-and-transfer-proven instance uses ``reap_timeout_s``; all other
+        instances use ``registration_grace_s``.
 
         Args:
-            reap_timeout_s: Silence budget for ping-proven instances.
-            registration_grace_s: Silence budget for never-pinged instances.
+            reap_timeout_s: Silence budget for fully active instances.
+            registration_grace_s: Silence budget before both signals.
 
         Returns:
             The instance IDs reaped this scan.
@@ -346,7 +356,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 if now - entry.last_seen
                 > (
                     reap_timeout_s
-                    if entry.has_liveness_signal
+                    if (entry.has_liveness_signal and entry.has_transfer_activity)
                     else registration_grace_s
                 )
             ]
@@ -356,10 +366,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         entries: list[ContextEntry] = []
         for iid, e in reaped:
             logger.warning(
-                "Reaped GPU instance %d: silent for %.1fs (pinged=%s)",
+                "Reaped GPU instance %d: silent for %.1fs "
+                "(pinged=%s, transfer_activity=%s)",
                 iid,
                 now - e.last_seen,
                 e.has_liveness_signal,
+                e.has_transfer_activity,
             )
             reaped_ids.append(iid)
             entries.append(e)
@@ -603,7 +615,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """
         st = time.perf_counter()
 
-        entry = self.get_and_touch_context_entry(instance_id)
+        entry = self.get_and_touch_context_entry(instance_id, transfer_activity=True)
         if entry is None:
             # The worker can reconnect to a replacement server before its next
             # registration probe. No device work was submitted in that window,
@@ -877,7 +889,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """
         st = time.perf_counter()
 
-        entry = self.get_and_touch_context_entry(instance_id)
+        entry = self.get_and_touch_context_entry(instance_id, transfer_activity=True)
         if entry is None:
             # See store(): there is no completion event because no device work
             # was submitted. The False result lets the caller recover or

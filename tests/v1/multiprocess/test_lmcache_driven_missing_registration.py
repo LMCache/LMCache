@@ -105,7 +105,9 @@ def test_missing_registration_returns_terminal_false(method_name: str) -> None:
     )
 
     assert result == (b"", False)
-    module.get_and_touch_context_entry.assert_called_once_with(42)
+    module.get_and_touch_context_entry.assert_called_once_with(
+        42, transfer_activity=True
+    )
 
 
 @pytest.mark.parametrize("mla", [False, True], ids=["sharded-kv", "mla-shared-kv"])

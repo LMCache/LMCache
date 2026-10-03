@@ -577,7 +577,9 @@ class RetrieveMixin:
             ValueError: If the instance has no registered KV cache or rope
                 state.
         """
-        entry = self._transfer_module.get_and_touch_context_entry(instance_id)
+        entry = self._transfer_module.get_and_touch_context_entry(
+            instance_id, transfer_activity=True
+        )
         if entry is None:
             raise ValueError(
                 f"Instance {instance_id} not registered for paged KV cache"
