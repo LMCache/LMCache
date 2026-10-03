@@ -40,7 +40,12 @@ class LMCacheServer:
             data.extend(packet)
         return data
 
-    def handle_client(self, client_socket):
+    def handle_client(self, client_socket: socket.socket) -> None:
+        """Serve requests on ``client_socket`` and close it on exit.
+
+        Incomplete PUT bodies are discarded without changing stored entries.
+        Socket and protocol parsing errors propagate after socket cleanup.
+        """
         try:
             while True:
                 logger.debug("Waiting for command")
@@ -53,6 +58,9 @@ class LMCacheServer:
                     case ClientCommand.PUT:
                         t0 = time.perf_counter()
                         s = self.receive_all(client_socket, meta.length)
+                        if s is None:
+                            # A disconnected writer must not overwrite a retry.
+                            break
                         t1 = time.perf_counter()
                         self.data_store.put(meta, s)
                         t2 = time.perf_counter()
