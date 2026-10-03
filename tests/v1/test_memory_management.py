@@ -150,6 +150,92 @@ def test_tensor_allocator(use_paging):
     allocator.close()
 
 
+@pytest.mark.no_shared_allocator
+@pytest.mark.parametrize("release_mode", ["free", "batched_free", "ref_count"])
+def test_paged_allocator_rejects_duplicate_release(release_mode: str) -> None:
+    """A duplicate release must not alias two live page allocations."""
+    page_count = 4
+    shape = torch.Size([16, 512])
+    dtype = torch.float16
+    page_bytes = shape.numel() * dtype.itemsize
+    allocator = PagedTensorMemoryAllocator(
+        torch.empty(page_count * page_bytes, dtype=torch.uint8),
+        [shape],
+        [dtype],
+        MemoryFormat.KV_2LTD,
+    )
+
+    original = allocator.allocate(shape, dtype)
+    assert original is not None
+    if release_mode == "free":
+        allocator.free(original)
+        allocator.free(original)
+    elif release_mode == "batched_free":
+        allocator.batched_free([original, original])
+    else:
+        original.ref_count_down()
+        original.ref_count_down()
+
+    live = allocator.batched_allocate(shape, dtype, page_count)
+    assert live is not None
+
+    assert len({memory_obj.tensor.data_ptr() for memory_obj in live}) == page_count
+    assert allocator.allocate(shape, dtype) is None
+    assert allocator.memcheck()
+
+    for memory_obj in live:
+        memory_obj.ref_count_down()
+    assert allocator.memcheck()
+    allocator.close()
+
+
+@pytest.mark.no_shared_allocator
+def test_paged_allocator_failed_batch_preserves_live_pages() -> None:
+    """An exhausted batch leaves live data and the remaining capacity intact."""
+    page_count = 4
+    shape = torch.Size([16, 512])
+    dtype = torch.float16
+    page_bytes = shape.numel() * dtype.itemsize
+    allocator = PagedTensorMemoryAllocator(
+        torch.empty(page_count * page_bytes, dtype=torch.uint8),
+        [shape],
+        [dtype],
+        MemoryFormat.KV_2LTD,
+    )
+    live: list[TensorMemoryObj] = []
+    try:
+        original = allocator.allocate(shape, dtype)
+        assert original is not None
+        live.append(original)
+        original.tensor.fill_(7)
+
+        assert allocator.batched_allocate(shape, dtype, page_count) is None
+        assert allocator.num_active_allocations == 1
+        assert allocator.total_allocated_size == page_bytes
+        assert allocator.address_manager.get_free_size() == 3 * page_bytes
+        assert allocator.memcheck()
+
+        remaining = allocator.batched_allocate(shape, dtype, page_count - 1)
+        assert remaining is not None
+        live.extend(remaining)
+        assert len(remaining) == page_count - 1
+        for memory_obj in remaining:
+            tensor = memory_obj.tensor
+            assert tensor is not None
+            tensor.zero_()
+        assert torch.all(original.tensor == 7)
+        assert allocator.allocate(shape, dtype) is None
+        assert allocator.memcheck()
+    finally:
+        for memory_obj in live:
+            memory_obj.ref_count_down()
+        allocator.close()
+
+    assert allocator.num_active_allocations == 0
+    assert allocator.address_manager.get_free_size() == page_count * page_bytes
+    assert allocator.memcheck()
+
+
 @pytest.mark.parametrize("batch_size", [-1, -5])
 @pytest.mark.parametrize("allocated_pages", [0, 2, 4])
 def test_tensor_allocator_negative_batch_size(
