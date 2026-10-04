@@ -530,6 +530,7 @@ def test_json_opt_in_preserves_configuration_defaults() -> None:
     )
     assert config.ownership_mode == "equal"
     assert config.participant_count == 2
+    assert config.read_view_cache_max_entries == 8192
     assert not config.skip_payload_flush
     region = config.rank_placement.regions[0]
     assert region.metadata_offset_bytes == 0
@@ -606,6 +607,22 @@ def test_host_local_policies_are_explicit_opt_in_booleans(field_name: str) -> No
     assert getattr(enabled, field_name) is True
     with pytest.raises(ValueError, match="must be a boolean"):
         _base_config(**{field_name: 1})
+
+
+def test_read_view_cache_limit_accepts_json_overrides_and_rejects_invalid_values() -> (
+    None
+):
+    """The host-local descriptor limit accepts non-negative integers only."""
+    for limit in (0, 2):
+        config = DaxCoordinatedL1Config.from_json(
+            json.dumps(_config_values(read_view_cache_max_entries=limit))
+        )
+        assert config.read_view_cache_max_entries == limit
+    for invalid_limit in (-1, True, 1.5, "8192", None):
+        with pytest.raises(ValueError, match="read_view_cache_max_entries"):
+            DaxCoordinatedL1Config.from_json(
+                json.dumps(_config_values(read_view_cache_max_entries=invalid_limit))
+            )
 
 
 def test_cli_requires_the_same_explicit_l1_devdax_device() -> None:
@@ -1486,14 +1503,14 @@ def test_client_attach_honors_memcheck_policy(
 
 
 @pytest.mark.parametrize("close_reader", [False, True])
-def test_finished_peer_reads_release_views_and_deleted_keys(
+def test_finished_peer_reads_bound_views_and_release_deleted_slots(
     emulated_devices: tuple, close_reader: bool
 ) -> None:
-    """Read views expire with their reservations; owner delete releases keys."""
+    """Cached descriptors stay bounded without retaining native read ownership."""
     rank_placement, _, _ = emulated_devices
     rank_placement = replace(rank_placement, tp_size=2)
     owner = _client(_config(rank_placement))
-    reader = _client(_config(rank_placement, 1))
+    reader = _client(_config(rank_placement, 1, read_view_cache_max_entries=8))
     view_refs = []
     key_refs = []
     try:
@@ -1518,7 +1535,9 @@ def test_finished_peer_reads_release_views_and_deleted_keys(
             assert reader.unsafe_read([key])[key].memory_obj is view()
             if close_reader:
                 reader.close()
-                reader = _client(_config(rank_placement, 1))
+                reader = _client(
+                    _config(rank_placement, 1, read_view_cache_max_entries=8)
+                )
                 assert reader.initialize_model_layouts(_MODEL, 2, 256, [_layout()])
             else:
                 assert reader.finish_read([key])[key] == Raw.SUCCESS
@@ -1531,10 +1550,14 @@ def test_finished_peer_reads_release_views_and_deleted_keys(
             assert deleted_view.get_size() == 1 << 20
             del deleted_view, key
         gc.collect()
+        retained = 0 if close_reader else 8
+        assert sum(ref() is not None for ref in view_refs) == retained
+        assert sum(ref() is not None for ref in key_refs) == retained
+        assert reader.report_status()["active_read_reservations"] == 0
+        reader.close()
         assert all(ref() is None for ref in view_refs)
         assert all(ref() is None for ref in key_refs)
         assert owner.report_status()["payload_slot_used"] == 0
-        assert reader.report_status()["active_read_reservations"] == 0
     finally:
         reader.close()
         owner.close()
@@ -1879,6 +1902,120 @@ def test_request_completion_preserves_local_and_peer_readers(
         sessions.close()
 
 
+def test_read_view_cache_reuses_views_without_owning_read_reservations(
+    emulated_devices: tuple,
+) -> None:
+    """LRU eviction preserves active reads; cached views never pin shared slots."""
+    placement, _, _ = emulated_devices
+    owner = _client(_config(placement))
+    reader = _client(_config(placement, 1, read_view_cache_max_entries=2))
+    a, b, c = keys = [_key(0), _key(1), _key(0, chunk=2)]
+    with closing(owner), closing(reader):
+        for client in (owner, reader):
+            assert client.initialize_model_layouts(_MODEL, 4, 256, [_layout()])
+        _payload_values(owner.reserve_write(keys, _layout()), dict.fromkeys(keys, 7))
+        _assert_success(owner.finish_write(keys))
+        first = reader.reserve_read([a], 2)[a].memory_obj
+        assert first is not None
+        assert reader.reserve_read([a])[a].memory_obj is first
+        assert reader.report_status()["active_read_reservations"] == 2
+        # Evict the cached reference to a while its two native tokens stay live.
+        _assert_success(reader.reserve_read([b, c]))
+        assert reader.report_status()["read_view_cache_limit"] == 2
+        assert reader.report_status()["read_view_cache_entries"] == 2
+        assert reader.report_status()["read_view_cache_hits"] == 1
+        assert reader.unsafe_read([a])[a].memory_obj is first
+        assert first.tensor is not None
+        assert torch.all(first.tensor.view(torch.bfloat16) == 7)
+        assert owner.delete([a])[a].result != Raw.SUCCESS
+        _assert_success(reader.finish_read([a], 2))
+        assert owner.delete([a])[a].result != Raw.SUCCESS
+        _assert_success(reader.finish_read([a]))
+        # The cached b view survives completion but does not prevent deletion.
+        _assert_success(reader.finish_read([b, c]))
+        _assert_success(owner.delete([a, b]))
+        assert reader.reserve_read([b])[b].result == Raw.NOT_FOUND
+        assert reader.report_status()["active_read_reservations"] == 0
+        held = reader.reserve_read([c])[c].memory_obj
+        assert held is not None
+        reference = weakref.ref(held)
+        del held, first
+        reader.close()
+        assert reader.report_status()["read_view_cache_entries"] == 0
+        assert reference() is None
+        _assert_success(owner.delete([c]))
+
+
+def test_read_view_cache_rejects_replaced_generation_at_same_address(
+    emulated_devices: tuple,
+) -> None:
+    """Slot generations distinguish reuse even when bucket generations coincide."""
+    placement, _, _ = emulated_devices
+    placement = replace(placement, tp_size=2)
+    config = replace(
+        _config(placement, skip_payload_flush=True), buckets_per_level=[1, 1, 1]
+    )
+    owner = _client(config)
+    reader = _client(replace(config, participant_id=1))
+    layout = MemoryLayoutDesc([torch.Size([1, 1, 1, _GIB])], [torch.uint8])
+    key = _key(0, 2)
+    with closing(owner), closing(reader):
+        for client in (owner, reader):
+            assert client.initialize_model_layouts(_MODEL, 2, 1, [layout])
+        write = owner.reserve_write([key], layout)[key].memory_obj
+        assert write is not None and write.tensor is not None
+        write.tensor.flatten()[:8].fill_(17)
+        _assert_success(owner.finish_write([key]))
+        old = reader.reserve_read([key])[key].memory_obj
+        assert old is not None and old.tensor is not None
+        address = old.tensor.data_ptr()
+        _assert_success(reader.finish_read([key]))
+        _assert_success(owner.delete([key]))
+        # Occupy the first bucket using a different rank's slot. The original
+        # key now moves to a fresh bucket (generation 1 again), reusing its old
+        # payload address. Only the slot generation distinguishes this reuse.
+        other = _key(1, 2, 2)
+        _assert_success(owner.reserve_write([other], layout))
+        _assert_success(owner.finish_write([other]))
+        write = owner.reserve_write([key], layout)[key].memory_obj
+        assert write is not None and write.tensor is not None
+        # An old cache entry cannot turn an unpublished write into a read hit.
+        assert reader.reserve_read([key])[key].result != Raw.SUCCESS
+        write.tensor.flatten()[:8].fill_(29)
+        _assert_success(owner.finish_write([key]))
+        current = reader.reserve_read([key])[key].memory_obj
+        assert current is not None and current is not old
+        assert current.tensor is not None
+        assert current.tensor.data_ptr() == address
+        assert torch.all(current.tensor.flatten()[:8] == 29)
+        assert reader.report_status()["read_view_cache_hits"] == 0
+        assert reader.report_status()["read_view_cache_misses"] == 2
+        _assert_success(reader.finish_read([key]))
+        assert owner.memcheck() and reader.memcheck()
+        del write, old, current
+
+
+def test_read_view_cache_rebuilds_invalidated_descriptor(
+    emulated_devices: tuple,
+) -> None:
+    """A consumer-invalidated descriptor must not be returned by a later read."""
+    placement, _, _ = emulated_devices
+    key = _key(0)
+    with closing(_client(_config(placement))) as client:
+        assert client.initialize_model_layouts(_MODEL, 4, 256, [_layout()])
+        _assert_success(client.reserve_write([key], _layout()))
+        _assert_success(client.finish_write([key]))
+        old = client.reserve_read([key])[key].memory_obj
+        assert old is not None
+        _assert_success(client.finish_read([key]))
+        old.invalidate()
+        current = client.reserve_read([key])[key].memory_obj
+        assert current is not None and current is not old and current.is_valid()
+        assert current.get_size() == 1 << 20
+        _assert_success(client.finish_read([key]))
+        del old, current
+
+
 def test_read_lock_totals_allow_partial_and_interleaved_returns(
     emulated_devices: tuple,
 ) -> None:
@@ -2147,3 +2284,35 @@ def test_existing_magic_requires_matching_epoch_before_attach(
                 assert stream.read(4096) == header
         assert owner.memcheck()
     assert sorted(unpinned) == sorted(pointer for pointer, _, _ in pinned)
+
+
+def test_zero_read_view_cache_limit_preserves_reads_without_retaining_views(
+    emulated_devices: tuple,
+) -> None:
+    """Disabling descriptor retention still reserves and reads peer objects."""
+    placement, _, _ = emulated_devices
+    with (
+        closing(_client(_config(placement))) as owner,
+        closing(
+            _client(_config(placement, 1, read_view_cache_max_entries=0))
+        ) as reader,
+    ):
+        for client in (owner, reader):
+            assert client.initialize_model_layouts(_MODEL, 4, 256, [_layout()])
+        key = _key(0)
+        _payload_values(owner.reserve_write([key], _layout()), {key: 7})
+        _assert_success(owner.finish_write([key]))
+        first = reader.reserve_read([key])[key].memory_obj
+        second = reader.reserve_read([key])[key].memory_obj
+        assert first is not None and second is not None and first is not second
+        assert second.tensor is not None
+        assert torch.all(second.tensor.view(torch.bfloat16) == 7)
+        status = reader.report_status()
+        assert status["read_view_cache_limit"] == 0
+        assert status["read_view_cache_entries"] == 0
+        assert status["read_view_cache_hits"] == 0
+        assert status["read_view_cache_misses"] == 2
+        _assert_success(reader.finish_read([key], 2))
+        assert reader.report_status()["active_read_reservations"] == 0
+        del first, second
+        _assert_success(owner.delete([key]))

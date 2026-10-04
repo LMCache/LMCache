@@ -273,6 +273,11 @@ class DaxCoordinatedL1Config:
     per_transfer_logging: bool = False
     """Log each completed Device-DAX PUT/GET via MP CUDA-stream events."""
 
+    read_view_cache_max_entries: int = 8192
+    """Host-local descriptor LRU limit across TP ranks; 0 disables retention.
+    Does not change payload capacity or the shared layout digest.
+    """
+
     ownership_mode: Literal["equal", "participant_0_all"] = "equal"
     """Payload-slot ownership policy.
     ``equal`` divides slots equally. ``participant_0_all`` assigns all slots
@@ -300,6 +305,14 @@ class DaxCoordinatedL1Config:
         ):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"DAX-Coordinated L1 {name} must be a boolean")
+        if (
+            type(self.read_view_cache_max_entries) is not int
+            or self.read_view_cache_max_entries < 0
+        ):
+            raise ValueError(
+                "DAX-Coordinated L1 read_view_cache_max_entries "
+                "must be a non-negative integer"
+            )
         if type(self.participant_count) is not int or self.participant_count not in (
             2,
             4,

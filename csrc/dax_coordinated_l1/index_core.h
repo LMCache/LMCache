@@ -37,6 +37,7 @@ struct ReservationResult {
   std::uint64_t payload_offset{0};
   std::uint32_t payload_length{0};
   std::uint32_t layout_id{0};
+  std::uint64_t slot_generation{0};
 };
 
 struct CoreStatus {

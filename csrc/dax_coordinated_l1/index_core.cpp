@@ -442,7 +442,8 @@ ReservationResult IndexCore::make_reservation_result(
           identity.bucket_generation,
           identity.global_payload_slot_id * superblock_->payload_slot_bytes,
           identity.payload_length,
-          identity.layout_id};
+          identity.layout_id,
+          identity.slot_generation};
 }
 
 ReservationResult IndexCore::reserve_write(const Digest& key_digest,

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 # Standard
+from collections import OrderedDict
 from dataclasses import dataclass
 from hashlib import sha256
 from threading import RLock
@@ -105,6 +106,8 @@ class _NativePayload(Protocol):
     payload_offset: int
     payload_length: int
     layout_id: int
+    bucket_generation: int
+    slot_generation: int
 
 
 @dataclass
@@ -148,6 +151,11 @@ class DaxCoordinatedL1Client:
         self._write_contexts: dict[ObjectKey, _ReservationContext] = {}
         self._read_contexts: dict[ObjectKey, list[_ReservationContext]] = {}
         self._layouts: dict[int, MemoryLayoutDesc] = {}
+        self._read_views: OrderedDict[
+            tuple[ObjectKey, int, int, int, int, int, bool], MemoryObj
+        ] = OrderedDict()
+        self._read_view_hits = 0
+        self._read_view_misses = 0
         self._region = DaxCoordinatedL1Region(self._config, memory_config)
 
     @property
@@ -199,6 +207,7 @@ class DaxCoordinatedL1Client:
 
         The count belongs to this reservation, not to all hosts' readers.
         L1Manager clamps its public input; direct clients require a positive count.
+        Views may be reused, but every call acquires fresh native reservations.
         """
         self._key_ranks(keys)
         if read_locks < 1:
@@ -217,7 +226,7 @@ class DaxCoordinatedL1Client:
             if result is not RawResult.SUCCESS:
                 output[key] = DevDaxReservationResult(result)
                 continue
-            memory_obj = self._memory_obj(native)
+            memory_obj = self._read_memory_obj(key, native)
             context = _ReservationContext(
                 token=native.token,
                 memory_obj=memory_obj,
@@ -421,6 +430,10 @@ class DaxCoordinatedL1Client:
             "memcheck_on_attach": self._config.memcheck_on_attach,
             "payload_put_flush_enabled": not self._config.skip_payload_flush,
             "payload_get_refresh_enabled": not self._config.skip_payload_flush,
+            "read_view_cache_entries": len(self._read_views),
+            "read_view_cache_limit": self._config.read_view_cache_max_entries,
+            "read_view_cache_hits": self._read_view_hits,
+            "read_view_cache_misses": self._read_view_misses,
             **self._model_profile_status(),
         }
         if not self.initialized:
@@ -505,6 +518,7 @@ class DaxCoordinatedL1Client:
                     self._core.close()
                 self._write_contexts.clear()
                 self._read_contexts.clear()
+                self._read_views.clear()
                 self._region.close()
                 self._region = None
                 self._core = None
@@ -671,6 +685,40 @@ class DaxCoordinatedL1Client:
                 }
             )
         return status
+
+    def _read_memory_obj(self, key: ObjectKey, native: _NativePayload) -> MemoryObj:
+        """Reuse a bounded non-owning view after native read validation succeeds.
+
+        The client owns one mapping lifetime. Key/generation and the full view
+        geometry prevent reuse across slot replacement or layout discovery.
+        Eviction drops only the cache reference; active contexts keep their view
+        and native token until DMA completion and finish_read.
+        """
+        identity = (
+            key,
+            native.bucket_generation,
+            native.slot_generation,
+            native.payload_offset,
+            native.payload_length,
+            native.layout_id,
+            native.layout_id in self._layouts,
+        )
+        memory_obj = self._read_views.get(identity)
+        if (
+            memory_obj is not None
+            and memory_obj.is_valid()
+            and memory_obj.get_size() == native.payload_length
+        ):
+            self._read_views.move_to_end(identity)
+            self._read_view_hits += 1
+            return memory_obj
+        memory_obj = self._memory_obj(native)
+        self._read_views[identity] = memory_obj
+        self._read_views.move_to_end(identity)
+        if len(self._read_views) > self._config.read_view_cache_max_entries:
+            self._read_views.popitem(last=False)
+        self._read_view_misses += 1
+        return memory_obj
 
     def _memory_obj(self, native: _NativePayload) -> MemoryObj:
         """Build a payload view, using a locally known layout when possible."""

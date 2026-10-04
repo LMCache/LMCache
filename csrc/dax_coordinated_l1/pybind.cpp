@@ -55,6 +55,7 @@ PYBIND11_MODULE(lmcache_dax_coordinated_l1, module) {
       .def_readonly("global_payload_slot_id",
                     &ReservationResult::global_payload_slot_id)
       .def_readonly("bucket_generation", &ReservationResult::bucket_generation)
+      .def_readonly("slot_generation", &ReservationResult::slot_generation)
       .def_readonly("payload_offset", &ReservationResult::payload_offset)
       .def_readonly("payload_length", &ReservationResult::payload_length)
       .def_readonly("layout_id", &ReservationResult::layout_id);
