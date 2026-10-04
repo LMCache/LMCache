@@ -26,7 +26,6 @@ class RKVWorker:
         kernel_size: int = 7,
         mix_lambda: float = 0.1,
         retain_ratio: float = 0.1,
-        retain_direction: str = "last",
         score_chunk_bytes: int = 512 * 1024 * 1024,
     ) -> None:
         if window_size <= 0:
@@ -41,8 +40,6 @@ class RKVWorker:
             raise ValueError("R-KV mix_lambda must be in [0, 1]")
         if not 0.0 < retain_ratio <= 1.0:
             raise ValueError("R-KV retain_ratio must be in (0, 1]")
-        if retain_direction not in ("last", "first"):
-            raise ValueError("R-KV retain_direction must be 'last' or 'first'")
         if score_chunk_bytes <= 0:
             raise ValueError("R-KV score_chunk_bytes must be positive")
 
@@ -54,12 +51,10 @@ class RKVWorker:
             ) from exc
 
         self.budget = budget
-        self.buffer = buffer
         self.window_size = window_size
         self.kernel_size = kernel_size
         self.mix_lambda = mix_lambda
         self.retain_ratio = retain_ratio
-        self.retain_direction = retain_direction
         self.score_chunk_bytes = score_chunk_bytes
         self._policy = R1KV(
             budget=budget,
@@ -67,21 +62,28 @@ class RKVWorker:
             kernel_size=kernel_size,
             mix_lambda=mix_lambda,
             retain_ratio=retain_ratio,
-            retain_direction=retain_direction,
+            buffer=buffer,
         )
         self._kv_caches: dict[str, torch.Tensor] = {}
         self._layer_names: list[str] = []
         self._block_size = 0
-        self._recent_queries: dict[str, dict[str, torch.Tensor]] = {}
+
+        self._query_rings: dict[str, torch.Tensor] = {}
+        self._query_slots: dict[str, int] = {}
+        self._free_query_slots: list[int] = []
+        self._query_counts: dict[str, int] = {}
+        self._next_query_slot = 0
+        self._query_ring_width = 0
+        self._query_last_indices: torch.Tensor | None = None
+        self._query_write_indices: torch.Tensor | None = None
 
         self._request_ids: list[str] = []
-        self._query_ranges: list[tuple[int, int]] | None = None
         self._seq_lens: list[int] | None = None
         self._block_table: torch.Tensor | None = None
         self._is_genuine_decode: list[bool] | None = None
-        self._should_compress: list[bool] | None = None
+        self._num_decoded_tokens: list[int] | None = None
+        self._num_new_tokens: list[int] | None = None
         self._compacted_requests: set[str] = set()
-        self._n_compactions = 0
         self._query_hooks_installed = False
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
@@ -110,13 +112,21 @@ class RKVWorker:
         self._block_size = block_size
 
     def reset(self) -> None:
-        self._recent_queries.clear()
+        self._query_rings.clear()
+        self._query_slots.clear()
+        self._free_query_slots.clear()
+        self._query_counts.clear()
+        self._next_query_slot = 0
+        self._query_ring_width = 0
         self._compacted_requests.clear()
         self._clear_step()
 
     def drop_requests(self, request_ids: set[str]) -> None:
         for request_id in request_ids:
-            self._recent_queries.pop(request_id, None)
+            slot = self._query_slots.pop(request_id, None)
+            if slot is not None:
+                self._free_query_slots.append(slot)
+            self._query_counts.pop(request_id, None)
             self._compacted_requests.discard(request_id)
 
     def prepare_forward(
@@ -133,9 +143,8 @@ class RKVWorker:
             raise ValueError("R-KV MVP requires eager attention metadata")
 
         representative = next(iter(attn_metadata.values()))
-        query_start_loc = representative.query_start_loc.tolist()
-        num_reqs = len(query_start_loc) - 1
-        if len(request_states) != num_reqs:
+        num_reqs = len(request_states)
+        if representative.query_start_loc.shape[0] != num_reqs + 1:
             raise ValueError("R-KV request/attention row count mismatch")
 
         by_first_block: dict[int, Any] = {}
@@ -153,18 +162,11 @@ class RKVWorker:
         except KeyError as exc:
             raise ValueError("R-KV could not match worker rows to requests") from exc
 
-        query_lens = [
-            end - start
-            for start, end in zip(
-                query_start_loc[:-1], query_start_loc[1:], strict=True
-            )
-        ]
-        logical_seq_lens = representative.seq_lens[:num_reqs].tolist()
+        query_lens = [int(state.num_new_tokens) for state in ordered_states]
+        if any(state.resident_kv_tokens is None for state in ordered_states):
+            raise RuntimeError("R-KV scheduler metadata is missing resident KV length")
         physical_seq_lens = [
-            logical_len
-            if state.resident_kv_tokens is None
-            else state.resident_kv_tokens
-            for state, logical_len in zip(ordered_states, logical_seq_lens, strict=True)
+            int(state.resident_kv_tokens) for state in ordered_states
         ]
         if any(
             query_len <= 0 or physical_len < query_len
@@ -219,11 +221,15 @@ class RKVWorker:
         self.begin_step(
             [state.request_id for state in ordered_states],
             next(iter(forward_context.attn_metadata.values())),
+            physical_seq_lens=physical_seq_lens,
             is_genuine_decode=[
                 bool(state.is_genuine_decode) for state in ordered_states
             ],
-            should_compress=[
-                bool(state.should_compress) for state in ordered_states
+            num_decoded_tokens=[
+                int(state.num_decoded_tokens) for state in ordered_states
+            ],
+            num_new_tokens=[
+                int(state.num_new_tokens) for state in ordered_states
             ],
         )
 
@@ -232,8 +238,10 @@ class RKVWorker:
         request_ids: list[str],
         attn_metadata: Any,
         *,
+        physical_seq_lens: list[int],
         is_genuine_decode: list[bool] | None = None,
-        should_compress: list[bool] | None = None,
+        num_decoded_tokens: list[int] | None = None,
+        num_new_tokens: list[int] | None = None,
     ) -> None:
         if not self._kv_caches:
             raise RuntimeError("R-KV KV caches are not registered")
@@ -243,11 +251,10 @@ class RKVWorker:
         self._clear_step()
         self._request_ids = list(request_ids)
 
-        query_start_loc = attn_metadata.query_start_loc.tolist()
-        seq_lens = attn_metadata.seq_lens.tolist()
-        if len(query_start_loc) != len(self._request_ids) + 1:
+        query_start_loc = attn_metadata.query_start_loc
+        if query_start_loc.shape[0] != len(self._request_ids) + 1:
             raise ValueError("R-KV request/query segmentation mismatch")
-        if len(seq_lens) != len(self._request_ids):
+        if len(physical_seq_lens) != len(self._request_ids):
             raise ValueError("R-KV request/sequence-length mismatch")
 
         num_reqs = len(self._request_ids)
@@ -256,21 +263,25 @@ class RKVWorker:
             if is_genuine_decode is None
             else list(is_genuine_decode)
         )
-        self._should_compress = (
-            [True] * num_reqs
-            if should_compress is None
-            else list(should_compress)
+        self._num_decoded_tokens = (
+            [0] * num_reqs
+            if num_decoded_tokens is None
+            else list(num_decoded_tokens)
+        )
+        self._num_new_tokens = (
+            [1] * num_reqs
+            if num_new_tokens is None
+            else list(num_new_tokens)
         )
         if (
             len(self._is_genuine_decode) != num_reqs
-            or len(self._should_compress) != num_reqs
+            or len(self._num_decoded_tokens) != num_reqs
+            or len(self._num_new_tokens) != num_reqs
         ):
-            raise ValueError("R-KV request/step flag count mismatch")
+            raise ValueError("R-KV request/step fact count mismatch")
 
-        self._query_ranges = list(
-            zip(query_start_loc[:-1], query_start_loc[1:], strict=True)
-        )
-        self._seq_lens = seq_lens
+        self._prepare_query_write_plan(query_start_loc)
+        self._seq_lens = list(physical_seq_lens)
         self._block_table = attn_metadata.block_table
 
     def install_query_hooks(self, no_compile_layers: dict[str, Any]) -> None:
@@ -303,8 +314,15 @@ class RKVWorker:
             ) -> Any:
                 # CUDA uses the opaque unified-attention custom op. Under
                 # PIECEWISE cudagraph this backend call remains outside the
-                # graph and therefore executes on every model step.
-                self.capture_query(attn_layer.layer_name, query)
+                # graph and therefore executes on every model step. vLLM may
+                # pad query rows for cudagraphs; only real scheduled rows belong
+                # to the per-request observation window.
+                num_actual_tokens = getattr(
+                    attn_metadata, "num_actual_tokens", query.shape[0]
+                )
+                self.capture_query(
+                    attn_layer.layer_name, query[:num_actual_tokens]
+                )
                 return _forward(
                     attn_layer,
                     query,
@@ -322,10 +340,60 @@ class RKVWorker:
 
         self._query_hooks_installed = True
 
+    def _prepare_query_write_plan(self, query_start_loc: torch.Tensor) -> None:
+        assert self._is_genuine_decode is not None
+
+        active_rows: list[int] = []
+        active_slots: list[int] = []
+        cursors: list[int] = []
+        for row, (request_id, is_decode) in enumerate(
+            zip(self._request_ids, self._is_genuine_decode, strict=True)
+        ):
+            slot = self._query_slots.get(request_id)
+            if slot is None:
+                slot = (
+                    self._free_query_slots.pop()
+                    if self._free_query_slots
+                    else self._next_query_slot
+                )
+                if slot == self._next_query_slot:
+                    self._next_query_slot += 1
+                self._query_slots[request_id] = slot
+                self._query_counts[request_id] = 0
+
+            if not is_decode:
+                continue
+
+            count = self._query_counts[request_id]
+            active_rows.append(row)
+            active_slots.append(slot)
+            cursors.append(count % self.window_size)
+            self._query_counts[request_id] = count + 1
+
+        if not active_rows:
+            return
+
+        if self._next_query_slot > self._query_ring_width:
+            width = max(self._next_query_slot, 16)
+            if self._query_ring_width:
+                width = max(width, self._query_ring_width * 2)
+            self._query_ring_width = width
+
+        device = query_start_loc.device
+        rows = torch.as_tensor(active_rows, dtype=torch.long, device=device)
+        self._query_last_indices = (
+            query_start_loc.index_select(0, rows + 1) - 1
+        ).clamp_min(0).long()
+        self._query_write_indices = (
+            torch.as_tensor(cursors, dtype=torch.long, device=device)
+            * self._query_ring_width
+            + torch.as_tensor(active_slots, dtype=torch.long, device=device)
+        )
+
     def capture_query(self, layer_name: str, query: torch.Tensor) -> None:
         if layer_name not in self._kv_caches:
             return
-        if self._query_ranges is None:
+        if self._query_write_indices is None or self._query_last_indices is None:
             return
 
         head_dim = self._kv_caches[layer_name].shape[-1]
@@ -337,29 +405,27 @@ class RKVWorker:
                 "or [tokens, q_heads, head_dim]"
             )
 
-        if self._query_ranges[-1][1] != query.shape[0]:
-            raise ValueError("R-KV query row count mismatch")
+        last_q = query.index_select(0, self._query_last_indices)
+        ring = self._query_rings.get(layer_name)
+        if ring is None or ring.shape[1] < self._query_ring_width:
+            new_ring = last_q.new_zeros(
+                (
+                    self.window_size,
+                    self._query_ring_width,
+                    last_q.shape[1],
+                    last_q.shape[2],
+                )
+            )
+            if ring is not None:
+                new_ring[:, : ring.shape[1]] = ring
+            ring = new_ring
+            self._query_rings[layer_name] = ring
 
-        assert self._is_genuine_decode is not None
-        for row_index, (request_id, (start, end)) in enumerate(
-            zip(self._request_ids, self._query_ranges, strict=True)
-        ):
-            if not self._is_genuine_decode[row_index]:
-                continue
-            rows = query[start:end]
-            if rows.shape[0] == 0:
-                continue
-            # Upstream R-KV records one frontier query per genuine decode step.
-            rows = rows[-1:]
-
-            by_layer = self._recent_queries.setdefault(request_id, {})
-            previous = by_layer.get(layer_name)
-            if rows.shape[0] >= self.window_size:
-                by_layer[layer_name] = rows[-self.window_size :].detach().clone()
-            elif previous is None:
-                by_layer[layer_name] = rows.detach().clone()
-            else:
-                by_layer[layer_name] = torch.cat([previous, rows], dim=0)[-self.window_size :]
+        ring.view(
+            self.window_size * self._query_ring_width,
+            last_q.shape[1],
+            last_q.shape[2],
+        ).index_copy_(0, self._query_write_indices, last_q)
 
     def _slots_for_request(self, row: int, seq_len: int) -> torch.Tensor:
         assert self._block_table is not None
@@ -371,8 +437,8 @@ class RKVWorker:
     def _compact_group_batched(
         self,
         members: list[tuple[int, str, torch.Tensor]],
-    ) -> None:
-        """Run canonical R1KV on contiguous Q/K/V and write compacted K/V back."""
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Score contiguous K/Q and return shared source/destination slots."""
         num_reqs = len(members)
         num_layers = len(self._layer_names)
         seq_len = members[0][2].numel()
@@ -381,7 +447,7 @@ class RKVWorker:
         head_dim = first_cache.shape[3]
         elt = first_cache.element_size()
 
-        # Bound the same quadratic score working set as the upstream vLLM port.
+        # Match the upstream serving implementation's quadratic-score cap.
         per_unit = max(
             1,
             2 * (2 * elt + 1 + 4) * kv_heads * seq_len * seq_len,
@@ -390,23 +456,21 @@ class RKVWorker:
         req_chunk = max(1, min(num_reqs, units_cap))
         layer_chunk = max(1, min(num_layers, units_cap // req_chunk))
 
+        source_parts: list[torch.Tensor] = []
+        destination_parts: list[torch.Tensor] = []
+
         for r0 in range(0, num_reqs, req_chunk):
             chunk_members = members[r0 : r0 + req_chunk]
             rc = len(chunk_members)
-            slots_cat = torch.cat([member[2] for member in chunk_members])
+            slots_list = [member[2] for member in chunk_members]
+            slots_cat = torch.cat(slots_list)
             blocks = slots_cat // self._block_size
             offsets = slots_cat % self._block_size
 
-            destination_slots = torch.cat(
-                [member[2][: self.budget] for member in chunk_members]
-            )
-            destination_blocks = destination_slots // self._block_size
-            destination_offsets = destination_slots % self._block_size
-
+            shared_scores: torch.Tensor | None = None
             for l0 in range(0, num_layers, layer_chunk):
                 layer_names = self._layer_names[l0 : l0 + layer_chunk]
                 lc = len(layer_names)
-
                 keys = (
                     torch.stack(
                         [
@@ -419,23 +483,13 @@ class RKVWorker:
                     .reshape(lc * rc, kv_heads, seq_len, head_dim)
                     .contiguous()
                 )
-                values = (
-                    torch.stack(
-                        [
-                            self._kv_caches[name][:, 1][blocks, offsets]
-                            for name in layer_names
-                        ]
-                    )
-                    .view(lc, rc, seq_len, kv_heads, head_dim)
-                    .permute(0, 1, 3, 2, 4)
-                    .reshape(lc * rc, kv_heads, seq_len, head_dim)
-                    .contiguous()
-                )
                 queries = torch.stack(
                     [
                         torch.stack(
                             [
-                                self._recent_queries[request_id][name]
+                                self._query_rings[name][
+                                    :, self._query_slots[request_id]
+                                ]
                                 for _, request_id, _ in chunk_members
                             ]
                         )
@@ -449,64 +503,76 @@ class RKVWorker:
                     .contiguous()
                 )
 
-                compacted_keys, compacted_values = self._policy.update_kv(
-                    keys,
-                    queries,
-                    values,
+                layer_scores = self._policy.score_kv(keys, queries).mean(dim=1)
+                layer_scores = layer_scores.view(
+                    lc, rc, seq_len - self.window_size
                 )
-                compacted_keys = (
-                    compacted_keys.view(
-                        lc, rc, kv_heads, self.budget, head_dim
+                for li in range(lc):
+                    shared_scores = (
+                        layer_scores[li]
+                        if shared_scores is None
+                        else shared_scores + layer_scores[li]
                     )
-                    .permute(0, 1, 3, 2, 4)
-                    .contiguous()
-                )
-                compacted_values = (
-                    compacted_values.view(
-                        lc, rc, kv_heads, self.budget, head_dim
-                    )
-                    .permute(0, 1, 3, 2, 4)
-                    .contiguous()
-                )
 
-                for li, name in enumerate(layer_names):
-                    key_cache = self._kv_caches[name][:, 0]
-                    value_cache = self._kv_caches[name][:, 1]
-                    key_cache[destination_blocks, destination_offsets] = (
-                        compacted_keys[li].reshape(
-                            rc * self.budget, kv_heads, head_dim
-                        )
-                    )
-                    value_cache[destination_blocks, destination_offsets] = (
-                        compacted_values[li].reshape(
-                            rc * self.budget, kv_heads, head_dim
-                        )
-                    )
+            assert shared_scores is not None
+            past_idx = shared_scores.topk(
+                self.budget - self.window_size,
+                dim=-1,
+            ).indices
+            window_idx = torch.arange(
+                seq_len - self.window_size,
+                seq_len,
+                device=past_idx.device,
+            ).expand(rc, self.window_size)
+            kept = torch.sort(
+                torch.cat([past_idx, window_idx], dim=-1),
+                dim=-1,
+            ).values
+
+            source_parts.append(
+                torch.gather(
+                    torch.stack(slots_list),
+                    1,
+                    kept,
+                ).reshape(-1)
+            )
+            destination_parts.append(
+                torch.cat([slots[: self.budget] for slots in slots_list])
+            )
+
+        return torch.cat(source_parts), torch.cat(destination_parts)
 
     def compact(self) -> dict[str, int]:
         if self._seq_lens is None or self._block_table is None:
             return {}
 
-        assert self._should_compress is not None
+        assert self._is_genuine_decode is not None
+        assert self._num_decoded_tokens is not None
+        assert self._num_new_tokens is not None
         groups: dict[int, list[tuple[int, str, torch.Tensor]]] = {}
         for row, request_id in enumerate(self._request_ids):
-            if not self._should_compress[row]:
-                continue
             seq_len = self._seq_lens[row]
-            if seq_len < self.budget + self.buffer:
-                continue
-            queries = self._recent_queries.get(request_id, {})
-            has_window = all(
-                name in queries and queries[name].shape[0] == self.window_size
-                for name in self._layer_names
+            query_window_tokens = min(
+                self._query_counts.get(request_id, 0),
+                self.window_size,
             )
-            if not has_window:
-                if request_id in self._compacted_requests:
-                    raise RuntimeError(
-                        "R-KV lost its observation window after compaction"
-                    )
-                # Safe before the first compaction (e.g. post-preemption catch-up).
+            if (
+                request_id in self._compacted_requests
+                and query_window_tokens < self.window_size
+            ):
+                raise RuntimeError(
+                    "R-KV lost its observation window after compaction"
+                )
+
+            if not self._policy.should_compact(
+                resident_len=seq_len,
+                num_decoded_tokens=self._num_decoded_tokens[row],
+                num_new_tokens=self._num_new_tokens[row],
+                is_genuine_decode=self._is_genuine_decode[row],
+                query_window_tokens=query_window_tokens,
+            ):
                 continue
+
             groups.setdefault(seq_len, []).append(
                 (row, request_id, self._slots_for_request(row, seq_len))
             )
@@ -515,19 +581,38 @@ class RKVWorker:
             return {}
 
         updates: dict[str, int] = {}
+        source_parts: list[torch.Tensor] = []
+        destination_parts: list[torch.Tensor] = []
         for members in groups.values():
-            self._compact_group_batched(members)
+            source_slots, destination_slots = self._compact_group_batched(members)
+            source_parts.append(source_slots)
+            destination_parts.append(destination_slots)
             for _, request_id, _ in members:
                 updates[request_id] = self.budget
                 self._compacted_requests.add(request_id)
-                self._n_compactions += 1
+
+        source_slots = torch.cat(source_parts)
+        destination_slots = torch.cat(destination_parts)
+        src_blocks = source_slots // self._block_size
+        src_offsets = source_slots % self._block_size
+        dst_blocks = destination_slots // self._block_size
+        dst_offsets = destination_slots % self._block_size
+        for name in self._layer_names:
+            key_cache = self._kv_caches[name][:, 0]
+            value_cache = self._kv_caches[name][:, 1]
+            kept_keys = key_cache[src_blocks, src_offsets]
+            kept_values = value_cache[src_blocks, src_offsets]
+            key_cache[dst_blocks, dst_offsets] = kept_keys
+            value_cache[dst_blocks, dst_offsets] = kept_values
 
         return updates
 
     def _clear_step(self) -> None:
         self._request_ids = []
-        self._query_ranges = None
+        self._query_last_indices = None
+        self._query_write_indices = None
         self._seq_lens = None
         self._block_table = None
         self._is_genuine_decode = None
-        self._should_compress = None
+        self._num_decoded_tokens = None
+        self._num_new_tokens = None

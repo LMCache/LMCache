@@ -82,6 +82,76 @@ def _new_cache(num_blocks: int) -> dict[str, torch.Tensor]:
     }
 
 
+def _shared_kept_indices(
+    original: dict[str, torch.Tensor],
+    slots: torch.Tensor,
+    recent_queries: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    policy = _policy()
+    shared_scores = None
+    for name in LAYER_NAMES:
+        keys = (
+            original[name][:, 0][slots // BLOCK_SIZE, slots % BLOCK_SIZE]
+            .permute(1, 0, 2)
+            .unsqueeze(0)
+            .contiguous()
+        )
+        queries = (
+            recent_queries[name]
+            .permute(1, 0, 2)
+            .unsqueeze(0)
+            .contiguous()
+        )
+        layer_score = policy.score_kv(keys, queries).mean(dim=1)
+        shared_scores = (
+            layer_score if shared_scores is None else shared_scores + layer_score
+        )
+
+    assert shared_scores is not None
+    past_idx = shared_scores.topk(BUDGET - WINDOW, dim=-1).indices
+    window_idx = torch.arange(
+        slots.numel() - WINDOW,
+        slots.numel(),
+        device=slots.device,
+    ).expand(1, WINDOW)
+    return torch.sort(torch.cat([past_idx, window_idx], dim=-1), dim=-1).values[0]
+
+
+def _seed_query_windows(
+    worker: RKVWorker,
+    windows: dict[str, dict[str, torch.Tensor]],
+) -> None:
+    worker._query_slots.clear()
+    worker._query_counts.clear()
+    worker._free_query_slots.clear()
+    worker._query_rings.clear()
+
+    worker._next_query_slot = len(windows)
+    worker._query_ring_width = max(16, worker._next_query_slot)
+    for slot, (request_id, by_layer) in enumerate(windows.items()):
+        worker._query_slots[request_id] = slot
+        worker._query_counts[request_id] = WINDOW
+        for layer_name, queries in by_layer.items():
+            ring = worker._query_rings.get(layer_name)
+            if ring is None:
+                ring = queries.new_zeros(
+                    WINDOW,
+                    worker._query_ring_width,
+                    queries.shape[1],
+                    queries.shape[2],
+                )
+                worker._query_rings[layer_name] = ring
+            ring[:, slot] = queries
+
+
+def _query_window(
+    worker: RKVWorker,
+    request_id: str,
+    layer_name: str,
+) -> torch.Tensor:
+    return worker._query_rings[layer_name][:, worker._query_slots[request_id]]
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_prepare_forward_builds_physical_view_and_captures_queries():
     caches = _new_cache(8)
@@ -117,16 +187,18 @@ def test_prepare_forward_builds_physical_view_and_captures_queries():
         SimpleNamespace(
             request_id="req-b",
             block_ids=[2, 4, 6],
-            resident_kv_tokens=None,
+            resident_kv_tokens=40,
             is_genuine_decode=True,
-            should_compress=False,
+            num_decoded_tokens=0,
+            num_new_tokens=1,
         ),
         SimpleNamespace(
             request_id="req-a",
             block_ids=[1, 3, 5],
             resident_kv_tokens=33,
             is_genuine_decode=True,
-            should_compress=False,
+            num_decoded_tokens=0,
+            num_new_tokens=1,
         ),
     ]
 
@@ -146,7 +218,7 @@ def test_prepare_forward_builds_physical_view_and_captures_queries():
         assert torch.equal(context.slot_mapping[name], expected_slots)
 
         query = torch.randn(
-            2,
+            4,
             Q_HEADS * HEAD_DIM,
             device="cuda",
             dtype=torch.bfloat16,
@@ -157,13 +229,14 @@ def test_prepare_forward_builds_physical_view_and_captures_queries():
             None,
             None,
             None,
-            None,
+            SimpleNamespace(num_actual_tokens=2),
         )
 
     for request_id in ("req-a", "req-b"):
+        assert worker._query_counts[request_id] == 1
         for name in LAYER_NAMES:
-            assert worker._recent_queries[request_id][name].shape == (
-                1,
+            assert _query_window(worker, request_id, name).shape == (
+                WINDOW,
                 Q_HEADS,
                 HEAD_DIM,
             )
@@ -188,32 +261,31 @@ def test_rkv_worker_compacts_all_layers_matches_upstream_update_kv():
 
     slots = _slots(block_ids, length)
     destination_slots = slots[:BUDGET]
-    expected = {}
-    for name in LAYER_NAMES:
-        keys = (
-            original[name][:, 0][slots // BLOCK_SIZE, slots % BLOCK_SIZE]
-            .permute(1, 0, 2)
-            .unsqueeze(0)
-            .contiguous()
-        )
-        values = (
-            original[name][:, 1][slots // BLOCK_SIZE, slots % BLOCK_SIZE]
-            .permute(1, 0, 2)
-            .unsqueeze(0)
-            .contiguous()
-        )
-        recent_queries = (
-            queries[name][-WINDOW:].permute(1, 0, 2).unsqueeze(0).contiguous()
-        )
-        expected[name] = _policy().update_kv(keys, recent_queries, values)
+    recent_queries = {
+        name: queries[name][-WINDOW:].clone() for name in LAYER_NAMES
+    }
+    kept = _shared_kept_indices(original, slots, recent_queries)
+    source_slots = slots[kept]
 
     worker = RKVWorker(BUDGET, buffer=WINDOW)
     worker.register_kv_caches(caches)
     metadata = _metadata(block_ids, length, length)
-    worker.begin_step(["req"], metadata)
-    worker._recent_queries["req"] = {
-        name: queries[name][-WINDOW:].clone() for name in LAYER_NAMES
-    }
+    worker.begin_step(
+        ["req"],
+        metadata,
+        physical_seq_lens=[length],
+        is_genuine_decode=[True],
+        num_decoded_tokens=[WINDOW],
+        num_new_tokens=[1],
+    )
+    _seed_query_windows(
+        worker,
+        {
+            "req": {
+                name: queries[name][-WINDOW:].clone() for name in LAYER_NAMES
+            }
+        },
+    )
 
     assert worker.compact() == {"req": BUDGET}
 
@@ -221,12 +293,19 @@ def test_rkv_worker_compacts_all_layers_matches_upstream_update_kv():
         actual_k = caches[name][:, 0][
             destination_slots // BLOCK_SIZE,
             destination_slots % BLOCK_SIZE,
-        ].permute(1, 0, 2).unsqueeze(0)
+        ]
         actual_v = caches[name][:, 1][
             destination_slots // BLOCK_SIZE,
             destination_slots % BLOCK_SIZE,
-        ].permute(1, 0, 2).unsqueeze(0)
-        expected_k, expected_v = expected[name]
+        ]
+        expected_k = original[name][:, 0][
+            source_slots // BLOCK_SIZE,
+            source_slots % BLOCK_SIZE,
+        ]
+        expected_v = original[name][:, 1][
+            source_slots // BLOCK_SIZE,
+            source_slots % BLOCK_SIZE,
+        ]
         assert torch.equal(actual_k, expected_k)
         assert torch.equal(actual_v, expected_v)
 
@@ -245,8 +324,10 @@ def test_rkv_worker_recompacts_on_decode_buffer_boundaries():
     worker.begin_step(
         ["req"],
         prompt_metadata,
+        physical_seq_lens=[prompt_len],
         is_genuine_decode=[False],
-        should_compress=[False],
+        num_decoded_tokens=[0],
+        num_new_tokens=[prompt_len],
     )
     for name in LAYER_NAMES:
         query = torch.randn(
@@ -257,7 +338,7 @@ def test_rkv_worker_recompacts_on_decode_buffer_boundaries():
             dtype=torch.bfloat16,
         )
         worker.capture_query(name, query)
-    assert worker._recent_queries == {}
+    assert worker._query_counts.get("req", 0) == 0
     assert worker.compact() == {}
 
     # First compaction fires after exactly one full buffer of decode tokens.
@@ -266,8 +347,10 @@ def test_rkv_worker_recompacts_on_decode_buffer_boundaries():
         worker.begin_step(
             ["req"],
             metadata,
+            physical_seq_lens=[prompt_len + step],
             is_genuine_decode=[True],
-            should_compress=[step == WINDOW],
+            num_decoded_tokens=[step],
+            num_new_tokens=[1],
         )
         for name in LAYER_NAMES:
             worker.capture_query(
@@ -290,8 +373,10 @@ def test_rkv_worker_recompacts_on_decode_buffer_boundaries():
         worker.begin_step(
             ["req"],
             metadata,
+            physical_seq_lens=[BUDGET + step],
             is_genuine_decode=[True],
-            should_compress=[step == WINDOW],
+            num_decoded_tokens=[WINDOW + step],
+            num_new_tokens=[1],
         )
         for name in LAYER_NAMES:
             worker.capture_query(
@@ -334,60 +419,63 @@ def test_rkv_worker_compacts_two_requests_independently():
         block_table=torch.tensor(request_blocks, device="cuda"),
     )
 
-    expected = {}
+    expected_sources = {}
     for req_index, request_id in enumerate(request_ids):
         slots = _slots(request_blocks[req_index], length)
         start = req_index * length
         end = start + length
-        for name in LAYER_NAMES:
-            keys = (
-                original[name][:, 0][slots // BLOCK_SIZE, slots % BLOCK_SIZE]
-                .permute(1, 0, 2)
-                .unsqueeze(0)
-                .contiguous()
-            )
-            values = (
-                original[name][:, 1][slots // BLOCK_SIZE, slots % BLOCK_SIZE]
-                .permute(1, 0, 2)
-                .unsqueeze(0)
-                .contiguous()
-            )
-            recent_queries = (
-                queries_by_layer[name][start:end][-WINDOW:]
-                .permute(1, 0, 2)
-                .unsqueeze(0)
-                .contiguous()
-            )
-            expected[(request_id, name)] = _policy().update_kv(
-                keys, recent_queries, values
-            )
+        recent_queries = {
+            name: queries_by_layer[name][start:end][-WINDOW:].clone()
+            for name in LAYER_NAMES
+        }
+        kept = _shared_kept_indices(original, slots, recent_queries)
+        expected_sources[request_id] = slots[kept]
 
     worker = RKVWorker(BUDGET, buffer=WINDOW)
     worker.register_kv_caches(caches)
-    worker.begin_step(request_ids, metadata)
-    worker._recent_queries = {
-        request_id: {
-            name: queries_by_layer[name][
-                req_index * length : (req_index + 1) * length
-            ][-WINDOW:].clone()
-            for name in LAYER_NAMES
-        }
-        for req_index, request_id in enumerate(request_ids)
-    }
+    worker.begin_step(
+        request_ids,
+        metadata,
+        physical_seq_lens=[length, length],
+        is_genuine_decode=[True, True],
+        num_decoded_tokens=[WINDOW, WINDOW],
+        num_new_tokens=[1, 1],
+    )
+    _seed_query_windows(
+        worker,
+        {
+            request_id: {
+                name: queries_by_layer[name][
+                    req_index * length : (req_index + 1) * length
+                ][-WINDOW:].clone()
+                for name in LAYER_NAMES
+            }
+            for req_index, request_id in enumerate(request_ids)
+        },
+    )
 
     assert worker.compact() == {"req-a": BUDGET, "req-b": BUDGET}
-    assert worker._n_compactions == 2
 
     for req_index, request_id in enumerate(request_ids):
-        slots = _slots(request_blocks[req_index], length)[:BUDGET]
+        destination_slots = _slots(request_blocks[req_index], length)[:BUDGET]
+        source_slots = expected_sources[request_id]
         for name in LAYER_NAMES:
             actual_k = caches[name][:, 0][
-                slots // BLOCK_SIZE, slots % BLOCK_SIZE
-            ].permute(1, 0, 2).unsqueeze(0)
+                destination_slots // BLOCK_SIZE,
+                destination_slots % BLOCK_SIZE,
+            ]
             actual_v = caches[name][:, 1][
-                slots // BLOCK_SIZE, slots % BLOCK_SIZE
-            ].permute(1, 0, 2).unsqueeze(0)
-            expected_k, expected_v = expected[(request_id, name)]
+                destination_slots // BLOCK_SIZE,
+                destination_slots % BLOCK_SIZE,
+            ]
+            expected_k = original[name][:, 0][
+                source_slots // BLOCK_SIZE,
+                source_slots % BLOCK_SIZE,
+            ]
+            expected_v = original[name][:, 1][
+                source_slots // BLOCK_SIZE,
+                source_slots % BLOCK_SIZE,
+            ]
             assert torch.equal(actual_k, expected_k)
             assert torch.equal(actual_v, expected_v)
 
@@ -395,12 +483,12 @@ def test_rkv_worker_compacts_two_requests_independently():
 
 def test_rkv_worker_defaults_match_upstream_vllm_config():
     worker = RKVWorker(BUDGET)
-    assert worker.buffer == 128
+    assert worker._policy.buffer == 128
     assert worker.window_size == 8
     assert worker.kernel_size == 7
     assert worker.mix_lambda == 0.1
     assert worker.retain_ratio == 0.1
-    assert worker.retain_direction == "last"
+    assert worker._policy.retain_direction == "last"
     assert worker.score_chunk_bytes == 512 * 1024 * 1024
 
 
@@ -416,23 +504,30 @@ def test_rkv_worker_records_only_genuine_decode_frontier_query():
     worker.begin_step(
         ["req"],
         metadata,
+        physical_seq_lens=[length],
         is_genuine_decode=[False],
-        should_compress=[True],
+        num_decoded_tokens=[0],
+        num_new_tokens=[4],
     )
     prefill = torch.randn(
         4, Q_HEADS, HEAD_DIM, device="cuda", dtype=torch.bfloat16
     )
     for name in LAYER_NAMES:
         worker.capture_query(name, prefill)
-    assert worker._recent_queries == {}
+    assert worker._query_counts.get("req", 0) == 0
     assert worker.compact() == {}
 
     worker.begin_step(
         ["req"],
         metadata,
+        physical_seq_lens=[length],
         is_genuine_decode=[True],
-        should_compress=[False],
+        num_decoded_tokens=[1],
+        num_new_tokens=[1],
     )
     for name in LAYER_NAMES:
         worker.capture_query(name, prefill)
-        assert torch.equal(worker._recent_queries["req"][name], prefill[-1:])
+        assert torch.equal(
+            _query_window(worker, "req", name)[0],
+            prefill[-1],
+        )

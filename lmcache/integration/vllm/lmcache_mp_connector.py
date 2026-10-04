@@ -212,31 +212,22 @@ def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
     return False
 
 
-def _rkv_step_flags(
+def _rkv_step_facts(
     *,
     num_computed: int,
     num_new_tokens: int,
     num_tokens: int,
     num_prompt_tokens: int,
-    buffer: int,
-) -> tuple[bool, bool]:
-    """Return (is_genuine_decode, should_compress) for one scheduler step."""
+) -> tuple[bool, int]:
+    """Return engine facts for one scheduled request step."""
     prev_computed = num_computed - num_new_tokens
-    is_prefill_chunk = num_computed < num_tokens
     is_genuine_decode = (
         num_new_tokens > 0
         and num_computed >= num_tokens
         and prev_computed >= num_prompt_tokens
     )
-    num_decoded = num_computed - num_prompt_tokens
-    prev_decoded = prev_computed - num_prompt_tokens
-    should_compress = (
-        buffer > 0
-        and not is_prefill_chunk
-        and num_decoded > 0
-        and num_decoded // buffer > prev_decoded // buffer
-    )
-    return is_genuine_decode, should_compress
+    num_decoded_tokens = max(0, num_computed - num_prompt_tokens)
+    return is_genuine_decode, num_decoded_tokens
 
 
 def _iter_kv_cache_specs(kv_cache_config: "KVCacheConfig | None") -> Iterable[Any]:
@@ -655,11 +646,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "lmcache.mp.rkv_retain_ratio", 0.1
             )
         )
-        self._rkv_retain_direction = str(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.rkv_retain_direction", "last"
-            )
-        )
         self._rkv_score_chunk_bytes = int(
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "lmcache.mp.rkv_score_chunk_bytes", 512 * 1024 * 1024
@@ -672,6 +658,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._can_store = False
             if vllm_config.cache_config.enable_prefix_caching:
                 raise ValueError("R-KV MVP requires prefix caching disabled")
+            if getattr(
+                vllm_config.scheduler_config, "enable_chunked_prefill", False
+            ):
+                raise ValueError("R-KV MVP does not support chunked prefill")
             if getattr(vllm_config, "speculative_config", None) is not None:
                 raise ValueError("R-KV MVP does not support speculative decoding")
             if getattr(vllm_config.scheduler_config, "async_scheduling", False):
@@ -845,7 +835,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     kernel_size=self._rkv_kernel_size,
                     mix_lambda=self._rkv_mix_lambda,
                     retain_ratio=self._rkv_retain_ratio,
-                    retain_direction=self._rkv_retain_direction,
                     score_chunk_bytes=self._rkv_score_chunk_bytes,
                 )
             if self.transfer_intermediate_tensors:
@@ -1597,21 +1586,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 raise RuntimeError(f"Missing R-KV blocks for {request_id}")
 
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
-            is_genuine_decode, should_compress = _rkv_step_flags(
+            is_genuine_decode, num_decoded_tokens = _rkv_step_facts(
                 num_computed=tracker.num_scheduled_tokens,
                 num_new_tokens=num_new_tokens,
                 num_tokens=len(tracker.all_token_ids),
                 num_prompt_tokens=tracker.num_prompt_tokens,
-                buffer=self._rkv_buffer,
             )
+
+            resident_kv_tokens = get_resident_kv_tokens(request_id)
+            if resident_kv_tokens is None:
+                resident_kv_tokens = tracker.num_scheduled_tokens
 
             metadata.rkv_requests.append(
                 LMCacheMPRKVRequestState(
                     request_id=request_id,
                     block_ids=block_ids,
-                    resident_kv_tokens=get_resident_kv_tokens(request_id),
+                    resident_kv_tokens=resident_kv_tokens,
                     is_genuine_decode=is_genuine_decode,
-                    should_compress=should_compress,
+                    num_decoded_tokens=num_decoded_tokens,
+                    num_new_tokens=num_new_tokens,
                 )
             )
 
@@ -1884,6 +1877,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         for new_request in scheduler_output.scheduled_new_reqs:
             request_tracker = self._get_request_tracker(new_request.req_id)
+
+            # MultiConnector may pass empty blocks to a non-selected loader,
+            # but a writer still needs the scheduler's allocated block ids.
+            if not request_tracker.allocated_block_ids and new_request.block_ids:
+                request_tracker.append_block_ids(
+                    new_request.block_ids, self._mamba_relocation_window
+                )
 
             num_new_tokens = scheduler_output.num_scheduled_tokens[new_request.req_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)

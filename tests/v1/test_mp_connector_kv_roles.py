@@ -278,7 +278,8 @@ def test_scheduler_builds_authoritative_rkv_state() -> None:
             block_ids=[10, 11, 18],
             resident_kv_tokens=33,
             is_genuine_decode=True,
-            should_compress=False,
+            num_decoded_tokens=1,
+            num_new_tokens=1,
         )
     ]
     clear_resident_kv_tokens("request")
@@ -648,28 +649,42 @@ def test_rkv_ignores_final_update_after_request_finished() -> None:
 @pytest.mark.parametrize(
     ("num_computed", "num_new", "num_tokens", "expected"),
     [
-        (512, 512, 512, (False, False)),  # initial prefill
-        (513, 1, 513, (True, False)),
-        (639, 1, 639, (True, False)),
-        (640, 1, 640, (True, True)),  # 128th decode token
-        (300, 100, 700, (False, False)),  # preemption replay / prefill
-        (639, 1, 700, (False, False)),  # replaying generated history
-        (640, 1, 640, (True, True)),  # catch-up may arm; worker gates on window
+        (512, 512, 512, (False, 0)),  # initial prefill
+        (513, 1, 513, (True, 1)),
+        (639, 1, 639, (True, 127)),
+        (640, 1, 640, (True, 128)),
+        (300, 100, 700, (False, 0)),  # preemption replay / prefill
+        (639, 1, 700, (False, 127)),  # replaying generated history
+        (640, 1, 640, (True, 128)),  # catch-up fact; R-KV owns trigger policy
     ],
 )
-def test_rkv_step_flags_match_upstream_decode_cadence(
+def test_rkv_step_facts_are_policy_free(
     num_computed: int,
     num_new: int,
     num_tokens: int,
-    expected: tuple[bool, bool],
+    expected: tuple[bool, int],
 ) -> None:
     assert (
-        connector_mod._rkv_step_flags(
+        connector_mod._rkv_step_facts(
             num_computed=num_computed,
             num_new_tokens=num_new,
             num_tokens=num_tokens,
             num_prompt_tokens=512,
-            buffer=128,
         )
         == expected
     )
+
+
+def test_rkv_rejects_chunked_prefill() -> None:
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"lmcache.mp.rkv_budget": 32},
+        )
+    )
+    config.cache_config.enable_prefix_caching = False
+    config.scheduler_config.enable_chunked_prefill = True
+
+    with pytest.raises(ValueError, match="does not support chunked prefill"):
+        LMCacheMPConnector(config, KVConnectorRole.WORKER)

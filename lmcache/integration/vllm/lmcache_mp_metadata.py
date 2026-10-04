@@ -402,7 +402,8 @@ class LMCacheMPRKVRequestState:
     block_ids: list[int]
     resident_kv_tokens: int | None = None
     is_genuine_decode: bool = False
-    should_compress: bool = False
+    num_decoded_tokens: int = 0
+    num_new_tokens: int = 0
 
 
 class LMCacheMPConnectorMetadata(KVConnectorMetadata):
