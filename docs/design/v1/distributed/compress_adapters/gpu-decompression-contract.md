@@ -93,7 +93,7 @@ GpuDecompressCompletion
 GpuDecompressBackend
 ```
 
-Completion validation is compression-specific because it owns per-chunk status, actual-size, and CRC semantics. It does not belong in a generic platform `DeviceCompletion`.
+Completion validation is compression-specific because it owns per-chunk status, actual-size, and CRC semantics. PR3 builds it above the existing platform `CompletionEvent` and stream helpers; an event reporting finished device work does not establish valid decompressed output or finalize submission resources.
 
 Vendor implementations live in separate modules:
 
@@ -142,7 +142,7 @@ Equality and hashing use the snapshotted device, address, capacity, offset, and 
 DeviceExecutionContext.from_cache_context(cache_context)
 ```
 
-The adapter captures the existing cache context's device and opaque stream owner, typed as `object`. It does not add another abstract property that every CPU or accelerator cache context must implement. Only the matching vendor backend interprets the owner's concrete type and translates it to `cudaStream_t`, `hipStream_t`, or an equivalent native type.
+The adapter captures the existing cache context's device and opaque stream owner, typed as `object`. It does not add another abstract property that every CPU or accelerator cache context must implement. Native handle lookup, synchronization, and completion-event recording reuse `lmcache.v1.platform.stream` and the selected `DeviceSpec`. A vendor backend converts the resulting handle to its library's `cudaStream_t`, `hipStream_t`, or equivalent native argument only at the submission boundary.
 
 A backend submits on the supplied context and never switches silently to a global or default stream. Input H2D work is enqueued on the same context. The adapter retains the context, but cannot prevent another thread from closing it; production shutdown must quiesce decompression handlers before closing cache contexts or backend resources.
 
@@ -312,9 +312,9 @@ class GpuDecompressCompletion(Protocol):
 
 Native work is not cancellable initially. `wait_and_discard()` drains work and releases resources without making output usable. Every returned completion is finalized in a `finally` block, including cancellation and validation failure.
 
-`wait_and_validate()` finalizes and releases resources after reaching either a stable success or stable validation failure. The `finally` call to `wait_and_discard()` is an idempotent safety net for host interruption while a wait is in progress.
+`wait_and_validate()` finalizes backend work after reaching either a stable success or stable validation failure. Backend-owned input, workspace, and native result arrays may be released after their last use. Successful output staging must remain reserved through subsequent paged-KV placement: PR3 defines retention or an ownership handoff to the placement caller without a gap in the reservation. Failed or discarded output leases may be released after all accessing work has been drained. The `finally` call to `wait_and_discard()` is an idempotent safety net for host interruption while a wait is in progress; after validated success it must not revoke the placement caller's output reservation.
 
-The completion retains the request and its output leases, the execution-context owner, backend-owned input leases, workspace, descriptors, status arrays, actual-size arrays, and CRC arrays until finalization.
+The completion retains the request and its output leases, the execution-context owner, backend-owned input leases, workspace, descriptors, status arrays, actual-size arrays, and CRC arrays until backend finalization. Finalization alone does not permit output-staging reuse while placement still needs those bytes.
 
 ### Completion states
 
@@ -385,11 +385,18 @@ The record becomes read-ready only after its exact length, header, and compresse
 
 ## Relationship to existing LMCache components
 
-- `GPUCacheContext` already owns an opaque stream and flat per-object-group staging tensors. The output buffer wrapper derives from those tensor views.
-- The decompression backend owns a compressed-input pool and leases exact record-sized ranges to active submissions; output reuses existing raw-KV-sized context staging.
-- `SerdeL2AdapterWrapper` later preserves a validated portable record in L1 instead of always CPU-materializing it.
-- The multiprocess retrieve path classifies raw and deferred representations, orders compressed H2D work, invokes the backend, validates completion, and then uses the existing paged-placement operation.
-- Existing stream callbacks retain and release L1 locks only after all decompression, validation, and placement work is ordered correctly.
+The shared contracts adapt existing interfaces. The following boundaries keep later integration from introducing competing device, memory, or completion authorities.
+
+| Existing interface | Responsibility retained | Integration requirement |
+|---|---|---|
+| [DeviceSpec](../../../../../lmcache/v1/platform/base/device_spec.py) and [BaseCacheContext](../../../../../lmcache/v1/platform/base/cache_context.py) | Backend selection, device identity, stream ownership, and fixed object-group staging views | PR2 derives its values from these APIs. Output leases reserve the existing views; they do not allocate another staging pool. |
+| [Platform stream helpers](../../../../../lmcache/v1/platform/stream.py) | Native stream handles, synchronization, and pollable completion events | PR3 reuses these primitives beneath compression-specific status, size, CRC, and finalization logic. |
+| [Serde interfaces](../serde/README.md) and [SerdeL2AdapterWrapper](../l2_adapters/serde_wrapper.md) | Transform registration, temporary-buffer accounting, event notifications, and materializing KV on load | PR6 adds deferred compressed-record publication. Keep serde's consume-once results distinct from the decompression completion's repeatable terminal state. Deserializers may already execute GPU kernels. |
+| [MemoryObj](../../../../../lmcache/v1/memory_management.py) and [L1Manager](../l1_manager.md) | Used-byte accounting and input allocation/read ownership | Reuse `get_size()`, `set_used_size()`, and read reservations. A Python owner reference or an output-staging lease does not replace an input's allocator lifetime guard. |
+| [L2AdapterInterface](../../../../../lmcache/v1/distributed/l2_adapters/base.py) | Batched loads into caller-owned memory, per-key result bitmaps, and buffer lifetime through completion | PR6 applies the capacity/actual-length rule to individual adapters while preserving their completion and ownership contracts. |
+| [Object-group transfer](../../../../../lmcache/v1/multiprocess/object_group_transfer.py) and [retrieve handling](../../../../../lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py) | Raw direct-copy dispatch, fixed-slot staging, paged placement, prefix skipping, and stream-ordered L1 release | PR7 classifies representation before transfer dispatch, serializes or jointly reserves raw/compressed staging use, and keeps output leases until placement completes or is drained. |
+
+The decompression backend owns a separate compressed-input pool because its ranges and workspaces are internal to submission. Its output continues to use context staging. Existing CacheGen and TurboQuant GPU decoders consume different formats and do not implement the portable-record request contract; any later reuse requires an explicit codec/format adaptation.
 
 ## Delivery plan
 
