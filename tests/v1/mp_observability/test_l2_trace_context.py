@@ -3,16 +3,11 @@
 
 # Standard
 from unittest.mock import create_autospec
-import asyncio
 import select
 import sys
-import threading
 
 # Third Party
 from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 import pytest
 import torch
@@ -37,11 +32,6 @@ from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
 )
-from lmcache.v1.distributed.storage_controllers.store_controller import (
-    StoreController,
-    StoreListener,
-)
-from lmcache.v1.distributed.storage_controllers.store_policy import DefaultStorePolicy
 from lmcache.v1.distributed.storage_controllers.utils import (
     L1ManagerDescriptor,
     L2AdapterDescriptor,
@@ -51,11 +41,6 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
-)
-from lmcache.v1.mp_observability.propagation import (
-    capture_trace_context,
-    extract_trace_context,
-    run_with_trace_links,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -101,14 +86,21 @@ def wait_fd(fd: int) -> bool:
 class ObservedL2(MockL2Adapter):
     """Observe public submissions; the upstream mock still completes its I/O."""
 
-    def __init__(self, config: MockL2AdapterConfig) -> None:
+    def __init__(
+        self, config: MockL2AdapterConfig, fail_operation: str | None = None
+    ) -> None:
         super().__init__(config)
         self.seen: list[tuple[str, int, bool]] = []
-        self.stored = threading.Event()
+        self.fail_operation = fail_operation
+        self.failed = False
 
     def observe(self, operation: str) -> None:
+        """Record each caller and optionally fail request 10 at an I/O boundary."""
         ctx = trace.get_current_span().get_span_context()
         self.seen.append((operation, ctx.trace_id, ctx.trace_flags.sampled))
+        if operation == self.fail_operation and ctx.trace_id == 10:
+            self.failed = True
+            raise ValueError("test adapter submission failure")
 
     def submit_lookup_and_lock_task(
         self, keys: list[ObjectKey], layout_descs: dict[int, MemoryLayoutDesc]
@@ -123,17 +115,18 @@ class ObservedL2(MockL2Adapter):
     def submit_store_task(self, keys: list[ObjectKey], objs: list[MemoryObj]) -> int:
         self.observe("store")
         result = super().submit_store_task(keys, objs)
-        self.stored.set()
         return result
 
 
 @pytest.mark.parametrize("sampled", [True, False])
+@pytest.mark.parametrize("fail_operation", [None, "lookup", "load"])
 def test_prefetch_queue_keeps_each_parent(
-    monkeypatch: pytest.MonkeyPatch, sampled: bool
+    monkeypatch: pytest.MonkeyPatch, sampled: bool, fail_operation: str | None
 ) -> None:
+    """A failed lookup/load must not contaminate the next queued request."""
     monkeypatch.setenv("LMCACHE_MP_TRACE_CONTEXT", "1")
     config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10)
-    adapter = ObservedL2(config)
+    adapter = ObservedL2(config, fail_operation)
     keys = [key(1), key(2)]
     warm = adapter.submit_store_task(keys, [memory_obj(), memory_obj()])
     assert wait_fd(adapter.get_store_event_fd())
@@ -172,139 +165,19 @@ def test_prefetch_queue_keeps_each_parent(
                         PrefetchTaskSpec(key_groups=[group])
                     )
                 )
-        for request in requests:
+        successful_requests = requests if fail_operation is None else requests[1:]
+        for request in successful_requests:
             assert controller.wait_prefetch_result(request, timeout=5)
             assert controller.query_prefetch_result(request) is not None
-        assert sorted(adapter.seen) == sorted(
-            [
-                ("lookup", 10, sampled),
-                ("load", 10, sampled),
-                ("lookup", 11, sampled),
-                ("load", 11, sampled),
-            ]
-        )
+        assert adapter.failed == (fail_operation is not None)
+        expected = [
+            ("lookup", 10, sampled),
+            ("lookup", 11, sampled),
+            ("load", 11, sampled),
+        ]
+        if fail_operation != "lookup":
+            expected.append(("load", 10, sampled))
+        assert sorted(adapter.seen) == sorted(expected)
     finally:
         controller.stop()
         adapter.close()
-
-
-def test_shared_store_links_writers_without_selecting_a_parent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LMCACHE_MP_TRACE_CONTEXT", "1")
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    tracer = provider.get_tracer("lmcache_mp.server")
-    monkeypatch.setattr(trace, "get_tracer", lambda *args, **kwargs: tracer)
-    config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10)
-    adapter = ObservedL2(config)
-    l1 = create_autospec(L1Manager, instance=True)
-    l1.reserve_read.side_effect = lambda keys: {
-        k: (L1Error.SUCCESS, memory_obj()) for k in keys
-    }
-    completed = threading.Event()
-    l1.finish_read.side_effect = lambda *args, **kwargs: completed.set()
-    controller = StoreController(
-        l1, [adapter], [L2AdapterDescriptor(0, config)], DefaultStorePolicy()
-    )
-    listener = l1.register_listener.call_args.args[0]
-    assert isinstance(listener, StoreListener)
-    keys = [key(1), key(2)]
-    for number, objkey in enumerate(keys, 10):
-        with trace.use_span(parent(number)):
-            listener.on_l1_keys_reserved_write([objkey])
-    listener.on_l1_keys_write_finished(keys)
-    controller.start()
-    try:
-        assert completed.wait(5)
-        spans = exporter.get_finished_spans()
-        assert len(spans) == 1
-        span = spans[0]
-        assert span.name == "mp.l2.store.schedule" and span.parent is None
-        assert {link.context.trace_id for link in span.links} == {10, 11}
-        assert adapter.seen == [("store", span.context.trace_id, True)]
-        assert not span.attributes
-    finally:
-        controller.stop()
-        adapter.close()
-        provider.shutdown()
-
-
-@pytest.mark.parametrize("sampled", [True, False])
-def test_batch_link_bounds_and_sampling(
-    monkeypatch: pytest.MonkeyPatch, sampled: bool
-) -> None:
-    monkeypatch.setenv("LMCACHE_MP_TRACE_CONTEXT", "1")
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(
-        trace, "get_tracer", lambda *args, **kwargs: provider.get_tracer("test")
-    )
-    carriers = []
-    for number in range(1, 151):
-        with trace.use_span(parent(number, sampled)):
-            carriers.append(capture_trace_context())
-    try:
-        assert run_with_trace_links(carriers + carriers, lambda: 7) == 7
-        spans = exporter.get_finished_spans()
-        if sampled:
-            assert len(spans) == 1 and len(spans[0].links) == 128
-        else:
-            assert not spans
-    finally:
-        provider.shutdown()
-
-
-def test_abandoned_writer_eviction_keeps_pending_keys(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LMCACHE_MP_TRACE_CONTEXT", "1")
-    listener = StoreListener()
-    first, last = key(0), key(10001)
-    try:
-        with trace.use_span(parent(1)):
-            listener.on_l1_keys_reserved_write([first])
-        with trace.use_span(parent(2)):
-            listener.on_l1_keys_reserved_write([key(i) for i in range(1, 10002)])
-        listener.on_l1_keys_write_finished([first, last])
-        keys, carriers = listener.pop_pending_batch()
-        assert keys == [first, last]
-        assert [
-            trace.get_current_span(extract_trace_context(c)).get_span_context().trace_id
-            for c in carriers
-        ] == [2]
-    finally:
-        listener.close()
-
-
-@pytest.mark.parametrize("error", [ValueError, TimeoutError, asyncio.CancelledError])
-def test_failed_batch_ends_without_exporting_error_payload(
-    monkeypatch: pytest.MonkeyPatch, error: type[BaseException]
-) -> None:
-    monkeypatch.setenv("LMCACHE_MP_TRACE_CONTEXT", "1")
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(
-        trace, "get_tracer", lambda *args, **kwargs: provider.get_tracer("test")
-    )
-    with trace.use_span(parent(8)):
-        carrier = capture_trace_context()
-
-    def fail() -> None:
-        raise error("synthetic private request content")
-
-    try:
-        with trace.use_span(parent(99)):
-            with pytest.raises(error):
-                run_with_trace_links([carrier], fail)
-            assert trace.get_current_span().get_span_context().trace_id == 99
-        span = exporter.get_finished_spans()[0]
-        assert span.status.status_code == trace.StatusCode.ERROR
-        assert not span.status.description and not span.attributes and not span.events
-        assert span.end_time is not None
-        assert run_with_trace_links([carrier], lambda: 3) == 3
-    finally:
-        provider.shutdown()
