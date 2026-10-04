@@ -50,11 +50,6 @@ class RKVWorker:
                 "R-KV is enabled but the optional 'rkv' package is not installed"
             ) from exc
 
-        self.budget = budget
-        self.window_size = window_size
-        self.kernel_size = kernel_size
-        self.mix_lambda = mix_lambda
-        self.retain_ratio = retain_ratio
         self.score_chunk_bytes = score_chunk_bytes
         self._policy = R1KV(
             budget=budget,
@@ -368,7 +363,7 @@ class RKVWorker:
             count = self._query_counts[request_id]
             active_rows.append(row)
             active_slots.append(slot)
-            cursors.append(count % self.window_size)
+            cursors.append(count % self._policy.window_size)
             self._query_counts[request_id] = count + 1
 
         if not active_rows:
@@ -411,7 +406,7 @@ class RKVWorker:
         if ring is None or ring.shape[1] < self._query_ring_width:
             new_ring = last_q.new_zeros(
                 (
-                    self.window_size,
+                    self._policy.window_size,
                     self._query_ring_width,
                     last_q.shape[1],
                     last_q.shape[2],
@@ -423,7 +418,7 @@ class RKVWorker:
             self._query_rings[layer_name] = ring
 
         ring.view(
-            self.window_size * self._query_ring_width,
+            self._policy.window_size * self._query_ring_width,
             last_q.shape[1],
             last_q.shape[2],
         ).index_copy_(0, self._query_write_indices, last_q)
@@ -505,13 +500,13 @@ class RKVWorker:
                 q_heads = queries.shape[3]
                 queries = (
                     queries.permute(0, 1, 3, 2, 4)
-                    .reshape(lc * rc, q_heads, self.window_size, head_dim)
+                    .reshape(lc * rc, q_heads, self._policy.window_size, head_dim)
                     .contiguous()
                 )
 
                 layer_scores = self._policy.score_kv(keys, queries).mean(dim=1)
                 layer_scores = layer_scores.view(
-                    lc, rc, seq_len - self.window_size
+                    lc, rc, seq_len - self._policy.window_size
                 )
                 for li in range(lc):
                     shared_scores = (
@@ -526,14 +521,14 @@ class RKVWorker:
                     "R-KV computed non-finite scores; refusing to compact"
                 )
             past_idx = shared_scores.topk(
-                self.budget - self.window_size,
+                self._policy.budget - self._policy.window_size,
                 dim=-1,
             ).indices
             window_idx = torch.arange(
-                seq_len - self.window_size,
+                seq_len - self._policy.window_size,
                 seq_len,
                 device=past_idx.device,
-            ).expand(rc, self.window_size)
+            ).expand(rc, self._policy.window_size)
             kept = torch.sort(
                 torch.cat([past_idx, window_idx], dim=-1),
                 dim=-1,
@@ -547,7 +542,7 @@ class RKVWorker:
                 ).reshape(-1)
             )
             destination_parts.append(
-                torch.cat([slots[: self.budget] for slots in slots_list])
+                torch.cat([slots[: self._policy.budget] for slots in slots_list])
             )
 
         return torch.cat(source_parts), torch.cat(destination_parts)
@@ -564,11 +559,11 @@ class RKVWorker:
             seq_len = self._seq_lens[row]
             query_window_tokens = min(
                 self._query_counts.get(request_id, 0),
-                self.window_size,
+                self._policy.window_size,
             )
             if (
                 request_id in self._compacted_requests
-                and query_window_tokens < self.window_size
+                and query_window_tokens < self._policy.window_size
             ):
                 raise RuntimeError(
                     "R-KV lost its observation window after compaction"
@@ -598,7 +593,7 @@ class RKVWorker:
             source_parts.append(source_slots)
             destination_parts.append(destination_slots)
             for _, request_id, _ in members:
-                updates[request_id] = self.budget
+                updates[request_id] = self._policy.budget
                 self._compacted_requests.add(request_id)
 
         source_slots = torch.cat(source_parts)

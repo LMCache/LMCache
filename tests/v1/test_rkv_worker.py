@@ -613,10 +613,10 @@ def test_rkv_worker_rejects_non_finite_scores():
 def test_rkv_worker_defaults_match_upstream_vllm_config():
     worker = RKVWorker(BUDGET)
     assert worker._policy.buffer == 128
-    assert worker.window_size == 8
-    assert worker.kernel_size == 7
-    assert worker.mix_lambda == 0.1
-    assert worker.retain_ratio == 0.1
+    assert worker._policy.window_size == 8
+    assert worker._policy.kernel_size == 7
+    assert worker._policy.mix_lambda == 0.1
+    assert worker._policy.retain_ratio == 0.1
     assert worker._policy.retain_direction == "last"
     assert worker.score_chunk_bytes == 512 * 1024 * 1024
 

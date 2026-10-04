@@ -203,12 +203,12 @@ def test_rkv_semantic_knobs_pass_through_to_worker(mock_io: SimpleNamespace) -> 
     worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
     try:
         assert worker._rkv is not None
-        assert worker._rkv.budget == 64
+        assert worker._rkv._policy.budget == 64
         assert worker._rkv._policy.buffer == 40
-        assert worker._rkv.window_size == 4
-        assert worker._rkv.kernel_size == 5
-        assert worker._rkv.mix_lambda == 0.25
-        assert worker._rkv.retain_ratio == 0.2
+        assert worker._rkv._policy.window_size == 4
+        assert worker._rkv._policy.kernel_size == 5
+        assert worker._rkv._policy.mix_lambda == 0.25
+        assert worker._rkv._policy.retain_ratio == 0.2
         assert worker._rkv._policy.retain_direction == "last"
         assert worker._rkv.score_chunk_bytes == 512 * 1024 * 1024
     finally:
