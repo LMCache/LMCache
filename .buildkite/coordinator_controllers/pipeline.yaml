@@ -1,0 +1,24 @@
+# coordinator-controllers <-> LMCache compatibility test.
+#
+# Runs the private coordinator-controllers repo's test suite against the PR's
+# LMCache, on the shared host agent (no GPU is used). Steps editor in Buildkite:
+#   buildkite-agent pipeline upload .buildkite/coordinator_controllers/pipeline.yaml
+# Buildkite secrets: CC_TM_PAT (GitHub PAT, contents read) and CC_REPO
+# (owner/name). CC_REF in the pipeline env overrides the ref under test.
+
+steps:
+  - label: "coordinator-controllers compat"
+    key: "cc_compat"
+    timeout_in_minutes: 30
+    command: |
+      echo $$PWD # for debugging
+      bash .buildkite/coordinator_controllers/run.sh
+
+  - label: "Cleanup workspace"
+    depends_on: "cc_compat"
+    allow_dependency_failure: true
+    command: |
+      export TARGET="$$PWD"
+      echo "Deleting current workspace $$TARGET"
+      cd /
+      rm -rf "$$TARGET" || true

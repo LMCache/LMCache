@@ -136,6 +136,9 @@ Rules:
 - optional verification on load
 - recovery by loading the latest durable checkpoint and rebuilding the in-memory
   index
+- POSIX recovery validates per-slot headers with an internal pool of 8 reader
+  threads. Regular `io_uring` batches header reads up to
+  `iouring_queue_depth`, while `io_uring_cmd` keeps serial validation.
 
 The on-device format is intentionally unchanged by the MP adapter work.
 
@@ -181,7 +184,7 @@ Important validation rules:
 - `per_tp_device_paths` is rejected in MP mode
 - `load_checkpoint_on_init=false` starts with an empty in-memory index instead
   of loading the latest on-device metadata checkpoint
-- with `use_odirect=true`, MP L1 alignment must satisfy
+- with `use_odirect=true` or `use_uring_cmd=true`, MP L1 alignment must satisfy
   `l1_align_bytes >= block_align`
 - with `use_odirect=true`, raw-block I/O rejects offsets and total I/O lengths
   that are not aligned to `block_align`; misaligned write buffers use an

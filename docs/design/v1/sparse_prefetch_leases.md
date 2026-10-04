@@ -43,7 +43,9 @@ result from being applied to a reused request row. A second submit for the
 same identity does not replace the first job; its competing handle is cleaned
 up separately, and an uncertain cleanup remains reachable for retry.
 
-Cancellation and release are idempotent. If a request is already gone, the
+Cancellation stops future consumption and drains already accepted controller I/O
+to its terminal result; it does not abort the accepted adapter load. Cancellation
+and release are idempotent. If a request is already gone, the
 operation is a successful no-op. If the controller or connection cannot
 confirm cleanup, the caller receives failure and the adapter keeps its cleanup
 record rather than treating the remote lease as released.

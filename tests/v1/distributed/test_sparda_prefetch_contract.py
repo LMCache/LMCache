@@ -15,12 +15,15 @@ import pytest
 import torch
 
 # First Party
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
-    PrefetchRequestSpec,
-    TrimPolicy,
+    PrefetchLockMode,
+    PrefetchResult,
+    PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.storage_manager import StorageManager
@@ -38,285 +41,184 @@ def _layout() -> MemoryLayoutDesc:
     return MemoryLayoutDesc([torch.Size([1])], [torch.float16])
 
 
-def test_read_prefetched_results_can_defer_release_until_copy_completion():
+def _spec(keys, readers=1, lock_mode=PrefetchLockMode.LOCK):
+    return PrefetchTaskSpec(
+        key_groups=[GroupedObjectKeys(keys, 0, _layout())],
+        num_kv_readers=readers,
+        fetching_policy="full",
+        lock_mode=lock_mode,
+    )
+
+
+def _result(size, indices):
+    hits = Bitmap(size)
+    hits.batched_set(indices)
+    return PrefetchResult([hits], [hits], [Bitmap(size)])
+
+
+def _storage():
     storage = StorageManager.__new__(StorageManager)
-    key = _key(b"deferred-read")
+    storage._prefetch_release_lock = threading.Lock()
+    storage._prefetch_handle_metadata = {}
+    storage._prefetch_controller = Mock()
+    storage._prefetch_controller.wait_prefetch_result.return_value = True
+    storage.finish_read_prefetched = Mock()
+    next_id = 0
+
+    def submit(spec, external_request_id=""):
+        nonlocal next_id
+        handle = PrefetchHandle(next_id, external_request_id, spec.group_size, 0.0)
+        next_id += 1
+        return handle
+
+    storage.submit_prefetch_task = Mock(side_effect=submit)
+    storage.query_prefetch_status = Mock(return_value=_result(1, [0]))
+    return storage
+
+
+def _read_storage(key):
+    storage = StorageManager.__new__(StorageManager)
     memory_obj = object()
-    finish_read = Mock(return_value={key: L1Error.SUCCESS})
     storage._l1_manager = SimpleNamespace(
         unsafe_read=Mock(return_value={key: (L1Error.SUCCESS, memory_obj)}),
-        finish_read=finish_read,
+        finish_read=Mock(return_value={key: L1Error.SUCCESS}),
     )
+    storage._l1_managers_by_id = {0: storage._l1_manager}
     storage._event_bus = Mock()
+    return storage, memory_obj
 
-    with storage.read_prefetched_results([key], release_on_exit=False) as objs:
+
+def test_read_prefetched_results_can_defer_release_until_copy_completion():
+    key = _key(b"deferred-read")
+    storage, memory_obj = _read_storage(key)
+    with storage.read_prefetched_results([key], release_on_error=False) as objs:
         assert objs == [memory_obj]
-    finish_read.assert_not_called()
-
+    storage._l1_manager.finish_read.assert_not_called()
     storage.finish_read_prefetched([key])
-    finish_read.assert_called_once_with([key], read_locks=1)
+    storage._l1_manager.finish_read.assert_called_once_with([key], read_locks=1)
 
 
 def test_deferred_read_does_not_release_on_copy_exception():
-    storage = StorageManager.__new__(StorageManager)
     key = _key(b"deferred-copy-error")
-    memory_obj = object()
-    finish_read = Mock(return_value={key: L1Error.SUCCESS})
-    storage._l1_manager = SimpleNamespace(
-        unsafe_read=Mock(return_value={key: (L1Error.SUCCESS, memory_obj)}),
-        finish_read=finish_read,
-    )
-    storage._event_bus = Mock()
-
+    storage, _ = _read_storage(key)
     with pytest.raises(RuntimeError, match="copy failed"):
-        with storage.read_prefetched_results([key], release_on_exit=False):
+        with storage.read_prefetched_results([key], release_on_error=False):
             raise RuntimeError("copy failed")
-
-    finish_read.assert_not_called()
+    storage._l1_manager.finish_read.assert_not_called()
     storage.finish_read_prefetched([key])
-    finish_read.assert_called_once_with([key], read_locks=1)
+    storage._l1_manager.finish_read.assert_called_once_with([key], read_locks=1)
 
 
-def test_generation_is_validated_and_carried_by_spec_and_handle():
-    spec = PrefetchRequestSpec(
-        keys=[_key()],
-        group_layout_descs={0: _layout()},
-        policy=TrimPolicy.SPARSE,
-        generation=4,
-    )
-    handle = PrefetchHandle(
-        prefetch_request_id=3,
-        external_request_id="request",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
-        total_requested_keys=1,
-        submit_time=0.0,
-        generation=spec.generation,
-    )
-
-    assert spec.generation == 4
-    assert handle.generation == 4
-    with pytest.raises(ValueError, match="generation"):
-        PrefetchRequestSpec(
-            keys=[_key()],
-            group_layout_descs={0: _layout()},
-            generation=-1,
-        )
+def test_negative_generation_is_rejected_before_context_access():
+    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
+    module.get_and_touch_context_entry = Mock()
+    assert module.sparse_prefetch(0, "request", -1, 1, [_key()]) is False
+    module.get_and_touch_context_entry.assert_not_called()
 
 
 def test_l1_only_handles_have_independent_idempotent_cleanup():
-    storage = StorageManager.__new__(StorageManager)
-    storage._prefetch_release_lock = threading.Lock()
-    storage._released_prefetch_handles = {}
-    storage._prefetch_handle_metadata = {}
-    storage.finish_read_prefetched = Mock()
-
-    first = PrefetchHandle(
-        prefetch_request_id=-1,
-        external_request_id="first",
-        l1_found_indices=(0,),
-        l1_hit_chunks=1,
-        total_requested_keys=1,
-        submit_time=0.0,
-    )
-    second = PrefetchHandle(
-        prefetch_request_id=-1,
-        external_request_id="second",
-        l1_found_indices=(0,),
-        l1_hit_chunks=1,
-        total_requested_keys=1,
-        submit_time=0.0,
-    )
-    first_key = _key(b"first")
-    second_key = _key(b"second")
-    storage._remember_prefetch_handle(first, [first_key], 1)
-    storage._remember_prefetch_handle(second, [second_key], 1)
-
-    storage._release_prefetch_lease(first)
-    storage._release_prefetch_lease(first)
-
-    assert id(second) in storage._prefetch_handle_metadata
-    storage._release_prefetch_lease(second)
-    assert storage.finish_read_prefetched.call_count == 2
-    assert id(first) in storage._released_prefetch_handles
-    assert id(second) in storage._released_prefetch_handles
+    storage = _storage()
+    first_key, second_key = _key(b"first"), _key(b"second")
+    first = storage.submit_prefetch_lease(_spec([first_key]))
+    second = storage.submit_prefetch_lease(_spec([second_key]))
+    storage.release_prefetch_task(first)
+    storage.release_prefetch_task(first)
+    assert storage.query_prefetch_lease(second) is not None
+    storage.release_prefetch_task(second)
+    assert storage.finish_read_prefetched.call_args_list == [
+        (([first_key], 1),),
+        (([second_key], 1),),
+    ]
 
 
-def test_warm_handle_release_does_not_drop_nonexistent_read_locks():
-    storage = StorageManager.__new__(StorageManager)
-    storage._prefetch_release_lock = threading.Lock()
-    storage._released_prefetch_handles = {}
-    storage._prefetch_handle_metadata = {}
-    storage.finish_read_prefetched = Mock()
-
-    handle = PrefetchHandle(
-        prefetch_request_id=-1,
-        external_request_id="warm",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
-        total_requested_keys=1,
-        submit_time=0.0,
-    )
-    storage._remember_prefetch_handle(handle, [_key(b"warm")], 0)
-
-    storage.release_prefetch_task(handle)
-
-    assert storage.finish_read_prefetched.call_count == 0
+def test_warm_prefetch_cannot_acquire_a_read_lease():
+    storage = _storage()
+    with pytest.raises(ValueError, match="read locks"):
+        storage.submit_prefetch_lease(
+            _spec([_key()], lock_mode=PrefetchLockMode.NO_LOCK)
+        )
+    storage.submit_prefetch_task.assert_not_called()
+    storage.finish_read_prefetched.assert_not_called()
 
 
-def test_release_uses_generation_guard_and_is_idempotent():
-    storage = StorageManager.__new__(StorageManager)
-    storage._prefetch_release_lock = threading.Lock()
-    storage._released_prefetch_handles = {}
-    storage._prefetch_handle_metadata = {}
-    storage._prefetch_controller = Mock()
-    storage._prefetch_controller.cancel_prefetch_request.return_value = False
-    storage.query_prefetch_status = Mock(return_value=None)
-    storage.finish_read_prefetched = Mock()
-
+def test_release_checks_handle_identity_and_is_idempotent():
+    storage = _storage()
     key = _key(b"release")
-    handle = PrefetchHandle(
-        prefetch_request_id=8,
-        external_request_id="request",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
-        total_requested_keys=1,
-        submit_time=0.0,
-        generation=12,
-    )
-    storage._remember_prefetch_handle(handle, [key], 2)
-
+    handle = storage.submit_prefetch_lease(_spec([key], readers=2))
+    copied_handle = PrefetchHandle(handle.prefetch_request_id, "request", 1, 0.0)
+    storage.release_prefetch_task(copied_handle)
+    storage.finish_read_prefetched.assert_not_called()
     storage.release_prefetch_task(handle, [key])
     storage.release_prefetch_task(handle, [key])
-
-    storage._prefetch_controller.cancel_prefetch_request.assert_called_once_with(
-        8, generation=12
-    )
-    storage._prefetch_controller.forget_prefetch_result.assert_called_once_with(
-        8, generation=12
-    )
-    storage.finish_read_prefetched.assert_called_once_with([key], read_locks=2)
+    storage.finish_read_prefetched.assert_called_once_with([key], 2)
 
 
 def test_release_waits_for_controller_cleanup_before_releasing_l1_lock():
-    storage = StorageManager.__new__(StorageManager)
-    storage._prefetch_release_lock = threading.Lock()
-    storage._released_prefetch_handles = {}
-    storage._prefetch_handle_metadata = {}
-    storage._prefetch_controller = Mock()
-    storage._prefetch_controller.cancel_prefetch_request.return_value = True
-    storage.wait_prefetch_status = Mock(return_value=True)
-    storage.query_prefetch_status = Mock(return_value=None)
-    storage.finish_read_prefetched = Mock()
-
+    storage = _storage()
     key = _key(b"wait-before-release")
-    handle = PrefetchHandle(
-        prefetch_request_id=9,
-        external_request_id="request",
-        l1_found_indices=(0,),
-        l1_hit_chunks=0,
-        total_requested_keys=1,
-        submit_time=0.0,
-        generation=13,
+    handle = storage.submit_prefetch_lease(_spec([key]))
+    order = []
+    storage._prefetch_controller.wait_prefetch_result.side_effect = (
+        lambda *_args: order.append("io_complete") or True
     )
-    storage._remember_prefetch_handle(handle, [key], 1)
+    storage.finish_read_prefetched.side_effect = lambda *_args: order.append("unlock")
+    storage.cancel_prefetch_task(handle)
+    assert order == ["io_complete", "unlock"]
 
+
+def test_release_keeps_observed_result_and_releases_only_retained_keys():
+    storage = _storage()
+    keys = [_key(bytes([i])) for i in range(3)]
+    storage.query_prefetch_status.return_value = _result(3, [0, 2])
+    handle = storage.submit_prefetch_lease(_spec(keys))
+    assert storage.query_prefetch_lease(handle).hit_cells[0].get_indices_list() == [
+        0,
+        2,
+    ]
+    storage.release_prefetch_task(handle, [keys[0], keys[2]])
+    storage.query_prefetch_status.assert_called_once_with(handle)
+    storage.finish_read_prefetched.assert_called_once_with([keys[0], keys[2]], 1)
+
+
+def test_release_failure_keeps_lease_for_retry():
+    storage = _storage()
+    key = _key(b"retry")
+    handle = storage.submit_prefetch_lease(_spec([key]))
+    storage.finish_read_prefetched.side_effect = [RuntimeError("cleanup failed"), None]
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        storage.release_prefetch_task(handle)
+    assert storage.query_prefetch_lease(handle) is not None
     storage.release_prefetch_task(handle)
-
-    storage.wait_prefetch_status.assert_called_once_with(handle, timeout=None)
-    storage.finish_read_prefetched.assert_called_once_with([key], read_locks=1)
-
-
-def test_release_keeps_explicit_keys_after_controller_result_was_consumed():
-    storage = StorageManager.__new__(StorageManager)
-    storage._prefetch_release_lock = threading.Lock()
-    storage._released_prefetch_handles = {}
-    storage._prefetch_handle_metadata = {}
-    storage._prefetch_controller = Mock()
-    storage._prefetch_controller.cancel_prefetch_request.return_value = True
-    storage.wait_prefetch_status = Mock(return_value=True)
-    storage.query_prefetch_status = Mock(return_value=None)
-    storage.finish_read_prefetched = Mock()
-
-    key = _key(b"consumed-result")
-    handle = PrefetchHandle(
-        prefetch_request_id=10,
-        external_request_id="request",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
-        total_requested_keys=1,
-        submit_time=0.0,
-        generation=14,
-    )
-    storage._remember_prefetch_handle(handle, [key], 1)
-
-    storage.release_prefetch_task(handle, [key])
-
-    storage.finish_read_prefetched.assert_called_once_with([key], read_locks=1)
-
-
-def test_release_failure_keeps_lease_metadata_for_retry():
-    storage = StorageManager.__new__(StorageManager)
-    storage._prefetch_release_lock = threading.Lock()
-    storage._released_prefetch_handles = {}
-    storage._prefetch_handle_metadata = {}
-    storage.finish_read_prefetched = Mock(
-        side_effect=[RuntimeError("read lock release failed"), None]
-    )
-
-    key = _key(b"retry-release")
-    handle = PrefetchHandle(
-        prefetch_request_id=-1,
-        external_request_id="retry",
-        l1_found_indices=(0,),
-        l1_hit_chunks=1,
-        total_requested_keys=1,
-        submit_time=0.0,
-    )
-    storage._remember_prefetch_handle(handle, [key], 1)
-
-    with pytest.raises(RuntimeError, match="read lock release failed"):
-        storage._release_prefetch_lease(handle)
-
-    assert id(handle) in storage._prefetch_handle_metadata
-    assert id(handle) not in storage._released_prefetch_handles
-
-    storage._release_prefetch_lease(handle)
-
-    assert id(handle) not in storage._prefetch_handle_metadata
+    assert storage.query_prefetch_lease(handle) is None
     assert storage.finish_read_prefetched.call_count == 2
 
 
+def test_release_rejects_keys_outside_the_lease():
+    storage = _storage()
+    key = _key(b"owned")
+    handle = storage.submit_prefetch_lease(_spec([key]))
+    with pytest.raises(ValueError, match="belong"):
+        storage.release_prefetch_task(handle, [_key(b"foreign")])
+    storage.finish_read_prefetched.assert_not_called()
+    storage.release_prefetch_task(handle)
+    storage.finish_read_prefetched.assert_called_once_with([key], 1)
+
+
 def test_released_handle_bookkeeping_does_not_keep_handles_alive():
-    storage = StorageManager.__new__(StorageManager)
-    storage._prefetch_release_lock = threading.Lock()
-    storage._released_prefetch_handles = {}
-    storage._prefetch_handle_metadata = {}
-    storage.finish_read_prefetched = Mock()
-
-    handle = PrefetchHandle(
-        prefetch_request_id=-1,
-        external_request_id="weakref",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
-        total_requested_keys=0,
-        submit_time=0.0,
-    )
-    handle_id = id(handle)
-    storage._remember_prefetch_handle(handle, [], 0)
-    storage._release_prefetch_lease(handle)
+    storage = _storage()
+    handle = storage.submit_prefetch_lease(_spec([_key()]))
     handle_ref = weakref.ref(handle)
-
+    storage.release_prefetch_task(handle)
+    storage.query_prefetch_status.reset_mock()
     del handle
     gc.collect()
-
     assert handle_ref() is None
-    assert handle_id not in storage._released_prefetch_handles
 
 
 def test_concurrent_sparse_submit_keeps_one_job_and_releases_loser():
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._sparse_jobs = {}
+    module._sparse_orphan_handles = {}
     module._sparse_jobs_lock = threading.Lock()
     module.get_and_touch_context_entry = Mock(
         return_value=SimpleNamespace(model_name="contract-test", world_size=1)
@@ -331,22 +233,19 @@ def test_concurrent_sparse_submit_keeps_one_job_and_releases_loser():
     handles = []
     submit_barrier = threading.Barrier(2)
 
-    def submit_prefetch_task(*_args, **_kwargs):
+    def submit_prefetch_lease(*_args, **_kwargs):
         submit_barrier.wait(timeout=5)
         handle = PrefetchHandle(
             prefetch_request_id=len(handles),
             external_request_id="request:0:1",
-            l1_found_indices=(),
-            l1_hit_chunks=0,
             total_requested_keys=1,
             submit_time=0.0,
-            generation=0,
         )
         handles.append(handle)
         return handle
 
     module._ctx.storage_manager = SimpleNamespace(
-        submit_prefetch_task=Mock(side_effect=submit_prefetch_task),
+        submit_prefetch_lease=Mock(side_effect=submit_prefetch_lease),
         cancel_prefetch_task=Mock(),
     )
 
@@ -369,6 +268,7 @@ def test_concurrent_sparse_submit_keeps_one_job_and_releases_loser():
 def test_duplicate_sparse_submit_retries_loser_cleanup_after_failure():
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._sparse_jobs = {}
+    module._sparse_orphan_handles = {}
     module._sparse_jobs_lock = threading.Lock()
     module.get_and_touch_context_entry = Mock(
         return_value=SimpleNamespace(model_name="contract-test", world_size=1)
@@ -383,23 +283,20 @@ def test_duplicate_sparse_submit_retries_loser_cleanup_after_failure():
     handles = []
     submit_barrier = threading.Barrier(2)
 
-    def submit_prefetch_task(*_args, **_kwargs):
+    def submit_prefetch_lease(*_args, **_kwargs):
         submit_barrier.wait(timeout=5)
         handle = PrefetchHandle(
             prefetch_request_id=len(handles),
             external_request_id="request:0:1",
-            l1_found_indices=(),
-            l1_hit_chunks=0,
             total_requested_keys=1,
             submit_time=0.0,
-            generation=0,
         )
         handles.append(handle)
         return handle
 
     cancel = Mock(side_effect=[RuntimeError("temporary cleanup failure"), None])
     module._ctx.storage_manager = SimpleNamespace(
-        submit_prefetch_task=Mock(side_effect=submit_prefetch_task),
+        submit_prefetch_lease=Mock(side_effect=submit_prefetch_lease),
         cancel_prefetch_task=cancel,
         release_prefetch_task=Mock(),
     )
@@ -427,17 +324,15 @@ def test_duplicate_sparse_submit_retries_loser_cleanup_after_failure():
 def test_sparse_retrieve_waits_for_submitted_copy_before_release(monkeypatch):
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._sparse_jobs = {}
+    module._sparse_orphan_handles = {}
     module._sparse_jobs_lock = threading.Lock()
 
     key = _key(b"retrieve")
     handle = PrefetchHandle(
         prefetch_request_id=11,
         external_request_id="request:0:1",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
         total_requested_keys=1,
         submit_time=0.0,
-        generation=0,
     )
     job = _SparsePrefetchJob(
         handle=handle,
@@ -526,6 +421,7 @@ def test_sparse_retrieve_waits_for_submitted_copy_before_release(monkeypatch):
 def test_sparse_copy_sync_failure_retains_job_and_lease():
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._sparse_jobs = {}
+    module._sparse_orphan_handles = {}
     module._sparse_jobs_lock = threading.Lock()
 
     class _FailingStream:
@@ -535,11 +431,8 @@ def test_sparse_copy_sync_failure_retains_job_and_lease():
     handle = PrefetchHandle(
         prefetch_request_id=12,
         external_request_id="request:0:1",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
         total_requested_keys=1,
         submit_time=0.0,
-        generation=0,
     )
     job = _SparsePrefetchJob(
         handle=handle,
@@ -565,16 +458,14 @@ def test_sparse_copy_sync_failure_retains_job_and_lease():
 def test_sparse_cleanup_releases_all_retrieved_keys_after_copy_sync():
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._sparse_jobs = {}
+    module._sparse_orphan_handles = {}
     module._sparse_jobs_lock = threading.Lock()
     keys = (_key(b"miss"), _key(b"hit"))
     handle = PrefetchHandle(
         prefetch_request_id=16,
         external_request_id="request:0:1",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
         total_requested_keys=2,
         submit_time=0.0,
-        generation=0,
     )
     job = _SparsePrefetchJob(
         handle=handle,
@@ -603,15 +494,13 @@ def test_sparse_cleanup_releases_all_retrieved_keys_after_copy_sync():
 def test_sparse_cancel_marks_job_before_releasing_lease():
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._sparse_jobs = {}
+    module._sparse_orphan_handles = {}
     module._sparse_jobs_lock = threading.Lock()
     handle = PrefetchHandle(
         prefetch_request_id=13,
         external_request_id="request:0:1",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
         total_requested_keys=1,
         submit_time=0.0,
-        generation=0,
     )
     job = _SparsePrefetchJob(
         handle=handle,
@@ -651,16 +540,14 @@ def test_sparse_retrieve_rejects_job_marked_for_cancel(monkeypatch):
 
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._sparse_jobs = {}
+    module._sparse_orphan_handles = {}
     module._sparse_jobs_lock = threading.Lock()
     key = _key(b"cancel-before-retrieve")
     handle = PrefetchHandle(
         prefetch_request_id=14,
         external_request_id="request:0:1",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
         total_requested_keys=1,
         submit_time=0.0,
-        generation=0,
     )
     job = _SparsePrefetchJob(
         handle=handle,
@@ -730,6 +617,7 @@ def test_sparse_retrieve_rejects_job_marked_for_cancel(monkeypatch):
 def test_sparse_cancel_missing_job_is_idempotent():
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._sparse_jobs = {}
+    module._sparse_orphan_handles = {}
     module._sparse_jobs_lock = threading.Lock()
 
     assert module.sparse_cancel_prefetch(0, "missing", 0, 1) is True
@@ -738,16 +626,14 @@ def test_sparse_cancel_missing_job_is_idempotent():
 def test_sparse_completion_release_failure_leaves_job_retryable():
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._sparse_jobs = {}
+    module._sparse_orphan_handles = {}
     module._sparse_jobs_lock = threading.Lock()
     key = _key(b"completion-release")
     handle = PrefetchHandle(
         prefetch_request_id=15,
         external_request_id="request:0:1",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
         total_requested_keys=1,
         submit_time=0.0,
-        generation=0,
     )
     job = _SparsePrefetchJob(
         handle=handle,
@@ -771,3 +657,55 @@ def test_sparse_completion_release_failure_leaves_job_retryable():
     assert module._sparse_jobs[(0, "request", 0, 1)] is job
     assert job.retrieving is False
     assert job.completed is False
+
+
+@pytest.mark.parametrize("separate_groups", [False, True])
+@pytest.mark.parametrize("preserve_head_geometry", [False, True])
+def test_unified_sparse_copy_changes_only_the_selected_serving_layer(
+    separate_groups, preserve_head_geometry
+):
+    """A single-layer request preserves other K/V layers and unselected pages."""
+    # First Party
+    from lmcache import lmcache_native
+    from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+        _stage_sparse_layer,
+    )
+
+    group_layers = [[0, 1], [2, 3]] if separate_groups else [[0, 1, 2, 3]]
+    groups = [
+        SimpleNamespace(layer_indices=layers, shape_desc=SimpleNamespace(bs=1))
+        for layers in group_layers
+    ]
+    targets = [torch.full((10, 1, 2), -1.0) for _ in range(4)]
+    sources = []
+    for layers in group_layers:
+        source = torch.empty(1, len(layers), 4, 2)
+        for local, physical in enumerate(layers):
+            source[0, local] = torch.arange(8).reshape(4, 2) + physical * 100
+        sources.append(source.unsqueeze(-2) if preserve_head_geometry else source)
+    context = SimpleNamespace(
+        kv_tensors=targets,
+        lmcache_tokens_per_chunk=4,
+        kv_layer_groups_manager=SimpleNamespace(
+            kernel_groups=groups,
+            object_groups=[
+                SimpleNamespace(kernel_group_indices=list(range(len(groups))))
+            ],
+        ),
+        calculate_num_blocks=lambda tokens, group_id: tokens,
+        get_engine_kv_format=lambda group_id: (
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS
+            if preserve_head_geometry
+            else lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
+        ),
+    )
+    obj = SimpleNamespace(get_tensor=lambda group_position: sources[group_position])
+    selected = [2, 7, 9, 4]
+    _stage_sparse_layer(context, [obj], [selected] * len(groups), 0, 1)
+    for physical in (1, 3):
+        expected = torch.full((10, 1, 2), -1.0)
+        expected[selected, 0] = (
+            torch.arange(8, dtype=expected.dtype).reshape(4, 2) + physical * 100
+        )
+        torch.testing.assert_close(targets[physical], expected)
+    assert torch.all(targets[0] == -1) and torch.all(targets[2] == -1)

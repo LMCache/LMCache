@@ -16,9 +16,10 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import (
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
+    PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -36,8 +37,11 @@ from lmcache.v1.distributed.storage_controllers.store_controller import (
     StoreController,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     DefaultStorePolicy,
+)
+from lmcache.v1.distributed.storage_controllers.utils import (
+    L1ManagerDescriptor,
+    L2AdapterDescriptor,
 )
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 
@@ -76,9 +80,24 @@ def make_adapter(bandwidth_gb: float = 10.0) -> MockL2Adapter:
     return MockL2Adapter(config)
 
 
-def make_descriptor(index: int) -> AdapterDescriptor:
+def make_l1_descriptor() -> L1ManagerDescriptor:
+    """Create an L1ManagerDescriptor for the single test L1 manager."""
+    config = L1ManagerConfig(
+        memory_config=L1MemoryManagerConfig(size_in_bytes=1 << 20, use_lazy=False)
+    )
+    return L1ManagerDescriptor(index=0, config=config)
+
+
+def single_row_spec(keys, layout) -> PrefetchTaskSpec:
+    """A prefetch spec with one full-attention row over ``keys``."""
+    return PrefetchTaskSpec(
+        key_groups=[GroupedObjectKeys(keys=keys, object_group_id=0, layout_desc=layout)]
+    )
+
+
+def make_descriptor(index: int) -> L2AdapterDescriptor:
     config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
-    return AdapterDescriptor(index=index, config=config)
+    return L2AdapterDescriptor(index=index, config=config)
 
 
 def wait_for_condition(predicate, timeout: float = 5.0) -> bool:
@@ -99,7 +118,6 @@ def write_keys_to_l1(
         keys=keys,
         is_temporary=[False] * len(keys),
         layout_desc=layout,
-        mode="new",
     )
     written = [k for k, (e, m) in results.items() if m is not None]
     if written:
@@ -301,7 +319,8 @@ class TestNumInflightL2Loads:
         store_keys_in_l2(adapter, keys, layout)
 
         ctrl = PrefetchController(
-            l1_manager=l1_manager,
+            l1_managers=[l1_manager],
+            l1_manager_descriptors=[make_l1_descriptor()],
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(adapter_index)],
             policy=DefaultPrefetchPolicy(),
@@ -311,7 +330,7 @@ class TestNumInflightL2Loads:
         before_loads = _value_for("lmcache_mp.num_inflight_l2_loads", attrs)
         before_bytes = _value_for("lmcache_mp.inflight_load_memory_usage_bytes", attrs)
 
-        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys, layout))
 
         # Wait for the request to fully resolve, then the counters should
         # come back to where they started.
@@ -348,7 +367,8 @@ class TestNumInflightL2Loads:
         store_keys_in_l2(adapter, keys, layout)
 
         ctrl = PrefetchController(
-            l1_manager=l1_manager,
+            l1_managers=[l1_manager],
+            l1_manager_descriptors=[make_l1_descriptor()],
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(adapter_index)],
             policy=DefaultPrefetchPolicy(),
@@ -358,7 +378,7 @@ class TestNumInflightL2Loads:
         before_loads = _value_for("lmcache_mp.num_inflight_l2_loads", attrs)
         before_bytes = _value_for("lmcache_mp.inflight_load_memory_usage_bytes", attrs)
 
-        ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
+        ctrl.submit_prefetch_request(single_row_spec(keys, layout))
 
         # Wait until the load is actually in flight on this adapter; only
         # then is ``_cleanup_in_flight_requests`` the path that brings the

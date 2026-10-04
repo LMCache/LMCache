@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, TypeVar,
 import asyncio
 import functools
 import hashlib
+import os
 import re
+import stat
 import threading
 import traceback
 import warnings
@@ -46,6 +48,33 @@ KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 
 
 # Device utility functions
+def get_device_identity(source: str | int) -> tuple[bool, int, int] | None:
+    """Return the physical identity of a character device or regular file.
+
+    Args:
+        source: Path (str, following symlinks) or open file descriptor (int).
+
+    Returns:
+        ``(True, st_rdev, 0)`` for a character device,
+        ``(False, st_dev, st_ino)`` for a regular file, or ``None`` otherwise.
+
+        ``None`` means unidentified (unsupported type or failed path/fd lookup),
+        not unowned. Callers must check for ``None`` candidates before comparing
+        identities.
+    """
+    try:
+        info = os.fstat(source) if isinstance(source, int) else os.stat(source)
+    except (OSError, ValueError) as exc:
+        if isinstance(source, int):
+            logger.warning("Failed to inspect DAX device fd %s: %s", source, exc)
+        return None
+    if stat.S_ISCHR(info.st_mode):
+        return True, info.st_rdev, 0
+    if stat.S_ISREG(info.st_mode):
+        return False, info.st_dev, info.st_ino
+    return None
+
+
 def check_interprocess_event_support() -> None:
     """Check if the current backend supports interprocess device events.
 
@@ -628,8 +657,8 @@ class LayerCacheEngineKey(CacheEngineKey):
 
 @dataclass
 class CacheStoreEvent:
-    block_hashes: list[int]
-    parent_block_hash: int | None
+    block_hashes: list[int | bytes]
+    parent_block_hash: int | bytes | None
     token_ids: list[int]
     block_size: int
 

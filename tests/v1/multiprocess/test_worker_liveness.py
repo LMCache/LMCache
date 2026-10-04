@@ -40,6 +40,9 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._ctx = MagicMock(name="ctx")
     module._cache_contexts = {}
+    module._sparse_jobs = {}
+    module._sparse_orphan_handles = {}
+    module._sparse_jobs_lock = threading.Lock()
     module._lock = threading.Lock()
     return module
 
@@ -238,6 +241,24 @@ def test_management_ping_touches_targets() -> None:
     assert mgmt.ping(42) is True
     assert mgmt.ping(None) is True
     assert target.touched == [42]
+
+
+def test_management_clear_defaults_to_non_force() -> None:
+    ctx = MagicMock()
+    mgmt = ManagementModule(ctx)
+
+    mgmt.clear()
+
+    ctx.storage_manager.clear.assert_called_once_with(force=False)
+
+
+def test_management_clear_accepts_force() -> None:
+    ctx = MagicMock()
+    mgmt = ManagementModule(ctx)
+
+    mgmt.clear(force=True)
+
+    ctx.storage_manager.clear.assert_called_once_with(force=True)
 
 
 def test_management_reaper_reaps_and_drops() -> None:

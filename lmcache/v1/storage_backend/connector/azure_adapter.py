@@ -58,7 +58,7 @@ class AzureConnectorAdapter(ConnectorAdapter):
                 "Azure url must include a container: azure://<container_name>"
             )
 
-        logger.info(f"Creating Azure connector for container: {container}")
+        logger.info("Creating Azure connector for container: %s", container)
 
         return AzureConnector(
             container=container,

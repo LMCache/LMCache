@@ -79,6 +79,18 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--l1-use-hugepages",
+        dest="l1_use_hugepages",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Allocate the benchmark L1 buffer from the pre-allocated 2 MiB "
+            "hugepage pool instead of regular pinned memory. Requires "
+            "pre-allocated hugepages (sysctl vm.nr_hugepages). Default is "
+            "False."
+        ),
+    )
+    parser.add_argument(
         "--rounds",
         type=int,
         default=1,
@@ -269,7 +281,13 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
     # Backing L1 memory buffer for adapters that need an L1 desc.
     # Sized for one in-flight wave of store + load buffers.
-    l1_buffer = make_aligned_tensor(2 * keys_per_round * data_size, l1_align_bytes)
+    use_hugepages = bool(getattr(args, "l1_use_hugepages", False))
+    l1_buffer_size = 2 * keys_per_round * data_size
+    l1_buffer = make_aligned_tensor(
+        l1_buffer_size,
+        l1_align_bytes,
+        use_hugepages=use_hugepages,
+    )
     l1_memory_desc = create_l1_memory_desc(l1_buffer, align_bytes=l1_align_bytes)
 
     # Resolve and validate the flame-graph toolchain up front, before any
@@ -564,6 +582,15 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             adapter.close()
         except Exception as e:
             print(f"[Cleanup] adapter.close() failed: {e}", file=sys.stderr)
+        # Release the hugepage-backed L1 buffer explicitly. ``make_aligned_tensor``
+        # builds it from a raw pointer via ``torch.frombuffer`` (which does not
+        # own the memory), so dropping the tensor alone would not return the
+        # 2 MiB hugepages to the pool until the process exits.
+        if use_hugepages:
+            # First Party
+            from lmcache.v1.memory_management import _free_cpu_memory
+
+            _free_cpu_memory(l1_buffer, l1_buffer_size, use_hugepages=True)
         log("[Cleanup] Done.")
 
     if failed:

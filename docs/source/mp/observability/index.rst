@@ -264,10 +264,11 @@ Configuration
        limited by the 1 Hz internal heartbeat.
    * - ``--trace-level``
      - *(none)*
-     - Enable trace recording at the given level. Currently only
-       ``storage`` is supported (records ``StorageManager`` public-API
-       calls for offline replay). When unset, trace recording is off.
-       See :ref:`trace-recording` for details.
+     - Enable trace recording at the given level. ``storage`` records
+       ``StorageManager`` public-API calls for offline replay. ``events``
+       records the cache-event stream this server emits for the MP
+       coordinator, whether or not ``--coordinator-url`` is set. When
+       unset, trace recording is off. See :ref:`trace-recording`.
    * - ``--trace-output``
      - *(none)*
      - Path to write the trace file. If omitted while ``--trace-level``

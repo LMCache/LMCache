@@ -504,3 +504,30 @@ def test_stats_reports_blend_index_counts():
         assert data["num_chunks"] == 1
         assert data["num_claims"] == 1
         assert data["num_namespaces"] == 1
+
+
+# -- Separate object groups --------------------------------------------------
+
+
+def test_a_token_lookup_reports_every_object_group_it_is_stored_in():
+    """Under --separate-object-groups a chunk is stored once per group. A
+    lookup that resolved group 0 alone answered "cached" while reporting a
+    fraction of what was held; it now reports every group, each with its
+    own placement."""
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0, eviction_check_interval=0.0, chunk_size=4
+    )
+    body = {"model_name": MODEL, "world_size": 1, "token_ids": [1, 2, 3, 4]}
+    with TestClient(create_app(config)) as client:
+        [group_zero] = client.post("/directory/lookup", json=body).json()["results"]
+        stored = [{**group_zero["key"], "object_group_id": g} for g in (0, 1, 2)]
+        _post_events(
+            client,
+            [_batch(entries=[{"key": key, "size_bytes": 64} for key in stored])],
+        )
+
+        results = client.post("/directory/lookup", json=body).json()
+
+    assert results["chunks"] == 1
+    assert sorted(r["key"]["object_group_id"] for r in results["results"]) == [0, 1, 2]
+    assert all(r["placements"] for r in results["results"])

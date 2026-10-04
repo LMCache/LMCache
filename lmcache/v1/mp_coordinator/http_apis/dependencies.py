@@ -20,7 +20,7 @@ import httpx
 from lmcache.v1.mp_coordinator.controllers.base import Controller
 from lmcache.v1.mp_coordinator.discovery import Registry
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
-from lmcache.v1.mp_coordinator.ingest.http_event_source import HttpCacheEventSource
+from lmcache.v1.mp_coordinator.ingest.event_source import CacheEventSource
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.views.base import View
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -48,8 +48,10 @@ class CoordinatorContext:
             ``ServerConfigRegistry`` for the declared capacities a usage
             ratio divides by.
         event_gate: Admission authority after a source delivers cache events.
-        event_source: HTTP source adapter used by ``POST /events`` before
-            batches reach the gate.
+        event_source: The one source adapter delivering cache events to the
+            gate, per ``MPCoordinatorConfig.event_source_config``: the HTTP
+            push source behind ``POST /events``, or the Kafka pull source
+            (in which case ``POST /events`` answers 404).
         metadata_persister: Durable store for operator intent. Every
             handler that changes a pin or a quota must ``save`` so the
             change survives a restart.
@@ -59,7 +61,7 @@ class CoordinatorContext:
     token_hasher: TokenHasher
     views: Registry[View]
     event_gate: EventGate
-    event_source: HttpCacheEventSource
+    event_source: CacheEventSource
     metadata_persister: MetadataPersister
 
 

@@ -1,79 +1,72 @@
-Prefetch leases and generations
-===============================
+Logical sparse prefetch leases
+==============================
 
-The distributed ``PrefetchRequestSpec`` API supports logical sparse
-prefetches without exposing a serving engine's physical block identifiers.
-Callers provide :class:`ObjectKey` chunks and may set
-``policy=TrimPolicy.SPARSE``.  The result bitmap always uses the order of the
-original logical key list.
+The distributed ``PrefetchTaskSpec`` API accepts ``GroupedObjectKeys`` rows.
+A sparse transfer uses ``fetching_policy="full"`` and one singleton row per
+logical ``ObjectKey``. Its reported indices retain the original key order,
+including holes. Physical serving-engine page IDs stay outside this lookup
+contract.
 
-Request generations
--------------------
+Request identity
+----------------
 
-``PrefetchRequestSpec.generation`` is an opaque, non-negative value owned by
-the caller.  A serving adapter should advance it whenever a request slot is
-reused or reordered.  The value is copied to ``PrefetchHandle`` and is
-used as a guard when cancelling an asynchronous request; it does not affect
-key lookup or sparse bitmap selection.
-
-The generation is intentionally separate from ``ObjectKey``.  A key can be
-shared by multiple requests while a stale prefetch operation is still safely
-cancelled.
+The multiprocess transfer module owns the identity
+``(instance_id, request_id, generation, layer_id)``. Generations are
+non-negative and must advance when a serving request row is reused.
+``PrefetchHandle`` remains the controller's normal handle; it does not carry
+the serving generation. A late result cannot replace a newer sparse job.
 
 Lease lifecycle
 ---------------
 
-For ``policy=TrimPolicy.SPARSE``, ``submit_prefetch_task`` retains the L1 read
-locks for the keys reported by the handle and coordinates any L2 lookup/load
-locks in the controller.  A caller has two compatible choices:
+``submit_prefetch_lease(spec)`` requires ``PrefetchLockMode.LOCK`` and retains
+the grouped specification and result until explicit release. Use
+``query_prefetch_lease`` or ``wait_prefetch_lease`` for these handles. Ordinary
+``submit_prefetch_task`` and ``query_prefetch_status`` callers retain their
+existing explicit ``finish_read_prefetched`` contract.
 
-* Existing integrations can call ``query_prefetch_status(handle)``, read the
-  retained objects, and finish them with ``finish_read_prefetched(keys)``.
-* Lease-oriented integrations can call ``consume_prefetch_task(handle)`` after
-  they have finished using the retained objects and the result bitmap is
-  available.  This releases the retained read locks for that handle.  If the
-  result is not ready, the method returns ``None`` and does not change
-  ownership.
+``release_prefetch_task(handle)`` and ``cancel_prefetch_task(handle)`` drain
+already accepted controller I/O to completion before releasing that lease's
+L1 read locks. They do not abort an adapter's accepted load. Repeated cleanup
+is safe. A cleanup exception leaves the lease reachable for retry. Optional
+release keys validate ownership and cannot broaden the owned key set.
 
-When a sparse prediction is no longer valid, call
-``release_prefetch_task(handle)``.  It is idempotent and cancels the controller
-request with the handle's generation and waits for controller cleanup before
-releasing manager-owned L1 locks.  If the caller has already consumed the
-result bitmap through the legacy query API, it may pass the consumed keys to
-``release_prefetch_task(handle, keys)`` so those locks are released as well.
-The existing ``PREFIX`` and ``WARM`` paths keep their historical cleanup
-semantics.
-
-Cancellation is completed on the controller thread.  An in-flight adapter
-operation is allowed to return before its L2 locks, L1 write reservation, and
-any retained L1 read locks are released.  This ordering prevents eviction or
-reuse from racing an asynchronous load.  Repeated cancellation/release calls
-are safe, and a generation mismatch cannot cancel a newer operation using the
-same logical request slot.
+A sparse GPU retrieval uses ``read_prefetched_results(...,
+release_on_error=False)``. If a later copy fails, its owner first synchronizes
+the copy stream, then releases the lease. Failed synchronization retains the
+job for retry. The default read context still releases on errors and retains
+locks after successful reads, as before.
 
 Minimal example
 ---------------
 
 .. code-block:: python
 
-   spec = PrefetchRequestSpec(
-       keys=logical_keys,
-       group_layout_descs={0: layout},
-       policy=TrimPolicy.SPARSE,
-       generation=request_generation,
+   spec = PrefetchTaskSpec(
+       key_groups=[
+           GroupedObjectKeys([key], key.object_group_id, layout)
+           for key in logical_keys
+       ],
+       fetching_policy="full",
+       lock_mode=PrefetchLockMode.LOCK,
    )
-   handle = storage_manager.submit_prefetch_task(spec)
-
-   if not storage_manager.wait_prefetch_status(handle, timeout=1.0):
+   handle = storage_manager.submit_prefetch_lease(spec)
+   try:
+       if storage_manager.wait_prefetch_lease(handle, timeout=1.0):
+           found = storage_manager.query_prefetch_lease(handle)
+           retained = [
+               key
+               for row, hits in zip(spec.key_groups, found.hit_cells)
+               for key in hits.gather(row.keys)
+           ]
+           with storage_manager.read_prefetched_results(
+               retained, release_on_error=False
+           ) as objects:
+               consume_synchronously(objects)
+   finally:
        storage_manager.release_prefetch_task(handle)
-   else:
-       found = storage_manager.query_prefetch_status(handle)
-       retained_keys = found.gather(logical_keys)
-       with storage_manager.read_prefetched_results(retained_keys) as objects:
-           consume(objects)
-       storage_manager.release_prefetch_task(handle, retained_keys)
 
-LMCache accepts only logical keys/chunks in this contract.  An adapter that
-uses physical page tables must perform that mapping at its own boundary and
-must not pass physical block IDs as ``ObjectKey`` values.  The contract does
-not require SGLang or any other serving engine as a dependency.
+The six sparse RPCs use operation names on ZeroMQ and explicit protobuf
+messages on gRPC. Frozen legacy numeric operation IDs are unchanged. The
+serving adapter maps logical chunks and supplies GPU destinations only to its
+registered transfer context; LMCache has no SGLang dependency.
