@@ -166,31 +166,26 @@ class DaxCoordinatedL1Region:
                 "DAX-Coordinated L1 alignment must be a power of two >= 64"
             )
         rank_placement = dax_coordinated_l1_config.rank_placement
-        self._portable = rank_placement is not None
-        if rank_placement is not None:
-            metadata_path = rank_placement.regions[0].devdax_path
-            assert rank_placement.regions[0].metadata_offset_bytes is not None
-            self._mapping_offset = int(rank_placement.regions[0].metadata_offset_bytes)
-        else:
-            metadata_path = dax_coordinated_l1_config.devdax_path
-            self._mapping_offset = dax_coordinated_l1_config.metadata_offset_bytes
+        self._portable = rank_placement.tp_size > 1
+        metadata_region = rank_placement.regions[0]
+        metadata_path = metadata_region.devdax_path
+        assert metadata_region.metadata_offset_bytes is not None
+        assert metadata_region.metadata_reservation_bytes is not None
+        self._mapping_offset = int(metadata_region.metadata_offset_bytes)
         payloads = resolve_payload_mappings(dax_coordinated_l1_config)
         self._metadata_path = metadata_path
         self._metadata_alignment = _read_devdax_alignment(metadata_path)
-        self._metadata_reservation = (
-            int(rank_placement.metadata_reservation_bytes) if rank_placement else None
-        )
+        self._metadata_reservation = int(metadata_region.metadata_reservation_bytes)
         self._payload_mappings = payloads
         self._size = 0
         self._metadata_mapping: tuple[mmap.mmap, torch.Tensor | None] | None = None
-        # The full TP reservation is known at startup. For TP=1 the exact
-        # metadata extent is checked again after model geometry is available.
+        # Validate the full reservation before mapping payloads at any TP size.
         _validate_mapping_ranges(
             [
                 DevDaxPayloadMapping(
                     metadata_path,
                     self._mapping_offset,
-                    self._metadata_reservation or self._metadata_alignment,
+                    self._metadata_reservation,
                 ),
                 *payloads,
             ],
@@ -278,14 +273,14 @@ class DaxCoordinatedL1Region:
             if size != self._size:
                 raise ValueError("DAX-Coordinated L1 metadata size is already bound")
             return
-        if self._metadata_reservation is not None and size > self._metadata_reservation:
-            raise ValueError("TP native metadata exceeds metadata_reservation_bytes")
+        if size > self._metadata_reservation:
+            raise ValueError("native metadata exceeds metadata_reservation_bytes")
         _validate_mapping_ranges(
             [
                 DevDaxPayloadMapping(
                     self._metadata_path,
                     self._mapping_offset,
-                    self._metadata_reservation or size,
+                    self._metadata_reservation,
                 ),
                 *self._payload_mappings,
             ],

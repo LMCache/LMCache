@@ -175,9 +175,7 @@ class DaxCoordinatedL1Client:
                 kv_world_size,
                 chunk_size,
                 layout_descs,
-                expected_kv_world_size=self._rank_placement.tp_size
-                if self._rank_placement
-                else 1,
+                expected_kv_world_size=self._rank_placement.tp_size,
             )
             if self._model_profile is None:
                 geometry = resolve_payload_geometry(self._config, profile.payload_bytes)
@@ -452,12 +450,11 @@ class DaxCoordinatedL1Client:
         )
         status["payload_size_GiB"] = self._config.payload_size_bytes >> 30
         status["payload_size_bytes"] = self._config.payload_size_bytes
-        if self._rank_placement is not None:
-            for rank, free in enumerate(native.free_slots_by_rank):
-                total = geometry.owner_rank_slot_counts[rank]
-                status[f"rank_{rank}_payload_slot_free"] = free
-                status[f"rank_{rank}_payload_slot_used"] = total - free
-                status[f"rank_{rank}_owner_slot_count"] = total
+        for rank, free in enumerate(native.free_slots_by_rank):
+            total = geometry.owner_rank_slot_counts[rank]
+            status[f"rank_{rank}_payload_slot_free"] = free
+            status[f"rank_{rank}_payload_slot_used"] = total - free
+            status[f"rank_{rank}_owner_slot_count"] = total
         return status
 
     def get_memory_usage(self) -> tuple[int, int]:
@@ -478,7 +475,7 @@ class DaxCoordinatedL1Client:
 
     def get_l1_memory_desc(self) -> L1MemoryDesc:
         """Describe the complete mapped shared range."""
-        if self._rank_placement is not None:
+        if self._rank_placement.tp_size > 1:
             return L1MemoryDesc(
                 ptr=0, size=0, align_bytes=self._memory_config.align_bytes
             )
@@ -535,10 +532,9 @@ class DaxCoordinatedL1Client:
             self._memory_config.align_bytes,
             model_profile.layout_digest,
         )
-        if self._rank_placement is not None:
-            digest = sha256(
-                digest + b"shared-index" + self._rank_placement.layout_digest()
-            ).digest()
+        digest = sha256(
+            digest + b"shared-index" + self._rank_placement.layout_digest()
+        ).digest()
 
         parameters = dax_coordinated_l1_parameters(
             self._config.region_epoch,
@@ -633,8 +629,6 @@ class DaxCoordinatedL1Client:
         """Validate the whole TP batch before reserving or releasing any slot."""
         if self._closed:
             raise RuntimeError("DAX-Coordinated L1 client is closed")
-        if self._rank_placement is None:
-            return [0] * len(keys)
         ranks = []
         for key in keys:
             ranks.append(self._rank_placement.rank_from_kv_rank(key.kv_rank))
@@ -660,23 +654,22 @@ class DaxCoordinatedL1Client:
             "model_layout_digest": profile.layout_digest.hex(),
             "model_dtypes": ",".join(profile.dtype_names),
         }
-        if self._rank_placement is not None:
-            status["tp_size"] = self._rank_placement.tp_size
-            status["payload_region_count"] = len(self._rank_placement.regions)
-            status["tp_layout_digest"] = self._rank_placement.layout_digest().hex()
-            status["payload_unused_partition_bytes"] = (
-                sum(r.payload_size_GiB << 30 for r in self._rank_placement.regions)
-                - self._config.payload_size_bytes
+        status["tp_size"] = self._rank_placement.tp_size
+        status["payload_region_count"] = len(self._rank_placement.regions)
+        status["tp_layout_digest"] = self._rank_placement.layout_digest().hex()
+        status["payload_unused_partition_bytes"] = (
+            sum(r.payload_size_GiB << 30 for r in self._rank_placement.regions)
+            - self._config.payload_size_bytes
+        )
+        for placement in self._rank_placement.placements():
+            prefix = f"rank_{placement.rank}_"
+            status.update(
+                {
+                    prefix + "devdax_path": placement.devdax_path,
+                    prefix + "payload_offset_bytes": placement.payload_offset_bytes,
+                    prefix + "payload_size_bytes": placement.payload_size_GiB << 30,
+                }
             )
-            for placement in self._rank_placement.placements():
-                prefix = f"rank_{placement.rank}_"
-                status.update(
-                    {
-                        prefix + "devdax_path": placement.devdax_path,
-                        prefix + "payload_offset_bytes": placement.payload_offset_bytes,
-                        prefix + "payload_size_bytes": placement.payload_size_GiB << 30,
-                    }
-                )
         return status
 
     def _memory_obj(self, native: _NativePayload) -> MemoryObj:

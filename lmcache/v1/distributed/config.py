@@ -16,7 +16,6 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import L1BackendType
 from lmcache.v1.distributed.dax_coordinated_l1.devdax_layout import (
     DaxCoordinatedL1RankPlacementConfig,
-    normalize_devdax_offset,
 )
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -228,8 +227,8 @@ class DaxCoordinatedL1Config:
     DEVDAX_CACHE_LINE_BYTES: ClassVar[int] = 64
     """Cache-line size for the qualified x86 visibility contract."""
 
-    devdax_path: str
-    """Device-DAX path, e.g. ``/dev/dax0.0``; offset zero anchors both mappings."""
+    rank_placement: DaxCoordinatedL1RankPlacementConfig
+    """Required rank-to-region placement for local TP=1..8/PP=1."""
 
     region_id: str
     """Operator-assigned identity of the physical shared range."""
@@ -245,17 +244,6 @@ class DaxCoordinatedL1Config:
 
     participant_count: int = 2
     """Shared region participants: 2 or 4, using a Peterson tournament."""
-
-    metadata_offset_bytes: int = 0
-    """Device offset of WB CPU metadata. Offset strings normalize at creation."""
-
-    payload_offset_bytes: int = 0x7F80000000
-    """Device offset of payload memory; defaults to 510 GiB.
-    Integer and base-prefixed string inputs normalize to integers at creation.
-    """
-
-    payload_size_GiB: int = 512
-    """Payload capacity in binary GiB, starting at ``payload_offset_bytes``."""
 
     skip_payload_flush: bool = False
     """Skip PUT publication flush and GET refresh, retaining metadata sync.
@@ -291,11 +279,6 @@ class DaxCoordinatedL1Config:
     to participant 0; other participants can attach/read without allocating.
     """
 
-    rank_placement: DaxCoordinatedL1RankPlacementConfig | None = None
-    """Optional rank-to-region placement for local TP=2..8/PP=1.
-    Its regions replace the top-level metadata and payload ranges.
-    """
-
     def __post_init__(self) -> None:
         if isinstance(self.rank_placement, dict):
             try:
@@ -304,29 +287,12 @@ class DaxCoordinatedL1Config:
                 )
             except TypeError as error:
                 raise ValueError(f"invalid rank_placement config: {error}") from error
-        if self.rank_placement is not None and not isinstance(
-            self.rank_placement, DaxCoordinatedL1RankPlacementConfig
-        ):
+        if not isinstance(self.rank_placement, DaxCoordinatedL1RankPlacementConfig):
             raise ValueError("rank_placement must be a configuration object")
-        self.devdax_path = self.devdax_path.strip()
-        if not self.devdax_path:
-            raise ValueError("DAX-Coordinated L1 requires devdax_path")
-        self.metadata_offset_bytes = normalize_devdax_offset(
-            self.metadata_offset_bytes, "metadata_offset_bytes"
-        )
-        self.payload_offset_bytes = normalize_devdax_offset(
-            self.payload_offset_bytes, "payload_offset_bytes"
-        )
         if not self.region_id:
             raise ValueError("DAX-Coordinated L1 requires region_id")
         if self.region_epoch <= 0:
             raise ValueError("DAX-Coordinated L1 region_epoch must be positive")
-        if isinstance(self.payload_size_GiB, bool) or not isinstance(
-            self.payload_size_GiB, int
-        ):
-            raise ValueError("DAX-Coordinated L1 payload_size_GiB must be an integer")
-        if self.payload_size_GiB <= 0:
-            raise ValueError("DAX-Coordinated L1 payload_size_GiB must be positive")
         for name in (
             "skip_payload_flush",
             "memcheck_on_attach",
@@ -389,7 +355,7 @@ class DaxCoordinatedL1Config:
             raise ValueError("DAX-Coordinated L1 requires --l1-devdax-path")
         if memory_config.devdax_path != self.devdax_path:
             raise ValueError(
-                "DAX-Coordinated L1 JSON devdax_path must match "
+                "DAX-Coordinated L1 regions[0].devdax_path must match "
                 "the L1 memory Device-DAX path"
             )
         if memory_config.devdax_size_in_bytes:
@@ -429,13 +395,14 @@ class DaxCoordinatedL1Config:
             raise ValueError(f"invalid DAX-Coordinated L1 config: {error}") from error
 
     @property
+    def devdax_path(self) -> str:
+        """Return the metadata device path used to validate the common L1 CLI."""
+        return self.rank_placement.regions[0].devdax_path
+
+    @property
     def payload_size_bytes(self) -> int:
         """Return the configured binary-GiB capacity in bytes."""
-        if self.rank_placement is not None:
-            return sum(
-                p.payload_size_GiB << 30 for p in self.rank_placement.placements()
-            )
-        return self.payload_size_GiB << 30
+        return sum(p.payload_size_GiB << 30 for p in self.rank_placement.placements())
 
     @property
     def owner_payload_size_bytes(self) -> int:

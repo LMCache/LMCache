@@ -115,8 +115,18 @@ _GIB = 1 << 30
 
 
 def _config_values(**overrides: object) -> dict[str, object]:
-    values: dict[str, object] = {
+    region: dict[str, object] = {
         "devdax_path": "/dev/dax0.0",
+        "metadata_offset_bytes": 0,
+        "metadata_reservation_bytes": _GIB,
+        "payload_offset_bytes": 0x7F80000000,
+        "payload_size_GiB": 512,
+    }
+    for name in region:
+        if name in overrides:
+            region[name] = overrides.pop(name)
+    values: dict[str, object] = {
+        "rank_placement": {"tp_size": 1, "regions": [region]},
         "region_id": "qualification-range",
         "region_epoch": 1,
         "participant_id": 0,
@@ -171,13 +181,22 @@ def _cli_base() -> list[str]:
 def _configs(payload_offset: int = 4096, payload_gib: int = 1) -> tuple:
     return (
         DaxCoordinatedL1Config(
-            devdax_path="/dev/null",
+            rank_placement=DaxCoordinatedL1RankPlacementConfig(
+                1,
+                (
+                    DevDaxTPRegion(
+                        "/dev/null",
+                        payload_offset,
+                        payload_gib,
+                        metadata_offset_bytes=0,
+                        metadata_reservation_bytes=4096,
+                    ),
+                ),
+            ),
             region_id="region-mock-test",
             region_epoch=1,
             participant_id=0,
             hardware_qualification_digest="ab" * 32,
-            payload_offset_bytes=payload_offset,
-            payload_size_GiB=payload_gib,
         ),
         L1MemoryManagerConfig(
             devdax_path="/dev/null",
@@ -192,7 +211,15 @@ def _configs(payload_offset: int = 4096, payload_gib: int = 1) -> tuple:
 def _emulate_mapping(monkeypatch: pytest.MonkeyPatch, size: int) -> None:
     real_mmap = mmap.mmap
     monkeypatch.setattr(
-        DaxCoordinatedL1Config, "payload_size_bytes", property(lambda _: size)
+        devdax_region,
+        "resolve_payload_mappings",
+        lambda config: [
+            devdax_region.DevDaxPayloadMapping(
+                config.devdax_path,
+                int(config.rank_placement.regions[0].payload_offset_bytes),
+                size,
+            )
+        ],
     )
     monkeypatch.setattr(devdax_region, "_read_devdax_size", lambda _: 4096 + size)
     monkeypatch.setattr(devdax_region, "_read_devdax_alignment", lambda _: 4096)
@@ -267,8 +294,26 @@ def _rank_placement(tp_size: int = 4) -> DaxCoordinatedL1RankPlacementConfig:
     return DaxCoordinatedL1RankPlacementConfig(
         tp_size,
         (
-            DevDaxTPRegion("/dev/dax0.0", 4 * _GIB, 2, metadata_offset_bytes=0),
+            DevDaxTPRegion(
+                "/dev/dax0.0",
+                4 * _GIB,
+                2,
+                metadata_offset_bytes=0,
+                metadata_reservation_bytes=_GIB,
+            ),
             DevDaxTPRegion("/dev/dax1.0", 4 * _GIB, 2),
+        )[: min(tp_size, 2)],
+    )
+
+
+def _with_metadata_reservation(
+    placement: DaxCoordinatedL1RankPlacementConfig, size: int
+) -> DaxCoordinatedL1RankPlacementConfig:
+    return replace(
+        placement,
+        regions=(
+            replace(placement.regions[0], metadata_reservation_bytes=size),
+            *placement.regions[1:],
         ),
     )
 
@@ -279,7 +324,6 @@ def _config(
     **kwargs: Any,
 ) -> DaxCoordinatedL1Config:
     return DaxCoordinatedL1Config(
-        devdax_path=rank_placement.regions[0].devdax_path,
         region_id="rank_placement-test",
         region_epoch=1,
         participant_id=participant,
@@ -487,8 +531,9 @@ def test_json_opt_in_preserves_configuration_defaults() -> None:
     assert config.ownership_mode == "equal"
     assert config.participant_count == 2
     assert not config.skip_payload_flush
-    assert config.metadata_offset_bytes == 0
-    payload_offset_bytes = config.payload_offset_bytes
+    region = config.rank_placement.regions[0]
+    assert region.metadata_offset_bytes == 0
+    payload_offset_bytes = region.payload_offset_bytes
     assert isinstance(payload_offset_bytes, int)
     assert payload_offset_bytes == 0x7F80000000
     assert config.payload_size_bytes == 512 << 30
@@ -524,13 +569,15 @@ def test_offset_inputs_are_normalized_for_direct_field_access(
     """Integer and hexadecimal JSON offsets expose the same integer fields."""
     config = DaxCoordinatedL1Config.from_json(
         json.dumps(
-            _config_values(metadata_offset_bytes=offset, payload_offset_bytes=offset)
+            _config_values(metadata_offset_bytes=offset, payload_offset_bytes=4 * _GIB)
         )
     )
     assert config is not None
-    assert type(config.metadata_offset_bytes) is int
-    assert type(config.payload_offset_bytes) is int
-    assert config.metadata_offset_bytes == config.payload_offset_bytes == 4096
+    region = config.rank_placement.regions[0]
+    assert type(region.metadata_offset_bytes) is int
+    assert type(region.payload_offset_bytes) is int
+    assert region.metadata_offset_bytes == 4096
+    assert region.payload_offset_bytes == 4 * _GIB
 
 
 @pytest.mark.parametrize(
@@ -580,7 +627,7 @@ def test_cli_requires_the_same_explicit_l1_devdax_device() -> None:
 
     with pytest.raises(ValueError, match="requires --l1-devdax-path"):
         _parse_cli([*_cli_base(), "--dax-coordinated-l1-config-json", raw])
-    with pytest.raises(ValueError, match="JSON devdax_path must match"):
+    with pytest.raises(ValueError, match=r"regions\[0\]\.devdax_path must match"):
         _parse_cli(
             [
                 *_cli_base(),
@@ -898,7 +945,7 @@ def test_metadata_binding_reuses_registered_payload_and_rejects_overlap(
     with closing(DaxCoordinatedL1Region(config, memory)) as region:
         descriptor = region.get_memory_desc()
         assert region.size == 0
-        with pytest.raises(ValueError, match="overlap"):
+        with pytest.raises(ValueError, match="exceeds metadata_reservation_bytes"):
             region.map_metadata(8192)
         assert region.cuda_registered
         assert unpinned == []
@@ -919,21 +966,24 @@ def test_slot_ranges_partition_rank_mappings(
 ) -> None:
     """All MPs agree on disjoint physical ranges and owner-contiguous slot IDs."""
     rank_placement = DaxCoordinatedL1RankPlacementConfig(
-        max(2, tp_size),
+        tp_size,
         (
-            DevDaxTPRegion("/dev/dax0.0", 4 * _GIB, 5, metadata_offset_bytes=0),
+            DevDaxTPRegion(
+                "/dev/dax0.0",
+                4 * _GIB,
+                5,
+                metadata_offset_bytes=0,
+                metadata_reservation_bytes=_GIB,
+            ),
             DevDaxTPRegion("/dev/dax1.0", 4 * _GIB, 7),
-        ),
+        )[: min(tp_size, 2)],
     )
     configs = [
-        replace(
-            _config(
-                rank_placement,
-                pid,
-                participant_count=participants,
-                ownership_mode=ownership,
-            ),
-            rank_placement=None if tp_size == 1 else rank_placement,
+        _config(
+            rank_placement,
+            pid,
+            participant_count=participants,
+            ownership_mode=ownership,
         )
         for pid in range(participants)
     ]
@@ -1029,6 +1079,7 @@ def test_tagged_writer_cannot_publish_another_writers_payload(
 @pytest.mark.parametrize(
     "world, regions, offsets, sizes",
     [
+        (1, [0], [4], [2]),
         (2, [0, 1], [4, 4], [2, 2]),
         (4, [0, 1, 0, 1], [4, 4, 5, 5], [1, 1, 1, 1]),
         (3, [0, 1, 0], [4, 4, 5], [1, 2, 1]),
@@ -1047,22 +1098,22 @@ def test_each_rank_gets_one_disjoint_contiguous_slice(
 def test_metadata_reservation_config_preserves_existing_arena_digest() -> None:
     """The renamed JSON key keeps the reservation and shared v1 identity."""
     values = asdict(_rank_placement())
-    values["metadata_reservation_bytes"] = "0x40000000"
+    values["regions"][0]["metadata_reservation_bytes"] = "0x40000000"
     config_values = asdict(_config(_rank_placement()))
     config_values["rank_placement"] = values
     config = DaxCoordinatedL1Config.from_json(json.dumps(config_values))
     rank_placement = config.rank_placement
     assert rank_placement is not None
-    assert rank_placement.metadata_reservation_bytes == _GIB
+    assert rank_placement.regions[0].metadata_reservation_bytes == _GIB
     # Digest from the same placement before the configuration field was renamed.
     assert rank_placement.layout_digest().hex() == (
         "e82fc8b6a757dc03df20e56e2b66dbb4886c224efc2df3bb1eac8582b0d56efa"
     )
-    assert replace(
-        rank_placement, metadata_reservation_bytes=2 * _GIB
-    ).layout_digest() != (rank_placement.layout_digest())
+    assert _with_metadata_reservation(rank_placement, 2 * _GIB).layout_digest() != (
+        rank_placement.layout_digest()
+    )
     with pytest.raises(ValueError, match="overlap"):
-        replace(rank_placement, metadata_reservation_bytes=5 * _GIB)
+        _with_metadata_reservation(rank_placement, 5 * _GIB)
 
 
 @pytest.mark.parametrize("region_count", [1, 2])
@@ -1085,16 +1136,19 @@ def test_only_first_region_needs_metadata_offset(region_count: int) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "field_name", ["metadata_offset_bytes", "metadata_reservation_bytes"]
+)
 @pytest.mark.parametrize("omit", [True, False])
-def test_first_region_requires_explicit_metadata_offset(omit: bool) -> None:
+def test_first_region_requires_explicit_metadata_settings(
+    field_name: str, omit: bool
+) -> None:
     values = asdict(_rank_placement())
     if omit:
-        values["regions"][0].pop("metadata_offset_bytes")
+        values["regions"][0].pop(field_name)
     else:
-        values["regions"][0]["metadata_offset_bytes"] = None
-    with pytest.raises(
-        ValueError, match=r"regions\[0\] requires metadata_offset_bytes"
-    ):
+        values["regions"][0][field_name] = None
+    with pytest.raises(ValueError, match=rf"regions\[0\] requires {field_name}"):
         DaxCoordinatedL1Config.from_json(
             json.dumps({**asdict(_config(_rank_placement())), "rank_placement": values})
         )
@@ -1108,6 +1162,11 @@ def test_later_region_rejects_metadata_offset(
     values["regions"] = list(values["regions"])
     values["regions"].append(asdict(DevDaxTPRegion("/dev/dax2.0", 4 * _GIB, 2)))
     values["regions"][region_index]["metadata_offset_bytes"] = offset
+    if offset == 4096:
+        # Reusing the same path still cannot declare a second metadata arena.
+        values["regions"][region_index]["devdax_path"] = values["regions"][0][
+            "devdax_path"
+        ]
     with pytest.raises(
         ValueError, match=rf"regions\[{region_index}\] must omit metadata_offset_bytes"
     ):
@@ -1119,7 +1178,79 @@ def test_later_region_rejects_metadata_offset(
 @pytest.mark.parametrize("reservation", [True, 0, 4097, 1 << 64])
 def test_invalid_metadata_reservation_is_rejected(reservation: int) -> None:
     with pytest.raises(ValueError, match="metadata_reservation_bytes"):
-        replace(_rank_placement(), metadata_reservation_bytes=reservation)
+        _with_metadata_reservation(_rank_placement(), reservation)
+
+
+def test_later_region_rejects_metadata_reservation_without_offset() -> None:
+    """A payload-only region cannot independently reserve a metadata arena."""
+    placement = _rank_placement()
+    with pytest.raises(
+        ValueError, match=r"regions\[1\] must omit metadata_reservation_bytes"
+    ):
+        replace(
+            placement,
+            regions=(
+                placement.regions[0],
+                replace(placement.regions[1], metadata_reservation_bytes=_GIB),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "devdax_path",
+        "metadata_offset_bytes",
+        "payload_offset_bytes",
+        "payload_size_GiB",
+    ],
+)
+def test_removed_top_level_placement_fields_are_rejected(field_name: str) -> None:
+    """Legacy fields must fail instead of silently shadowing the region settings."""
+    values = _config_values()
+    values[field_name] = "/dev/dax0.0" if field_name == "devdax_path" else 0
+    with pytest.raises(ValueError, match=field_name):
+        DaxCoordinatedL1Config.from_json(json.dumps(values))
+
+
+def test_documented_configs_parse_and_match_l1_device() -> None:
+    """Both complete JSON examples remain valid public CLI configurations."""
+    doc = Path(__file__).resolve().parents[3] / (
+        "docs/design/v1/distributed/dax_coordinated_l1/dax-coordinated-l1.md"
+    )
+    worlds = []
+    for block in doc.read_text().split("```json\n")[1:]:
+        raw = block.split("```", 1)[0].replace("<64 hex characters>", "ab" * 32)
+        config = DaxCoordinatedL1Config.from_json(raw)
+        parsed = _parse_cli(
+            [
+                *_cli_base(),
+                "--l1-devdax-path",
+                config.devdax_path,
+                "--dax-coordinated-l1-config-json",
+                raw,
+            ]
+        )
+        assert parsed.l1_manager_config.dax_coordinated_l1_config == config
+        worlds.append(config.rank_placement.tp_size)
+    assert worlds == [1, 2]
+
+
+def test_rank_placement_is_required_and_owns_no_metadata_reservation() -> None:
+    values = _config_values()
+    values.pop("rank_placement")
+    with pytest.raises(ValueError, match="rank_placement"):
+        DaxCoordinatedL1Config.from_json(json.dumps(values))
+    with pytest.raises(ValueError, match="rank_placement"):
+        DaxCoordinatedL1Config.from_json(
+            json.dumps(_config_values(rank_placement=None))
+        )
+    placement = asdict(_rank_placement())
+    placement["metadata_reservation_bytes"] = _GIB
+    with pytest.raises(ValueError, match="metadata_reservation_bytes"):
+        DaxCoordinatedL1Config.from_json(
+            json.dumps(_config_values(rank_placement=placement))
+        )
 
 
 @pytest.mark.parametrize(
@@ -1157,7 +1288,7 @@ def test_preflight_rejects_entire_plan_before_mapping(
     )
     rank_placement = _rank_placement()
     if failure == "metadata_reservation":
-        rank_placement = replace(rank_placement, metadata_reservation_bytes=4096)
+        rank_placement = _with_metadata_reservation(rank_placement, 4096)
     with pytest.raises(ValueError):
         _client(_config(rank_placement))
     assert mapped == []
@@ -1785,16 +1916,12 @@ def test_common_client_reopens_persisted_rank_payloads(
 ) -> None:
     """TP=1 and uneven TP use the same lifecycle and survive a fresh attachment."""
     rank_placement, _, _ = emulated_devices
-    config = (
+    config = _config(
         replace(
-            _config(rank_placement),
-            rank_placement=None,
-            metadata_offset_bytes=0,
-            payload_offset_bytes=4 * _GIB,
-            payload_size_GiB=2,
+            rank_placement,
+            tp_size=world,
+            regions=rank_placement.regions[: min(world, 2)],
         )
-        if world == 1
-        else _config(replace(rank_placement, tp_size=world))
     )
     keys = [_key(rank, world) for rank in range(world)]
     writer = _client(config)

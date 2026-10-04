@@ -39,13 +39,15 @@ def normalize_devdax_offset(value: object, name: str) -> int:
 class DevDaxTPRegion:
     """One device/bank's payload and metadata arena, in local DAX offsets.
 
-    The first region requires the common metadata offset; subsequent regions
-    must leave it unset. Each assigned rank gets an equal whole-GiB payload
-    slice. Paths may differ between hosts; physical bank correspondence must agree.
+    The first region requires the common metadata offset and reservation size;
+    subsequent regions must leave both unset. Each assigned rank gets an equal
+    whole-GiB payload slice. Paths may differ between hosts; physical bank
+    correspondence must agree.
     """
 
     devdax_path: str
     metadata_offset_bytes: int | str | None = field(default=None, kw_only=True)
+    metadata_reservation_bytes: int | str | None = field(default=None, kw_only=True)
     payload_offset_bytes: int | str
     payload_size_GiB: int
 
@@ -64,6 +66,13 @@ class DevDaxTPRegion:
             "payload_size_GiB",
             _integer(self.payload_size_GiB, "payload_size_GiB", 1),
         )
+        if self.metadata_reservation_bytes is not None:
+            size = normalize_devdax_offset(
+                self.metadata_reservation_bytes, "metadata_reservation_bytes"
+            )
+            if size == 0:
+                raise ValueError("metadata_reservation_bytes must be positive")
+            object.__setattr__(self, "metadata_reservation_bytes", size)
 
 
 @dataclass(frozen=True)
@@ -79,7 +88,7 @@ class DevDaxTPRankPlacement:
 
 @dataclass(frozen=True)
 class DaxCoordinatedL1RankPlacementConfig:
-    """Opt in to TP=2..8, PP=1, with all ranks local to one LMCache server.
+    """Place TP=1..8, PP=1, with all ranks local to one LMCache server.
 
     Configure physical DAX payload placement, not engine tensor parallelism.
     ``tp_size`` is the expected rank count, checked against runtime registration.
@@ -87,23 +96,18 @@ class DaxCoordinatedL1RankPlacementConfig:
 
     ``rank % len(regions)`` selects a region. Ranks sharing a region receive
     disjoint slices; a remainder smaller than one GiB per rank is unused.
-    ``metadata_reservation_bytes`` reserves 1 GiB by default for the common index
-    at the first region's metadata offset; it is not multiplied by TP size.
+    The first region supplies both metadata offset and reservation size for the
+    common index; the reservation is not multiplied by TP size.
     Invalid topology, alignment or overlapping ranges raises ``ValueError``.
     """
 
     tp_size: int
     regions: tuple[DevDaxTPRegion, ...]
-    metadata_reservation_bytes: int | str = 1 << 30
-    """Reserved bytes for the common index in regions[0], starting at its
-    metadata_offset_bytes. This bounds the aligned metadata mapping and excludes
-    payload placement from the whole reservation, regardless of TP size.
-    """
 
     def __post_init__(self) -> None:
-        tp_size = _integer(self.tp_size, "tp_size", 2)
+        tp_size = _integer(self.tp_size, "tp_size", 1)
         if tp_size > 8:
-            raise ValueError("rank_placement supports local TP=2..8 with PP=1")
+            raise ValueError("rank_placement supports local TP=1..8 with PP=1")
         if not isinstance(self.regions, (list, tuple)):
             raise ValueError("rank_placement regions must be a list")
         try:
@@ -119,22 +123,20 @@ class DaxCoordinatedL1RankPlacementConfig:
             raise ValueError("rank_placement requires 1..tp_size valid regions")
         if regions[0].metadata_offset_bytes is None:
             raise ValueError("rank_placement regions[0] requires metadata_offset_bytes")
-        for index, region in enumerate(regions[1:], start=1):
-            if region.metadata_offset_bytes is not None:
-                raise ValueError(
-                    f"rank_placement regions[{index}] must omit metadata_offset_bytes; "
-                    "only regions[0] supplies the common metadata arena"
-                )
-        reservation_bytes = _integer(
-            self.metadata_reservation_bytes, "metadata_reservation_bytes", 4096
-        )
-        if reservation_bytes % 4096 or reservation_bytes >= 1 << 64:
+        if regions[0].metadata_reservation_bytes is None:
             raise ValueError(
-                "rank_placement metadata_reservation_bytes must be page aligned"
+                "rank_placement regions[0] requires metadata_reservation_bytes"
             )
+        for index, region in enumerate(regions[1:], start=1):
+            for name in ("metadata_offset_bytes", "metadata_reservation_bytes"):
+                if getattr(region, name) is not None:
+                    raise ValueError(
+                        f"rank_placement regions[{index}] must omit {name}; "
+                        "only regions[0] supplies the common metadata arena"
+                    )
+        reservation_bytes = int(regions[0].metadata_reservation_bytes)
         object.__setattr__(self, "tp_size", tp_size)
         object.__setattr__(self, "regions", regions)
-        object.__setattr__(self, "metadata_reservation_bytes", reservation_bytes)
         # Validate even before device access. Runtime repeats this comparison
         # using st_rdev so symlinks/alternate names cannot hide overlap.
         ranges: dict[str, list[tuple[int, int]]] = {}
@@ -188,7 +190,7 @@ class DaxCoordinatedL1RankPlacementConfig:
             "tp_size": self.tp_size,
             # Keep the v1 digest field name so this config rename does not
             # invalidate existing shared arenas. It encodes reserved bytes.
-            "metadata_stride_bytes": self.metadata_reservation_bytes,
+            "metadata_stride_bytes": self.regions[0].metadata_reservation_bytes,
             "metadata_offset_bytes": self.regions[0].metadata_offset_bytes,
             "regions": [
                 [r.payload_offset_bytes, r.payload_size_GiB] for r in self.regions
@@ -260,17 +262,11 @@ def resolve_payload_mappings(
         Device path, payload offset and capacity in bytes for each TP rank,
         or one range when TP placement is not configured.
     """
-    if config.rank_placement is not None:
-        return [
-            DevDaxPayloadMapping(
-                p.devdax_path, p.payload_offset_bytes, p.payload_size_GiB << 30
-            )
-            for p in config.rank_placement.placements()
-        ]
     return [
         DevDaxPayloadMapping(
-            config.devdax_path, config.payload_offset_bytes, config.payload_size_bytes
+            p.devdax_path, p.payload_offset_bytes, p.payload_size_GiB << 30
         )
+        for p in config.rank_placement.placements()
     ]
 
 

@@ -38,20 +38,29 @@ selects the private allocator. Without the native extension, enabling the
 DAX-Coordinated L1 backend fails with a rebuild instruction.
 
 `DaxCoordinatedL1Config` lives in `lmcache/v1/distributed/config.py` and parses
-JSON through `from_json()`. The local `--l1-devdax-path` must match `devdax_path`.
+JSON through `from_json()`. The local `--l1-devdax-path` must match
+`rank_placement.regions[0].devdax_path`.
 For TP=1, a configuration looks like this; replace the qualification placeholder
 with the SHA-256 digest of the actual hardware qualification record:
 
 ```json
 {
-  "devdax_path": "/dev/dax0.0",
   "region_id": "lab-shared-range-1",
   "region_epoch": 1,
   "participant_id": 0,
   "hardware_qualification_digest": "<64 hex characters>",
-  "metadata_offset_bytes": 0,
-  "payload_offset_bytes": "0x7F80000000",
-  "payload_size_GiB": 512,
+  "rank_placement": {
+    "tp_size": 1,
+    "regions": [
+      {
+        "devdax_path": "/dev/dax0.0",
+        "metadata_offset_bytes": 0,
+        "metadata_reservation_bytes": 1073741824,
+        "payload_offset_bytes": 32212254720,
+        "payload_size_GiB": 64
+      }
+    ]
+  },
   "ownership_mode": "equal",
   "visibility_mode": "x86_clflush_64b_v1",
   "skip_payload_flush": false
@@ -65,23 +74,23 @@ attach memcheck, timeout and logging are host-local settings.
 
 | Setting | Default / meaning |
 | --- | --- |
+| `region_id` | Required operator-assigned name for the shared arena; all participants must match the stored identity. |
+| `hardware_qualification_digest` | Required SHA-256 hex digest of the hardware validation record, identical across participants; does not automatically verify DDIO or UC. |
 | `participant_count` | `2`; supports `2` or `4`, one unique ID per MP server |
-| `metadata_offset_bytes` | `0`; CPU metadata start |
-| `payload_offset_bytes` | `0x7F80000000` (510 GiB); payload start |
-| `payload_size_GiB` | `512`; payload capacity, independent of `--l1-size-gb` |
+| `participant_id` | Required unique MP server ID from `0` to `participant_count - 1`; participant 0 initializes unformatted metadata, while peers wait and attach. |
 | `ownership_mode` | `equal`; alternatively `participant_0_all` |
 | `buckets_per_level` | `[200003, 200009, 200017, 200023, 200029]`; one to eight positive level sizes |
 | `visibility_mode` | `x86_clflush_64b_v1`; alternatively `x86_clflushopt_bulk_v1` |
 | `skip_payload_flush` | `false`; qualified opt-in to skip STORE and RETRIEVE payload cache maintenance |
 | `memcheck_on_attach` | `false`; opt-in full-index diagnostic scan with all participants quiesced |
 | `per_transfer_logging` | `false`; completed STORE/RETRIEVE bytes, latency and GB/s |
-| `rank_placement` | Optional; absent means TP=1. For local TP=2..8, provide `tp_size` and `regions`; see [TP support](#tp-support) |
+| `rank_placement` | Required for TP=1..8; all device paths, metadata reservations and payload ranges live in `regions`; see [TP support](#tp-support) |
 
 - Llama or Qwen3 model names, one homogeneous object group and one runtime
   `[K/V, layers, tokens, hidden]` layout. Qwen3.5 and other model names
   outside the allowlist, as well as multiple object groups, are rejected.
-- TP=1 by default. Optional `rank_placement` supports local TP=2..8 with one
-  shared index and a designated payload slice per rank
+- Explicit `rank_placement.tp_size` supports local TP=1..8 with one
+  shared index and a designated payload slice per rank.
 
 ## Model registration and layout
 
@@ -124,8 +133,8 @@ until formatting completes. Payload mappings and GPU registrations remain alive
 across these retries; closing before attach releases them as well. Attachment
 is serialized with model registration and shutdown within each MP,
 so a concurrent retry cannot replace a core that already holds reservations.
-TP=1 metadata extent depends on the model and is checked against the payload range before
-metadata mmap. Existing formatted metadata must match the expected
+At every TP size, the model-dependent metadata extent must fit the first
+region's reservation before metadata mmap. Existing formatted metadata must match the expected
 profile; incompatible regions are rejected rather than overwritten.
 
 Attach always validates the superblock magic/version, region/epoch and layout
@@ -143,17 +152,16 @@ to `--dax-coordinated-l1-config-json`:
 
 | JSON field | Requirement and behavior |
 | --- | --- |
-| `rank_placement` | Optional. Omit it for TP=1, which uses the top-level metadata/payload ranges. Set it for local TP=2..8 with PP=1. |
-| `rank_placement.tp_size` | Required when `rank_placement` is set; an integer from 2 to 8. Used to divide payload regions among ranks and checked against the actual KV world size at model registration. A mismatch is rejected. |
-| `rank_placement.regions` | Required ordered list of DAX paths, offsets and capacities. Replaces the top-level metadata/payload ranges. Regions may be separate ranges of one DAX node or distinct nodes. |
+| `rank_placement` | Required for local TP=1..8 with PP=1. |
+| `rank_placement.tp_size` | Integer from 1 to 8, checked against the KV world size at registration. Set the engine's tensor parallelism separately. |
+| `rank_placement.regions` | Ordered device paths and payload ranges; 1 to `tp_size` entries. TP=1 has exactly one region. Regions may use disjoint ranges of one device or separate devices. |
+| `regions[0].metadata_offset_bytes` | Required metadata start, including an explicit `0` for the device beginning. |
+| `regions[0].metadata_reservation_bytes` | Required positive, page-aligned reservation size; 1 GiB in these examples. |
+| `regions[].payload_offset_bytes` / `payload_size_GiB` | Required payload start and capacity per region, independent of `--l1-size-gb`. |
 
-`DaxCoordinatedL1RankPlacementConfig` controls each rank's region and contiguous
-payload slice. Set engine tensor parallelism separately: `tp_size` describes the
-expected rank count and does not change the engine's TP configuration. It is a
-nested JSON field, not a top-level backend setting or a separate CLI option.
-
-`tp_payload` is no longer accepted as a configuration key. Existing JSON must
-rename it to `rank_placement`; the placement rules and layout digest are unchanged.
+The first region alone supplies both metadata fields. Later regions must omit
+both fields (or use `null`); even a second metadata offset of `0` is rejected.
+This rule also applies when multiple regions name the same device.
 
 `rank % len(regions)` selects a region; ranks sharing a region receive disjoint,
 equal whole-GiB payload slices. For two 256 GiB regions A and B:
@@ -173,53 +181,63 @@ global slot ID in the shared index. An address table maps slots to local payload
 addresses. Each object stays contiguous; a full slice does not borrow space
 from another rank.
 
-The common index starts at `regions[0].metadata_offset_bytes`.
-`metadata_reservation_bytes` reserves its capacity once, independent of TP size;
-only the first region accepts a metadata offset. The registered homogeneous KV layout
-determines one common slot size, while bucket counts cover all ranks together.
-
-`regions[0].metadata_offset_bytes` is required, including an explicit `0` when
-the common index starts at the beginning of the device. Later regions must omit
-the offset (or use `null` for an unset value); specifying even `0` is rejected.
-Remove previously ignored metadata offsets from those regions. For TP=4, add
-the following field to the backend configuration JSON:
+The common index starts at `regions[0].metadata_offset_bytes` and reserves
+`regions[0].metadata_reservation_bytes` once, independent of TP size.
+The homogeneous KV layout determines one common slot size; bucket counts
+cover all ranks together. To assign each rank an explicit offset on one device,
+provide exactly `tp_size` regions: `regions[i]` then belongs to rank `i`.
+This TP=2 example uses two disjoint ranges of `/dev/dax0.0` at offsets
+[30, 94) and [256, 320) GiB. Its no-flush setting assumes the deployment has qualified DDIO
+non-allocating writes and UC coverage for every payload range on all hosts:
 
 ```json
 {
+  "region_id": "lab-shared-range-1",
+  "region_epoch": 1,
+  "participant_id": 0,
+  "hardware_qualification_digest": "<64 hex characters>",
+  "skip_payload_flush": true,
   "rank_placement": {
-    "tp_size": 4,
-    "metadata_reservation_bytes": 1073741824,
+    "tp_size": 2,
     "regions": [
       {
         "devdax_path": "/dev/dax0.0",
         "metadata_offset_bytes": 0,
-        "payload_offset_bytes": 4294967296,
-        "payload_size_GiB": 2
+        "metadata_reservation_bytes": 1073741824,
+        "payload_offset_bytes": 32212254720,
+        "payload_size_GiB": 64
       },
       {
-        "devdax_path": "/dev/dax1.0",
-        "payload_offset_bytes": 4294967296,
-        "payload_size_GiB": 2
+        "devdax_path": "/dev/dax0.0",
+        "payload_offset_bytes": 274877906944,
+        "payload_size_GiB": 64
       }
     ]
   }
 }
 ```
 
-Metadata stays inside the first region's configuration. Removing unused offsets
-does not change the physical layout or the layout digest.
+| Rank | Device | Payload offsets (GiB) |
+| --- | --- | --- |
+| 0 | `/dev/dax0.0` | [30, 94) |
+| 1 | `/dev/dax0.0` | [256, 320) |
 
-`rank_placement.metadata_reservation_bytes` defaults to 1 GiB. On the first region's
-device, the reserved interval is `[metadata_offset_bytes,
-metadata_offset_bytes + metadata_reservation_bytes)`. Payload ranges must not
-overlap that interval. Only the device-aligned native metadata size is mapped;
-it must fit inside the reservation. No per-rank metadata spacing is implied.
-The region structure and first-region selection remain unchanged.
+Each rank receives 64 GiB (128 GiB total) before participant ownership is applied. Only the
+first entry declares metadata; repeating the device path does not create
+additional metadata arenas. Replace the qualification placeholder for the
+deployment.
 
-Configurations that explicitly used `metadata_stride_bytes` must rename that
-JSON key to `metadata_reservation_bytes`. The default, physical layout and v1
-layout-digest encoding remain unchanged, so the rename does not require
-reformatting an existing arena.
+The metadata reservation is `[metadata_offset_bytes,
+metadata_offset_bytes + metadata_reservation_bytes)` on the first device.
+No payload may overlap it. Only the device-aligned, model-dependent metadata
+size is mapped and initialized, not the entire reservation.
+
+For existing JSON, move the top-level `devdax_path`, `metadata_offset_bytes`,
+`payload_offset_bytes` and `payload_size_GiB` into the region configuration.
+Move `rank_placement.metadata_reservation_bytes` into `regions[0]` as well.
+Old locations are rejected rather than silently ignored. An unchanged TP>1
+placement retains its v1 layout digest. Former TP=1 arenas require fresh ranges
+or an offline reset because TP=1 now includes the placement digest too.
 
 Each worker transfers through its existing MP GPU and CUDA stream to its slice;
 CUDA device ordinals need not equal TP ranks. Portable CUDA registration and the
