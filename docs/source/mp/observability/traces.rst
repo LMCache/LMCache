@@ -32,6 +32,33 @@ View traces in any OTel-compatible backend such as **Jaeger** or
         --l1-size-gb 100 --eviction-policy LRU \
         --enable-tracing --otlp-endpoint http://localhost:4317
 
+Propagate a caller trace over ZMQ
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Set ``LMCACHE_MP_TRACE_CONTEXT=1`` in both the caller and MP server processes.
+Keep the server's existing ``--enable-tracing --otlp-endpoint <URL>`` flags.
+The caller needs an active OpenTelemetry span when it submits a request that
+contains an ``IPCCacheServerKey``.
+
+The client copies only W3C ``traceparent`` and ``tracestate`` into the request
+key. The server restores that parent in the executing worker and restores the
+previous context when the handler returns or raises. The request key's cache
+identity and the original caller object remain unchanged. Existing key maps
+without headers still decode; older map decoders ignore the extra field.
+
+Events capture the parent before the EventBus drain thread or an asynchronous
+GPU callback runs. The standard MP subscriber's existing ``request`` span uses this
+snapshot; LMCache does not install another tracer provider or change the
+provider's sampling policy. Invalid headers and values longer than 512
+characters are ignored. Headers are separate from event metadata and are not
+exported as attributes. Prompt content, token values, and baggage are not
+carried by this feature.
+
+The propagation switch is off by default. Without the OpenTelemetry API,
+request handlers use their original path. This boundary covers keyed ZMQ
+requests and CPU event submission. It does not cover gRPC, keyless control
+calls, CacheBlend root spans, L2 scheduling queues, or native storage backends.
+
 Per-Request Hit-Rate Attributes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 # Standard
 from typing import Any
+import os
 
 # First Party
 from lmcache.logging import init_logger
@@ -168,7 +169,8 @@ class MPServerTracingSubscriber(EventSubscriber):
         self._pending_store_count[sid] = self._pending_store_count.get(sid, 0) + 1
         # Capture the CPU-side parent before native GPU event recording,
         # whose callbacks do not retain Python thread context.
-        self._get_or_create_request_span(sid, event.timestamp, event.trace_context)
+        if event.trace_context:
+            self._get_or_create_request_span(sid, event.timestamp, event.trace_context)
 
     def _on_retrieve_submitted(self, event: Event) -> None:
         """Increment the in-flight retrieve counter for the session.
@@ -183,7 +185,8 @@ class MPServerTracingSubscriber(EventSubscriber):
             return
         sid = event.session_id
         self._pending_retrieve_count[sid] = self._pending_retrieve_count.get(sid, 0) + 1
-        self._get_or_create_request_span(sid, event.timestamp, event.trace_context)
+        if event.trace_context:
+            self._get_or_create_request_span(sid, event.timestamp, event.trace_context)
 
     def _on_session_end(self, event: Event) -> None:
         """Close the root span, or defer if GPU stores/retrieves are still in flight.
@@ -357,7 +360,11 @@ class MPServerTracingSubscriber(EventSubscriber):
             return entry
         root_span = _tracer.start_span(
             "request",
-            context=extract_trace_context(carrier),
+            context=(
+                extract_trace_context(carrier)
+                if os.environ.get("LMCACHE_MP_TRACE_CONTEXT") == "1"
+                else None
+            ),
             start_time=int(ts * 1e9),
         )
         root_span.set_attribute("session_id", session_id)

@@ -12,15 +12,23 @@ no headers, and old msgspec key decoders ignore the additional map field.
 Disable the environment switch to stop injecting and honoring remote parents.
 The existing provider's sampler still decides whether a span is recorded.
 
-This boundary does not cover gRPC, blending, keyless control RPCs, GPU callback
-context capture, or the native Mooncake storage adapter's own task queues.
+CPU submission events retain the parent before asynchronous GPU callbacks.
+This boundary does not cover gRPC, keyless control RPCs, or L2 task queues.
 """
+
+# Future
+from __future__ import annotations
 
 # Standard
 from collections.abc import Callable, Mapping
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, ParamSpec, TypeVar
 import os
 
+if TYPE_CHECKING:
+    # Third Party
+    from opentelemetry.context import Context
+
+P = ParamSpec("P")
 T = TypeVar("T")
 
 
@@ -29,6 +37,9 @@ def capture_trace_context() -> dict[str, str]:
 
     Only traceparent and tracestate are carried; baggage and request payloads
     are never included. No SDK or exporter is installed by this function.
+
+    Returns:
+        W3C headers, or an empty dictionary when disabled or unavailable.
     """
     if os.environ.get("LMCACHE_MP_TRACE_CONTEXT") != "1":
         return {}
@@ -44,11 +55,17 @@ def capture_trace_context() -> dict[str, str]:
     return carrier
 
 
-def extract_trace_context(carrier: Mapping[str, str] | None) -> Any:
+def extract_trace_context(carrier: Mapping[str, str] | None) -> Context:
     """Extract an isolated OTel context, ignoring invalid or oversized headers.
 
     Returns an empty context when propagation is disabled or headers are
     absent. Requires the OTel API; callers without OTel should skip this call.
+
+    Args:
+        carrier: Optional W3C headers captured in the submitting process.
+
+    Returns:
+        A remote parent context, or an empty context for invalid input.
     """
     # Third Party
     from opentelemetry.context import Context
@@ -66,20 +83,37 @@ def extract_trace_context(carrier: Mapping[str, str] | None) -> Any:
 
 
 def run_with_trace_context(
-    carrier: Mapping[str, str] | None, handler: Callable[..., T], *args: Any
+    carrier: Mapping[str, str] | None,
+    handler: Callable[P, T],
+    *args: P.args,
+    **kwargs: P.kwargs,
 ) -> T:
     """Run a handler under an isolated context and restore it even on failure.
 
     The caller must invoke this inside the executing worker, not the submitting
     thread. Exceptions, including cancellation, propagate unchanged.
+
+    Args:
+        carrier: Optional W3C headers captured in the submitting process.
+        handler: Synchronous request handler to execute.
+        args: Positional arguments forwarded to the handler.
+        kwargs: Keyword arguments forwarded to the handler.
+
+    Returns:
+        The handler's original result.
+
+    Raises:
+        BaseException: Any exception raised by the handler, unchanged.
     """
+    if os.environ.get("LMCACHE_MP_TRACE_CONTEXT") != "1":
+        return handler(*args, **kwargs)
     try:
         # Third Party
         from opentelemetry import context
     except ImportError:
-        return handler(*args)
+        return handler(*args, **kwargs)
     token = context.attach(extract_trace_context(carrier))
     try:
-        return handler(*args)
+        return handler(*args, **kwargs)
     finally:
         context.detach(token)

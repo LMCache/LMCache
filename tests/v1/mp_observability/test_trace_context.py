@@ -4,8 +4,9 @@
 # Standard
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from typing import Any
 import asyncio
+import subprocess
+import sys
 import threading
 
 # Third Party
@@ -30,6 +31,7 @@ from lmcache.v1.mp_observability.subscribers.tracing.mp_server import (
     MPServerTracingSubscriber,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
@@ -138,7 +140,7 @@ def test_invalid_carrier_isolated(carrier: dict[str, str]) -> None:
 
 
 @pytest.mark.usefixtures("enabled")
-@pytest.mark.parametrize("error", [ValueError, asyncio.CancelledError])
+@pytest.mark.parametrize("error", [ValueError, TimeoutError, asyncio.CancelledError])
 def test_exception_and_cancellation_restore_context(error: type[BaseException]) -> None:
     def fail() -> None:
         raise error()
@@ -147,6 +149,12 @@ def test_exception_and_cancellation_restore_context(error: type[BaseException]) 
         with pytest.raises(error):
             run_with_trace_context({}, fail)
         assert trace.get_current_span().get_span_context().trace_id == 1
+        assert (
+            run_with_trace_context(
+                {}, lambda: trace.get_current_span().get_span_context().trace_id
+            )
+            == 0
+        )
 
 
 @pytest.mark.usefixtures("enabled")
@@ -154,8 +162,9 @@ def test_real_handlers_and_concurrent_worker_isolation() -> None:
     def observe(request: IPCCacheServerKey) -> int:
         return trace.get_current_span().get_span_context().trace_id
 
-    blocking = BlockingRequestHandler([IPCCacheServerKey], int, observe)
-    sync = SyncRequestHandler([IPCCacheServerKey], int, observe)
+    # The existing constructors type the wire class as a response value.
+    blocking = BlockingRequestHandler[int]([IPCCacheServerKey], int, observe)  # type: ignore[arg-type]
+    sync = SyncRequestHandler[int]([IPCCacheServerKey], int, observe)  # type: ignore[arg-type]
     with ThreadPoolExecutor(max_workers=2) as pool:
         blocking.executor = pool
         futures = []
@@ -235,7 +244,9 @@ def test_real_zmq_worker_event_bus_parentage(
     try:
         parent = parent_span(99, sampled)
         with trace.use_span(parent):
-            future: Any = client.submit_request("lookup", [request, 1])
+            future: MessagingFuture[None] = client.submit_request(
+                "lookup", [request, 1]
+            )
         assert future.result(5) is None
         assert completed.wait(5)
         spans = exporter.get_finished_spans()
@@ -256,3 +267,45 @@ def test_real_zmq_worker_event_bus_parentage(
         bus.stop()
         ctx.term()
         provider.shutdown()
+
+
+def test_disabled_handler_keeps_existing_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opting out must preserve the original handler's ambient context."""
+    monkeypatch.delenv("LMCACHE_MP_TRACE_CONTEXT", raising=False)
+    with trace.use_span(parent_span(73)):
+        assert (
+            run_with_trace_context(
+                {"traceparent": "00-" + "0" * 31 + "1-" + "0" * 15 + "2-01"},
+                lambda: trace.get_current_span().get_span_context().trace_id,
+            )
+            == 73
+        )
+
+
+def test_optional_api_is_not_required() -> None:
+    """A clean stdlib-only child process executes the original handler path."""
+    # First Party
+    from lmcache.v1.mp_observability import propagation
+
+    script = """
+import importlib.util
+import os
+import sys
+spec = importlib.util.spec_from_file_location("propagation", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+os.environ["LMCACHE_MP_TRACE_CONTEXT"] = "1"
+assert module.capture_trace_context() == {}
+assert module.run_with_trace_context({}, lambda value: value + 1, 4) == 5
+try:
+    module.run_with_trace_context({}, lambda: 1 / 0)
+except ZeroDivisionError:
+    pass
+else:
+    raise AssertionError("handler exception was swallowed")
+"""
+    subprocess.run(
+        [sys.executable, "-S", "-c", script, propagation.__file__], check=True
+    )

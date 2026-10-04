@@ -36,6 +36,9 @@ class IPCCacheServerKey:
     The request_id field is for session tracking and is NOT included
     in equality/hash comparisons (two keys with same content but different
     request_ids are considered equal for cache purposes).
+
+    trace_context carries optional W3C headers and is also excluded from
+    equality, ordering, hashing, and repr. It does not change cache identity.
     """
 
     model_name: str
