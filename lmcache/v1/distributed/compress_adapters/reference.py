@@ -36,6 +36,18 @@ def _as_byte_view(
     name: str,
     data: bytes | bytearray | memoryview,
 ) -> memoryview:
+    """Expose a C-contiguous input buffer as bytes without copying it.
+
+    Args:
+        name: Argument name used in validation errors.
+        data: Input buffer to view; a mutable owner remains aliased.
+
+    Returns:
+        A one-dimensional byte view retaining the input owner.
+
+    Raises:
+        TypeError: If ``data`` cannot expose a C-contiguous byte view.
+    """
     try:
         return memoryview(data).cast("B")
     except (TypeError, ValueError) as exc:
@@ -43,6 +55,18 @@ def _as_byte_view(
 
 
 def _require_chunk_size(chunk_size: int) -> None:
+    """Enforce the version-1 size and output-alignment rules for encoder chunks.
+
+    Args:
+        chunk_size: Maximum input bytes in one independent codec stream.
+
+    Returns:
+        None for a positive uint32 value divisible by the payload alignment.
+
+    Raises:
+        TypeError: If ``chunk_size`` is not an exact int.
+        ValueError: If it is zero, outside uint32 bounds, or unaligned.
+    """
     if type(chunk_size) is not int:
         raise TypeError(f"chunk_size must be an int, got {type(chunk_size).__name__}")
     if chunk_size <= 0 or chunk_size > _UINT32_MAX:
@@ -55,6 +79,18 @@ def _require_chunk_size(chunk_size: int) -> None:
 
 
 def _require_expected_uncompressed_size(expected_uncompressed_size: int) -> None:
+    """Validate the caller's logical output size before inspecting record bytes.
+
+    Args:
+        expected_uncompressed_size: Exact decoded size supplied by the caller.
+
+    Returns:
+        None for a nonnegative exact int, including zero for empty records.
+
+    Raises:
+        TypeError: If the size is not an exact int, including boolean values.
+        ValueError: If the size is negative.
+    """
     if type(expected_uncompressed_size) is not int:
         raise TypeError(
             "expected_uncompressed_size must be an int, got "
@@ -68,6 +104,17 @@ def _require_expected_uncompressed_size(expected_uncompressed_size: int) -> None
 
 
 def _deflate_wbits(stored_format: StoredCompressionFormat) -> int:
+    """Translate a supported stored format to zlib's framing selector.
+
+    Args:
+        stored_format: Typed format already checked at the public API boundary.
+
+    Returns:
+        Negative ``MAX_WBITS`` for raw Deflate or ``MAX_WBITS | 16`` for Gzip.
+
+    Raises:
+        ValueError: If the codec, framing, or post-transform is unsupported.
+    """
     if stored_format.codec is not CompressionCodec.DEFLATE:
         raise ValueError(
             "the reference codec supports only Deflate, got "
@@ -88,6 +135,18 @@ def _deflate_wbits(stored_format: StoredCompressionFormat) -> int:
 
 
 def _compress_chunk(data: memoryview, wbits: int) -> bytes:
+    """Encode one input chunk as a complete, independent codec stream.
+
+    Args:
+        data: Contiguous byte view of the input chunk.
+        wbits: Raw-Deflate or Gzip selector returned by ``_deflate_wbits``.
+
+    Returns:
+        Compressed bytes including the stream's end marker and framing trailer.
+
+    Raises:
+        zlib.error: If zlib cannot initialize or finish the stream.
+    """
     compressor = zlib.compressobj(wbits=wbits)
     return compressor.compress(data) + compressor.flush()
 
@@ -99,6 +158,29 @@ def _decompress_chunk(
     wbits: int,
     chunk_index: int,
 ) -> bytes:
+    """Decode exactly one stream while enforcing its advertised output size.
+
+    Args:
+        data: Exact compressed-stream view from a validated record descriptor.
+        expected_size: Positive descriptor output size. The record's total
+            decoded size must already match the caller's logical layout.
+        wbits: Raw-Deflate or Gzip selector returned by ``_deflate_wbits``.
+        chunk_index: Descriptor index used in error messages.
+
+    Returns:
+        Exactly ``expected_size`` decoded bytes. The caller must still compare
+        their CRC against the descriptor's output checksum.
+
+    Raises:
+        CompressedRecordFormatError: If zlib rejects the stream, decoded size
+            differs, the stream is truncated, or trailing compressed bytes
+            remain, including a concatenated second stream.
+
+    Notes:
+        Compressed input is fed in bounded windows and each decompress call
+        allows at most the remaining advertised output plus one byte, so an
+        oversized output is detected before processing further input.
+    """
     output_limit = expected_size + 1
     output = bytearray()
     decompressor = zlib.decompressobj(wbits)

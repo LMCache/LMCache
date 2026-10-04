@@ -100,6 +100,14 @@ assert decode_reference_record(
 
 The reference codec is a correctness oracle and fixture producer. It is not registered as a production serde or used as an implicit CPU fallback. Deflate output is not canonical across encoder versions; the frozen fixtures constrain reader compatibility, not every encoder's exact output bytes.
 
+## Relationship to existing serde and memory APIs
+
+Production integration should use the existing [Serializer and Deserializer interfaces](../../../../../lmcache/v1/distributed/serde/base.py) and [SerdeL2AdapterWrapper](../l2_adapters/serde_wrapper.md). A future portable-record serializer must write into the supplied `MemoryObj` and return the actual complete record length. `AsyncSerdeProcessor` already passes that length to `MemoryObj.set_used_size()`. Its allocation estimate must include the header, descriptors, alignment gaps, and an upper bound on codec output. The caller's `MemoryLayoutDesc` remains the source of logical KV shapes and dtypes; the record's decoded size must agree with that layout.
+
+The current wrapper loads serialized bytes into temporary buffers and invokes a deserializer to materialize KV data. Keeping a validated compressed record in L1 requires a later change to that load and publication flow. The immutable `bytes` accepted here do not establish an allocator reservation for `MemoryObj` storage; a future zero-copy form must retain an L1 read reservation or equivalent ownership until native work has finished using the input.
+
+[CacheGenDeserializer](../../../../../lmcache/v1/storage_backend/naive_serde/cachegen_decoder.py) uses the older naive-serde interface and its own encoded format. [TurboQuantDeserializer](../../../../../lmcache/v1/distributed/serde/turboquant/turboquant.py) implements distributed serde and reconstructs KV through GPU kernels from a separate quantized format. Their encoded bytes cannot be interpreted as portable Deflate records. Reusing either codec requires an explicit format and integration decision; shared GPU execution alone does not establish wire compatibility.
+
 ## Compatibility evidence and testing
 
 The [vendor probe](../../../../../tests/v1/distributed/compress_adapters/vendor_compatibility/README.md) copies each frozen record unchanged to a device and passes record-relative chunk offsets to nvCOMP or hipCOMP. The source branch records successful raw-Deflate and Gzip decoding with nvCOMP 5.3.0.16 on an RTX 4060 using CUDA 12.9.86. An AMD hardware result remains pending. These single-chunk fixtures establish framing and address-alignment compatibility, not production throughput, concurrency, or asynchronous ownership guarantees.

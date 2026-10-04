@@ -64,6 +64,20 @@ _MAX_RECORD_CHUNKS = (
 
 
 def _require_uint(name: str, value: int, maximum: int) -> None:
+    """Validate a wire integer without accepting booleans or integer subclasses.
+
+    Args:
+        name: Wire field name used in validation errors.
+        value: Integer to validate.
+        maximum: Inclusive upper bound for the field's unsigned wire type.
+
+    Returns:
+        None when ``value`` is an exact int in ``[0, maximum]``.
+
+    Raises:
+        TypeError: If ``value`` is not an exact int.
+        ValueError: If ``value`` is outside the unsigned range.
+    """
     if type(value) is not int:
         raise TypeError(f"{name} must be an int, got {type(value).__name__}")
     if value < 0 or value > maximum:
@@ -137,6 +151,19 @@ def record_header_size(chunk_count: int) -> int:
 
 
 def _header_crc32(data: bytes | bytearray | memoryview) -> int:
+    """Checksum a complete header with its checksum field treated as zero.
+
+    Args:
+        data: Contiguous header bytes whose fixed-header and descriptor-table
+            lengths have already been checked by ``parse_record_header``.
+
+    Returns:
+        Unsigned CRC-32/IEEE covering the fixed header and chunk descriptors.
+
+    Notes:
+        The parser bounds this temporary copy to ``MAX_RECORD_HEADER_SIZE``.
+        The supplied buffer is left unchanged.
+    """
     header_bytes = bytearray(data)
     struct.pack_into("<I", header_bytes, _HEADER_CRC32_OFFSET, 0)
     return crc32_ieee(header_bytes)
