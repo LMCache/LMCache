@@ -420,10 +420,12 @@ class LookupMixin:
             under SEGMENTED_PREFIX, else None.
         """
         owners: dict[ObjectKey, int] = {}
+        read_generations: dict[ObjectKey, int] = {}
         if job.prefix_handle is not None:
             result = self._ctx.storage_manager.query_prefetch_status(job.prefix_handle)
             if result is None:
                 return None  # still loading
+            read_generations = result.read_generations
             rows = result.hit_cells
             owners = result.l1_owners
             # Window-aware fold: a windowed group's out-of-window keys are
@@ -446,7 +448,9 @@ class LookupMixin:
         # Publish the lock model so free_lookup_locks releases exactly what
         # this leg locked.
         session = self._ctx.session_manager.get_or_create(rid)
-        session.record_prefetch_result(leading, job.prefix_lock_gids, owners)
+        session.record_prefetch_result(
+            leading, job.prefix_lock_gids, owners, read_generations=read_generations
+        )
         self._event_bus.publish(
             Event(
                 event_type=EventType.CB_PREFIX_LOOKUP_END,
