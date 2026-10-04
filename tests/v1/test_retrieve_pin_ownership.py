@@ -532,9 +532,12 @@ def test_async_cleanup_releases_one_prefetch_pin(
 
     if completion == "retrieve":
         assert engine.retrieve(cache_case.tokens, req_id="A").all()
-        # Successful retrieve retains the event record. Remove only the record,
-        # not its already-consumed references; aborted lookups use lookup_unpin.
-        engine.event_manager.pop_event(EventType.LOADING, "A")
+        # Successful retrieve consumes the event record, so the request's
+        # lookup_unpin() at wait_for_save does not release the objects again.
+        assert engine.event_manager.get_event_status(EventType.LOADING, "A") == (
+            EventStatus.NOT_FOUND
+        )
+        engine.lookup_unpin("A")
     else:
         engine.lookup_unpin("A")
         engine.lookup_unpin("A")
