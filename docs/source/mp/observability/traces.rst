@@ -60,10 +60,9 @@ inside the synchronous, normal-pool, or affinity-pool handler. It keeps the
 existing affinity identifier and worker scheduling rules. Missing or invalid
 headers use an isolated context when propagation is enabled.
 
-The propagation switch is off by default. Without the OpenTelemetry API,
-request handlers use their original path. This boundary covers keyed ZMQ
-requests, gRPC metadata, and CPU event submission. It does not cover
-CacheBlend root spans, L2 scheduling queues, or native storage backends.
+The propagation switch is off by default. This boundary covers keyed ZMQ
+requests, gRPC metadata, and CPU event submission, including CacheBlend request
+root spans. It does not cover L2 scheduling queues or native storage backends.
 
 Per-Request Hit-Rate Attributes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -3,7 +3,6 @@
 
 # Standard
 from multiprocessing.connection import Connection
-from typing import Any
 import multiprocessing
 import os
 
@@ -25,6 +24,8 @@ from lmcache.v1.mp_observability.subscribers.tracing.mp_server import (
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
+from lmcache.v1.multiprocess.transport.grpc_impl.client import GrpcMultiprocessClient
+from lmcache.v1.multiprocess.transport.grpc_impl.server import GrpcMultiprocessServer
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     MessageQueueClient,
     MessageQueueServer,
@@ -71,7 +72,7 @@ def run_server(connection: Connection, transport: str) -> None:
 
     module = Module()
     ctx = zmq.Context()
-    server: Any
+    server: MessageQueueServer | GrpcMultiprocessServer
     if transport == "zmq":
         server = MessageQueueServer("tcp://127.0.0.1:*", ctx)
         for operation in ("lookup", "end_session"):
@@ -81,11 +82,6 @@ def run_server(connection: Connection, transport: str) -> None:
         server.add_normal_thread_pool(["lookup", "end_session"], max_workers=2)
         endpoint = server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
     else:
-        # First Party
-        from lmcache.v1.multiprocess.transport.grpc_impl.server import (
-            GrpcMultiprocessServer,
-        )
-
         server = GrpcMultiprocessServer("grpc://127.0.0.1:0", 2, 1, 4)
         server.add_modules([module])
         endpoint = f"grpc://127.0.0.1:{server.bound_port}"
@@ -115,7 +111,7 @@ def test_two_process_parent_and_keyless_lifecycle(
     process = mp.Process(target=run_server, args=(child_conn, transport))
     process.start()
     child_conn.close()
-    client: Any = None
+    client: MessageQueueClient | GrpcMultiprocessClient | None = None
     ctx = zmq.Context()
     try:
         assert parent_conn.poll(20), "child server did not initialize"
@@ -123,11 +119,6 @@ def test_two_process_parent_and_keyless_lifecycle(
         if transport == "zmq":
             client = MessageQueueClient(endpoint, ctx)
         else:
-            # First Party
-            from lmcache.v1.multiprocess.transport.grpc_impl.client import (
-                GrpcMultiprocessClient,
-            )
-
             # RPC methods are installed at runtime, as in the transport tests.
             client = GrpcMultiprocessClient(endpoint)  # type: ignore[abstract]
         request = IPCCacheServerKey.from_token_ids("model", 1, 0, [1], request_id="r")
@@ -135,13 +126,13 @@ def test_two_process_parent_and_keyless_lifecycle(
         with trace.use_span(span):
             future = (
                 client.submit_request("lookup", [request, 1])
-                if transport == "zmq"
+                if isinstance(client, MessageQueueClient)
                 else client.lookup(request, 1)
             )
         assert future.result(10) is None
         end = (
             client.submit_request("end_session", ["r"])
-            if transport == "zmq"
+            if isinstance(client, MessageQueueClient)
             else client.end_session("r")
         )
         assert end.result(10) is None

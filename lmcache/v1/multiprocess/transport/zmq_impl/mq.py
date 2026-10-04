@@ -72,11 +72,24 @@ def unwrap_request_payloads(
     return decoded_payloads
 
 
-def invoke_request_handler(handler: Callable[..., T], decoded_payloads: list[Any]) -> T:
+def invoke_request_handler(
+    handler: Callable[..., T], decoded_payloads: list[object]
+) -> T:
     """Execute a decoded request under its optional key's W3C context.
 
-    Requests without a key run under an empty context so pooled threads do
-    not inherit another request. Handler exceptions propagate unchanged.
+    When propagation is enabled, requests without a key run under an empty
+    context so pooled threads do not inherit another request. Disabling
+    propagation preserves the handler's existing ambient context.
+
+    Args:
+        handler: Synchronous request handler to execute in the worker.
+        decoded_payloads: Positional request arguments decoded from the wire.
+
+    Returns:
+        The handler's original result.
+
+    Raises:
+        BaseException: Any exception raised by the handler, unchanged.
     """
     carrier = next(
         (

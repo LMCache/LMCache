@@ -5,11 +5,10 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 import asyncio
-import subprocess
-import sys
 import threading
 
 # Third Party
+from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 from opentelemetry import baggage, context, trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -27,12 +26,19 @@ from lmcache.v1.mp_observability.propagation import (
     extract_trace_context,
     run_with_trace_context,
 )
+from lmcache.v1.mp_observability.subscribers.tracing.cb_server import (
+    BlendTracingSubscriber,
+)
 from lmcache.v1.mp_observability.subscribers.tracing.mp_server import (
     MPServerTracingSubscriber,
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import common_pb2
+from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
+    compile_request_codec_for_types,
+)
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
@@ -40,6 +46,7 @@ from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     SyncRequestHandler,
     msgspec_encode,
 )
+import lmcache.v1.mp_observability.subscribers.tracing.cb_server as blend_tracing_module
 import lmcache.v1.mp_observability.subscribers.tracing.mp_server as tracing_module
 
 
@@ -103,6 +110,7 @@ def test_key_wire_compatibility_and_identity() -> None:
     assert original == propagated
     assert hash(original) == hash(propagated)
     assert "traceparent" not in repr(propagated)
+    assert propagated.no_worker_id_version().trace_context == propagated.trace_context
     wire = msgspec.msgpack.decode(msgspec.msgpack.encode(propagated))
     wire.pop("trace_context")
     assert (
@@ -124,6 +132,40 @@ def test_key_wire_compatibility_and_identity() -> None:
 
     legacy = msgspec.msgpack.decode(msgspec.msgpack.encode(propagated), type=LegacyKey)
     assert legacy.token_ids == original.token_ids
+
+
+@pytest.mark.usefixtures("enabled")
+def test_grpc_key_wire_compatibility() -> None:
+    """The typed codec accepts old keys and old peers ignore the new field."""
+    schema = descriptor_pb2.FileDescriptorProto.FromString(
+        common_pb2.DESCRIPTOR.serialized_pb
+    )
+    key_schema = next(
+        item for item in schema.message_type if item.name == "IpcCacheServerKey"
+    )
+    trace_field = next(item for item in key_schema.field if item.number == 11)
+    key_schema.field.remove(trace_field)
+    del key_schema.oneof_decl[trace_field.oneof_index]
+    pool = descriptor_pool.DescriptorPool()
+    pool.Add(schema)
+    legacy_type = message_factory.GetMessageClass(
+        pool.FindMessageTypeByName(common_pb2.IpcCacheServerKey.DESCRIPTOR.full_name)
+    )
+    encode, decode = compile_request_codec_for_types(
+        common_pb2.IpcCacheServerKey, (IPCCacheServerKey,)
+    )
+    with trace.use_span(parent_span(1)):
+        propagated = replace(key(), trace_context=capture_trace_context())
+    message = encode((propagated,), {})
+    assert decode(message)[0].trace_context == propagated.trace_context
+    legacy = legacy_type.FromString(message.SerializeToString())
+    assert legacy.request_id == propagated.request_id
+    assert tuple(legacy.token_ids) == propagated.token_ids
+    legacy.DiscardUnknownFields()
+    old_message = common_pb2.IpcCacheServerKey.FromString(legacy.SerializeToString())
+    decoded = decode(old_message)[0]
+    assert decoded == propagated
+    assert decoded.trace_context is None
 
 
 @pytest.mark.usefixtures("enabled")
@@ -180,8 +222,9 @@ def test_real_handlers_and_concurrent_worker_isolation() -> None:
 
 @pytest.mark.usefixtures("enabled")
 @pytest.mark.parametrize("sampled", [True, False])
+@pytest.mark.parametrize("operation", ["STORE", "RETRIEVE"])
 def test_gpu_callback_events_use_cpu_submission_parent(
-    monkeypatch: pytest.MonkeyPatch, sampled: bool
+    monkeypatch: pytest.MonkeyPatch, sampled: bool, operation: str
 ) -> None:
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
@@ -192,19 +235,21 @@ def test_gpu_callback_events_use_cpu_submission_parent(
     subscriber = MPServerTracingSubscriber()
     callbacks = subscriber.get_subscriptions()
     with trace.use_span(parent_span(42, sampled)):
-        submitted = Event(EventType.MP_STORE_SUBMITTED, session_id="gpu", timestamp=1)
+        submitted = Event(
+            EventType[f"MP_{operation}_SUBMITTED"], session_id="gpu", timestamp=1
+        )
     callbacks[submitted.event_type](submitted)
     for kind in (
         EventType.MP_REQUEST_END,
-        EventType.MP_STORE_START,
-        EventType.MP_STORE_END,
+        EventType[f"MP_{operation}_START"],
+        EventType[f"MP_{operation}_END"],
     ):
         # Native stream events carry no Python thread-local context.
         callbacks[kind](Event(kind, session_id="gpu", timestamp=2, trace_context={}))
     spans = exporter.get_finished_spans()
     if sampled:
         assert {span.context.trace_id for span in spans} == {42}
-        assert {span.name for span in spans} == {"request", "mp.store"}
+        assert {span.name for span in spans} == {"request", f"mp.{operation.lower()}"}
     else:
         assert not spans
     subscriber.shutdown()
@@ -284,28 +329,37 @@ def test_disabled_handler_keeps_existing_context(
         )
 
 
-def test_optional_api_is_not_required() -> None:
-    """A clean stdlib-only child process executes the original handler path."""
-    # First Party
-    from lmcache.v1.mp_observability import propagation
-
-    script = """
-import importlib.util
-import os
-import sys
-spec = importlib.util.spec_from_file_location("propagation", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-os.environ["LMCACHE_MP_TRACE_CONTEXT"] = "1"
-assert module.capture_trace_context() == {}
-assert module.run_with_trace_context({}, lambda value: value + 1, 4) == 5
-try:
-    module.run_with_trace_context({}, lambda: 1 / 0)
-except ZeroDivisionError:
-    pass
-else:
-    raise AssertionError("handler exception was swallowed")
-"""
-    subprocess.run(
-        [sys.executable, "-S", "-c", script, propagation.__file__], check=True
+@pytest.mark.parametrize("enabled", [True, False])
+def test_blend_request_parent_and_opt_out(
+    monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    """Blend roots use the captured parent only when propagation is enabled."""
+    if enabled:
+        monkeypatch.setenv("LMCACHE_MP_TRACE_CONTEXT", "1")
+    else:
+        monkeypatch.delenv("LMCACHE_MP_TRACE_CONTEXT", raising=False)
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(
+        blend_tracing_module, "_tracer", provider.get_tracer("lmcache_mp.blend")
     )
+    subscriber = BlendTracingSubscriber()
+    callbacks = subscriber.get_subscriptions()
+    try:
+        with trace.use_span(parent_span(41)):
+            event = Event(EventType.CB_REQUEST_START, session_id="blend")
+        with trace.use_span(parent_span(73)):
+            callbacks[EventType.CB_REQUEST_START](event)
+        callbacks[EventType.CB_REQUEST_END](
+            Event(EventType.CB_REQUEST_END, session_id="blend")
+        )
+        root = next(
+            span for span in exporter.get_finished_spans() if span.name == "cb.request"
+        )
+        expected = parent_span(41 if enabled else 73).get_span_context()
+        assert root.context.trace_id == expected.trace_id
+        assert root.parent.span_id == expected.span_id
+    finally:
+        subscriber.shutdown()
+        provider.shutdown()

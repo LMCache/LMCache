@@ -154,6 +154,7 @@ class IPCCacheServerKey:
             request_id=self.request_id,
             cache_salt=self.cache_salt,
             request_configs=self.request_configs,
+            trace_context=self.trace_context,
         )
 
 

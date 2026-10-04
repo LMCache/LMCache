@@ -22,12 +22,13 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, ParamSpec, TypeVar
+from typing import ParamSpec, TypeVar
 import os
 
-if TYPE_CHECKING:
-    # Third Party
-    from opentelemetry.context import Context
+# Third Party
+from opentelemetry import context
+from opentelemetry.context import Context
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -40,16 +41,9 @@ def capture_trace_context() -> dict[str, str]:
     are never included. No SDK or exporter is installed by this function.
 
     Returns:
-        W3C headers, or an empty dictionary when disabled or unavailable.
+        W3C headers, or an empty dictionary when disabled.
     """
     if os.environ.get("LMCACHE_MP_TRACE_CONTEXT") != "1":
-        return {}
-    try:
-        # Third Party
-        from opentelemetry.trace.propagation.tracecontext import (
-            TraceContextTextMapPropagator,
-        )
-    except ImportError:
         return {}
     carrier: dict[str, str] = {}
     TraceContextTextMapPropagator().inject(carrier)
@@ -60,7 +54,7 @@ def extract_trace_context(carrier: Mapping[str, str] | None) -> Context:
     """Extract an isolated OTel context, ignoring invalid or oversized headers.
 
     Returns an empty context when propagation is disabled or headers are
-    absent. Requires the OTel API; callers without OTel should skip this call.
+    absent. The OpenTelemetry API is an existing LMCache dependency.
 
     Args:
         carrier: Optional W3C headers captured in the submitting process.
@@ -68,12 +62,6 @@ def extract_trace_context(carrier: Mapping[str, str] | None) -> Context:
     Returns:
         A remote parent context, or an empty context for invalid input.
     """
-    # Third Party
-    from opentelemetry.context import Context
-    from opentelemetry.trace.propagation.tracecontext import (
-        TraceContextTextMapPropagator,
-    )
-
     headers: dict[str, str] = {}
     if os.environ.get("LMCACHE_MP_TRACE_CONTEXT") == "1" and carrier:
         for name, limit in (("traceparent", 512), ("tracestate", 512)):
@@ -107,11 +95,6 @@ def run_with_trace_context(
         BaseException: Any exception raised by the handler, unchanged.
     """
     if os.environ.get("LMCACHE_MP_TRACE_CONTEXT") != "1":
-        return handler(*args, **kwargs)
-    try:
-        # Third Party
-        from opentelemetry import context
-    except ImportError:
         return handler(*args, **kwargs)
     token = context.attach(extract_trace_context(carrier))
     try:
