@@ -168,6 +168,27 @@ caller-provided load buffers during prefetch.
     # With eviction
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
 
+**Failure handling and shutdown:**
+
+Recoverable ``io_uring`` submission errors (``EAGAIN``, ``EINTR``, ``EBUSY``)
+retry after completion progress or 1–100 ms exponential backoff. Permanent
+errors, or 30 seconds without submission or completion progress, mark the
+worker unhealthy and stop new native I/O. The core status exposes the failure
+reason as ``worker_error``.
+
+After a known worker failure, new prefetch tasks report failure through their
+normal task results and new stores are skipped. The adapter still publishes
+completion results and notifications so controllers can release locks and
+buffers; the serving engine can recompute missing data instead of receiving a
+synchronous storage exception. Valid hits from L1 or other L2 adapters remain
+usable. The legacy non-MP raw-block backend also skips new stores after worker
+failure.
+
+Already-accepted I/O retains its buffers until completion or successful
+cancellation. Close and destructor cleanup release the Python GIL while
+waiting, but can still block indefinitely if accepted I/O cannot finish or be
+cancelled. The 30-second submission retry budget is not a shutdown timeout.
+
 **Hardware-gated FDP status validation:**
 
 FDP live-device validation is opt-in because it requires an FDP-capable NVMe

@@ -500,7 +500,7 @@ class RawBlockCore:
         )
         return aligned_bytes
 
-    def _rawdev(self):
+    def _rawdev(self) -> Any:
         """Return the lazily opened Rust raw-block device binding."""
         if self._raw is None:
             try:
@@ -520,6 +520,7 @@ class RawBlockCore:
                 iouring_queue_depth=self.iouring_queue_depth,
                 use_uring_cmd=self.use_uring_cmd,
             )
+        self.raise_if_failed()
         return self._raw
 
     def raw_device(self) -> Any:
@@ -752,6 +753,7 @@ class RawBlockCore:
         Raises:
             ValueError: If either sequence is empty, sequence lengths do not
                 match, or a placement identifier is 0.
+            RuntimeError: If the native io_uring worker has permanently failed.
         """
         if not keys or not objs:
             raise ValueError("keys and objs must be non-empty")
@@ -762,6 +764,7 @@ class RawBlockCore:
             len(keys),
             field_name="placement_ids",
         )
+        self.raise_if_failed()
 
         if self.io_engine == "io_uring" and len(keys) > 1:
             return self._put_many_batch_io(keys, objs, per_key_placement_ids)
@@ -843,8 +846,11 @@ class RawBlockCore:
             lock: If true, increment L2 lock refcounts for every hit.
 
         Returns:
-            A list of booleans aligned with ``encoded_keys``.
+            A list of booleans aligned with ``encoded_keys``. A permanently
+            failed io_uring worker reports all misses without locking keys.
         """
+        if self._worker_error() is not None:
+            return [False] * len(encoded_keys)
         results: list[bool] = []
         with self._lock:
             for encoded_key in encoded_keys:
@@ -875,11 +881,13 @@ class RawBlockCore:
         Raises:
             ValueError: If either sequence is empty or the sequence lengths do
                 not match.
+            RuntimeError: If the native io_uring worker has permanently failed.
         """
         if not encoded_keys or not objs:
             raise ValueError("encoded_keys and objs must be non-empty")
         if len(encoded_keys) != len(objs):
             raise ValueError("encoded_keys and objs must have the same length")
+        self.raise_if_failed()
 
         with self._lock:
             items = [
@@ -1049,11 +1057,31 @@ class RawBlockCore:
         """
         return self._apply_loaded_state(data)
 
+    def raise_if_failed(self) -> None:
+        """Reject work after a terminal native io_uring submission failure.
+
+        Raises:
+            RuntimeError: Includes the worker's terminal error. Recoverable
+                submission errors and ordinary per-request I/O failures do not
+                mark the worker as failed.
+        """
+        worker_error = self._worker_error()
+        if worker_error is not None:
+            raise RuntimeError(worker_error)
+
     def report_status(self) -> dict:
-        """Return raw-block health, layout, metadata, and in-flight counters."""
+        """Return health, terminal worker error, layout, and in-flight counters.
+
+        Returns:
+            Status dictionary with ``is_healthy=False`` after close or terminal
+            worker failure, and the failure reason in ``worker_error`` when
+            available. Inspecting status never opens a new native device.
+        """
         with self._lock:
+            worker_error = self._worker_error()
             return {
-                "is_healthy": not self._closed,
+                "is_healthy": not self._closed and worker_error is None,
+                "worker_error": worker_error,
                 "type": "RawBlockCore",
                 "key_namespace": self.key_namespace,
                 "device_path": self.device_path,
@@ -1112,6 +1140,12 @@ class RawBlockCore:
                 )
             finally:
                 self._raw = None
+
+    def _worker_error(self) -> str | None:
+        if self._raw is None or self._closed:
+            return None
+        get_worker_error = getattr(self._raw, "worker_error", None)
+        return get_worker_error() if get_worker_error is not None else None
 
     def _cleanup_after_init_failure(self) -> None:
         """Close resources that may have been opened before init failed."""

@@ -11,6 +11,9 @@ the full integration without mocking internals.
 """
 
 # Standard
+from collections.abc import Sequence
+from threading import Event
+from unittest.mock import patch
 import time
 
 # Third Party
@@ -39,6 +42,10 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
 )
+from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
+    RawBlockL2Adapter,
+    RawBlockL2AdapterConfig,
+)
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
 )
@@ -53,6 +60,7 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L2AdapterDescriptor,
 )
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
+from lmcache.v1.storage_backend.raw_block import RawBlockCore, encode_object_key
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 if not torch_dev.is_available():
@@ -464,6 +472,104 @@ class TestSingleAdapterPrefetch:
 # =============================================================================
 # Multiple adapters
 # =============================================================================
+
+
+@pytest.mark.no_shared_allocator
+class TestRawBlockWorkerFailure:
+    @pytest.mark.parametrize("failure_phase", ["lookup", "load"])
+    def test_worker_failure_preserves_other_hits_and_releases_resources(
+        self, l1_manager: L1Manager, failure_phase: str
+    ) -> None:
+        """A failed raw-block worker must not abort hits from healthy tiers."""
+        layout = make_layout()
+        keys = [make_object_key(index) for index in range(3)]
+        stored_key = encode_object_key(keys[2]).encoded
+        locked_keys: set[str] = set()
+        worker_failed = Event()
+        if failure_phase == "lookup":
+            worker_failed.set()
+
+        def reject_failed_worker() -> None:
+            if worker_failed.is_set():
+                raise RuntimeError("io_uring worker submission failed: test error")
+
+        def lookup_keys(
+            encoded_keys: Sequence[str], *, lock: bool = False
+        ) -> list[bool]:
+            results = [encoded_key == stored_key for encoded_key in encoded_keys]
+            if lock:
+                locked_keys.update(
+                    encoded_key
+                    for encoded_key, found in zip(encoded_keys, results, strict=True)
+                    if found
+                )
+            worker_failed.set()
+            return results
+
+        raw_config = RawBlockL2AdapterConfig(
+            device_path="/unused/raw-block",
+            slot_bytes=1024 * 1024,
+            use_odirect=False,
+            io_engine="io_uring",
+            num_store_workers=1,
+            num_lookup_workers=1,
+            num_load_workers=1,
+        )
+        with patch(
+            "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.RawBlockCore",
+            autospec=RawBlockCore,
+        ) as core_cls:
+            core = core_cls.return_value
+            core.report_status.return_value = {"usable_capacity_bytes": 1024 * 1024}
+            core.snapshot_indexed_keys.return_value = []
+            core.raise_if_failed.side_effect = reject_failed_worker
+            core.exists_many.side_effect = lookup_keys
+            core.unlock_many.side_effect = locked_keys.difference_update
+            raw_adapter = RawBlockL2Adapter(raw_config)
+            healthy_adapter = make_adapter()
+            ctrl = PrefetchController(
+                l1_managers=[l1_manager],
+                l1_manager_descriptors=[
+                    L1ManagerDescriptor(index=0, config=make_l1_config())
+                ],
+                l2_adapters=[raw_adapter, healthy_adapter],
+                adapter_descriptors=[
+                    L2AdapterDescriptor(index=0, config=raw_config),
+                    make_descriptor(1),
+                ],
+                policy=DefaultPrefetchPolicy(),
+            )
+            try:
+                write_keys_to_l1(l1_manager, keys[:1], layout)
+                store_keys_in_l2(healthy_adapter, keys[1:2], layout)
+                ctrl.start()
+                req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+                assert ctrl.wait_prefetch_result(req_id, timeout=5)
+                result = ctrl.query_prefetch_result(req_id)
+
+                assert row_bits(result) == [0, 1]
+                assert hit_counts(result) == (1, 1)
+                assert_read_locked(l1_manager, keys[:2])
+                assert_absent(l1_manager, keys[2:])
+                assert l1_manager.get_staging_memory_usage() == 0
+                assert not locked_keys
+                assert_l2_unlocked(healthy_adapter)
+                assert ctrl.query_prefetch_result(req_id) is None
+                assert wait_for_condition(
+                    lambda: ctrl.report_status()["in_flight_request_count"] == 0
+                )
+                core.put_many.assert_not_called()
+                core.load_many_into.assert_not_called()
+                if failure_phase == "lookup":
+                    core.exists_many.assert_not_called()
+                else:
+                    core.exists_many.assert_called_once()
+                    core.unlock_many.assert_called_once()
+                l1_manager.finish_read(keys[:2])
+            finally:
+                ctrl.stop()
+                raw_adapter.close()
+                healthy_adapter.close()
 
 
 class TestMultiAdapterPrefetch:
