@@ -48,7 +48,15 @@ class MockMemoryObj:
     def __init__(self, obj_id: int):
         self.obj_id = obj_id
         self.ref_count = 1
+        self.pin_count = 0
         self.ref_count_down_called = False
+
+    @property
+    def is_pinned(self) -> bool:
+        return self.pin_count > 0
+
+    def unpin(self):
+        self.pin_count -= 1
 
     def ref_count_down(self):
         self.ref_count -= 1
