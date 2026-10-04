@@ -128,7 +128,8 @@ def test_two_process_parent_and_keyless_lifecycle(
                 GrpcMultiprocessClient,
             )
 
-            client = GrpcMultiprocessClient(endpoint)
+            # RPC methods are installed at runtime, as in the transport tests.
+            client = GrpcMultiprocessClient(endpoint)  # type: ignore[abstract]
         request = IPCCacheServerKey.from_token_ids("model", 1, 0, [1], request_id="r")
         span = NonRecordingSpan(SpanContext(123, 456, False, TraceFlags(int(sampled))))
         with trace.use_span(span):

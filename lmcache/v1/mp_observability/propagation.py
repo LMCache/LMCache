@@ -13,7 +13,8 @@ Disable the environment switch to stop injecting and honoring remote parents.
 The existing provider's sampler still decides whether a span is recorded.
 
 CPU submission events retain the parent before asynchronous GPU callbacks.
-This boundary does not cover gRPC, keyless control RPCs, or L2 task queues.
+gRPC carries the same headers in per-call metadata, including keyless control
+RPCs. This boundary does not cover L2 task queues or native storage backends.
 """
 
 # Future
