@@ -621,36 +621,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             "lmcache.mp.rkv_budget", None
         )
         self._rkv_budget = int(rkv_budget) if rkv_budget is not None else None
-        self._rkv_buffer = int(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.rkv_buffer", 128
-            )
-        )
-        self._rkv_mix_lambda = float(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.rkv_mix_lambda", 0.1
-            )
-        )
-        self._rkv_window_size = int(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.rkv_window_size", 8
-            )
-        )
-        self._rkv_kernel_size = int(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.rkv_kernel_size", 7
-            )
-        )
-        self._rkv_retain_ratio = float(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.rkv_retain_ratio", 0.1
-            )
-        )
-        self._rkv_score_chunk_bytes = int(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.rkv_score_chunk_bytes", 512 * 1024 * 1024
-            )
-        )
+        # Keep the MVP's serving policy fixed. Only budget is public config;
+        # buffer remains internal because allocator headroom must match the
+        # R-KV compaction cadence.
+        self._rkv_buffer = 128
         self._rkv: RKVWorker | None = None
         if self._rkv_budget is not None:
             if role == KVConnectorRole.SCHEDULER:
@@ -827,15 +801,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             self._pending_resident_kv_updates: dict[str, int] = {}
             if self._rkv_budget is not None:
-                assert self._rkv_buffer is not None
                 self._rkv = RKVWorker(
                     self._rkv_budget,
                     buffer=self._rkv_buffer,
-                    window_size=self._rkv_window_size,
-                    kernel_size=self._rkv_kernel_size,
-                    mix_lambda=self._rkv_mix_lambda,
-                    retain_ratio=self._rkv_retain_ratio,
-                    score_chunk_bytes=self._rkv_score_chunk_bytes,
                 )
             if self.transfer_intermediate_tensors:
                 # First Party
@@ -1584,7 +1552,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if allocation is None:
                 raise RuntimeError(f"Missing R-KV allocation for {request_id}")
             tracker = self._get_request_tracker(request_id)
-            block_ids = list(tracker.allocated_block_ids.get(0, []))
+            block_ids = tracker.allocated_block_ids.get(0, [])
             if not block_ids:
                 raise RuntimeError(f"Missing R-KV blocks for {request_id}")
 
@@ -1603,7 +1571,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             metadata.rkv_requests.append(
                 LMCacheMPRKVRequestState(
                     request_id=request_id,
-                    block_ids=block_ids,
+                    first_block_id=block_ids[0],
                     resident_kv_tokens=resident_kv_tokens,
                     is_genuine_decode=is_genuine_decode,
                     num_decoded_tokens=num_decoded_tokens,

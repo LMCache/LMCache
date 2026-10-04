@@ -331,7 +331,7 @@ def test_scheduler_builds_authoritative_rkv_state() -> None:
     assert metadata.rkv_requests == [
         LMCacheMPRKVRequestState(
             request_id="request",
-            block_ids=[10, 11, 18],
+            first_block_id=10,
             resident_kv_tokens=33,
             is_genuine_decode=True,
             num_decoded_tokens=1,
@@ -364,7 +364,7 @@ def test_rkv_worker_connector_lifecycle() -> None:
     metadata.rkv_requests.append(
         LMCacheMPRKVRequestState(
             request_id="request",
-            block_ids=[1],
+            first_block_id=1,
             resident_kv_tokens=None,
         )
     )

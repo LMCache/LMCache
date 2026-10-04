@@ -149,14 +149,16 @@ class RKVWorker:
 
         by_first_block: dict[int, Any] = {}
         for state in request_states:
-            if not state.block_ids:
-                raise ValueError(f"R-KV request {state.request_id} has no KV blocks")
-            first_block = state.block_ids[0]
+            first_block = int(state.first_block_id)
             if first_block in by_first_block:
                 raise ValueError("R-KV requires private, uniquely-owned KV blocks")
             by_first_block[first_block] = state
 
-        first_blocks = representative.block_table[:num_reqs, 0].tolist()
+        # vLLM's model runner already owns the authoritative paged-KV block
+        # table. The connector only needs a stable row identity to align
+        # scheduler facts after persistent-batch condense/reordering.
+        block_table = representative.block_table
+        first_blocks = block_table[:num_reqs, 0].tolist()
         try:
             ordered_states = [by_first_block[block_id] for block_id in first_blocks]
         except KeyError as exc:
@@ -176,39 +178,38 @@ class RKVWorker:
         ):
             raise ValueError("R-KV received invalid physical/query lengths")
 
-        block_table = torch.zeros_like(representative.block_table)
-        for row, state in enumerate(ordered_states):
-            if len(state.block_ids) > block_table.shape[1]:
-                raise ValueError("R-KV block table exceeds worker capacity")
-            block_table[row, : len(state.block_ids)] = torch.tensor(
-                state.block_ids,
-                dtype=block_table.dtype,
-                device=block_table.device,
-            )
-
         seq_lens = representative.seq_lens.clone()
-        seq_lens[:num_reqs] = torch.tensor(
+        physical_seq_lens_gpu = torch.as_tensor(
             physical_seq_lens,
             dtype=seq_lens.dtype,
             device=seq_lens.device,
         )
+        seq_lens[:num_reqs] = physical_seq_lens_gpu
 
-        slot_parts: list[torch.Tensor] = []
-        for row, (physical_len, query_len) in enumerate(
-            zip(physical_seq_lens, query_lens, strict=True)
-        ):
-            positions = torch.arange(
-                physical_len - query_len,
-                physical_len,
-                device=block_table.device,
-                dtype=torch.long,
-            )
-            row_blocks = block_table[row]
-            slot_parts.append(
-                row_blocks[positions // self._block_size].long() * self._block_size
-                + positions % self._block_size
-            )
-        slot_mapping = torch.cat(slot_parts)
+        # Re-map this step's newly written tokens to the compacted physical
+        # frontier in one vectorized paged-KV lookup.
+        query_start_loc = representative.query_start_loc
+        query_lens_gpu = (
+            query_start_loc[1 : num_reqs + 1] - query_start_loc[:num_reqs]
+        ).long()
+        rows = torch.repeat_interleave(
+            torch.arange(num_reqs, device=block_table.device),
+            query_lens_gpu,
+        )
+        flat_positions = torch.arange(
+            sum(query_lens),
+            device=block_table.device,
+            dtype=torch.long,
+        )
+        relative_positions = flat_positions - query_start_loc[:num_reqs].long().index_select(
+            0, rows
+        )
+        physical_starts = physical_seq_lens_gpu.long() - query_lens_gpu
+        positions = relative_positions + physical_starts.index_select(0, rows)
+        slot_mapping = (
+            block_table[rows, positions // self._block_size].long() * self._block_size
+            + positions % self._block_size
+        )
 
         apply_physical_kv_view(
             forward_context,

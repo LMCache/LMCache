@@ -186,7 +186,7 @@ def test_prepare_forward_builds_physical_view_and_captures_queries():
     states = [
         SimpleNamespace(
             request_id="req-b",
-            block_ids=[2, 4, 6],
+            first_block_id=2,
             resident_kv_tokens=40,
             is_genuine_decode=True,
             num_decoded_tokens=0,
@@ -194,7 +194,7 @@ def test_prepare_forward_builds_physical_view_and_captures_queries():
         ),
         SimpleNamespace(
             request_id="req-a",
-            block_ids=[1, 3, 5],
+            first_block_id=1,
             resident_kv_tokens=33,
             is_genuine_decode=True,
             num_decoded_tokens=0,

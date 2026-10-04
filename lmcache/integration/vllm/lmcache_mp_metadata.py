@@ -399,7 +399,7 @@ class LMCacheMPRequestMetadata:
 @dataclass
 class LMCacheMPRKVRequestState:
     request_id: str
-    block_ids: list[int]
+    first_block_id: int
     resident_kv_tokens: int | None = None
     is_genuine_decode: bool = False
     num_decoded_tokens: int = 0
