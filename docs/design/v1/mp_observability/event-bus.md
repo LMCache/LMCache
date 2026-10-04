@@ -230,3 +230,12 @@ self._event_bus.publish(Event(
 
 `StorageManager`, by contrast, has no business-logic listeners and publishes
 exclusively to the EventBus.
+
+### Shared RPC key schema compatibility
+
+The optional `IPCCacheServerKey.trace_context` field requires a matching
+`encoded_trace_context` protobuf field. The existing gRPC structural codec
+checks that dataclass and protobuf field counts match, even with tracing off.
+The schema alignment is part of the shared key change; gRPC per-call context
+injection and worker attachment remain a separate transport contribution.
+Regenerate bindings with `grpc_impl/_proto_gen/_generate.py`.
