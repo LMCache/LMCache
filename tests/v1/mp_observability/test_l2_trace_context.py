@@ -9,7 +9,7 @@ import sys
 import threading
 
 # Third Party
-from opentelemetry import trace
+from opentelemetry import baggage, context, trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -52,13 +52,14 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.propagation import (
     capture_trace_context,
     extract_trace_context,
     run_with_trace_links,
 )
 
-pytestmark = pytest.mark.skipif(
+linux_controller = pytest.mark.skipif(
     sys.platform != "linux", reason="controllers use poll/eventfd"
 )
 
@@ -127,6 +128,7 @@ class ObservedL2(MockL2Adapter):
         return result
 
 
+@linux_controller
 @pytest.mark.parametrize("sampled", [True, False])
 def test_prefetch_queue_keeps_each_parent(
     monkeypatch: pytest.MonkeyPatch, sampled: bool
@@ -188,6 +190,7 @@ def test_prefetch_queue_keeps_each_parent(
         adapter.close()
 
 
+@linux_controller
 def test_shared_store_links_writers_without_selecting_a_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -275,6 +278,104 @@ def test_abandoned_writer_eviction_keeps_pending_keys(
             trace.get_current_span(extract_trace_context(c)).get_span_context().trace_id
             for c in carriers
         ] == [2]
+    finally:
+        listener.close()
+
+
+@pytest.mark.parametrize(
+    "error", [None, ValueError, TimeoutError, asyncio.CancelledError]
+)
+def test_unsampled_batch_isolates_and_restores_context(
+    monkeypatch: pytest.MonkeyPatch, error: type[BaseException] | None
+) -> None:
+    """Nested SDK spans keep the unsampled decision without choosing a writer."""
+    monkeypatch.setenv("LMCACHE_MP_TRACE_CONTEXT", "1")
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("test")
+    with trace.use_span(parent(8, False)):
+        carrier = capture_trace_context()
+
+    def submit() -> int:
+        batch = trace.get_current_span().get_span_context()
+        assert batch.is_valid and not batch.trace_flags.sampled
+        assert batch.trace_id not in {8, 99}
+        assert baggage.get_baggage("payload") is None
+        event = Event(EventType.L2_STORE_SUBMITTED)
+        assert event.trace_context["traceparent"].endswith("-00")
+        with tracer.start_as_current_span("backend.child") as child:
+            assert not child.is_recording()
+            if error is not None:
+                raise error("synthetic private request content")
+        return 7
+
+    token = context.attach(baggage.set_baggage("payload", "synthetic"))
+    try:
+        with trace.use_span(parent(99)):
+            if error is None:
+                assert run_with_trace_links([carrier], submit) == 7
+            else:
+                with pytest.raises(error):
+                    run_with_trace_links([carrier], submit)
+            assert trace.get_current_span().get_span_context().trace_id == 99
+            assert baggage.get_baggage("payload") == "synthetic"
+        assert not exporter.get_finished_spans()
+    finally:
+        context.detach(token)
+        provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    "cleanup",
+    ["on_l1_keys_deleted_by_manager", "on_l1_keys_finish_write_and_reserve_read"],
+)
+def test_shared_writer_bounds_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch, cleanup: str
+) -> None:
+    """A shared key retains bounded contributors and clears abandoned writes."""
+    monkeypatch.setenv("LMCACHE_MP_TRACE_CONTEXT", "1")
+    listener = StoreListener()
+    shared = key(1)
+    try:
+        for number in range(1, 13):
+            with trace.use_span(parent(number)):
+                listener.on_l1_keys_reserved_write([shared])
+        listener.on_l1_keys_write_finished([shared])
+        keys, carriers = listener.pop_pending_batch()
+        assert keys == [shared]
+        assert [
+            trace.get_current_span(extract_trace_context(c)).get_span_context().trace_id
+            for c in carriers
+        ] == list(range(1, 9))
+        with trace.use_span(parent(99)):
+            listener.on_l1_keys_reserved_write([shared])
+        getattr(listener, cleanup)([shared])
+        assert listener.pending_count() == 0
+        listener.on_l1_keys_write_finished([shared])
+        keys, carriers = listener.pop_pending_batch()
+        assert keys == [shared] and not carriers
+    finally:
+        listener.close()
+
+
+def test_opt_out_keeps_ambient_context_and_pending_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LMCACHE_MP_TRACE_CONTEXT", raising=False)
+    listener = StoreListener()
+    try:
+        with trace.use_span(parent(99)):
+            assert (
+                run_with_trace_links(
+                    [], lambda: trace.get_current_span().get_span_context().trace_id
+                )
+                == 99
+            )
+            listener.on_l1_keys_reserved_write([key(1)])
+            listener.on_l1_keys_write_finished([key(1)])
+        keys, carriers = listener.pop_pending_batch()
+        assert keys == [key(1)] and not carriers
     finally:
         listener.close()
 

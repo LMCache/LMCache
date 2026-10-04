@@ -71,6 +71,10 @@ The store span measures synchronous scheduling only, not completion of backend
 I/O. Writer snapshots are bounded to 10,000 keys and eight contexts per key.
 Each scheduling span carries at most 128 distinct links. Evicted or truncated
 contexts lose only trace attribution; cache keys and writes are retained.
+An entirely unsampled batch uses an independent, unsampled context rather than
+a new scheduling span. This keeps child spans unsampled with a parent-based
+sampler. Existing L2 subscribers do not create I/O spans from event snapshots;
+this change does not trace asynchronous backend completion.
 
 Per-Request Hit-Rate Attributes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

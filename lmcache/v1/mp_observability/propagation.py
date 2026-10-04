@@ -25,11 +25,12 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import ParamSpec, TypeVar
 import os
+import secrets
 
 # Third Party
 from opentelemetry import context, trace
-from opentelemetry.trace import SpanContext
 from opentelemetry.context import Context
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 P = ParamSpec("P")
@@ -142,7 +143,23 @@ def run_with_trace_links(
                 break
     # A linked batch must not turn an entirely unsampled workload into a
     # new sampled root merely because the provider's root sampler is AlwaysOn.
-    if not any(parent.trace_flags.sampled for parent in parents.values()):
+    if parents and not any(parent.trace_flags.sampled for parent in parents.values()):
+        # Preserve the unsampled decision for downstream ParentBased tracers
+        # without choosing a contributing writer as the shared batch's parent.
+        batch = NonRecordingSpan(
+            SpanContext(
+                secrets.randbits(128) or 1,
+                secrets.randbits(64) or 1,
+                is_remote=False,
+                trace_flags=TraceFlags(0),
+            )
+        )
+        token = context.attach(trace.set_span_in_context(batch, Context()))
+        try:
+            return handler(*args, **kwargs)
+        finally:
+            context.detach(token)
+    if not parents:
         return run_with_trace_context({}, handler, *args, **kwargs)
     tracer = trace.get_tracer("lmcache_mp.server")
     with tracer.start_as_current_span(

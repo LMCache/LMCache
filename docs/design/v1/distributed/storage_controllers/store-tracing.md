@@ -15,6 +15,14 @@ Tracking is bounded to 10,000 keys, 8 contributors per key, and 128 distinct
 batch links. L1 deletion, prefetch-only write completion, and listener close
 remove retained contexts. Eviction affects links only; keys remain pending.
 An entirely unsampled batch does not create a new scheduling span.
+It installs a valid, independent, unsampled context while the handler runs.
+This preserves the sampling decision for tracers using a parent-based sampler
+without selecting a writer as the batch parent. A custom sampler can override
+that decision. The caller's context is restored after success or failure.
+
+L2 events capture this context, but the current L2 subscribers do not create
+I/O spans from it. Backend completion tracing and native queues are separate
+work; this change covers the controller's synchronous submission boundary.
 
 Tests use real controller queues, Linux poll/eventfd, CPU buffers, an L1 test
 fixture, and the existing MockL2Adapter. They do not establish compatibility
