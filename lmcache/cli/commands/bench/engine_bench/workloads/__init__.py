@@ -27,6 +27,10 @@ from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_qa import (
     LongDocQAConfig,
     LongDocQAWorkload,
 )
+from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_sampler import (
+    LongDocSamplerConfig,
+    LongDocSamplerWorkload,
+)
 from lmcache.cli.commands.bench.engine_bench.workloads.multi_round_chat import (
     MultiRoundChatConfig,
     MultiRoundChatWorkload,
@@ -53,6 +57,8 @@ __all__ = [
     "LongDocPermutatorWorkload",
     "LongDocQAConfig",
     "LongDocQAWorkload",
+    "LongDocSamplerConfig",
+    "LongDocSamplerWorkload",
     "MultiRoundChatConfig",
     "MultiRoundChatWorkload",
     "PrefixSuffixTunerConfig",
@@ -69,6 +75,7 @@ __all__ = [
 _WORKLOAD_NAMES = (
     "long-doc-permutator",
     "long-doc-qa",
+    "long-doc-sampler",
     "multi-round-chat",
     "prefix-suffix-tuner",
     "rag-qa-quality",
@@ -77,19 +84,19 @@ _WORKLOAD_NAMES = (
 
 # Workloads that expose a user-configurable max output length, each via its own
 # flag (``--ldqa-max-output-length`` / ``--mrc-output-length`` /
-# ``--ldp-max-output-length``).
+# ``--ldp-max-output-length`` / ``--lds-max-output-length``).
 _WORKLOADS_WITH_MAX_OUTPUT_LENGTH: frozenset[str] = frozenset(
-    {"long-doc-permutator", "long-doc-qa", "multi-round-chat"}
+    {"long-doc-permutator", "long-doc-qa", "long-doc-sampler", "multi-round-chat"}
 )
 
 
 def validate_max_output_length_supported(workload: str) -> None:
     """Validate that a max output length can be specified for ``workload``.
 
-    Only workloads with a max-output-length parameter (``long-doc-permutator``,
-    ``long-doc-qa``, ``multi-round-chat``) support setting it; every other
-    workload fixes its generation length internally, so requesting one is
-    rejected.
+    Only workloads with a max-output-length parameter
+    (``long-doc-permutator``, ``long-doc-qa``, ``long-doc-sampler``,
+    ``multi-round-chat``) support setting it; every other workload fixes its
+    generation length internally, so requesting one is rejected.
 
     Args:
         workload: The selected workload name (``EngineBenchConfig.workload``).
@@ -144,6 +151,30 @@ def create_workload(
         )
         return LongDocPermutatorWorkload(
             config=ldp_workload_config,
+            request_sender=request_sender,
+            stats_collector=stats_collector,
+            progress_monitor=progress_monitor,
+            seed=config.seed,
+            model_name=config.model,
+        )
+
+    if config.workload == "long-doc-sampler":
+        lds_workload_config = LongDocSamplerConfig.resolve(
+            kv_cache_volume_gb=config.kv_cache_volume_gb,
+            tokens_per_gb_kvcache=config.tokens_per_gb_kvcache,
+            pool_size=args.lds_pool_size,
+            docs_per_request=args.lds_docs_per_request,
+            context_length=args.lds_context_length,
+            system_prompt_length=args.lds_system_prompt_length,
+            num_requests=args.lds_num_requests,
+            overflow_factor=args.lds_overflow_factor,
+            access_skew=args.lds_access_skew,
+            vocab_size=8000,
+            num_inflight_requests=args.lds_num_inflight_requests,
+            max_output_length=args.lds_max_output_length,
+        )
+        return LongDocSamplerWorkload(
+            config=lds_workload_config,
             request_sender=request_sender,
             stats_collector=stats_collector,
             progress_monitor=progress_monitor,
