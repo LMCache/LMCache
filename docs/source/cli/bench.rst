@@ -416,6 +416,12 @@ come back from storage. Under LRU with uniform access the steady-state share of
 reads served by L2 is about ``1 - 1 / overflow_factor``, so the default factor
 of 2.0 targets roughly half.
 
+This is a sizing heuristic rather than a prediction: it assumes pure LRU over
+uniformly-drawn whole documents and ignores prefetch re-admission and
+chunk-level sharing, so the measured share can land either side of it. Use it
+to choose a pool size, then read the share that actually occurred from the
+cache's tier counters.
+
 Warmup is a deterministic sweep: the pool is partitioned into
 ``ceil(pool_size / docs_per_request)`` non-overlapping groups and each is sent
 once, so every document is cached exactly once before measurement. This matters

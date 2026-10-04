@@ -371,6 +371,11 @@ pool_size = ceil(overflow_factor x kv_cache_volume_gb
 
 Under LRU with uniform access the L1 hit rate approaches the fraction of the
 working set that fits, so the L2 read share is `1 - 1 / overflow_factor`.
+This is a sizing heuristic, not a prediction -- it ignores prefetch
+re-admission, chunk-level sharing and intra-request re-reads. Measured shares
+of 45% at overflow 1.0 and 36% at overflow 2.0 have both been observed, so
+treat the figure as a dial for choosing `pool_size` and take the real share
+from the tier counters.
 A non-zero `pool_size` is used verbatim and `overflow_factor` is then ignored
 for sizing but still reported. `access_skew` applies Zipf weights
 `1 / (rank + 1) ** skew`, which raises the L1 hit rate and *lowers* the L2

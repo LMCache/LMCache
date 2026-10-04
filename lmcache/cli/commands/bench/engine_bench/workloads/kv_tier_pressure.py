@@ -34,6 +34,13 @@ Under LRU with uniform access the steady-state L1 hit rate is approximately
 roughly half of all cache reads coming from the storage tier.  Pass
 ``pool_size`` explicitly to override the derivation entirely.
 
+That figure is a **sizing heuristic, not a prediction**.  It assumes pure LRU
+over uniformly-drawn whole documents and ignores prefetch re-admission,
+chunk-level sharing and intra-request re-reads, so the measured share can
+land either side of it -- observed 45% at an overflow of 1.0 on one stack and
+36% at an overflow of 2.0 on another.  Use it to pick a pool size, then read
+the share that actually occurred from the cache's own tier counters.
+
 Warm-up
 -------
 Warm-up is a DETERMINISTIC SWEEP, not a dummy request, for two reasons:
