@@ -804,9 +804,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 return None
             result = self._ctx.storage_manager.query_prefetch_lease(job.handle)
             if result is not None:
-                found = tuple(
-                    index for index, row in enumerate(result.hit_cells) if row.test(0)
-                )
+                found = tuple(index for index in result.hit_cells[0].get_indices_list())
         finally:
             with job.condition:
                 if found is not None:
@@ -837,6 +835,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
             return False
         if any(key.object_group_id < 0 for key in keys):
+            return False
+        if len({(key.object_group_id, key.kv_rank) for key in keys}) != 1:
             return False
         job_key = self._sparse_job_key(instance_id, request_id, generation, layer_id)
         with self._sparse_jobs_lock:
@@ -869,11 +869,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             PrefetchTaskSpec(
                 key_groups=[
                     GroupedObjectKeys(
-                        keys=[key],
-                        object_group_id=key.object_group_id,
-                        layout_desc=group_layout_descs[key.object_group_id],
+                        keys=list(keys),
+                        object_group_id=keys[0].object_group_id,
+                        layout_desc=group_layout_descs[keys[0].object_group_id],
                     )
-                    for key in keys
                 ],
                 fetching_policy="full",
             ),

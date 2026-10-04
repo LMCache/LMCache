@@ -7,8 +7,8 @@ likely to use. It needs to ask LMCache to stage those chunks without exposing
 the serving engine's physical page IDs, and it must keep the objects protected
 until the GPU copy has finished.
 
-The contract in this document is used by the SGLang adapter, but LMCache itself
-does not depend on SGLang. The public boundary carries `ObjectKey` values,
+The contract in this document is used by the SGLang adapter. Its storage and
+transport remain independent of SGLang. The public boundary carries `ObjectKey` values,
 request generations, layer IDs, and logical result bitmaps.
 
 ## Ownership
@@ -25,6 +25,13 @@ No component releases a read lock merely because an RPC was submitted. A
 successful release requires the controller operation to have completed, or a
 retrieve copy stream to have been synchronized when the caller already
 consumed the result bitmap.
+
+## Grouping
+
+A sparse request holds one object-group/KV-rank row, with the logical chunks
+in input order as columns. The current `full` fetching policy retains complete
+columns, including gaps. Putting each independent chunk in its own row would
+incorrectly require all of them to hit as counterparts of one column.
 
 ## Lifecycle
 
@@ -61,10 +68,10 @@ can retry safely.
 
 ## Integration boundary
 
-LMCache does not receive SGLang block IDs. The SGLang adapter computes logical
-keys with the configured token-hash contract, sends the logical sparse request,
-and supplies the physical destination mapping only to the registered local
-transfer context. The adapter's completion event is retained until the RPC
+Logical lookup uses `ObjectKey` identity, never physical serving block IDs.
+The adapter computes keys with the configured token-hash contract and supplies
+the destination block mapping only to retrieval through its registered transfer
+context. The adapter's completion event is retained until the RPC
 future finishes. This keeps logical cache ownership in LMCache and physical
 page ownership in the serving runtime, avoiding a second storage protocol or a
 second owner for the same destination page.

@@ -709,3 +709,30 @@ def test_unified_sparse_copy_changes_only_the_selected_serving_layer(
         )
         torch.testing.assert_close(targets[physical], expected)
     assert torch.all(targets[0] == -1) and torch.all(targets[2] == -1)
+
+
+def test_sparse_partial_hit_preserves_logical_key_positions():
+    """Independent logical chunks are columns, not required counterpart rows."""
+    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
+    module._sparse_jobs = {}
+    module._sparse_orphan_handles = {}
+    module._sparse_jobs_lock = threading.Lock()
+    module.get_and_touch_context_entry = Mock(
+        return_value=SimpleNamespace(model_name="contract-test", world_size=1)
+    )
+    storage = _storage()
+    storage.query_prefetch_status.return_value = _result(3, [0, 2])
+    module._ctx = SimpleNamespace(
+        storage_manager=storage,
+        layout_desc_registry=SimpleNamespace(
+            find_group_layout_descs=Mock(return_value={0: _layout()}),
+            find_attn_desc=Mock(return_value=SimpleNamespace(num_object_groups=1)),
+        ),
+    )
+    keys = [_key(bytes([i])) for i in range(3)]
+    assert module.sparse_prefetch(0, "request", 0, 0, keys) is True
+    spec = storage.submit_prefetch_task.call_args.args[0]
+    assert len(spec.key_groups) == 1 and spec.key_groups[0].keys == keys
+    assert module.sparse_query_prefetch(0, "request", 0, 0) == [0, 2]
+    assert module.sparse_release_prefetch(0, "request", 0, 0) is True
+    storage.finish_read_prefetched.assert_called_once_with([keys[0], keys[2]], 1)

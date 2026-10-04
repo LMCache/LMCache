@@ -2,8 +2,9 @@ Logical sparse prefetch leases
 ==============================
 
 The distributed ``PrefetchTaskSpec`` API accepts ``GroupedObjectKeys`` rows.
-A sparse transfer uses ``fetching_policy="full"`` and one singleton row per
-logical ``ObjectKey``. Its reported indices retain the original key order,
+A sparse transfer uses ``fetching_policy="full"`` and one row per
+serving object-group/rank, with logical chunks as columns. Its reported
+indices retain the original key order,
 including holes. Physical serving-engine page IDs stay outside this lookup
 contract.
 
@@ -44,8 +45,7 @@ Minimal example
 
    spec = PrefetchTaskSpec(
        key_groups=[
-           GroupedObjectKeys([key], key.object_group_id, layout)
-           for key in logical_keys
+           GroupedObjectKeys(logical_keys, logical_keys[0].object_group_id, layout)
        ],
        fetching_policy="full",
        lock_mode=PrefetchLockMode.LOCK,
@@ -69,4 +69,5 @@ Minimal example
 The six sparse RPCs use operation names on ZeroMQ and explicit protobuf
 messages on gRPC. Frozen legacy numeric operation IDs are unchanged. The
 serving adapter maps logical chunks and supplies GPU destinations only to its
-registered transfer context; LMCache has no SGLang dependency.
+registered transfer context. Storage and transport remain independent of
+SGLang.
