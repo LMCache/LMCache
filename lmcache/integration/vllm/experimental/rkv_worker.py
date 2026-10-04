@@ -453,6 +453,11 @@ class RKVWorker:
             1,
             2 * (2 * elt + 1 + 4) * kv_heads * seq_len * seq_len,
         )
+        if per_unit > self.score_chunk_bytes:
+            raise RuntimeError(
+                "R-KV scoring for one layer/request exceeds the internal "
+                "memory cap; lower budget/buffer"
+            )
         units_cap = max(1, self.score_chunk_bytes // per_unit)
         req_chunk = max(1, min(num_reqs, units_cap))
         layer_chunk = max(1, min(num_layers, units_cap // req_chunk))
@@ -516,6 +521,10 @@ class RKVWorker:
                     )
 
             assert shared_scores is not None
+            if not torch.isfinite(shared_scores).all():
+                raise RuntimeError(
+                    "R-KV computed non-finite scores; refusing to compact"
+                )
             past_idx = shared_scores.topk(
                 self.budget - self.window_size,
                 dim=-1,

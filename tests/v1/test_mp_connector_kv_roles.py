@@ -182,6 +182,71 @@ def connectors(
         scheduler.shutdown()
 
 
+def test_rkv_semantic_knobs_pass_through_to_worker(mock_io: SimpleNamespace) -> None:
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "lmcache.mp.rkv_budget": 64,
+                "lmcache.mp.rkv_buffer": 40,
+                "lmcache.mp.rkv_window_size": 4,
+                "lmcache.mp.rkv_kernel_size": 5,
+                "lmcache.mp.rkv_mix_lambda": 0.25,
+                "lmcache.mp.rkv_retain_ratio": 0.2,
+            },
+        )
+    )
+    config.cache_config.enable_prefix_caching = False
+    config.model_config.enforce_eager = True
+
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    try:
+        assert worker._rkv is not None
+        assert worker._rkv.budget == 64
+        assert worker._rkv._policy.buffer == 40
+        assert worker._rkv.window_size == 4
+        assert worker._rkv.kernel_size == 5
+        assert worker._rkv.mix_lambda == 0.25
+        assert worker._rkv.retain_ratio == 0.2
+        assert worker._rkv._policy.retain_direction == "last"
+        assert worker._rkv.score_chunk_bytes == 512 * 1024 * 1024
+    finally:
+        worker.shutdown()
+
+
+def test_rkv_skips_lmcache_allocation_telemetry(mock_io: SimpleNamespace) -> None:
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"lmcache.mp.rkv_budget": 64},
+        )
+    )
+    config.cache_config.enable_prefix_caching = False
+    config.model_config.enforce_eager = True
+
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    try:
+        request = _request()
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+        scheduler.update_state_after_alloc(
+            request,
+            MagicMock(get_block_ids=lambda: ([1],)),
+            0,
+        )
+        scheduler._report_block_allocation_deltas = MagicMock()
+
+        scheduler.build_connector_meta(
+            _schedule(num_tokens=4, block_ids=([1],), new=True)
+        )
+
+        scheduler._report_block_allocation_deltas.assert_not_called()
+        mock_io.scheduler.report_block_allocations.assert_not_called()
+    finally:
+        scheduler.shutdown()
+
+
 def test_rkv_registers_kv_only_with_worker_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
     connector._vllm_config = object()

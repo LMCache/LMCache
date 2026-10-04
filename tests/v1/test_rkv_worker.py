@@ -481,6 +481,135 @@ def test_rkv_worker_compacts_two_requests_independently():
 
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_rkv_worker_score_chunking_preserves_kept_set():
+    length = BUDGET + WINDOW
+    request_ids = ["req-a", "req-b"]
+    request_blocks = [[1, 3, 5], [2, 4, 6]]
+    caches = _new_cache(8)
+    queries = {
+        name: torch.randn(
+            2,
+            WINDOW,
+            Q_HEADS,
+            HEAD_DIM,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        for name in LAYER_NAMES
+    }
+    members = [
+        (i, request_id, _slots(request_blocks[i], length))
+        for i, request_id in enumerate(request_ids)
+    ]
+    windows = {
+        request_id: {
+            name: queries[name][i].clone() for name in LAYER_NAMES
+        }
+        for i, request_id in enumerate(request_ids)
+    }
+
+    def plan(score_chunk_bytes: int):
+        worker = RKVWorker(
+            BUDGET,
+            buffer=WINDOW,
+            score_chunk_bytes=score_chunk_bytes,
+        )
+        worker.register_kv_caches(
+            {name: cache.clone() for name, cache in caches.items()}
+        )
+        _seed_query_windows(worker, windows)
+        return worker._compact_group_batched(members)
+
+    default_source, default_destination = plan(512 * 1024 * 1024)
+    per_unit = (
+        2
+        * (2 * caches[LAYER_NAMES[0]].element_size() + 1 + 4)
+        * KV_HEADS
+        * length
+        * length
+    )
+    chunked_source, chunked_destination = plan(per_unit)
+
+    assert torch.equal(chunked_source, default_source)
+    assert torch.equal(chunked_destination, default_destination)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_rkv_worker_rejects_scoring_unit_over_memory_cap():
+    length = BUDGET + WINDOW
+    caches = _new_cache(8)
+    per_unit = (
+        2
+        * (2 * caches[LAYER_NAMES[0]].element_size() + 1 + 4)
+        * KV_HEADS
+        * length
+        * length
+    )
+    worker = RKVWorker(
+        BUDGET,
+        buffer=WINDOW,
+        score_chunk_bytes=per_unit - 1,
+    )
+    worker.register_kv_caches(caches)
+    _seed_query_windows(
+        worker,
+        {
+            "req": {
+                name: torch.randn(
+                    WINDOW,
+                    Q_HEADS,
+                    HEAD_DIM,
+                    device="cuda",
+                    dtype=torch.bfloat16,
+                )
+                for name in LAYER_NAMES
+            }
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="memory cap"):
+        worker._compact_group_batched(
+            [(0, "req", _slots([1, 3, 5], length))]
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_rkv_worker_rejects_non_finite_scores():
+    length = BUDGET + WINDOW
+    caches = _new_cache(8)
+    worker = RKVWorker(BUDGET, buffer=WINDOW)
+    worker.register_kv_caches(caches)
+    _seed_query_windows(
+        worker,
+        {
+            "req": {
+                name: torch.randn(
+                    WINDOW,
+                    Q_HEADS,
+                    HEAD_DIM,
+                    device="cuda",
+                    dtype=torch.bfloat16,
+                )
+                for name in LAYER_NAMES
+            }
+        },
+    )
+
+    def non_finite_score(keys, queries):
+        return keys.new_full(
+            (keys.shape[0], keys.shape[1], keys.shape[2] - WINDOW),
+            float("nan"),
+        )
+
+    worker._policy.score_kv = non_finite_score
+
+    with pytest.raises(RuntimeError, match="non-finite"):
+        worker._compact_group_batched(
+            [(0, "req", _slots([1, 3, 5], length))]
+        )
+
+
 def test_rkv_worker_defaults_match_upstream_vllm_config():
     worker = RKVWorker(BUDGET)
     assert worker._policy.buffer == 128

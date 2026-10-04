@@ -1559,8 +1559,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if len(metadata) > 0:
             logger.debug("Final connector metadata: %s", metadata)
 
-        # Report block allocation deltas to LMCache for observability
-        self._report_block_allocation_deltas(scheduler_output)
+        # R-KV bypasses LMCache STORE/RETRIEVE; allocation telemetry is
+        # unrelated to compaction and would add server work to every step.
+        if self._rkv_budget is None:
+            self._report_block_allocation_deltas(scheduler_output)
 
         return metadata
 
