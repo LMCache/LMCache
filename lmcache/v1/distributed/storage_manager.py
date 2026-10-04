@@ -29,6 +29,9 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     get_configured_capacity_bytes,
 )
+from lmcache.v1.distributed.dax_coordinated_l1.devdax_l1_backend import (
+    DaxCoordinatedL1Backend,
+)
 from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -185,6 +188,16 @@ class StorageManager:
             ),
             self.get_l2_usages,
         )
+
+    @property
+    def uses_dax_coordinated_l1(self) -> bool:
+        """Return whether this manager uses the DAX-Coordinated L1 backend."""
+        return self._l1_config.dax_coordinated_l1_config is not None
+
+    @property
+    def dax_coordinated_l1_backend(self) -> DaxCoordinatedL1Backend | None:
+        """Return the active DAX backend; L1Manager retains lifecycle ownership."""
+        return self._l1_manager.dax_coordinated_l1_backend
 
     # External APIs for serving engine integration code to call
     @enable_tracing()
@@ -1013,6 +1026,8 @@ class StorageManager:
             the freshly allocated stable id, ``adapter`` is the new adapter
             instance, and ``descriptor`` is its descriptor carrying that id.
         """
+        if self._l1_config.dax_coordinated_l1_config is not None:
+            raise ValueError("DAX-Coordinated L1 cannot be combined with L2 adapters")
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
         adapter: L2AdapterInterface = create_l2_adapter(config, self._l1_memory_desc)

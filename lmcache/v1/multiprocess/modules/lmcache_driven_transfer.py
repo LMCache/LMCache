@@ -473,6 +473,21 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             for gid in range(num_object_groups)
         }
         attn_desc = kv_groups_manager.get_attn_desc()
+        if self._ctx.storage_manager.uses_dax_coordinated_l1:
+            # Payloads are already mapped and GPU-registered. Bind model slot
+            # geometry here, including for participants that only read peers.
+            try:
+                backend = self._ctx.storage_manager.dax_coordinated_l1_backend
+                assert backend is not None
+                backend.client.initialize_model_layouts(
+                    model_name,
+                    world_size,
+                    self._ctx.chunk_size,
+                    list(group_layout_descs.values()),
+                )
+            except Exception:
+                cache_context.close()
+                raise
         self._ctx.layout_desc_registry.register(
             model_name,
             world_size,

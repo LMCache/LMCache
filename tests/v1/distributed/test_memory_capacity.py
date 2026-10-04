@@ -331,6 +331,7 @@ class TestReportStatusSharesTheSource:
                 return True
 
         manager = L1Manager.__new__(L1Manager)
+        manager._dax_coordinated_l1 = None
         manager._memory_manager = cast("L1ManagerProtocol", _MemoryManager())
         # report_status reads the total precomputed at construction.
         manager._configured_capacity_bytes = sum(

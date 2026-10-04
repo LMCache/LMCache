@@ -92,6 +92,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     )
     ctx = MagicMock()
     ctx.chunk_size = 16
+    ctx.storage_manager.uses_dax_coordinated_l1 = False
     ctx.layout_desc_registry = LayoutDescRegistry()
 
     def fake_create_cache_context(
@@ -229,3 +230,61 @@ def test_registry_windows_updated_on_reregister() -> None:
     )
 
     assert registry.find_attn_desc("m", 1).num_chunks_in_sw == [-1, 4]
+
+
+@pytest.mark.parametrize("binding", ["ordinary", "ready", "waiting", "error"])
+def test_registration_binds_only_dax_layout_and_closes_failed_context(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_lmcache_native: Any,
+    binding: str,
+) -> None:
+    """Only DAX binds model slots; waiting succeeds and failure closes GPU IPC."""
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+    from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
+
+    layout = MemoryLayoutDesc(shapes=[torch.Size([2, 16, 32])], dtypes=[torch.float32])
+    ctx = MagicMock()
+    ctx.chunk_size = 16
+    ctx.layout_desc_registry = LayoutDescRegistry()
+    ctx.storage_manager.uses_dax_coordinated_l1 = binding != "ordinary"
+    initialize = (
+        ctx.storage_manager.dax_coordinated_l1_backend.client.initialize_model_layouts
+    )
+    initialize.return_value = binding == "ready"
+    if binding == "error":
+        initialize.side_effect = ValueError("incompatible model layout")
+    cache_context = _FakeGPUContext()
+    close = MagicMock()
+    monkeypatch.setattr(cache_context, "close", close)
+    monkeypatch.setattr(
+        transfer, "DeviceHostFuncDispatcher", _FakeDeviceHostFuncDispatcher
+    )
+    monkeypatch.setattr(
+        transfer, "create_cache_context", lambda *a, **kw: cache_context
+    )
+    monkeypatch.setattr(transfer, "get_layout_desc", lambda *a, **kw: layout)
+    monkeypatch.setattr(transfer.torch_dev, "empty_cache", lambda: None, raising=False)
+    module = transfer.LMCacheDrivenTransferModule(ctx)
+    try:
+        if binding == "error":
+            with pytest.raises(ValueError, match="incompatible model layout"):
+                module.register_kv_cache(
+                    1, [], "shared-model", 1, EngineType.VLLM, {}, []
+                )
+            close.assert_called_once()
+            assert ctx.layout_desc_registry.find("shared-model", 1) is None
+        else:
+            module.register_kv_cache(1, [], "shared-model", 1, EngineType.VLLM, {}, [])
+            close.assert_not_called()
+            assert ctx.layout_desc_registry.find("shared-model", 1) is layout
+            module.unregister_kv_cache(1)
+            close.assert_called_once()
+        if binding == "ordinary":
+            initialize.assert_not_called()
+        else:
+            initialize.assert_called_once_with("shared-model", 1, 16, [layout])
+    finally:
+        module.close()

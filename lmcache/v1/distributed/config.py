@@ -6,13 +6,18 @@ Configuration for distributed storage manager
 
 # Standard
 from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from typing import Any, ClassVar, Literal, cast
 import argparse
+import json
 import os
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import L1BackendType
+from lmcache.v1.distributed.dax_coordinated_l1.devdax_layout import (
+    DaxCoordinatedL1RankPlacementConfig,
+    normalize_devdax_offset,
+)
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     L2AdaptersConfig,
@@ -197,6 +202,250 @@ class GdsL1Config:
 
 
 @dataclass
+class DaxCoordinatedL1Config:
+    """Configure one participant in a hardware-qualified DAX-Coordinated L1 region.
+
+    Raises:
+        ValueError: If a field violates the fixed MVP contract.
+    """
+
+    DEFAULT_BUCKETS_PER_LEVEL: ClassVar[tuple[int, ...]] = (
+        200003,
+        200009,
+        200017,
+        200023,
+        200029,
+    )
+    """Five prime-sized lookup levels with roughly one million total buckets.
+    Overrides remain part of the persistent layout digest.
+    """
+
+    RECOMMENDED_128_GIB_BUCKETS_PER_LEVEL: ClassVar[tuple[int, ...]] = (
+        DEFAULT_BUCKETS_PER_LEVEL
+    )
+    """Compatibility name for the external qualification/benchmark kit."""
+
+    DEVDAX_CACHE_LINE_BYTES: ClassVar[int] = 64
+    """Cache-line size for the qualified x86 visibility contract."""
+
+    devdax_path: str
+    """Device-DAX path, e.g. ``/dev/dax0.0``; offset zero anchors both mappings."""
+
+    region_id: str
+    """Operator-assigned identity of the physical shared range."""
+
+    region_epoch: int
+    """Fencing epoch stored in the formatted superblock."""
+
+    participant_id: int
+    """Unique participant ID in [0, participant_count)."""
+
+    hardware_qualification_digest: str
+    """Hex SHA-256 of the hardware qualification record."""
+
+    participant_count: int = 2
+    """Shared region participants: 2 or 4, using a Peterson tournament."""
+
+    metadata_offset_bytes: int = 0
+    """Device offset of WB CPU metadata. Offset strings normalize at creation."""
+
+    payload_offset_bytes: int = 0x7F80000000
+    """Device offset of payload memory; defaults to 510 GiB.
+    Integer and base-prefixed string inputs normalize to integers at creation.
+    """
+
+    payload_size_GiB: int = 512
+    """Payload capacity in binary GiB, starting at ``payload_offset_bytes``."""
+
+    skip_payload_flush: bool = False
+    """Skip PUT publication flush and GET refresh, retaining metadata sync.
+    Requires DDIO non-allocating writes, UC payload memory on every host,
+    DMA-only payload use, cleared pre-existing cache lines, and qualified
+    cross-host completion ordering; none is configured or verified here.
+    """
+
+    memcheck_on_attach: bool = False
+    """Scan the shared index on attach, only with all participants quiesced.
+    Required superblock, participant and mapping validation always runs.
+    This diagnostic setting is host-local and does not change the layout digest.
+    """
+
+    buckets_per_level: list[int] = field(
+        default_factory=lambda: list(DaxCoordinatedL1Config.DEFAULT_BUCKETS_PER_LEVEL)
+    )
+    """Bucket count for each lookup level, included in the layout digest."""
+
+    visibility_mode: Literal["x86_clflush_64b_v1", "x86_clflushopt_bulk_v1"] = (
+        "x86_clflush_64b_v1"
+    )
+    """Qualified visibility contract.
+    Bulk mode uses CLFLUSHOPT for payload lines followed by one SFENCE.
+    """
+
+    per_transfer_logging: bool = False
+    """Log each completed Device-DAX PUT/GET via MP CUDA-stream events."""
+
+    ownership_mode: Literal["equal", "participant_0_all"] = "equal"
+    """Payload-slot ownership policy.
+    ``equal`` divides slots equally. ``participant_0_all`` assigns all slots
+    to participant 0; other participants can attach/read without allocating.
+    """
+
+    rank_placement: DaxCoordinatedL1RankPlacementConfig | None = None
+    """Optional rank-to-region placement for local TP=2..8/PP=1.
+    Its regions replace the top-level metadata and payload ranges.
+    """
+
+    def __post_init__(self) -> None:
+        if isinstance(self.rank_placement, dict):
+            try:
+                self.rank_placement = DaxCoordinatedL1RankPlacementConfig(
+                    **self.rank_placement
+                )
+            except TypeError as error:
+                raise ValueError(f"invalid rank_placement config: {error}") from error
+        if self.rank_placement is not None and not isinstance(
+            self.rank_placement, DaxCoordinatedL1RankPlacementConfig
+        ):
+            raise ValueError("rank_placement must be a configuration object")
+        self.devdax_path = self.devdax_path.strip()
+        if not self.devdax_path:
+            raise ValueError("DAX-Coordinated L1 requires devdax_path")
+        self.metadata_offset_bytes = normalize_devdax_offset(
+            self.metadata_offset_bytes, "metadata_offset_bytes"
+        )
+        self.payload_offset_bytes = normalize_devdax_offset(
+            self.payload_offset_bytes, "payload_offset_bytes"
+        )
+        if not self.region_id:
+            raise ValueError("DAX-Coordinated L1 requires region_id")
+        if self.region_epoch <= 0:
+            raise ValueError("DAX-Coordinated L1 region_epoch must be positive")
+        if isinstance(self.payload_size_GiB, bool) or not isinstance(
+            self.payload_size_GiB, int
+        ):
+            raise ValueError("DAX-Coordinated L1 payload_size_GiB must be an integer")
+        if self.payload_size_GiB <= 0:
+            raise ValueError("DAX-Coordinated L1 payload_size_GiB must be positive")
+        for name in (
+            "skip_payload_flush",
+            "memcheck_on_attach",
+            "per_transfer_logging",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"DAX-Coordinated L1 {name} must be a boolean")
+        if type(self.participant_count) is not int or self.participant_count not in (
+            2,
+            4,
+        ):
+            raise ValueError("DAX-Coordinated L1 participant_count must be 2 or 4")
+        if (
+            type(self.participant_id) is not int
+            or not 0 <= self.participant_id < self.participant_count
+        ):
+            raise ValueError("DAX-Coordinated L1 participant ID is outside the region")
+        if self.ownership_mode not in ("equal", "participant_0_all"):
+            raise ValueError(
+                "DAX-Coordinated L1 ownership_mode must be equal or participant_0_all"
+            )
+        if not 1 <= len(self.buckets_per_level) <= 8 or any(
+            count <= 0 for count in self.buckets_per_level
+        ):
+            raise ValueError(
+                "DAX-Coordinated L1 requires 1-8 levels with positive bucket counts"
+            )
+        if self.visibility_mode not in (
+            "x86_clflush_64b_v1",
+            "x86_clflushopt_bulk_v1",
+        ):
+            raise ValueError("unsupported DAX-Coordinated L1 visibility mode")
+        if len(self.hardware_qualification_digest) != 64:
+            raise ValueError(
+                "DAX-Coordinated L1 hardware qualification digest must be SHA-256 hex"
+            )
+        try:
+            bytes.fromhex(self.hardware_qualification_digest)
+        except ValueError as error:
+            raise ValueError(
+                "DAX-Coordinated L1 hardware qualification digest is not hex"
+            ) from error
+
+    def validate_composition(
+        self,
+        memory_config: L1MemoryManagerConfig,
+        l2_adapter_config: L2AdaptersConfig,
+    ) -> None:
+        """Validate DAX-Coordinated L1 compatibility with normalized storage settings.
+
+        Args:
+            memory_config: L1 memory settings after storage normalization.
+            l2_adapter_config: L2 settings after storage normalization.
+
+        Raises:
+            ValueError: If the L1 Device-DAX path is missing or mismatched,
+                hybrid DRAM overflow is enabled, or L2 adapters remain.
+        """
+        if not memory_config.devdax_path:
+            raise ValueError("DAX-Coordinated L1 requires --l1-devdax-path")
+        if memory_config.devdax_path != self.devdax_path:
+            raise ValueError(
+                "DAX-Coordinated L1 JSON devdax_path must match "
+                "the L1 memory Device-DAX path"
+            )
+        if memory_config.devdax_size_in_bytes:
+            raise ValueError("DAX-Coordinated L1 does not support hybrid DRAM overflow")
+        if l2_adapter_config.adapters:
+            l2_adapter_names = [
+                get_type_name_for_config(adapter)
+                for adapter in l2_adapter_config.adapters
+            ]
+            raise ValueError(
+                "DAX-Coordinated L1 initially rejects L2 adapters until their "
+                "shared-mapping transfer path is qualified: "
+                f"{', '.join(l2_adapter_names)}"
+            )
+
+    @classmethod
+    def from_json(cls, raw_config: str) -> "DaxCoordinatedL1Config":
+        """Construct a validated configuration from a JSON object.
+
+        Args:
+            raw_config: Inline JSON containing the DAX-Coordinated L1 configuration.
+
+        Returns:
+            A validated configuration instance.
+
+        Raises:
+            ValueError: If the JSON value is not an object or violates the
+                configuration contract.
+            json.JSONDecodeError: If the input is not valid JSON.
+        """
+        decoded = json.loads(raw_config)
+        if not isinstance(decoded, dict):
+            raise ValueError("DAX-Coordinated L1 config JSON must be an object")
+        try:
+            return cls(**decoded)
+        except TypeError as error:
+            raise ValueError(f"invalid DAX-Coordinated L1 config: {error}") from error
+
+    @property
+    def payload_size_bytes(self) -> int:
+        """Return the configured binary-GiB capacity in bytes."""
+        if self.rank_placement is not None:
+            return sum(
+                p.payload_size_GiB << 30 for p in self.rank_placement.placements()
+            )
+        return self.payload_size_GiB << 30
+
+    @property
+    def owner_payload_size_bytes(self) -> int:
+        """Return this participant's payload budget before model slot rounding."""
+        if self.ownership_mode == "participant_0_all":
+            return self.payload_size_bytes if self.participant_id == 0 else 0
+        return self.payload_size_bytes // self.participant_count
+
+
+@dataclass
 class L1ManagerConfig:
     """
     Special config for the L1 Object/Key manager
@@ -208,6 +457,14 @@ class L1ManagerConfig:
     gds_l1_config: "GdsL1Config | None" = None
     """ Optional GDS L1 tier. When set, the GDS slab is the L1 medium
     (mutually exclusive with the pinned-DRAM tier in ``memory_config``). """
+
+    dax_coordinated_l1_config: DaxCoordinatedL1Config | None = None
+    """Opt in to DAX-Coordinated L1 by supplying this configuration.
+
+    None preserves the existing L1 backend selection. When configured with
+    Device-DAX, the distributed backend delegates shared allocation and object
+    state to the native index core; no private L1 allocator is constructed.
+    """
 
     write_ttl_seconds: int = field(default=600)
     """ Time to live for each object's write lock. Default is 600s (10 minutes). """
@@ -238,10 +495,18 @@ def get_configured_capacity_bytes(
 
     Returns:
         Configured bytes per medium, omitting any sized zero.
+
+        DAX-Coordinated L1 is an exception: it retains a zero owner budget.
+        Its configured owner budget is independent of model slot rounding.
     """
     if config.gds_l1_config is not None:
         size = config.gds_l1_config.size_in_bytes
         return {L1BackendType.GDS: size} if size > 0 else {}
+
+    if config.dax_coordinated_l1_config is not None:
+        # A zero owner budget is intentional for a read-only participant.
+        size = config.dax_coordinated_l1_config.owner_payload_size_bytes
+        return {L1BackendType.DEVDAX: size}
 
     memory_config = config.memory_config
     if memory_config.devdax_path:
@@ -343,6 +608,8 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     This rejects L2 adapters that require a single contiguous L1 memory
     descriptor when hybrid L1 Device-DAX overflow is enabled.
 
+    Also validates DAX-Coordinated L1 composition when configured.
+
     Args:
         config: Storage manager configuration to validate.
 
@@ -352,6 +619,7 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     Raises:
         ValueError: If mutually exclusive L1 tiers are both configured, or
             hybrid L1 is paired with incompatible L2 adapters.
+            Also raised if DAX-Coordinated L1 settings conflict.
     """
     if (
         config.l1_manager_config.gds_l1_config is not None
@@ -360,6 +628,11 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
 
     memory_config = config.l1_manager_config.memory_config
+    dax_coordinated_l1_config = config.l1_manager_config.dax_coordinated_l1_config
+    if dax_coordinated_l1_config is not None:
+        dax_coordinated_l1_config.validate_composition(
+            memory_config, config.l2_adapter_config
+        )
     if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
         return
 
@@ -432,6 +705,16 @@ def add_storage_manager_args(
         type=float,
         required=True,
         help="The size of L1 memory in GB.",
+    )
+    memory_group.add_argument(
+        "--dax-coordinated-l1-config-json",
+        type=str,
+        default=None,
+        help=(
+            "Inline JSON object for the hardware-qualified "
+            "DAX-Coordinated L1. "
+            "The feature remains disabled when omitted."
+        ),
     )
     memory_group.add_argument(
         "--l1-use-lazy",
@@ -652,9 +935,19 @@ def parse_args_to_config(
             backend=args.gds_l1_backend,
         )
 
+    raw_dax_coordinated_l1_config = getattr(
+        args, "dax_coordinated_l1_config_json", None
+    )
+    dax_coordinated_l1_config = (
+        DaxCoordinatedL1Config.from_json(raw_dax_coordinated_l1_config)
+        if raw_dax_coordinated_l1_config
+        else None
+    )
+
     l1_manager_config = L1ManagerConfig(
         memory_config=memory_config,
         gds_l1_config=gds_l1_config,
+        dax_coordinated_l1_config=dax_coordinated_l1_config,
         write_ttl_seconds=args.l1_write_ttl_seconds,
         read_ttl_seconds=args.l1_read_ttl_seconds,
     )

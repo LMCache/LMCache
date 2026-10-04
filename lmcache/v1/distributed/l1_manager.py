@@ -12,6 +12,9 @@ from lmcache.lmcache_native import TTLLock
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
+from lmcache.v1.distributed.dax_coordinated_l1.devdax_l1_backend import (
+    DaxCoordinatedL1Backend,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
 from lmcache.v1.distributed.memory_manager import (
@@ -182,16 +185,27 @@ class L1Manager:
         self._staging: dict[ObjectKey, dict[str, L1ObjectState]] = {}
         # Bytes held by staging objects (kept in sync with ``_staging``).
         self._staging_bytes: int = 0
+        dax_coordinated_l1_config = None
 
         # GDS, Device-DAX, and CPU L1 are mutually exclusive tiers. Each tier
         # owns its backing allocator instead of branching inside the CPU path.
+        # DAX-Coordinated L1 uses the shared native index when explicitly
+        # configured; a Device-DAX path alone still selects the private allocator.
         self._memory_manager: L1ManagerProtocol
         if config.gds_l1_config is not None:
             self._memory_manager = GDSL1MemoryManager(config.gds_l1_config)
             logger.info("L1Manager: GDS L1 tier enabled; CPU pinned-DRAM L1 disabled")
         elif config.memory_config.devdax_path:
-            self._memory_manager = DevDaxL1MemoryManager(config.memory_config)
-            logger.info("L1Manager: Device-DAX L1 tier enabled; CPU-only L1 disabled")
+            if config.dax_coordinated_l1_config is not None:
+                # Shared allocation and object state belong to the native
+                # index core. Construct the backend below after its event
+                # dependencies are ready, without creating a private allocator.
+                dax_coordinated_l1_config = config.dax_coordinated_l1_config
+            else:
+                self._memory_manager = DevDaxL1MemoryManager(config.memory_config)
+                logger.info(
+                    "L1Manager: Device-DAX L1 tier enabled; CPU-only L1 disabled"
+                )
         else:
             self._memory_manager = L1MemoryManager(config.memory_config)
 
@@ -206,6 +220,20 @@ class L1Manager:
         self._registered_listeners: list[L1ManagerListener] = []
 
         self._event_bus = get_event_bus()
+
+        # The backend adapts the native shared lifecycle to L1 results and
+        # events. None leaves all operations on the existing private L1 path.
+        self._dax_coordinated_l1: DaxCoordinatedL1Backend | None
+        if dax_coordinated_l1_config is not None:
+            self._dax_coordinated_l1 = DaxCoordinatedL1Backend(
+                dax_coordinated_l1_config,
+                config.memory_config,
+                self._registered_listeners,
+                self._event_bus,
+            )
+            logger.info("L1Manager: DAX-Coordinated L1 lifecycle enabled")
+        else:
+            self._dax_coordinated_l1 = None
 
         L1Manager._gauge_target = self
         if not L1Manager._gauge_registered:
@@ -242,6 +270,15 @@ class L1Manager:
         with self._lock:
             self._registered_listeners.append(listener)
 
+    @property
+    def dax_coordinated_l1_backend(self) -> DaxCoordinatedL1Backend | None:
+        """Return the active DAX backend, or None for other L1 backends.
+
+        Allows DAX-specific setup through the backend's public API.
+        L1Manager retains ownership of the backend and its shutdown.
+        """
+        return self._dax_coordinated_l1
+
     @l1_mgr_synchronized
     def reserve_read(
         self,
@@ -270,6 +307,9 @@ class L1Manager:
             being written is reported as ``KEY_NOT_EXIST``.
         """
         total = _validate_read_locks(read_locks)
+        if self._dax_coordinated_l1 is not None:
+            return self._dax_coordinated_l1.reserve_read(keys, total)
+
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         for key in keys:
@@ -311,6 +351,9 @@ class L1Manager:
             KEY_NOT_EXIST: The key does not exist.
             KEY_NOT_READABLE: The key is not readable (in this case, not read-locked).
         """
+        if self._dax_coordinated_l1 is not None:
+            return self._dax_coordinated_l1.unsafe_read(keys)
+
         ret: dict[ObjectKey, L1OperationResult] = {}
 
         for key in keys:
@@ -357,6 +400,9 @@ class L1Manager:
                 means the reader may read inconsistent data.
         """
         total = _validate_read_locks(read_locks)
+        if self._dax_coordinated_l1 is not None:
+            return self._dax_coordinated_l1.finish_read(keys, total)
+
         need_to_free: list[MemoryObj] = []
         need_to_free_keys: list[ObjectKey] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -456,6 +502,11 @@ class L1Manager:
             raise ValueError(
                 f"L1Manager.reserve_write: {len(keys)} keys but "
                 f"{len(is_temporary)} is_temporary flags"
+            )
+
+        if self._dax_coordinated_l1 is not None:
+            return self._dax_coordinated_l1.reserve_write(
+                keys, is_temporary, layout_desc, tag=tag
             )
 
         need_to_allocate: list[tuple[ObjectKey, bool]] = []
@@ -561,6 +612,9 @@ class L1Manager:
             is discarded, the resident object is kept and ``SUCCESS`` is
             still reported: the data is in L1 either way.
         """
+        if self._dax_coordinated_l1 is not None:
+            return self._dax_coordinated_l1.finish_write(keys, tag=tag)
+
         ret: dict[ObjectKey, L1Error] = {}
         notification_keys: list[ObjectKey] = []
         notification_keys_meta: list[L1ObjectMeta] = []
@@ -639,6 +693,11 @@ class L1Manager:
             always holds the object that readers see.
         """
         total = _validate_read_locks(read_locks)
+        if self._dax_coordinated_l1 is not None:
+            return self._dax_coordinated_l1.finish_write_and_reserve_read(
+                keys, total, tag=tag
+            )
+
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         successful_keys_meta: list[L1ObjectMeta] = []
@@ -708,6 +767,9 @@ class L1Manager:
                 exists for it, so it cannot be deleted. Never returned when
                 ``force`` is True.
         """
+        if self._dax_coordinated_l1 is not None:
+            return self._dax_coordinated_l1.delete(keys, force)
+
         need_to_free: list[MemoryObj] = []
         ret: dict[ObjectKey, L1Error] = {}
         successful_keys: list[ObjectKey] = []
@@ -771,6 +833,9 @@ class L1Manager:
             KEY_IN_WRONG_STATE: The staging object is not write-locked (its
                 reservation expired).
         """
+        if self._dax_coordinated_l1 is not None:
+            return self._dax_coordinated_l1.finish_write_and_delete(keys, tag=tag)
+
         ret: dict[ObjectKey, L1Error] = {}
         discarded: list[MemoryObj] = []
         gone_keys: list[ObjectKey] = []
@@ -821,6 +886,10 @@ class L1Manager:
                 lock expired, keeping read-locked objects and live staging
                 objects intact.
         """
+        if self._dax_coordinated_l1 is not None:
+            self._dax_coordinated_l1.clear(force)
+            return
+
         if force:
             staging_count = sum(len(per_tag) for per_tag in self._staging.values())
             logger.warning(
@@ -905,6 +974,9 @@ class L1Manager:
             True if the key has a resident object that is not read-locked,
             or a staging object whose write lock expired; False otherwise.
         """
+        if self._dax_coordinated_l1 is not None:
+            return False
+
         entry = self._objects.get(key, None)
         if entry is not None and not entry.read_lock.is_locked():
             return True
@@ -926,6 +998,8 @@ class L1Manager:
             In the future, we many want to make a "callback" based mechanism
             via "L1ManagerListener" to notify the memory usage changes.
         """
+        if self._dax_coordinated_l1 is not None:
+            return self._dax_coordinated_l1.client.get_memory_usage()
         return self._memory_manager.get_memory_usage()
 
     @l1_mgr_synchronized
@@ -940,14 +1014,21 @@ class L1Manager:
             The value is part of :meth:`get_memory_usage`'s used bytes, not
             in addition to it.
         """
+        if self._dax_coordinated_l1 is not None:
+            return self._dax_coordinated_l1.get_staging_memory_usage()
         return self._staging_bytes
 
     def get_l1_memory_desc(self):
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
+        if self._dax_coordinated_l1 is not None:
+            return self._dax_coordinated_l1.client.get_l1_memory_desc()
         return self._memory_manager.get_l1_memory_desc()
 
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
+        if self._dax_coordinated_l1 is not None:
+            self._dax_coordinated_l1.client.close()
+            return
         with self._lock:
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
             for per_tag in self._staging.values():
@@ -968,6 +1049,10 @@ class L1Manager:
         ``staging_object_count`` / ``staging_bytes`` report the staging
         subset and ``write_locked_count`` the live reservations among them.
         """
+        if self._dax_coordinated_l1 is not None:
+            status = self._dax_coordinated_l1.client.report_status()
+            status["memory_configured_bytes"] = self._configured_capacity_bytes
+            return status
         read_locked = 0
         temporary = 0
         for entry in self._objects.values():
@@ -1017,11 +1102,15 @@ class L1Manager:
         Returns:
             The L1ObjectState if the object exists, None otherwise.
         """
+        if self._dax_coordinated_l1 is not None:
+            return None
         return self._objects.get(key, None)
 
     @l1_mgr_synchronized
     def memcheck(self) -> bool:
         """Perform memory check for L1 cache."""
+        if self._dax_coordinated_l1 is not None:
+            return self._dax_coordinated_l1.client.memcheck()
         mem_check_result = self._memory_manager.memcheck()
 
         # Log the locked objects for debugging
