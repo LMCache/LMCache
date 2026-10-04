@@ -27,6 +27,9 @@ from lmcache.v1.mp_observability.propagation import (
     extract_trace_context,
     run_with_trace_context,
 )
+from lmcache.v1.mp_observability.subscribers.tracing.cb_server import (
+    BlendTracingSubscriber,
+)
 from lmcache.v1.mp_observability.subscribers.tracing.mp_server import (
     MPServerTracingSubscriber,
 )
@@ -40,6 +43,7 @@ from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     SyncRequestHandler,
     msgspec_encode,
 )
+import lmcache.v1.mp_observability.subscribers.tracing.cb_server as cb_tracing_module
 import lmcache.v1.mp_observability.subscribers.tracing.mp_server as tracing_module
 
 
@@ -282,6 +286,33 @@ def test_disabled_handler_keeps_existing_context(
             )
             == 73
         )
+
+
+def test_disabled_cacheblend_keeps_original_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The excluded CacheBlend path must retain its original ambient parent."""
+    monkeypatch.delenv("LMCACHE_MP_TRACE_CONTEXT", raising=False)
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(
+        cb_tracing_module, "_tracer", provider.get_tracer("lmcache_mp.server")
+    )
+    subscriber = BlendTracingSubscriber()
+    callbacks = subscriber.get_subscriptions()
+    try:
+        with trace.use_span(parent_span(73)):
+            for kind, timestamp in (
+                (EventType.CB_REQUEST_START, 1),
+                (EventType.CB_REQUEST_END, 2),
+            ):
+                callbacks[kind](Event(kind, session_id="cb", timestamp=timestamp))
+        root = exporter.get_finished_spans()[0]
+        assert root.context.trace_id == 73 and root.parent.span_id == 173
+    finally:
+        subscriber.shutdown()
+        provider.shutdown()
 
 
 def test_optional_api_is_not_required() -> None:

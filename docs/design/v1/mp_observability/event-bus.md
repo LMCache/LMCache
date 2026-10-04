@@ -61,8 +61,9 @@ remote extraction require `LMCACHE_MP_TRACE_CONTEXT=1`; the default is off.
 
 The MP request span is created from the first request or CPU submission event.
 This retains the parent even when subsequent GPU callback events have no
-Python context. CacheBlend's request span uses the same snapshot. Existing
-providers and samplers decide which spans are recorded.
+Python context. CacheBlend root parenting is outside this propagation change;
+its subscriber keeps its existing behavior. Existing providers and samplers
+decide which spans are recorded.
 
 ### Timestamp semantics
 

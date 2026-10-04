@@ -75,8 +75,10 @@ def unwrap_request_payloads(
 def invoke_request_handler(handler: Callable[..., T], decoded_payloads: list[Any]) -> T:
     """Execute a decoded request under its optional key's W3C context.
 
-    Requests without a key run under an empty context so pooled threads do
-    not inherit another request. Handler exceptions propagate unchanged.
+    With propagation enabled and the OTel API available, requests without a
+    key run under an empty context so pooled threads do not inherit another
+    request. Otherwise the original ambient context is retained. Handler
+    exceptions propagate unchanged.
     """
     carrier = next(
         (
