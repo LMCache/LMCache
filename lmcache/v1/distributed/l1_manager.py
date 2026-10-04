@@ -7,6 +7,7 @@ Managing objects and memory for L1 cache
 from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import count
+from time import monotonic
 import threading
 import weakref
 
@@ -41,6 +42,35 @@ from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
 _l1_manager_ids = count()
+_read_generations = count(1)
+
+
+@dataclass(slots=True)
+class _ReadLock:
+    """Shared reader count and TTL, mutated under the L1 manager mutex.
+
+    Expiry and generation renewal use one clock sample so a new lifetime
+    cannot accidentally inherit an expired reader's generation.
+    """
+
+    ttl_seconds: int
+    generation: int = 0
+    _count: int = 0
+    _expires_at: float = 0.0
+
+    def lock(self, count: int = 1) -> None:
+        now = monotonic()
+        if self._count == 0 or now >= self._expires_at:
+            self._count = 0
+            self.generation = next(_read_generations)
+        self._count += count
+        self._expires_at = now + self.ttl_seconds
+
+    def unlock(self, count: int = 1) -> None:
+        self._count = max(0, self._count - count)
+
+    def is_locked(self) -> bool:
+        return self._count > 0 and monotonic() < self._expires_at
 
 
 # Internal classes and helper functions
@@ -56,7 +86,7 @@ class L1ObjectState:
     write_lock: TTLLock
     """ The writer's reservation; held while the object is staged. """
 
-    read_lock: TTLLock
+    read_lock: _ReadLock
     """ The read lock with TTL for the object. """
 
     is_temporary: bool
@@ -281,6 +311,8 @@ class L1Manager:
         self,
         keys: list[ObjectKey],
         read_locks: int = 1,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve read access for the given keys.
 
@@ -291,6 +323,7 @@ class L1Manager:
                 one per worker that consumes a read lock
                 for the same key (e.g. MLA models with
                 TP > 1).
+            read_generations: Optional output mapping of acquired lock generations.
 
         Returns:
             A dictionary mapping each object key to a tuple
@@ -312,11 +345,9 @@ class L1Manager:
                 ret[key] = (L1Error.KEY_NOT_EXIST, None)
                 continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.lock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.lock()
+            entry.read_lock.lock(total)
+            if read_generations is not None:
+                read_generations[key] = entry.read_lock.generation
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 
@@ -366,6 +397,8 @@ class L1Manager:
         self,
         keys: list[ObjectKey],
         read_locks: int = 1,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1Error]:
         """Finish read access for the given keys.
 
@@ -380,6 +413,8 @@ class L1Manager:
                 default); the reservation owner releasing the
                 whole reservation passes the ``reserve_read``
                 total.
+            read_generations: If supplied, release only matching generations;
+                missing keys are rejected. Omit for legacy key-only completion.
 
         Returns:
             A dictionary mapping each object key to an
@@ -407,6 +442,11 @@ class L1Manager:
                 ret[key] = L1Error.KEY_NOT_EXIST
                 continue
 
+            if read_generations is not None and (
+                read_generations.get(key) != entry.read_lock.generation
+            ):
+                ret[key] = L1Error.KEY_IN_WRONG_STATE
+                continue
             if not entry.read_lock.is_locked():
                 logger.warning(
                     "L1Manager: finish read on non-read-locked key %s, "
@@ -416,11 +456,7 @@ class L1Manager:
                 ret[key] = L1Error.KEY_IN_WRONG_STATE
                 continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.unlock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.unlock()
+            entry.read_lock.unlock(total)
             if entry.is_temporary and not entry.read_lock.is_locked():
                 need_to_free.append(entry.memory_obj)
                 need_to_free_keys.append(key)
@@ -549,7 +585,7 @@ class L1Manager:
                 entry = L1ObjectState(
                     memory_obj=mem_obj,
                     write_lock=TTLLock(self._write_ttl_seconds),
-                    read_lock=TTLLock(self._read_ttl_seconds),
+                    read_lock=_ReadLock(self._read_ttl_seconds),
                     is_temporary=is_temp,
                 )
                 entry.write_lock.lock()
@@ -651,6 +687,8 @@ class L1Manager:
         keys: list[ObjectKey],
         read_locks: int = 1,
         tag: str = "",
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Atomically finish write and acquire read lock for the given keys.
 
@@ -665,6 +703,7 @@ class L1Manager:
                 worker that consumes a read lock for the same key
                 (e.g. MLA models with TP > 1).
             tag: The writer's tag passed to ``reserve_write``.
+            read_generations: Optional output mapping of acquired lock generations.
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -709,8 +748,9 @@ class L1Manager:
                 discarded.append(entry.memory_obj)
                 resident_keys.append(key)
                 entry = resident
-            for _ in range(total):
-                entry.read_lock.lock()
+            entry.read_lock.lock(total)
+            if read_generations is not None:
+                read_generations[key] = entry.read_lock.generation
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
 
         self._memory_manager.free(discarded)

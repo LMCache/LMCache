@@ -553,12 +553,13 @@ class StorageManager:
                     {"keys": keys},
                 )
 
-    @enable_tracing(redact=("l1_owners",))
     def finish_read_prefetched(
         self,
         keys: list[ObjectKey],
         read_locks: int = 1,
         l1_owners: dict[ObjectKey, int] | None = None,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> None:
         """Finish reading prefetched objects.
 
@@ -566,10 +567,22 @@ class StorageManager:
             keys: Object keys that have been read.
             read_locks: Read locks to release per key (the whole
                 reservation when releasing a lookup's locks).
+            l1_owners: Runtime L1 manager IDs retained by prefetch; required
+                when multiple L1 managers are configured.
+            read_generations: Optional generations captured at acquisition;
+                supplied missing or stale generations cannot release a lock.
         """
-        finish_result = self._finish_read_objects(keys, read_locks, l1_owners)
+        finish_result = self._finish_read_objects(
+            keys, read_locks, l1_owners, read_generations=read_generations
+        )
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
+        # Trace effects, not rejected stale releases or process-local generations.
+        if successful_keys:
+            publish_call_event(
+                "lmcache.v1.distributed.storage_manager.StorageManager.finish_read_prefetched",
+                {"keys": successful_keys, "read_locks": read_locks},
+            )
         self._event_bus.publish(
             Event(
                 event_type=EventType.SM_READ_PREFETCHED_FINISHED,
@@ -1402,12 +1415,19 @@ class StorageManager:
         return results
 
     def _finish_read_objects(
-        self, keys: list[ObjectKey], count: int, owners: dict[ObjectKey, int] | None
+        self,
+        keys: list[ObjectKey],
+        count: int,
+        owners: dict[ObjectKey, int] | None,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1Error]:
         results = {}
         for owner, group in self._read_groups(keys, owners).items():
             results.update(
-                self._l1_managers_by_id[owner].finish_read(group, read_locks=count)
+                self._l1_managers_by_id[owner].finish_read(
+                    group, read_locks=count, read_generations=read_generations
+                )
             )
         return results
 

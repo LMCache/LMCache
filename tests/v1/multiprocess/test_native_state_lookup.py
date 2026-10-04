@@ -103,6 +103,8 @@ class _PresenceStorage:
         keys: list[ObjectKey],
         read_locks: int,
         l1_owners: dict[ObjectKey, int] | None = None,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> None:
         """Release only locks actually acquired by a lookup."""
         for key in keys:
