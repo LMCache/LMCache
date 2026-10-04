@@ -107,6 +107,7 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
         "--workload",
         default=None,
         choices=[
+            "kv-tier-pressure",
             "long-doc-permutator",
             "long-doc-qa",
             "multi-round-chat",
@@ -232,6 +233,78 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
         help="Max tokens to generate per permutation request (default: 128). "
         "Use 1 to measure prefill alone; combine larger values with "
         "--ignore-eos for a reproducible decode phase.",
+    )
+
+    # --- KV-tier-pressure workload args ---
+    ktp_group = parser.add_argument_group("kv-tier-pressure workload options")
+    ktp_group.add_argument(
+        "--ktp-pool-size",
+        type=int,
+        default=0,
+        help="Total documents in the corpus (default: 0 = derive from "
+        "--kv-cache-volume and --ktp-overflow-factor). The pool is what "
+        "sets the working set, independently of how large one prompt is.",
+    )
+    ktp_group.add_argument(
+        "--ktp-overflow-factor",
+        type=float,
+        default=2.0,
+        help="Working set as a multiple of --kv-cache-volume (default: 2.0). "
+        "Above 1.0 forces eviction to L2; the steady-state L2 read share is "
+        "about 1 - 1/factor, so 2.0 targets ~50%% of reads from storage. "
+        "Ignored when --ktp-pool-size is given.",
+    )
+    ktp_group.add_argument(
+        "--ktp-docs-per-request",
+        type=int,
+        default=16,
+        help="Documents sampled into each request (default: 16). Bounded by "
+        "the engine's context limit, not by the pool size.",
+    )
+    ktp_group.add_argument(
+        "--ktp-context-length",
+        type=int,
+        default=2560,
+        help="Exact token length of each document (default: 2560, which is "
+        "10 whole 256-token chunks). Requires a loadable tokenizer; pass "
+        "--model when the engine reports a name that is not a HuggingFace "
+        "repo ID or local path.",
+    )
+    ktp_group.add_argument(
+        "--ktp-system-prompt-length",
+        type=int,
+        default=256,
+        help="Exact token length of the shared system prompt (default: 256). "
+        "Use 0 for no system prompt.",
+    )
+    ktp_group.add_argument(
+        "--ktp-num-requests",
+        type=int,
+        default=200,
+        help="Number of measured requests (default: 200). The warm-up sweep "
+        "is separate and sized automatically from the pool.",
+    )
+    ktp_group.add_argument(
+        "--ktp-access-skew",
+        type=float,
+        default=0.0,
+        help="Zipf exponent for document popularity (default: 0.0 = uniform). "
+        "Larger values concentrate reads on a hot subset, raising the L1 hit "
+        "rate and lowering the L2 share.",
+    )
+    ktp_group.add_argument(
+        "--ktp-num-inflight-requests",
+        type=int,
+        default=8,
+        help="Max concurrent in-flight requests (default: 8).",
+    )
+    ktp_group.add_argument(
+        "--ktp-max-output-length",
+        type=int,
+        default=1,
+        help="Max tokens to generate per request (default: 1). The default "
+        "isolates prefill, which is the phase the cache tier affects; larger "
+        "values add decode time that dilutes the measurement.",
     )
 
     # --- Long-doc-qa workload args ---
