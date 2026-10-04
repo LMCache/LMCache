@@ -40,13 +40,19 @@ from lmcache.v1.multiprocess.session import Session
 
 logger = init_logger(__name__)
 
-_BLEND_PROTOCOL_VERSION = 1
+#: Blend protocol version this server speaks. 2: a request may be retrieved
+#: over several CB_RETRIEVE_PRE_COMPUTED calls (one per engine prefill chunk)
+#: and keeps its unretrieved matches' read locks between them. The wire format
+#: is unchanged from 1, so version-1 clients stay compatible; a client that
+#: retrieves per chunk requires a server reporting 2 or later.
+_BLEND_PROTOCOL_VERSION = 2
+_COMPATIBLE_CLIENT_VERSIONS = frozenset({1, 2})
 
 
 def _handshake_response(client_version: int) -> tuple[int, bool]:
     return (
         _BLEND_PROTOCOL_VERSION,
-        client_version == _BLEND_PROTOCOL_VERSION,
+        client_version in _COMPATIBLE_CLIENT_VERSIONS,
     )
 
 
@@ -61,9 +67,11 @@ class BlendModule(
     fingerprints; serves CB rope/lookup/retrieve RPCs; reads cross-module
     GPU state via :class:`LMCacheDrivenTransferModule.cache_contexts`."""
 
-    #: ``Session.extras`` key: ``{"read_locks": N, "per_hash": {hash: keys}}``
-    #: — the sparse lookup's read-lock reservation, consumed by exactly one
-    #: ``extras.pop`` (the retrieve, or :meth:`_release_unretrieved_locks`).
+    #: ``Session.extras`` key: the sparse lookup's
+    #: :class:`~lmcache.v1.multiprocess.modules.blend.read_locks.ReadLockReservation`.
+    #: Each retrieve claims a lock per key it reads and sweeps the matches no
+    #: later retrieve can send; session end releases the rest. All under
+    #: ``_cb_retain_lock``.
     UNRETRIEVED_KEYS_EXTRA = "cb.unretrieved_read_locked_keys"
 
     def __init__(
@@ -79,6 +87,9 @@ class BlendModule(
         # Retain the gapped prefix on a mid-prefix L2 retrieve failure
         # instead of truncating at the gap.
         self._segmented_prefix = enable_segmented_prefix
+        # Guards every request's read-lock reservation: TP ranks' retrieves,
+        # session end and a repeat lookup all touch it.
+        self._cb_retain_lock = threading.Lock()
         # Fleet-wide fingerprint directory; None => purely local matching.
         self._coordinator = coordinator
 
@@ -177,19 +188,25 @@ class BlendModule(
 
         Without this, a request that never sends CB_RETRIEVE_PRE_COMPUTED
         would pin its sparse-prefetched chunks in L1 forever. Session
-        destruction is the safe release point: no retrieve can arrive after.
+        destruction is the release point. A late retrieve can still race it;
+        under the shared lock each lock is either claimed by that retrieve or
+        released here, never both, and a retrieve after this point finds no
+        reservation and reads nothing.
         """
-        stash = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
-        if not stash:
+        with self._cb_retain_lock:
+            reservation = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
+            if reservation is None:
+                return
+            to_release = reservation.release_all()
+        if not to_release:
             return
-        keys = [key for hash_keys in stash["per_hash"].values() for key in hash_keys]
-        # No retrieve consumed anything, so the full reservation is still held.
-        self._ctx.storage_manager.finish_read_prefetched(
-            keys, read_locks=stash["read_locks"], l1_owners=stash.get("l1_owners")
-        )
+        for n, keys in to_release.items():
+            self._ctx.storage_manager.finish_read_prefetched(
+                keys, read_locks=n, l1_owners=reservation.l1_owners
+            )
         logger.info(
             "Released %d unretrieved read lock(s) for ended request %s",
-            len(keys),
+            sum(n * len(keys) for n, keys in to_release.items()),
             session.request_id,
         )
 

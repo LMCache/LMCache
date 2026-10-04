@@ -143,6 +143,7 @@ reported with a fixed reason code on `CB_RETRIEVE_NOOP`:
 | `matches_beyond_alloc` | `True` (no publish) | **all** matches beyond the allocated slots | defer to vLLM's full-alloc follow-up call; locks stay held |
 | `matches_straddle_alloc` | `False` | **some** matches beyond the allocated slots while others are forwarded this step | client degrades the request to full recompute (TP-consensus, no raise) |
 | `no_object_keys` | `True` | nothing to read | silent full recompute |
+| `read_locks_not_held` | `False` | the request no longer holds a read lock on every key the call would read (no reservation, or already claimed or released) | client degrades the request; nothing is read |
 | read/scatter failure | `False` | prefetched objects unavailable, or an exception mid-scatter | client degrades the request |
 
 Invariant: `scatter_ran=True` implies every matched row the client forwards
@@ -156,11 +157,30 @@ applied, a reassigned destination re-scatters.
 
 ## Locks
 
-Sparse-prefetch read locks follow one rule: exactly one owner releases each
-reservation. The retrieve releases applied ranges stream-ordered after the
-scatter, releases lookup-stash orphans it will never read, and leaves
-beyond-slot-bound ranges locked for the follow-up call; anything never
-consumed by a retrieve is released on session destruction.
+The sparse lookup read-locks every object key of every match it finds,
+`num_kv_readers` times per key, and records the reservation on the session
+(`ReadLockReservation`, `modules/blend/read_locks.py`). Its ledger counts the
+locks the request still holds per key, and every lock leaves it exactly once:
+
+- **Claim.** A retrieve claims one lock on each key it will read, all or
+  nothing, and then owns that lock's release: stream-ordered after the
+  scatter, or by the storage read context when the read fails. A call that
+  cannot claim every key reads nothing and returns `read_locks_not_held`:
+  L1's read check only sees that *some* request holds a lock, so reading a
+  key this request no longer holds could take another request's lock.
+- **Sweep.** A request can be retrieved over several calls, one per engine
+  prefill chunk. The client sends each match at most once, in the call whose
+  allocated window holds it whole, and calls arrive in increasing window
+  order. A call therefore releases every unsent match that ends at or before
+  its last sent match, and on the call that sees the whole prompt allocated
+  (`slot_bound >= key.end`, the only call of a single-shot request) every
+  unsent match.
+- **Session end and repeat lookups** release whatever is still held. A repeat
+  lookup (e.g. a preempted request resuming) installs a fresh reservation.
+
+All of it runs under `BlendModule._cb_retain_lock`; storage calls run outside
+it. The blend protocol version is 2 since this contract: a client that
+retrieves per chunk checks for it with `cb_protocol_handshake`.
 
 ## Observability
 

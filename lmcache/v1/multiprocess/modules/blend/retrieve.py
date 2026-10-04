@@ -9,6 +9,7 @@ import time
 if TYPE_CHECKING:
     # Standard
     from collections import OrderedDict
+    import threading
     import weakref
 
     # First Party
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
     from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
         LMCacheDrivenTransferModule,
     )
+    from lmcache.v1.multiprocess.session import Session
 
 # Third Party
 import numpy as np
@@ -53,6 +55,42 @@ logger = init_logger(__name__)
 _NOOP_REASONS_SEEN: set[str] = set()
 
 
+def _assemble_obj_keys(
+    key: IPCCacheServerKey,
+    cb_match_result: list[CBMatchResult],
+    per_match: list[list[ObjectKey] | None],
+    blend_gids: tuple[int, ...],
+    n_read: int,
+) -> list[ObjectKey]:
+    """Build the chunk-major object keys this retrieve reads.
+
+    Matches whose keys the lookup's reservation holds for this rank use them;
+    the others derive their keys exactly as a retrieve without a reservation
+    does.
+
+    :param key: This retrieve's cache key.
+    :param cb_match_result: The matches this retrieve consumes.
+    :param per_match: Per match, this rank's reserved keys or ``None``.
+    :param blend_gids: The read groups' group ids.
+    :param n_read: Read groups per hash.
+    :return: All keys, ``n_read`` consecutive keys per match.
+    """
+    missing = [
+        r for r, ks in zip(cb_match_result, per_match, strict=True) if ks is None
+    ]
+    derived = iter(
+        _cb_chunk_major_object_keys(key, [r.hash for r in missing], blend_gids)
+        if missing
+        else []
+    )
+    all_obj_keys: list[ObjectKey] = []
+    for ks in per_match:
+        if ks is None:
+            ks = [next(derived) for _ in range(n_read)]
+        all_obj_keys.extend(ks)
+    return all_obj_keys
+
+
 class RetrieveReason(enum.Enum):
     """Retrieve outcome taxonomy.
 
@@ -68,16 +106,21 @@ class RetrieveReason(enum.Enum):
     MATCHES_BEYOND_ALLOC = "matches_beyond_alloc"
     MATCHES_STRADDLE_ALLOC = "matches_straddle_alloc"
     NO_OBJECT_KEYS = "no_object_keys"
+    READ_LOCKS_NOT_HELD = "read_locks_not_held"
 
     @property
     def scatter_ran(self) -> bool:
-        return self is not RetrieveReason.MATCHES_STRADDLE_ALLOC
+        return self not in (
+            RetrieveReason.MATCHES_STRADDLE_ALLOC,
+            RetrieveReason.READ_LOCKS_NOT_HELD,
+        )
 
     @property
     def publish(self) -> bool:
         return self in (
             RetrieveReason.MATCHES_STRADDLE_ALLOC,
             RetrieveReason.NO_OBJECT_KEYS,
+            RetrieveReason.READ_LOCKS_NOT_HELD,
         )
 
 
@@ -103,6 +146,7 @@ class RetrieveMixin:
     if TYPE_CHECKING:
         # State owned by BlendModule.__init__; declared so the mixin type-checks.
         UNRETRIEVED_KEYS_EXTRA: str
+        _cb_retain_lock: "threading.Lock"
         _ctx: "MPCacheServerContext"
         _event_bus: Any
         _transfer_module: "LMCacheDrivenTransferModule"
@@ -582,6 +626,13 @@ class RetrieveMixin:
         per block-alloc round), fail with scatter_ran=False when it covers
         only part. Never a partial scatter.
 
+        A request may be retrieved over several calls, one per engine prefill
+        chunk, each sent only the matches that lie whole inside that chunk's
+        window, in increasing window order. Each call reads under the read
+        locks the lookup reserved for the request; see
+        :meth:`_claim_read_locks` for the contract. A call whose keys the
+        request no longer holds fails with scatter_ran=False.
+
         Args:
             key: The request key.
             cb_match_result: Matched ranges to scatter, any order.
@@ -713,6 +764,7 @@ class RetrieveMixin:
             if not cb_match_result:
                 return _no_scatter(RetrieveReason.ALREADY_APPLIED)
         applied_now: "set[tuple[bytes, int, int, tuple]]" = set()
+        slot_bound: int | None = None
         # Partial-alloc first call: matches can be beyond the allocated slots
         # -> settle before the obj-key machinery.
         if cb_match_result:
@@ -748,71 +800,8 @@ class RetrieveMixin:
                     f"/{len(cb_match_result)} match(es) beyond "
                     f"slot_bound={slot_bound}",
                 )
-        # L2 opt: take the lookup's obj_keys stash (once; later calls
-        # re-resolve). ``get``, not ``get_or_create``: a retrieve after
-        # session end must not recreate ownership state.
-        session = self._ctx.session_manager.get(key.request_id)
-        _stash = (
-            session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
-            if session is not None
-            else None
-        )
-        cached = _stash["per_hash"] if _stash else None
-        stash_read_locks = _stash["read_locks"] if _stash else 1
-        l1_owners = (
-            _stash.get("l1_owners")
-            if _stash
-            else session.extras.get("cb.sparse_l1_owners")
-            if session
-            else None
-        )
-        if cached is not None and all(r.hash in cached for r in cb_match_result):
-            # The lookup cached all-ranks obj keys (group-major, rank-minor);
-            # select THIS rank's key per read group or TP>1 mispairs ranks.
-            if key.worker_id is not None and key.world_size > 1:
-                ws = key.world_size
-                all_obj_keys = [
-                    cached[r.hash][g * ws + key.worker_id]
-                    for r in cb_match_result
-                    for g in range(n_read)
-                ]
-            else:
-                all_obj_keys = [k for r in cb_match_result for k in cached[r.hash]]
-        else:
-            # One key per (hash, read group), chunk-major like the cached path.
-            all_obj_keys = _cb_chunk_major_object_keys(
-                key, [r.hash for r in cb_match_result], read_groups.blend_gids
-            )
-
-        # The connector may have dropped matches after the lookup read-locked
-        # the full found set; release those orphan locks now (disjoint from
-        # all_obj_keys, which retrieve still consumes).
-        if cached is not None:
-            retrieved_hashes = {r.hash for r in cb_match_result}
-            orphan_keys = [
-                k for h, ks in cached.items() if h not in retrieved_hashes for k in ks
-            ]
-            if orphan_keys:
-                # Nothing will read these keys: release every lock the lookup
-                # took (N per key).
-                self._ctx.storage_manager.finish_read_prefetched(
-                    orphan_keys, read_locks=stash_read_locks, l1_owners=l1_owners
-                )
-                logger.debug(
-                    "CB released %d prefetched-but-unretrieved keys (req=%s)",
-                    len(orphan_keys),
-                    key.request_id,
-                )
-
-        # Non-prefix sparse hits split by re-rope need (not prefix coverage).
-        n_non_shifted = sum(1 for r in cb_match_result if r.old_st == r.cur_st)
-        n_shifted = len(cb_match_result) - n_non_shifted
-
-        if not all_obj_keys:
-            return _no_scatter(RetrieveReason.NO_OBJECT_KEYS)
-
-        logger.debug("CB retrieving object keys: %s", all_obj_keys)
-
+        # Configuration checks that can raise run before the read locks are
+        # claimed below, so a raise never strands a claimed lock.
         # CB supports only uncompressed single-block-id-space layouts, so the
         # first staged kernel group is representative.
         tokens_per_block = gpu_context.kv_layer_groups_manager.kernel_groups[
@@ -823,6 +812,59 @@ class RetrieveMixin:
                 f"chunk_size {chunk_size} must be a multiple of "
                 f"tokens_per_block {tokens_per_block}"
             )
+
+        # Resolve each kernel group's block table + block size once by
+        # engine_group_idx (kernel groups may share one). CPU tables only.
+        kgm = gpu_context.kv_layer_groups_manager
+        block_ids_np = [np.asarray(b, dtype=np.int64) for b in gpu_block_ids]
+        cpu_block_tables: "list[tuple[np.ndarray, int]]" = []
+        for group_idx in staged_kernel:
+            eg_idx = kgm.kernel_groups[group_idx].engine_group_idx
+            if eg_idx >= len(gpu_block_ids):
+                # Engine groups have independent block tables under HMA;
+                # substituting another's would silently corrupt KV.
+                raise ValueError(
+                    f"CB retrieve: kernel group {group_idx} maps to engine "
+                    f"group {eg_idx}, but only "
+                    f"{len(gpu_block_ids)} block table(s) were "
+                    "provided."
+                )
+            group_bs = kgm.kernel_groups[group_idx].tokens_per_block
+            cpu_block_tables.append((block_ids_np[eg_idx], group_bs))
+
+        # The lookup read-locked every match it found and reserved those locks
+        # on the session. A request can be retrieved over several calls, one
+        # per engine prefill chunk, each with only that chunk's matches. Each
+        # call claims one lock per key it reads (and then owns its release),
+        # and releases the matches no later call can send. A call whose keys
+        # the request no longer holds reads nothing: the L1 read check only
+        # sees that *some* request holds a lock, so reading (and later
+        # releasing) them could take another request's lock. ``get``, not
+        # ``get_or_create``: a retrieve after session end must not recreate
+        # ownership state.
+        session = self._ctx.session_manager.get(key.request_id)
+        claim = (
+            self._claim_read_locks(
+                session, cb_match_result, key, read_groups.blend_gids, slot_bound
+            )
+            if session is not None
+            else None
+        )
+        if claim is None:
+            return _no_scatter(
+                RetrieveReason.READ_LOCKS_NOT_HELD,
+                "the request no longer holds a read lock on every matched key",
+            )
+        all_obj_keys, l1_owners = claim
+
+        # Non-prefix sparse hits split by re-rope need (not prefix coverage).
+        n_non_shifted = sum(1 for r in cb_match_result if r.old_st == r.cur_st)
+        n_shifted = len(cb_match_result) - n_non_shifted
+
+        if not all_obj_keys:
+            return _no_scatter(RetrieveReason.NO_OBJECT_KEYS)
+
+        logger.debug("CB retrieving object keys: %s", all_obj_keys)
 
         # Retrieve-owned stream: never the shared stream (FIFO behind store
         # copies re-creates the device-sync stall).
@@ -848,25 +890,6 @@ class RetrieveMixin:
             torch_dev.stream(retrieve_stream),
         ):
             event = event_backend.create_event(gpu_context.device)
-
-            # Resolve each kernel group's block table + block size once by
-            # engine_group_idx (kernel groups may share one). CPU tables only.
-            kgm = gpu_context.kv_layer_groups_manager
-            block_ids_np = [np.asarray(b, dtype=np.int64) for b in gpu_block_ids]
-            cpu_block_tables: "list[tuple[np.ndarray, int]]" = []
-            for group_idx in staged_kernel:
-                eg_idx = kgm.kernel_groups[group_idx].engine_group_idx
-                if eg_idx >= len(gpu_block_ids):
-                    # Engine groups have independent block tables under HMA;
-                    # substituting another's would silently corrupt KV.
-                    raise ValueError(
-                        f"CB retrieve: kernel group {group_idx} maps to engine "
-                        f"group {eg_idx}, but only "
-                        f"{len(gpu_block_ids)} block table(s) were "
-                        "provided."
-                    )
-                group_bs = kgm.kernel_groups[group_idx].tokens_per_block
-                cpu_block_tables.append((block_ids_np[eg_idx], group_bs))
 
             # CPU-synchronous sentinel holds cb.request open across the GPU
             # work so another worker's no-op CB_REQUEST_END cannot close the
@@ -909,8 +932,11 @@ class RetrieveMixin:
                 ) as memory_objs:
                     _stage_ms["fetch"] = (time.perf_counter() - _stage_t) * 1000
                     if memory_objs is None:
-                        # Read failed: close the retrieve span and end the
-                        # request, else cb.retrieve leaks. Return a fresh
+                        # Read failed. The read context releases the keys it
+                        # did read (one lock each), which spends this call's
+                        # claim on them; the keys it could not read hold no
+                        # lock of this reader. Close the retrieve span and end
+                        # the request, else cb.retrieve leaks. Return a fresh
                         # server event + False, never the client's own handle
                         # (self-import crashes TP).
                         self._event_bus.publish_on_stream(
@@ -1038,15 +1064,6 @@ class RetrieveMixin:
                         (r.hash, r.cur_st, r.cur_ed, _dest(r)) for r, _ in pairs
                     }
 
-                    self._release_applied_read_locks(
-                        cb_match_result,
-                        [r for r, _ in pairs],
-                        all_obj_keys,
-                        n_read,
-                        retrieve_cupy_stream,
-                        l1_owners,
-                    )
-
                     # Record this retrieve's device work for the next
                     # request's scoped barrier.
                     if gpu_context.device.type == "cuda":
@@ -1063,6 +1080,17 @@ class RetrieveMixin:
                         ),
                     )
                     scatter_open = False
+                # After the read context exits cleanly: it releases nothing on
+                # this path, and a raise inside it (which makes it release the
+                # read objects itself) can no longer follow this release.
+                self._release_applied_read_locks(
+                    cb_match_result,
+                    [r for r, _ in pairs],
+                    all_obj_keys,
+                    n_read,
+                    retrieve_cupy_stream,
+                    l1_owners,
+                )
             except Exception:
                 logger.exception("Error during retrieving prefetched results")
                 if scatter_open:
@@ -1134,3 +1162,72 @@ class RetrieveMixin:
             ),
         )
         return event_backend.export_event(event, gpu_context.device), True
+
+    def _claim_read_locks(
+        self,
+        session: "Session",
+        cb_match_result: list[CBMatchResult],
+        key: IPCCacheServerKey,
+        blend_gids: tuple[int, ...],
+        slot_bound: int | None,
+    ) -> tuple[list[ObjectKey], dict[ObjectKey, int] | None] | None:
+        """Claim this retrieve's read locks and release the unreachable ones.
+
+        TP ranks retrieve the same request concurrently (one handler thread
+        per client), and session end or a repeat lookup may race a retrieve,
+        so the reservation is only touched under ``_cb_retain_lock``.
+
+        Window contract: a client sends each match at most once, in the call
+        whose allocated window holds it whole, and calls for one request in
+        increasing window order (the CacheBlend vLLM connector does, under
+        chunked prefill). Every TP rank's retrieve for an engine step finishes
+        before any rank's retrieve for the next step. A match this call was
+        not sent is therefore released once it ends at or before the last
+        match this call was sent, and every unsent match is released on the
+        call that sees the whole prompt allocated (``slot_bound >= key.end``),
+        which is the only call of a single-shot request. With ``slot_bound``
+        unknown nothing is released here; session end does it.
+
+        :param session: The request's session.
+        :param cb_match_result: The matches this retrieve consumes.
+        :param key: This retrieve's cache key.
+        :param blend_gids: The read groups' group ids.
+        :param slot_bound: Tokens the engine has allocated for the request.
+        :return: ``None`` when the request holds no reservation or no longer
+            holds a lock on every key this call would read (nothing claimed);
+            else the keys to read, ``len(blend_gids)`` per match, each with
+            one claimed lock this call must release, and the L1 owners.
+        """
+        n_read = len(blend_gids)
+        to_release: dict[int, list[ObjectKey]] = {}
+        with self._cb_retain_lock:
+            reservation = session.extras.get(self.UNRETRIEVED_KEYS_EXTRA)
+            if reservation is None:
+                return None
+            all_obj_keys = _assemble_obj_keys(
+                key,
+                cb_match_result,
+                reservation.rank_keys(cb_match_result, key, n_read),
+                blend_gids,
+                n_read,
+            )
+            claimed = reservation.claim(all_obj_keys)
+            if slot_bound is not None and cb_match_result:
+                to_release = reservation.sweep(
+                    {r.hash for r in cb_match_result},
+                    upto=max(r.cur_ed for r in cb_match_result),
+                    final=slot_bound >= key.end,
+                )
+            l1_owners = reservation.l1_owners
+        for n, keys in to_release.items():
+            # Nothing will read these keys: release every lock still held.
+            self._ctx.storage_manager.finish_read_prefetched(
+                keys, read_locks=n, l1_owners=l1_owners
+            )
+        if to_release:
+            logger.debug(
+                "CB released %d prefetched-but-unretrieved keys (req=%s)",
+                sum(len(keys) for keys in to_release.values()),
+                key.request_id,
+            )
+        return (all_obj_keys, l1_owners) if claimed else None

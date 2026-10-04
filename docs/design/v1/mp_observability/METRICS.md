@@ -689,11 +689,13 @@ growing denominator against a flat numerator, and
 **What it answers:** How often is CB retrieval invoked? How many chunks are retrieved per call? What is the failure rate?
 
 **No-op retrieves are the "CB engaged but was not faster" signal.** A no-op
-returns *success* without scattering anything, so the request silently falls
-back to a full recompute and no failure counter moves.  Only counted when reuse
-was actually lost, under a fixed `reason` — `beyond_slot_bound` (matches lay
-past the allocated slots; expect a second retrieve after full block allocation)
-or `no_object_keys` (nothing resolved; never benign).
+scatters nothing, so the request falls back to a full recompute and no failure
+counter moves. Only counted when reuse was actually lost, under a fixed
+`reason` (`RetrieveReason` in `modules/blend/retrieve.py`):
+`matches_straddle_alloc` (some matches lay past the allocated slots while
+others were forwarded), `no_object_keys` (nothing resolved; never benign) or
+`read_locks_not_held` (the request no longer held a read lock on every matched
+key, so nothing was read).
 
 A no-op returns before the GPU work, so it does **not** increment
 `retrieve_requests`; the two are disjoint and the attempt total is their sum:
