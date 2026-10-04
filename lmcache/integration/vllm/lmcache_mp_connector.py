@@ -1684,9 +1684,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if len(blocks.blocks) != 1:
                 raise ValueError("R-KV MVP requires exactly one KV cache group")
             row = blocks.blocks[0]
-            keep_blocks = (num_tokens + block_size - 1) // block_size
-            if keep_blocks > len(row):
+            resident_blocks = (num_tokens + block_size - 1) // block_size
+            if resident_blocks > len(row):
                 raise ValueError("R-KV resident length exceeds allocated KV capacity")
+
+            # Match the official vLLM R-KV allocation cap: budget + buffer plus
+            # one scheduler block of native allocation headroom.
+            capacity_tokens = self._rkv_budget + self._rkv_buffer + block_size
+            capacity_blocks = (capacity_tokens + block_size - 1) // block_size
+            keep_blocks = min(len(row), capacity_blocks)
 
             freed = row[keep_blocks:]
             if any(block.ref_cnt != 1 for block in freed):

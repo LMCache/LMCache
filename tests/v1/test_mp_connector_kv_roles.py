@@ -257,6 +257,8 @@ def test_scheduler_commits_resident_kv_and_reclaims_tail() -> None:
     scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
     scheduler._gpu_block_pool = _FakeBlockPool()
     scheduler._group_tokens_per_block = [16]
+    scheduler._rkv_budget = 32
+    scheduler._rkv_buffer = 32
     row = [SimpleNamespace(block_id=block_id, ref_cnt=1) for block_id in range(10, 17)]
     scheduler._rkv_allocations = {
         "request": SimpleNamespace(blocks=[row]),
@@ -269,9 +271,35 @@ def test_scheduler_commits_resident_kv_and_reclaims_tail() -> None:
 
     scheduler._commit_rkv_resident_updates({"request": 32})
 
-    assert [block.block_id for block in row] == [10, 11]
-    assert scheduler._gpu_block_pool.freed_ids == [16, 15, 14, 13, 12]
-    assert tracker.allocated_block_ids[0] == [10, 11]
+    assert [block.block_id for block in row] == [10, 11, 12, 13, 14]
+    assert scheduler._gpu_block_pool.freed_ids == [16, 15]
+    assert tracker.allocated_block_ids[0] == [10, 11, 12, 13, 14]
+    assert get_resident_kv_tokens("request") == 32
+    clear_resident_kv_tokens("request")
+
+
+def test_scheduler_rkv_cap_does_not_require_future_headroom_allocated() -> None:
+    clear_resident_kv_tokens("request")
+    scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    scheduler._gpu_block_pool = _FakeBlockPool()
+    scheduler._group_tokens_per_block = [16]
+    scheduler._rkv_budget = 32
+    scheduler._rkv_buffer = 32
+    row = [SimpleNamespace(block_id=block_id, ref_cnt=1) for block_id in range(10, 14)]
+    scheduler._rkv_allocations = {
+        "request": SimpleNamespace(blocks=[row]),
+    }
+    tracker = SimpleNamespace(
+        num_scheduled_tokens=64,
+        allocated_block_ids={0: list(range(10, 14))},
+    )
+    scheduler.request_trackers = {"request": tracker}
+
+    scheduler._commit_rkv_resident_updates({"request": 32})
+
+    assert [block.block_id for block in row] == [10, 11, 12, 13]
+    assert scheduler._gpu_block_pool.freed_ids == []
+    assert tracker.allocated_block_ids[0] == [10, 11, 12, 13]
     assert get_resident_kv_tokens("request") == 32
     clear_resident_kv_tokens("request")
 
