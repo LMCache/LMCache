@@ -3,10 +3,32 @@
 cmake_minimum_required(VERSION 3.22)
 project(lmcache_compressed_record_probe LANGUAGES CXX)
 
-set(LMCACHE_COMPAT_VENDOR "" CACHE STRING "NVIDIA or AMD")
-set_property(CACHE LMCACHE_COMPAT_VENDOR PROPERTY STRINGS NVIDIA AMD)
+set(LMCACHE_COMPAT_VENDOR "" CACHE STRING
+    "NVIDIA, AMD, or empty for host-only fixture validation")
+set_property(CACHE LMCACHE_COMPAT_VENDOR PROPERTY STRINGS "" NVIDIA AMD)
+
+add_library(lmcache_probe_fixtures STATIC fixture_validation.cpp)
+target_compile_features(lmcache_probe_fixtures PUBLIC cxx_std_17)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(lmcache_probe_fixture_test fixture_validation_test.cpp)
+  target_link_libraries(lmcache_probe_fixture_test PRIVATE lmcache_probe_fixtures)
+  add_test(
+    NAME lmcache_probe_fixture_test
+    COMMAND
+      lmcache_probe_fixture_test
+      ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/raw-deflate-v1.hex
+      ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/gzip-v1.hex
+      ${CMAKE_CURRENT_BINARY_DIR}/mutated-fixture.hex)
+endif()
+
+if(LMCACHE_COMPAT_VENDOR STREQUAL "")
+  return()
+endif()
 
 add_executable(lmcache_compressed_record_probe record_probe.cpp)
+target_link_libraries(lmcache_compressed_record_probe PRIVATE lmcache_probe_fixtures)
 
 if(LMCACHE_COMPAT_VENDOR STREQUAL "NVIDIA")
   enable_language(CUDA)
@@ -36,10 +58,11 @@ else()
   message(FATAL_ERROR "Set LMCACHE_COMPAT_VENDOR to NVIDIA or AMD")
 endif()
 
-include(CTest)
-add_test(
-  NAME lmcache_compressed_record_probe
-  COMMAND
-    lmcache_compressed_record_probe
-    ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/raw-deflate-v1.hex
-    ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/gzip-v1.hex)
+if(BUILD_TESTING)
+  add_test(
+    NAME lmcache_compressed_record_probe
+    COMMAND
+      lmcache_compressed_record_probe
+      ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/raw-deflate-v1.hex
+      ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/gzip-v1.hex)
+endif()

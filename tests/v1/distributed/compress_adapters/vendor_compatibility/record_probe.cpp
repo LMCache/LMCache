@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "fixture_validation.h"
 
 #if defined(LMCACHE_COMPAT_NVIDIA) == defined(LMCACHE_COMPAT_AMD)
   #error "Define exactly one vendor compatibility target"
@@ -50,10 +50,7 @@ constexpr std::size_t kFixedHeaderSize = 44;
 constexpr std::size_t kChunkDescriptorSize = 24;
 constexpr std::size_t kPayloadAlignment = 16;
 
-enum class Framing : std::uint8_t {
-  kRaw = 1,
-  kGzip = 2,
-};
+using record_probe::Framing;
 
 struct ChunkDescriptor {
   std::size_t payload_offset;
@@ -203,50 +200,6 @@ class GpuStream {
   GpuStreamHandle stream_{};
 };
 
-int hex_digit(char value) {
-  if (value >= '0' && value <= '9') {
-    return value - '0';
-  }
-  if (value >= 'a' && value <= 'f') {
-    return value - 'a' + 10;
-  }
-  if (value >= 'A' && value <= 'F') {
-    return value - 'A' + 10;
-  }
-  return -1;
-}
-
-std::vector<std::uint8_t> read_hex_file(const std::string& path) {
-  std::ifstream input(path);
-  if (!input) {
-    throw std::runtime_error("cannot open fixture " + path);
-  }
-
-  std::vector<std::uint8_t> bytes;
-  int high_nibble = -1;
-  char value = 0;
-  while (input.get(value)) {
-    if (std::isspace(static_cast<unsigned char>(value)) != 0) {
-      continue;
-    }
-    const int digit = hex_digit(value);
-    if (digit < 0) {
-      throw std::runtime_error("fixture contains a non-hex character: " + path);
-    }
-    if (high_nibble < 0) {
-      high_nibble = digit;
-    } else {
-      bytes.push_back(static_cast<std::uint8_t>((high_nibble << 4) | digit));
-      high_nibble = -1;
-    }
-  }
-  if (high_nibble >= 0) {
-    throw std::runtime_error("fixture contains an incomplete hex byte: " +
-                             path);
-  }
-  return bytes;
-}
-
 void require_range(const std::vector<std::uint8_t>& bytes, std::size_t offset,
                    std::size_t size) {
   if (offset > bytes.size() || size > bytes.size() - offset) {
@@ -291,7 +244,8 @@ std::size_t align_payload_offset(std::size_t offset) {
 }
 
 ParsedRecord parse_record(const std::string& path, Framing expected_framing) {
-  std::vector<std::uint8_t> bytes = read_hex_file(path);
+  std::vector<std::uint8_t> bytes =
+      record_probe::read_fixed_fixture(path, expected_framing);
   require_range(bytes, 0, kFixedHeaderSize);
   if (bytes[0] != 'L' || bytes[1] != 'M' || bytes[2] != 'C' ||
       bytes[3] != 'R') {
@@ -594,8 +548,10 @@ int main(int argument_count, char** arguments) {
   }
 
   try {
-    run_probe(parse_record(arguments[1], Framing::kRaw));
-    run_probe(parse_record(arguments[2], Framing::kGzip));
+    const ParsedRecord raw_record = parse_record(arguments[1], Framing::kRaw);
+    const ParsedRecord gzip_record = parse_record(arguments[2], Framing::kGzip);
+    run_probe(raw_record);
+    run_probe(gzip_record);
   } catch (const std::exception& error) {
     std::cerr << "compatibility probe failed: " << error.what() << std::endl;
     return 1;
