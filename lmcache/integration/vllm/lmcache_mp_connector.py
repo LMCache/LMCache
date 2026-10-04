@@ -946,13 +946,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             layout_hints=layout_hints,
             dcp_size=self._dcp_size,
         )
-        self.worker_adapter.register_kv_caches(
-            kv_caches,
-            engine_group_infos=engine_group_infos,
-            layout_hints=layout_hints,
-        )
         if self._rkv is not None:
+            # R-KV bypasses LMCache STORE/RETRIEVE, so keep paged KV local.
+            # Exporting it through CUDA IPC makes in-place compaction expensive.
             self._rkv.register_kv_caches(kv_caches)
+        else:
+            self.worker_adapter.register_kv_caches(
+                kv_caches,
+                engine_group_infos=engine_group_infos,
+                layout_hints=layout_hints,
+            )
         if self.dispatcher is not None:
             dispatch(
                 self.dispatcher,

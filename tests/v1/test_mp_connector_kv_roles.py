@@ -182,6 +182,34 @@ def connectors(
         scheduler.shutdown()
 
 
+def test_rkv_registers_kv_only_with_worker_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._vllm_config = object()
+    connector._kv_cache_config = None
+    connector._dcp_size = 1
+    connector.worker_adapter = MagicMock()
+    connector._rkv = MagicMock()
+    connector.dispatcher = None
+
+    monkeypatch.setattr(connector_mod, "vllm_layout_hints", lambda _cfg: None)
+    monkeypatch.setattr(
+        connector_mod,
+        "apply_kv_cache_group_edits",
+        lambda _cfg, caches, *, layout_hints: caches,
+    )
+    monkeypatch.setattr(
+        connector_mod,
+        "create_engine_group_infos_from_vllm",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    caches = {"layer": torch.empty(1)}
+    connector.register_kv_caches(caches)
+
+    connector._rkv.register_kv_caches.assert_called_once_with(caches)
+    connector.worker_adapter.register_kv_caches.assert_not_called()
+
+
 def test_worker_reports_resident_kv_update_once() -> None:
     worker = LMCacheMPConnector.__new__(LMCacheMPConnector)
     worker._pending_resident_kv_updates = {"request": 17}
