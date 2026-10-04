@@ -48,8 +48,8 @@ without headers still decode; older map decoders ignore the extra field.
 
 The shared key's optional protobuf field is kept aligned with its Python
 dataclass. This keeps the existing gRPC structural codec usable even when
-propagation is off. The baseline transport still requires the separate gRPC
-metadata propagation change to forward a caller's parent through gRPC.
+propagation is off. gRPC per-call metadata, described below, supplies the
+caller's parent independently of this shared key field.
 
 Events capture the parent before the EventBus drain thread or an asynchronous
 GPU callback runs. The standard MP subscriber's existing ``request`` span uses this
