@@ -13,7 +13,7 @@ from __future__ import annotations
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, ParamSpec, TypeVar, cast
 import threading
 
 if TYPE_CHECKING:
@@ -56,6 +56,9 @@ RawBlockStoreTaskResult = tuple[
     list[ObjectKey],
     list[int],
 ]
+
+_TaskArgs = ParamSpec("_TaskArgs")
+_TaskResult = TypeVar("_TaskResult")
 
 _FDP_DATA_PLACEMENT_POLICY_NONE = "none"
 _FDP_DATA_PLACEMENT_POLICY_CACHE_SALT_PREFIX = "cache_salt_prefix"
@@ -683,9 +686,12 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         Returns:
             Task ID that can be observed through ``pop_completed_store_tasks``.
+            A failed native worker produces an unsuccessful task result without
+            queuing a write.
 
         Raises:
             ValueError: If either list is empty or the lengths differ.
+            RuntimeError: If the adapter is closed.
         """
         if not keys or not objects:
             raise ValueError("keys and objects must be non-empty")
@@ -697,8 +703,8 @@ class RawBlockL2Adapter(L2AdapterInterface):
             task_id = self._get_next_task_id_locked()
             self._store_inflight_tasks += 1
         try:
-            future = self._store_pool.submit(
-                self._run_store_task, list(keys), list(objects)
+            future = self._submit_task(
+                self._store_pool, self._run_store_task, list(keys), list(objects)
             )
         except Exception:
             with self._lock:
@@ -724,10 +730,12 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         Returns:
             Task ID whose bitmap can be queried with
-            ``query_lookup_and_lock_result``.
+            ``query_lookup_and_lock_result``. A failed native worker completes
+            with an all-zero bitmap without queuing work or locking keys.
 
         Raises:
             ValueError: If ``keys`` is empty.
+            RuntimeError: If the adapter is closed.
         """
         if not keys:
             raise ValueError("keys must be non-empty")
@@ -736,7 +744,9 @@ class RawBlockL2Adapter(L2AdapterInterface):
             task_id = self._get_next_task_id_locked()
             self._lookup_inflight_tasks += 1
         try:
-            future = self._lookup_pool.submit(self._run_lookup_task, list(keys))
+            future = self._submit_task(
+                self._lookup_pool, self._run_lookup_task, list(keys)
+            )
         except Exception:
             with self._lock:
                 self._lookup_inflight_tasks -= 1
@@ -767,9 +777,12 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         Returns:
             Task ID whose bitmap can be queried with ``query_load_result``.
+            A failed native worker completes with an all-zero bitmap without
+            queuing a read.
 
         Raises:
             ValueError: If either list is empty or the lengths differ.
+            RuntimeError: If the adapter is closed.
         """
         if not keys or not objects:
             raise ValueError("keys and objects must be non-empty")
@@ -781,8 +794,8 @@ class RawBlockL2Adapter(L2AdapterInterface):
             task_id = self._get_next_task_id_locked()
             self._load_inflight_tasks += 1
         try:
-            future = self._load_pool.submit(
-                self._run_load_task, list(keys), list(objects)
+            future = self._submit_task(
+                self._load_pool, self._run_load_task, list(keys), list(objects)
             )
         except Exception:
             with self._lock:
@@ -961,8 +974,25 @@ class RawBlockL2Adapter(L2AdapterInterface):
         )
 
     def _raise_if_closed_locked(self) -> None:
+        """Reject submissions after the adapter has been closed."""
         if self._closed:
             raise RuntimeError("RawBlockL2Adapter is closed")
+
+    def _submit_task(
+        self,
+        executor: ThreadPoolExecutor,
+        function: Callable[_TaskArgs, _TaskResult],
+        *args: _TaskArgs.args,
+        **kwargs: _TaskArgs.kwargs,
+    ) -> Future[_TaskResult]:
+        """Propagate worker failure through a future without queuing work."""
+        try:
+            self._core.raise_if_failed()
+        except RuntimeError as error:
+            future: Future[_TaskResult] = Future()
+            future.set_exception(error)
+            return future
+        return executor.submit(function, *args, **kwargs)
 
     def _get_next_task_id_locked(self) -> L2TaskId:
         task_id = self._next_task_id
