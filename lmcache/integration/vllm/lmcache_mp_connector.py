@@ -621,10 +621,33 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             "lmcache.mp.rkv_budget", None
         )
         self._rkv_budget = int(rkv_budget) if rkv_budget is not None else None
-        # Keep the MVP's serving policy fixed. Only budget is public config;
-        # buffer remains internal because allocator headroom must match the
-        # R-KV compaction cadence.
-        self._rkv_buffer = 128
+        # These mirror R-KV serving semantics. LMCache only transports them to
+        # the worker/allocator; it does not redefine the algorithm.
+        self._rkv_buffer = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.rkv_buffer", 128
+            )
+        )
+        self._rkv_window_size = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.rkv_window_size", 8
+            )
+        )
+        self._rkv_kernel_size = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.rkv_kernel_size", 7
+            )
+        )
+        self._rkv_mix_lambda = float(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.rkv_mix_lambda", 0.1
+            )
+        )
+        self._rkv_retain_ratio = float(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.rkv_retain_ratio", 0.1
+            )
+        )
         self._rkv: RKVWorker | None = None
         if self._rkv_budget is not None:
             if role == KVConnectorRole.SCHEDULER:
@@ -804,6 +827,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self._rkv = RKVWorker(
                     self._rkv_budget,
                     buffer=self._rkv_buffer,
+                    window_size=self._rkv_window_size,
+                    kernel_size=self._rkv_kernel_size,
+                    mix_lambda=self._rkv_mix_lambda,
+                    retain_ratio=self._rkv_retain_ratio,
                 )
             if self.transfer_intermediate_tensors:
                 # First Party
