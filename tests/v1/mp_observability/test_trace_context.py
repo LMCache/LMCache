@@ -2,8 +2,8 @@
 """CPU tests for the real MQ, worker and event-subscriber propagation path."""
 
 # Standard
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from queue import Queue
 import asyncio
 import threading
 
@@ -16,7 +16,6 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, TraceState
 import msgspec
 import pytest
-import zmq
 
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -34,17 +33,15 @@ from lmcache.v1.mp_observability.subscribers.tracing.mp_server import (
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.rpc import get_rpc_spec
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import common_pb2
 from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     compile_request_codec_for_types,
 )
-from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
-    BlockingRequestHandler,
-    MessageQueueClient,
-    MessageQueueServer,
-    SyncRequestHandler,
-    msgspec_encode,
+from tests.v1.multiprocess.transport_test_utils import (
+    request_server_url,
+    start_lookup_request_server,
 )
 import lmcache.v1.mp_observability.subscribers.tracing.cb_server as blend_tracing_module
 import lmcache.v1.mp_observability.subscribers.tracing.mp_server as tracing_module
@@ -200,24 +197,33 @@ def test_exception_and_cancellation_restore_context(error: type[BaseException]) 
 
 
 @pytest.mark.usefixtures("enabled")
-def test_real_handlers_and_concurrent_worker_isolation() -> None:
-    def observe(request: IPCCacheServerKey) -> int:
-        return trace.get_current_span().get_span_context().trace_id
+@pytest.mark.parametrize("handler_type", [HandlerType.SYNC, HandlerType.BLOCKING])
+def test_real_handlers_and_concurrent_worker_isolation(
+    handler_type: HandlerType, unused_tcp_port: int
+) -> None:
+    observed: Queue[int] = Queue()
 
-    # The existing constructors type the wire class as a response value.
-    blocking = BlockingRequestHandler[int]([IPCCacheServerKey], int, observe)  # type: ignore[arg-type]
-    sync = SyncRequestHandler[int]([IPCCacheServerKey], int, observe)  # type: ignore[arg-type]
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        blocking.executor = pool
+    class Module:
+        @request_handler(handler_type)
+        def lookup(self, request: IPCCacheServerKey, tp_size: int) -> None:
+            """Record the active parent from the executing request handler."""
+            observed.put(trace.get_current_span().get_span_context().trace_id)
+
+    endpoint = request_server_url("zmq", unused_tcp_port)
+    server = start_lookup_request_server("zmq", endpoint, Module())
+    client = RequestClientFactory.create(endpoint)
+    try:
         futures = []
         for number in range(1, 21):
             with trace.use_span(parent_span(number)):
-                request = replace(key(), trace_context=capture_trace_context())
-            payload = [msgspec_encode(request, IPCCacheServerKey)]
-            assert sync(payload) == number
-            futures.append(blocking(payload))
-        assert [future.result(5) for future in futures] == list(range(1, 21))
-        assert blocking([msgspec_encode(key(), IPCCacheServerKey)]).result(5) == 0
+                futures.append(client.lookup(key(), 1))
+        assert [future.result(5) for future in futures] == [None] * 20
+        assert sorted(observed.get(timeout=5) for _ in futures) == list(range(1, 21))
+        assert client.lookup(key(), 1).result(5) is None
+        assert observed.get(timeout=5) == 0
+    finally:
+        client.close()
+        server.close()
 
 
 @pytest.mark.usefixtures("enabled")
@@ -259,7 +265,7 @@ def test_gpu_callback_events_use_cpu_submission_parent(
 @pytest.mark.usefixtures("enabled")
 @pytest.mark.parametrize("sampled", [True, False])
 def test_real_zmq_worker_event_bus_parentage(
-    monkeypatch: pytest.MonkeyPatch, sampled: bool
+    monkeypatch: pytest.MonkeyPatch, sampled: bool, unused_tcp_port: int
 ) -> None:
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
@@ -272,26 +278,26 @@ def test_real_zmq_worker_event_bus_parentage(
     completed = threading.Event()
     bus.subscribe(EventType.MP_REQUEST_END, lambda event: completed.set())
 
-    def lookup(request: IPCCacheServerKey, tp_size: int) -> None:
-        bus.publish(Event(EventType.MP_REQUEST_START, session_id=request.request_id))
-        bus.publish(Event(EventType.MP_STORE_START, session_id=request.request_id))
-        bus.publish(Event(EventType.MP_STORE_END, session_id=request.request_id))
-        bus.publish(Event(EventType.MP_REQUEST_END, session_id=request.request_id))
+    class Module:
+        @request_handler(HandlerType.BLOCKING)
+        def lookup(self, request: IPCCacheServerKey, tp_size: int) -> None:
+            """Emit lifecycle events from the executing request handler."""
+            bus.publish(
+                Event(EventType.MP_REQUEST_START, session_id=request.request_id)
+            )
+            bus.publish(Event(EventType.MP_STORE_START, session_id=request.request_id))
+            bus.publish(Event(EventType.MP_STORE_END, session_id=request.request_id))
+            bus.publish(Event(EventType.MP_REQUEST_END, session_id=request.request_id))
 
-    ctx = zmq.Context()
-    server = MessageQueueServer("tcp://127.0.0.1:*", ctx)
-    server.add_blocking_handler(get_rpc_spec("lookup"), lookup)
-    server.add_normal_thread_pool(["lookup"], max_workers=2)
+    endpoint = request_server_url("zmq", unused_tcp_port)
+    server = start_lookup_request_server("zmq", endpoint, Module())
     bus.start()
-    server.start()
-    client = MessageQueueClient(server.socket.getsockopt_string(zmq.LAST_ENDPOINT), ctx)
+    client = RequestClientFactory.create(endpoint)
     request = key()
     try:
         parent = parent_span(99, sampled)
         with trace.use_span(parent):
-            future: MessagingFuture[None] = client.submit_request(
-                "lookup", [request, 1]
-            )
+            future: MessagingFuture[None] = client.lookup(request, 1)
         assert future.result(5) is None
         assert completed.wait(5)
         spans = exporter.get_finished_spans()
@@ -310,7 +316,6 @@ def test_real_zmq_worker_event_bus_parentage(
         client.close()
         server.close()
         bus.stop()
-        ctx.term()
         provider.shutdown()
 
 
