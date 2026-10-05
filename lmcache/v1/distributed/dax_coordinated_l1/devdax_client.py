@@ -7,6 +7,7 @@ from __future__ import annotations
 # Standard
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import lru_cache
 from hashlib import sha256
 from threading import RLock
 from typing import NoReturn, Protocol
@@ -77,6 +78,7 @@ except ModuleNotFoundError as exc:
 logger = init_logger(__name__)
 
 
+@lru_cache(maxsize=len(RawResult))
 def _raw_result(native_result: object) -> RawResult:
     """Convert one pybind enum value to its stable string-backed enum."""
     name = str(native_result).rsplit(".", maxsplit=1)[-1]
@@ -110,7 +112,7 @@ class _NativePayload(Protocol):
     slot_generation: int
 
 
-@dataclass
+@dataclass(slots=True)
 class _ReservationContext:
     """One native token and view, with remaining locks for a read reservation."""
 
@@ -209,7 +211,7 @@ class DaxCoordinatedL1Client:
         L1Manager clamps its public input; direct clients require a positive count.
         Views may be reused, but every call acquires fresh native reservations.
         """
-        self._key_ranks(keys)
+        self._validate_keys(keys)
         if read_locks < 1:
             raise ValueError("read_locks must be positive")
         if not self.initialized and self._geometry is not None:
@@ -232,7 +234,11 @@ class DaxCoordinatedL1Client:
                 memory_obj=memory_obj,
                 count=count,
             )
-            self._read_contexts.setdefault(key, []).append(context)
+            contexts = self._read_contexts.get(key)
+            if contexts is None:
+                self._read_contexts[key] = [context]
+            else:
+                contexts.append(context)
             output[key] = DevDaxReservationResult(result, memory_obj)
         return output
 
@@ -240,10 +246,10 @@ class DaxCoordinatedL1Client:
         self, keys: list[ObjectKey]
     ) -> dict[ObjectKey, DevDaxReservationResult]:
         """Return payload views for keys already reserved by this process."""
-        self._key_ranks(keys)
+        self._validate_keys(keys)
         output: dict[ObjectKey, DevDaxReservationResult] = {}
         for key in keys:
-            contexts = self._read_contexts.get(key, [])
+            contexts = self._read_contexts.get(key, ())
             if not contexts:
                 output[key] = DevDaxReservationResult(RawResult.NOT_FOUND)
                 continue
@@ -260,7 +266,7 @@ class DaxCoordinatedL1Client:
         A reservation may be consumed by several workers, one lock at a time.
         Other local reservations and peer activity flags remain protected.
         """
-        self._key_ranks(keys)
+        self._validate_keys(keys)
         if read_locks < 1:
             raise ValueError("read_locks must be positive")
         _, core = self._require_initialized()
@@ -268,7 +274,7 @@ class DaxCoordinatedL1Client:
         output: dict[ObjectKey, RawResult] = {}
         pending: list[tuple[ObjectKey, _ReservationContext, int]] = []
         for key in keys:
-            contexts = self._read_contexts.get(key, [])
+            contexts = self._read_contexts.get(key, ())
             if sum(context.count for context in contexts) < count:
                 output[key] = RawResult.INVALID_STATE
                 continue
@@ -292,7 +298,7 @@ class DaxCoordinatedL1Client:
             if key not in output or result is not RawResult.SUCCESS:
                 output[key] = result
         for key in output:
-            contexts = self._read_contexts.get(key, [])
+            contexts = self._read_contexts.get(key, ())
             remaining_contexts = [context for context in contexts if context.count > 0]
             if remaining_contexts:
                 self._read_contexts[key] = remaining_contexts
@@ -306,7 +312,7 @@ class DaxCoordinatedL1Client:
         layout_desc: MemoryLayoutDesc,
     ) -> dict[ObjectKey, DevDaxReservationResult]:
         """Reserve new allocations; published keys reject further writes."""
-        ranks = self._key_ranks(keys)
+        self._validate_keys(keys)
         payload_length = get_size_bytes(layout_desc.shapes, layout_desc.dtypes)
         geometry = self._geometry
         if geometry is None:
@@ -325,7 +331,8 @@ class DaxCoordinatedL1Client:
         stable_layout_id = layout_id(layout_desc)
         self._layouts[stable_layout_id] = layout_desc
         output: dict[ObjectKey, DevDaxReservationResult] = {}
-        for key, rank in zip(keys, ranks, strict=True):
+        for key in keys:
+            rank = self._rank_placement.rank_from_kv_rank(key.kv_rank)
             digest = key_digest(key, self._layout_digest)
             native = core.reserve_write(digest, payload_length, stable_layout_id, rank)
             result = _raw_result(native.result)
@@ -343,7 +350,7 @@ class DaxCoordinatedL1Client:
         self, keys: list[ObjectKey]
     ) -> dict[ObjectKey, DevDaxReservationResult]:
         """Publish completed D2H payloads and commit READY metadata."""
-        self._key_ranks(keys)
+        self._validate_keys(keys)
         _, core = self._require_initialized()
         output: dict[ObjectKey, DevDaxReservationResult] = {}
         pending: list[tuple[ObjectKey, _ReservationContext]] = []
@@ -365,7 +372,7 @@ class DaxCoordinatedL1Client:
         self, keys: list[ObjectKey], read_locks: int = 1
     ) -> dict[ObjectKey, DevDaxReservationResult]:
         """Commit writes and add ``read_locks`` local locks before writer release."""
-        self._key_ranks(keys)
+        self._validate_keys(keys)
         if read_locks < 1:
             raise ValueError("read_locks must be positive")
         _, core = self._require_initialized()
@@ -389,13 +396,17 @@ class DaxCoordinatedL1Client:
                 write_context.memory_obj,
                 count,
             )
-            self._read_contexts.setdefault(key, []).append(context)
+            contexts = self._read_contexts.get(key)
+            if contexts is None:
+                self._read_contexts[key] = [context]
+            else:
+                contexts.append(context)
             output[key] = DevDaxReservationResult(result, write_context.memory_obj)
         return output
 
     def delete(self, keys: list[ObjectKey]) -> dict[ObjectKey, DevDaxReservationResult]:
         """Invalidate owned targets; returned views describe reclaimed payload."""
-        self._key_ranks(keys)
+        self._validate_keys(keys)
         _, core = self._require_initialized()
         output: dict[ObjectKey, DevDaxReservationResult] = {}
         for key in keys:
@@ -639,20 +650,18 @@ class DaxCoordinatedL1Client:
             )
         return region, core
 
-    def _key_ranks(self, keys: list[ObjectKey]) -> list[int]:
+    def _validate_keys(self, keys: list[ObjectKey]) -> None:
         """Validate the whole TP batch before reserving or releasing any slot."""
         if self._closed:
             raise RuntimeError("DAX-Coordinated L1 client is closed")
-        ranks = []
         for key in keys:
-            ranks.append(self._rank_placement.rank_from_kv_rank(key.kv_rank))
+            self._rank_placement.rank_from_kv_rank(key.kv_rank)
             if key.object_group_id != 0:
                 raise ValueError(
                     "TP DAX-Coordinated L1 requires homogeneous object group 0"
                 )
             if self._model_profile and key.model_name != self._model_profile.model_name:
                 raise ValueError("TP key model differs from registered model")
-        return ranks
 
     def _model_profile_status(self) -> dict[str, int | str]:
         """Return the bounded public projection of the bound model profile."""
