@@ -1391,8 +1391,6 @@ class PrefetchController(StorageControllerInterface):
             The index of the L1 manager that has affinity with the given L2 adapter
             index.
         """
-        # TODO: right now we only support one L1 manager. Update this after we have
-        # multi-tier L1 support
         return self._l2_affinity[l2_adapter_idx]
 
     def _poll_load_results(
