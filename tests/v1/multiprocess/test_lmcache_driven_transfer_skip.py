@@ -640,3 +640,43 @@ def test_retrieve_of_only_an_unfull_chunk_skips_aux_groups(monkeypatch):
 def _no_unfull(chunk_size: int) -> bool:
     """``has_unfull_chunk`` of a key double that addresses full chunks only."""
     return False
+
+
+@pytest.mark.parametrize("fail_sync", [False, True])
+def test_retrieve_completion_failure_preserves_read_owners(
+    monkeypatch: pytest.MonkeyPatch, fail_sync: bool
+) -> None:
+    """Only a successful stream drain permits fallback L1 release."""
+    module, _, _ = _make_module(monkeypatch, 2, [-1])
+    context = module.get_and_touch_context_entry(1).cache_context
+    manager = module.context.storage_manager
+    completion = [(10, ["g0c0", "g0c1"])]
+    manager.prepare_read_completion.return_value = completion
+    operations: list[object] = []
+
+    def fail_release(stream: object, kind: str, payload: object) -> None:
+        if kind == "finish_read_by_owner":
+            raise RuntimeError("callback submission failed")
+
+    def synchronize() -> None:
+        operations.append("drain")
+        if fail_sync:
+            raise RuntimeError("stream drain failed")
+
+    context.stream.synchronize.side_effect = synchronize
+    manager.finish_read_by_owner.side_effect = lambda owners: operations.append(owners)
+    monkeypatch.setattr(mod, "submit_callback_to_stream", fail_release)
+    message = "stream drain failed" if fail_sync else "callback submission failed"
+    with pytest.raises(RuntimeError, match=message):
+        module.retrieve(
+            SimpleNamespace(
+                request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            ),
+            1,
+            [[1, 2]],
+            b"producer",
+        )
+    expected: list[object] = ["drain"]
+    if not fail_sync:
+        expected.append(completion)
+    assert operations == expected
