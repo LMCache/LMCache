@@ -40,7 +40,6 @@ from lmcache.v1.multiprocess.modules.blend.rope import (
     _cb_group_rope_geometry,
     _CBRopeState,
     _FP8_FLAVOR_TO_AT_SCALAR,
-    _TORCH_FP8_TO_AT_SCALAR,
     _TORCH_TO_AT_SCALAR,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
@@ -266,7 +265,7 @@ class RetrieveMixin:
             at_scalar = _TORCH_TO_AT_SCALAR.get(buf0.dtype) or (
                 _FP8_FLAVOR_TO_AT_SCALAR.get(rope_state.kv_quant)
                 if buf0.dtype == torch.uint8
-                else _TORCH_FP8_TO_AT_SCALAR.get(buf0.dtype)
+                else None
             )
             if at_scalar is None:
                 return None

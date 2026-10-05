@@ -316,20 +316,14 @@ def test_ropeless_group_sentinel_skips_rerope():
 
 def test_fp8_at_scalar_maps():
     """The plan builder resolves a uint8 K plane through the declared flavor
-    and a true float8 dtype directly; both must name the same kernel enums
-    (guarded C++-side by a static_assert in pos_kernels.cu)."""
+    (enum values guarded C++-side by a static_assert in pos_kernels.cu)."""
     # First Party
     from lmcache.v1.multiprocess.modules.blend.rope import (
         _FP8_FLAVOR_TO_AT_SCALAR,
-        _TORCH_FP8_TO_AT_SCALAR,
         _TORCH_TO_AT_SCALAR,
     )
 
     assert _FP8_FLAVOR_TO_AT_SCALAR == {"fp8_e4m3": 24, "fp8_e5m2": 23}
-    assert _TORCH_FP8_TO_AT_SCALAR == {
-        torch.float8_e4m3fn: 24,
-        torch.float8_e5m2: 23,
-    }
     # An undeclared uint8 plane must resolve to nothing (plan unavailable).
     assert torch.uint8 not in _TORCH_TO_AT_SCALAR
     assert "" not in _FP8_FLAVOR_TO_AT_SCALAR

@@ -19,7 +19,10 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
-from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
+from lmcache.v1.multiprocess.modules.blend.rope import (
+    _CBRopeState,
+    _FP8_FLAVOR_TO_AT_SCALAR,
+)
 from lmcache.v1.multiprocess.request_handler import request_handler
 
 logger = init_logger(__name__)
@@ -123,10 +126,10 @@ class RegistrationMixin:
                     f"to index {max_eg_idx}."
                 )
 
-        if kv_quant not in ("", "fp8_e4m3", "fp8_e5m2"):
+        if kv_quant and kv_quant not in _FP8_FLAVOR_TO_AT_SCALAR:
             raise ValueError(
-                f"kv_quant={kv_quant!r}: expected '', 'fp8_e4m3', or "
-                "'fp8_e5m2'."
+                f"kv_quant={kv_quant!r}: expected one of "
+                f"{sorted(_FP8_FLAVOR_TO_AT_SCALAR)} or ''."
             )
 
         # Normalize rope windows (wire turns tuples into lists); validate now

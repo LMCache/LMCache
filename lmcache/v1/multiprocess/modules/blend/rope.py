@@ -27,12 +27,6 @@ _FP8_FLAVOR_TO_AT_SCALAR = {
     "fp8_e5m2": 23,  # at::ScalarType::Float8_e5m2
 }
 
-# KV planes allocated as a true float8 torch dtype need no declared flavor.
-_TORCH_FP8_TO_AT_SCALAR = {
-    torch.float8_e4m3fn: 24,
-    torch.float8_e5m2: 23,
-}
-
 
 @dataclass
 class _CBRopeState:
