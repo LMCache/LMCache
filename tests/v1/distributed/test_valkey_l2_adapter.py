@@ -192,8 +192,10 @@ def _build_fake_glide_modules() -> dict[str, types.ModuleType]:
 from lmcache.v1.distributed.api import (  # noqa: E402
     MemoryLayoutDesc,
     ObjectKey,
+    Tier,
 )
 from lmcache.v1.distributed.internal_api import L2AdapterListener  # noqa: E402
+from lmcache.v1.distributed.l2_adapters import base as l2_adapter_base  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.valkey_l2_adapter import (  # noqa: E402
     ValkeyL2Adapter,
     ValkeyL2AdapterConfig,
@@ -203,6 +205,28 @@ from lmcache.v1.memory_management import (  # noqa: E402
     MemoryFormat,
     MemoryObjMetadata,
     TensorMemoryObj,
+)
+from lmcache.v1.mp_coordinator.api import (  # noqa: E402
+    CacheEventBatch,
+    CacheEventType,
+)
+from lmcache.v1.mp_coordinator.cache_events import (  # noqa: E402
+    CacheEventSink,
+    CacheEventSubscriber,
+)
+from lmcache.v1.mp_coordinator.controllers.eviction_controller import (  # noqa: E402
+    FleetEvictionController,
+)
+from lmcache.v1.mp_coordinator.views.instance_registry import (  # noqa: E402
+    InstanceRegistry,
+)
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory  # noqa: E402
+from lmcache.v1.mp_coordinator.views.usage_manager import (  # noqa: E402
+    CacheUsageManager,
+)
+from lmcache.v1.mp_observability.event_bus import (  # noqa: E402
+    EventBus,
+    EventBusConfig,
 )
 from lmcache.v1.platform import consume_fd  # noqa: E402
 
@@ -218,6 +242,7 @@ class _RecordingListener(L2AdapterListener):
 
     def __init__(self) -> None:
         self.stored: list[list[ObjectKey]] = []
+        self.stored_sizes: list[list[int]] = []
         self.accessed: list[list[ObjectKey]] = []
         self.deleted: list[list[ObjectKey]] = []
         self.lock = threading.Lock()
@@ -225,6 +250,7 @@ class _RecordingListener(L2AdapterListener):
     def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         with self.lock:
             self.stored.append(list(keys))
+            self.stored_sizes.append(list(sizes))
 
     def on_l2_keys_accessed(self, keys: list[ObjectKey]) -> None:
         with self.lock:
@@ -233,6 +259,35 @@ class _RecordingListener(L2AdapterListener):
     def on_l2_keys_deleted(self, keys: list[ObjectKey]) -> None:
         with self.lock:
             self.deleted.append(list(keys))
+
+
+class _ApplyingSink(CacheEventSink):
+    """Apply emitted batches to the coordinator views used in production."""
+
+    def __init__(self) -> None:
+        self.usage = CacheUsageManager()
+        self.directory = KeyDirectory()
+        self.eviction = FleetEvictionController(self.usage, InstanceRegistry())
+        self.batches: list[CacheEventBatch] = []
+        self.condition = threading.Condition()
+
+    def publish(self, batches: list[CacheEventBatch]) -> None:
+        with self.condition:
+            for batch in batches:
+                self.usage.consume(batch)
+                self.directory.consume(batch)
+                self.eviction.consume(batch)
+                self.batches.append(batch)
+            self.condition.notify_all()
+
+    def wait_for_batches(self, count: int, timeout: float = 5.0) -> None:
+        """Wait until at least ``count`` cache-event batches arrive."""
+        with self.condition:
+            arrived = self.condition.wait_for(
+                lambda: len(self.batches) >= count,
+                timeout,
+            )
+        assert arrived, f"only {len(self.batches)} cache-event batches arrived"
 
 
 def create_object_key(
@@ -498,19 +553,145 @@ class TestStore:
         assert result.is_successful()
         assert result.bytes_transferred() == 0
 
-    def test_partial_failure_accounting(self, adapter):
-        """
-        partial batch failure must report the
-        task as NOT successful and  account
-        only the keys that actually wrote in per-salt
-        """
+    def test_repeat_store_keeps_usage_and_reports_full_size(self, adapter):
         listener = _RecordingListener()
         adapter.register_listener(listener)
+        key = create_object_key(1, cache_salt="tenant-a")
+        src = create_memory_obj(size=16, fill_value=0.5)
+
+        first = _wait_for_store(adapter, adapter.submit_store_task([key], [src]))
+        second = _wait_for_store(adapter, adapter.submit_store_task([key], [src]))
+
+        assert first.is_successful()
+        assert second.is_successful()
+        assert first.bytes_transferred() == src.get_size()
+        assert second.bytes_transferred() == src.get_size()
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == src.get_size()
+        assert usage.bytes_by_cache_salt == {"tenant-a": src.get_size()}
+        assert listener.stored == [[key], [key]]
+        assert listener.stored_sizes == [[src.get_size()], [src.get_size()]]
+
+        dst = create_memory_obj(size=16, fill_value=0.0)
+        bitmap = _wait_for_load(adapter, adapter.submit_load_task([key], [dst]))
+        assert bitmap.test(0)
+        assert torch.equal(dst.tensor, src.tensor)
+
+    def test_duplicate_key_in_batch_counts_unique_usage(self, adapter):
+        listener = _RecordingListener()
+        adapter.register_listener(listener)
+        key = create_object_key(1, cache_salt="tenant-a")
+        obj = create_memory_obj(size=16)
+
+        result = _wait_for_store(
+            adapter,
+            adapter.submit_store_task([key, key], [obj, obj]),
+        )
+
+        assert result.is_successful()
+        assert result.bytes_transferred() == 2 * obj.get_size()
+        assert adapter.get_usage().total_bytes_used == obj.get_size()
+        assert listener.stored_sizes == [[obj.get_size(), obj.get_size()]]
+
+    def test_mixed_repeat_and_new_store_preserves_bucket_usage(self, adapter):
+        listener = _RecordingListener()
+        adapter.register_listener(listener)
+        existing = create_object_key(1, cache_salt="tenant-a")
+        new = create_object_key(2, cache_salt="tenant-b")
+        obj = create_memory_obj(size=16)
+        _wait_for_store(adapter, adapter.submit_store_task([existing], [obj]))
+
+        result = _wait_for_store(
+            adapter,
+            adapter.submit_store_task([existing, new], [obj, obj]),
+        )
+
+        assert result.is_successful()
+        assert result.bytes_transferred() == 2 * obj.get_size()
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == 2 * obj.get_size()
+        assert usage.bytes_by_cache_salt == {
+            "tenant-a": obj.get_size(),
+            "tenant-b": obj.get_size(),
+        }
+        assert listener.stored_sizes[-1] == [obj.get_size(), obj.get_size()]
+
+    def test_repeat_store_preserves_coordinator_placement_and_eviction(
+        self, monkeypatch
+    ):
+        bus = EventBus(EventBusConfig(enabled=True))
+        monkeypatch.setattr(l2_adapter_base, "get_event_bus", lambda: bus)
+        sink = _ApplyingSink()
+        sink.eviction.quota.set_quota("tenant-a", 32)
+        bus.register_subscriber(
+            CacheEventSubscriber(
+                sink,
+                instance_id="test-node",
+                incarnation=1,
+                flush_interval=0,
+            )
+        )
+        bus.start()
+        adapter = ValkeyL2Adapter(_make_config(num_workers=1))
+        adapter.set_backend_identity("valkey", shared=True)
+        key = create_object_key(1, cache_salt="tenant-a")
+        obj = create_memory_obj(size=16)
+        try:
+            for expected_count in (1, 2):
+                result = _wait_for_store(
+                    adapter,
+                    adapter.submit_store_task([key], [obj]),
+                )
+                assert result.is_successful()
+                sink.wait_for_batches(expected_count)
+
+            store_batches = [
+                batch
+                for batch in sink.batches
+                if batch.event_type == CacheEventType.STORE
+            ]
+            assert [batch.entries[0].size_bytes for batch in store_batches] == [
+                obj.get_size(),
+                obj.get_size(),
+            ]
+            assert sink.usage.get_salt_bytes(Tier.L2, "tenant-a") == obj.get_size()
+            assert sink.directory.lookup([key])[0][0].size_bytes == obj.get_size()
+            assert sink.eviction.compute_eviction_plan() == {"tenant-a": [key]}
+
+            # A coordinator that observes only the repeated STORE must still
+            # be able to reconstruct the complete placement.
+            fresh_usage = CacheUsageManager()
+            fresh_directory = KeyDirectory()
+            fresh_usage.consume(store_batches[-1])
+            fresh_directory.consume(store_batches[-1])
+            assert fresh_usage.get_salt_bytes(Tier.L2, "tenant-a") == obj.get_size()
+            assert fresh_directory.lookup([key])[0][0].size_bytes == obj.get_size()
+
+            adapter.delete([key])
+            sink.wait_for_batches(3)
+            assert adapter.get_usage().total_bytes_used == 0
+            assert sink.usage.get_salt_bytes(Tier.L2, "tenant-a") == 0
+            assert sink.directory.lookup([key]) == [[]]
+            bitmap = _wait_for_lookup(
+                adapter,
+                adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT}),
+            )
+            assert not bitmap.test(0)
+        finally:
+            adapter.close()
+            bus.stop()
+
+    def test_partial_failure_accounting(self, adapter):
+        """A partial failure publishes and accounts only successful keys."""
         keys = [create_object_key(i) for i in range(3)]
         objs = [create_memory_obj(size=16) for _ in range(3)]
+        # Seed key 0 so the failing batch includes an overwrite and a new key.
+        _wait_for_store(adapter, adapter.submit_store_task([keys[0]], [objs[0]]))
+        listener = _RecordingListener()
+        adapter.register_listener(listener)
 
-        # Make the SET for key index 1's wire key fail.
-        target_wire = adapter._wire_key(keys[1]).encode()  # noqa: SLF001
+        # Make the SET for key index 2's wire key fail.
+        target_wire = adapter._wire_key(keys[2]).encode()  # noqa: SLF001
 
         def faulty(k: bytes):
             if k == target_wire:
@@ -526,14 +707,12 @@ class TestStore:
         assert not result.is_successful()
         assert result.bytes_transferred() == 0
 
-        # Real accounting: only the 2 successful keys are counted.
+        # Key 0 remains counted once and key 1 is added; the failed key is absent.
         usage = adapter.get_usage()
         assert usage.total_bytes_used == 2 * objs[0].get_size()
-        # verify the failed key is not in the stored-listener notifications.
-        stored_flat = {k for batch in listener.stored for k in batch}
-        assert keys[0] in stored_flat
-        assert keys[2] in stored_flat
-        assert keys[1] not in stored_flat
+        assert usage.bytes_by_cache_salt == {"": 2 * objs[0].get_size()}
+        assert listener.stored == [[keys[0], keys[1]]]
+        assert listener.stored_sizes == [[objs[0].get_size(), objs[1].get_size()]]
 
     def test_length_mismatch_raises(self, adapter):
         with pytest.raises(ValueError, match="length mismatch"):
