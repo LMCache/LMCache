@@ -611,6 +611,11 @@ class ServerBenchClient:
 
         Cleanup is idempotent, including after partial startup. A blocked
         native transfer can delay shutdown until it returns.
+
+        Raises:
+            RuntimeError: If store completion or unregistration is unproven.
+                Worker buffers and IPC resources remain live; callers must
+                not reuse them after this failure.
         """
         self._started = False
         if self._transfer_executor is not None:
@@ -622,21 +627,21 @@ class ServerBenchClient:
                 instance_id = worker.spec.instance_id
                 try:
                     worker.transfer_context.flush_inflight_stores()
-                except Exception as exc:
-                    self._log(
-                        "  [warning] TransferContext flush failed for iid %d: %s"
-                        % (instance_id, exc)
-                    )
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        "Cannot close server benchmark worker iid %d: "
+                        "in-flight store completion is unknown" % instance_id
+                    ) from exc
                 try:
                     future = worker.transfer_context.unregister()
                     if future is not None:
                         future.result(timeout=_DEFAULT_RPC_TIMEOUT_S)
                         self._log("[iid %d] UNREGISTER_KV_CACHE: OK" % instance_id)
-                except Exception as exc:
-                    self._log(
-                        "  [warning] UNREGISTER_KV_CACHE failed for "
-                        "iid %d: %s" % (instance_id, exc)
-                    )
+                except (ConnectionError, TimeoutError, RuntimeError) as exc:
+                    raise RuntimeError(
+                        "Cannot close server benchmark worker iid %d: "
+                        "the server did not acknowledge unregister" % instance_id
+                    ) from exc
         for worker in self._workers:
             try:
                 worker.transfer_context.close()

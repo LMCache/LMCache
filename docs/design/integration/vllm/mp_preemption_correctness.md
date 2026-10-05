@@ -45,13 +45,62 @@ server is still reading. The store then commits the wrong KV under the
 preempted request's keys -- which looks fine until a later request loads that
 prefix.
 
-`TransferContext.flush_inflight_stores()` already exists for this, and the
-worker adapter already calls it on steps the scheduler flags as having
-preempted or resumed requests. It was implemented for the async engine-driven
-context and left as `pass` for the LMCache-driven one, which is the hole. It
-now tracks its in-flight store futures and waits for them. A timeout is logged
-rather than raised, so a slow server degrades to a possibly stale store rather
-than a crashed engine.
+`TransferContext.flush_inflight_stores()` fences these reads. The worker
+adapter calls it on steps flagged as having preempted or resumed requests,
+even when the heartbeat reports the server unhealthy. The LMCache-driven
+context retains each submitted store until its device-completion future
+settles. The async engine-driven context waits for its deferred local gathers.
+
+### Failure contract and availability
+
+A timeout or RPC error is not evidence that the server stopped accessing KV
+memory. The LMCache-driven flush raises `RuntimeError` and keeps unresolved
+futures. The worker adapter and `LMCacheMPConnector.handle_preemptions()` do
+not catch it: it propagates through vLLM's `ActiveKVConnector.pre_forward()`
+before the next forward pass. This is intentionally a serving failure, not a
+cache miss or a guarantee that only one request fails. Depending on the
+executor, the affected worker or engine may fail and require restart.
+
+The request timeout bounds waiting for the server reply. Once a device event
+is available, synchronization can wait longer; a stuck device can block the
+call. Increasing the timeout may accommodate a slow reply, but cannot turn a
+terminal RPC error into completion evidence. A future whose reply merely
+arrives late can be joined by a later flush. A future completed with an RPC
+exception stays unresolved for ownership purposes.
+
+The other ownership boundaries follow the same rule:
+
+| Boundary | Completion unknown | Completion proven |
+|---|---|---|
+| Eager or lazy completion polling | RPC failures raise without dropping futures/events or emitting a completion receipt. Heartbeat loss alone keeps submitted work pending. | A completed false result is an ordinary failed cache operation; receives can be recomputed. |
+| Heartbeat recovery | Keep the old context and leave health unset; a successful ping is insufficient. | Replace the context only after its stores and tracked transfers are joined. |
+| Sleep, discard or weight-update memory release | Raise before unregistration or local teardown; preserve the context if the unregister acknowledgement is lost. | Close and detach the context, then permit the engine to release memory. |
+| Shutdown | Stop new submissions and heartbeat activity, then raise before releasing contexts, clients or IPC resources. | Drain transfers, acknowledge unregistration, close resources. |
+
+Requests dropped **before** submission can still be reported as completed:
+there is no remote work using their blocks. This is distinct from a submitted
+request whose reply was lost. The benchmark client's close path also retains
+its worker tensors if flushing or unregistration fails.
+
+Shutdown propagation protects the ordered in-process cleanup path. It cannot
+prevent an executor or administrator from terminating the process. After an
+unrecoverable transfer error, recovery must establish that the old server's
+work is quiescent before restarting workers or reusing their memory. This PR
+does not add a remote cancellation acknowledgement, session-generation fence,
+per-request quarantine, or transparent restart protocol. Simply catching the
+exception and continuing serving would defeat the ownership guarantee.
+
+### Failure-path tests
+
+`tests/v1/test_vllm_mp_adapter.py` exercises eager/lazy polling, pending
+receives during an outage, preemption while unhealthy, recovery, failed
+unregistration, and shutdown admission through public adapter methods.
+`tests/v1/multiprocess/test_event_ipc_handle_path.py` uses real messaging and
+device futures with a stubbed event backend to distinguish a late reply from
+a terminal RPC error. `tests/cli/commands/bench/test_server_bench.py` checks
+that worker tensors remain alive on failed close and are released after a
+successful retry. These are failure-contract tests, not a live vLLM/server
+crash-and-restart qualification.
 
 ## Observability
 
@@ -144,4 +193,6 @@ nothing in either case.
 
 ## Not covered
 
-- Lazy offload under preemption.
+- Live server failure/restart while copies are in flight and the vLLM allocator
+  is under reuse pressure, including lazy offload. Unit coverage of the
+  failure contract does not qualify that end-to-end recovery scenario.
