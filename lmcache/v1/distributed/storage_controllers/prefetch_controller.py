@@ -1051,10 +1051,13 @@ class PrefetchController(StorageControllerInterface):
             )
             request.inflight_lookup_tasks[adapter_idx] = task_id
 
-        # No live L2 adapter: serve from L1 alone, on this thread.
+        # No live L2 adapter: serve from L1 alone, on this thread. The
+        # request was registered before locking so a failed start can be
+        # aborted; retire it here like _advance_request does.
         if not active_adapters:
             self._plan_load(request, {})
             self._finish_request(request)
+            self._retire_request(request)
             return
 
         self._event_bus.publish(

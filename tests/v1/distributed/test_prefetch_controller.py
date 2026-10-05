@@ -1392,6 +1392,46 @@ class TestRuntimeAdapters:
         ctrl.stop()
         adapter.close()
 
+    def test_requests_during_drain_release_their_admission_slot(self, l1_manager):
+        """An L1-only request admitted during drain must leave the in-flight
+        table, freeing its slot without a later load signal re-finishing it."""
+        adapter = make_adapter(bandwidth_gb=0.001)
+        layout = make_layout()
+        slow_keys = [make_object_key(i) for i in range(20)]
+        store_keys_in_l2(adapter, slow_keys, layout)
+        ctrl = make_controller(l1_manager, [adapter], max_in_flight=2)
+        ctrl.start()
+
+        slow = ctrl.submit_prefetch_request(single_row_spec(slow_keys))
+        assert wait_for_condition(
+            lambda: adapter.debug_get_locked_key_count() == len(slow_keys)
+        )
+        # The slow load keeps the adapter attached but draining: new
+        # requests see no active adapter and complete on L1 alone.
+        done = ctrl.request_remove_adapter(0)
+        assert not done.wait(timeout=0.2)
+
+        for i in range(3):
+            req_id = ctrl.submit_prefetch_request(
+                single_row_spec([make_object_key(100 + i)])
+            )
+            assert row_bits(wait_for_result(ctrl, req_id, timeout=5.0)) == []
+            # Publication slightly precedes retirement; allow the controller
+            # to finish that step before checking the admission slot.
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["in_flight_request_count"] == 1
+            ), ctrl.report_status()
+            assert ctrl.report_status()["pending_queue_size"] == 0
+        assert not done.is_set()
+
+        assert row_bits(wait_for_result(ctrl, slow, timeout=30.0)) == list(range(20))
+        assert done.wait(timeout=5.0)
+        # Retired requests cannot be re-finished and republish consumed results.
+        assert ctrl.report_status()["completed_results_count"] == 0
+        l1_manager.finish_read(slow_keys)
+        ctrl.stop()
+        adapter.close()
+
     def test_double_remove_is_safe(self, l1_manager):
         """Removing an already-removed adapter signals immediately."""
         adapter = make_adapter()
