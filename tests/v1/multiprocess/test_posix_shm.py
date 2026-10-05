@@ -7,6 +7,9 @@ shared by SHM-based transports.
 
 # Standard
 import os
+import subprocess
+import sys
+import textwrap
 
 # Third Party
 import pytest
@@ -76,3 +79,49 @@ def test_open_pool_as_mmap_zero_copy_view():
 def test_munmap_no_op_on_zero_addr():
     # Should not crash; best-effort no-op.
     shm_munmap(0, 4096)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+def test_forked_child_does_not_unlink_parent_segment():
+    script = textwrap.dedent(
+        """
+        import os
+        import sys
+
+        from lmcache.v1.multiprocess.posix_shm import (
+            shm_create_readwrite,
+            shm_map_readwrite,
+            shm_munmap,
+            shm_unlink,
+        )
+
+        name = f"/lmc_pshm_fork_{os.getpid()}"
+        child_name = f"/lmc_pshm_child_{os.getpid()}"
+        nbytes = 4096
+        addr = shm_create_readwrite(name, nbytes)
+        child_pid = os.fork()
+        if child_pid == 0:
+            shm_create_readwrite(child_name, nbytes)
+            sys.exit(0)
+
+        try:
+            _, status = os.waitpid(child_pid, 0)
+            assert os.waitstatus_to_exitcode(status) == 0
+
+            mapped_addr = shm_map_readwrite(name, nbytes)
+            shm_munmap(mapped_addr, nbytes)
+
+            try:
+                shm_map_readwrite(child_name, nbytes)
+            except FileNotFoundError:
+                pass
+            else:
+                raise AssertionError("child-owned segment was not unlinked")
+        finally:
+            shm_munmap(addr, nbytes)
+            shm_unlink(name)
+            shm_unlink(child_name)
+        """
+    )
+
+    subprocess.run([sys.executable, "-c", script], check=True)
