@@ -395,10 +395,18 @@ def test_concurrent_submit_and_retire(two_worker_pool: AffinityThreadPool) -> No
     barrier = threading.Barrier(4, timeout=5)
 
     def client(key: int) -> None:
+        def running(resume: threading.Event) -> str:
+            assert resume.wait(timeout=5)
+            return _thread_name()
+
         barrier.wait()
         for _ in range(50):
-            first = pool.submit(_thread_name, affinity_key=key)
-            second = pool.submit(_thread_name, affinity_key=key)
+            resume = threading.Event()
+            try:
+                first = pool.submit(running, resume, affinity_key=key)
+                second = pool.submit(_thread_name, affinity_key=key)
+            finally:
+                resume.set()
             assert first.result(timeout=5) == second.result(timeout=5)
             pool.release_key(key)
 
@@ -406,3 +414,58 @@ def test_concurrent_submit_and_retire(two_worker_pool: AffinityThreadPool) -> No
         futures = [clients.submit(client, key) for key in range(4)]
         for future in futures:
             future.result(timeout=10)
+
+
+def test_idle_shared_keys_reuse_late_reclaimed_capacity(
+    two_worker_pool: AffinityThreadPool,
+) -> None:
+    pool = two_worker_pool
+    threads = {
+        key: pool.submit(_thread_name, affinity_key=key).result(timeout=5)
+        for key in (1, 2, 3, 4)
+    }
+    assert threads[2] == threads[4]
+    pool.release_key(1)
+    pool.release_key(3)
+    with patch.object(affinity_pool_mod.logger, "warning") as warning:
+        second = pool.submit(_thread_name, affinity_key=2).result(timeout=5)
+        fourth = pool.submit(_thread_name, affinity_key=4).result(timeout=5)
+        assert second != fourth
+        assert pool.submit(_thread_name, affinity_key=2).result(timeout=5) == second
+        assert pool.submit(_thread_name, affinity_key=4).result(timeout=5) == fourth
+    warning.assert_not_called()
+
+
+def test_shared_key_does_not_move_until_pending_work_drains(
+    two_worker_pool: AffinityThreadPool,
+) -> None:
+    pool = two_worker_pool
+    threads = {
+        key: pool.submit(_thread_name, affinity_key=key).result(timeout=5)
+        for key in (1, 2, 3, 4)
+    }
+    started = threading.Event()
+    resume = threading.Event()
+
+    def running() -> str:
+        started.set()
+        assert resume.wait(timeout=5)
+        return _thread_name()
+
+    first = pool.submit(running, affinity_key=2)
+    try:
+        assert started.wait(timeout=5)
+        queued = pool.submit(_thread_name, affinity_key=2)
+        pool.release_key(1)
+        pool.release_key(3)
+        after_reap = pool.submit(_thread_name, affinity_key=2)
+        assert not after_reap.done()
+        resume.set()
+        assert [f.result(timeout=5) for f in (first, queued, after_reap)] == [
+            threads[2]
+        ] * 3
+        assert pool.submit(_thread_name, affinity_key=2).result(
+            timeout=5
+        ) != pool.submit(_thread_name, affinity_key=4).result(timeout=5)
+    finally:
+        resume.set()

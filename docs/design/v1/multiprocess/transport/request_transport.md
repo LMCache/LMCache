@@ -72,17 +72,21 @@ shared RPC signature, including operations with a different argument order.
 Reconnecting the same instance therefore preserves its worker binding in both
 ZMQ and gRPC.
 
-The request server is an `InstanceLivenessTarget` state mirror. Server construction
-attaches it to the existing management reaper; `drop_instance_state` retires the
-instance's affinity key. Unregister handlers marked `releases_client_affinity`
-retire the same key after successful completion.
+The concrete ZMQ and gRPC servers opt into the existing `InstanceLivenessTarget`
+state mirror; the general `RequestServer` contract remains start/close only.
+Server construction attaches the transport to the management reaper.
+`drop_instance_state` retires the instance's affinity key. The transports also
+retire that key after successful KV, engine-driven KV, or Q unregister RPCs.
 
 The pool serializes submission and retirement with one lock. Retirement does not
 cancel outstanding work: running and queued tasks, including new submissions for
 a reactivated instance, retain their original worker until that key drains.
 The next submission can establish a new binding. New keys use the least-bound
 worker, preferring reclaimed slots over sharing a worker with another bound key.
-Existing live bindings are not moved. True oversubscription still shares workers
+If restarts precede reaping, a surviving key may already share a worker.
+After capacity is reclaimed, that key can move to a free slot on its next
+submission, but only after its running and queued handlers have drained.
+Dedicated bindings stay in place. True oversubscription still shares workers
 and emits the existing once-per-pool warning.
 
 ## Adding an RPC

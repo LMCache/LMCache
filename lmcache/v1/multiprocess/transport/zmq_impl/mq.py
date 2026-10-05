@@ -24,6 +24,7 @@ from lmcache.v1.multiprocess.custom_types import (
     get_customized_decoder,
     get_customized_encoder,
 )
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.request_handler import (
     HandlerType,
@@ -523,7 +524,7 @@ class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
     pass
 
 
-class MessageQueueServer(RequestServer):
+class MessageQueueServer(RequestServer, InstanceLivenessTarget):
     def __init__(self, bind_url: str, context: zmq.Context) -> None:
         # Socket
         self.ctx = context
@@ -861,9 +862,9 @@ class MessageQueueServer(RequestServer):
         """Assign an AffinityThreadPool to specific request types.
 
         Use this for GPU-bound blocking handlers (e.g. STORE, RETRIEVE).
-        Requests for the same worker instance_id are always dispatched
-        to the same worker thread, eliminating the need for per-instance
-        GPU transfer locks.
+        Requests for the same worker instance_id execute sequentially,
+        eliminating the need for per-instance GPU transfer locks. Bindings
+        can move only after that instance's queued/running handlers drain.
 
         Must be called after the handlers are registered (via add_handler /
         add_blocking_handler) and before start().

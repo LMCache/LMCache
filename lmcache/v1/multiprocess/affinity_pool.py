@@ -2,13 +2,13 @@
 """
 Thread pool with affinity routing.
 
-Tasks submitted with the same ``affinity_key`` execute on the same worker
-until that key is released and drained. Within each worker, tasks execute
-sequentially in FIFO order.
+Tasks submitted with the same ``affinity_key`` execute sequentially in FIFO
+order. Bindings stay on their worker while work is pending, an idle key sharing
+a worker may move to a reclaimed slot on its next submission.
 
-This is used for GPU-bound request handlers (STORE / RETRIEVE) so that all
-operations for a given vLLM instance land on one thread, eliminating the need
-for per-instance locks on the shared temporary GPU buffer.
+This serializes GPU-bound request handlers (STORE / RETRIEVE) for each vLLM
+instance, eliminating the need for per-instance locks on the shared temporary
+GPU buffer.
 """
 
 # Standard
@@ -31,6 +31,7 @@ class AffinityThreadPool:
 
     Submission and key retirement are thread-safe. A retired key keeps its
     worker until all queued/running tasks for that key have drained.
+    Reclaimed capacity also lets idle keys leave an overloaded worker.
     Callers must stop submitting before shutting down the pool.
 
     Args:
@@ -50,6 +51,8 @@ class AffinityThreadPool:
         self._key_to_slot: dict[int, int] = {}
         self._pending: Counter[int] = Counter()
         self._retired: set[int] = set()
+        # Avoid rescanning established bindings until capacity is reclaimed.
+        self._rebalance = False
         self._lock = threading.Lock()
         self._overflow_warned = False
         for i in range(max_workers):
@@ -102,24 +105,36 @@ class AffinityThreadPool:
                 if affinity_key in self._retired:
                     self._retired.remove(affinity_key)
                     del self._key_to_slot[affinity_key]
+                    self._rebalance = True
 
     # ------------------------------------------------------------------
     # Routing
     # ------------------------------------------------------------------
 
     def _slot_for_key(self, affinity_key: int) -> int:
-        """Return the worker slot bound to ``affinity_key``, assigning on first use.
+        """Choose a slot without moving running or queued work.
 
         Returns:
             The worker slot (an index in ``[0, _num_workers)``) for the key.
         """
         slot = self._key_to_slot.get(affinity_key)
-        if slot is not None:
+        if slot is not None and (not self._rebalance or self._pending[affinity_key]):
             return slot
 
         # Reuse freed slots before sharing a worker.
         bindings = Counter(self._key_to_slot.values())
-        slot = min(range(self._num_workers), key=bindings.__getitem__)
+        if slot is not None:
+            free_slot = next(
+                (i for i in range(self._num_workers) if not bindings[i]), None
+            )
+            self._rebalance = free_slot is not None and any(
+                count > 1 for count in bindings.values()
+            )
+            if free_slot is None or bindings[slot] == 1:
+                return slot
+            slot = free_slot
+        else:
+            slot = min(range(self._num_workers), key=bindings.__getitem__)
         is_overflow = bindings[slot] > 0
         self._key_to_slot[affinity_key] = slot
 
@@ -167,12 +182,14 @@ class AffinityThreadPool:
         Thread-safe and idempotent. Submissions for the same key keep using its
         old worker until its queue drains, including submissions after release.
         Once drained, the next submission may bind the key to a different worker.
+        Idle keys on shared workers can reuse the freed slot on submission.
         """
         with self._lock:
             if self._pending[affinity_key]:
                 self._retired.add(affinity_key)
             else:
-                self._key_to_slot.pop(affinity_key, None)
+                if self._key_to_slot.pop(affinity_key, None) is not None:
+                    self._rebalance = True
 
     def shutdown(self, wait: bool = True) -> None:
         """Shut down the pool.

@@ -7,14 +7,15 @@ from __future__ import annotations
 # Standard
 from typing import TYPE_CHECKING
 
-# First Party
-from lmcache.v1.multiprocess.modules.management import ManagementModule
-
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.multiprocess.config import MPServerConfig
     from lmcache.v1.multiprocess.engine_module import EngineModule
     from lmcache.v1.multiprocess.transport.base import RequestServer
+    from lmcache.v1.multiprocess.transport.grpc_impl.server import (
+        GrpcMultiprocessServer,
+    )
+    from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueServer
 
 
 def create_request_server(
@@ -30,13 +31,17 @@ def create_request_server(
     Returns:
         Configured, but not yet started, request server.
     """
+    # First Party
+    from lmcache.v1.multiprocess.modules.management import ManagementModule
+
+    server: GrpcMultiprocessServer | MessageQueueServer
     if mp_config.transport == "grpc":
         # First Party
         from lmcache.v1.multiprocess.transport.grpc_impl.server import (
             build_grpc_request_server,
         )
 
-        server: RequestServer = build_grpc_request_server(modules, mp_config)
+        server = build_grpc_request_server(modules, mp_config)
     else:
         # First Party
         from lmcache.v1.multiprocess.transport.zmq_impl.server import (

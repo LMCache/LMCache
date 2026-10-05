@@ -112,7 +112,8 @@ is stopped and joined before any module clears state.
 
 The request transport also receives `drop_instance_state` and retires the
 instance's thread-affinity binding. Queued/running tasks keep their original
-worker until they drain; subsequent clients can reuse the released slot.
+worker until they drain; new clients and idle clients sharing a worker can reuse
+the released slot.
 Explicit KV/Q unregister RPCs perform the same affinity retirement. See
 [Worker affinity lifecycle](transport/request_transport.md#worker-affinity-lifecycle).
 

@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import cast
 from unittest.mock import MagicMock, patch
 import socket
+import subprocess
+import sys
 import threading
 import time
 
@@ -146,16 +148,16 @@ class _AffinityModule(EngineModule):
     ) -> tuple[bytes, bool]:
         return threading.current_thread().name.encode(), True
 
-    @request_handler(releases_client_affinity=True)
+    @request_handler()
     def unregister_kv_cache(self, instance_id: int) -> None:
         if instance_id < 0:
             raise ValueError("unregister failed")
 
-    @request_handler(releases_client_affinity=True)
+    @request_handler()
     def unregister_kv_cache_engine_driven_context(self, instance_id: int) -> None:
         pass
 
-    @request_handler(releases_client_affinity=True)
+    @request_handler()
     def unregister_q_cache(self, instance_id: int) -> None:
         pass
 
@@ -265,6 +267,46 @@ def test_failed_unregister_does_not_release_affinity() -> None:
     with pytest.raises(ValueError, match="unregister failed"):
         handler(-1)
     release.assert_not_called()
+
+
+def test_affinity_recovers_when_restarts_precede_reaping(
+    affinity_server: tuple[str, Callable[[int], None]],
+) -> None:
+    server_url, reap = affinity_server
+    client = RequestClientFactory.create(server_url)
+    try:
+        threads = {key: _store_thread(client, key) for key in (1001, 1002, 1003, 1004)}
+        assert threads[1002] == threads[1004]
+        reap(1001)
+        reap(1003)
+        assert _store_thread(client, 1002) != _store_thread(client, 1004)
+    finally:
+        client.close()
+
+
+def test_server_factory_import_is_lightweight() -> None:
+    """Importing the factory must not import a backend or engine state."""
+    script = """
+import importlib.abc
+import sys
+
+blocked = (
+    "lmcache.v1.multiprocess.engine_context",
+    "lmcache.v1.multiprocess.modules.management",
+    "lmcache.v1.multiprocess.transport.grpc_impl",
+    "lmcache.v1.multiprocess.transport.zmq_impl",
+)
+
+class ImportBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if any(fullname == name or fullname.startswith(name + ".") for name in blocked):
+            raise ImportError(f"Factory eagerly imported {fullname}")
+        return None
+
+sys.meta_path.insert(0, ImportBlocker())
+import lmcache.v1.multiprocess.transport.server_factory
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 @pytest.mark.parametrize("operation", ["noop", "ping"])

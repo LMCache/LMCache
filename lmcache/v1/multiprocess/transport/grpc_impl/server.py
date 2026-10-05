@@ -15,7 +15,7 @@ import grpc
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.engine_module import EngineModule
+from lmcache.v1.multiprocess.engine_module import EngineModule, InstanceLivenessTarget
 from lmcache.v1.multiprocess.request_handler import (
     BoundRequestHandler,
     HandlerType,
@@ -121,7 +121,7 @@ class _GeneratedServicer:
             raise RuntimeError("gRPC context abort unexpectedly returned") from exc
 
 
-class GrpcMultiprocessServer(RequestServer):
+class GrpcMultiprocessServer(RequestServer, InstanceLivenessTarget):
     """Register transport-neutral modules against generated gRPC services."""
 
     def __init__(

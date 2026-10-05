@@ -519,7 +519,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             cache_context.num_layers,
         )
 
-    @request_handler(releases_client_affinity=True)
+    @request_handler()
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister the KV cache tensors for a given GPU instance ID.
 

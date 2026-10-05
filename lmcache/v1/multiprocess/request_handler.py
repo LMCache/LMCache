@@ -31,7 +31,6 @@ class RequestHandlerOptions:
     operation: RpcOperation | None
     handler_type: HandlerType
     requires_client_affinity: bool
-    releases_client_affinity: bool = False
 
 
 @dataclass(frozen=True)
@@ -48,13 +47,8 @@ def request_handler(
     *,
     operation: RpcOperation | None = None,
     requires_client_affinity: bool = False,
-    releases_client_affinity: bool = False,
 ) -> Callable[[F], F]:
-    """Attach scheduling metadata; operation defaults to the method name.
-
-    Affinity uses the RPC's integer ``instance_id``. Unregister handlers set
-    ``releases_client_affinity`` to retire that binding after successful return.
-    """
+    """Attach scheduling metadata; operation defaults to the method name."""
     if requires_client_affinity and handler_type is not HandlerType.BLOCKING:
         raise ValueError("Client affinity requires HandlerType.BLOCKING")
 
@@ -62,7 +56,6 @@ def request_handler(
         operation=operation,
         handler_type=handler_type,
         requires_client_affinity=requires_client_affinity,
-        releases_client_affinity=releases_client_affinity,
     )
 
     def decorate(func: F) -> F:
@@ -103,8 +96,11 @@ def wrap_affinity_release(
     Transports install this wrapper at registration time. ``release`` must be
     thread-safe; the wrapper executes on the handler's normal dispatch thread.
     """
-    options = get_request_handler_options(handler)
-    if options is None or not options.releases_client_affinity:
+    if operation not in (
+        "unregister_kv_cache",
+        "unregister_kv_cache_engine_driven_context",
+        "unregister_q_cache",
+    ):
         return handler
     index = get_affinity_key_index(operation)
 

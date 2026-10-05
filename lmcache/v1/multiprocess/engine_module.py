@@ -41,8 +41,7 @@ class InstanceLivenessTarget(Protocol):
       ``tracked_instance_count``). The transfer modules fill this role.
     * **State mirror** -- holds a second reference to a reaped instance's
       resources and releases it on demand (``drop_instance_state``).
-      ``BlendModule`` fills this role for its per-instance CB state; request
-      transports fill it for per-instance thread-affinity bindings.
+      ``BlendModule`` fills this role for its per-instance CB state.
 
     Every method defaults to a no-op, so an implementer subclasses this
     protocol and overrides only the role it fills. The management module
