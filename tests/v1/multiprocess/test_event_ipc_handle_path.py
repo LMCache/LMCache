@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import inspect
 
 # Third Party
+import msgspec
 import pytest
 import torch
 
@@ -58,10 +59,12 @@ class _FakeEventBackend:
 
 
 class _NoopDispatcher:
-    """Avoid starting native callback threads in the server unit test."""
+    """Record registrations instead of starting native callback threads."""
+
+    payload_types: dict[str, object] = {}
 
     def register(self, kind: str, handler: object, payload_type: object) -> None:
-        return None
+        _NoopDispatcher.payload_types[kind] = payload_type
 
     def start(self) -> None:
         return None
@@ -229,6 +232,19 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     )
 
     storage_manager = _FakeStorageManager()
+    callbacks: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        lmcache_driven_transfer,
+        "submit_callback_to_stream",
+        lambda stream, kind, payload: callbacks.append((kind, payload)),
+    )
+    held: list[tuple[str, bytes]] = []
+    released: list[int] = []
+
+    def hold_imported_event(event: tuple[str, bytes]) -> int:
+        held.append(event)
+        return len(held) - 1
+
     server_context = SimpleNamespace(
         chunk_size=1,
         null_block_id=0,
@@ -248,6 +264,8 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         device=torch.device("cpu"),
         stream="transfer-stream",
         cupy_stream="cupy-stream",
+        hold_imported_event=hold_imported_event,
+        release_imported_event=released.append,
         max_batch_size=1,
         kv_layer_groups_manager=SimpleNamespace(
             num_object_groups=1,
@@ -285,6 +303,18 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     waited_handles = [call[1][1] for call in backend.calls if call[0] == "wait"]
     assert imported_handles == [b"store-producer", b"retrieve-producer"]
     assert waited_handles == [b"store-producer", b"retrieve-producer"]
+
+    # Each import is held and its release is queued on the transfer stream
+    # right behind the wait; the callback payload decodes as registered.
+    assert held == [("remote", handle) for handle in imported_handles]
+    assert callbacks == [
+        ("release_imported_event", (1, 0)),
+        ("release_imported_event", (1, 1)),
+    ]
+    for kind, payload in callbacks:
+        decoder = msgspec.msgpack.Decoder(type=_NoopDispatcher.payload_types[kind])
+        module._release_imported_event(decoder.decode(msgspec.msgpack.encode(payload)))
+    assert released == [0, 1]
     assert sum(call[0] == "record" for call in backend.calls) == 2
     assert sum(call[0] == "export" for call in backend.calls) == 2
     for index, call in enumerate(backend.calls):

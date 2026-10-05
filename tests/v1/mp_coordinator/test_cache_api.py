@@ -5,6 +5,11 @@ Quota writes, usage events, and status reads moved to the ``/quota`` group --
 see ``test_quota_api.py``.
 """
 
+# Standard
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import replace
+
 # Third Party
 from fastapi.testclient import TestClient
 import httpx
@@ -501,3 +506,162 @@ def test_delete_server_unreachable_returns_502():
         )
         resp = client.post("/cache/delete", json=_delete_body("mp-1"))
         assert resp.status_code == 502
+
+
+# -- Separate object groups --------------------------------------------------
+#
+# Under --separate-object-groups a chunk is stored once per object group.
+# Token-addressed operations resolve group 0; pins reach the other groups by
+# matching regardless of group, and deletes by expanding through what the
+# directory holds.
+
+GROUPS = (0, 1, 2)
+TOKENS = [1, 2, 3, 4, 5, 6, 7, 8]
+OTHER = [11, 12, 13, 14, 15, 16, 17, 18]
+
+
+def _keys_in_groups(ctx, tokens=TOKENS, salt="alice", groups=GROUPS):
+    """The keys a fleet with separate object groups stores for ``tokens``."""
+    keys, _ = resolve_object_keys(ctx.token_hasher, "m", 1, tokens, salt)
+    return [replace(key, object_group_id=g) for g in groups for key in keys]
+
+
+def _store(ctx, keys, tier=Tier.L2, first_seq=1):
+    for seq, key in enumerate(keys, start=first_seq):
+        ctx.event_gate.ingest(
+            CacheEventBatch(
+                instance_id="mp-1",
+                incarnation=1,
+                seq=seq,
+                event_type=CacheEventType.STORE,
+                tier=tier,
+                backend="fs" if tier == Tier.L2 else "dram",
+                entries=[
+                    CacheEventEntry(key=key.to_encoded_object_key(), size_bytes=1000)
+                ],
+            )
+        )
+    return first_seq + len(keys)
+
+
+def test_a_pin_protects_every_object_group_of_its_content():
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        eviction = ctx.controllers.get(FleetEvictionController)
+        keys = _keys_in_groups(ctx)
+        client.put("/quota/config", json={"default_limit_gb": 0})
+        _store(ctx, keys)
+        assert set(eviction.compute_eviction_plan()["alice"]) == set(keys)
+
+        client.post("/cache/pins", json=_pin_body())
+
+        assert eviction.compute_eviction_plan() == {}
+
+
+def test_a_pin_taken_before_any_content_is_stored_covers_every_group():
+    """Nothing about the model is known when the pin is taken; matching
+    regardless of group still covers whatever groups the content lands in.
+    Unpinned content alongside shows the pressure is real."""
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        eviction = ctx.controllers.get(FleetEvictionController)
+        client.put("/quota/config", json={"default_limit_gb": 0})
+
+        client.post("/cache/pins", json=_pin_body())
+        pinned = _keys_in_groups(ctx)
+        loose = _keys_in_groups(ctx, tokens=OTHER)
+        _store(ctx, pinned + loose)
+
+        assert set(eviction.compute_eviction_plan()["alice"]) == set(loose)
+
+
+def test_unpinning_releases_every_object_group():
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        eviction = ctx.controllers.get(FleetEvictionController)
+        keys = _keys_in_groups(ctx)
+        client.put("/quota/config", json={"default_limit_gb": 0})
+        _store(ctx, keys)
+        client.post("/cache/pins", json=_pin_body())
+        assert eviction.compute_eviction_plan() == {}  # every group was held
+
+        client.request("DELETE", "/cache/pins", json=_pin_body())
+
+        assert set(eviction.compute_eviction_plan()["alice"]) == set(keys)
+
+
+def test_a_pin_is_listed_once_per_chunk_not_once_per_group():
+    """A pin is on content, so the table holds one entry per (chunk, rank)
+    however many groups that content is stored in."""
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        _store(ctx, _keys_in_groups(ctx))
+
+        pinned = client.post("/cache/pins", json=_pin_body()).json()
+        listed = client.get("/cache/pins").json()
+
+        assert pinned["affected"] == len(_resolve(ctx))
+        assert listed["total"] == len(_resolve(ctx))
+        assert {p["key"]["object_group_id"] for p in listed["pins"]} == {0}
+
+
+def test_a_model_without_separate_groups_pins_exactly_as_before():
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        resp = client.post("/cache/pins", json=_pin_body())
+        assert resp.json()["affected"] == len(_resolve(ctx))
+
+
+@contextmanager
+def _registered_delete_client(deletes: list) -> Iterator[TestClient]:
+    with _delete_client() as client:
+        client.post(
+            "/instances",
+            json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
+        )
+        client.app.state.outbound_client = _mock_delete_server(deletes)
+        yield client
+
+
+def test_a_delete_reaches_every_object_group():
+    deletes: list = []
+    with _registered_delete_client(deletes) as client:
+        ctx = client.app.state.ctx
+        keys = _keys_in_groups(ctx)
+        _store(ctx, keys)
+
+        resp = client.post("/cache/delete", json=_delete_body("mp-1", tier="l2"))
+
+        assert resp.status_code == 200, resp.text
+        [call] = deletes
+        assert {k["object_group_id"] for k in call["keys"]} == set(GROUPS)
+        assert len(call["keys"]) == len(keys)
+
+
+def test_a_delete_sends_only_the_groups_the_chunk_is_stored_in():
+    """Expanded from what the directory holds, so a chunk in two groups is
+    deleted in two groups -- nothing is sent for a group it is not in."""
+    deletes: list = []
+    with _registered_delete_client(deletes) as client:
+        ctx = client.app.state.ctx
+        _store(ctx, _keys_in_groups(ctx, groups=(0, 1)))
+
+        client.post("/cache/delete", json=_delete_body("mp-1", tier="l2"))
+
+        [call] = deletes
+        assert {k["object_group_id"] for k in call["keys"]} == {0, 1}
+        assert len(call["keys"]) == 2 * len(_resolve(ctx))
+
+
+def test_a_non_force_delete_holds_back_every_group_of_pinned_content():
+    deletes: list = []
+    with _registered_delete_client(deletes) as client:
+        ctx = client.app.state.ctx
+        keys = _keys_in_groups(ctx)
+        _store(ctx, keys)
+        client.post("/cache/pins", json=_pin_body())
+
+        resp = client.post("/cache/delete", json=_delete_body("mp-1", tier="l2"))
+
+        assert deletes == []  # every group was pinned, so nothing was sent
+        assert resp.json()["skipped"] == len(keys)

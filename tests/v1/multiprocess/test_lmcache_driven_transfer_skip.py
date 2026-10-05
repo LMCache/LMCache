@@ -11,7 +11,7 @@
 # Standard
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 # Third Party
 import pytest
@@ -331,6 +331,8 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
 
 def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
     module, reads, _ = _make_module(monkeypatch, 2, [-1, 1])
+    cache_context = module.get_and_touch_context_entry(1).cache_context
+    cache_context.hold_imported_event.return_value = 7
     owners = {"g0c0": 10, "g0c1": 10, "g1c1": 20}
     completion = [(10, ["g0c0", "g0c1"]), (20, ["g1c1"])]
     module.context.get_read_owners.return_value = owners
@@ -353,9 +355,8 @@ def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
     module.context.storage_manager.prepare_read_completion.assert_called_once_with(
         ["g0c0", "g0c1", "g1c1"], owners
     )
-    callback.assert_called_once_with(
-        module.get_and_touch_context_entry(1).cache_context.cupy_stream,
-        "finish_read_by_owner",
-        completion,
-    )
+    assert callback.call_args_list == [
+        call(cache_context.cupy_stream, "release_imported_event", (1, 7)),
+        call(cache_context.cupy_stream, "finish_read_by_owner", completion),
+    ]
     module.context.storage_manager.finish_read_prefetched.assert_not_called()
