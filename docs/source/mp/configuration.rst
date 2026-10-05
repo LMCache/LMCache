@@ -791,6 +791,13 @@ All connector-level options are passed through
        allowing L2-to-L1 KV staging to overlap with scheduler queue wait.
        Resumable requests are skipped because their token IDs may be incomplete
        at enqueue time.
+   * - ``lmcache.mp.enable_lookup``
+     - ``true``
+     - When ``false``, the connector skips all LMCache lookups (including the
+       eager-prefetch path) and only stores KV caches. Useful in vLLM
+       MultiConnector topologies where another connector (e.g. Mooncake)
+       handles KV loading and LMCache is only used as an offload/distributed
+       store.
    * - ``lmcache.mp.autostart``
      - ``false``
      - Whether vLLM worker 0 should start a local ``lmcache server`` process

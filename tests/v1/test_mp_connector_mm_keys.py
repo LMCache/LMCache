@@ -191,6 +191,7 @@ def test_eager_prefetch_forwards_request_configs():
     scheduler_adapter = MagicMock()
     connector = SimpleNamespace(
         role=KVConnectorRole.SCHEDULER,
+        enable_lookup=True,
         _eager_prefetch=True,
         _reserve_last_token_for_lookup=False,
         scheduler_adapter=scheduler_adapter,
@@ -218,6 +219,7 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
+    connector.enable_lookup = True
     connector._reserve_last_token_for_lookup = True
     connector._hit_alignment_tokens = 64
     connector._connector_stats = MagicMock()
