@@ -29,7 +29,7 @@ Examples
 .. note::
 
     The examples below use a python script for inferencing multimodal models hosted by vLLM.
-    The script is the `openai_chat_completion_client_for_multimodal python script in vLLM <https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py>`_.
+    The script is the `openai_chat_completion_client_for_multimodal python script in vLLM <https://github.com/vllm-project/vllm/blob/main/examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py>`_.
     You will need to download it locally for running the examples below.
     The script is printed in the `reference section <#reference-inferencing-multimodal-models-in-vllm-example-python-script>`_ that follows for you perusal.
     Go to the `Example output <#example-output>`_ section to see the output in the vLLM logs that demonstrate the speedup improvements.
@@ -143,7 +143,7 @@ This then shows the speedup between the first and second runs.
 Reference: Inferencing multimodal models in vLLM example Python script 
 ======================================================================
 
-Source: https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py
+Source: https://github.com/vllm-project/vllm/blob/main/examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py
 
 .. code-block:: python
 

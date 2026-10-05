@@ -3,7 +3,7 @@
 Module: `lmcache/v1/mp_coordinator/cache_events.py`
 Contract vocabulary: `lmcache/v1/mp_coordinator/api.py`
 Consumer: `lmcache/v1/mp_coordinator/views/key_directory.py` (see
-[key_directory.md](key_directory.md))
+[key_directory.md](views/key_directory.md))
 
 This is the emission half of the key directory (M1 of the control-plane
 RFC, [issue #4226](https://github.com/LMCache/LMCache/issues/4226)): MP
@@ -145,7 +145,7 @@ listener plumbing or a dedicated flush task:
   so token bindings ride the store events themselves. Tokens are
   therefore repeated per rank/group/tier placement — an accepted wire
   trade for a self-contained protocol (see
-  [key_directory.md](key_directory.md) — Token index).
+  [key_directory.md](views/key_directory.md) — Token index).
   `ACCESS` batches carry an **empty backend**: the directory only
   refreshes key-level recency and access count on access, so there is
   no placement identity to name. The vocabulary requires a non-empty
