@@ -10,8 +10,8 @@ import os
 import urllib.error
 import urllib.request
 
-# Third Party
 try:
+    # Third Party
     from openai import OpenAI
 except ModuleNotFoundError as exc:
     if exc.name != "openai":

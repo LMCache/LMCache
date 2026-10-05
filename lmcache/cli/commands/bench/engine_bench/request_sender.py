@@ -7,8 +7,8 @@ import collections.abc
 import os
 import time
 
-# Third Party
 try:
+    # Third Party
     from openai import AsyncOpenAI
 except ModuleNotFoundError as exc:
     if exc.name != "openai":
