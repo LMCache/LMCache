@@ -1587,6 +1587,8 @@ class LMCacheMPWorkerAdapter:
     def _send_register_kv_caches_request(
         self,
         kv_caches: dict[str, torch.Tensor],
+        *,
+        reuse_transfer_ctx: bool = False,
     ) -> None:
         """Submit a REGISTER_KV_CACHE request and wait for the response.
 
@@ -1595,20 +1597,32 @@ class LMCacheMPWorkerAdapter:
 
         Args:
             kv_caches: The KV cache dict to register.
+            reuse_transfer_ctx: Re-register the existing transfer context so
+                its in-flight ownership records survive server recovery.
 
         Raises:
             ConnectionError: if the server does not respond within
                 mq_timeout.
+            RuntimeError: if recovery has no existing transfer context to
+                re-register.
         """
         self.kv_caches = kv_caches
-        transfer_ctx = create_transfer_context(
-            kv_caches,
-            instance_id=self.instance_id,
-            req_client=self.req_client,
-            mode=self._mp_transfer_mode,
-        )
+        if reuse_transfer_ctx:
+            transfer_ctx = self.transfer_ctx
+            if transfer_ctx is None:
+                raise RuntimeError(
+                    "Cannot recover KV-cache registration without the existing "
+                    "transfer context"
+                )
+        else:
+            transfer_ctx = create_transfer_context(
+                kv_caches,
+                instance_id=self.instance_id,
+                req_client=self.req_client,
+                mode=self._mp_transfer_mode,
+            )
+            self.transfer_ctx = transfer_ctx
         layout_hints = self._layout_hints
-        self.transfer_ctx = transfer_ctx
         try:
             # Register on the local, not self.transfer_ctx: a concurrent
             # shutdown() may null self.transfer_ctx between publish and this
@@ -1686,7 +1700,10 @@ class LMCacheMPWorkerAdapter:
             return False
 
         try:
-            self._send_register_kv_caches_request(self.kv_caches)
+            self._send_register_kv_caches_request(
+                self.kv_caches,
+                reuse_transfer_ctx=True,
+            )
         except ConnectionError:
             logger.exception(
                 "Failed to re-register KV caches after server recovery; "
@@ -2271,10 +2288,14 @@ class LMCacheMPWorkerAdapter:
         Args:
             need_flush_before_forward: When True, flush in-flight gather
                 operations on the transfer context. When False, this is a no-op.
+
+        Raises:
+            RuntimeError: If a submitted store cannot be proven complete. The
+                next forward pass must not reuse its KV blocks in that case.
         """
         if not need_flush_before_forward:
             return
-        if not self.is_healthy or self.transfer_ctx is None:
+        if self.transfer_ctx is None:
             return
         self.transfer_ctx.flush_inflight_stores()
         # Force device sync here, compare to preemption, perf panelty is trivial
@@ -2322,29 +2343,37 @@ class LMCacheMPWorkerAdapter:
         return events
 
     def shutdown(self) -> None:
-        """
-        Shutdown the LMCache MP worker adapter.
+        """Shutdown the LMCache MP worker adapter.
 
         Stops the heartbeat (if started) before UNREGISTER: no new ping
         on the closing request client, and a straggler in-flight cycle cannot
         re-register or flip the health event after unregistration.
+
+        Raises:
+            RuntimeError: If an in-flight store cannot be proven complete or
+                the server does not acknowledge unregistration. Resources
+                remain live so callers may retry after the failure clears.
         """
         with self._heartbeat_lock:
             if self._heartbeat is not None:
                 self._heartbeat.stop()
 
         if self.transfer_ctx is not None:
+            # A heartbeat or RPC failure is not a device-completion fence.
+            # Keep the context, request client, and IPC resources alive if any
+            # submitted store cannot be joined; releasing them would allow
+            # the engine to recycle memory the server may still reference.
+            self.transfer_ctx.flush_inflight_stores()
             logger.info("Unregistering kv caches")
             try:
                 future = self.transfer_ctx.unregister()
                 if future is not None:
                     future.result(timeout=self._mq_timeout)
-            except TimeoutError:
-                logger.warning(
-                    "LMCache server did not respond to unregister within %ss. "
-                    "Proceeding with shutdown.",
-                    self._mq_timeout,
-                )
+            except TimeoutError as exc:
+                raise RuntimeError(
+                    "Cannot release MP transfer resources: the server did not "
+                    f"acknowledge unregister within {self._mq_timeout}s"
+                ) from exc
 
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "shutdown")

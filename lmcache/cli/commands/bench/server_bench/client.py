@@ -619,7 +619,13 @@ class ServerBenchClient:
         _send_end_session(req_client, request.request_id)
 
     def close(self) -> None:
-        """Idempotently release resources, including after partial startup."""
+        """Idempotently release resources, including after partial startup.
+
+        Raises:
+            RuntimeError: If a submitted store cannot be proven complete.
+                Worker KV tensors and transport resources remain live so the
+                caller can retry after the failure clears.
+        """
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import (
             _DEFAULT_RPC_TIMEOUT_S,
@@ -631,10 +637,10 @@ class ServerBenchClient:
                 try:
                     worker.transfer_context.flush_inflight_stores()
                 except Exception as exc:
-                    self._log(
-                        "  [warning] TransferContext flush failed for iid %d: %s"
-                        % (instance_id, exc)
-                    )
+                    raise RuntimeError(
+                        "Cannot close server benchmark worker iid %d: "
+                        "in-flight store completion is unknown" % instance_id
+                    ) from exc
                 try:
                     future = worker.transfer_context.unregister()
                     if future is not None:
