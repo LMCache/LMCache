@@ -34,22 +34,6 @@ _TORCH_FP8_TO_AT_SCALAR = {
 }
 
 
-def _cb_key_at_scalar(dtype: torch.dtype, kv_quant: str) -> "int | None":
-    """The rope kernel's at::ScalarType for a K plane, or None if unsupported.
-
-    A uint8 plane is only rope-able when the registration declared its fp8
-    flavor (``kv_quant``); the kernel then dequantizes, rotates, and
-    requantizes per element. The per-tensor fp8 scale needs no handling:
-    rotation commutes with it and it is the same on input and output.
-    """
-    at_scalar = _TORCH_TO_AT_SCALAR.get(dtype)
-    if at_scalar is None:
-        at_scalar = _TORCH_FP8_TO_AT_SCALAR.get(dtype)
-    if at_scalar is None and dtype == torch.uint8 and kv_quant:
-        at_scalar = _FP8_FLAVOR_TO_AT_SCALAR.get(kv_quant)
-    return at_scalar
-
-
 @dataclass
 class _CBRopeState:
     """Per-instance RoPE state IPC-shared from vLLM; dangles on reallocate.
@@ -68,11 +52,7 @@ class _CBRopeState:
     # Required for MLA: inference would rotate the latent's content dims.
     group_rot: "list[tuple[int, int] | None]" = field(default_factory=list)
     group_head_size: list[int] = field(default_factory=list)
-    # Declared fp8 flavor of the paged KV ("fp8_e4m3" / "fp8_e5m2"; "" =
-    # unquantized). Only legacy-geometry models rope quantized KV: under a
-    # declared map ``rot_for_group``'s dtype gate still skips non-float
-    # kernel groups, because a quantized index side-plane and a quantized
-    # main-KV plane are indistinguishable by dtype there.
+    # fp8 flavor of the paged KV ("fp8_e4m3"/"fp8_e5m2"); "" = unquantized.
     kv_quant: str = ""
 
     def head_size_for_group(self, engine_group_idx: int) -> int:

@@ -314,20 +314,25 @@ def test_ropeless_group_sentinel_skips_rerope():
 # --------------------------------------------------------------------------
 
 
-def test_cb_key_at_scalar_resolution():
-    """uint8 K planes are rope-able only with a declared fp8 flavor; true
-    float8 dtypes need none; floats resolve as before."""
+def test_fp8_at_scalar_maps():
+    """The plan builder resolves a uint8 K plane through the declared flavor
+    and a true float8 dtype directly; both must name the same kernel enums
+    (guarded C++-side by a static_assert in pos_kernels.cu)."""
     # First Party
-    from lmcache.v1.multiprocess.modules.blend.rope import _cb_key_at_scalar
+    from lmcache.v1.multiprocess.modules.blend.rope import (
+        _FP8_FLAVOR_TO_AT_SCALAR,
+        _TORCH_FP8_TO_AT_SCALAR,
+        _TORCH_TO_AT_SCALAR,
+    )
 
-    assert _cb_key_at_scalar(torch.bfloat16, "") == 15
-    assert _cb_key_at_scalar(torch.float16, "fp8_e4m3") == 5  # dtype wins
-    assert _cb_key_at_scalar(torch.uint8, "") is None
-    assert _cb_key_at_scalar(torch.uint8, "fp8_e4m3") == 24
-    assert _cb_key_at_scalar(torch.uint8, "fp8_e5m2") == 23
-    assert _cb_key_at_scalar(torch.uint8, "nvfp4") is None
-    assert _cb_key_at_scalar(torch.float8_e4m3fn, "") == 24
-    assert _cb_key_at_scalar(torch.float8_e5m2, "") == 23
+    assert _FP8_FLAVOR_TO_AT_SCALAR == {"fp8_e4m3": 24, "fp8_e5m2": 23}
+    assert _TORCH_FP8_TO_AT_SCALAR == {
+        torch.float8_e4m3fn: 24,
+        torch.float8_e5m2: 23,
+    }
+    # An undeclared uint8 plane must resolve to nothing (plan unavailable).
+    assert torch.uint8 not in _TORCH_TO_AT_SCALAR
+    assert "" not in _FP8_FLAVOR_TO_AT_SCALAR
 
 
 def _reference_rerope_fp8(rows_u8, old_pos, new_pos, cache_bf16, n_heads, hs):

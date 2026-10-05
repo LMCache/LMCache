@@ -37,10 +37,11 @@ from lmcache.v1.multiprocess.modules.blend.read_set import (
     _classify_cb_read_groups,
 )
 from lmcache.v1.multiprocess.modules.blend.rope import (
-    _TORCH_TO_AT_SCALAR,
     _cb_group_rope_geometry,
-    _cb_key_at_scalar,
     _CBRopeState,
+    _FP8_FLAVOR_TO_AT_SCALAR,
+    _TORCH_FP8_TO_AT_SCALAR,
+    _TORCH_TO_AT_SCALAR,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
@@ -259,7 +260,14 @@ class RetrieveMixin:
                     )
                 )
                 continue
-            at_scalar = _cb_key_at_scalar(buf0.dtype, rope_state.kv_quant)
+            # uint8 K planes are rope-able only with a declared fp8 flavor;
+            # the kernel then dequant-rotates-requants, scale-free (rotation
+            # commutes with the per-tensor scale).
+            at_scalar = _TORCH_TO_AT_SCALAR.get(buf0.dtype) or (
+                _FP8_FLAVOR_TO_AT_SCALAR.get(rope_state.kv_quant)
+                if buf0.dtype == torch.uint8
+                else _TORCH_FP8_TO_AT_SCALAR.get(buf0.dtype)
+            )
             if at_scalar is None:
                 return None
             try:

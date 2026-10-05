@@ -84,10 +84,8 @@ class RegistrationMixin:
                 inference and would get its content dims rotated.
             group_head_size: Per-engine-group scatter head size. Empty means
                 ``head_size`` covers every group.
-            kv_quant: Declared fp8 flavor of the paged KV cache
-                (``"fp8_e4m3"`` / ``"fp8_e5m2"``); empty for unquantized KV.
-                Required to re-RoPE a uint8 KV plane — the buffer dtype alone
-                cannot name the bit layout.
+            kv_quant: fp8 flavor of the paged KV (``"fp8_e4m3"`` /
+                ``"fp8_e5m2"``); empty for unquantized KV.
 
         Raises:
             ValueError: On a missing KV cache, bad ``group_to_cache``
