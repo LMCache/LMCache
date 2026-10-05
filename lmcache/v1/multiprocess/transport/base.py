@@ -221,8 +221,7 @@ class RequestClient(Protocol):
     @rpc_method
     def get_experimental(self) -> MessagingFuture[list[str]]: ...
 
-    # Deprecated compatibility alias (#4878): frozen at its deprecation-time
-    # shape — new parameters (kv_quant) go on cb_register_rope only.
+    # Deprecated alias (#4878), frozen: new params go on cb_register_rope.
     def cb_register_rope_v3(
         self,
         instance_id: int,
