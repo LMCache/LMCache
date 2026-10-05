@@ -20,8 +20,8 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
 from lmcache.v1.multiprocess.modules.blend.rope import (
-    _CBRopeState,
     _FP8_FLAVOR_TO_AT_SCALAR,
+    _CBRopeState,
 )
 from lmcache.v1.multiprocess.request_handler import request_handler
 

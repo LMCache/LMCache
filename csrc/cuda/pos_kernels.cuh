@@ -28,6 +28,5 @@ void rotary_embedding_k_fused_ramp_multi_ptr(
     const std::vector<uintptr_t>& key_ptrs, at::ScalarType key_dtype,
     at::ScalarType cache_dtype, int64_t num_tokens,
     const std::vector<int64_t>& old_sts, const std::vector<int64_t>& new_sts,
-    int64_t slots, int64_t head_size, int64_t head_stride,
-    int64_t num_kv_heads, uintptr_t cos_sin_cache_ptr, int rot_dim,
-    bool is_neox);
+    int64_t slots, int64_t head_size, int64_t head_stride, int64_t num_kv_heads,
+    uintptr_t cos_sin_cache_ptr, int rot_dim, bool is_neox);
