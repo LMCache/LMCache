@@ -245,6 +245,14 @@ CLI Reference
    * - ``--heartbeat-url``
      - *(none)*
      - If set, the dashboard itself also sends heartbeats to this URL.
+   * - ``--heartbeat-interval``
+     - ``30``
+     - Heartbeat interval in seconds. Only takes effect when
+       ``--heartbeat-url`` is set.
+   * - ``--heartbeat-initial-delay``
+     - ``0``
+     - Seconds to wait before the first heartbeat. Only takes effect when
+       ``--heartbeat-url`` is set.
    * - ``--report-host``
      - *(auto)*
      - Host reported in the heartbeat ``api_address``. When set, skips
