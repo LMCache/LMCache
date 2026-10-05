@@ -1033,35 +1033,62 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             window_objs
                         )
 
-                        transfer_kv_per_object_group(
-                            cache_context,
-                            block_ids_per_group_gpu,
-                            memory_objs,
-                            object_group_id=obj_group_id,
-                            batch_size=cache_context.max_batch_size,
-                            skip_first_n_tokens=skip_first_n_tokens,
-                            direction=lmcache_native.TransferDirection.H2D,
-                            transfer_key=transfer_key,
-                            block_ids_host=gpu_block_ids,
-                        )
-                        # Extend only after the copy is enqueued: on exception,
-                        # read_prefetched_results releases this group's locks
-                        # itself, and a key must not be released twice.
+                        # Hand ownership of the read locks to the retrieve
+                        # stream before submitting any asynchronous work. A
+                        # transfer helper may enqueue part of a plan and then
+                        # raise; allowing that exception to escape the context
+                        # manager would release the L1 sources while the GPU
+                        # still reads them.
                         prefetched_keys.extend(in_window_keys)
+                        try:
+                            transfer_kv_per_object_group(
+                                cache_context,
+                                block_ids_per_group_gpu,
+                                memory_objs,
+                                object_group_id=obj_group_id,
+                                batch_size=cache_context.max_batch_size,
+                                skip_first_n_tokens=skip_first_n_tokens,
+                                direction=lmcache_native.TransferDirection.H2D,
+                                transfer_key=transfer_key,
+                                block_ids_host=gpu_block_ids,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Cannot retrieve object group %d due to exception",
+                                obj_group_id,
+                            )
+                            retrieve_succeeded = False
+                            break
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
             finally:
-                event_backend.record_event(event, cache_context.stream)
-                if prefetched_keys:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_read_prefetched",
-                        prefetched_keys,
+                try:
+                    event_backend.record_event(event, cache_context.stream)
+                    if prefetched_keys:
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream,
+                            "finish_read_prefetched",
+                            prefetched_keys,
+                        )
+                except Exception:
+                    # If completion publication fails, wait for every copy
+                    # already submitted on this stream before releasing its
+                    # L1 sources. Returning early would permit allocator reuse
+                    # while the device still reads those buffers.
+                    logger.exception(
+                        "Cannot publish retrieve completion; synchronizing "
+                        "before releasing L1 read locks"
                     )
+                    cache_context.stream.synchronize()
+                    if prefetched_keys:
+                        self._ctx.storage_manager.finish_read_prefetched(
+                            prefetched_keys
+                        )
+                    raise
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
-                    if len(prefetched_keys) == expected_retained
+                    if retrieve_succeeded and len(prefetched_keys) == expected_retained
                     else 0
                 )
                 self._ctx.event_bus.publish_on_stream(

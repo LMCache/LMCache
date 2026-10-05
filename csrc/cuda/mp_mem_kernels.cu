@@ -863,6 +863,43 @@ void execute_direct_copy_transfer(
                 " paged layer pointers, needs ", ptrs_needed);
   }
 
+  // Validate the complete plan before the first asynchronous copy.  The
+  // object loop below submits one cudaMemcpyBatchAsync per object, so finding
+  // a bad block id or short object in a later entry after an earlier entry was
+  // queued would make the caller's exception path race L1 source reuse.
+  for (const DirectCopyObject& obj : objects) {
+    TORCH_CHECK(obj.skip_prefix_n_blocks.size() == group_specs.size(),
+                "DirectCopyObject.skip_prefix_n_blocks has ",
+                obj.skip_prefix_n_blocks.size(), " entries, expected ",
+                group_specs.size());
+    TORCH_CHECK(obj.chunk_idx >= 0, "chunk_idx must be non-negative, got ",
+                obj.chunk_idx);
+    for (size_t g = 0; g < group_specs.size(); ++g) {
+      const DirectCopyGroupSpec& spec = group_specs[g];
+      const PageBufferShapeDesc& sd = spec.shape_desc;
+      const int bpc = blocks_per_chunk[g];
+      const int skip = obj.skip_prefix_n_blocks[g];
+      TORCH_CHECK(skip >= 0 && skip <= bpc, "skip_prefix_n_blocks (", skip,
+                  ") out of range [0, ", bpc, "] for group ", g);
+      const size_t block_base = static_cast<size_t>(obj.chunk_idx) * bpc;
+      TORCH_CHECK(block_base + bpc <= spec.block_ids.size(), "chunk ",
+                  obj.chunk_idx, " needs block ids [", block_base, ", ",
+                  block_base + bpc, ") but group ", g, " only has ",
+                  spec.block_ids.size());
+      const size_t region_end =
+          spec.byte_offset_in_object +
+          static_cast<size_t>(sd.kv_size) * sd.nl * layer_bytes[g];
+      TORCH_CHECK(region_end <= obj.nbytes, "group ", g,
+                  " region ends at byte ", region_end, " past the object size ",
+                  obj.nbytes);
+      for (int b = skip; b < bpc; ++b) {
+        const int64_t block_id = spec.block_ids[block_base + b];
+        TORCH_CHECK(block_id >= 0 && block_id < sd.nb, "block id ", block_id,
+                    " out of range [0, ", sd.nb, ") for group ", g);
+      }
+    }
+  }
+
   const at::cuda::OptionalCUDAGuard device_guard(device);
   // cudaMemcpyBatchAsync rejects the legacy NULL stream. The transfer runs on
   // the cache context's own stream in production; if a caller is on the
@@ -884,12 +921,6 @@ void execute_direct_copy_transfer(
   std::vector<size_t> sizes;
 
   for (const DirectCopyObject& obj : objects) {
-    TORCH_CHECK(obj.skip_prefix_n_blocks.size() == group_specs.size(),
-                "DirectCopyObject.skip_prefix_n_blocks has ",
-                obj.skip_prefix_n_blocks.size(), " entries, expected ",
-                group_specs.size());
-    TORCH_CHECK(obj.chunk_idx >= 0, "chunk_idx must be non-negative, got ",
-                obj.chunk_idx);
     dsts.clear();
     srcs.clear();
     sizes.clear();
@@ -900,21 +931,7 @@ void execute_direct_copy_transfer(
       const BlockAddressing& addr = addressing[g];
       const int bpc = blocks_per_chunk[g];
       const int skip = obj.skip_prefix_n_blocks[g];
-      TORCH_CHECK(skip >= 0 && skip <= bpc, "skip_prefix_n_blocks (", skip,
-                  ") out of range [0, ", bpc, "] for group ", g);
       const size_t block_base = static_cast<size_t>(obj.chunk_idx) * bpc;
-      TORCH_CHECK(block_base + bpc <= spec.block_ids.size(), "chunk ",
-                  obj.chunk_idx, " needs block ids [", block_base, ", ",
-                  block_base + bpc, ") but group ", g, " only has ",
-                  spec.block_ids.size());
-      // Whole region this group touches inside the object; one check covers
-      // every entry below because (kv, layer, block) only ever move forward.
-      const size_t region_end =
-          spec.byte_offset_in_object +
-          static_cast<size_t>(sd.kv_size) * sd.nl * layer_bytes[g];
-      TORCH_CHECK(region_end <= obj.nbytes, "group ", g,
-                  " region ends at byte ", region_end, " past the object size ",
-                  obj.nbytes);
 
       for (int kv = 0; kv < sd.kv_size; ++kv) {
         for (int layer = 0; layer < sd.nl; ++layer) {
@@ -926,9 +943,6 @@ void execute_direct_copy_transfer(
               (static_cast<size_t>(kv) * sd.nl + layer) * layer_bytes[g];
           for (int b = skip; b < bpc; ++b) {
             const int64_t block_id = spec.block_ids[block_base + b];
-            TORCH_CHECK(block_id >= 0 && block_id < sd.nb, "block id ",
-                        block_id, " out of range [0, ", sd.nb, ") for group ",
-                        g);
             const uintptr_t host = host_base + b * addr.block_bytes;
             const uintptr_t dev =
                 dev_base + static_cast<size_t>(block_id) * addr.block_stride;

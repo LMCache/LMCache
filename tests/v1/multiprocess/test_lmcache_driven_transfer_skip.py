@@ -298,6 +298,80 @@ def test_retrieve_full_attention_only_reads_everything(monkeypatch):
     assert len(mem) == 3 and all(o is not None for o in mem)
 
 
+def test_retrieve_transfer_failure_releases_sources_on_stream(monkeypatch) -> None:
+    """A partial async submission keeps L1 sources until stream completion."""
+    module, _read_calls, _transfer_calls = _make_module(
+        monkeypatch, 2, num_chunks_in_sw=[-1]
+    )
+    storage_manager = module.context.storage_manager
+    context_saw_exception = False
+
+    @contextmanager
+    def guarded_read(keys):
+        nonlocal context_saw_exception
+        try:
+            yield [MagicMock(get_size=MagicMock(return_value=10)) for _ in keys]
+        except Exception:
+            context_saw_exception = True
+            raise
+
+    storage_manager.read_prefetched_results.side_effect = guarded_read
+    submissions: list[str] = []
+
+    def partially_submit(*args, **kwargs) -> None:
+        submissions.append("enqueued")
+        raise RuntimeError("late transfer failure")
+
+    callbacks: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(mod, "transfer_kv_per_object_group", partially_submit)
+    monkeypatch.setattr(
+        mod,
+        "submit_callback_to_stream",
+        lambda stream, kind, payload: callbacks.append((kind, list(payload))),
+    )
+
+    _handle, ok = module.retrieve(
+        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        instance_id=1,
+        gpu_block_ids=[[1, 2]],
+        event_ipc_handle=b"x",
+    )
+
+    assert ok is False
+    assert submissions == ["enqueued"]
+    assert context_saw_exception is False
+    assert callbacks[-1] == ("finish_read_prefetched", ["g0c0", "g0c1"])
+    storage_manager.finish_read_prefetched.assert_not_called()
+    end_event = cast(MagicMock, mod.Event).call_args.kwargs["metadata"]
+    assert end_event["num_tokens"] == 0
+
+
+def test_retrieve_completion_failure_synchronizes_before_release(monkeypatch) -> None:
+    """A failed stream callback falls back to a synchronous safe release."""
+    module, _read_calls, _transfer_calls = _make_module(
+        monkeypatch, 2, num_chunks_in_sw=[-1]
+    )
+    cache_context = module.get_and_touch_context_entry(1).cache_context
+    storage_manager = module.context.storage_manager
+
+    def fail_read_release(stream, kind, payload) -> None:
+        if kind == "finish_read_prefetched":
+            raise RuntimeError("callback submission failed")
+
+    monkeypatch.setattr(mod, "submit_callback_to_stream", fail_read_release)
+
+    with pytest.raises(RuntimeError, match="callback submission failed"):
+        module.retrieve(
+            key=SimpleNamespace(request_id="req", cache_salt="salt"),
+            instance_id=1,
+            gpu_block_ids=[[1, 2]],
+            event_ipc_handle=b"x",
+        )
+
+    cache_context.stream.synchronize.assert_called_once_with()
+    storage_manager.finish_read_prefetched.assert_called_once_with(["g0c0", "g0c1"])
+
+
 def test_retrieve_never_reads_aux_groups(monkeypatch):
     """The std retrieve skips connector-private aux object groups.
 
