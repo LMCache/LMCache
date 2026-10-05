@@ -2014,41 +2014,20 @@ class LMCacheMPWorkerAdapter:
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "reclaim")
 
-        # If unhealthy, drain all pending futures immediately
+        # Heartbeat failure says nothing about transfers already submitted to
+        # the server. Keep their futures and IPC events alive until each
+        # transfer reports terminal completion; reporting them here would let
+        # vLLM reuse blocks that the server may still be reading or writing.
+        # Requests dropped before submission are different: no remote work can
+        # reference their blocks, so they remain safe to report exactly once.
         if not self.is_healthy:
-            finished_stores = set(self.store_futures.keys())
-            finished_retrieves = set()
-            for request_id, (
-                _r_future,
-                r_block_ids,
-            ) in self.retrieve_futures.items():
-                finished_retrieves.add(request_id)
-                self.error_block_ids.update(r_block_ids)
-            self.store_futures.clear()
-            self.retrieve_futures.clear()
-            self.store_events.clear()
-            self.retrieve_events.clear()
-            self._pending_store_kv_events.clear()
-
-            # Retrieves dropped at submit time still must be reported,
-            # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
-            # Swap-drain (not update-then-clear): a concurrent
-            # submit_retrieve_request add lands in the old set (reported now)
-            # or the fresh set (reported next call), never lost.
             dropped = self._dropped_retrieves
             self._dropped_retrieves = set()
-            finished_retrieves.update(dropped)
-
             ret_stores = self._process_finished_stores(
-                finished_stores, finished_req_ids_from_engine
+                set(), finished_req_ids_from_engine
             )
-            # A request may have a pending retrieve AND appear in
-            # finished_req_ids_from_engine (it ran without loading KV after
-            # the server died).  The scheduler processes finished_recving
-            # first and deletes the request, so we must not also report it
-            # in finished_sending.
-            ret_stores -= finished_retrieves
-            return ret_stores, finished_retrieves
+            ret_stores -= dropped
+            return ret_stores, dropped
 
         finished_stores = set()
         finished_retrieves = set()
@@ -2146,37 +2125,14 @@ class LMCacheMPWorkerAdapter:
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "reclaim")
 
-        # If unhealthy, drain all pending futures immediately
+        # Preserve submitted transfers and their IPC events across a heartbeat
+        # outage. Lazy-offload completion receipts release pinned engine blocks,
+        # so only requests known never to have reached the server can complete
+        # while health is unknown.
         if not self.is_healthy:
-            finished_stores = set(self.store_futures.keys())
-            finished_retrieves = set()
-            for request_id, (
-                _r_future,
-                r_block_ids,
-            ) in self.retrieve_futures.items():
-                finished_retrieves.add(request_id)
-                self.error_block_ids.update(r_block_ids)
-            self.store_futures.clear()
-            self.retrieve_futures.clear()
-            self.store_events.clear()
-            self.retrieve_events.clear()
-            self._pending_store_kv_events.clear()
-
-            # Retrieves dropped at submit time still must be reported,
-            # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
-            # Swap-drain (not update-then-clear): a concurrent
-            # submit_retrieve_request add lands in the old set (reported now)
-            # or the fresh set (reported next call), never lost.
             dropped = self._dropped_retrieves
             self._dropped_retrieves = set()
-            finished_retrieves.update(dropped)
-
-            for req_id in finished_stores:
-                self._completed_store_requests[req_id] = 1
-                # The drained future's outcome is unknown; the data cannot
-                # be assumed stored.
-                self._failed_store_requests.add(req_id)
-            return None, finished_retrieves
+            return None, dropped
 
         finished_stores = set()
         finished_retrieves = set()

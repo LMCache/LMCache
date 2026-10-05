@@ -804,12 +804,59 @@ def test_lazy_store_kv_events_preserve_completion_and_failure_reporting(
 
     adapter.get_finished_with_lazy_offload()
 
+    if store_result is None:
+        assert adapter.get_kv_events() == []
+        assert adapter.get_completed_store_requests() is None
+        assert adapter.get_failed_store_requests() is None
+        assert "req-1" in adapter.store_futures
+        FakeHeartbeatThread.instances[-1].simulate_successful_ping()
+        adapter.get_finished_with_lazy_offload()
+
     assert len(adapter.get_kv_events()) == (1 if store_result else 0)
     assert adapter.get_kv_events() == []
     assert adapter.get_completed_store_requests() == {"req-1": 1}
     assert adapter.get_completed_store_requests() is None
     assert adapter.get_failed_store_requests() == (None if store_result else {"req-1"})
     assert adapter.get_failed_store_requests() is None
+
+
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_unhealthy_poll_preserves_submitted_transfer_ownership(
+    fake_adapter,
+    lazy_offload: bool,
+) -> None:
+    """Heartbeat loss cannot turn completion-unknown work into completion."""
+    adapter, _send_mock, _ = fake_adapter
+    adapter.lazy_offload = lazy_offload
+    store_event = MagicMock(name="store_event")
+    retrieve_event = MagicMock(name="retrieve_event")
+    store_future = MagicMock(name="store_future")
+    retrieve_future = MagicMock(name="retrieve_future")
+    transfer_ctx = MagicMock()
+    transfer_ctx.submit_store.return_value = store_future
+    transfer_ctx.submit_retrieve.return_value = retrieve_future
+    adapter.transfer_ctx = transfer_ctx
+    adapter.submit_store_request("store", _op([[1]]), store_event)
+    adapter.submit_retrieve_request("retrieve", _op([[7, 8]]), retrieve_event)
+    FakeHeartbeatThread.instances[-1].health_event.clear()
+
+    if lazy_offload:
+        finished_stores, finished_retrieves = adapter.get_finished_with_lazy_offload()
+        assert finished_stores is None
+        assert adapter.get_completed_store_requests() is None
+        assert adapter.get_failed_store_requests() is None
+    else:
+        finished_stores, finished_retrieves = adapter.get_finished({"store"})
+        assert finished_stores == set()
+
+    assert finished_retrieves == set()
+    assert adapter.store_futures == {"store": store_future}
+    assert adapter.retrieve_futures == {"retrieve": (retrieve_future, [7, 8])}
+    assert adapter.store_events == {"store": store_event}
+    assert adapter.retrieve_events == {"retrieve": retrieve_event}
+    assert adapter.get_block_ids_with_load_errors() == set()
+    store_future.query.assert_not_called()
+    retrieve_future.query.assert_not_called()
 
 
 @pytest.mark.parametrize("lazy_offload", [False, True])
