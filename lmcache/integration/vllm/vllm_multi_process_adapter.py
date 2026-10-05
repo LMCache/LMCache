@@ -126,6 +126,10 @@ class ExtraConfigDefault(enum.Enum):
     # Must match the MP server's --hash-algorithm setting because KV events
     # expose the same chunk hashes used by server-side object keys.
     hash_algorithm = "blake3"
+    # Generic token-dropping controls. A budget of 0 disables token dropping.
+    # Algorithm-specific policy config must stay out of this public surface.
+    token_drop_budget = 0
+    token_drop_buffer = 128
 
 
 # Backward-compatible aliases for callers that still pass these as

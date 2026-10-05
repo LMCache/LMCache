@@ -22,12 +22,27 @@ class RKVWorker:
         budget: int,
         *,
         buffer: int = 128,
-        window_size: int = 8,
-        kernel_size: int = 7,
-        mix_lambda: float = 0.1,
-        retain_ratio: float = 0.1,
+        rkv_config: dict[str, Any] | None = None,
         score_chunk_bytes: int = 512 * 1024 * 1024,
     ) -> None:
+        policy_config: dict[str, Any] = {
+            "window_size": 8,
+            "kernel_size": 7,
+            "mix_lambda": 0.1,
+            "retain_ratio": 0.1,
+        }
+        if rkv_config is not None:
+            unknown = set(rkv_config) - set(policy_config)
+            if unknown:
+                raise ValueError(
+                    f"Unsupported R-KV policy config keys: {sorted(unknown)}"
+                )
+            policy_config.update(rkv_config)
+
+        window_size = int(policy_config["window_size"])
+        kernel_size = int(policy_config["kernel_size"])
+        mix_lambda = float(policy_config["mix_lambda"])
+        retain_ratio = float(policy_config["retain_ratio"])
         if window_size <= 0:
             raise ValueError("R-KV window_size must be positive")
         if budget <= window_size:
@@ -53,11 +68,8 @@ class RKVWorker:
         self.score_chunk_bytes = score_chunk_bytes
         self._policy = R1KV(
             budget=budget,
-            window_size=window_size,
-            kernel_size=kernel_size,
-            mix_lambda=mix_lambda,
-            retain_ratio=retain_ratio,
             buffer=buffer,
+            **policy_config,
         )
         self._kv_caches: dict[str, torch.Tensor] = {}
         self._layer_names: list[str] = []

@@ -188,12 +188,14 @@ def test_rkv_semantic_knobs_pass_through_to_worker(mock_io: SimpleNamespace) -> 
             kv_connector="LMCacheMPConnector",
             kv_role="kv_both",
             kv_connector_extra_config={
-                "lmcache.mp.rkv_budget": 64,
-                "lmcache.mp.rkv_buffer": 40,
-                "lmcache.mp.rkv_window_size": 4,
-                "lmcache.mp.rkv_kernel_size": 5,
-                "lmcache.mp.rkv_mix_lambda": 0.25,
-                "lmcache.mp.rkv_retain_ratio": 0.2,
+                "lmcache.mp.token_drop_budget": 64,
+                "lmcache.mp.token_drop_buffer": 40,
+                "lmcache.mp.rkv_config": {
+                    "window_size": 4,
+                    "kernel_size": 5,
+                    "mix_lambda": 0.25,
+                    "retain_ratio": 0.2,
+                },
             },
         )
     )
@@ -215,12 +217,39 @@ def test_rkv_semantic_knobs_pass_through_to_worker(mock_io: SimpleNamespace) -> 
         worker.shutdown()
 
 
+@pytest.mark.parametrize(
+    "extra_config",
+    [
+        {"lmcache.mp.rkv_config": {"window_size": 4}},
+        {
+            "lmcache.mp.token_drop_budget": 64,
+            "lmcache.mp.rkv_config": "not-a-json-object",
+        },
+    ],
+)
+def test_rkv_rejects_invalid_backdoor_config(
+    extra_config: dict[str, object],
+) -> None:
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config=extra_config,
+        )
+    )
+    config.cache_config.enable_prefix_caching = False
+    config.model_config.enforce_eager = True
+
+    with pytest.raises(ValueError):
+        LMCacheMPConnector(config, KVConnectorRole.WORKER)
+
+
 def test_rkv_skips_lmcache_allocation_telemetry(mock_io: SimpleNamespace) -> None:
     config = _config(
         KVTransferConfig(
             kv_connector="LMCacheMPConnector",
             kv_role="kv_both",
-            kv_connector_extra_config={"lmcache.mp.rkv_budget": 64},
+            kv_connector_extra_config={"lmcache.mp.token_drop_budget": 64},
         )
     )
     config.cache_config.enable_prefix_caching = False
@@ -247,7 +276,9 @@ def test_rkv_skips_lmcache_allocation_telemetry(mock_io: SimpleNamespace) -> Non
         scheduler.shutdown()
 
 
-def test_rkv_registers_kv_only_with_worker_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rkv_registers_kv_only_with_worker_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
     connector._vllm_config = object()
     connector._kv_cache_config = None
@@ -832,7 +863,7 @@ def test_rkv_rejects_unsupported_runtime_modes(
         KVTransferConfig(
             kv_connector="LMCacheMPConnector",
             kv_role="kv_both",
-            kv_connector_extra_config={"lmcache.mp.rkv_budget": 32},
+            kv_connector_extra_config={"lmcache.mp.token_drop_budget": 32},
         )
     )
     config.cache_config.enable_prefix_caching = False

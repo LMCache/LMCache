@@ -559,6 +559,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
       enters vLLM's waiting queue. Disabled by default.
+
+    Generic token dropping:
+    - lmcache.mp.token_drop_budget: target resident KV-token budget; 0 disables.
+    - lmcache.mp.token_drop_buffer: decode-token cadence/headroom between drops.
+
+    Algorithm-specific settings are intentionally not part of the LMCache
+    config surface; R-KV receives them through the opaque
+    lmcache.mp.rkv_config mapping.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -617,37 +625,35 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
         )
 
-        rkv_budget = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache.mp.rkv_budget", None
+        token_drop_budget = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.token_drop_budget", 0
+            )
         )
-        self._rkv_budget = int(rkv_budget) if rkv_budget is not None else None
-        # These mirror R-KV serving semantics. LMCache only transports them to
-        # the worker/allocator; it does not redefine the algorithm.
+        if token_drop_budget < 0:
+            raise ValueError("lmcache.mp.token_drop_budget must be non-negative")
+        self._rkv_budget = token_drop_budget or None
         self._rkv_buffer = int(
             vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.rkv_buffer", 128
+                "lmcache.mp.token_drop_buffer", 128
             )
         )
-        self._rkv_window_size = int(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.rkv_window_size", 8
-            )
+
+        # Algorithm-specific policy knobs stay behind one opaque backdoor.
+        # The connector does not interpret individual R-KV parameters.
+        rkv_config = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.rkv_config", None
         )
-        self._rkv_kernel_size = int(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.rkv_kernel_size", 7
+        if rkv_config is None:
+            self._rkv_config: dict[str, Any] = {}
+        elif isinstance(rkv_config, dict):
+            self._rkv_config = dict(rkv_config)
+        else:
+            raise ValueError("lmcache.mp.rkv_config must be a JSON object")
+        if self._rkv_budget is None and self._rkv_config:
+            raise ValueError(
+                "lmcache.mp.rkv_config requires lmcache.mp.token_drop_budget > 0"
             )
-        )
-        self._rkv_mix_lambda = float(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.rkv_mix_lambda", 0.1
-            )
-        )
-        self._rkv_retain_ratio = float(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.rkv_retain_ratio", 0.1
-            )
-        )
         self._rkv: RKVWorker | None = None
         if self._rkv_budget is not None:
             if role == KVConnectorRole.SCHEDULER:
@@ -827,10 +833,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self._rkv = RKVWorker(
                     self._rkv_budget,
                     buffer=self._rkv_buffer,
-                    window_size=self._rkv_window_size,
-                    kernel_size=self._rkv_kernel_size,
-                    mix_lambda=self._rkv_mix_lambda,
-                    retain_ratio=self._rkv_retain_ratio,
+                    rkv_config=self._rkv_config,
                 )
             if self.transfer_intermediate_tensors:
                 # First Party
