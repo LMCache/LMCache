@@ -10,8 +10,13 @@ import os
 import urllib.error
 import urllib.request
 
-# Third Party
-from openai import OpenAI
+try:
+    # Third Party
+    from openai import OpenAI
+except ModuleNotFoundError as exc:
+    if exc.name != "openai":
+        raise
+    OpenAI = None  # type: ignore[assignment]
 
 # First Party
 from lmcache.logging import init_logger
@@ -85,7 +90,8 @@ def auto_detect_model(engine_url: str) -> str:
         The model ID string.
 
     Raises:
-        RuntimeError: If the engine is unreachable or returns no models.
+        RuntimeError: If the optional OpenAI dependency is unavailable, the
+            engine is unreachable, or the engine returns no models.
     """
     base_url = engine_url.rstrip("/")
     if not base_url.startswith(("http://", "https://")):
@@ -95,6 +101,12 @@ def auto_detect_model(engine_url: str) -> str:
 
     api_key = os.getenv("OPENAI_API_KEY", "sk-dummy")
     logger.debug("Auto-detecting model from %s/models", base_url)
+
+    if OpenAI is None:
+        raise RuntimeError(
+            "lmcache bench engine requires the optional 'openai' package. "
+            "Install it with `pip install openai`."
+        )
 
     try:
         client = OpenAI(base_url=base_url, api_key=api_key)

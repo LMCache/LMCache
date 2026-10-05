@@ -565,11 +565,16 @@ class PrefetchResult:
     Note:
         ``l1_hit_cells`` and ``l2_hit_cells`` are disjoint and their union is
         ``hit_cells``.
+
+    ``found_cells`` (superset of ``hit_cells``): what existed at plan time —
+    in L1 or pinned in L2. Found-but-not-hit means "didn't fit", not
+    "evicted". ``None`` when not reported.
     """
 
     hit_cells: list["Bitmap"]
     l1_hit_cells: list["Bitmap"]
     l2_hit_cells: list["Bitmap"]
+    found_cells: "list[Bitmap] | None" = None
     _l1_hit_count: int = field(init=False, repr=False, compare=False)
     _l2_hit_count: int = field(init=False, repr=False, compare=False)
 
