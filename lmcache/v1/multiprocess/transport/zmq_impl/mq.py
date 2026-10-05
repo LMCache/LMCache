@@ -24,10 +24,12 @@ from lmcache.v1.multiprocess.custom_types import (
     get_customized_decoder,
     get_customized_encoder,
 )
-from lmcache.v1.multiprocess.futures import (
-    MessagingFuture,
+from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.request_handler import (
+    HandlerType,
+    get_affinity_key_index,
+    wrap_affinity_release,
 )
-from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
@@ -480,18 +482,21 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
         self.payload_clss = payload_clss
         self.handler = handler
         self.response_cls = response_cls
+        self.affinity_key_index: int | None = None
 
-    def __call__(
-        self, payloads: list[bytes], affinity_key: int = 0
-    ) -> Future[ResponseType]:
+    def __call__(self, payloads: list[bytes]) -> Future[ResponseType]:
         assert self.executor is not None, (
             "BlockingRequestHandler has no executor assigned. "
             "Call add_normal_thread_pool or add_affinity_thread_pool first."
         )
         decoded_payloads = unwrap_request_payloads(payloads, self.payload_clss)
         if isinstance(self.executor, AffinityThreadPool):
+            if self.affinity_key_index is None:
+                raise RuntimeError("Affinity handler has no instance_id payload index")
             return self.executor.submit(
-                self.handler, *decoded_payloads, affinity_key=affinity_key
+                self.handler,
+                *decoded_payloads,
+                affinity_key=decoded_payloads[self.affinity_key_index],
             )
         return self.executor.submit(self.handler, *decoded_payloads)
 
@@ -584,10 +589,8 @@ class MessageQueueServer(RequestServer):
             handler_entry (BlockingRequestHandler[Any]): The handler entry.
             payloads (list[bytes]): The payloads of the request.
             prefix_frames (list[bytes]): The prefix frames to send back.
-                prefix_frames[0] is the zmq identity used as affinity key.
         """
-        affinity_key = hash(prefix_frames[0])
-        future = handler_entry(payloads, affinity_key=affinity_key)
+        future = handler_entry(payloads)
 
         def _notify_response(fut: Future):
             try:
@@ -763,6 +766,7 @@ class MessageQueueServer(RequestServer):
             raise ValueError(
                 f"Handler signature does not match for operation: {operation}"
             )
+        handler = wrap_affinity_release(operation, handler, self.drop_instance_state)
 
         match handler_type:
             case HandlerType.SYNC:
@@ -857,7 +861,7 @@ class MessageQueueServer(RequestServer):
         """Assign an AffinityThreadPool to specific request types.
 
         Use this for GPU-bound blocking handlers (e.g. STORE, RETRIEVE).
-        Requests from the same zmq client identity are always dispatched
+        Requests for the same worker instance_id are always dispatched
         to the same worker thread, eliminating the need for per-instance
         GPU transfer locks.
 
@@ -871,6 +875,7 @@ class MessageQueueServer(RequestServer):
         self._validate_blocking_handlers(operations, "add_affinity_thread_pool")
         if not operations:
             return
+        key_indices = {op: get_affinity_key_index(op) for op in operations}
 
         pool = AffinityThreadPool(
             max_workers=max_workers,
@@ -881,12 +886,19 @@ class MessageQueueServer(RequestServer):
             handler = self.handlers[operation]
             assert isinstance(handler, BlockingRequestHandler)
             handler.executor = pool
+            handler.affinity_key_index = key_indices[operation]
 
         logger.debug(
             "Created affinity thread pool (max_workers=%d) for request types: %s",
             max_workers,
             operations,
         )
+
+    def drop_instance_state(self, instance_id: int) -> None:
+        """Retire a worker's affinity bindings; safe from the reaper thread."""
+        for pool in self.extra_pools:
+            if isinstance(pool, AffinityThreadPool):
+                pool.release_key(instance_id)
 
     def start(self) -> None:
         # Validate all blocking handlers have an executor assigned

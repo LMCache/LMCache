@@ -78,6 +78,14 @@ class ManagementModule:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
+    def add_liveness_target(self, target: InstanceLivenessTarget) -> None:
+        """Attach a transport state mirror before accepting requests.
+
+        Called during server construction, after the business modules are
+        built. Replace the tuple so a running reaper keeps a stable snapshot.
+        """
+        self._liveness_targets = (*self._liveness_targets, target)
+
     def report_status(self) -> dict:
         """Return module-specific status information.
 

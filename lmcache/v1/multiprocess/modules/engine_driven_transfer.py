@@ -353,7 +353,10 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             shm_name=shm_name, pool_size=pool_size
         )
 
-    @request_handler(operation="unregister_kv_cache_engine_driven_context")
+    @request_handler(
+        operation="unregister_kv_cache_engine_driven_context",
+        releases_client_affinity=True,
+    )
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister a non-GPU KV cache context for the given instance ID.
 

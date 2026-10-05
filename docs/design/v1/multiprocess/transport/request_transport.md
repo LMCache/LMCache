@@ -64,6 +64,27 @@ engine modules and passes them to `create_request_server()`, which returns the
 protocol; concrete server classes are accessed only inside their transport
 packages and implementation-level tests.
 
+### Worker affinity lifecycle
+
+Handlers marked `requires_client_affinity` are routed by the RPC's integer
+`instance_id`, not the connection identity. The payload position comes from the
+shared RPC signature, including operations with a different argument order.
+Reconnecting the same instance therefore preserves its worker binding in both
+ZMQ and gRPC.
+
+The request server is an `InstanceLivenessTarget` state mirror. Server construction
+attaches it to the existing management reaper; `drop_instance_state` retires the
+instance's affinity key. Unregister handlers marked `releases_client_affinity`
+retire the same key after successful completion.
+
+The pool serializes submission and retirement with one lock. Retirement does not
+cancel outstanding work: running and queued tasks, including new submissions for
+a reactivated instance, retain their original worker until that key drains.
+The next submission can establish a new binding. New keys use the least-bound
+worker, preferring reclaimed slots over sharing a worker with another bound key.
+Existing live bindings are not moved. True oversubscription still shares workers
+and emits the existing once-per-pool warning.
+
 ## Adding an RPC
 
 An ordinary RPC requires three changes:

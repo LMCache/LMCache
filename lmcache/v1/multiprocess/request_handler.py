@@ -4,6 +4,7 @@
 # Standard
 from dataclasses import dataclass
 from enum import Enum, auto
+from functools import wraps
 from typing import Any, Callable, TypeVar, get_type_hints
 import inspect
 
@@ -30,6 +31,7 @@ class RequestHandlerOptions:
     operation: RpcOperation | None
     handler_type: HandlerType
     requires_client_affinity: bool
+    releases_client_affinity: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,8 +48,13 @@ def request_handler(
     *,
     operation: RpcOperation | None = None,
     requires_client_affinity: bool = False,
+    releases_client_affinity: bool = False,
 ) -> Callable[[F], F]:
-    """Attach scheduling metadata; operation defaults to the method name."""
+    """Attach scheduling metadata; operation defaults to the method name.
+
+    Affinity uses the RPC's integer ``instance_id``. Unregister handlers set
+    ``releases_client_affinity`` to retire that binding after successful return.
+    """
     if requires_client_affinity and handler_type is not HandlerType.BLOCKING:
         raise ValueError("Client affinity requires HandlerType.BLOCKING")
 
@@ -55,6 +62,7 @@ def request_handler(
         operation=operation,
         handler_type=handler_type,
         requires_client_affinity=requires_client_affinity,
+        releases_client_affinity=releases_client_affinity,
     )
 
     def decorate(func: F) -> F:
@@ -70,6 +78,43 @@ def get_request_handler_options(
     """Return handler metadata, if the callable is decorated."""
     source = getattr(handler, "__func__", handler)
     return getattr(source, _HANDLER_OPTIONS_ATTR, None)
+
+
+def get_affinity_key_index(operation: RpcOperation) -> int:
+    """Return the integer instance_id payload index required by affinity.
+
+    Raises:
+        ValueError: If the RPC has no integer worker identity.
+    """
+    spec = get_rpc_spec(operation)
+    for index, name in enumerate(spec.signature.parameters):
+        if name == "instance_id" and spec.payload_types[index] is int:
+            return index
+    raise ValueError(f"Affinity RPC {operation!r} requires an integer instance_id")
+
+
+def wrap_affinity_release(
+    operation: RpcOperation,
+    handler: Callable[..., Any],
+    release: Callable[[int], None],
+) -> Callable[..., Any]:
+    """Release instance affinity after a successful unregister handler.
+
+    Transports install this wrapper at registration time. ``release`` must be
+    thread-safe; the wrapper executes on the handler's normal dispatch thread.
+    """
+    options = get_request_handler_options(handler)
+    if options is None or not options.releases_client_affinity:
+        return handler
+    index = get_affinity_key_index(operation)
+
+    @wraps(handler)
+    def invoke(*payloads: Any) -> Any:
+        result = handler(*payloads)
+        release(payloads[index])
+        return result
+
+    return invoke
 
 
 def _normalize_none_type(value: Any) -> Any:

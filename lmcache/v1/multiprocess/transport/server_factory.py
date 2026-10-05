@@ -7,6 +7,9 @@ from __future__ import annotations
 # Standard
 from typing import TYPE_CHECKING
 
+# First Party
+from lmcache.v1.multiprocess.modules.management import ManagementModule
+
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.multiprocess.config import MPServerConfig
@@ -33,11 +36,15 @@ def create_request_server(
             build_grpc_request_server,
         )
 
-        return build_grpc_request_server(modules, mp_config)
+        server: RequestServer = build_grpc_request_server(modules, mp_config)
+    else:
+        # First Party
+        from lmcache.v1.multiprocess.transport.zmq_impl.server import (
+            build_zmq_request_server,
+        )
 
-    # First Party
-    from lmcache.v1.multiprocess.transport.zmq_impl.server import (
-        build_zmq_request_server,
-    )
-
-    return build_zmq_request_server(modules, mp_config)
+        server = build_zmq_request_server(modules, mp_config)
+    for module in modules:
+        if isinstance(module, ManagementModule):
+            module.add_liveness_target(server)
+    return server

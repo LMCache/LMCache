@@ -20,12 +20,13 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.rpc import rpc_method
 
 
-class RequestServer(Protocol):
+class RequestServer(InstanceLivenessTarget, Protocol):
     """Base interface for multiprocess request servers."""
 
     def start(self) -> None:

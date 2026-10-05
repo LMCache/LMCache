@@ -2,6 +2,9 @@
 """Tests for AffinityThreadPool."""
 
 # Standard
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 import threading
 import time
 
@@ -9,6 +12,7 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess import affinity_pool as affinity_pool_mod
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 
 
@@ -246,3 +250,159 @@ def test_shutdown_no_wait():
     pool.submit(lambda: time.sleep(0.5), affinity_key=0)
     # Should return immediately without waiting
     pool.shutdown(wait=False)
+
+
+@pytest.fixture
+def two_worker_pool() -> Iterator[AffinityThreadPool]:
+    pool = AffinityThreadPool(max_workers=2)
+    try:
+        yield pool
+    finally:
+        pool.shutdown()
+
+
+def _thread_name() -> str:
+    return threading.current_thread().name
+
+
+@pytest.mark.parametrize("retired_key", [1001, 1002])
+def test_retired_slots_are_reused(
+    two_worker_pool: AffinityThreadPool, retired_key: int
+) -> None:
+    """Repeated restarts reclaim either slot without moving the surviving key."""
+    pool = two_worker_pool
+    threads = {
+        key: pool.submit(_thread_name, affinity_key=key).result(timeout=5)
+        for key in (1001, 1002)
+    }
+    survivor = 1002 if retired_key == 1001 else 1001
+    retired_thread = threads[retired_key]
+    assert retired_thread != threads[survivor]
+
+    with (
+        patch.object(affinity_pool_mod.logger, "warning") as warning,
+        patch.object(affinity_pool_mod.logger, "info") as info,
+    ):
+        for replacement in range(1003, 1103):
+            pool.release_key(retired_key)
+            pool.release_key(retired_key)
+            pool.release_key(-1)
+            assert (
+                pool.submit(_thread_name, affinity_key=replacement).result(timeout=5)
+                == retired_thread
+            )
+            assert (
+                pool.submit(_thread_name, affinity_key=survivor).result(timeout=5)
+                == threads[survivor]
+            )
+            bound_key_count = info.call_args.args[-1]
+            assert bound_key_count == 2
+            retired_key = replacement
+    warning.assert_not_called()
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
+def test_retirement_drains_pending_work_and_reactivated_key(
+    two_worker_pool: AffinityThreadPool, outcome: str
+) -> None:
+    """Reaping cannot split running, queued, or reactivated work across threads."""
+    pool = two_worker_pool
+    survivor_thread = pool.submit(_thread_name, affinity_key=1).result(timeout=5)
+    started = threading.Event()
+    resume = threading.Event()
+    order: list[str] = []
+
+    def record(label: str) -> str:
+        order.append(label)
+        return _thread_name()
+
+    def running() -> str:
+        started.set()
+        assert resume.wait(timeout=5)
+        if outcome == "error":
+            raise ValueError("task failed")
+        return record("running")
+
+    first = pool.submit(running, affinity_key=2)
+    try:
+        assert started.wait(timeout=5)
+        queued = pool.submit(record, "queued", affinity_key=2)
+        if outcome == "cancel":
+            assert queued.cancel()
+
+        with ThreadPoolExecutor(max_workers=1) as reaper:
+            reaper.submit(pool.release_key, 2).result(timeout=5)
+        assert (
+            pool.submit(_thread_name, affinity_key=3).result(timeout=5)
+            == survivor_thread
+        )
+        reactivated = pool.submit(record, "reactivated", affinity_key=2)
+        assert not reactivated.done()
+        resume.set()
+
+        if outcome == "error":
+            with pytest.raises(ValueError, match="task failed"):
+                first.result(timeout=5)
+        else:
+            assert first.result(timeout=5) != survivor_thread
+        if outcome != "cancel":
+            assert queued.result(timeout=5) != survivor_thread
+        retired_thread = reactivated.result(timeout=5)
+        assert retired_thread != survivor_thread
+        assert order == (
+            ([] if outcome == "error" else ["running"])
+            + ([] if outcome == "cancel" else ["queued"])
+            + ["reactivated"]
+        )
+        assert (
+            pool.submit(_thread_name, affinity_key=4).result(timeout=5)
+            == retired_thread
+        )
+    finally:
+        resume.set()
+
+
+def test_retirement_from_a_worker_does_not_deadlock(
+    two_worker_pool: AffinityThreadPool,
+) -> None:
+    pool = two_worker_pool
+
+    def unregister() -> str:
+        pool.release_key(1)
+        return _thread_name()
+
+    retired_thread = pool.submit(unregister, affinity_key=1).result(timeout=5)
+    assert pool.submit(_thread_name, affinity_key=2).result(timeout=5) == retired_thread
+
+
+def test_retiring_one_shared_key_does_not_free_its_live_peer(
+    two_worker_pool: AffinityThreadPool,
+) -> None:
+    pool = two_worker_pool
+    threads = {
+        key: pool.submit(_thread_name, affinity_key=key).result(timeout=5)
+        for key in (1, 2, 3)
+    }
+    assert threads[1] == threads[3] != threads[2]
+    pool.release_key(1)
+    pool.release_key(2)
+    assert pool.submit(_thread_name, affinity_key=4).result(timeout=5) == threads[2]
+    assert pool.submit(_thread_name, affinity_key=3).result(timeout=5) == threads[3]
+
+
+def test_concurrent_submit_and_retire(two_worker_pool: AffinityThreadPool) -> None:
+    pool = two_worker_pool
+    barrier = threading.Barrier(4, timeout=5)
+
+    def client(key: int) -> None:
+        barrier.wait()
+        for _ in range(50):
+            first = pool.submit(_thread_name, affinity_key=key)
+            second = pool.submit(_thread_name, affinity_key=key)
+            assert first.result(timeout=5) == second.result(timeout=5)
+            pool.release_key(key)
+
+    with ThreadPoolExecutor(max_workers=4) as clients:
+        futures = [clients.submit(client, key) for key in range(4)]
+        for future in futures:
+            future.result(timeout=10)

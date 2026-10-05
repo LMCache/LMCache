@@ -298,7 +298,7 @@ class QStoreModule(InstanceLivenessTarget):
             cache_context.num_layers,
         )
 
-    @request_handler()
+    @request_handler(releases_client_affinity=True)
     def unregister_q_cache(self, instance_id: int) -> None:
         """Unregister the paged Q ring tensors for a given worker instance ID.
 
