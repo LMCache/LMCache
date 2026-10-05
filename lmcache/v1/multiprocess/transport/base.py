@@ -177,6 +177,7 @@ class RequestClient(Protocol):
         group_to_cache: list[int],
         group_rot: list[list[int]],
         group_head_size: list[int],
+        kv_quant: str = "",
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -220,6 +221,8 @@ class RequestClient(Protocol):
     @rpc_method
     def get_experimental(self) -> MessagingFuture[list[str]]: ...
 
+    # Deprecated compatibility alias (#4878): frozen at its deprecation-time
+    # shape — new parameters (kv_quant) go on cb_register_rope only.
     def cb_register_rope_v3(
         self,
         instance_id: int,

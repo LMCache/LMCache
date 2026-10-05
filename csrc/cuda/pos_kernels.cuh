@@ -21,10 +21,13 @@ void rotary_embedding_k_fused_strided(const torch::Tensor& old_positions,
                                       bool is_neox);
 
 // Fused multi-chunk ramp re-RoPE: one launch rotates up to
-// MAX_FUSED_TRANSFER_CHUNKS same-geometry tmp slots.
+// MAX_FUSED_TRANSFER_CHUNKS same-geometry tmp slots. `cache_dtype` is the
+// cos/sin cache's dtype; it differs from `key_dtype` only for fp8 KV caches
+// (Float8_e4m3fn / Float8_e5m2 keys, float cache).
 void rotary_embedding_k_fused_ramp_multi_ptr(
     const std::vector<uintptr_t>& key_ptrs, at::ScalarType key_dtype,
-    int64_t num_tokens, const std::vector<int64_t>& old_sts,
-    const std::vector<int64_t>& new_sts, int64_t slots, int64_t head_size,
-    int64_t head_stride, int64_t num_kv_heads, uintptr_t cos_sin_cache_ptr,
-    int rot_dim, bool is_neox);
+    at::ScalarType cache_dtype, int64_t num_tokens,
+    const std::vector<int64_t>& old_sts, const std::vector<int64_t>& new_sts,
+    int64_t slots, int64_t head_size, int64_t head_stride,
+    int64_t num_kv_heads, uintptr_t cos_sin_cache_ptr, int rot_dim,
+    bool is_neox);

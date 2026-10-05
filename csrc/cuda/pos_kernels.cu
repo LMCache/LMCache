@@ -13,19 +13,38 @@
 #include "cuda_compat.h"
 #include "mem_kernels.cuh"  // MAX_FUSED_TRANSFER_CHUNKS
 
+#include <type_traits>
 #include <vector>
+
+// rope.py's _FP8_FLAVOR_TO_AT_SCALAR hardcodes these enum values.
+static_assert(static_cast<int>(at::ScalarType::Float8_e5m2) == 23 &&
+                  static_cast<int>(at::ScalarType::Float8_e4m3fn) == 24,
+              "at::ScalarType fp8 values drifted; update "
+              "lmcache/v1/multiprocess/modules/blend/rope.py to match");
 
 namespace lmc {
 
-template <typename scalar_t, bool IS_NEOX>
+// scalar_t <-> cache_t conversion: identity when they match (the homogeneous
+// paths keep their exact pre-fp8 numerics); otherwise through float, which
+// every c10 reduced-precision type (including Float8_*) converts via.
+template <typename To, typename From>
+inline __device__ To rope_cvt(From v) {
+  if constexpr (std::is_same_v<To, From>) {
+    return v;
+  } else {
+    return static_cast<To>(static_cast<float>(v));
+  }
+}
+
+template <typename scalar_t, typename cache_t, bool IS_NEOX>
 inline __device__ void apply_token_rotary_embedding_fused(
-    scalar_t* __restrict__ arr, const scalar_t* __restrict__ old_cos_ptr,
-    const scalar_t* __restrict__ old_sin_ptr,
-    const scalar_t* __restrict__ new_cos_ptr,
-    const scalar_t* __restrict__ new_sin_ptr, int rot_offset, int embed_dim) {
+    scalar_t* __restrict__ arr, const cache_t* __restrict__ old_cos_ptr,
+    const cache_t* __restrict__ old_sin_ptr,
+    const cache_t* __restrict__ new_cos_ptr,
+    const cache_t* __restrict__ new_sin_ptr, int rot_offset, int embed_dim) {
   int x_index, y_index;
-  scalar_t old_cos, old_sin;
-  scalar_t new_cos, new_sin;
+  cache_t old_cos, old_sin;
+  cache_t new_cos, new_sin;
   if (IS_NEOX) {
     // GPT-NeoX style rotary embedding.
     x_index = rot_offset;
@@ -46,43 +65,43 @@ inline __device__ void apply_token_rotary_embedding_fused(
     new_sin = LMCACHE_LDG(new_sin_ptr + x_index / 2);
   }
 
-  const scalar_t x = arr[x_index];
-  const scalar_t y = arr[y_index];
+  const cache_t x = rope_cvt<cache_t>(arr[x_index]);
+  const cache_t y = rope_cvt<cache_t>(arr[y_index]);
 
-  const scalar_t x_reverse = x * old_cos + y * old_sin;
-  const scalar_t y_reverse = y * old_cos - x * old_sin;
+  const cache_t x_reverse = x * old_cos + y * old_sin;
+  const cache_t y_reverse = y * old_cos - x * old_sin;
 
-  arr[x_index] = x_reverse * new_cos - y_reverse * new_sin;
-  arr[y_index] = y_reverse * new_cos + x_reverse * new_sin;
+  arr[x_index] = rope_cvt<scalar_t>(x_reverse * new_cos - y_reverse * new_sin);
+  arr[y_index] = rope_cvt<scalar_t>(y_reverse * new_cos + x_reverse * new_sin);
 }
 
-template <typename scalar_t, bool IS_NEOX>
+template <typename scalar_t, typename cache_t, bool IS_NEOX>
 inline __device__ void apply_rotary_embedding_fused(
     scalar_t* __restrict__ key,  // [batch_size, seq_len, num_kv_heads,
                                  // head_size] or [num_tokens, num_kv_heads,
                                  // head_size]
-    const scalar_t* old_cache_ptr, const scalar_t* new_cache_ptr,
+    const cache_t* old_cache_ptr, const cache_t* new_cache_ptr,
     const int head_size, const int num_kv_heads, const int rot_dim,
     const int token_idx, const int64_t key_stride, const int64_t head_stride) {
   const int embed_dim = rot_dim / 2;
-  const scalar_t* old_cos_ptr = old_cache_ptr;
-  const scalar_t* old_sin_ptr = old_cache_ptr + embed_dim;
+  const cache_t* old_cos_ptr = old_cache_ptr;
+  const cache_t* old_sin_ptr = old_cache_ptr + embed_dim;
 
-  const scalar_t* new_cos_ptr = new_cache_ptr;
-  const scalar_t* new_sin_ptr = new_cache_ptr + embed_dim;
+  const cache_t* new_cos_ptr = new_cache_ptr;
+  const cache_t* new_sin_ptr = new_cache_ptr + embed_dim;
 
   const int nk = num_kv_heads * embed_dim;
   for (int i = threadIdx.x; i < nk; i += blockDim.x) {
     const int head_idx = i / embed_dim;
     const int64_t token_head = token_idx * key_stride + head_idx * head_stride;
     const int rot_offset = i % embed_dim;
-    apply_token_rotary_embedding_fused<scalar_t, IS_NEOX>(
+    apply_token_rotary_embedding_fused<scalar_t, cache_t, IS_NEOX>(
         key + token_head, old_cos_ptr, old_sin_ptr, new_cos_ptr, new_sin_ptr,
         rot_offset, embed_dim);
   }
 }
 
-template <typename scalar_t, bool IS_NEOX>
+template <typename scalar_t, typename cache_t, bool IS_NEOX>
 __global__ void rotary_embedding_kernel_fused(
     const int64_t* __restrict__ old_positions,  // [batch_size, seq_len] or
                                                 // [num_tokens]
@@ -93,8 +112,8 @@ __global__ void rotary_embedding_kernel_fused(
     scalar_t* __restrict__ key,  // [batch_size, seq_len, num_kv_heads,
                                  // head_size] or [num_tokens, num_kv_heads,
                                  // head_size]
-    const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
-                                                 // 2]
+    const cache_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
+                                                // 2]
     const int rot_dim, const int64_t key_stride, const int num_kv_heads,
     const int head_size, const int64_t head_stride) {
   // Each thread block is responsible for one token.
@@ -102,10 +121,10 @@ __global__ void rotary_embedding_kernel_fused(
   int64_t old_pos = old_positions[token_idx];
   int64_t new_pos = new_positions[token_idx];
 
-  const scalar_t* old_cache_ptr = cos_sin_cache + old_pos * rot_dim;
-  const scalar_t* new_cache_ptr = cos_sin_cache + new_pos * rot_dim;
+  const cache_t* old_cache_ptr = cos_sin_cache + old_pos * rot_dim;
+  const cache_t* new_cache_ptr = cos_sin_cache + new_pos * rot_dim;
 
-  apply_rotary_embedding_fused<scalar_t, IS_NEOX>(
+  apply_rotary_embedding_fused<scalar_t, cache_t, IS_NEOX>(
       key, old_cache_ptr, new_cache_ptr, head_size, num_kv_heads, rot_dim,
       token_idx, key_stride, head_stride);
 }
@@ -129,11 +148,11 @@ struct FusedRopePack {
 // rotates up to MAX_FUSED_TRANSFER_CHUNKS same-geometry chunks. Positions
 // are `st + (token_idx % slots)`, derived in-kernel so a launch is fully
 // described by scalars -- no position tensors, no torch at enqueue.
-template <typename scalar_t, bool IS_NEOX>
+template <typename scalar_t, typename cache_t, bool IS_NEOX>
 __global__ void rotary_embedding_kernel_fused_ramp_multi(
     const FusedRopePack<scalar_t> pack, const int64_t slots,
-    const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
-                                                 // 2]
+    const cache_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
+                                                // 2]
     const int rot_dim, const int64_t key_stride, const int num_kv_heads,
     const int head_size, const int64_t head_stride) {
   // Each thread block is responsible for one token of one chunk.
@@ -141,12 +160,10 @@ __global__ void rotary_embedding_kernel_fused_ramp_multi(
   const FusedRopeChunk<scalar_t>& chunk = pack.chunks[blockIdx.y];
   const int64_t ramp = token_idx % slots;
 
-  const scalar_t* old_cache_ptr =
-      cos_sin_cache + (chunk.old_st + ramp) * rot_dim;
-  const scalar_t* new_cache_ptr =
-      cos_sin_cache + (chunk.new_st + ramp) * rot_dim;
+  const cache_t* old_cache_ptr = cos_sin_cache + (chunk.old_st + ramp) * rot_dim;
+  const cache_t* new_cache_ptr = cos_sin_cache + (chunk.new_st + ramp) * rot_dim;
 
-  apply_rotary_embedding_fused<scalar_t, IS_NEOX>(
+  apply_rotary_embedding_fused<scalar_t, cache_t, IS_NEOX>(
       chunk.key, old_cache_ptr, new_cache_ptr, head_size, num_kv_heads, rot_dim,
       token_idx, key_stride, head_stride);
 }
@@ -175,14 +192,14 @@ void rotary_embedding_k_fused_strided(const torch::Tensor& old_positions,
   LMC_DISPATCH_FLOATING_TYPES(
       key.scalar_type(), "rotary_embedding_k_fused", [&] {
         if (is_neox) {
-          lmc::rotary_embedding_kernel_fused<scalar_t, true>
+          lmc::rotary_embedding_kernel_fused<scalar_t, scalar_t, true>
               <<<grid, block, 0, stream>>>(
                   old_positions.data_ptr<int64_t>(),
                   new_positions.data_ptr<int64_t>(), key.data_ptr<scalar_t>(),
                   cos_sin_cache.data_ptr<scalar_t>(), rot_dim, key_stride,
                   num_kv_heads, head_size, head_stride);
         } else {
-          lmc::rotary_embedding_kernel_fused<scalar_t, false>
+          lmc::rotary_embedding_kernel_fused<scalar_t, scalar_t, false>
               <<<grid, block, 0, stream>>>(
                   old_positions.data_ptr<int64_t>(),
                   new_positions.data_ptr<int64_t>(), key.data_ptr<scalar_t>(),
@@ -202,13 +219,53 @@ void rotary_embedding_k_fused(const torch::Tensor& old_positions,
                                    head_size, cos_sin_cache, is_neox);
 }
 
+namespace {
+
+template <typename key_t, typename cache_t>
+void launch_rope_ramp_multi(const std::vector<uintptr_t>& key_ptrs,
+                            const std::vector<int64_t>& old_sts,
+                            const std::vector<int64_t>& new_sts,
+                            const dim3& grid, const dim3& block,
+                            cudaStream_t stream, int64_t slots,
+                            uintptr_t cos_sin_cache_ptr, int rot_dim,
+                            int64_t key_stride, int64_t num_kv_heads,
+                            int64_t head_size, int64_t head_stride,
+                            bool is_neox) {
+  const int n_chunks = static_cast<int>(key_ptrs.size());
+  lmc::FusedRopePack<key_t> pack{};
+  for (int c = 0; c < n_chunks; ++c) {
+    pack.chunks[c].key = reinterpret_cast<key_t*>(key_ptrs[c]);
+    pack.chunks[c].old_st = old_sts[c];
+    pack.chunks[c].new_st = new_sts[c];
+  }
+  auto* cos_sin = reinterpret_cast<const cache_t*>(cos_sin_cache_ptr);
+  if (is_neox) {
+    lmc::rotary_embedding_kernel_fused_ramp_multi<key_t, cache_t, true>
+        <<<grid, block, 0, stream>>>(pack, slots, cos_sin, rot_dim, key_stride,
+                                     num_kv_heads, head_size, head_stride);
+  } else {
+    lmc::rotary_embedding_kernel_fused_ramp_multi<key_t, cache_t, false>
+        <<<grid, block, 0, stream>>>(pack, slots, cos_sin, rot_dim, key_stride,
+                                     num_kv_heads, head_size, head_stride);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+}  // namespace
+
 // Fused ramp entry: one launch, up to MAX_FUSED_TRANSFER_CHUNKS slots.
+// `key_dtype` may differ from `cache_dtype` only for fp8 KV caches (the
+// cos/sin cache always stays in the model's float dtype); the rotation then
+// runs dequantize -> rotate -> requantize per element. No scale is involved:
+// rotation commutes with the per-tensor fp8 scale, which is the same on
+// input and output.
 void rotary_embedding_k_fused_ramp_multi_ptr(
     const std::vector<uintptr_t>& key_ptrs, at::ScalarType key_dtype,
-    int64_t num_tokens, const std::vector<int64_t>& old_sts,
-    const std::vector<int64_t>& new_sts, int64_t slots, int64_t head_size,
-    int64_t head_stride, int64_t num_kv_heads, uintptr_t cos_sin_cache_ptr,
-    int rot_dim, bool is_neox) {
+    at::ScalarType cache_dtype, int64_t num_tokens,
+    const std::vector<int64_t>& old_sts, const std::vector<int64_t>& new_sts,
+    int64_t slots, int64_t head_size, int64_t head_stride,
+    int64_t num_kv_heads, uintptr_t cos_sin_cache_ptr, int rot_dim,
+    bool is_neox) {
   const int n_chunks = static_cast<int>(key_ptrs.size());
   TORCH_CHECK(n_chunks >= 1 && n_chunks <= MAX_FUSED_TRANSFER_CHUNKS,
               "fused rope chunk count out of range: ", n_chunks);
@@ -221,25 +278,26 @@ void rotary_embedding_k_fused_ramp_multi_ptr(
   dim3 block(std::min<int64_t>(num_kv_heads * rot_dim / 2, 512));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   LMC_DISPATCH_FLOATING_TYPES(
-      key_dtype, "rotary_embedding_k_fused_ramp_multi", [&] {
-        lmc::FusedRopePack<scalar_t> pack{};
-        for (int c = 0; c < n_chunks; ++c) {
-          pack.chunks[c].key = reinterpret_cast<scalar_t*>(key_ptrs[c]);
-          pack.chunks[c].old_st = old_sts[c];
-          pack.chunks[c].new_st = new_sts[c];
-        }
-        auto* cos_sin = reinterpret_cast<const scalar_t*>(cos_sin_cache_ptr);
-        if (is_neox) {
-          lmc::rotary_embedding_kernel_fused_ramp_multi<scalar_t, true>
-              <<<grid, block, 0, stream>>>(pack, slots, cos_sin, rot_dim,
-                                           key_stride, num_kv_heads, head_size,
-                                           head_stride);
+      cache_dtype, "rotary_embedding_k_fused_ramp_multi", [&] {
+        using cache_t = scalar_t;
+        if (key_dtype == cache_dtype) {
+          launch_rope_ramp_multi<cache_t, cache_t>(
+              key_ptrs, old_sts, new_sts, grid, block, stream, slots,
+              cos_sin_cache_ptr, rot_dim, key_stride, num_kv_heads, head_size,
+              head_stride, is_neox);
+        } else if (key_dtype == at::ScalarType::Float8_e4m3fn) {
+          launch_rope_ramp_multi<c10::Float8_e4m3fn, cache_t>(
+              key_ptrs, old_sts, new_sts, grid, block, stream, slots,
+              cos_sin_cache_ptr, rot_dim, key_stride, num_kv_heads, head_size,
+              head_stride, is_neox);
+        } else if (key_dtype == at::ScalarType::Float8_e5m2) {
+          launch_rope_ramp_multi<c10::Float8_e5m2, cache_t>(
+              key_ptrs, old_sts, new_sts, grid, block, stream, slots,
+              cos_sin_cache_ptr, rot_dim, key_stride, num_kv_heads, head_size,
+              head_stride, is_neox);
         } else {
-          lmc::rotary_embedding_kernel_fused_ramp_multi<scalar_t, false>
-              <<<grid, block, 0, stream>>>(pack, slots, cos_sin, rot_dim,
-                                           key_stride, num_kv_heads, head_size,
-                                           head_stride);
+          TORCH_CHECK(false, "fused rope: unsupported KV dtype ", key_dtype,
+                      " with cos/sin cache dtype ", cache_dtype);
         }
-        C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
 }

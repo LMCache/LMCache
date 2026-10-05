@@ -39,6 +39,7 @@ from lmcache.v1.multiprocess.modules.blend.read_set import (
 from lmcache.v1.multiprocess.modules.blend.rope import (
     _TORCH_TO_AT_SCALAR,
     _cb_group_rope_geometry,
+    _cb_key_at_scalar,
     _CBRopeState,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
@@ -258,7 +259,7 @@ class RetrieveMixin:
                     )
                 )
                 continue
-            at_scalar = _TORCH_TO_AT_SCALAR.get(buf0.dtype)
+            at_scalar = _cb_key_at_scalar(buf0.dtype, rope_state.kv_quant)
             if at_scalar is None:
                 return None
             try:
@@ -277,6 +278,11 @@ class RetrieveMixin:
             # NoPE took the skipped-group branch above, so non-None here.
             group_cos_sin = rope_state.cache_for_group(group.engine_group_idx)
             assert group_cos_sin is not None
+            # The cos/sin cache keeps the model's float dtype; under fp8 KV
+            # it diverges from the K plane's, so the kernel takes both.
+            cache_at_scalar = _TORCH_TO_AT_SCALAR.get(group_cos_sin.dtype)
+            if cache_at_scalar is None:
+                return None
             if rot_offset > 0 and int(group_cos_sin.shape[1]) != rot[1]:
                 # Registration-level inconsistency: rotating with the wrong
                 # width would corrupt KV.
@@ -293,6 +299,7 @@ class RetrieveMixin:
                     rope_num_kv_heads=n_heads,
                     rope_head_stride=per_head,
                     key_scalar_type=at_scalar,
+                    cache_scalar_type=cache_at_scalar,
                     rope_base_offset=rot_offset * buf0.element_size(),
                     **spec_common,
                 )

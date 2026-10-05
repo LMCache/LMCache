@@ -18,6 +18,37 @@ _TORCH_TO_AT_SCALAR = {
     torch.bfloat16: 15,  # at::ScalarType::BFloat16
 }
 
+# Registered fp8 KV flavor -> at::ScalarType. vLLM allocates fp8 KV caches as
+# uint8, so the buffer dtype alone cannot name the bit layout; the client
+# declares it at CB_REGISTER_ROPE. Values are guarded by a static_assert in
+# csrc/cuda/pos_kernels.cu.
+_FP8_FLAVOR_TO_AT_SCALAR = {
+    "fp8_e4m3": 24,  # at::ScalarType::Float8_e4m3fn
+    "fp8_e5m2": 23,  # at::ScalarType::Float8_e5m2
+}
+
+# KV planes allocated as a true float8 torch dtype need no declared flavor.
+_TORCH_FP8_TO_AT_SCALAR = {
+    torch.float8_e4m3fn: 24,
+    torch.float8_e5m2: 23,
+}
+
+
+def _cb_key_at_scalar(dtype: torch.dtype, kv_quant: str) -> "int | None":
+    """The rope kernel's at::ScalarType for a K plane, or None if unsupported.
+
+    A uint8 plane is only rope-able when the registration declared its fp8
+    flavor (``kv_quant``); the kernel then dequantizes, rotates, and
+    requantizes per element. The per-tensor fp8 scale needs no handling:
+    rotation commutes with it and it is the same on input and output.
+    """
+    at_scalar = _TORCH_TO_AT_SCALAR.get(dtype)
+    if at_scalar is None:
+        at_scalar = _TORCH_FP8_TO_AT_SCALAR.get(dtype)
+    if at_scalar is None and dtype == torch.uint8 and kv_quant:
+        at_scalar = _FP8_FLAVOR_TO_AT_SCALAR.get(kv_quant)
+    return at_scalar
+
 
 @dataclass
 class _CBRopeState:
@@ -37,6 +68,12 @@ class _CBRopeState:
     # Required for MLA: inference would rotate the latent's content dims.
     group_rot: "list[tuple[int, int] | None]" = field(default_factory=list)
     group_head_size: list[int] = field(default_factory=list)
+    # Declared fp8 flavor of the paged KV ("fp8_e4m3" / "fp8_e5m2"; "" =
+    # unquantized). Only legacy-geometry models rope quantized KV: under a
+    # declared map ``rot_for_group``'s dtype gate still skips non-float
+    # kernel groups, because a quantized index side-plane and a quantized
+    # main-KV plane are indistinguishable by dtype there.
+    kv_quant: str = ""
 
     def head_size_for_group(self, engine_group_idx: int) -> int:
         """The scatter head size for one engine group.
