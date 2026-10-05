@@ -58,19 +58,21 @@ from lmcache.integration.vllm.kv_cache_groups import (
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
-    LMCacheMPRKVRequestState,
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
+    LMCacheMPTokenDropRequestState,
     LMCacheMPWorkerMetadata,
 )
 from lmcache.integration.vllm.rkv_allocator_adapter import (
     clear_resident_kv_tokens,
     get_resident_kv_tokens,
-    install_rkv_allocator_adapter,
+    install_token_drop_allocator_adaptor,
     set_resident_kv_tokens,
 )
-from lmcache.integration.vllm.rkv_worker_adaptor import install_rkv_worker_adaptor
+from lmcache.integration.vllm.rkv_worker_adaptor import (
+    install_token_drop_worker_adaptor,
+)
 from lmcache.integration.vllm.lmcache_mp_metrics import (
     LMCacheMPConnectorStats,
     LMCacheMPPromMetrics,
@@ -213,21 +215,21 @@ def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
     return False
 
 
-def _rkv_step_facts(
+def _token_drop_step_facts(
     *,
     num_computed: int,
     num_new_tokens: int,
     num_tokens: int,
     num_prompt_tokens: int,
 ) -> tuple[bool, int]:
-    """Return engine facts for one scheduled request step."""
+    """Return pre-forward engine facts for one scheduled request step."""
     prev_computed = num_computed - num_new_tokens
     is_genuine_decode = (
         num_new_tokens > 0
         and num_computed >= num_tokens
         and prev_computed >= num_prompt_tokens
     )
-    num_decoded_tokens = max(0, num_computed - num_prompt_tokens)
+    num_decoded_tokens = max(0, prev_computed - num_prompt_tokens)
     return is_genuine_decode, num_decoded_tokens
 
 
@@ -561,13 +563,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
       enters vLLM's waiting queue. Disabled by default.
 
-    Generic token dropping:
-    - lmcache.mp.token_drop_budget: target resident KV-token budget; 0 disables.
-    - lmcache.mp.token_drop_buffer: decode-token cadence/headroom between drops.
-
-    Algorithm-specific settings are intentionally not part of the LMCache
-    config surface; R-KV receives them through the opaque
-    lmcache.mp.rkv_config mapping.
+    Token dropping is selected per request via kv_transfer_params; the
+    connector has no engine-wide token-drop switch.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -626,65 +623,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
         )
 
-        token_drop_budget = int(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.token_drop_budget", 0
-            )
-        )
-        if token_drop_budget < 0:
-            raise ValueError("lmcache.mp.token_drop_budget must be non-negative")
-        self._rkv_budget = token_drop_budget or None
-        self._rkv_buffer = int(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.token_drop_buffer", 128
-            )
-        )
-
-        # Algorithm-specific policy knobs stay behind one opaque backdoor.
-        # The connector does not interpret individual R-KV parameters.
-        rkv_config = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache.mp.rkv_config", None
-        )
-        if rkv_config is None:
-            self._rkv_config: dict[str, Any] = {}
-        elif isinstance(rkv_config, dict):
-            self._rkv_config = dict(rkv_config)
-        else:
-            raise ValueError("lmcache.mp.rkv_config must be a JSON object")
-        if self._rkv_budget is None and self._rkv_config:
-            raise ValueError(
-                "lmcache.mp.rkv_config requires lmcache.mp.token_drop_budget > 0"
-            )
+        # Token dropping is selected per request via kv_transfer_params.
+        # Connector configuration never switches the whole engine into a
+        # token-dropping mode.
         self._rkv: RKVWorker | None = None
-        if self._rkv_budget is not None:
-            if role == KVConnectorRole.SCHEDULER:
-                install_rkv_allocator_adapter()
-            elif role == KVConnectorRole.WORKER:
-                install_rkv_worker_adaptor()
-            else:
-                raise ValueError(f"Unsupported R-KV connector role: {role}")
-            self._can_store = False
-            if vllm_config.cache_config.enable_prefix_caching:
-                raise ValueError("R-KV MVP requires prefix caching disabled")
-            if getattr(
-                vllm_config.scheduler_config, "enable_chunked_prefill", False
-            ):
-                raise ValueError("R-KV MVP does not support chunked prefill")
-            if getattr(vllm_config, "speculative_config", None) is not None:
-                raise ValueError("R-KV MVP does not support speculative decoding")
-            if getattr(vllm_config.scheduler_config, "async_scheduling", False):
-                raise ValueError("R-KV MVP requires synchronous scheduling")
-            if not getattr(vllm_config.model_config, "enforce_eager", False):
-                cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-                if cudagraph_mode != CUDAGraphMode.PIECEWISE:
-                    raise ValueError(
-                        "R-KV requires either enforce_eager=True or "
-                        "cudagraph_mode=PIECEWISE"
-                    )
-            if vllm_config.parallel_config.world_size != 1:
-                raise ValueError("R-KV MVP requires a single GPU")
-            if len(group_tokens_per_block) != 1:
-                raise ValueError("R-KV MVP requires exactly one KV cache group")
 
         # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
         # string) over the single-server lmcache.mp.host / lmcache.mp.port.
@@ -813,8 +755,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
-            self._rkv_allocations: dict[str, "KVCacheBlocks"] = {}
-            self._rkv_finished_before_output: set[str] = set()
+            self._token_drop_allocations: dict[str, "KVCacheBlocks"] = {}
+            self._token_drop_finished_before_output: set[str] = set()
         elif self.role == KVConnectorRole.WORKER:
             # Node routing: a worker connects only to its local LMCache server.
             # Global ranks are assigned to nodes in contiguous blocks:
@@ -834,12 +776,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 enable_kv_events=self._enable_kv_events,
             )
             self._pending_resident_kv_updates: dict[str, int] = {}
-            if self._rkv_budget is not None:
-                self._rkv = RKVWorker(
-                    self._rkv_budget,
-                    buffer=self._rkv_buffer,
-                    rkv_config=self._rkv_config,
-                )
+            # Generic helper only. Whether a request token-drops is decided
+            # exclusively by its request config and sparse scheduler metadata.
+            self._rkv = RKVWorker()
             if self.transfer_intermediate_tensors:
                 # First Party
                 from lmcache.integration.vllm.experimental import (
@@ -949,16 +888,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             layout_hints=layout_hints,
             dcp_size=self._dcp_size,
         )
+        # Mixed batches need both capabilities over the same paged KV pool:
+        # LMCache transfers normal requests, while R-KV only touches requests
+        # carrying token-drop config.
+        self.worker_adapter.register_kv_caches(
+            kv_caches,
+            engine_group_infos=engine_group_infos,
+            layout_hints=layout_hints,
+        )
         if self._rkv is not None:
-            # R-KV bypasses LMCache STORE/RETRIEVE, so keep paged KV local.
-            # Exporting it through CUDA IPC makes in-place compaction expensive.
             self._rkv.register_kv_caches(kv_caches)
-        else:
-            self.worker_adapter.register_kv_caches(
-                kv_caches,
-                engine_group_infos=engine_group_infos,
-                layout_hints=layout_hints,
-            )
         if self.dispatcher is not None:
             dispatch(
                 self.dispatcher,
@@ -988,14 +927,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
         if self._rkv is not None:
-            if metadata.need_flush_before_forward:
-                self._rkv.reset()
-            if metadata.requests:
-                raise RuntimeError(
-                    "R-KV MVP does not support LMCache STORE/RETRIEVE in the "
-                    "same request stream"
-                )
-            self._rkv.prepare_forward(forward_context, metadata.rkv_requests)
+            self._rkv.prepare_forward(
+                forward_context,
+                metadata.token_drop_requests,
+            )
 
         request_ids = []
         ops = []
@@ -1109,28 +1044,32 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "wait_for_save", event=event)
 
-    # TODO: How does lmcache driven path handle preemption?
-    # NOTE1: handle_preemptions is called by vllm each step regardless
-    #        preemption really happens or not.
-    # NOTE2: preemption hint is managed by KVConnectorRole.SCHEDULER,
-    #        that's why here we have to judge preemption by
-    #        need_flush_before_forward flag which is set by SCHEDULER.
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
-        """Flush async engine-driven stores only when scheduler metadata requests it.
-
-        Args:
-            kv_connector_metadata: Connector metadata produced by the scheduler;
-                only acts when it is a :class:`LMCacheMPConnectorMetadata` with
-                ``need_flush_before_forward=True``.
-        """
+        """Apply normal LMCache flushes and request-local token-drop resets."""
         worker_adapter = getattr(self, "worker_adapter", None)
         if self.role != KVConnectorRole.WORKER or worker_adapter is None:
             return
+
+        metadata = (
+            kv_connector_metadata
+            if isinstance(kv_connector_metadata, LMCacheMPConnectorMetadata)
+            else None
+        )
         need_flush_before_forward = (
-            isinstance(kv_connector_metadata, LMCacheMPConnectorMetadata)
-            and kv_connector_metadata.need_flush_before_forward
+            metadata is not None and metadata.need_flush_before_forward
         )
         worker_adapter.handle_preemptions(need_flush_before_forward)
+
+        if metadata is None:
+            return
+        if metadata.token_drop_requests:
+            # execute_model() calls this hook before _prepare_inputs(), so the
+            # adaptor is active before the first token-drop row is prepared.
+            install_token_drop_worker_adaptor()
+        if self._rkv is not None and metadata.token_drop_reset_ids:
+            self._rkv.drop_requests(metadata.token_drop_reset_ids)
+            for request_id in metadata.token_drop_reset_ids:
+                self._pending_resident_kv_updates.pop(request_id, None)
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -1148,18 +1087,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
+        token_drop_finished: set[str] = set()
         if self._rkv is not None and finished_req_ids:
-            self._rkv.drop_requests(finished_req_ids)
-            for request_id in finished_req_ids:
+            token_drop_finished = {
+                request_id
+                for request_id in finished_req_ids
+                if self._rkv.is_token_drop_request(request_id)
+            }
+            self._rkv.drop_requests(token_drop_finished)
+            for request_id in token_drop_finished:
                 self._pending_resident_kv_updates.pop(request_id, None)
 
         if self.lazy_offload:
             val = self.worker_adapter.get_finished_with_lazy_offload()
         else:
-            # The adapter reports engine-finished IDs even without a STORE.
-            # Consumers never delay frees for saves, but must still poll retrieves.
+            # Only normal requests participate in LMCache's engine-finished
+            # lifecycle. Token-drop requests never own LMCache STORE work.
+            normal_finished = finished_req_ids - token_drop_finished
             val = self.worker_adapter.get_finished(
-                finished_req_ids if self._can_store else set()
+                normal_finished if self._can_store else set()
             )
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
@@ -1289,6 +1235,36 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if self.lazy_offload:
                 self._lazy_offload_manager.bind_block_pool(gpu_block_pool)
 
+    def _validate_token_drop_request(
+        self,
+        tracker: LMCacheMPRequestTracker,
+    ) -> None:
+        """Validate engine capabilities only for this token-dropping request."""
+        spec = tracker.token_drop_spec
+        if spec is None:
+            return
+        if spec.algorithm != "rkv":
+            raise ValueError(f"Unsupported token-drop algorithm: {spec.algorithm!r}")
+
+        vllm_config = self._vllm_config
+        if getattr(vllm_config.scheduler_config, "enable_chunked_prefill", False):
+            raise ValueError("R-KV MVP does not support chunked prefill")
+        if getattr(vllm_config, "speculative_config", None) is not None:
+            raise ValueError("R-KV MVP does not support speculative decoding")
+        if getattr(vllm_config.scheduler_config, "async_scheduling", False):
+            raise ValueError("R-KV MVP requires synchronous scheduling")
+        if not getattr(vllm_config.model_config, "enforce_eager", False):
+            cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+            if cudagraph_mode != CUDAGraphMode.PIECEWISE:
+                raise ValueError(
+                    "R-KV requires either enforce_eager=True or "
+                    "cudagraph_mode=PIECEWISE"
+                )
+        if vllm_config.parallel_config.world_size != 1:
+            raise ValueError("R-KV MVP requires a single GPU")
+        if len(self._group_tokens_per_block) != 1:
+            raise ValueError("R-KV MVP requires exactly one KV cache group")
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -1322,7 +1298,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             into account.
         """
         tracker = self._get_or_create_request_tracker(request)
-        if self._rkv_budget is not None:
+        if tracker.token_drop_spec is not None:
+            self._validate_token_drop_request(tracker)
             tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
             return 0, False
 
@@ -1421,19 +1398,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         return need_to_load, need_to_load > 0
 
     def on_new_request(self, request: "Request") -> None:
-        """Submit an LMCache lookup when a request enters the waiting queue.
-
-        Args:
-            request (Request): The request object.
-        """
+        """Apply per-request token-drop admission or submit LMCache lookup."""
         if self.role != KVConnectorRole.SCHEDULER:
-            return
-        if self._rkv_budget is not None:
-            return
-        if not self._eager_prefetch or request.resumable:
             return
 
         tracker = self._get_or_create_request_tracker(request)
+        if tracker.token_drop_spec is not None:
+            self._validate_token_drop_request(tracker)
+            request.skip_reading_prefix_cache = True
+            install_token_drop_allocator_adaptor()
+            return
+
+        if not self._eager_prefetch or request.resumable:
+            return
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
         self.scheduler_adapter.maybe_submit_lookup_request(
@@ -1472,8 +1449,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # to avoid duplication, which would corrupt the store path's block indexing.
         tracker = self._get_request_tracker(request.request_id)
         block_ids = blocks.get_block_ids() or ()
-        if self._rkv_budget is not None:
-            self._rkv_allocations[request.request_id] = blocks
+        if tracker.token_drop_spec is not None:
+            self._token_drop_allocations[request.request_id] = blocks
 
         # Only append blocks beyond what's already tracked, per engine group.
         existing_counts = tracker.num_allocated_blocks()
@@ -1551,11 +1528,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         metadata = LMCacheMPConnectorMetadata()
         metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
 
+        preempted = scheduler_output.preempted_req_ids or set()
+        for request_id in preempted:
+            tracker = self.request_trackers.get(request_id)
+            if tracker is None or tracker.token_drop_spec is None:
+                continue
+            metadata.token_drop_reset_ids.add(request_id)
+            clear_resident_kv_tokens(request_id)
+            self._token_drop_allocations.pop(request_id, None)
+
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
         self._process_cached_requests(scheduler_output, metadata)
-        if self._rkv_budget is not None:
-            self._add_rkv_request_states(scheduler_output, metadata)
+        self._add_token_drop_request_states(scheduler_output, metadata)
 
         if self.lazy_offload:
             actions = self._lazy_offload_manager.on_scheduler_step(scheduler_output)
@@ -1564,17 +1549,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             for request_id in actions.sessions_to_end:
                 self.scheduler_adapter.end_session(request_id)
 
-        if len(metadata) > 0:
+        if (
+            len(metadata) > 0
+            or metadata.token_drop_requests
+            or metadata.token_drop_reset_ids
+        ):
             logger.debug("Final connector metadata: %s", metadata)
 
-        # R-KV bypasses LMCache STORE/RETRIEVE; allocation telemetry is
-        # unrelated to compaction and would add server work to every step.
-        if self._rkv_budget is None:
-            self._report_block_allocation_deltas(scheduler_output)
-
+        self._report_block_allocation_deltas(scheduler_output)
         return metadata
 
-    def _add_rkv_request_states(
+    def _add_token_drop_request_states(
         self,
         scheduler_output: SchedulerOutput,
         metadata: LMCacheMPConnectorMetadata,
@@ -1585,13 +1570,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         request_ids.extend(scheduler_output.scheduled_cached_reqs.req_ids)
 
         for request_id in request_ids:
-            allocation = self._rkv_allocations.get(request_id)
-            if allocation is None:
-                raise RuntimeError(f"Missing R-KV allocation for {request_id}")
             tracker = self._get_request_tracker(request_id)
+            spec = tracker.token_drop_spec
+            if spec is None:
+                continue
+
+            self._require_private_token_drop_blocks(request_id)
 
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
-            is_genuine_decode, num_decoded_tokens = _rkv_step_facts(
+            is_genuine_decode, num_decoded_tokens = _token_drop_step_facts(
                 num_computed=tracker.num_scheduled_tokens,
                 num_new_tokens=num_new_tokens,
                 num_tokens=len(tracker.all_token_ids),
@@ -1605,9 +1592,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 else resident_override
             )
 
-            metadata.rkv_requests.append(
-                LMCacheMPRKVRequestState(
+            metadata.token_drop_requests.append(
+                LMCacheMPTokenDropRequestState(
                     request_id=request_id,
+                    algorithm=spec.algorithm,
+                    config=dict(spec.config),
                     resident_kv_tokens=resident_kv_tokens,
                     has_physical_override=resident_override is not None,
                     is_genuine_decode=is_genuine_decode,
@@ -1634,14 +1623,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     kv_cache_events.get_number_of_workers()
                 )
 
-        finished_rkv_requests: set[str] = set()
-        if self._rkv_budget is not None:
-            # vLLM calls request_finished() for requests that stop in this
-            # model step before it delivers this step's worker metadata.
-            # Their final resident update is stale: vLLM already freed the
-            # request's KV blocks, so there is nothing left to reclaim.
-            finished_rkv_requests = self._rkv_finished_before_output
-            self._rkv_finished_before_output = set()
+        # vLLM may call request_finished() before delivering this step's
+        # worker metadata. Resident updates for those token-drop requests are
+        # stale because their KV blocks have already been freed.
+        finished_token_drop_requests = self._token_drop_finished_before_output
+        self._token_drop_finished_before_output = set()
 
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, LMCacheMPWorkerMetadata):
@@ -1655,28 +1641,46 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             for request_id in actions.sessions_to_end:
                 self.scheduler_adapter.end_session(request_id)
 
-        if self._rkv_budget is not None and meta.resident_kv_updates:
+        if meta.resident_kv_updates:
             updates = {
                 request_id: num_tokens
                 for request_id, num_tokens in meta.resident_kv_updates.items()
-                if request_id not in finished_rkv_requests
+                if request_id not in finished_token_drop_requests
             }
             if updates:
-                self._commit_rkv_resident_updates(updates)
+                self._commit_token_drop_resident_updates(updates)
         return None
 
-    def _commit_rkv_resident_updates(self, updates: dict[str, int]) -> None:
+    def _require_private_token_drop_blocks(self, request_id: str) -> list[Any]:
+        allocation = self._token_drop_allocations.get(request_id)
+        if allocation is None:
+            raise RuntimeError(f"Missing token-drop allocation for {request_id}")
+        if len(allocation.blocks) != 1:
+            raise ValueError("Token dropping MVP requires exactly one KV cache group")
+
+        row = allocation.blocks[0]
+        if any(
+            block.ref_cnt != 1 or block.block_hash is not None
+            for block in row
+        ):
+            raise ValueError(
+                "Token dropping requires exclusively owned, unhashed KV blocks"
+            )
+        return row
+
+    def _commit_token_drop_resident_updates(self, updates: dict[str, int]) -> None:
         if self._gpu_block_pool is None:
-            raise RuntimeError("R-KV requires the vLLM GPU block pool")
+            raise RuntimeError("Token dropping requires the vLLM GPU block pool")
 
         block_size = self._group_tokens_per_block[0]
         for request_id, num_tokens in updates.items():
-            allocation = self._rkv_allocations.get(request_id)
-            if allocation is None:
-                raise RuntimeError(f"Missing R-KV allocation for {request_id}")
-
-            blocks = allocation
+            row = self._require_private_token_drop_blocks(request_id)
             tracker = self._get_request_tracker(request_id)
+            spec = tracker.token_drop_spec
+            if spec is None or spec.algorithm != "rkv":
+                raise RuntimeError(
+                    f"Resident R-KV update for non-R-KV request {request_id!r}"
+                )
             current_tokens = get_resident_kv_tokens(request_id)
             if current_tokens is None:
                 current_tokens = tracker.num_scheduled_tokens
@@ -1686,23 +1690,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     f"{request_id}: current={current_tokens}"
                 )
 
-            if len(blocks.blocks) != 1:
-                raise ValueError("R-KV MVP requires exactly one KV cache group")
-            row = blocks.blocks[0]
-            resident_blocks = (num_tokens + block_size - 1) // block_size
-            if resident_blocks > len(row):
+            keep_blocks = (num_tokens + block_size - 1) // block_size
+            if keep_blocks > len(row):
                 raise ValueError("R-KV resident length exceeds allocated KV capacity")
 
-            # Match the official vLLM R-KV allocation cap: budget + buffer plus
-            # one scheduler block of native allocation headroom.
-            capacity_tokens = self._rkv_budget + self._rkv_buffer + block_size
-            capacity_blocks = (capacity_tokens + block_size - 1) // block_size
-            keep_blocks = min(len(row), capacity_blocks)
-
+            # Reclaim exactly to the current resident frontier. Any future
+            # headroom comes from vanilla vLLM allocation, not token-drop state.
             freed = row[keep_blocks:]
-            if any(block.ref_cnt != 1 for block in freed):
-                raise ValueError("R-KV MVP requires private KV blocks")
-
             del row[keep_blocks:]
             if freed:
                 self._gpu_block_pool.free_blocks(reversed(freed))
@@ -1730,10 +1724,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             returned by the engine.
         """
 
-        if self._rkv_budget is not None:
+        request_tracker = self._get_request_tracker(request.request_id)
+        is_token_dropping = request_tracker.token_drop_spec is not None
+        if is_token_dropping:
             clear_resident_kv_tokens(request.request_id)
-            self._rkv_allocations.pop(request.request_id, None)
-            self._rkv_finished_before_output.add(request.request_id)
+            self._token_drop_allocations.pop(request.request_id, None)
+            self._token_drop_finished_before_output.add(request.request_id)
 
         params: dict[str, Any] | None = getattr(request, "kv_transfer_params", None)
         return_params: dict[str, Any] | None = {} if params is not None else None
@@ -1752,8 +1748,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
 
-        # Clean up request tracker to prevent memory leak
+        # Clean up request tracker to prevent memory leak.
         self._cleanup_request_tracker(request.request_id)
+
+        if is_token_dropping:
+            # Token-drop requests never start an LMCache lookup/store session,
+            # so finishing them must not touch LMCache or lazy-offload state.
+            return False, (return_params or None)
 
         # Drop lookup state for a request aborted before its lookup was
         # consumed (update_state_after_alloc never ran for it). Both the eager
@@ -1871,6 +1872,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         lmcache_tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
 
         for request_tracker in self.request_trackers.values():
+            if request_tracker.token_drop_spec is not None:
+                continue
             if request_tracker.state != LMCacheMPRequestState.WAITING_FOR_LOAD:
                 continue
             r_metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
@@ -1902,7 +1905,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             num_new_tokens = scheduler_output.num_scheduled_tokens[new_request.req_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
-            if not self._can_store:
+            if request_tracker.token_drop_spec is not None or not self._can_store:
                 continue
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
@@ -1940,7 +1943,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
-            if not self._can_store:
+            if request_tracker.token_drop_spec is not None or not self._can_store:
                 continue
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
@@ -1973,7 +1976,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # actual token content (not just the newly-scheduled slice).
         for new_request in scheduler_output.scheduled_new_reqs:
             tracker = self.request_trackers.get(new_request.req_id)
-            if tracker is None:
+            if tracker is None or tracker.token_drop_spec is not None:
                 continue
             primary_block_ids = tracker.allocated_block_ids.get(0, [])
             num_blocks = len(primary_block_ids)
@@ -1998,7 +2001,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if not new_block_ids:
                 continue
             tracker = self.request_trackers.get(request_id)
-            if tracker is None:
+            if tracker is None or tracker.token_drop_spec is not None:
                 continue
             # The new blocks sit at the end of the request's block list.
             # Compute the token range they cover.
@@ -2029,31 +2032,27 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self, request: "Request"
     ) -> LMCacheMPRequestTracker:
         request_id = request.request_id
-        # Remove the old trackers that is created before the preemption
+        # Remove the old tracker before a preempted request is admitted
+        # again. Token-drop requests have no lazy-offload lifecycle.
         if (
             request.status == RequestStatus.PREEMPTED
             and request_id in self.request_trackers
         ):
             tracker = self.request_trackers[request_id]
 
-            # NOTE: since this function may be called multiple times
-            # for a single request (because get_num_new_matched_tokens
-            # may be called multiple times) for the same request, we
-            # will only do the remove if the tracker is not in the "fresh"
-            # state, i.e., PREFETCHING
+            # get_num_new_matched_tokens may be polled repeatedly. Only reset a
+            # tracker that has actually progressed beyond the fresh state.
             if tracker.state != LMCacheMPRequestState.PREFETCHING:
                 self.request_trackers.pop(request_id)
-                if self.lazy_offload:
-                    # The recreated tracker restarts at token zero, so its
-                    # manager discards overlapping buffered metadata.
+                if self.lazy_offload and tracker.token_drop_spec is None:
                     self._lazy_offload_manager.on_request_reset(request_id)
 
         if request_id not in self.request_trackers:
-            if self.lazy_offload:
+            new_tracker = LMCacheMPRequestTracker(request)
+            if self.lazy_offload and new_tracker.token_drop_spec is None:
                 actions = self._lazy_offload_manager.on_request_arrived(request_id)
                 for session_id in actions.sessions_to_end:
                     self.scheduler_adapter.end_session(session_id)
-            new_tracker = LMCacheMPRequestTracker(request)
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
 

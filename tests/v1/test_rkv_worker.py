@@ -39,7 +39,7 @@ class _FakeAttention:
         self.impl = _FakeAttentionImpl()
 
 
-def _policy():
+def _reference_rkv():
     return R1KV(
         budget=BUDGET,
         window_size=WINDOW,
@@ -87,7 +87,7 @@ def _shared_kept_indices(
     slots: torch.Tensor,
     recent_queries: dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    policy = _policy()
+    rkv = _reference_rkv()
     shared_scores = None
     for name in LAYER_NAMES:
         keys = (
@@ -102,7 +102,7 @@ def _shared_kept_indices(
             .unsqueeze(0)
             .contiguous()
         )
-        layer_score = policy.score_kv(keys, queries).mean(dim=1)
+        layer_score = rkv.score_kv(keys, queries).mean(dim=1)
         shared_scores = (
             layer_score if shared_scores is None else shared_scores + layer_score
         )
@@ -152,9 +152,30 @@ def _query_window(
     return worker._query_rings[layer_name][:, worker._query_slots[request_id]]
 
 
+def _register_rkv(
+    worker: RKVWorker,
+    request_id: str = "req",
+    *,
+    budget: int = BUDGET,
+    buffer: int = WINDOW,
+    config: dict | None = None,
+):
+    return worker._rkv_from_state(
+        SimpleNamespace(
+            request_id=request_id,
+            algorithm="rkv",
+            config={
+                "budget": budget,
+                "buffer": buffer,
+                **(config or {}),
+            },
+        )
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_prepare_forward_skips_vanilla_step_outside_observation_window():
-    worker = RKVWorker(BUDGET, buffer=16)
+    worker = RKVWorker()
     worker.register_kv_caches(_new_cache(8))
     layers = {name: _FakeAttention(name) for name in LAYER_NAMES}
     worker.install_query_hooks(layers)
@@ -162,6 +183,8 @@ def test_prepare_forward_skips_vanilla_step_outside_observation_window():
 
     state = SimpleNamespace(
         request_id="req",
+        algorithm="rkv",
+        config={"budget": BUDGET, "buffer": 16},
         resident_kv_tokens=33,
         has_physical_override=True,
         is_genuine_decode=True,
@@ -181,7 +204,8 @@ def test_prepare_forward_skips_vanilla_step_outside_observation_window():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_begin_step_only_plans_queries_marked_for_observation():
-    worker = RKVWorker(BUDGET, buffer=16)
+    worker = RKVWorker()
+    _register_rkv(worker, buffer=16)
     worker.register_kv_caches(_new_cache(8))
     metadata = _metadata([1, 3, 5], BUDGET + WINDOW, 1)
 
@@ -215,7 +239,7 @@ def test_begin_step_only_plans_queries_marked_for_observation():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_prepare_forward_uses_adaptor_row_order_and_only_captures_queries():
     caches = _new_cache(8)
-    worker = RKVWorker(BUDGET, buffer=WINDOW)
+    worker = RKVWorker()
     worker.register_kv_caches(caches)
 
     block_table = torch.tensor([[1, 3, 5], [2, 4, 6]], device="cuda")
@@ -246,19 +270,25 @@ def test_prepare_forward_uses_adaptor_row_order_and_only_captures_queries():
     states = [
         SimpleNamespace(
             request_id="req-a",
+            algorithm="rkv",
+            config={"budget": BUDGET, "buffer": WINDOW},
             resident_kv_tokens=33,
             has_physical_override=True,
             is_genuine_decode=True,
             num_decoded_tokens=8,
             num_new_tokens=1,
+            worker_row=0,
         ),
         SimpleNamespace(
             request_id="req-b",
+            algorithm="rkv",
+            config={"budget": BUDGET, "buffer": WINDOW},
             resident_kv_tokens=40,
             has_physical_override=True,
             is_genuine_decode=True,
             num_decoded_tokens=8,
             num_new_tokens=1,
+            worker_row=1,
         ),
     ]
 
@@ -322,7 +352,8 @@ def test_rkv_worker_compacts_all_layers_matches_upstream_update_kv():
     kept = _shared_kept_indices(original, slots, recent_queries)
     source_slots = slots[kept]
 
-    worker = RKVWorker(BUDGET, buffer=WINDOW)
+    worker = RKVWorker()
+    _register_rkv(worker)
     worker.register_kv_caches(caches)
     metadata = _metadata(block_ids, length, length)
     worker.begin_step(
@@ -370,7 +401,8 @@ def test_rkv_worker_compacts_all_layers_matches_upstream_update_kv():
 def test_rkv_worker_recompacts_on_decode_buffer_boundaries():
     block_ids = [1, 3, 5]
     caches = _new_cache(8)
-    worker = RKVWorker(BUDGET, buffer=WINDOW)
+    worker = RKVWorker()
+    _register_rkv(worker)
     worker.register_kv_caches(caches)
 
     # Initial prefill never contributes to the observation window or compacts.
@@ -486,7 +518,9 @@ def test_rkv_worker_compacts_two_requests_independently():
         kept = _shared_kept_indices(original, slots, recent_queries)
         expected_sources[request_id] = slots[kept]
 
-    worker = RKVWorker(BUDGET, buffer=WINDOW)
+    worker = RKVWorker()
+    for request_id in request_ids:
+        _register_rkv(worker, request_id)
     worker.register_kv_caches(caches)
     worker.begin_step(
         request_ids,
@@ -537,104 +571,20 @@ def test_rkv_worker_compacts_two_requests_independently():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_rkv_worker_score_chunking_preserves_kept_set():
-    length = BUDGET + WINDOW
-    request_ids = ["req-a", "req-b"]
-    request_blocks = [[1, 3, 5], [2, 4, 6]]
-    caches = _new_cache(8)
-    queries = {
-        name: torch.randn(
-            2,
-            WINDOW,
-            Q_HEADS,
-            HEAD_DIM,
-            device="cuda",
-            dtype=torch.bfloat16,
-        )
-        for name in LAYER_NAMES
-    }
-    members = [
-        (i, request_id, _slots(request_blocks[i], length))
-        for i, request_id in enumerate(request_ids)
-    ]
-    windows = {
-        request_id: {
-            name: queries[name][i].clone() for name in LAYER_NAMES
-        }
-        for i, request_id in enumerate(request_ids)
-    }
-
-    def plan(score_chunk_bytes: int):
-        worker = RKVWorker(
-            BUDGET,
-            buffer=WINDOW,
-            score_chunk_bytes=score_chunk_bytes,
-        )
-        worker.register_kv_caches(
-            {name: cache.clone() for name, cache in caches.items()}
-        )
-        _seed_query_windows(worker, windows)
-        return worker._compact_group_batched(members)
-
-    default_source, default_destination = plan(512 * 1024 * 1024)
-    per_unit = (
-        2
-        * (2 * caches[LAYER_NAMES[0]].element_size() + 1 + 4)
-        * KV_HEADS
-        * length
-        * length
-    )
-    chunked_source, chunked_destination = plan(per_unit)
-
-    assert torch.equal(chunked_source, default_source)
-    assert torch.equal(chunked_destination, default_destination)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_rkv_worker_rejects_scoring_unit_over_memory_cap():
-    length = BUDGET + WINDOW
-    caches = _new_cache(8)
-    per_unit = (
-        2
-        * (2 * caches[LAYER_NAMES[0]].element_size() + 1 + 4)
-        * KV_HEADS
-        * length
-        * length
-    )
-    worker = RKVWorker(
-        BUDGET,
-        buffer=WINDOW,
-        score_chunk_bytes=per_unit - 1,
-    )
-    worker.register_kv_caches(caches)
-    _seed_query_windows(
-        worker,
-        {
-            "req": {
-                name: torch.randn(
-                    WINDOW,
-                    Q_HEADS,
-                    HEAD_DIM,
-                    device="cuda",
-                    dtype=torch.bfloat16,
-                )
-                for name in LAYER_NAMES
-            }
-        },
-    )
-
-    with pytest.raises(RuntimeError, match="memory cap"):
-        worker._compact_group_batched(
-            [(0, "req", _slots([1, 3, 5], length))]
-        )
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_rkv_worker_rejects_non_finite_scores():
     length = BUDGET + WINDOW
     caches = _new_cache(8)
-    worker = RKVWorker(BUDGET, buffer=WINDOW)
+    worker = RKVWorker()
+    rkv = _register_rkv(worker)
     worker.register_kv_caches(caches)
+    worker.begin_step(
+        ["req"],
+        _metadata([1, 3, 5], length, 1),
+        physical_seq_lens=[length],
+        is_genuine_decode=[True],
+        num_decoded_tokens=[WINDOW],
+        num_new_tokens=[1],
+    )
     _seed_query_windows(
         worker,
         {
@@ -657,23 +607,122 @@ def test_rkv_worker_rejects_non_finite_scores():
             float("nan"),
         )
 
-    worker._policy.score_kv = non_finite_score
+    rkv.score_kv = non_finite_score
 
     with pytest.raises(RuntimeError, match="non-finite"):
-        worker._compact_group_batched(
-            [(0, "req", _slots([1, 3, 5], length))]
-        )
+        worker.compact()
 
 
-def test_rkv_worker_defaults_match_upstream_vllm_config():
-    worker = RKVWorker(BUDGET)
-    assert worker._policy.buffer == 128
-    assert worker._policy.window_size == 8
-    assert worker._policy.kernel_size == 7
-    assert worker._policy.mix_lambda == 0.1
-    assert worker._policy.retain_ratio == 0.1
-    assert worker._policy.retain_direction == "last"
-    assert worker.score_chunk_bytes == 512 * 1024 * 1024
+def test_rkv_worker_uses_rkv_serving_defaults():
+    worker = RKVWorker()
+    rkv = _register_rkv(worker, buffer=128)
+    assert rkv.buffer == 128
+    assert rkv.window_size == 8
+    assert rkv.kernel_size == 7
+    assert rkv.mix_lambda == 0.1
+    assert rkv.retain_ratio == 0.1
+    assert rkv.retain_direction == "last"
+
+
+def test_normal_registration_does_not_require_rkv_compatible_kv_layout():
+    worker = RKVWorker()
+    worker.register_kv_caches({"layer": torch.empty(2, 8, 4, 1, 8)})
+
+    assert worker._kv_caches_validated is False
+
+    state = SimpleNamespace(
+        request_id="td",
+        algorithm="rkv",
+        config={"budget": 32, "buffer": 16},
+        resident_kv_tokens=33,
+        has_physical_override=False,
+        is_genuine_decode=True,
+        num_decoded_tokens=1,
+        num_new_tokens=1,
+    )
+    with pytest.raises(ValueError, match="FlashAttention KV shaped"):
+        worker.prepare_forward(SimpleNamespace(attn_metadata=None), [state])
+
+
+def test_request_local_rkv_configs_stay_independent():
+    worker = RKVWorker()
+    state_a = SimpleNamespace(
+        request_id="a",
+        algorithm="rkv",
+        config={"budget": 32, "buffer": 16, "window_size": 4},
+    )
+    state_b = SimpleNamespace(
+        request_id="b",
+        algorithm="rkv",
+        config={"budget": 48, "buffer": 24, "window_size": 8},
+    )
+
+    rkv_a = worker._rkv_from_state(state_a)
+    rkv_b = worker._rkv_from_state(state_b)
+
+    assert rkv_a is not rkv_b
+    assert (rkv_a.budget, rkv_a.buffer, rkv_a.window_size) == (32, 16, 4)
+    assert (rkv_b.budget, rkv_b.buffer, rkv_b.window_size) == (48, 24, 8)
+    assert worker._rkv_for_request("a") is rkv_a
+    assert worker._rkv_for_request("b") is rkv_b
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_two_different_rkv_configs_compact_in_same_batch():
+    worker = RKVWorker()
+    worker.register_kv_caches(_new_cache(10))
+
+    states = [
+        SimpleNamespace(
+            request_id="a",
+            algorithm="rkv",
+            config={"budget": 32, "buffer": 8, "window_size": 4},
+        ),
+        SimpleNamespace(
+            request_id="b",
+            algorithm="rkv",
+            config={"budget": 48, "buffer": 8, "window_size": 8},
+        ),
+    ]
+    for state in states:
+        worker._rkv_from_state(state)
+
+    metadata = SimpleNamespace(
+        use_cascade=False,
+        query_start_loc=torch.tensor([0, 1, 2], device="cuda"),
+        seq_lens=torch.tensor([40, 56], device="cuda"),
+        block_table=torch.tensor(
+            [[1, 3, 5, 0], [2, 4, 6, 7]],
+            device="cuda",
+        ),
+    )
+    worker.begin_step(
+        ["a", "b"],
+        metadata,
+        physical_seq_lens=[40, 56],
+        request_rows=[0, 1],
+        is_genuine_decode=[True, True],
+        num_decoded_tokens=[8, 8],
+        num_new_tokens=[1, 1],
+    )
+    _seed_query_windows(
+        worker,
+        {
+            request_id: {
+                name: torch.randn(
+                    WINDOW,
+                    Q_HEADS,
+                    HEAD_DIM,
+                    device="cuda",
+                    dtype=torch.bfloat16,
+                )
+                for name in LAYER_NAMES
+            }
+            for request_id in ("a", "b")
+        },
+    )
+
+    assert worker.compact() == {"a": 32, "b": 48}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -681,7 +730,8 @@ def test_rkv_worker_records_only_genuine_decode_frontier_query():
     length = BUDGET + WINDOW
     block_ids = [1, 3, 5]
     caches = _new_cache(8)
-    worker = RKVWorker(BUDGET, buffer=WINDOW)
+    worker = RKVWorker()
+    _register_rkv(worker)
     worker.register_kv_caches(caches)
 
     metadata = _metadata(block_ids, length, 4)

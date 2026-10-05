@@ -325,28 +325,6 @@ def test_resolve_extra_config_default_mp_transfer_mode_is_auto() -> None:
     assert cfg[ExtraConfigDefault.mp_transfer_mode.name] == "auto"
 
 
-def test_resolve_extra_config_exposes_generic_token_drop_controls() -> None:
-    # First Party
-    from lmcache.integration.vllm.vllm_multi_process_adapter import (
-        ExtraConfigDefault,
-        _resolve_extra_config,
-    )
-
-    cfg = _resolve_extra_config(
-        {
-            "lmcache.mp.token_drop_budget": "1024",
-            "lmcache.mp.token_drop_buffer": "64",
-            # Algorithm-specific config is intentionally not part of the
-            # formal LMCache MP config registry.
-            "lmcache.mp.rkv_config": {"window_size": 4},
-        }
-    )
-
-    assert cfg[ExtraConfigDefault.token_drop_budget.name] == 1024
-    assert cfg[ExtraConfigDefault.token_drop_buffer.name] == 64
-    assert "rkv_config" not in cfg
-
-
 def test_resolve_extra_config_overrides_mp_transfer_mode() -> None:
     """``lmcache.mp.mp_transfer_mode`` override flows through unchanged."""
     # First Party

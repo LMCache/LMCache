@@ -14,6 +14,7 @@ from vllm.v1.utils import ConstantList
 import torch
 
 # First Party
+from lmcache.integration.vllm.token_drop import TokenDropSpec, parse_token_drop_spec
 from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
@@ -75,6 +76,7 @@ class LMCacheMPRequestTracker:
 
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    token_drop_spec: TokenDropSpec | None = None
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
@@ -84,6 +86,7 @@ class LMCacheMPRequestTracker:
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.request_configs = extract_request_configs_from_request(request)
+        self.token_drop_spec = parse_token_drop_spec(self.request_configs)
         self.max_offload_tokens = (self.request_configs or {}).get(
             "lmcache.max_offload_tokens"
         )
@@ -397,13 +400,16 @@ class LMCacheMPRequestMetadata:
 
 
 @dataclass
-class LMCacheMPRKVRequestState:
+class LMCacheMPTokenDropRequestState:
     request_id: str
+    algorithm: str
+    config: dict[str, Any]
     resident_kv_tokens: int | None = None
     has_physical_override: bool = False
     is_genuine_decode: bool = False
     num_decoded_tokens: int = 0
     num_new_tokens: int = 0
+    worker_row: int = -1
 
 
 class LMCacheMPConnectorMetadata(KVConnectorMetadata):
@@ -411,7 +417,8 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
         self.need_flush_before_forward: bool = False
-        self.rkv_requests: list[LMCacheMPRKVRequestState] = []
+        self.token_drop_requests: list[LMCacheMPTokenDropRequestState] = []
+        self.token_drop_reset_ids: set[str] = set()
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)

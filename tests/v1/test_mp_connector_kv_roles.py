@@ -37,9 +37,10 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
-    LMCacheMPRKVRequestState,
+    LMCacheMPTokenDropRequestState,
     LMCacheMPWorkerMetadata,
 )
+from lmcache.integration.vllm.token_drop import TokenDropSpec  # noqa: E402
 from lmcache.integration.vllm.rkv_allocator_adapter import (  # noqa: E402
     clear_resident_kv_tokens,
     get_resident_kv_tokens,
@@ -53,18 +54,53 @@ def _config(transfer_config: KVTransferConfig) -> VllmConfig:
     return cast(
         VllmConfig,
         SimpleNamespace(
-            model_config=SimpleNamespace(model="test-model", use_mla=False),
+            model_config=SimpleNamespace(
+                model="test-model",
+                use_mla=False,
+                enforce_eager=True,
+            ),
             parallel_config=SimpleNamespace(
                 world_size=1, rank=0, tensor_parallel_size=1, pipeline_parallel_size=1
             ),
             cache_config=SimpleNamespace(block_size=4, enable_prefix_caching=True),
-            scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
+            scheduler_config=SimpleNamespace(
+                disable_hybrid_kv_cache_manager=True,
+                enable_chunked_prefill=False,
+                async_scheduling=False,
+            ),
+            speculative_config=None,
             kv_transfer_config=transfer_config,
         ),
     )
 
 
-def _request(request_id: str = "request") -> Request:
+def _token_drop_config(
+    *,
+    budget: int = 32,
+    buffer: int = 16,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    rkv_config = {
+        "budget": budget,
+        "buffer": buffer,
+        **(config or {}),
+    }
+    return {
+        "algorithm": "rkv",
+        "config": rkv_config,
+    }
+
+
+def _request(
+    request_id: str = "request",
+    *,
+    token_drop: dict[str, Any] | None = None,
+) -> Request:
+    transfer_params = (
+        {"lmcache.token_drop": token_drop}
+        if token_drop is not None
+        else {}
+    )
     return cast(
         Request,
         SimpleNamespace(
@@ -74,7 +110,12 @@ def _request(request_id: str = "request") -> Request:
             all_token_ids=list(range(12)),
             status=RequestStatus.WAITING,
             num_computed_tokens=0,
+            sampling_params=SimpleNamespace(
+                extra_args={"kv_transfer_params": transfer_params}
+            ),
             kv_transfer_params=None,
+            skip_reading_prefix_cache=False,
+            resumable=False,
         ),
     )
 
@@ -85,6 +126,7 @@ def _schedule(
     block_ids: tuple[list[int], ...] = (),
     *,
     new: bool = False,
+    preempted: set[str] | None = None,
 ) -> SchedulerOutput:
     return cast(
         SchedulerOutput,
@@ -101,6 +143,8 @@ def _schedule(
             ),
             num_scheduled_tokens={request_id: num_tokens} if num_tokens else {},
             total_num_scheduled_tokens=num_tokens,
+            preempted_req_ids=preempted or set(),
+            finished_req_ids=set(),
         ),
     )
 
@@ -182,101 +226,64 @@ def connectors(
         scheduler.shutdown()
 
 
-def test_rkv_semantic_knobs_pass_through_to_worker(mock_io: SimpleNamespace) -> None:
-    config = _config(
-        KVTransferConfig(
-            kv_connector="LMCacheMPConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
-                "lmcache.mp.token_drop_budget": 64,
-                "lmcache.mp.token_drop_buffer": 40,
-                "lmcache.mp.rkv_config": {
-                    "window_size": 4,
-                    "kernel_size": 5,
-                    "mix_lambda": 0.25,
-                    "retain_ratio": 0.2,
-                },
-            },
-        )
-    )
-    config.cache_config.enable_prefix_caching = False
-    config.model_config.enforce_eager = True
-
-    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
-    try:
-        assert worker._rkv is not None
-        assert worker._rkv._policy.budget == 64
-        assert worker._rkv._policy.buffer == 40
-        assert worker._rkv._policy.window_size == 4
-        assert worker._rkv._policy.kernel_size == 5
-        assert worker._rkv._policy.mix_lambda == 0.25
-        assert worker._rkv._policy.retain_ratio == 0.2
-        assert worker._rkv._policy.retain_direction == "last"
-        assert worker._rkv.score_chunk_bytes == 512 * 1024 * 1024
-    finally:
-        worker.shutdown()
-
-
-@pytest.mark.parametrize(
-    "extra_config",
-    [
-        {"lmcache.mp.rkv_config": {"window_size": 4}},
-        {
-            "lmcache.mp.token_drop_budget": 64,
-            "lmcache.mp.rkv_config": "not-a-json-object",
-        },
-    ],
-)
-def test_rkv_rejects_invalid_backdoor_config(
-    extra_config: dict[str, object],
+def test_token_drop_is_request_local_and_skips_only_its_lmcache_lookup(
+    mock_io: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(
         KVTransferConfig(
             kv_connector="LMCacheMPConnector",
             kv_role="kv_both",
-            kv_connector_extra_config=extra_config,
+            kv_connector_extra_config={"lmcache.mp.eager_prefetch": True},
         )
     )
-    config.cache_config.enable_prefix_caching = False
-    config.model_config.enforce_eager = True
-
-    with pytest.raises(ValueError):
-        LMCacheMPConnector(config, KVConnectorRole.WORKER)
-
-
-def test_rkv_skips_lmcache_allocation_telemetry(mock_io: SimpleNamespace) -> None:
-    config = _config(
-        KVTransferConfig(
-            kv_connector="LMCacheMPConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={"lmcache.mp.token_drop_budget": 64},
-        )
-    )
-    config.cache_config.enable_prefix_caching = False
-    config.model_config.enforce_eager = True
-
     scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    install = MagicMock()
+    monkeypatch.setattr(
+        connector_mod,
+        "install_token_drop_allocator_adaptor",
+        install,
+    )
     try:
-        request = _request()
-        assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
-        scheduler.update_state_after_alloc(
-            request,
-            MagicMock(get_block_ids=lambda: ([1],)),
-            0,
+        normal = _request("normal")
+        token_drop = _request(
+            "td",
+            token_drop=_token_drop_config(
+                budget=64,
+                buffer=40,
+                config={
+                    "window_size": 4,
+                    "kernel_size": 5,
+                    "mix_lambda": 0.25,
+                    "retain_ratio": 0.2,
+                },
+            ),
         )
-        scheduler._report_block_allocation_deltas = MagicMock()
 
-        scheduler.build_connector_meta(
-            _schedule(num_tokens=4, block_ids=([1],), new=True)
+        scheduler.on_new_request(normal)
+        scheduler.on_new_request(token_drop)
+
+        assert normal.skip_reading_prefix_cache is False
+        assert token_drop.skip_reading_prefix_cache is True
+        assert scheduler.request_trackers["normal"].token_drop_spec is None
+        spec = scheduler.request_trackers["td"].token_drop_spec
+        assert spec is not None
+        assert spec.algorithm == "rkv"
+        assert spec.config["budget"] == 64
+        assert spec.config["buffer"] == 40
+        assert spec.config["window_size"] == 4
+
+        mock_io.scheduler.maybe_submit_lookup_request.assert_called_once()
+        assert (
+            mock_io.scheduler.maybe_submit_lookup_request.call_args.args[0]
+            == "normal"
         )
-
-        scheduler._report_block_allocation_deltas.assert_not_called()
-        mock_io.scheduler.report_block_allocations.assert_not_called()
+        install.assert_called_once_with()
     finally:
         scheduler.shutdown()
 
 
-def test_rkv_registers_kv_only_with_worker_policy(
+def test_worker_registers_lmcache_and_rkv_over_same_kv_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
@@ -287,6 +294,7 @@ def test_rkv_registers_kv_only_with_worker_policy(
     connector._rkv = MagicMock()
     connector.dispatcher = None
 
+    group_infos = object()
     monkeypatch.setattr(connector_mod, "vllm_layout_hints", lambda _cfg: None)
     monkeypatch.setattr(
         connector_mod,
@@ -296,14 +304,18 @@ def test_rkv_registers_kv_only_with_worker_policy(
     monkeypatch.setattr(
         connector_mod,
         "create_engine_group_infos_from_vllm",
-        lambda *_args, **_kwargs: object(),
+        lambda *_args, **_kwargs: group_infos,
     )
 
     caches = {"layer": torch.empty(1)}
     connector.register_kv_caches(caches)
 
+    connector.worker_adapter.register_kv_caches.assert_called_once_with(
+        caches,
+        engine_group_infos=group_infos,
+        layout_hints=None,
+    )
     connector._rkv.register_kv_caches.assert_called_once_with(caches)
-    connector.worker_adapter.register_kv_caches.assert_not_called()
 
 
 def test_worker_reports_resident_kv_update_once() -> None:
@@ -348,66 +360,149 @@ class _FakeBlockPool:
         self.freed_ids.extend(block.block_id for block in blocks)
 
 
-def test_scheduler_commits_resident_kv_and_reclaims_tail() -> None:
+def _private_kv_blocks(block_ids: list[int]):
+    row = [
+        SimpleNamespace(block_id=block_id, ref_cnt=1, block_hash=None)
+        for block_id in block_ids
+    ]
+    return SimpleNamespace(
+        blocks=[row],
+        get_block_ids=lambda: (list(block_ids),),
+    )
+
+
+def test_scheduler_commits_resident_kv_and_reclaims_private_tail() -> None:
     clear_resident_kv_tokens("request")
     scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
     scheduler._gpu_block_pool = _FakeBlockPool()
     scheduler._group_tokens_per_block = [16]
-    scheduler._rkv_budget = 32
-    scheduler._rkv_buffer = 32
-    row = [SimpleNamespace(block_id=block_id, ref_cnt=1) for block_id in range(10, 17)]
-    scheduler._rkv_allocations = {
+    row = [
+        SimpleNamespace(block_id=block_id, ref_cnt=1, block_hash=None)
+        for block_id in range(10, 17)
+    ]
+    scheduler._token_drop_allocations = {
         "request": SimpleNamespace(blocks=[row]),
     }
     tracker = SimpleNamespace(
+        token_drop_spec=TokenDropSpec("rkv", {"budget": 32, "buffer": 32}),
         num_scheduled_tokens=104,
         allocated_block_ids={0: list(range(10, 17))},
     )
     scheduler.request_trackers = {"request": tracker}
 
-    scheduler._commit_rkv_resident_updates({"request": 32})
+    scheduler._commit_token_drop_resident_updates({"request": 32})
 
-    assert [block.block_id for block in row] == [10, 11, 12, 13, 14]
-    assert scheduler._gpu_block_pool.freed_ids == [16, 15]
-    assert tracker.allocated_block_ids[0] == [10, 11, 12, 13, 14]
+    assert [block.block_id for block in row] == [10, 11]
+    assert scheduler._gpu_block_pool.freed_ids == [16, 15, 14, 13, 12]
+    assert tracker.allocated_block_ids[0] == [10, 11]
     assert get_resident_kv_tokens("request") == 32
     clear_resident_kv_tokens("request")
 
 
-def test_scheduler_rkv_cap_does_not_require_future_headroom_allocated() -> None:
+def test_scheduler_rejects_non_private_token_drop_block() -> None:
+    scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    scheduler._gpu_block_pool = _FakeBlockPool()
+    scheduler._group_tokens_per_block = [16]
+    row = [
+        SimpleNamespace(block_id=10, ref_cnt=1, block_hash=b"cached"),
+        SimpleNamespace(block_id=11, ref_cnt=1, block_hash=None),
+    ]
+    scheduler._token_drop_allocations = {
+        "request": SimpleNamespace(blocks=[row]),
+    }
+    scheduler.request_trackers = {
+        "request": SimpleNamespace(
+            token_drop_spec=TokenDropSpec("rkv", {"budget": 16, "buffer": 16}),
+            num_scheduled_tokens=32,
+            allocated_block_ids={0: [10, 11]},
+        )
+    }
+
+    with pytest.raises(ValueError, match="exclusively owned, unhashed"):
+        scheduler._commit_token_drop_resident_updates({"request": 16})
+
+
+def test_scheduler_checks_private_blocks_before_worker_metadata() -> None:
+    scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    scheduler._token_drop_allocations = {
+        "request": SimpleNamespace(
+            blocks=[
+                [
+                    SimpleNamespace(
+                        block_id=10,
+                        ref_cnt=1,
+                        block_hash=b"cached",
+                    )
+                ]
+            ]
+        )
+    }
+    scheduler.request_trackers = {
+        "request": SimpleNamespace(
+            token_drop_spec=TokenDropSpec("rkv", {"budget": 16, "buffer": 16}),
+            num_scheduled_tokens=17,
+            all_token_ids=list(range(17)),
+            num_prompt_tokens=16,
+        )
+    }
+    output = SimpleNamespace(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["request"]),
+        num_scheduled_tokens={"request": 1},
+    )
+
+    with pytest.raises(ValueError, match="exclusively owned, unhashed"):
+        scheduler._add_token_drop_request_states(
+            cast(SchedulerOutput, output),
+            LMCacheMPConnectorMetadata(),
+        )
+
+
+def test_scheduler_reclaims_to_resident_frontier_without_token_drop_reserve() -> None:
     clear_resident_kv_tokens("request")
     scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
     scheduler._gpu_block_pool = _FakeBlockPool()
     scheduler._group_tokens_per_block = [16]
-    scheduler._rkv_budget = 32
-    scheduler._rkv_buffer = 32
-    row = [SimpleNamespace(block_id=block_id, ref_cnt=1) for block_id in range(10, 14)]
-    scheduler._rkv_allocations = {
+    row = [
+        SimpleNamespace(block_id=block_id, ref_cnt=1, block_hash=None)
+        for block_id in range(10, 14)
+    ]
+    scheduler._token_drop_allocations = {
         "request": SimpleNamespace(blocks=[row]),
     }
     tracker = SimpleNamespace(
+        token_drop_spec=TokenDropSpec("rkv", {"budget": 32, "buffer": 32}),
         num_scheduled_tokens=64,
         allocated_block_ids={0: list(range(10, 14))},
     )
     scheduler.request_trackers = {"request": tracker}
 
-    scheduler._commit_rkv_resident_updates({"request": 32})
+    scheduler._commit_token_drop_resident_updates({"request": 32})
 
-    assert [block.block_id for block in row] == [10, 11, 12, 13]
-    assert scheduler._gpu_block_pool.freed_ids == []
-    assert tracker.allocated_block_ids[0] == [10, 11, 12, 13]
+    assert [block.block_id for block in row] == [10, 11]
+    assert scheduler._gpu_block_pool.freed_ids == [13, 12]
+    assert tracker.allocated_block_ids[0] == [10, 11]
     assert get_resident_kv_tokens("request") == 32
     clear_resident_kv_tokens("request")
 
 
-def test_scheduler_builds_authoritative_rkv_state() -> None:
+def test_scheduler_builds_request_local_token_drop_state() -> None:
     clear_resident_kv_tokens("request")
 
     scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
-    scheduler._rkv_allocations = {"request": object()}
-    scheduler._rkv_buffer = 128
+    scheduler._token_drop_allocations = {
+        "request": _private_kv_blocks([10, 11, 18])
+    }
     scheduler.request_trackers = {
         "request": SimpleNamespace(
+            token_drop_spec=TokenDropSpec(
+                "rkv",
+                {
+                    "budget": 64,
+                    "buffer": 40,
+                    "window_size": 4,
+                },
+            ),
             allocated_block_ids={0: [10, 11, 18]},
             num_scheduled_tokens=33,
             all_token_ids=list(range(33)),
@@ -421,28 +516,40 @@ def test_scheduler_builds_authoritative_rkv_state() -> None:
     )
 
     metadata = LMCacheMPConnectorMetadata()
-    scheduler._add_rkv_request_states(scheduler_output, metadata)
-    assert metadata.rkv_requests == [
-        LMCacheMPRKVRequestState(
+    scheduler._add_token_drop_request_states(scheduler_output, metadata)
+    assert metadata.token_drop_requests == [
+        LMCacheMPTokenDropRequestState(
             request_id="request",
+            algorithm="rkv",
+            config={
+                "budget": 64,
+                "buffer": 40,
+                "window_size": 4,
+            },
             resident_kv_tokens=33,
             has_physical_override=False,
             is_genuine_decode=True,
-            num_decoded_tokens=1,
+            num_decoded_tokens=0,
             num_new_tokens=1,
         )
     ]
 
     set_resident_kv_tokens("request", 33)
     metadata = LMCacheMPConnectorMetadata()
-    scheduler._add_rkv_request_states(scheduler_output, metadata)
-    assert metadata.rkv_requests == [
-        LMCacheMPRKVRequestState(
+    scheduler._add_token_drop_request_states(scheduler_output, metadata)
+    assert metadata.token_drop_requests == [
+        LMCacheMPTokenDropRequestState(
             request_id="request",
+            algorithm="rkv",
+            config={
+                "budget": 64,
+                "buffer": 40,
+                "window_size": 4,
+            },
             resident_kv_tokens=33,
             has_physical_override=True,
             is_genuine_decode=True,
-            num_decoded_tokens=1,
+            num_decoded_tokens=0,
             num_new_tokens=1,
         )
     ]
@@ -453,8 +560,10 @@ def _rkv_worker_connector(
     metadata: LMCacheMPConnectorMetadata,
 ) -> tuple[LMCacheMPConnector, MagicMock]:
     worker = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    worker._role = KVConnectorRole.WORKER
     rkv = MagicMock()
     rkv.compact.return_value = {"request": 17}
+    rkv.is_token_drop_request.side_effect = lambda request_id: request_id == "request"
     worker._rkv = rkv
     worker._pending_resident_kv_updates = {}
     worker._connector_metadata = metadata
@@ -466,23 +575,37 @@ def _rkv_worker_connector(
     return worker, rkv
 
 
-def test_rkv_worker_connector_lifecycle() -> None:
+def _token_drop_state(request_id: str = "request") -> LMCacheMPTokenDropRequestState:
+    return LMCacheMPTokenDropRequestState(
+        request_id=request_id,
+        algorithm="rkv",
+        config={"budget": 32, "buffer": 16},
+        resident_kv_tokens=33,
+        has_physical_override=True,
+        is_genuine_decode=True,
+        num_decoded_tokens=16,
+        num_new_tokens=1,
+    )
+
+
+def test_rkv_worker_connector_lifecycle_is_request_local() -> None:
     metadata = LMCacheMPConnectorMetadata()
     metadata.need_flush_before_forward = True
-    metadata.rkv_requests.append(
-        LMCacheMPRKVRequestState(
-            request_id="request",
-            resident_kv_tokens=None,
-        )
-    )
+    metadata.token_drop_requests.append(_token_drop_state())
+    metadata.token_drop_reset_ids.add("request")
     worker, rkv = _rkv_worker_connector(metadata)
+    worker._pending_resident_kv_updates["request"] = 99
     forward_context = SimpleNamespace()
 
+    worker.handle_preemptions(metadata)
+    worker.worker_adapter.handle_preemptions.assert_called_once_with(True)
+    rkv.drop_requests.assert_called_once_with({"request"})
+    assert worker._pending_resident_kv_updates == {}
+
     worker.start_load_kv(forward_context)
-    rkv.reset.assert_called_once_with()
     rkv.prepare_forward.assert_called_once_with(
         forward_context,
-        metadata.rkv_requests,
+        metadata.token_drop_requests,
     )
 
     worker.wait_for_save()
@@ -493,8 +616,9 @@ def test_rkv_worker_connector_lifecycle() -> None:
 
     worker._pending_resident_kv_updates["request"] = 17
     worker.get_finished({"request"})
-    rkv.drop_requests.assert_called_once_with({"request"})
+    assert rkv.drop_requests.call_args_list[-1].args == ({"request"},)
     assert worker._pending_resident_kv_updates == {}
+    worker.worker_adapter.get_finished.assert_called_once_with(set())
 
 
 def test_rkv_no_forward_step_clears_step_state() -> None:
@@ -507,14 +631,123 @@ def test_rkv_no_forward_step_clears_step_state() -> None:
     rkv.prepare_forward.assert_called_once_with(forward_context, [])
 
 
-def test_rkv_rejects_lmcache_transfer_in_same_stream() -> None:
+def test_normal_preemption_does_not_reset_token_drop_state() -> None:
     metadata = LMCacheMPConnectorMetadata()
-    metadata.requests.append(cast(Any, object()))
+    metadata.need_flush_before_forward = True
+    metadata.token_drop_requests.append(_token_drop_state("td"))
     worker, rkv = _rkv_worker_connector(metadata)
 
-    with pytest.raises(RuntimeError, match="STORE/RETRIEVE"):
-        worker.start_load_kv(SimpleNamespace())
-    rkv.prepare_forward.assert_not_called()
+    worker.handle_preemptions(metadata)
+
+    worker.worker_adapter.handle_preemptions.assert_called_once_with(True)
+    rkv.drop_requests.assert_not_called()
+
+
+def test_normal_lmcache_retrieve_and_token_drop_can_share_worker_step() -> None:
+    metadata = LMCacheMPConnectorMetadata()
+    metadata.token_drop_requests.append(_token_drop_state("td"))
+    metadata.requests.append(
+        SimpleNamespace(
+            request_id="normal",
+            direction="RETRIEVE",
+            op=object(),
+            cache_salt="",
+            request_configs=None,
+        )
+    )
+    worker, rkv = _rkv_worker_connector(metadata)
+    forward_context = SimpleNamespace()
+
+    worker.start_load_kv(forward_context)
+
+    rkv.prepare_forward.assert_called_once_with(
+        forward_context,
+        metadata.token_drop_requests,
+    )
+    worker.worker_adapter.batched_submit_retrieve_requests.assert_called_once()
+    call = worker.worker_adapter.batched_submit_retrieve_requests.call_args
+    assert call.args[0] == ["normal"]
+
+
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_normal_store_and_token_drop_share_scheduler_step(
+    mock_io: SimpleNamespace,
+    lazy_offload: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "lmcache.mp.lazy_offload": lazy_offload,
+                "lmcache.mp.lazy_offload_policy": "FIFO",
+                "lmcache.mp.lazy_offload_threshold": 1,
+                "lmcache.mp.lazy_offload_select_count": 1,
+            },
+        )
+    )
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+    monkeypatch.setattr(
+        connector_mod,
+        "install_token_drop_allocator_adaptor",
+        MagicMock(),
+    )
+    try:
+        normal = _request("normal")
+        td = _request("td", token_drop=_token_drop_config())
+
+        assert scheduler.get_num_new_matched_tokens(normal, 0) == (0, False)
+        assert scheduler.get_num_new_matched_tokens(td, 0) == (0, False)
+
+        scheduler.update_state_after_alloc(
+            normal,
+            MagicMock(get_block_ids=lambda: ([1],)),
+            0,
+        )
+        scheduler.update_state_after_alloc(
+            td,
+            _private_kv_blocks([2]),
+            0,
+        )
+
+        output = cast(
+            SchedulerOutput,
+            SimpleNamespace(
+                scheduled_new_reqs=[
+                    SimpleNamespace(req_id="normal", block_ids=([1],)),
+                    SimpleNamespace(req_id="td", block_ids=([2],)),
+                ],
+                scheduled_cached_reqs=SimpleNamespace(
+                    req_ids=[],
+                    new_block_ids=[],
+                    resumed_req_ids=set(),
+                ),
+                num_scheduled_tokens={"normal": 4, "td": 4},
+                total_num_scheduled_tokens=8,
+                preempted_req_ids=set(),
+                finished_req_ids=set(),
+            ),
+        )
+        metadata = scheduler.build_connector_meta(output)
+
+        assert [state.request_id for state in metadata.token_drop_requests] == ["td"]
+        store_ids = [
+            meta.request_id
+            for meta in metadata.requests
+            if meta.direction == "STORE"
+        ]
+        if lazy_offload:
+            # TD never enters the lazy queue; a normal candidate may remain
+            # queued until the lazy manager selects it.
+            assert "td" not in store_ids
+            lazy_policy = scheduler._lazy_offload_manager._require_policy()
+            assert not lazy_policy.has_pending_request("td")
+        else:
+            assert store_ids == ["normal"]
+    finally:
+        scheduler.shutdown()
 
 
 def test_chunked_prefill_stores_and_completion(
@@ -765,30 +998,37 @@ def test_multi_connector_child_role_and_completion(
     scheduler.shutdown()
 
 
-def test_rkv_finish_marks_final_worker_update_stale() -> None:
+def test_token_drop_finish_marks_final_worker_update_stale_without_lmcache() -> None:
     scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
-    scheduler._rkv_budget = 32
-    scheduler._rkv_allocations = {"request": object()}
-    scheduler._rkv_finished_before_output = set()
-    scheduler.request_trackers = {}
+    scheduler._token_drop_allocations = {"request": object()}
+    scheduler._token_drop_finished_before_output = set()
+    scheduler.request_trackers = {
+        "request": SimpleNamespace(
+            token_drop_spec=TokenDropSpec("rkv", {"budget": 32, "buffer": 16}),
+        )
+    }
     scheduler.scheduler_adapter = MagicMock()
     scheduler.lazy_offload = False
     scheduler._can_store = False
 
-    scheduler.request_finished(_request(), [])
+    result = scheduler.request_finished(
+        _request("request", token_drop=_token_drop_config()),
+        [],
+    )
 
-    assert scheduler._rkv_allocations == {}
-    assert scheduler._rkv_finished_before_output == {"request"}
-    scheduler.scheduler_adapter.end_session.assert_called_once_with("request")
+    assert result == (False, None)
+    assert scheduler._token_drop_allocations == {}
+    assert scheduler._token_drop_finished_before_output == {"request"}
+    assert scheduler.request_trackers == {}
+    scheduler.scheduler_adapter.end_session.assert_not_called()
 
 
 def test_rkv_ignores_final_update_after_request_finished() -> None:
     scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
-    scheduler._rkv_budget = 32
-    scheduler._rkv_finished_before_output = {"finished"}
+    scheduler._token_drop_finished_before_output = {"finished"}
     scheduler._kv_cache_events = None
     scheduler.lazy_offload = False
-    scheduler._commit_rkv_resident_updates = MagicMock()
+    scheduler._commit_token_drop_resident_updates = MagicMock()
 
     meta = LMCacheMPWorkerMetadata(
         completed_store_requests={},
@@ -805,30 +1045,31 @@ def test_rkv_ignores_final_update_after_request_finished() -> None:
 
     scheduler.update_connector_output(output)
 
-    scheduler._commit_rkv_resident_updates.assert_called_once_with({"live": 32})
-    assert scheduler._rkv_finished_before_output == set()
+    scheduler._commit_token_drop_resident_updates.assert_called_once_with({"live": 32})
+    assert scheduler._token_drop_finished_before_output == set()
 
 
 @pytest.mark.parametrize(
     ("num_computed", "num_new", "num_tokens", "expected"),
     [
         (512, 512, 512, (False, 0)),  # initial prefill
-        (513, 1, 513, (True, 1)),
-        (639, 1, 639, (True, 127)),
-        (640, 1, 640, (True, 128)),
+        (513, 1, 513, (True, 0)),
+        (639, 1, 639, (True, 126)),
+        (640, 1, 640, (True, 127)),
+        (641, 1, 641, (True, 128)),  # boundary is visible on the next forward
         (300, 100, 700, (False, 0)),  # preemption replay / prefill
-        (639, 1, 700, (False, 127)),  # replaying generated history
-        (640, 1, 640, (True, 128)),  # catch-up fact; R-KV owns trigger policy
+        (639, 1, 700, (False, 126)),  # replaying generated history
+        (640, 1, 640, (True, 127)),  # catch-up fact; R-KV decides when to compact
     ],
 )
-def test_rkv_step_facts_are_policy_free(
+def test_token_drop_step_facts_are_algorithm_config_free(
     num_computed: int,
     num_new: int,
     num_tokens: int,
     expected: tuple[bool, int],
 ) -> None:
     assert (
-        connector_mod._rkv_step_facts(
+        connector_mod._token_drop_step_facts(
             num_computed=num_computed,
             num_new_tokens=num_new,
             num_tokens=num_tokens,
@@ -841,7 +1082,6 @@ def test_rkv_step_facts_are_policy_free(
 @pytest.mark.parametrize(
     ("case", "match"),
     [
-        ("prefix", "prefix caching disabled"),
         ("chunked", "does not support chunked prefill"),
         ("speculative", "does not support speculative decoding"),
         ("async", "synchronous scheduling"),
@@ -850,7 +1090,7 @@ def test_rkv_step_facts_are_policy_free(
         ("multi_group", "exactly one KV cache group"),
     ],
 )
-def test_rkv_rejects_unsupported_runtime_modes(
+def test_unsupported_rkv_modes_reject_only_opt_in_request(
     case: str,
     match: str,
     mock_io: SimpleNamespace,
@@ -860,15 +1100,10 @@ def test_rkv_rejects_unsupported_runtime_modes(
         KVTransferConfig(
             kv_connector="LMCacheMPConnector",
             kv_role="kv_both",
-            kv_connector_extra_config={"lmcache.mp.token_drop_budget": 32},
         )
     )
-    config.cache_config.enable_prefix_caching = False
-    config.model_config.enforce_eager = True
 
-    if case == "prefix":
-        config.cache_config.enable_prefix_caching = True
-    elif case == "chunked":
+    if case == "chunked":
         config.scheduler_config.enable_chunked_prefill = True
     elif case == "speculative":
         config.speculative_config = object()
@@ -888,5 +1123,16 @@ def test_rkv_rejects_unsupported_runtime_modes(
     else:
         raise AssertionError(f"unknown case: {case}")
 
-    with pytest.raises(ValueError, match=match):
-        LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    try:
+        normal = _request("normal")
+        assert scheduler.get_num_new_matched_tokens(normal, 0) == (0, False)
+
+        token_drop = _request(
+            "td",
+            token_drop=_token_drop_config(),
+        )
+        with pytest.raises(ValueError, match=match):
+            scheduler.get_num_new_matched_tokens(token_drop, 0)
+    finally:
+        scheduler.shutdown()
