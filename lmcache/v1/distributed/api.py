@@ -576,7 +576,12 @@ class PrefetchResult:
     l2_hit_cells: list["Bitmap"]
     found_cells: "list[Bitmap] | None" = None
     l1_owners: dict[ObjectKey, int] = field(default_factory=dict)
-    """Exact manager IDs holding this request's retained read locks."""
+    """Runtime manager IDs holding this request's retained read locks.
+
+    These process-local IDs match MemoryObj ownership and read/write completion;
+    they are not persisted. Tags name configured L1s for affinity and reporting
+    and are the appropriate identity at process boundaries.
+    """
     _l1_hit_count: int = field(init=False, repr=False, compare=False)
     _l2_hit_count: int = field(init=False, repr=False, compare=False)
 
