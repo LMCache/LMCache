@@ -85,7 +85,9 @@ class RESPConnector(RemoteConnector):
         recv_buf = memory_obj.byte_array
         if not isinstance(recv_buf, memoryview):
             recv_buf = memoryview(recv_buf)
-        await self.client.get(key_str, recv_buf)
+        if not await self.client.get(key_str, recv_buf):
+            memory_obj.ref_count_down()
+            return None
         return memory_obj
 
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
@@ -136,6 +138,19 @@ class RESPConnector(RemoteConnector):
     async def _batched_get(
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
+        """Fetch ``keys`` in one batch, returning ``None`` for every miss.
+
+        A partially-hit batch is the normal case, so missed slots are released
+        and reported as ``None``; their staging buffers were never written and
+        must not be handed back as data.
+
+        Args:
+            keys: Keys to fetch.
+
+        Returns:
+            One entry per key, in order: the filled ``MemoryObj`` on a hit,
+            ``None`` on a miss.
+        """
         key_strs = [key.to_string() for key in keys]
         memory_objs = [
             self.local_cpu_backend.allocate(
@@ -151,8 +166,21 @@ class RESPConnector(RemoteConnector):
             else memoryview(memory_obj.byte_array)
             for memory_obj in memory_objs
         ]
-        await self.client.batch_get(key_strs, recv_bufs)
-        return memory_objs
+        try:
+            hits = await self.client.batch_get(key_strs, recv_bufs)
+        except Exception:
+            for memory_obj in memory_objs:
+                memory_obj.ref_count_down()
+            raise
+
+        results: List[Optional[MemoryObj]] = []
+        for memory_obj, hit in zip(memory_objs, hits, strict=True):
+            if hit:
+                results.append(memory_obj)
+            else:
+                memory_obj.ref_count_down()
+                results.append(None)
+        return results
 
     async def batched_get(
         self, keys: List[CacheEngineKey]
@@ -214,6 +242,30 @@ class RESPConnector(RemoteConnector):
     def support_batched_get_non_blocking(self) -> bool:
         return True
 
+    async def _batched_get_non_blocking(
+        self, keys: List[CacheEngineKey]
+    ) -> List[MemoryObj]:
+        """Return the consecutive prefix of hits, releasing everything after it.
+
+        Args:
+            keys: Keys to fetch.
+
+        Returns:
+            The hits preceding the first miss, in order. Objects fetched after
+            the first miss are released and excluded, per the base-class
+            prefix contract.
+        """
+        results = await self._batched_get(keys)
+        prefix: List[MemoryObj] = []
+        for i, memory_obj in enumerate(results):
+            if memory_obj is None:
+                for trailing in results[i + 1 :]:
+                    if trailing is not None:
+                        trailing.ref_count_down()
+                break
+            prefix.append(memory_obj)
+        return prefix
+
     async def batched_get_non_blocking(
         self,
         lookup_id: str,
@@ -221,7 +273,7 @@ class RESPConnector(RemoteConnector):
     ) -> List[MemoryObj]:
         # prefetch priority
         return await self.pq_executor.submit_job(
-            self._batched_get, keys=keys, priority=Priorities.PREFETCH
+            self._batched_get_non_blocking, keys=keys, priority=Priorities.PREFETCH
         )
 
     # TODO
