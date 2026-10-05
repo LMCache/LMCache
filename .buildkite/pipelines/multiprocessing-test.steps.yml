@@ -13,8 +13,9 @@ steps:
     command: |
       set -euo pipefail
       source .buildkite/k3_tests/common_scripts/helpers.sh
+      source .buildkite/k3_tests/common_scripts/path-filter.sh
       if should_skip_multiprocess_for_good_first_issue; then
-        echo "Skipping multiprocessing tests for good first issue PR. Add force-ci to run the full suite."
+        echo "Skipping multiprocessing tests for labeled PR. Add force-ci to run the full suite."
         exit 0
       fi
       merge_pr_base_branch
