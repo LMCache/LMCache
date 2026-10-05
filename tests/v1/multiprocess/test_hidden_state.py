@@ -16,7 +16,11 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchResult,
+)
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 CHUNK_SIZE = 4
@@ -61,6 +65,9 @@ class _Bitmap:
                 break
             count += 1
         return count
+
+    def popcount(self) -> int:
+        return sum(1 for hit in self._hits if hit)
 
 
 class _FakeStorageManager:
@@ -110,8 +117,12 @@ class _FakeStorageManager:
     def wait_prefetch_status(self, handle: int, timeout: float) -> bool:
         return True
 
-    def query_prefetch_status(self, handle: int) -> list[_Bitmap]:
-        return [_Bitmap([key in self.committed for key in self._handles[handle]])]
+    def query_prefetch_status(self, handle: int) -> PrefetchResult:
+        # The real PrefetchResult, not a stand-in: the module reads a field off
+        # it, and a hand-rolled double would just mirror whatever the module
+        # already assumes.
+        row = _Bitmap([key in self.committed for key in self._handles[handle]])
+        return PrefetchResult(hit_cells=[row], l1_hit_cells=[row], l2_hit_cells=[])
 
     @contextmanager
     def read_prefetched_results(

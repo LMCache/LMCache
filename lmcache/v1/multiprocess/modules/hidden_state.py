@@ -182,9 +182,9 @@ class HiddenStateModule(InstanceLivenessTarget):
         ):
             return 0
         found = self._ctx.storage_manager.query_prefetch_status(handle)
-        if not found:
+        if found is None or not found.hit_cells:
             return 0
-        return found[0].count_leading_ones() * self._ctx.chunk_size
+        return found.hit_cells[0].count_leading_ones() * self._ctx.chunk_size
 
     @request_handler(HandlerType.BLOCKING)
     def store_hidden_state(
@@ -274,9 +274,9 @@ class HiddenStateModule(InstanceLivenessTarget):
         ):
             return b"", 0
         found = self._ctx.storage_manager.query_prefetch_status(handle)
-        if not found:
+        if found is None or not found.hit_cells:
             return b"", 0
-        hit_chunks = found[0].count_leading_ones()
+        hit_chunks = found.hit_cells[0].count_leading_ones()
         if hit_chunks == 0:
             return b"", 0
 
