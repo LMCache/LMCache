@@ -223,9 +223,17 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": int,
     },
     # the lmcache_worker_heartbeat_time means that sending heartbeat periodically.
+    # Defaults ON: the controller's health check deregisters any worker whose
+    # last heartbeat is older than lmcache_worker_timeout (30s by default),
+    # INCLUDING workers that never sent one - with a None default every
+    # worker was silently deregistered ~30s after registering, emptying the
+    # KV index ("cache misses that shouldn't be occurring") with no error.
+    # Must stay comfortably below lmcache_worker_timeout. Set 0 to disable
+    # heartbeats explicitly (only sensible when the controller's health
+    # check is also disabled via health_check_interval <= 0).
     "lmcache_worker_heartbeat_time": {
         "type": Optional[int],
-        "default": None,
+        "default": 10,
         "env_converter": int,
     },
     # PD-related configurations
