@@ -153,6 +153,67 @@ def _query_window(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_prepare_forward_skips_vanilla_step_outside_observation_window():
+    worker = RKVWorker(BUDGET, buffer=16)
+    worker.register_kv_caches(_new_cache(8))
+    layers = {name: _FakeAttention(name) for name in LAYER_NAMES}
+    worker.install_query_hooks(layers)
+    assert worker._query_hooks_installed
+
+    state = SimpleNamespace(
+        request_id="req",
+        first_block_id=1,
+        resident_kv_tokens=33,
+        has_physical_override=False,
+        is_genuine_decode=True,
+        num_decoded_tokens=1,
+        num_new_tokens=1,
+    )
+
+    # The fast path restores vanilla attention before touching its metadata.
+    worker.prepare_forward(SimpleNamespace(attn_metadata=None), [state])
+
+    assert worker._seq_lens is None
+    assert worker._block_table is None
+    assert not worker._query_hooks_installed
+    for layer in layers.values():
+        assert layer.impl.forward.__func__ is _FakeAttentionImpl.forward
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_begin_step_only_plans_queries_marked_for_observation():
+    worker = RKVWorker(BUDGET, buffer=16)
+    worker.register_kv_caches(_new_cache(8))
+    metadata = _metadata([1, 3, 5], BUDGET + WINDOW, 1)
+
+    worker.begin_step(
+        ["req"],
+        metadata,
+        physical_seq_lens=[BUDGET + WINDOW],
+        observe_query=[False],
+        is_genuine_decode=[True],
+        num_decoded_tokens=[1],
+        num_new_tokens=[1],
+    )
+    assert worker._query_last_indices is None
+    assert worker._query_write_indices is None
+    assert "req" not in worker._query_counts
+
+    worker.begin_step(
+        ["req"],
+        metadata,
+        physical_seq_lens=[BUDGET + WINDOW],
+        observe_query=[True],
+        is_genuine_decode=[True],
+        num_decoded_tokens=[9],
+        num_new_tokens=[1],
+    )
+    assert worker._query_last_indices is not None
+    assert worker._query_write_indices is not None
+    assert worker._query_counts["req"] == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_prepare_forward_builds_physical_view_and_captures_queries():
     caches = _new_cache(8)
     worker = RKVWorker(BUDGET, buffer=WINDOW)
@@ -188,16 +249,18 @@ def test_prepare_forward_builds_physical_view_and_captures_queries():
             request_id="req-b",
             first_block_id=2,
             resident_kv_tokens=40,
+            has_physical_override=True,
             is_genuine_decode=True,
-            num_decoded_tokens=0,
+            num_decoded_tokens=8,
             num_new_tokens=1,
         ),
         SimpleNamespace(
             request_id="req-a",
             first_block_id=1,
             resident_kv_tokens=33,
+            has_physical_override=True,
             is_genuine_decode=True,
-            num_decoded_tokens=0,
+            num_decoded_tokens=8,
             num_new_tokens=1,
         ),
     ]

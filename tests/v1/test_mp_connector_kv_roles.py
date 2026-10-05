@@ -371,7 +371,6 @@ def test_scheduler_rkv_cap_does_not_require_future_headroom_allocated() -> None:
 
 def test_scheduler_builds_authoritative_rkv_state() -> None:
     clear_resident_kv_tokens("request")
-    set_resident_kv_tokens("request", 33)
 
     scheduler = LMCacheMPConnector.__new__(LMCacheMPConnector)
     scheduler._rkv_allocations = {"request": object()}
@@ -389,15 +388,30 @@ def test_scheduler_builds_authoritative_rkv_state() -> None:
         scheduled_cached_reqs=SimpleNamespace(req_ids=["request"]),
         num_scheduled_tokens={"request": 1},
     )
+
     metadata = LMCacheMPConnectorMetadata()
-
     scheduler._add_rkv_request_states(scheduler_output, metadata)
-
     assert metadata.rkv_requests == [
         LMCacheMPRKVRequestState(
             request_id="request",
             first_block_id=10,
             resident_kv_tokens=33,
+            has_physical_override=False,
+            is_genuine_decode=True,
+            num_decoded_tokens=1,
+            num_new_tokens=1,
+        )
+    ]
+
+    set_resident_kv_tokens("request", 33)
+    metadata = LMCacheMPConnectorMetadata()
+    scheduler._add_rkv_request_states(scheduler_output, metadata)
+    assert metadata.rkv_requests == [
+        LMCacheMPRKVRequestState(
+            request_id="request",
+            first_block_id=10,
+            resident_kv_tokens=33,
+            has_physical_override=True,
             is_genuine_decode=True,
             num_decoded_tokens=1,
             num_new_tokens=1,
@@ -796,7 +810,24 @@ def test_rkv_step_facts_are_policy_free(
     )
 
 
-def test_rkv_rejects_chunked_prefill() -> None:
+@pytest.mark.parametrize(
+    ("case", "match"),
+    [
+        ("prefix", "prefix caching disabled"),
+        ("chunked", "does not support chunked prefill"),
+        ("speculative", "does not support speculative decoding"),
+        ("async", "synchronous scheduling"),
+        ("cudagraph", "PIECEWISE"),
+        ("multi_gpu", "single GPU"),
+        ("multi_group", "exactly one KV cache group"),
+    ],
+)
+def test_rkv_rejects_unsupported_runtime_modes(
+    case: str,
+    match: str,
+    mock_io: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config = _config(
         KVTransferConfig(
             kv_connector="LMCacheMPConnector",
@@ -805,7 +836,29 @@ def test_rkv_rejects_chunked_prefill() -> None:
         )
     )
     config.cache_config.enable_prefix_caching = False
-    config.scheduler_config.enable_chunked_prefill = True
+    config.model_config.enforce_eager = True
 
-    with pytest.raises(ValueError, match="does not support chunked prefill"):
+    if case == "prefix":
+        config.cache_config.enable_prefix_caching = True
+    elif case == "chunked":
+        config.scheduler_config.enable_chunked_prefill = True
+    elif case == "speculative":
+        config.speculative_config = object()
+    elif case == "async":
+        config.scheduler_config.async_scheduling = True
+    elif case == "cudagraph":
+        config.model_config.enforce_eager = False
+        config.compilation_config = SimpleNamespace(cudagraph_mode=object())
+    elif case == "multi_gpu":
+        config.parallel_config.world_size = 2
+    elif case == "multi_group":
+        monkeypatch.setattr(
+            connector_mod,
+            "get_group_tokens_per_block",
+            lambda *args, **kwargs: [4, 4],
+        )
+    else:
+        raise AssertionError(f"unknown case: {case}")
+
+    with pytest.raises(ValueError, match=match):
         LMCacheMPConnector(config, KVConnectorRole.WORKER)

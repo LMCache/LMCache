@@ -80,6 +80,7 @@ class RKVWorker:
         self._num_new_tokens: list[int] | None = None
         self._compacted_requests: set[str] = set()
         self._query_hooks_installed = False
+        self._query_hook_originals: dict[str, tuple[Any, Any]] = {}
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if not kv_caches:
@@ -107,6 +108,7 @@ class RKVWorker:
         self._block_size = block_size
 
     def reset(self) -> None:
+        self.remove_query_hooks()
         self._query_rings.clear()
         self._query_slots.clear()
         self._free_query_slots.clear()
@@ -130,6 +132,23 @@ class RKVWorker:
         request_states: list[Any],
     ) -> None:
         if not request_states:
+            self.remove_query_hooks()
+            self._clear_step()
+            return
+
+        observe_by_request = {
+            state.request_id: self._policy.should_observe_query(
+                num_decoded_tokens=int(state.num_decoded_tokens),
+                num_new_tokens=int(state.num_new_tokens),
+                is_genuine_decode=bool(state.is_genuine_decode),
+            )
+            for state in request_states
+        }
+        has_physical_override = any(
+            bool(state.has_physical_override) for state in request_states
+        )
+        if not has_physical_override and not any(observe_by_request.values()):
+            self.remove_query_hooks()
             self._clear_step()
             return
 
@@ -149,9 +168,8 @@ class RKVWorker:
                 raise ValueError("R-KV requires private, uniquely-owned KV blocks")
             by_first_block[first_block] = state
 
-        # vLLM's model runner already owns the authoritative paged-KV block
-        # table. The connector only needs a stable row identity to align
-        # scheduler facts after persistent-batch condense/reordering.
+        # vLLM's model runner owns the authoritative paged-KV block table.
+        # The connector carries only the first block as a stable row identity.
         block_table = representative.block_table
         first_blocks = block_table[:num_reqs, 0].tolist()
         try:
@@ -159,6 +177,9 @@ class RKVWorker:
         except KeyError as exc:
             raise ValueError("R-KV could not match worker rows to requests") from exc
 
+        observe_query = [
+            observe_by_request[state.request_id] for state in ordered_states
+        ]
         query_lens = [int(state.num_new_tokens) for state in ordered_states]
         if any(state.resident_kv_tokens is None for state in ordered_states):
             raise RuntimeError("R-KV scheduler metadata is missing resident KV length")
@@ -173,51 +194,63 @@ class RKVWorker:
         ):
             raise ValueError("R-KV received invalid physical/query lengths")
 
-        seq_lens = representative.seq_lens.clone()
-        physical_seq_lens_gpu = torch.as_tensor(
-            physical_seq_lens,
-            dtype=seq_lens.dtype,
-            device=seq_lens.device,
-        )
-        seq_lens[:num_reqs] = physical_seq_lens_gpu
+        if any(bool(state.has_physical_override) for state in ordered_states):
+            seq_lens = representative.seq_lens.clone()
+            physical_seq_lens_gpu = torch.as_tensor(
+                physical_seq_lens,
+                dtype=seq_lens.dtype,
+                device=seq_lens.device,
+            )
+            seq_lens[:num_reqs] = physical_seq_lens_gpu
 
-        # Re-map this step's newly written tokens to the compacted physical
-        # frontier in one vectorized paged-KV lookup.
-        query_start_loc = representative.query_start_loc
-        query_lens_gpu = (
-            query_start_loc[1 : num_reqs + 1] - query_start_loc[:num_reqs]
-        ).long()
-        rows = torch.repeat_interleave(
-            torch.arange(num_reqs, device=block_table.device),
-            query_lens_gpu,
-        )
-        flat_positions = torch.arange(
-            sum(query_lens),
-            device=block_table.device,
-            dtype=torch.long,
-        )
-        relative_positions = flat_positions - query_start_loc[:num_reqs].long().index_select(
-            0, rows
-        )
-        physical_starts = physical_seq_lens_gpu.long() - query_lens_gpu
-        positions = relative_positions + physical_starts.index_select(0, rows)
-        slot_mapping = (
-            block_table[rows, positions // self._block_size].long() * self._block_size
-            + positions % self._block_size
-        )
+            # Re-map this step's newly written tokens to the compacted physical
+            # frontier in one vectorized paged-KV lookup.
+            query_start_loc = representative.query_start_loc
+            query_lens_gpu = (
+                query_start_loc[1 : num_reqs + 1] - query_start_loc[:num_reqs]
+            ).long()
+            rows = torch.repeat_interleave(
+                torch.arange(num_reqs, device=block_table.device),
+                query_lens_gpu,
+            )
+            flat_positions = torch.arange(
+                sum(query_lens),
+                device=block_table.device,
+                dtype=torch.long,
+            )
+            relative_positions = (
+                flat_positions
+                - query_start_loc[:num_reqs].long().index_select(0, rows)
+            )
+            physical_starts = physical_seq_lens_gpu.long() - query_lens_gpu
+            positions = relative_positions + physical_starts.index_select(0, rows)
+            slot_mapping = (
+                block_table[rows, positions // self._block_size].long()
+                * self._block_size
+                + positions % self._block_size
+            )
 
-        apply_physical_kv_view(
-            forward_context,
-            seq_lens=seq_lens,
-            max_seq_len=max(physical_seq_lens),
-            block_table=block_table,
-            slot_mapping={layer_name: slot_mapping for layer_name in attn_metadata},
-        )
+            apply_physical_kv_view(
+                forward_context,
+                seq_lens=seq_lens,
+                max_seq_len=max(physical_seq_lens),
+                block_table=block_table,
+                slot_mapping={
+                    layer_name: slot_mapping for layer_name in attn_metadata
+                },
+            )
+
+        if not any(observe_query):
+            self.remove_query_hooks()
+            self._clear_step()
+            return
+
         self.install_query_hooks(forward_context.no_compile_layers)
         self.begin_step(
             [state.request_id for state in ordered_states],
             next(iter(forward_context.attn_metadata.values())),
             physical_seq_lens=physical_seq_lens,
+            observe_query=observe_query,
             is_genuine_decode=[
                 bool(state.is_genuine_decode) for state in ordered_states
             ],
@@ -235,6 +268,7 @@ class RKVWorker:
         attn_metadata: Any,
         *,
         physical_seq_lens: list[int],
+        observe_query: list[bool] | None = None,
         is_genuine_decode: list[bool] | None = None,
         num_decoded_tokens: list[int] | None = None,
         num_new_tokens: list[int] | None = None,
@@ -269,14 +303,20 @@ class RKVWorker:
             if num_new_tokens is None
             else list(num_new_tokens)
         )
+        observe_query = (
+            list(self._is_genuine_decode)
+            if observe_query is None
+            else list(observe_query)
+        )
         if (
             len(self._is_genuine_decode) != num_reqs
             or len(self._num_decoded_tokens) != num_reqs
             or len(self._num_new_tokens) != num_reqs
+            or len(observe_query) != num_reqs
         ):
             raise ValueError("R-KV request/step fact count mismatch")
 
-        self._prepare_query_write_plan(query_start_loc)
+        self._prepare_query_write_plan(query_start_loc, observe_query)
         self._seq_lens = list(physical_seq_lens)
         self._block_table = attn_metadata.block_table
 
@@ -288,6 +328,7 @@ class RKVWorker:
         if missing:
             raise RuntimeError(f"R-KV attention layers are missing: {sorted(missing)}")
 
+        originals: dict[str, tuple[Any, Any]] = {}
         for layer_name in self._layer_names:
             layer = no_compile_layers[layer_name]
             impl = getattr(layer, "impl", None)
@@ -296,6 +337,9 @@ class RKVWorker:
                 raise RuntimeError(
                     f"R-KV attention backend is missing for {layer_name}"
                 )
+            originals[layer_name] = (impl, original_forward)
+
+        for impl, original_forward in originals.values():
 
             def forward_with_query_capture(
                 attn_layer: Any,
@@ -334,17 +378,39 @@ class RKVWorker:
             # this engine's R-KV attention path is observed.
             impl.forward = forward_with_query_capture
 
+        self._query_hook_originals = originals
         self._query_hooks_installed = True
 
-    def _prepare_query_write_plan(self, query_start_loc: torch.Tensor) -> None:
+    def remove_query_hooks(self) -> None:
+        if not self._query_hooks_installed:
+            return
+
+        for impl, original_forward in self._query_hook_originals.values():
+            impl.forward = original_forward
+        self._query_hook_originals.clear()
+        self._query_hooks_installed = False
+
+    def _prepare_query_write_plan(
+        self,
+        query_start_loc: torch.Tensor,
+        observe_query: list[bool],
+    ) -> None:
         assert self._is_genuine_decode is not None
 
         active_rows: list[int] = []
         active_slots: list[int] = []
         cursors: list[int] = []
-        for row, (request_id, is_decode) in enumerate(
-            zip(self._request_ids, self._is_genuine_decode, strict=True)
+        for row, (request_id, is_decode, observe) in enumerate(
+            zip(
+                self._request_ids,
+                self._is_genuine_decode,
+                observe_query,
+                strict=True,
+            )
         ):
+            if not is_decode or not observe:
+                continue
+
             slot = self._query_slots.get(request_id)
             if slot is None:
                 slot = (
@@ -356,9 +422,6 @@ class RKVWorker:
                     self._next_query_slot += 1
                 self._query_slots[request_id] = slot
                 self._query_counts[request_id] = 0
-
-            if not is_decode:
-                continue
 
             count = self._query_counts[request_id]
             active_rows.append(row)

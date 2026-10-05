@@ -401,6 +401,7 @@ class LMCacheMPRKVRequestState:
     request_id: str
     first_block_id: int
     resident_kv_tokens: int | None = None
+    has_physical_override: bool = False
     is_genuine_decode: bool = False
     num_decoded_tokens: int = 0
     num_new_tokens: int = 0

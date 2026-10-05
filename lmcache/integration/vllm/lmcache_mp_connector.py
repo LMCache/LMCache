@@ -1593,15 +1593,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 num_prompt_tokens=tracker.num_prompt_tokens,
             )
 
-            resident_kv_tokens = get_resident_kv_tokens(request_id)
-            if resident_kv_tokens is None:
-                resident_kv_tokens = tracker.num_scheduled_tokens
+            resident_override = get_resident_kv_tokens(request_id)
+            resident_kv_tokens = (
+                tracker.num_scheduled_tokens
+                if resident_override is None
+                else resident_override
+            )
 
             metadata.rkv_requests.append(
                 LMCacheMPRKVRequestState(
                     request_id=request_id,
                     first_block_id=block_ids[0],
                     resident_kv_tokens=resident_kv_tokens,
+                    has_physical_override=resident_override is not None,
                     is_genuine_decode=is_genuine_decode,
                     num_decoded_tokens=num_decoded_tokens,
                     num_new_tokens=num_new_tokens,
