@@ -40,6 +40,9 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._ctx = MagicMock(name="ctx")
     module._cache_contexts = {}
+    module._sparse_jobs = {}
+    module._sparse_orphan_handles = {}
+    module._sparse_jobs_lock = threading.Lock()
     module._lock = threading.Lock()
     return module
 

@@ -5,6 +5,7 @@ Distributed multi-tier storage manager for MP mode
 
 # Standard
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field
 from typing import Any, Iterator, Optional, cast
 import threading
 import time
@@ -18,6 +19,7 @@ from lmcache.v1.distributed.api import (
     ModuleMemoryCapacity,
     ObjectKey,
     PrefetchHandle,
+    PrefetchLockMode,
     PrefetchResult,
     PrefetchTaskSpec,
     Tier,
@@ -90,6 +92,15 @@ _L1_WRITE_TAG = "storage_manager"
 L1WriteCompletion = list[tuple[int, list[ObjectKey]]]
 
 
+@dataclass
+class _PrefetchLeaseState:
+    handle: PrefetchHandle
+    spec: PrefetchTaskSpec
+    result: PrefetchResult | None = None
+    released: bool = False
+    lock: threading.RLock = field(default_factory=threading.RLock)
+
+
 class StorageManager:
     def __init__(
         self,
@@ -128,6 +139,8 @@ class StorageManager:
                 raise ValueError(
                     "internal L1 overflow requires no L2 and noop eviction"
                 )
+        self._prefetch_release_lock = threading.Lock()
+        self._prefetch_handle_metadata: dict[int, _PrefetchLeaseState] = {}
         managers = (
             _l1_managers
             if _l1_managers is not None
@@ -411,6 +424,8 @@ class StorageManager:
     def read_prefetched_results(
         self,
         keys: list[ObjectKey],
+        *,
+        release_on_error: bool = True,
     ) -> Iterator[list[MemoryObj] | None]:
         """
         Read the memory objects from L1 storage that has been prefetched beforehand.
@@ -425,6 +440,9 @@ class StorageManager:
                 memory objects corresponding to the requested keys.
 
         Note:
+            Set release_on_error=False for a lease whose owner must first
+            synchronize an asynchronous copy before releasing its read locks.
+
             If any object is not found in L1 storage, None is yielded. In this case,
             this function will release release the read lock of all successfully read
             memory objects when exiting the context.
@@ -509,7 +527,7 @@ class StorageManager:
         finally:
             # Decrease the read lock for all successfully read memory objects
             # if None is yielded or exception occurs during caller's processing
-            if not all_good or not successfully_yielded:
+            if release_on_error and (not all_good or not successfully_yielded):
                 self._l1_manager.finish_read(good_keys)
                 self._event_bus.publish(
                     Event(
@@ -656,6 +674,105 @@ class StorageManager:
         return self._prefetch_controller.wait_prefetch_result(
             handle.prefetch_request_id, timeout
         )
+
+    def submit_prefetch_lease(
+        self, spec: PrefetchTaskSpec, external_request_id: str = ""
+    ) -> PrefetchHandle:
+        """Submit a prefetch with manager-owned, explicitly released read locks.
+
+        Ordinary submit_prefetch_task callers keep their explicit finish_read
+        contract. A lease retains its complete grouped specification, so late
+        completion and cancellation release exactly the keys it acquired.
+        """
+        if spec.lock_mode is not PrefetchLockMode.LOCK:
+            raise ValueError("prefetch leases require read locks")
+        handle = self.submit_prefetch_task(spec, external_request_id)
+        with self._prefetch_release_lock:
+            self._prefetch_handle_metadata[handle.prefetch_request_id] = (
+                _PrefetchLeaseState(handle=handle, spec=spec)
+            )
+        return handle
+
+    def query_prefetch_lease(self, handle: PrefetchHandle) -> PrefetchResult | None:
+        """Read and retain a lease result until its explicit release."""
+        state = self._prefetch_lease(handle)
+        if state is None:
+            return None
+        with state.lock:
+            if state.released:
+                return None
+            if state.result is None:
+                state.result = self.query_prefetch_status(handle)
+            return state.result
+
+    def wait_prefetch_lease(
+        self, handle: PrefetchHandle, timeout: float | None
+    ) -> bool:
+        """Wait for an owned lease, including a previously observed result."""
+        state = self._prefetch_lease(handle)
+        if state is None:
+            return False
+        with state.lock:
+            if state.released:
+                return False
+            if state.result is not None:
+                return True
+            return self._prefetch_controller.wait_prefetch_result(
+                handle.prefetch_request_id, timeout
+            )
+
+    def cancel_prefetch_task(self, handle: PrefetchHandle) -> bool:
+        """Cancel future consumption and drain accepted I/O before unlock.
+
+        The controller owns accepted adapter tasks. Wait for their terminal
+        result before releasing locks; do not unlock a write reservation or
+        pinned L2 object while that task can still access it.
+        """
+        self.release_prefetch_task(handle)
+        return True
+
+    def release_prefetch_task(
+        self, handle: PrefetchHandle, keys: list[ObjectKey] | None = None
+    ) -> None:
+        """Release every retained key of one lease once, after I/O completes.
+
+        keys may be supplied by a consumer for consistency validation. It
+        never broadens the owned key set or releases another lease's locks.
+        """
+        state = self._prefetch_lease(handle)
+        if state is None:
+            return
+        with state.lock:
+            if state.released:
+                return
+            if state.result is None:
+                if not self.wait_prefetch_lease(handle, timeout=None):
+                    raise RuntimeError("prefetch lease did not reach completion")
+                state.result = self.query_prefetch_status(handle)
+            if state.result is None:
+                raise RuntimeError(
+                    "prefetch lease result was consumed outside its owner"
+                )
+            retained = [
+                key
+                for row, hits in zip(
+                    state.spec.key_groups, state.result.hit_cells, strict=True
+                )
+                for key in hits.gather(row.keys)
+            ]
+            if keys is not None and not set(keys).issubset(retained):
+                raise ValueError("release keys do not belong to this prefetch lease")
+            self.finish_read_prefetched(retained, state.spec.num_kv_readers)
+            state.released = True
+            with self._prefetch_release_lock:
+                self._prefetch_handle_metadata.pop(handle.prefetch_request_id, None)
+
+    def consume_prefetch_task(self, handle: PrefetchHandle) -> PrefetchResult | None:
+        """Observe a completed lease and release its retained read locks."""
+        result = self.query_prefetch_lease(handle)
+        if result is not None:
+            self.release_prefetch_task(handle)
+        return result
 
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
@@ -1209,6 +1326,10 @@ class StorageManager:
         """
         Close the storage manager and release all resources.
         """
+        with self._prefetch_release_lock:
+            handles = tuple(s.handle for s in self._prefetch_handle_metadata.values())
+        for handle in handles:
+            self.cancel_prefetch_task(handle)
         self._prefetch_controller.stop()
         self._store_controller.stop()
         self._eviction_controller.stop()
@@ -1279,6 +1400,11 @@ class StorageManager:
         """
         self._require_single_l1()
         return self._l1_manager.memcheck()
+
+    def _prefetch_lease(self, handle: PrefetchHandle) -> _PrefetchLeaseState | None:
+        with self._prefetch_release_lock:
+            state = self._prefetch_handle_metadata.get(handle.prefetch_request_id)
+            return state if state is not None and state.handle is handle else None
 
     def _require_single_l1(self) -> None:
         """Reject serving operations on the internal overflow-only harness."""

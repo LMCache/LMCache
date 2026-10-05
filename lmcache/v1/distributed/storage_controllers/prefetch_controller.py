@@ -621,7 +621,7 @@ class PrefetchController(StorageControllerInterface):
             return self._completed_results.pop(request_id, None)
 
     def wait_prefetch_result(
-        self, request_id: PrefetchRequestId, timeout: float
+        self, request_id: PrefetchRequestId, timeout: float | None
     ) -> bool:
         """
         Block until a prefetch request's result is published, or until timeout.
@@ -632,7 +632,7 @@ class PrefetchController(StorageControllerInterface):
 
         Args:
             request_id: The request ID from submit_prefetch_request.
-            timeout: Maximum number of seconds to wait for the result.
+            timeout: Maximum seconds to wait, or None to drain accepted I/O.
 
         Returns:
             True if the result became available within the timeout, False if

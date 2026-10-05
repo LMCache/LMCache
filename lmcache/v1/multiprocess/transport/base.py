@@ -148,6 +148,53 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[bool]: ...
 
     @rpc_method
+    def sparse_prefetch(
+        self,
+        instance_id: int,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        keys: list[ObjectKey],
+    ) -> MessagingFuture[bool]: ...
+
+    @rpc_method
+    def sparse_query_prefetch(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> MessagingFuture[list[int] | None]: ...
+
+    @rpc_method
+    def sparse_wait_prefetch(
+        self,
+        instance_id: int,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        timeout: float,
+    ) -> MessagingFuture[list[int] | None]: ...
+
+    @rpc_method
+    def sparse_retrieve(
+        self,
+        instance_id: int,
+        request_id: str,
+        generation: int,
+        layer_id: int,
+        keys: list[ObjectKey],
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, tuple[bool, list[int]]]]: ...
+
+    @rpc_method
+    def sparse_cancel_prefetch(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> MessagingFuture[bool]: ...
+
+    @rpc_method
+    def sparse_release_prefetch(
+        self, instance_id: int, request_id: str, generation: int, layer_id: int
+    ) -> MessagingFuture[bool]: ...
+
+    @rpc_method
     def clear(self, force: bool = False) -> MessagingFuture[None]: ...
 
     @rpc_method

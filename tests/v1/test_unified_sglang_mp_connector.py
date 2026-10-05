@@ -4,6 +4,7 @@
 # Standard
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
+import threading
 import unittest
 
 # Third Party
@@ -80,6 +81,9 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.addCleanup(heartbeat_patcher.stop)
         self.connector = object.__new__(UnifiedLMCacheMPConnector)
         self.connector.page_size = 4
+        self.connector._sparse_key_cache = {}
+        self.connector._sparse_hash_cache = {}
+        self.connector._sparse_key_cache_lock = threading.Lock()
 
     def test_slots_to_blocks_accepts_noncontiguous_pages(self):
         slots = torch.tensor([4, 5, 6, 7, 12, 13, 14, 15])

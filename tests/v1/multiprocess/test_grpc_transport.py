@@ -201,6 +201,81 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             assert task_id == 41
             return [TransferChannelAddress(offset=8, size=16)]
 
+        @request_handler(HandlerType.BLOCKING)
+        def sparse_prefetch(
+            self,
+            instance_id: int,
+            request_id: str,
+            generation: int,
+            layer_id: int,
+            keys: list[ObjectKey],
+        ) -> bool:
+            assert (instance_id, request_id, generation, layer_id) == (
+                7,
+                "sparse",
+                2,
+                3,
+            )
+            assert keys == [ObjectKey(b"chunk", "model", 0, cache_salt="tenant")]
+            return True
+
+        @request_handler(HandlerType.BLOCKING)
+        def sparse_query_prefetch(
+            self,
+            instance_id: int,
+            request_id: str,
+            generation: int,
+            layer_id: int,
+        ) -> list[int] | None:
+            return None if generation == 0 else ([] if generation == 1 else [0, 2])
+
+        @request_handler(HandlerType.BLOCKING)
+        def sparse_wait_prefetch(
+            self,
+            instance_id: int,
+            request_id: str,
+            generation: int,
+            layer_id: int,
+            timeout: float,
+        ) -> list[int] | None:
+            assert timeout == 0.5
+            return [0, 2]
+
+        @request_handler(HandlerType.BLOCKING, requires_client_affinity=True)
+        def sparse_retrieve(
+            self,
+            instance_id: int,
+            request_id: str,
+            generation: int,
+            layer_id: int,
+            keys: list[ObjectKey],
+            block_ids: list[list[int]],
+            event_ipc_handle: bytes,
+        ) -> tuple[bytes, tuple[bool, list[int]]]:
+            assert block_ids == [[4, 8], [5, 9]]
+            assert event_ipc_handle == b"producer"
+            return b"completion", (True, [0, 2])
+
+        @request_handler(HandlerType.BLOCKING)
+        def sparse_cancel_prefetch(
+            self,
+            instance_id: int,
+            request_id: str,
+            generation: int,
+            layer_id: int,
+        ) -> bool:
+            return True
+
+        @request_handler(HandlerType.BLOCKING)
+        def sparse_release_prefetch(
+            self,
+            instance_id: int,
+            request_id: str,
+            generation: int,
+            layer_id: int,
+        ) -> bool:
+            return True
+
     modules: Any = FakeModules()
     server = GrpcMultiprocessServer(
         "grpc://127.0.0.1:0",
@@ -529,3 +604,22 @@ def test_generated_grpc_services_communicate_end_to_end(
     assert client.p2p_query_lookup_results(task_id).result(5) == [
         TransferChannelAddress(offset=8, size=16)
     ]
+
+
+def test_sparse_grpc_preserves_holes_empty_and_pending_results(
+    grpc_client: tuple[GrpcMultiprocessClient, _Calls],
+) -> None:
+    client, _ = grpc_client
+    keys = [ObjectKey(b"chunk", "model", 0, cache_salt="tenant")]
+    assert client.sparse_prefetch(7, "sparse", 2, 3, keys).result(5) is True
+    for generation, expected in ((0, None), (1, []), (2, [0, 2])):
+        assert (
+            client.sparse_query_prefetch(7, "sparse", generation, 3).result(5)
+            == expected
+        )
+    assert client.sparse_wait_prefetch(7, "sparse", 2, 3, 0.5).result(5) == [0, 2]
+    assert client.sparse_retrieve(
+        7, "sparse", 2, 3, keys, [[4, 8], [5, 9]], b"producer"
+    ).result(5) == (b"completion", (True, [0, 2]))
+    assert client.sparse_cancel_prefetch(7, "sparse", 2, 3).result(5) is True
+    assert client.sparse_release_prefetch(7, "sparse", 2, 3).result(5) is True
