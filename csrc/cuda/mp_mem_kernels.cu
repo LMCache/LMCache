@@ -9,7 +9,7 @@
 #include <mutex>
 
 #if defined(USE_ROCM)
-#include <hip/hip_version.h>
+  #include <hip/hip_version.h>
 #endif
 
 namespace {
@@ -761,7 +761,7 @@ bool batch_memcpy_supported() {
     int driver = 0;
     if (cudaRuntimeGetVersion(&runtime) != cudaSuccess) return false;
     if (cudaDriverGetVersion(&driver) != cudaSuccess) return false;
-#if defined(USE_ROCM)
+  #if defined(USE_ROCM)
     // HIP versions its runtime/driver on a different scale, so the compile-time
     // HIP_VERSION guard cannot by itself prove the op is functional: some HIP
     // builds link hipMemcpyBatchAsync but return hipErrorNotSupported at
@@ -790,15 +790,16 @@ bool batch_memcpy_supported() {
       return true;
     }
     int can_use_host_ptr = 0;
-    if (hipDeviceGetAttribute(&can_use_host_ptr,
-                              hipDeviceAttributeCanUseHostPointerForRegisteredMem,
-                              device) != hipSuccess) {
+    if (hipDeviceGetAttribute(
+            &can_use_host_ptr,
+            hipDeviceAttributeCanUseHostPointerForRegisteredMem,
+            device) != hipSuccess) {
       return false;
     }
     return can_use_host_ptr != 0;
-#else
+  #else
     return runtime >= 12080 && driver >= 12080;
-#endif
+  #endif
   }();
   return supported;
 #else
