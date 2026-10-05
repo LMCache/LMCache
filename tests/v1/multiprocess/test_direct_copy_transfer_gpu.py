@@ -40,7 +40,9 @@ pytestmark = [
     pytest.mark.skipif(
         not hasattr(cuda_ops, "execute_direct_copy_transfer")
         or not cuda_ops.batch_memcpy_supported(),
-        reason="cudaMemcpyBatchAsync unavailable (needs CUDA >= 12.8 or ROCm/HIP >= 7.15)",
+        reason=(
+            "cudaMemcpyBatchAsync unavailable (needs CUDA >= 12.8 or ROCm/HIP >= 7.15)"
+        ),
     ),
 ]
 
