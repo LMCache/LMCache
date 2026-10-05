@@ -394,11 +394,19 @@ class LMCacheMPRequestMetadata:
         return None
 
 
+@dataclass
+class LMCacheMPRKVRequestState:
+    request_id: str
+    block_ids: list[int]
+    resident_kv_tokens: int | None = None
+
+
 class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
         self.need_flush_before_forward: bool = False
+        self.rkv_requests: list[LMCacheMPRKVRequestState] = []
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)
@@ -443,10 +451,13 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             breaks the request's stored-prefix chain so later chunks are not
             stored unreachable. ``aggregate()`` unions the sets: one rank's
             failure breaks the chain even when the other ranks succeeded.
+        resident_kv_updates: Absolute resident KV lengths produced by worker-side
+            compaction in this step.
     """
 
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
+    resident_kv_updates: dict[str, int] = field(default_factory=dict)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -464,9 +475,19 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
+
+        resident_kv_updates = self.resident_kv_updates or other.resident_kv_updates
+        if (
+            self.resident_kv_updates
+            and other.resident_kv_updates
+            and self.resident_kv_updates != other.resident_kv_updates
+        ):
+            raise ValueError("Workers reported different resident KV lengths")
+
         return LMCacheMPWorkerMetadata(
             completed_store_requests=merged,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
             ),
+            resident_kv_updates=dict(resident_kv_updates),
         )
