@@ -472,6 +472,9 @@ class SegmentTokenDatabase(TokenDatabase):
 
         if self.sep_len == 0 or len(tokens) < self.sep_len:
             yield tokens
+            # `tokens.unfold(0, self.sep_len, 1)` below raises when
+            # `len(tokens) < self.sep_len`, so this branch must return early.
+            return
 
         # Unfold into sliding windows
         # shape: (num_tokens-sep_len+1, sep_len)

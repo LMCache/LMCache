@@ -132,6 +132,55 @@ def test_segment_token_database(prefix_length, chunk_lengths):
         # print(ed, ends[i])
 
 
+class _StubTokenizer:
+    """Minimal stand-in for a HF tokenizer.
+
+    Lets ``SegmentTokenDatabase`` be constructed without downloading a model;
+    only ``encode`` is used by ``SegmentTokenDatabase.__init__``.
+    """
+
+    def __init__(self, sep_ids: list[int]) -> None:
+        self._sep_ids = sep_ids
+
+    def encode(self, text: str) -> list[int]:
+        return self._sep_ids
+
+
+class _StubAutoTokenizer:
+    """Stand-in for ``transformers.AutoTokenizer`` that never hits the network."""
+
+    @staticmethod
+    def from_pretrained(model_name: str) -> _StubTokenizer:
+        # __init__ drops the first encoded token, so the effective separator
+        # becomes [9, 9, 9] (sep_len == 3).
+        return _StubTokenizer([0, 9, 9, 9])
+
+
+def test_segment_split_handles_sequence_shorter_than_separator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sequence shorter than the separator yields one segment, not a crash.
+
+    Regression test: ``_fast_split_by_subtensor`` used to fall through to
+    ``tensor.unfold(0, sep_len, 1)`` for such inputs, which raises a
+    RuntimeError when ``len(tokens) < sep_len``.
+    """
+    monkeypatch.setattr("lmcache.v1.token_database.AutoTokenizer", _StubAutoTokenizer)
+
+    cfg = LMCacheEngineConfig.from_legacy(blend_special_str=" # # ")
+    metadata = dumb_metadata_with_model_name("dummy-model")
+    db = SegmentTokenDatabase(cfg, metadata)
+    assert db.sep_len == 3
+
+    # Two tokens: shorter than the 3-token separator.
+    short_tokens = torch.tensor([11, 12], dtype=torch.long)
+    results = list(db.process_tokens(tokens=short_tokens, make_key=False))
+
+    assert len(results) == 1
+    start, end, _ = results[0]
+    assert (start, end) == (0, 2)
+
+
 def test_process_tokens_returns_int_keys_for_bytes_hash_func() -> None:
     """process_tokens must produce int chunk_hash keys even when the underlying
     hash function returns bytes (e.g. sha256_cbor). This ensures downstream
