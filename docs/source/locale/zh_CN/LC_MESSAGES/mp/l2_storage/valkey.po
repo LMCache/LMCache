@@ -1,0 +1,197 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/valkey.rst:2
+msgid "Valkey"
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:4
+msgid ""
+"An L2 adapter backed by the official ``valkey-glide`` **sync** Python "
+"client. Stores KV cache chunks in a Valkey (or Redis) server and supports"
+" both **standalone** (``GlideClient``) and **Valkey-Cluster** "
+"(``GlideClusterClient``) topologies, selected via ``cluster_mode``."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:9
+msgid ""
+"I/O is dispatched through an internal ``ValkeyWorkerPool`` of worker "
+"threads; each worker holds its own glide client so a batch of keys "
+"parallelizes across threads and (in cluster mode) across primaries."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:14
+msgid "Why the ``valkey`` adapter (vs. the RESP adapter)"
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:16
+msgid ""
+"The :doc:`RESP <resp>` adapter targets a single Redis/Valkey server over "
+"the native C++ RESP connector. The ``valkey`` adapter is a first-class "
+"Valkey backend: it speaks ``valkey-glide-sync`` directly, adds Valkey-"
+"Cluster support (slot routing, MOVED/ASK redirects, and topology "
+"discovery are handled inside ``GlideClusterClient``), and preserves copy-"
+"reduced SET/GET on multi-megabyte KV chunks (see the `Valkey L2 Adapter "
+"design doc "
+"<https://github.com/LMCache/LMCache/blob/dev/docs/design/v1/distributed/l2_adapters/valkey.md>`_"
+" for the full rationale, including why the sync -- not async -- glide "
+"client is used)."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:28
+msgid "Prerequisites -- installing the glide sync client"
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:30
+msgid ""
+"The ``valkey`` adapter requires the ``valkey-glide-sync`` package "
+"(version ``>= 2.3.0``, the first release with both copy-reduced SET and "
+"buffer GET). It is lazy-imported the first time a Valkey worker starts:"
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:39
+msgid ""
+"If the package is missing when a Valkey worker starts, adapter "
+"construction fails with::"
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:46
+msgid "**Required fields:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:48
+msgid ""
+"``startup_nodes``: A ``\"host:port[,host:port...]\"`` string of seed "
+"nodes."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:51
+msgid ""
+"In **standalone** mode (``cluster_mode: false``, the default) only the "
+"first entry is used; extras trigger a warning."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:53
+msgid ""
+"In **cluster** mode any reachable seed is enough -- glide auto- discovers"
+" the full topology."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:56
+msgid "**Optional fields:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:58
+msgid ""
+"``cluster_mode`` (bool, default ``false``): When ``true`` use "
+"``GlideClusterClient``; otherwise use standalone ``GlideClient``."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:60
+msgid "``username`` (str, default ``\"\"``): Optional auth username."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:61
+msgid "``password`` (str, default ``\"\"``): Optional auth password."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:62
+msgid ""
+"``key_prefix`` (str, default ``\"\"``): Deployment-level key namespace, "
+"joined with the standard wire key by ``@``. **Must not contain** ``@``. "
+"Leave empty for a wire-format identical to the unprefixed layout."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:66
+msgid ""
+"``num_workers`` (int, default ``8``, > 0): Size of the internal worker "
+"thread pool. Each worker holds its own glide client, so this is the real "
+"I/O concurrency knob -- raise it to push throughput on large batches / "
+"cluster deployments."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:70
+msgid ""
+"``tls_enable`` (bool, default ``false``): Enable TLS. Required for "
+"managed Valkey services such as ElastiCache Serverless."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:72
+msgid ""
+"``database_id`` (int, optional): Logical database id for **standalone** "
+"mode. Ignored (with a warning) when ``cluster_mode: true``."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:75
+msgid ""
+"``request_timeout`` (float, default ``5.0``, > 0): Per-request timeout, "
+"in seconds."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:77
+msgid ""
+"``connection_timeout`` (float, default ``10.0``, > 0): Initial connection"
+" timeout, in seconds."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:79
+msgid ""
+"``max_capacity_gb`` (float, default ``0``, >= 0): Declared aggregate "
+"capacity in GB used to drive **LMCache-side** eviction. ``0`` (the "
+"default and the recommended setting) disables global LMCache eviction and"
+" defers to the Valkey server's own ``maxmemory`` / eviction policy; "
+"per-``cache_salt`` quotas configured on the coordinator still operate "
+"either way. Set ``> 0`` (together with an ``eviction`` block) only when a"
+" single LMCache writer privately owns the cluster -- do **not** combine "
+"``> 0`` with server-side eviction or a TTL, both of which drift LMCache's"
+" byte accounting."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:88
+msgid ""
+"``ttl_seconds`` (int, optional): Opt-in per-key TTL in seconds; must be a"
+" positive integer when set. Omit (default) to write keys with no expiry. "
+"Enables server-side time-based expiry, required by any ``volatile-*`` "
+"eviction policy configured on the Valkey server. Do **not** combine with "
+"``max_capacity_gb > 0`` (a warning is logged; server-side expiry is not "
+"reported back to LMCache's byte accounting)."
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:95
+msgid "**Configuration examples:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:130
+msgid "Wire key layout"
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:132
+msgid "Each stored value is keyed by::"
+msgstr ""
+
+#: ../../source/mp/l2_storage/valkey.rst:136
+#, python-brace-format
+msgid ""
+"The ``chunk_hash_hex`` component is a uniform content hash and the wire "
+"key contains no Redis hashtag (``{...}``), so keys distribute evenly "
+"across the 16384 cluster slots -- no manual key sharding is required."
+msgstr ""
+

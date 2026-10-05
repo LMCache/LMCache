@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-29 10:44+0000\n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -127,77 +127,127 @@ msgid ""
 "``preset`` (default ``turboquant_k8v4``), ``head_dim`` (optional, default"
 " 128), ``block_size`` (default 16), ``max_workers`` (thread pool size, "
 "default 1)"
-msgstr "``preset``（默认 ``turboquant_k8v4``），``head_dim``（可选，默认 128），``block_size``（默认 16），``max_workers``（线程池大小，默认 1）"
+msgstr ""
+"``preset``（默认 ``turboquant_k8v4``），``head_dim``（可选，默认 "
+"128），``block_size``（默认 16），``max_workers``（线程池大小，默认 1）"
+
+#: ../../source/mp/serde.rst:67
+msgid "``aesgcm``"
+msgstr ""
+
+#: ../../source/mp/serde.rst:68
+msgid ""
+"AES-GCM authenticated encryption of KV bytes at rest in L2, keyed per "
+"``cache_salt``."
+msgstr ""
 
 #: ../../source/mp/serde.rst:70
+msgid ""
+"``key_provider`` (default ``hkdf``), ``master_key_path`` (required for "
+"``hkdf``), ``aes_bits`` (``128`` default, or ``256``), ``max_workers`` "
+"(thread pool size, default 1)"
+msgstr ""
+
+#: ../../source/mp/serde.rst:76
 msgid "TurboQuant serde"
 msgstr "TurboQuant 序列化与反序列化"
 
-#: ../../source/mp/serde.rst:72
+#: ../../source/mp/serde.rst:78
 msgid ""
 "TurboQuant serde can be enabled by setting ``\"type\": \"turboquant\"`` "
 "in the adapter serde config. If ``preset`` is omitted, TurboQuant serde "
 "defaults to ``turboquant_k8v4``."
-msgstr "TurboQuant serde 可以通过在适配器 serde 配置中设置 ``\"type\": \"turboquant\"`` 来启用。如果省略 ``preset``，TurboQuant serde 默认使用 ``turboquant_k8v4``。"
+msgstr ""
+"TurboQuant serde 可以通过在适配器 serde 配置中设置 ``\"type\": \"turboquant\"`` "
+"来启用。如果省略 ``preset``，TurboQuant serde 默认使用 ``turboquant_k8v4``。"
 
-#: ../../source/mp/serde.rst:91
+#: ../../source/mp/serde.rst:97
 msgid "Supported presets:"
 msgstr "支持的预设："
 
-#: ../../source/mp/serde.rst:97
+#: ../../source/mp/serde.rst:103
 msgid "Preset"
 msgstr "预设"
 
-#: ../../source/mp/serde.rst:98
+#: ../../source/mp/serde.rst:104
 msgid "Key path"
 msgstr "键路径"
 
-#: ../../source/mp/serde.rst:99
+#: ../../source/mp/serde.rst:105
 msgid "Value path"
 msgstr "值路径"
 
-#: ../../source/mp/serde.rst:100
+#: ../../source/mp/serde.rst:106
 msgid "``turboquant_k8v4``"
 msgstr "``turboquant_k8v4``"
 
-#: ../../source/mp/serde.rst:101
+#: ../../source/mp/serde.rst:107
 msgid "FP8 key"
 msgstr "FP8 键"
 
-#: ../../source/mp/serde.rst:102 ../../source/mp/serde.rst:105
-#: ../../source/mp/serde.rst:108
+#: ../../source/mp/serde.rst:108 ../../source/mp/serde.rst:111
+#: ../../source/mp/serde.rst:114
 msgid "4-bit value quantization"
 msgstr "4位值量化"
 
-#: ../../source/mp/serde.rst:103
+#: ../../source/mp/serde.rst:109
 msgid "``turboquant_4bit_nc``"
 msgstr "``turboquant_4bit_nc``"
 
-#: ../../source/mp/serde.rst:104
+#: ../../source/mp/serde.rst:110
 msgid "4-bit MSE key with norm correction"
 msgstr "带有范数校正的 4 位 MSE 键"
 
-#: ../../source/mp/serde.rst:106
+#: ../../source/mp/serde.rst:112
 msgid "``turboquant_k3v4_nc``"
 msgstr "``turboquant_k3v4_nc``"
 
-#: ../../source/mp/serde.rst:107 ../../source/mp/serde.rst:110
+#: ../../source/mp/serde.rst:113 ../../source/mp/serde.rst:116
 msgid "3-bit MSE key with norm correction"
 msgstr "带有范数校正的 3 位 MSE 密钥"
 
-#: ../../source/mp/serde.rst:109
+#: ../../source/mp/serde.rst:115
 msgid "``turboquant_3bit_nc``"
 msgstr "``turboquant_3bit_nc``"
 
-#: ../../source/mp/serde.rst:111
+#: ../../source/mp/serde.rst:117
 msgid "3-bit value quantization"
 msgstr "3位值量化"
 
-#: ../../source/mp/serde.rst:115
+#: ../../source/mp/serde.rst:121
+#, fuzzy
+msgid "Encryption serde"
+msgstr "何时使用 serde"
+
+#: ../../source/mp/serde.rst:123
+msgid ""
+"The ``aesgcm`` serde encrypts KV bytes with AES-GCM before they land in "
+"L2 and decrypts them on load, so a party who can read the remote storage "
+"(bucket / disk / RESP) cannot recover cache contents. Each tenant's data "
+"is encrypted under a distinct key derived from its ``cache_salt``."
+msgstr ""
+
+#: ../../source/mp/serde.rst:143
+msgid ""
+"Provide the master key as a file (e.g. a mounted Kubernetes ``Secret``). "
+"The ``hkdf`` provider reads it once at startup and derives a "
+"per-``cache_salt`` key via HKDF-SHA256; the master key is never written "
+"to L2. ``aes_bits`` defaults to ``128`` (already unbreakable and slightly"
+" faster); set ``256`` if a compliance mandate requires it."
+msgstr ""
+
+#: ../../source/mp/serde.rst:151
+msgid ""
+"The ``hkdf`` provider derives every tenant's key from one shared master "
+"key, so any server holding the master can decrypt any tenant's data "
+"(\"fleet vs. outside\" trust). It is not per-tenant access isolation."
+msgstr ""
+
+#: ../../source/mp/serde.rst:158
 msgid "Writing a custom serde"
 msgstr "编写自定义 serde"
 
-#: ../../source/mp/serde.rst:117
+#: ../../source/mp/serde.rst:160
 msgid ""
 "Implement the two sync ABCs (``Serializer``, ``Deserializer``) with your "
 "transform logic, then register a factory keyed on a name you pick:"
@@ -205,15 +255,15 @@ msgstr ""
 "实现两个同步 ABC（\\ ``Serializer``\\ ，\\ ``Deserializer``\\ "
 "），并使用您的转换逻辑，然后注册一个以您选择的名称为键的工厂："
 
-#: ../../source/mp/serde.rst:149
+#: ../../source/mp/serde.rst:196
 msgid "Reference it from your adapter config:"
 msgstr "从您的适配器配置中引用它："
 
-#: ../../source/mp/serde.rst:157
+#: ../../source/mp/serde.rst:204
 msgid "Notes"
 msgstr "注意事项"
 
-#: ../../source/mp/serde.rst:159
+#: ../../source/mp/serde.rst:206
 msgid ""
 "**Buffer size.** ``estimate_serialized_size(layout)`` must return an "
 "upper bound on the actual serialized output — include any safety margin "
@@ -224,7 +274,19 @@ msgstr ""
 "必须返回实际序列化输出的上限——安全余量应直接计入估算值（例如，内置的 fp8 序列化器返回 ``1.5 * num_elements``\\ "
 "）。"
 
-#: ../../source/mp/serde.rst:163
+#: ../../source/mp/serde.rst:210
+msgid ""
+"**Raw-byte output.** If your serde writes bytes directly (rather than "
+"through ``MemoryObj.tensor`` like the quantizers), reach the buffer via "
+"``MemoryObj.byte_array`` and **cast it to the native format first**: "
+"``memoryview(dst.byte_array).cast(\"B\")``. ``byte_array`` is a ctypes-"
+"backed view with format ``\"<B\"``, and CPython does not support slice "
+"assignment into a non-native format (``dst[i:j] = ...`` raises "
+"``NotImplementedError: memoryview: unsupported format <B``). The built-in"
+" ``aesgcm`` serde is an example."
+msgstr ""
+
+#: ../../source/mp/serde.rst:218
 msgid ""
 "**Failure handling.** If any step fails (serialize, store, load, or "
 "deserialize), the whole submitted batch is reported as failed — partial "
@@ -234,7 +296,7 @@ msgstr ""
 "**失败处理。** "
 "如果任何步骤失败（序列化、存储、加载或反序列化），整个提交的批次均报告为失败——批次内的部分成功不会对外呈现。失败的键会自动清理。"
 
-#: ../../source/mp/serde.rst:167
+#: ../../source/mp/serde.rst:222
 msgid ""
 "**Thread pool.** ``AsyncSerdeProcessor(max_workers=N)`` controls the pool"
 " size. Transforms that release the GIL (e.g., torch ops) benefit from ``N"
@@ -243,11 +305,11 @@ msgstr ""
 "**线程池。** ``AsyncSerdeProcessor(max_workers=N)`` "
 "控制池的大小。释放全局解释器锁（GIL）的变换（例如，torch 操作）可以从 ``N > 1`` 中受益；纯 Python 变换则不然。"
 
-#: ../../source/mp/serde.rst:173
+#: ../../source/mp/serde.rst:228
 msgid "Example"
 msgstr "示例"
 
-#: ../../source/mp/serde.rst:175
+#: ../../source/mp/serde.rst:230
 msgid ""
 "An end-to-end script that starts an lmcache server with fp8 on a disk "
 "adapter, runs vLLM, clears L1, and re-runs the same request to trigger "
@@ -260,11 +322,11 @@ msgstr ""
 " 预取 + fp8 反序列化路径，位于 :file:`examples/serde/fp8/`。一个基于 pytest 的文件系统往返测试（不需要"
 " vLLM）位于 :file:`tests/v1/distributed/serde/test_serde_fs_e2e.py`。"
 
-#: ../../source/mp/serde.rst:183
+#: ../../source/mp/serde.rst:238
 msgid "Compression methods"
 msgstr "压缩方法"
 
-#: ../../source/mp/serde.rst:185
+#: ../../source/mp/serde.rst:240
 msgid ""
 "Higher-level KV cache compression methods layered on top of the per-"
 "adapter serde mechanism:"

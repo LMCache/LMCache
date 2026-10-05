@@ -1,0 +1,148 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/recipes/qwen2_5_vl.rst:4
+msgid "Qwen2.5-VL (multimodal)"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:7
+msgid "Validated models"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:9
+msgid ""
+"`Qwen/Qwen2.5-VL-3B-Instruct <https://huggingface.co/Qwen/Qwen2.5-VL-3B-"
+"Instruct>`_"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst
+msgid "vLLM"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:16
+msgid ""
+"**Engine documentation:** `Qwen2.5-VL in vLLM supported models "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-"
+"language-models>`_ (architecture ``Qwen2_5_VLForConditionalGeneration``)."
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:21
+msgid "**Status:** Validated with LMCache (image inputs, MP mode)."
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:23
+msgid "Start the LMCache MP server:"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:31
+msgid "Start vLLM with the LMCache MP connector:"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:42
+msgid ""
+"No multimodal-specific LMCache configuration is needed. Image identity is"
+" folded into the cache keys automatically: vLLM emits identical "
+"placeholder token ids for every image, so LMCache overwrites each "
+"placeholder span with a value derived from the image's content hash "
+"(``mm_hash``) before hashing. Two requests with the same text but "
+"different images therefore get distinct cache entries, while repeating "
+"the same image and prompt hits the cache."
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:50
+msgid ""
+"If there are any issues with vLLM setup, please refer to the `vLLM "
+"Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ "
+"for more details."
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst
+msgid "SGLang"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:56
+#: ../../source/recipes/qwen2_5_vl.rst:60
+msgid "**Status:** Not validated with LMCache."
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst
+msgid "TRT-LLM"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:63
+msgid "CacheBlend support"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:65
+msgid "Not validated."
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:68
+msgid "Compression support"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:74
+msgid "Method"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:75
+msgid "Status"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:76
+msgid "Notes"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:77
+msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:78
+msgid "Not validated"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:82
+msgid "Caveats"
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:84
+msgid ""
+"**KV cache only.** LMCache caches the decoder KV for multimodal requests."
+" Vision-encoder outputs are a separate cache: see "
+":doc:`../non_kv_cache/encoder_cache` (in-process mode only; not yet "
+"available in MP mode)."
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:88
+msgid ""
+"**Cross-user sharing.** Cache entries are content-addressed: two users "
+"sending the byte-identical image and prompt share an entry. For hard per-"
+"user or per-tenant isolation, set ``cache_salt`` on the request -- salted"
+" requests never share entries, even for identical content."
+msgstr ""
+
+#: ../../source/recipes/qwen2_5_vl.rst:92
+msgid ""
+"**Cache hits require identical images.** The key derives from the image "
+"content hash, so a re-encoded or resized variant of the same picture is a"
+" different image and misses the cache."
+msgstr ""
+

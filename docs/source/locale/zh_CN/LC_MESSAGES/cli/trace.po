@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-01 10:55+0000\n"
+"POT-Creation-Date: 2026-09-28 09:40+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -25,61 +25,92 @@ msgstr "lmcache trace"
 
 #: ../../source/cli/trace.rst:4
 msgid ""
-"The ``lmcache trace`` command inspects and replays LMCache storage-level "
-"trace files (``.lct``). It has two sub-commands:"
-msgstr "``lmcache trace`` 命令用于检查和重放 LMCache 存储级别的跟踪文件 (``.lct``)。它有两个子命令："
+"The ``lmcache trace`` command inspects and replays LMCache trace files "
+"(``.lct``). A file holds one trace *level*: ``storage`` records "
+"``StorageManager`` calls; ``events`` records the cache-event stream a "
+"server emits for the MP coordinator. It has three sub-commands:"
+msgstr "``lmcache trace`` 命令检查并重放 LMCache 追踪文件 (``.lct``)。一个文件包含一个追踪 *级别*：``storage`` 记录 ``StorageManager`` 调用；``events`` 记录服务器为 MP 协调器发出的缓存事件流。它有三个子命令："
 
-#: ../../source/cli/trace.rst:13
+#: ../../source/cli/trace.rst:15
 msgid ""
 "``lmcache trace`` needs the full ``lmcache`` package (StorageManager, "
 "trace codecs, ``TraceReader``). It is not available in the lightweight "
 "``lmcache-cli`` install and exits with status ``2`` if those modules are "
 "missing."
-msgstr "``lmcache trace`` 需要完整的 ``lmcache`` 包（StorageManager、trace 编解码器、\\ ``TraceReader``\\ ）。在轻量级的 ``lmcache-cli`` 安装中不可用，如果缺少这些模块，则会以状态 ``2`` 退出。"
+msgstr ""
+"``lmcache trace`` 需要完整的 ``lmcache`` 包（StorageManager、trace 编解码器、\\ "
+"``TraceReader``\\ ）。在轻量级的 ``lmcache-cli`` 安装中不可用，如果缺少这些模块，则会以状态 ``2`` 退出。"
 
-#: ../../source/cli/trace.rst:18
+#: ../../source/cli/trace.rst:20
+#, python-brace-format
 msgid ""
 "Trace *capture* is not a ``trace`` sub-command — recording is bound to a "
-"live server via ``lmcache server --trace-level storage [--trace-output "
-"...]`` (see :doc:`server`)."
-msgstr "Trace 捕获不是 ``trace`` 子命令 — 录制绑定到通过 ``lmcache server --trace-level storage [--trace-output ...]`` 的实时服务器（参见 :doc:`server`）。"
+"live server via ``lmcache server --trace-level {storage,events} [--trace-"
+"output ...]`` (see :doc:`server`)."
+msgstr "跟踪 *捕获* 不是 ``trace`` 子命令 — 记录绑定到通过 ``lmcache server --trace-level {storage,events} [--trace-output ...]`` 的实时服务器（见 :doc:`server`）。"
 
-#: ../../source/cli/trace.rst:24
+#: ../../source/cli/trace.rst:26
 msgid "info"
 msgstr "信息"
 
-#: ../../source/cli/trace.rst:26
+#: ../../source/cli/trace.rst:28
 msgid ""
 "Print a one-screen summary of a trace file: header metadata plus per-"
-"qualname record counts."
-msgstr "打印跟踪文件的一屏摘要：头部元数据加上每个 qualname 的记录计数。"
+"qualname record counts. Works for both levels."
+msgstr "打印跟踪文件的一屏摘要：头部元数据加上每个 qualname 的记录计数。适用于两个级别。"
 
-#: ../../source/cli/trace.rst:46
+#: ../../source/cli/trace.rst:35
+msgid "A ``storage`` file:"
+msgstr "一个 ``storage`` 文件："
+
+#: ../../source/cli/trace.rst:50
+msgid ""
+"An ``events`` file adds the header metadata the level records and a "
+"summary of the stream: which server wrote it and how many times it "
+"restarted (one incarnation per start), batches by event type, tier, "
+"backend and whether the backend is shared, entries per event type, bytes "
+"stored, and how many store entries carry token ids."
+msgstr "一个 ``events`` 文件添加了头部元数据，包括级别记录和流的摘要：哪个服务器写入了它，以及它重启了多少次（每次启动一个实例），按事件类型、层级、后端以及后端是否共享进行批处理，每种事件类型的条目、存储的字节数，以及有多少存储条目携带令牌 ID。"
+
+#: ../../source/cli/trace.rst:88
+msgid ""
+"``lifecycle: start=1, stop=1`` says the server started once and shut down"
+" cleanly; a missing ``stop`` means the process was killed and the tail "
+"may be truncated. ``restarts`` counts incarnations beyond the first."
+msgstr "``lifecycle: start=1, stop=1`` 表示服务器启动了一次并且正常关闭；缺少 ``stop`` 表示进程被终止，尾部可能被截断。 ``restarts`` 计算超过第一次的实例。"
+
+#: ../../source/cli/trace.rst:92
 msgid ""
 "The only argument is the positional ``FILE`` (path to a ``.lct`` trace "
 "file)."
 msgstr "唯一的参数是位置参数 ``FILE``\\ （指向 ``.lct`` 跟踪文件的路径）。"
 
-#: ../../source/cli/trace.rst:50
+#: ../../source/cli/trace.rst:96
 msgid "replay"
 msgstr "重放"
 
-#: ../../source/cli/trace.rst:52
+#: ../../source/cli/trace.rst:98
 msgid ""
 "Reissue every recorded call against a fresh ``StorageManager``, honoring "
-"the recorded inter-call timings."
-msgstr "对新创建的 ``StorageManager`` 重新发出每个记录的调用，遵循记录的调用间隔时间。"
+"the recorded inter-call timings. ``replay`` accepts ``storage`` files "
+"only; an ``events`` file is refused with a message saying so, since its "
+"records are coordinator input rather than storage calls (see ``replay-"
+"events``)."
+msgstr "对每个记录的调用进行重发，使用一个新的 ``StorageManager``，并遵循记录的调用间隔时间。``replay`` 仅接受 ``storage`` 文件；``events`` 文件会被拒绝，并显示相应的消息，因为其记录是协调器输入而不是存储调用（请参见 ``replay-events``）。"
 
-#: ../../source/cli/trace.rst:60
+#: ../../source/cli/trace.rst:108
 msgid ""
 "``replay`` accepts the standard storage-manager configuration flags "
 "(``--l1-size-gb``, ``--eviction-policy``, ``--l2-...``); see ``lmcache "
 "server --help`` for the full list. The replay-side config may differ from"
 " the config recorded in the trace, which can legitimately cause retrieve "
 "misses."
-msgstr "``replay`` 接受标准的存储管理器配置标志（\\ ``--l1-size-gb``, ``--eviction-policy``, ``--l2-...``\\ ）；有关完整列表，请参见 ``lmcache server --help``\\ 。重放侧的配置可能与记录在追踪中的配置不同，这可能会导致合法的查找未命中。"
+msgstr ""
+"``replay`` 接受标准的存储管理器配置标志（\\ ``--l1-size-gb``, ``--eviction-policy``, "
+"``--l2-...``\\ ）；有关完整列表，请参见 ``lmcache server --help``\\ "
+"。重放侧的配置可能与记录在追踪中的配置不同，这可能会导致合法的查找未命中。"
 
-#: ../../source/cli/trace.rst:68
+#: ../../source/cli/trace.rst:116
 msgid ""
 "A replay environment mismatch may cause retrieve misses. Replay uses the "
 "replay-side StorageManager config (which may differ from the recorded "
@@ -87,84 +118,184 @@ msgid ""
 "host, and StorageManager reads/writes are async. Treat retrieve-miss "
 "counts as a signal about the replay environment, not a defect in the "
 "trace."
-msgstr "重放环境不匹配可能导致查找未命中。重放使用重放端的 StorageManager 配置（可能与记录的配置不同），在性能可能与记录主机不同的主机上运行，并且 StorageManager 的读/写是异步的。将查找未命中计数视为重放环境的信号，而不是记录中的缺陷。"
+msgstr ""
+"重放环境不匹配可能导致查找未命中。重放使用重放端的 StorageManager "
+"配置（可能与记录的配置不同），在性能可能与记录主机不同的主机上运行，并且 StorageManager "
+"的读/写是异步的。将查找未命中计数视为重放环境的信号，而不是记录中的缺陷。"
 
-#: ../../source/cli/trace.rst:75
+#: ../../source/cli/trace.rst:123 ../../source/cli/trace.rst:187
 msgid "Options"
 msgstr "选项"
 
-#: ../../source/cli/trace.rst:81
+#: ../../source/cli/trace.rst:129 ../../source/cli/trace.rst:193
 msgid "Flag"
 msgstr "标志"
 
-#: ../../source/cli/trace.rst:82
+#: ../../source/cli/trace.rst:130 ../../source/cli/trace.rst:194
 msgid "Description"
 msgstr "描述"
 
-#: ../../source/cli/trace.rst:83
+#: ../../source/cli/trace.rst:131 ../../source/cli/trace.rst:195
 msgid "``FILE``"
 msgstr "``FILE``"
 
-#: ../../source/cli/trace.rst:84
+#: ../../source/cli/trace.rst:132
 msgid "Path to a ``.lct`` trace file (positional, required)."
 msgstr "```.lct``` 跟踪文件的路径（位置参数，必填）。"
 
-#: ../../source/cli/trace.rst:85
+#: ../../source/cli/trace.rst:133
 msgid "``--verbose``"
 msgstr "``--verbose``"
 
-#: ../../source/cli/trace.rst:86
+#: ../../source/cli/trace.rst:134
 msgid "Print one line per replayed record."
 msgstr "每个重放记录打印一行。"
 
-#: ../../source/cli/trace.rst:87
+#: ../../source/cli/trace.rst:135
 msgid "``--jsonl-out PATH``"
 msgstr "``--jsonl-out PATH``"
 
-#: ../../source/cli/trace.rst:88
+#: ../../source/cli/trace.rst:136
 msgid ""
 "Write one JSON object per replayed record to ``PATH`` (qualname, "
 "latency_ms, failed)."
 msgstr "将每个重放记录写入一个 JSON 对象到 ``PATH``\\ （qualname，延迟_ms，失败）。"
 
-#: ../../source/cli/trace.rst:90
+#: ../../source/cli/trace.rst:138
 msgid "``--output-dir DIR``"
 msgstr "``--output-dir DIR``"
 
-#: ../../source/cli/trace.rst:91
+#: ../../source/cli/trace.rst:139
 msgid ""
 "Directory for aggregated CSV / JSON summary output (default: current "
 "directory)."
 msgstr "聚合的 CSV / JSON 摘要输出目录（默认：当前目录）。"
 
-#: ../../source/cli/trace.rst:93
+#: ../../source/cli/trace.rst:141
 msgid "``--no-csv``"
 msgstr "``--no-csv``"
 
-#: ../../source/cli/trace.rst:94
+#: ../../source/cli/trace.rst:142
 msgid "Skip the aggregated CSV summary export."
 msgstr "跳过聚合的 CSV 摘要导出。"
 
-#: ../../source/cli/trace.rst:95
+#: ../../source/cli/trace.rst:143
 msgid "``--json``"
 msgstr "``--json``"
 
-#: ../../source/cli/trace.rst:96
+#: ../../source/cli/trace.rst:144
 msgid "Also export an aggregated JSON summary."
 msgstr "还可以导出一个汇总的 JSON。"
 
-#: ../../source/cli/trace.rst:97
+#: ../../source/cli/trace.rst:145 ../../source/cli/trace.rst:205
 msgid "``-q`` / ``--quiet``"
 msgstr "``-q`` / ``--quiet``"
 
-#: ../../source/cli/trace.rst:98
+#: ../../source/cli/trace.rst:146
 msgid "Suppress the terminal metrics table (files are still written)."
 msgstr "抑制终端指标表（文件仍然会被写入）。"
 
-#: ../../source/cli/trace.rst:100
+#: ../../source/cli/trace.rst:148
 msgid ""
 "The terminal summary reports overall replay stats (records replayed / "
 "skipped / failed, duration, config-digest match) and per-op latency "
 "percentiles. ``replay`` exits with status ``1`` if any record failed."
-msgstr "终端摘要报告整体重放统计信息（重放/跳过/失败的记录、持续时间、配置摘要匹配）和每个操作的延迟百分位数。如果任何记录失败，\\ ``replay`` 将以状态 ``1`` 退出。"
+msgstr ""
+"终端摘要报告整体重放统计信息（重放/跳过/失败的记录、持续时间、配置摘要匹配）和每个操作的延迟百分位数。如果任何记录失败，\\ "
+"``replay`` 将以状态 ``1`` 退出。"
+
+#: ../../source/cli/trace.rst:154
+msgid "replay-events"
+msgstr "重放事件"
+
+#: ../../source/cli/trace.rst:156
+msgid ""
+"Deliver the cache-event stream an ``events`` file holds to a coordinator,"
+" the way the server that wrote it would have. Several files, one per "
+"server, replay as one fleet, merged by wall-clock time:"
+msgstr "将缓存事件流中 ``events`` 文件所包含的内容传递给协调器，方式与写入该文件的服务器相同。多个文件，每个服务器一个，按墙钟时间合并为一个队列重放："
+
+#: ../../source/cli/trace.rst:165
+msgid ""
+"Each ``start`` mark registers its server with the coordinator (at the "
+"address the server recorded, or loopback) and begins heartbeating it "
+"every ``--heartbeat-interval`` seconds, each batch is one ``POST "
+"/events`` carrying the record unchanged, and each ``stop`` mark "
+"deregisters. A file that ends without a ``stop`` is a server that died or"
+" a recording that was cut: its heartbeats end with its last record, and "
+"the coordinator retires it after its instance timeout, as it would a real"
+" crash. By default the stream goes as fast as the coordinator takes it; "
+"``--speed 1`` replays at the recorded rate. The servers are not there to "
+"be called back, so a replay exercises ingest and the views (directory, "
+"usage, declared capacity), not a controller's deletes or prefetches; run "
+"the coordinator with its eviction loop off to keep it from addressing "
+"them. The summary says how the coordinator counted the batches: applied, "
+"duplicate (a sequence it had already admitted) and stale (an incarnation "
+"it had already moved past)."
+msgstr "每个 ``start`` 标记将其服务器注册到协调器（在服务器记录的地址或回环地址），并开始每 ``--heartbeat-interval`` 秒向其发送心跳，每个批次是一个 ``POST /events``，携带未更改的记录，每个 ``stop`` 标记则注销。一个没有 ``stop`` 结束的文件表示一个已死的服务器或被中断的录音：其心跳在最后一条记录结束，协调器在实例超时后将其退役，就像处理真正的崩溃一样。默认情况下，流的速度与协调器处理的速度相同；``--speed 1`` 以记录的速率重放。服务器并不在这里等待被调用，因此重放会测试摄取和视图（目录、使用情况、声明的容量），而不是控制器的删除或预取；运行协调器时关闭其逐出循环，以防止其处理这些操作。摘要说明了协调器如何计算批次：应用的、重复的（它已经接受的序列）和过时的（它已经处理过的实例）。"
+
+#: ../../source/cli/trace.rst:182
+msgid ""
+"Replay into a coordinator that does not have the same fleet live. "
+"Registering a recorded server replaces a live one's registration, and the"
+" coordinator would address the live server at the recorded address."
+msgstr "将重放到没有相同舰队在线的协调器中。注册一个记录的服务器会替换一个在线服务器的注册，协调器会在记录的地址上处理在线服务器。"
+
+#: ../../source/cli/trace.rst:196
+msgid "One or more ``events``-level ``.lct`` files (positional, required)."
+msgstr "一个或多个 ``events`` 级别的 ``.lct`` 文件（位置参数，必需）。"
+
+#: ../../source/cli/trace.rst:197
+msgid "``--coordinator-url URL``"
+msgstr "``--coordinator-url URL``"
+
+#: ../../source/cli/trace.rst:198
+msgid "The coordinator to deliver the stream to (required)."
+msgstr "将流传送到的协调器（必填）。"
+
+#: ../../source/cli/trace.rst:199
+msgid "``--speed N``"
+msgstr "``--speed N``"
+
+#: ../../source/cli/trace.rst:200
+msgid ""
+"Pacing relative to the recording; ``1`` is the recorded rate, ``0`` "
+"(default) as fast as the coordinator takes it."
+msgstr "与录制的速度相关；``1`` 是录制的速率，``0``（默认值）是协调器能处理的最快速率。"
+
+#: ../../source/cli/trace.rst:202
+msgid "``--heartbeat-interval SECONDS``"
+msgstr "``--heartbeat-interval SECONDS``"
+
+#: ../../source/cli/trace.rst:203
+msgid ""
+"Heartbeat each registered server this often (default ``5``, below the "
+"coordinator's 30 s instance timeout); ``0`` sends none."
+msgstr "每个注册的服务器的心跳频率（默认 ``5``，低于协调器的 30 秒实例超时）；``0`` 表示不发送心跳。"
+
+#: ../../source/cli/trace.rst:206
+msgid "Suppress the terminal summary."
+msgstr "抑制终端摘要。"
+
+#: ../../source/cli/trace.rst:208
+msgid ""
+"``replay-events`` exits with status ``2`` if a file is not an ``events`` "
+"trace this build can replay, and with status ``1`` if the coordinator "
+"cannot be reached or refuses a call; the replay stops there rather than "
+"skip records, since a partly delivered stream would leave views that look"
+" complete and are not. The per-record log says how far it got."
+msgstr "``replay-events`` 在文件不是此构建可以重放的 ``events`` 跟踪时以状态 ``2`` 退出，如果协调器无法访问或拒绝调用则以状态 ``1`` 退出；重放在此停止，而不是跳过记录，因为部分交付的流会留下看似完整但实际上并不完整的视图。每条记录的日志会说明它进展到哪里。"
+
+#~ msgid ""
+#~ "The ``lmcache trace`` command inspects "
+#~ "and replays LMCache storage-level trace"
+#~ " files (``.lct``). It has two sub-"
+#~ "commands:"
+#~ msgstr "``lmcache trace`` 命令用于检查和重放 LMCache 存储级别的跟踪文件 (``.lct``)。它有两个子命令："
+
+#~ msgid ""
+#~ "Reissue every recorded call against a"
+#~ " fresh ``StorageManager``, honoring the "
+#~ "recorded inter-call timings."
+#~ msgstr "对新创建的 ``StorageManager`` 重新发出每个记录的调用，遵循记录的调用间隔时间。"
 

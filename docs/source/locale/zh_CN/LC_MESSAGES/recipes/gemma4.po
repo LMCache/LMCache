@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -49,7 +49,11 @@ msgid ""
 "<https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-"
 "language-models>`_ (architectures ``Gemma4ForConditionalGeneration`` for "
 "31B/E4B and ``Gemma4UnifiedForConditionalGeneration`` for 12B)."
-msgstr "**引擎文档:** `vLLM 支持模型中的 Gemma 4 <https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-language-models>`_\\ （架构 ``Gemma4ForConditionalGeneration`` 适用于 31B/E4B，\\ ``Gemma4UnifiedForConditionalGeneration`` 适用于 12B）。"
+msgstr ""
+"**引擎文档:** `vLLM 支持模型中的 Gemma 4 "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-"
+"language-models>`_\\ （架构 ``Gemma4ForConditionalGeneration`` 适用于 "
+"31B/E4B，\\ ``Gemma4UnifiedForConditionalGeneration`` 适用于 12B）。"
 
 #: ../../source/recipes/gemma4.rst:24
 msgid "**Status:** Validated with LMCache."
@@ -74,7 +78,9 @@ msgid ""
 "Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
 " LMCache + vLLM wiring (ports, remote hosts), see "
 ":doc:`../getting_started/quickstart`."
-msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../getting_started/quickstart`。"
+msgstr ""
+"调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见"
+" :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/gemma4.rst:60
 msgid ""
@@ -101,7 +107,9 @@ msgstr "TRT-LLM"
 msgid ""
 "**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
 "LLM + LMCache setup."
-msgstr "**状态：** 支持。TRT-LLM + LMCache 的配置方式，请参阅 :doc:`../getting_started/quickstart`。"
+msgstr ""
+"**状态：** 支持。TRT-LLM + LMCache 的配置方式，请参阅 "
+":doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/gemma4.rst:73
 msgid "CacheBlend support"
@@ -132,10 +140,81 @@ msgid "Not validated"
 msgstr "未验证"
 
 #: ../../source/recipes/gemma4.rst:90
+msgid "MTP (speculative decoding) support"
+msgstr ""
+
+#: ../../source/recipes/gemma4.rst:92
+msgid ""
+"Gemma 4 supports MTP speculative decoding through separate **assistant "
+"checkpoints** (``google/gemma-4-<size>-it-assistant``), which vLLM loads "
+"as the draft model. The draft layers carry their own KV cache; LMCache "
+"detects them from vLLM's ``speculative_config`` and stores/retrieves the "
+"draft-layer KV together with the target model's -- no extra LMCache flags"
+" are required."
+msgstr ""
+
+#: ../../source/recipes/gemma4.rst:98
+#, fuzzy
+msgid "**Status:** Validated with LMCache (vLLM MP connector):"
+msgstr "**状态:** 已通过 LMCache 验证。"
+
+#: ../../source/recipes/gemma4.rst:100
+#, fuzzy
+msgid "``google/gemma-4-31B-it`` + ``google/gemma-4-31B-it-assistant`` (2 GPUs)"
+msgstr "`google/gemma-4-31B-it <https://huggingface.co/google/gemma-4-31B-it>`_"
+
+#: ../../source/recipes/gemma4.rst:101
+msgid ""
+"``google/gemma-4-12B-it`` + ``google/gemma-4-12B-it-assistant`` (1 GPU, "
+"needs ``--enforce-eager``; see below)"
+msgstr ""
+
+#: ../../source/recipes/gemma4.rst:103
+#, fuzzy
+msgid "``google/gemma-4-E4B-it`` + ``google/gemma-4-E4B-it-assistant`` (1 GPU)"
+msgstr "`google/gemma-4-E4B-it <https://huggingface.co/google/gemma-4-E4B-it>`_"
+
+#: ../../source/recipes/gemma4.rst:105
+msgid "Add to the ``vllm serve`` command shown above:"
+msgstr ""
+
+#: ../../source/recipes/gemma4.rst:115
+msgid ""
+"``--attention-backend TRITON_ATTN`` is **required when MTP is enabled**. "
+"The target model alone auto-selects the Triton backend (FlashAttention "
+"does not support Gemma 4's 512-dim global-attention heads), but the "
+"assistant draft model's backend selection picks FlashAttention and the "
+"engine crashes at startup with *\"FlashAttention forward only supports "
+"head dimension at most 256\"*. Pinning the backend explicitly covers both"
+" models."
+msgstr ""
+
+#: ../../source/recipes/gemma4.rst:123
+msgid ""
+"Validation evidence (gsm8k store-vs-retrieve, 100 samples, exact score "
+"match required under ``VLLM_BATCH_INVARIANT=1``): 31B scored 0.78 in both"
+" the computed and the LMCache-retrieved run with the MTP acceptance rate "
+"unchanged (0.911 vs 0.910); 12B scored 0.28 in both runs (acceptance "
+"0.854 vs 0.853); E4B scored 0.69 in both runs with acceptance rate "
+"identical (0.807). Cold-vs-warm TTFT improved 3.7x (31B) / 1.7x (12B) / "
+"1.4x (E4B) with MTP enabled throughout."
+msgstr ""
+
+#: ../../source/recipes/gemma4.rst:133
+msgid ""
+"The 12B Unified assistant requires ``--enforce-eager`` on the vLLM "
+"nightly tested: its draft head applies a token-suppression list held in "
+"an unpinned CPU tensor (``gemma4_mtp.py``, ``compute_logits``), which "
+"aborts CUDA graph capture with *\"Cannot copy between CPU and CUDA "
+"tensors during CUDA graph capture\"*. This is an upstream vLLM issue, "
+"unrelated to LMCache; 31B and E4B assistants are unaffected."
+msgstr ""
+
+#: ../../source/recipes/gemma4.rst:141
 msgid "Caveats"
 msgstr "注意事项"
 
-#: ../../source/recipes/gemma4.rst:92
+#: ../../source/recipes/gemma4.rst:143
 msgid ""
 "**Hybrid KV cache with heterogeneous block sizes.** Gemma 4 interleaves "
 "sliding-window and full-attention layers whose head dimensions differ "
@@ -144,9 +223,14 @@ msgid ""
 "``google/gemma-4-E4B-it``: sliding 32, full 16). LMCache stores and "
 "retrieves each KV cache group in its own block size; no extra flags are "
 "required."
-msgstr "**混合 KV Cache，具有异构块大小。** Gemma 4 交错了 sliding window 和 full attention 层，两者的头维度不同（sliding window 层为 256，full attention 层为 512），因此 vLLM 通过为这两种注意力类型分配不同的 ``block_size``\\\\ s（例如 ``google/gemma-4-E4B-it``\\ ：sliding window 层为 32，full attention 层为 16）来统一物理页面大小。LMCache 按各自的块大小存储和检索每个 KV Cache 组，无需额外配置。"
+msgstr ""
+"**混合 KV Cache，具有异构块大小。** Gemma 4 交错了 sliding window 和 full attention "
+"层，两者的头维度不同（sliding window 层为 256，full attention 层为 512），因此 vLLM "
+"通过为这两种注意力类型分配不同的 ``block_size``\\\\ s（例如 ``google/gemma-4-E4B-it``\\ "
+"：sliding window 层为 32，full attention 层为 16）来统一物理页面大小。LMCache "
+"按各自的块大小存储和检索每个 KV Cache 组，无需额外配置。"
 
-#: ../../source/recipes/gemma4.rst:98
+#: ../../source/recipes/gemma4.rst:149
 msgid ""
 "**Cross-layer KV sharing.** ``google/gemma-4-E4B-it`` reuses some layers'"
 " KV caches across layers. LMCache stores the cache-owning layers only; "

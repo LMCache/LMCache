@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-22 11:07+0000\n"
+"POT-Creation-Date: 2026-09-28 09:40+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -26,11 +26,11 @@ msgstr "lmcache server"
 #: ../../source/cli/server.rst:4
 msgid ""
 "The ``lmcache server`` command launches the standalone LMCache Multi-"
-"Process (MP) server, which exposes a ZMQ control plane and an HTTP "
-"frontend (status, healthcheck, cache-clear, checksum APIs). It is the "
-"server that ``lmcache describe``, ``lmcache ping kvcache``, ``lmcache "
-"kvcache``, and ``lmcache bench server`` talk to."
-msgstr "``lmcache server`` 命令启动独立的 LMCache 多进程 (MP) 服务器，该服务器暴露 ZMQ 控制平面和 HTTP 前端 (状态、健康检查、清除缓存、校验和 API)。这是 ``lmcache describe``\\ 、\\ ``lmcache ping kvcache``\\ 、\\ ``lmcache kvcache`` 和 ``lmcache bench server`` 进行交互的服务器。"
+"Process (MP) server, which exposes a configurable ZMQ or gRPC request "
+"endpoint and an HTTP frontend (status, healthcheck, cache-clear, checksum"
+" APIs). It is the server that ``lmcache describe``, ``lmcache ping "
+"kvcache``, ``lmcache kvcache``, and ``lmcache bench server`` talk to."
+msgstr "``lmcache server`` 命令启动独立的 LMCache 多进程 (MP) 服务器，该服务器暴露可配置的 ZMQ 或 gRPC 请求端点和 HTTP 前端（状态、健康检查、清除缓存、校验和 API）。这是 ``lmcache describe``、``lmcache ping kvcache``、``lmcache kvcache`` 和 ``lmcache bench server`` 进行交互的服务器。"
 
 #: ../../source/cli/server.rst:12
 msgid ""
@@ -71,188 +71,274 @@ msgid "Description"
 msgstr "描述"
 
 #: ../../source/cli/server.rst:50
+#, python-brace-format
+msgid "``--transport {zmq,grpc}``"
+msgstr "``--transport {zmq,grpc}``"
+
+#: ../../source/cli/server.rst:51
+msgid "Request transport exposed by the server (default: ``zmq``)."
+msgstr "服务器公开的请求传输方式（默认：``zmq``）。"
+
+#: ../../source/cli/server.rst:52
 msgid "``--host HOST``"
 msgstr "``--host HOST``"
 
-#: ../../source/cli/server.rst:51
+#: ../../source/cli/server.rst:53
 msgid "Bind address for the server."
 msgstr "服务器的绑定地址。"
 
-#: ../../source/cli/server.rst:52
+#: ../../source/cli/server.rst:54
 msgid "``--port PORT``"
 msgstr "``--port PORT``"
 
-#: ../../source/cli/server.rst:53
-msgid "ZMQ control-plane port."
-msgstr "ZMQ 控制平面端口。"
+#: ../../source/cli/server.rst:55
+msgid "Request-transport port."
+msgstr "请求传输端口。"
 
-#: ../../source/cli/server.rst:54
+#: ../../source/cli/server.rst:56
 msgid "``--chunk-size N``"
 msgstr "``--chunk-size N``"
 
-#: ../../source/cli/server.rst:55
+#: ../../source/cli/server.rst:57
 msgid "KV cache chunk size in tokens."
 msgstr "KV Cache 块大小（以 token 为单位）。"
 
-#: ../../source/cli/server.rst:56
+#: ../../source/cli/server.rst:58
 msgid "``--l1-size-gb GB``"
 msgstr "``--l1-size-gb GB``"
 
-#: ../../source/cli/server.rst:57
+#: ../../source/cli/server.rst:59
 msgid "L1 (CPU/DRAM) cache capacity in GB."
 msgstr "L1 (CPU/DRAM) 缓存容量（以 GB 为单位）。"
 
-#: ../../source/cli/server.rst:58
+#: ../../source/cli/server.rst:60
 msgid "``--eviction-policy POLICY``"
 msgstr "``--eviction-policy POLICY``"
 
-#: ../../source/cli/server.rst:59
-msgid "L1 eviction policy (e.g. ``LRU``)."
-msgstr "L1 逐出策略（例如 ``LRU``\\ ）。"
+#: ../../source/cli/server.rst:61
+msgid "L1 eviction policy (``LRU``, ``ARC``, ``IsolatedLRU``, or ``noop``)."
+msgstr "L1 逐出策略 (``LRU``, ``ARC``, ``IsolatedLRU``, 或 ``noop``)。"
 
-#: ../../source/cli/server.rst:60
+#: ../../source/cli/server.rst:62
 msgid "``--eviction-trigger-watermark RATIO``"
 msgstr "``--eviction-trigger-watermark RATIO``"
 
-#: ../../source/cli/server.rst:61
+#: ../../source/cli/server.rst:63
 msgid "L1 fill ratio at which eviction begins."
 msgstr "开始逐出的 L1 填充比率。"
 
-#: ../../source/cli/server.rst:62
+#: ../../source/cli/server.rst:64
 msgid "``--eviction-ratio RATIO``"
 msgstr "``--eviction-ratio RATIO``"
 
-#: ../../source/cli/server.rst:63
+#: ../../source/cli/server.rst:65
 msgid "Fraction of L1 cleared per eviction cycle."
 msgstr "每个逐出周期清除的 L1 分数。"
 
-#: ../../source/cli/server.rst:64
+#: ../../source/cli/server.rst:66
 msgid "``--max-workers N``"
 msgstr "``--max-workers N``"
 
-#: ../../source/cli/server.rst:65
-msgid "Number of server worker processes."
-msgstr "服务器工作进程的数量。"
+#: ../../source/cli/server.rst:67
+msgid "Base number of request worker threads."
+msgstr "请求工作线程的基本数量。"
 
-#: ../../source/cli/server.rst:66
+#: ../../source/cli/server.rst:68
+msgid "``--grpc-server-workers N``"
+msgstr "``--grpc-server-workers N``"
+
+#: ../../source/cli/server.rst:69
+msgid "gRPC dispatch threads (used only with ``--transport grpc``)."
+msgstr "gRPC 调度线程（仅在使用 ``--transport grpc`` 时使用）。"
+
+#: ../../source/cli/server.rst:70
 msgid "``--coordinator-url URL``"
 msgstr "``--coordinator-url URL``"
 
-#: ../../source/cli/server.rst:67
+#: ../../source/cli/server.rst:71
 msgid ""
 "Register with an MP coordinator at this base URL (e.g. "
 "``http://coordinator:9300``). Opt-in; enables fleet registration. See "
 ":doc:`/mp/coordinator`."
-msgstr "在此基础 URL（例如 ``http://coordinator:9300``\\ ）注册 MP 协调器。可选；启用车队注册。请参见 :doc:`/mp/coordinator`。"
+msgstr ""
+"在此基础 URL（例如 ``http://coordinator:9300``\\ ）注册 MP 协调器。可选；启用车队注册。请参见 "
+":doc:`/mp/coordinator`。"
 
-#: ../../source/cli/server.rst:70
+#: ../../source/cli/server.rst:74
 msgid "``--coordinator-advertise-ip IP``"
 msgstr "``--coordinator-advertise-ip IP``"
 
-#: ../../source/cli/server.rst:71
+#: ../../source/cli/server.rst:75
 msgid ""
 "IP the coordinator should reach this server at (defaults to the outbound "
 "IP)."
 msgstr "协调器应通过此服务器访问的 IP（默认为出站 IP）。"
 
-#: ../../source/cli/server.rst:73
+#: ../../source/cli/server.rst:77
 msgid "``--coordinator-heartbeat-interval SECONDS``"
 msgstr "``--coordinator-heartbeat-interval SECONDS``"
 
-#: ../../source/cli/server.rst:74
+#: ../../source/cli/server.rst:78
 msgid ""
 "Seconds between heartbeats (``> 0``, default ``5``). Keep well below the "
 "coordinator's instance timeout."
 msgstr "心跳之间的秒数（\\ ``> 0``\\ ，默认值为 ``5``\\ ）。应远低于协调器的实例超时。"
 
-#: ../../source/cli/server.rst:76
-msgid "``--coordinator-l2-event-reporting``"
-msgstr "``--coordinator-l2-event-reporting``"
-
-#: ../../source/cli/server.rst:77
-msgid ""
-"Enable reporting L2 store/lookup events to the coordinator for fleet-wide"
-" usage tracking and quota-based eviction."
-msgstr "启用向协调器上报 L2 存储/查找事件，用于全集群使用量跟踪及基于配额的逐出。"
-
-#: ../../source/cli/server.rst:79
-msgid "``--coordinator-l2-event-flush-interval SECONDS``"
-msgstr "``--coordinator-l2-event-flush-interval SECONDS``"
-
 #: ../../source/cli/server.rst:80
-msgid "Seconds between L2 event batch flushes (``> 0``, default ``1``)."
-msgstr "L2 事件批量刷新之间的秒数（\\ ``> 0``\\ ，默认 ``1``\\ ）。"
+msgid "``--coordinator-event-reporting``"
+msgstr "``--coordinator-event-reporting``"
 
 #: ../../source/cli/server.rst:81
+msgid ""
+"Stream cache store/access/delete events to the coordinator, feeding the "
+"key directory (fleet-wide placement tracking), L2 usage/quota tracking "
+"and eviction, and the blend index behind fleet CacheBlend matching."
+msgstr ""
+"将流缓存存储/访问/删除事件发送到协调器，提供关键目录（全舰队放置跟踪）、L2 使用/配额跟踪和逐出，以及舰队 CacheBlend "
+"匹配背后的混合索引。"
+
+#: ../../source/cli/server.rst:84
+msgid "``--coordinator-event-flush-interval SECONDS``"
+msgstr "``--coordinator-event-flush-interval SECONDS``"
+
+#: ../../source/cli/server.rst:85
+msgid "Seconds between cache-event batch flushes (``> 0``, default ``1``)."
+msgstr "缓存事件批量刷新之间的秒数（``> 0``，默认值为``1``）。"
+
+#: ../../source/cli/server.rst:86
+#, python-brace-format
+msgid "``--coordinator-event-transport {http,kafka}``"
+msgstr "``--coordinator-event-transport {http,kafka}``"
+
+#: ../../source/cli/server.rst:87
+msgid ""
+"Cache-event transport (default ``http``). ``kafka`` publishes each batch "
+"to a Kafka topic instead of ``POST /events``; it needs the optional "
+"``lmcache[kafka]`` extra. See :doc:`/mp/coordinator`."
+msgstr "缓存事件传输（默认 ``http``）。``kafka`` 将每个批次发布到 Kafka 主题，而不是 ``POST /events``；它需要可选的 ``lmcache[kafka]`` 扩展。请参阅 :doc:`/mp/coordinator`。"
+
+#: ../../source/cli/server.rst:90
+msgid "``--coordinator-kafka-bootstrap-servers SERVERS``"
+msgstr "``--coordinator-kafka-bootstrap-servers SERVERS``"
+
+#: ../../source/cli/server.rst:91
+msgid ""
+"Comma-separated Kafka bootstrap servers. Required with ``--coordinator-"
+"event-transport kafka``."
+msgstr "以逗号分隔的 Kafka 启动服务器。与 ``--coordinator-event-transport kafka`` 一起使用是必需的。"
+
+#: ../../source/cli/server.rst:93
+msgid "``--coordinator-kafka-topic TOPIC``"
+msgstr "``--coordinator-kafka-topic TOPIC``"
+
+#: ../../source/cli/server.rst:94
+msgid "Kafka topic receiving cache events (default ``lmcache-cache-events``)."
+msgstr "接收缓存事件的 Kafka 主题（默认 ``lmcache-cache-events``）。"
+
+#: ../../source/cli/server.rst:95
+msgid "``--coordinator-kafka-delivery-timeout SECONDS``"
+msgstr "``--coordinator-kafka-delivery-timeout SECONDS``"
+
+#: ../../source/cli/server.rst:96
+msgid ""
+"Seconds one flush waits for broker acknowledgement (``> 0``, default "
+"``10``)."
+msgstr "每次刷新等待代理确认的秒数（``> 0``，默认值为 ``10``）。"
+
+#: ../../source/cli/server.rst:98
 msgid "``--p2p-advertise-url HOST:PORT``"
 msgstr "``--p2p-advertise-url HOST:PORT``"
 
-#: ../../source/cli/server.rst:82
+#: ../../source/cli/server.rst:99
 msgid ""
 "Enable P2P KV cache sharing and advertise this server's transfer-channel "
 "endpoint to peers (e.g. ``10.0.0.1:8500``). Setting it turns P2P on; it "
 "additionally requires ``--coordinator-url`` for peer discovery. See "
 ":doc:`/mp/p2p`."
-msgstr "启用 P2P KV Cache 共享，并将此服务器的传输通道端点广告给对等方（例如 ``10.0.0.1:8500``）。设置它会开启 P2P；此外还需要 ``--coordinator-url`` 进行对等发现。请参见 :doc:`/mp/p2p`。"
+msgstr ""
+"启用 P2P KV Cache 共享，并将此服务器的传输通道端点广告给对等方（例如 ``10.0.0.1:8500``）。设置它会开启 "
+"P2P；此外还需要 ``--coordinator-url`` 进行对等发现。请参见 :doc:`/mp/p2p`。"
 
-#: ../../source/cli/server.rst:86
+#: ../../source/cli/server.rst:103
 msgid "``--p2p-listen-url HOST:PORT``"
 msgstr "``--p2p-listen-url 主机:端口``"
 
-#: ../../source/cli/server.rst:87
+#: ../../source/cli/server.rst:104
 msgid ""
 "Address the transfer-channel server binds to. Defaults to ``--p2p-"
 "advertise-url``. Set it when the advertised address differs from the bind"
 " address (e.g. bind ``0.0.0.0`` while advertising a routable IP)."
-msgstr "传输通道服务器绑定的地址。默认为 ``--p2p-advertise-url``。当广告地址与绑定地址不同（例如，绑定 ``0.0.0.0`` 而广告一个可路由的 IP）时，请设置它。"
+msgstr ""
+"传输通道服务器绑定的地址。默认为 ``--p2p-advertise-url``。当广告地址与绑定地址不同（例如，绑定 ``0.0.0.0`` "
+"而广告一个可路由的 IP）时，请设置它。"
 
-#: ../../source/cli/server.rst:90
+#: ../../source/cli/server.rst:107
 msgid "``--p2p-lookup-timeout SECONDS``"
 msgstr "``--p2p-lookup-timeout SECONDS``"
 
-#: ../../source/cli/server.rst:91
+#: ../../source/cli/server.rst:108
 msgid "Deadline for a peer lookup before it counts as a miss (default ``30``)."
 msgstr "对等查找的截止时间，超过该时间将视为未命中（默认 ``30``）。"
 
-#: ../../source/cli/server.rst:92
+#: ../../source/cli/server.rst:109
 msgid "``--p2p-load-timeout SECONDS``"
 msgstr "``--p2p-load-timeout SECONDS``"
 
-#: ../../source/cli/server.rst:93
+#: ../../source/cli/server.rst:110
 msgid ""
 "Deadline for a peer KV read before it counts as a failure (default "
 "``30``)."
 msgstr "对等 KV 读取的截止时间，超过该时间将视为失败（默认 ``30``）。"
 
-#: ../../source/cli/server.rst:95
+#: ../../source/cli/server.rst:112
 msgid "``--p2p-transfer-engine ENGINE``"
 msgstr "``--p2p-transfer-engine ENGINE``"
 
-#: ../../source/cli/server.rst:96
+#: ../../source/cli/server.rst:113
 msgid "Transfer-channel implementation for P2P reads (default ``nixl``)."
 msgstr "P2P 读取的传输通道实现（默认 ``nixl``）。"
 
-#: ../../source/cli/server.rst:97
+#: ../../source/cli/server.rst:114
 #, python-brace-format
-msgid "``--trace-level {storage}``"
-msgstr "``--trace-level {storage}``"
+msgid "``--trace-level {storage,events}``"
+msgstr "``--trace-level {storage,events}``"
 
-#: ../../source/cli/server.rst:98
-msgid "Enable storage-level trace recording (see :doc:`trace`)."
-msgstr "启用存储级别的追踪记录（请参见 :doc:`trace`）。"
+#: ../../source/cli/server.rst:115
+msgid ""
+"Enable trace recording: ``storage`` records StorageManager calls for "
+"replay, ``events`` records the cache-event stream emitted for the "
+"coordinator, with or without one configured (see :doc:`trace`)."
+msgstr "启用跟踪记录：``storage`` 记录 StorageManager 调用以供重放，``events`` 记录为协调器发出的缓存事件流，无论是否配置（请参见 :doc:`trace`）。"
 
-#: ../../source/cli/server.rst:99
+#: ../../source/cli/server.rst:118
 msgid "``--trace-output PATH``"
 msgstr "``--trace-output PATH``"
 
-#: ../../source/cli/server.rst:100
+#: ../../source/cli/server.rst:119
 msgid "Destination for recorded ``.lct`` trace files."
 msgstr "记录的 ``.lct`` 跟踪文件的目标。"
 
-#: ../../source/cli/server.rst:102
+#: ../../source/cli/server.rst:121
 msgid ""
 "L2 adapters, observability, and Prometheus exporters are configured "
 "through their own flag groups; see ``lmcache server --help`` for the "
 "complete set."
-msgstr "L2 适配器、可观察性和 Prometheus 导出器通过各自的标志组进行配置；有关完整的设置，请参见 ``lmcache server --help``\\ 。"
+msgstr ""
+"L2 适配器、可观察性和 Prometheus 导出器通过各自的标志组进行配置；有关完整的设置，请参见 ``lmcache server "
+"--help``\\ 。"
+
+#~ msgid ""
+#~ "Enable reporting L2 store/lookup events "
+#~ "to the coordinator for fleet-wide "
+#~ "usage tracking and quota-based eviction."
+#~ msgstr "启用向协调器上报 L2 存储/查找事件，用于全集群使用量跟踪及基于配额的逐出。"
+
+#~ msgid "ZMQ control-plane port."
+#~ msgstr "ZMQ 控制平面端口。"
+
+#~ msgid "L1 eviction policy (e.g. ``LRU``)."
+#~ msgstr "L1 逐出策略（例如 ``LRU``\\ ）。"
+
+#~ msgid "Enable storage-level trace recording (see :doc:`trace`)."
+#~ msgstr "启用存储级别的追踪记录（请参见 :doc:`trace`）。"
 
