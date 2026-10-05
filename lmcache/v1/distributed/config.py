@@ -29,6 +29,7 @@ logger = init_logger(__name__)
 # pre-allocated 2 MiB pool rather than regular 4 KiB pinned memory.
 HUGEPAGE_SIZE_BYTES = 2 * 1024 * 1024
 
+_SPDK_DEFAULT_MEM_SIZE_MB = 4096
 
 _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS = {
     "nixl_store",
@@ -69,6 +70,33 @@ def requires_single_l1_memory_region(
     ):
         return type_name
     return None
+
+
+def _spdk_requires_hugepages(l2_adapter_config: "L2AdaptersConfig") -> int:
+    """Return the SPDK memory (MiB) that must be reserved from the hugepage pool.
+
+    When at least one L2 adapter uses the SPDK I/O engine we force hugepage
+    allocation for the L1 memory allocator so the buffer can be registered for
+    zero-copy PCIe DMA. SPDK also reserves a fixed block of 2 MiB hugepages from
+    the same OS pool that backs the L1 buffer (via ``spdk_env_init``).
+
+    Args:
+        l2_adapter_config: The parsed L2 adapter configuration.
+
+    Returns:
+        Total SPDK memory reservation in MiB (``0`` when no adapter uses
+        ``io_engine == "spdk"``). A truthy value also signals that hugepage
+        allocation is required.
+    """
+    total_mb = 0
+    for adapter in l2_adapter_config.adapters:
+        if getattr(adapter, "io_engine", None) == "spdk":
+            logger.info(
+                "SPDK I/O engine detected in L2 adapter; "
+                "auto-enabling hugepage allocation for L1 memory"
+            )
+            total_mb += _SPDK_DEFAULT_MEM_SIZE_MB
+    return total_mb
 
 
 def _check_hugepage_availability(size_in_bytes: int) -> None:
@@ -714,7 +742,15 @@ def parse_args_to_config(
         StorageManagerConfig: The configuration object.
     """
     shm_name = getattr(args, "shm_name", None)
+    l2_adapter_config = parse_args_to_l2_adapters_config(args)
     use_hugepages = getattr(args, "l1_use_hugepages", False)
+
+    # SPDK zero-copy DMA requires pre-allocated hugepage memory, so force
+    # hugepage allocation when an SPDK L2 adapter is configured even if the
+    # caller did not pass --l1-use-hugepages.
+    spdk_hugepage_mb = _spdk_requires_hugepages(l2_adapter_config)
+    if spdk_hugepage_mb:
+        use_hugepages = True
 
     use_lazy = args.l1_use_lazy and not use_hugepages
     if use_hugepages and args.l1_use_lazy:
@@ -725,8 +761,9 @@ def parse_args_to_config(
 
     if use_hugepages:
         l1_size_bytes = int(args.l1_size_gb * (1 << 30))
+        total_hugepage_bytes = l1_size_bytes + spdk_hugepage_mb * 1024 * 1024
         try:
-            _check_hugepage_availability(l1_size_bytes)
+            _check_hugepage_availability(total_hugepage_bytes)
         except RuntimeError as e:
             logger.error("Hugepage availability check failed: %s", e)
             raise
@@ -775,8 +812,6 @@ def parse_args_to_config(
         extra_logging_enabled=getattr(args, "enable_extra_logging", False),
         extra_logging_interval=getattr(args, "extra_logging_interval", 10.0),
     )
-
-    l2_adapter_config = parse_args_to_l2_adapters_config(args)
 
     config = StorageManagerConfig(
         l1_manager_config=l1_manager_config,

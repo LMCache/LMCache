@@ -212,6 +212,10 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         default_output_path,
         resolve_flamegraph_dir,
     )
+    from lmcache.v1.distributed.config import (
+        _check_hugepage_availability,
+        _spdk_requires_hugepages,
+    )
     from lmcache.v1.distributed.l2_adapters import create_l2_adapter
     from lmcache.v1.distributed.l2_adapters.config import (
         parse_args_to_l2_adapters_config,
@@ -281,8 +285,22 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
     # Backing L1 memory buffer for adapters that need an L1 desc.
     # Sized for one in-flight wave of store + load buffers.
-    use_hugepages = bool(getattr(args, "l1_use_hugepages", False))
+    spdk_hugepage_mb = _spdk_requires_hugepages(l2_cfg)
+    use_hugepages = bool(getattr(args, "l1_use_hugepages", False)) or bool(
+        spdk_hugepage_mb
+    )
     l1_buffer_size = 2 * keys_per_round * data_size
+
+    # SPDK reserves a fixed block of 2 MiB hugepages from the same OS pool that
+    # backs this L1 buffer, so account for both before allocating.
+    if use_hugepages and spdk_hugepage_mb:
+        total_hugepage_bytes = l1_buffer_size + spdk_hugepage_mb * 1024 * 1024
+        try:
+            _check_hugepage_availability(total_hugepage_bytes)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(2)
+
     l1_buffer = make_aligned_tensor(
         l1_buffer_size,
         l1_align_bytes,

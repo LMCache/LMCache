@@ -28,9 +28,10 @@ caller-provided load buffers during prefetch.
   during startup (default ``true``). Set to ``false`` to start with an empty
   in-memory index instead.
 - ``enable_zero_copy``: Try aligned direct-buffer I/O when possible.
-- ``io_engine``: Rust raw-block I/O engine. Valid values are ``"posix"``
+- ``io_engine``: Raw-block I/O engine. Valid values are ``"posix"``
   (default synchronous ``pread``/``pwrite`` path), ``"io_uring"`` (direct Rust
-  io_uring syscall path).
+  io_uring syscall path), and ``"spdk"`` (SPDK/DPDK-based NVMe-oF or PCIe NVMe
+  with DMA-safe hugepage memory; see the notes below).
 - ``use_uring_cmd``: Enable NVMe passthrough via io_uring command interface
   for direct device access. Requires ``io_engine="io_uring"`` and NVMe
   character device node (e.g., ``/dev/ng0n1``).
@@ -63,9 +64,21 @@ caller-provided load buffers during prefetch.
   metadata checkpoint payload/header writes. Omit it to keep checkpoint writes
   on default NVMe placement.
 - ``num_store_workers`` / ``num_lookup_workers`` / ``num_load_workers``:
-  Worker-thread counts for each operation type.
+   Worker-thread counts for each operation type.
+- ``spdk_transport_type``: SPDK NVMe transport type. ``"pcie"`` for local
+  NVMe devices, ``"tcp"`` for NVMe-oF over TCP, ``"rdma"`` for NVMe-oF over
+  RDMA (default ``"tcp"``).
+- ``spdk_target_ip``: SPDK target address. The TCP IP for ``"tcp"``, or the
+  PCIe address (e.g., ``"0000:01:00.0"``) for ``"pcie"`` (default
+  ``"127.0.0.1"``).
+- ``spdk_target_port``: SPDK target port for NVMe-oF transports (TCP and RDMA,
+  default ``"4420"``). Not used for local PCIe devices.
+- ``spdk_target_nqn``: SPDK NVMe Qualified Name for the target subsystem
+  (default ``"nqn.2016-06.io.spdk:cnode1"``).
+- ``spdk_core_mask``: Hex core mask for SPDK poller cores (e.g., ``"0x3f"``;
+  empty lets SPDK auto-select cores).
 
-**Notes:**
+ **Notes:**
 
 - ``raw_block`` is a server-owned MP adapter. It does **not** support
   per-TP device-path mappings in MP mode.
@@ -141,9 +154,20 @@ caller-provided load buffers during prefetch.
   same object. This is the normal LMCache key identity rule; FDP placement is a
   write directive and is not used to locate data on reads.
 - Metadata checkpoint writes use ``meta_checkpoint_placement_id`` when
-  configured, otherwise they use default NVMe placement with no directive.
+   configured, otherwise they use default NVMe placement with no directive.
+- For ``io_engine="spdk"``, ``device_path`` is optional: NVMe-oF targets are
+  connected by SPDK using ``spdk_transport_type`` / ``spdk_target_ip`` /
+  ``spdk_target_nqn``; local PCIe devices are addressed by PCIe address.
+- ``io_engine="spdk"`` requires the SPDK/DPDK shared library and **hugepages**.
+  The storage manager forces ``use_hugepages=True`` for the L1 buffer and aligns
+  it to 2 MiB boundaries so it can be registered for zero-copy PCIe DMA.
+- SPDK reserves **4096 MB (2048 × 2 MiB hugepages)** from the same OS hugepage
+  pool that backs the L1 buffer. Size the 2 MiB hugepage pool for the L1 payload
+  **plus** this reservation; the storage manager validates the combined demand
+  at startup and fails fast with a clear error (naming the required
+  ``vm.nr_hugepages``) if the free pool is short.
 
-**Configuration examples:**
+ **Configuration examples:**
 
 .. code-block:: bash
 
@@ -164,6 +188,12 @@ caller-provided load buffers during prefetch.
 
     # With FDP discovery only, keeping KV data writes on default NVMe placement
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "fdp_data_placement_policy": "none", "use_odirect": false}'
+
+    # With the SPDK I/O engine over NVMe-oF (TCP); the device_path is optional
+    --l2-adapter '{"type": "raw_block", "slot_bytes": 1048576, "io_engine": "spdk", "spdk_transport_type": "tcp", "spdk_target_ip": "192.168.1.1", "spdk_target_port": "4420", "spdk_target_nqn": "nqn.2016-06.io.spdk:cnode1"}'
+
+    # With the SPDK I/O engine for a local PCIe NVMe device
+    --l2-adapter '{"type": "raw_block", "slot_bytes": 1048576, "io_engine": "spdk", "spdk_transport_type": "pcie", "spdk_target_ip": "0000:01:00.0"}'
 
     # With eviction
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
