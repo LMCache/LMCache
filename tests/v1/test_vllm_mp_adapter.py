@@ -274,6 +274,58 @@ def fake_adapter(monkeypatch):
     return adapter, req_client, future
 
 
+def test_bounded_id_set_evicts_oldest_beyond_capacity() -> None:
+    """``_BoundedIdSet`` must cap its size, evicting the least-recently-added
+    entry first, and must never grow past ``max_size`` no matter how many
+    distinct ids are added - this is what keeps ``_returned_finished``
+    from growing for the worker's entire process lifetime (see #5339)."""
+    bounded = adapter_mod._BoundedIdSet(max_size=3)
+
+    bounded.update({"a"})
+    bounded.update({"b"})
+    bounded.update({"c"})
+    assert len(bounded) == 3
+    assert "a" in bounded and "b" in bounded and "c" in bounded
+
+    bounded.update({"d"})
+    assert len(bounded) == 3
+    assert "a" not in bounded, "oldest entry should be evicted at capacity"
+    assert "b" in bounded and "c" in bounded and "d" in bounded
+
+    # Re-adding an existing id refreshes its recency instead of duplicating.
+    bounded.update({"b"})
+    bounded.update({"e"})
+    assert len(bounded) == 3
+    assert "c" not in bounded, "c was the least-recently-added after b's refresh"
+    assert "b" in bounded and "d" in bounded and "e" in bounded
+
+    # Never exceeds the cap under sustained, high-volume additions.
+    unbounded_load = adapter_mod._BoundedIdSet(max_size=100)
+    for i in range(10_000):
+        unbounded_load.update({f"req-{i}"})
+    assert len(unbounded_load) == 100
+    assert "req-9999" in unbounded_load
+    assert "req-0" not in unbounded_load
+
+
+def test_returned_finished_stays_bounded_across_many_requests(
+    fake_adapter,
+) -> None:
+    """The worker adapter's own ``_returned_finished`` set must not grow
+    without bound as distinct request ids are reported finished over the
+    life of the worker (see #5339)."""
+    adapter, _req_client, _future = fake_adapter
+    adapter._returned_finished = adapter_mod._BoundedIdSet(max_size=50)
+
+    for i in range(500):
+        req_id = f"req-{i}"
+        adapter._process_finished_stores(set(), {req_id})
+
+    assert len(adapter._returned_finished) == 50
+    assert "req-499" in adapter._returned_finished
+    assert "req-0" not in adapter._returned_finished
+
+
 def test_scheduler_reset_cache_clears_every_server_without_force(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
