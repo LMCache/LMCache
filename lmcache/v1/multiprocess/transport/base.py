@@ -10,6 +10,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
+    NO_SESSION_END_INFO,
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
@@ -19,6 +20,7 @@ from lmcache.v1.multiprocess.custom_types import (
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
+    SessionEndInfo,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -115,7 +117,11 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
-    def end_session(self, request_id: str) -> MessagingFuture[None]: ...
+    def end_session(
+        self,
+        request_id: str,
+        end_info: SessionEndInfo = NO_SESSION_END_INFO,
+    ) -> MessagingFuture[None]: ...
 
     @rpc_method
     def register_kv_cache_engine_driven_context(
