@@ -92,6 +92,23 @@ S3-Specific (in extra_config)
 - Consider S3 Express One Zone for less redundancy but better performance
 
 
+Cache Object Names and Upgrades
+-------------------------------
+
+The in-process connector stores each chunk under
+``lmcache-v2/<SHA-256 hex digest of the UTF-8 CacheEngineKey string>``.
+Hashing the complete key preserves distinctions such as ``a/b_c`` and
+``a_b/c`` that the previous slash-to-underscore naming lost. Object names
+are 75 ASCII bytes regardless of the model name's length.
+
+Upgrading starts a cold remote cache: legacy objects are neither read nor
+modified, because their names cannot reliably identify the original model.
+Old and new clients can use the same bucket but do not share these chunks.
+Allow the ``lmcache-v2/`` prefix in any object-prefix access policies or
+lifecycle rules. There is no automatic migration or deletion of old objects.
+This naming change applies only to the in-process connector; the MP adapter
+below uses its own object format.
+
 MP Mode Configuration
 ---------------------
 
