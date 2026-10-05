@@ -381,6 +381,7 @@ def run_cache_server(
         null_block_id=mp_config.null_block_id,
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
+        session_ttl_seconds=mp_config.session_ttl_seconds,
     )
 
     modules = _build_modules(ctx, mp_config, coordinator_config)

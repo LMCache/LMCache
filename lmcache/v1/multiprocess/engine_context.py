@@ -194,6 +194,7 @@ class MPCacheServerContext:
             group per sliding-window size at KV-cache registration. Default
             False.
         null_block_id: Engine block ID that denotes absent KV data.
+        session_ttl_seconds: Idle seconds before a request session is reaped.
     """
 
     def __init__(
@@ -204,6 +205,7 @@ class MPCacheServerContext:
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
         null_block_id: int = 0,
+        session_ttl_seconds: float = SessionManager.DEFAULT_SESSION_TTL,
     ) -> None:
         self._chunk_size = chunk_size
         self._null_block_id = null_block_id
@@ -217,7 +219,9 @@ class MPCacheServerContext:
         self._token_hasher = TokenHasher(
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
         )
-        self._session_manager = SessionManager(self._token_hasher)
+        self._session_manager = SessionManager(
+            self._token_hasher, ttl=session_ttl_seconds
+        )
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
 
