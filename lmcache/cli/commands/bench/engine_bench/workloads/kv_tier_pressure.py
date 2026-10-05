@@ -23,23 +23,24 @@ how large any single prompt is.
 
 Sizing
 ------
-The pool is sized from the benchmark's KV cache budget rather than guessed::
+``pool_size`` is the knob that decides whether the storage tier is reached at
+all: the distinct working set is ``pool_size x context_length`` tokens, and
+only what exceeds L1 can be evicted and read back.  To overflow a cache of
+``V`` GB by a factor of ``F``::
 
-    pool_size = ceil(overflow_factor x kv_cache_volume_gb
-                     x tokens_per_gb_kvcache / context_length)
+    pool_size = ceil(F x V x tokens_per_gb_kvcache / context_length)
 
-Under LRU with uniform access the steady-state L1 hit rate is approximately
-``1 / overflow_factor``, so the share of reads served by L2 is approximately
-``1 - 1 / overflow_factor``.  The default factor of 2.0 therefore targets
-roughly half of all cache reads coming from the storage tier.  Pass
-``pool_size`` explicitly to override the derivation entirely.
+``tokens_per_gb_kvcache`` comes from the engine's own KV layout -- ``lmcache
+bench engine`` resolves it from ``--lmcache-url``, and it is
+``(1024 ** 3) // (cache_size_per_token x world_size)``.  An ``F`` of 2 means
+half the working set cannot be resident, so roughly half of all cache reads
+must come from L2.
 
-That figure is a **sizing heuristic, not a prediction**.  It assumes pure LRU
-over uniformly-drawn whole documents and ignores prefetch re-admission,
-chunk-level sharing and intra-request re-reads, so the measured share can
-land either side of it -- observed 45% at an overflow of 1.0 on one stack and
-36% at an overflow of 2.0 on another.  Use it to pick a pool size, then read
-the share that actually occurred from the cache's own tier counters.
+Treat that only as a dial.  The idealised share ``1 - 1 / F`` assumes pure
+LRU over uniformly-drawn whole documents and ignores prefetch re-admission,
+chunk-level sharing and intra-request re-reads: 45% was measured at ``F = 1``
+on one stack and 36% at ``F = 2`` on another.  Size the pool with it, then
+read the share that actually occurred from the cache's tier counters.
 
 Warm-up
 -------
@@ -61,7 +62,6 @@ stored exactly once before measurement starts.
 # Standard
 from dataclasses import dataclass
 import asyncio
-import math
 import random
 
 # First Party
@@ -91,7 +91,6 @@ class KVTierPressureConfig:
     context_length: int = 2560
     system_prompt_length: int = 256
     num_requests: int = 200
-    overflow_factor: float = 2.0
     access_skew: float = 0.0
     vocab_size: int = 8000
     num_inflight_requests: int = 8
@@ -105,7 +104,12 @@ class KVTierPressureConfig:
                 ``docs_per_request`` exceeds ``pool_size``.
         """
         if self.pool_size < 1:
-            raise ValueError(f"pool_size must be >= 1, got {self.pool_size}")
+            raise ValueError(
+                f"pool_size must be >= 1, got {self.pool_size}. Pass "
+                f"--ktp-pool-size: it sets the working set "
+                f"(pool_size x context_length tokens) and therefore whether "
+                f"the storage tier is reached at all."
+            )
         if self.docs_per_request < 1:
             raise ValueError(
                 f"docs_per_request must be >= 1, got {self.docs_per_request}"
@@ -126,10 +130,6 @@ class KVTierPressureConfig:
             )
         if self.num_requests < 1:
             raise ValueError(f"num_requests must be >= 1, got {self.num_requests}")
-        if self.overflow_factor <= 0:
-            raise ValueError(
-                f"overflow_factor must be positive, got {self.overflow_factor}"
-            )
         if self.access_skew < 0:
             raise ValueError(f"access_skew must be >= 0, got {self.access_skew}")
         if self.vocab_size < 1:
@@ -146,41 +146,29 @@ class KVTierPressureConfig:
     @classmethod
     def resolve(
         cls,
-        kv_cache_volume_gb: float,
-        tokens_per_gb_kvcache: int,
-        pool_size: int = 0,
+        pool_size: int,
         docs_per_request: int = 16,
         context_length: int = 2560,
         system_prompt_length: int = 256,
         num_requests: int = 200,
-        overflow_factor: float = 2.0,
         access_skew: float = 0.0,
         vocab_size: int = 8000,
         num_inflight_requests: int = 8,
         max_output_length: int = 1,
     ) -> "KVTierPressureConfig":
-        """Create a config, deriving ``pool_size`` from the KV cache budget.
-
-        When ``pool_size`` is 0 the pool is sized so the distinct working set
-        is ``overflow_factor`` times the configured KV cache volume, which is
-        what makes the storage tier reachable.  A non-zero ``pool_size`` is
-        used verbatim and ``overflow_factor`` is ignored for sizing.
+        """Create a config from the provided parameters.
 
         Args:
-            kv_cache_volume_gb: Target active KV cache volume in GB.
-            tokens_per_gb_kvcache: Tokens fitting in 1 GB of KV cache.
-            pool_size: Total documents in the corpus.  0 derives it from the
-                KV cache budget and ``overflow_factor``.
+            pool_size: Total documents in the corpus.  This is what sets the
+                working set, and therefore whether the storage tier is
+                reached; see the module docstring for how to size it against
+                a given cache volume.
             docs_per_request: Documents sampled into each request.  Bounded
                 above by the engine's context limit, not by ``pool_size``.
             context_length: Exact token length of each document.
             system_prompt_length: Exact token length of the shared system
                 prompt.  Use 0 for no system prompt.
             num_requests: Number of measured requests to send.
-            overflow_factor: Working set as a multiple of the KV cache
-                volume.  Values above 1.0 force eviction to L2; the
-                steady-state L2 read share is approximately
-                ``1 - 1 / overflow_factor``.
             access_skew: Zipf exponent for document popularity.  0.0 samples
                 uniformly; larger values concentrate reads on a hot subset
                 and reduce the L2 read share.
@@ -196,34 +184,14 @@ class KVTierPressureConfig:
             A fully-resolved KVTierPressureConfig.
 
         Raises:
-            ValueError: If the derived or supplied values fail validation.
+            ValueError: If any value fails validation.
         """
-        resolved_pool_size = pool_size
-        if resolved_pool_size == 0:
-            if context_length <= 0:
-                raise ValueError(
-                    f"context_length must be positive to derive pool_size, "
-                    f"got {context_length}"
-                )
-            budget_tokens = overflow_factor * kv_cache_volume_gb * tokens_per_gb_kvcache
-            resolved_pool_size = max(math.ceil(budget_tokens / context_length), 1)
-            logger.debug(
-                "Derived pool_size=%d from kv_cache_volume_gb=%.1f, "
-                "tokens_per_gb_kvcache=%d, context_length=%d, "
-                "overflow_factor=%.2f",
-                resolved_pool_size,
-                kv_cache_volume_gb,
-                tokens_per_gb_kvcache,
-                context_length,
-                overflow_factor,
-            )
         return cls(
-            pool_size=resolved_pool_size,
+            pool_size=pool_size,
             docs_per_request=docs_per_request,
             context_length=context_length,
             system_prompt_length=system_prompt_length,
             num_requests=num_requests,
-            overflow_factor=overflow_factor,
             access_skew=access_skew,
             vocab_size=vocab_size,
             num_inflight_requests=num_inflight_requests,
@@ -497,8 +465,6 @@ class KVTierPressureWorkload(BaseWorkload):
             f"  System prompt:       {yellow}{c.system_prompt_length}{reset} tokens\n"
             f"  Working set:         {yellow}{self.working_set_tokens:,}{reset}"
             f" tokens\n"
-            f"  Overflow factor:     {yellow}{c.overflow_factor:.2f}x{reset} of KV "
-            f"cache volume\n"
             f"  Access skew:         {yellow}{c.access_skew:.2f}{reset} "
             f"(0 = uniform)\n"
             f"  Warm-up sweep:       {yellow}{len(self._sweep_groups)}{reset} "
@@ -517,7 +483,7 @@ class KVTierPressureWorkload(BaseWorkload):
         """Report the pool geometry that drove the run.
 
         Deliberately reports the inputs only.  A derived "predicted L2 read
-        share" used to sit here, but ``1 - 1 / overflow_factor`` assumes pure
+        share" used to sit here, but ``1 - 1 / F`` assumes pure
         LRU over uniformly-drawn whole documents and was measured 14 points
         low on one stack and 45 points high on another -- printing it beside
         real counters invited it being quoted as a result.  Read the share
@@ -528,7 +494,6 @@ class KVTierPressureWorkload(BaseWorkload):
             ("pool_size", "Document pool", c.pool_size),
             ("docs_per_request", "Docs per request", c.docs_per_request),
             ("working_set_tokens", "Working set (tokens)", self.working_set_tokens),
-            ("overflow_factor", "Overflow factor", round(c.overflow_factor, 3)),
             ("access_skew", "Access skew", round(c.access_skew, 3)),
             (
                 "warmup_sweep_requests",

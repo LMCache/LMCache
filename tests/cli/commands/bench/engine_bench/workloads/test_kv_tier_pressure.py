@@ -44,7 +44,6 @@ class TestKVTierPressureConfig:
         assert cfg.context_length == 2560
         assert cfg.system_prompt_length == 256
         assert cfg.num_requests == 200
-        assert cfg.overflow_factor == 2.0
         assert cfg.access_skew == 0.0
         assert cfg.num_inflight_requests == 8
         assert cfg.max_output_length == 1
@@ -61,7 +60,6 @@ class TestKVTierPressureConfig:
             ("context_length", 0, "context_length must be positive"),
             ("system_prompt_length", -1, "system_prompt_length must be >= 0"),
             ("num_requests", 0, "num_requests must be >= 1"),
-            ("overflow_factor", 0.0, "overflow_factor must be positive"),
             ("access_skew", -0.5, "access_skew must be >= 0"),
             ("vocab_size", 0, "vocab_size must be >= 1"),
             ("num_inflight_requests", 0, "num_inflight_requests must be >= 1"),
@@ -76,52 +74,26 @@ class TestKVTierPressureConfig:
 
 
 class TestResolve:
-    def test_derives_pool_from_kv_budget(self) -> None:
-        """pool_size = overflow x volume x tokens_per_gb / context_length."""
+    def test_passes_values_through(self) -> None:
         cfg = KVTierPressureConfig.resolve(
-            kv_cache_volume_gb=100.0,
-            tokens_per_gb_kvcache=1000,
+            pool_size=80,
+            docs_per_request=4,
             context_length=2500,
-            overflow_factor=2.0,
-            docs_per_request=4,
+            num_requests=50,
         )
-        # 2.0 * 100 * 1000 / 2500 = 80
         assert cfg.pool_size == 80
+        assert cfg.docs_per_request == 4
+        assert cfg.context_length == 2500
+        assert cfg.num_requests == 50
 
-    def test_overflow_factor_scales_the_pool(self) -> None:
-        def pool_for(factor: float) -> int:
-            return KVTierPressureConfig.resolve(
-                kv_cache_volume_gb=100.0,
-                tokens_per_gb_kvcache=1000,
-                context_length=2500,
-                overflow_factor=factor,
-                docs_per_request=4,
-            ).pool_size
+    def test_pool_size_is_required(self) -> None:
+        """There is no derivation any more: the caller must size the pool."""
+        with pytest.raises(TypeError):
+            KVTierPressureConfig.resolve()  # type: ignore[call-arg]
 
-        assert pool_for(1.0) == 40
-        assert pool_for(2.0) == 80
-        assert pool_for(4.0) == 160
-
-    def test_explicit_pool_size_wins(self) -> None:
-        cfg = KVTierPressureConfig.resolve(
-            kv_cache_volume_gb=100.0,
-            tokens_per_gb_kvcache=1000,
-            pool_size=7,
-            docs_per_request=4,
-            overflow_factor=99.0,
-        )
-        assert cfg.pool_size == 7
-
-    def test_pool_is_rounded_up(self) -> None:
-        cfg = KVTierPressureConfig.resolve(
-            kv_cache_volume_gb=1.0,
-            tokens_per_gb_kvcache=1000,
-            context_length=300,
-            overflow_factor=1.0,
-            docs_per_request=1,
-        )
-        # ceil(1000 / 300) = 4, never 3: rounding down would under-fill L1
-        assert cfg.pool_size == 4
+    def test_resolve_validates(self) -> None:
+        with pytest.raises(ValueError, match="pool_size must be >= 1"):
+            KVTierPressureConfig.resolve(pool_size=0)
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +369,7 @@ class TestWorkloadBehaviour:
         w.log_config()
 
     def test_extra_metric_section(self) -> None:
-        cfg = _make_config(pool_size=12, docs_per_request=3, overflow_factor=2.0)
+        cfg = _make_config(pool_size=12, docs_per_request=3)
         w, *_ = _make_workload(cfg)
         sections = w.extra_metric_sections()
         assert len(sections) == 1
@@ -405,6 +377,7 @@ class TestWorkloadBehaviour:
         assert entries["pool_size"] == 12
         assert entries["docs_per_request"] == 3
         assert "predicted_l2_read_share_pct" not in entries
+        assert "overflow_factor" not in entries
         assert entries["warmup_sweep_requests"] == 4
 
 

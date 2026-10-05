@@ -241,18 +241,12 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
         "--ktp-pool-size",
         type=int,
         default=0,
-        help="Total documents in the corpus (default: 0 = derive from "
-        "--kv-cache-volume and --ktp-overflow-factor). The pool is what "
-        "sets the working set, independently of how large one prompt is.",
-    )
-    ktp_group.add_argument(
-        "--ktp-overflow-factor",
-        type=float,
-        default=2.0,
-        help="Working set as a multiple of --kv-cache-volume (default: 2.0). "
-        "Above 1.0 forces eviction to L2; the steady-state L2 read share is "
-        "about 1 - 1/factor, so 2.0 targets ~50%% of reads from storage. "
-        "Ignored when --ktp-pool-size is given.",
+        help="Total documents in the corpus. Required for this workload. "
+        "This sets the working "
+        "set -- pool_size x --ktp-context-length tokens -- independently of "
+        "how large one prompt is, and only what exceeds L1 can reach the "
+        "storage tier. To overflow a cache of V GB by a factor F: "
+        "ceil(F * V * tokens_per_gb_kvcache / context_length).",
     )
     ktp_group.add_argument(
         "--ktp-docs-per-request",

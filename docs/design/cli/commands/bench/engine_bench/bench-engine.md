@@ -350,8 +350,7 @@ prefill stay comparable, while the working set scales with `D` alone.
 
 | Field | CLI arg | Default |
 |-------|---------|---------|
-| `pool_size` | `--ktp-pool-size` | 0 (derive from KV budget) |
-| `overflow_factor` | `--ktp-overflow-factor` | 2.0 |
+| `pool_size` | `--ktp-pool-size` | **required** |
 | `docs_per_request` | `--ktp-docs-per-request` | 16 |
 | `context_length` | `--ktp-context-length` | 2560 (exact tokens) |
 | `system_prompt_length` | `--ktp-system-prompt-length` | 256 (`0` disables) |
@@ -361,25 +360,26 @@ prefill stay comparable, while the working set scales with `D` alone.
 | `num_inflight_requests` | `--ktp-num-inflight-requests` | 8 |
 | `max_output_length` | `--ktp-max-output-length` | 1 |
 
-**Sizing contract.** When `pool_size` is 0 it is derived through the same KV
-budget convention as 4.1:
+**Sizing contract.** `pool_size` is required and used verbatim -- there is no
+derivation. The working set is `pool_size x context_length` tokens, and only
+what exceeds L1 can be evicted and read back. To overflow a cache of `V` GB
+by a factor `F`:
 
 ```
-pool_size = ceil(overflow_factor x kv_cache_volume_gb
-                 x tokens_per_gb_kvcache / context_length)
+pool_size = ceil(F x V x tokens_per_gb_kvcache / context_length)
 ```
 
-Under LRU with uniform access the L1 hit rate approaches the fraction of the
-working set that fits, so the L2 read share is `1 - 1 / overflow_factor`.
-This is a sizing heuristic, not a prediction -- it ignores prefetch
-re-admission, chunk-level sharing and intra-request re-reads. Measured shares
-of 45% at overflow 1.0 and 36% at overflow 2.0 have both been observed, so
-treat the figure as a dial for choosing `pool_size` and take the real share
-from the tier counters.
-A non-zero `pool_size` is used verbatim and `overflow_factor` is then ignored
-for sizing but still reported. `access_skew` applies Zipf weights
-`1 / (rank + 1) ** skew`, which raises the L1 hit rate and *lowers* the L2
-share — it models a hot subset, not extra pressure.
+An earlier `--ktp-overflow-factor` flag applied that formula automatically.
+It was removed: it duplicated `pool_size`, and the share it implied
+(`1 - 1 / F`) does not hold -- 45% measured at `F = 1` on one stack, 36% at
+`F = 2` on another, because the formula assumes pure LRU over uniformly-drawn
+whole documents and ignores prefetch re-admission, chunk-level sharing and
+intra-request re-reads. The formula survives as documented guidance; the real
+share comes from the tier counters.
+
+`access_skew` applies Zipf weights `1 / (rank + 1) ** skew`, which raises the
+L1 hit rate and *lowers* the L2 share -- it models a hot subset, not extra
+pressure.
 
 **Warmup is a deterministic sweep, not a dummy request.** Two reasons, both
 measurement-correctness rather than engine warm-up:
@@ -401,9 +401,9 @@ from the measurement.
 **Dispatch:** semaphore-controlled, as in 4.1.
 
 **Extra metrics.** Reports a `kv_tier_pressure` section carrying the resolved
-pool size, docs per request, working-set tokens, overflow factor, predicted L2
-read share, access skew, sweep size and measured tokens per request — so the
-observed share can be checked against what the sizing predicted.
+pool size, docs per request, working-set tokens, access skew, sweep size and
+measured tokens per request. Inputs only -- the share of reads actually served
+by L2 comes from the cache's tier counters, not from this workload.
 
 ### 4.6 `prefix-suffix-tuner`
 

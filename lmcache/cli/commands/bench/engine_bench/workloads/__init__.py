@@ -23,13 +23,13 @@ from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_permutator impor
     LongDocPermutatorConfig,
     LongDocPermutatorWorkload,
 )
-from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_qa import (
-    LongDocQAConfig,
-    LongDocQAWorkload,
-)
 from lmcache.cli.commands.bench.engine_bench.workloads.kv_tier_pressure import (
     KVTierPressureConfig,
     KVTierPressureWorkload,
+)
+from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_qa import (
+    LongDocQAConfig,
+    LongDocQAWorkload,
 )
 from lmcache.cli.commands.bench.engine_bench.workloads.multi_round_chat import (
     MultiRoundChatConfig,
@@ -55,10 +55,10 @@ __all__ = [
     "BaseWorkload",
     "LongDocPermutatorConfig",
     "LongDocPermutatorWorkload",
-    "LongDocQAConfig",
-    "LongDocQAWorkload",
     "KVTierPressureConfig",
     "KVTierPressureWorkload",
+    "LongDocQAConfig",
+    "LongDocQAWorkload",
     "MultiRoundChatConfig",
     "MultiRoundChatWorkload",
     "PrefixSuffixTunerConfig",
@@ -160,14 +160,11 @@ def create_workload(
 
     if config.workload == "kv-tier-pressure":
         ktp_workload_config = KVTierPressureConfig.resolve(
-            kv_cache_volume_gb=config.kv_cache_volume_gb,
-            tokens_per_gb_kvcache=config.tokens_per_gb_kvcache,
             pool_size=args.ktp_pool_size,
             docs_per_request=args.ktp_docs_per_request,
             context_length=args.ktp_context_length,
             system_prompt_length=args.ktp_system_prompt_length,
             num_requests=args.ktp_num_requests,
-            overflow_factor=args.ktp_overflow_factor,
             access_skew=args.ktp_access_skew,
             vocab_size=8000,
             num_inflight_requests=args.ktp_num_inflight_requests,

@@ -410,17 +410,25 @@ cache and samples a subset into each request:
 
    [System Prompt] + [Doc_a] + [Doc_b] + ... + [Doc_k]   (k of D, k << D)
 
-The pool is sized from ``--kv-cache-volume`` so the working set deliberately
-overflows L1, which is what forces eviction to L2 and makes subsequent reads
-come back from storage. Under LRU with uniform access the steady-state share of
-reads served by L2 is about ``1 - 1 / overflow_factor``, so the default factor
-of 2.0 targets roughly half.
+``--ktp-pool-size`` is what decides whether the storage tier is reached: the
+working set is ``pool_size x --ktp-context-length`` tokens, and only what
+exceeds L1 can be evicted and read back. To overflow a cache of ``V`` GB by a
+factor of ``F``:
 
-This is a sizing heuristic rather than a prediction: it assumes pure LRU over
-uniformly-drawn whole documents and ignores prefetch re-admission and
-chunk-level sharing, so the measured share can land either side of it. Use it
-to choose a pool size, then read the share that actually occurred from the
-cache's tier counters.
+.. code-block:: text
+
+   pool_size = ceil(F * V * tokens_per_gb_kvcache / context_length)
+
+``tokens_per_gb_kvcache`` comes from the engine's KV layout and is resolved
+automatically from ``--lmcache-url`` (see :ref:`bench-tokens-per-gb`). An
+``F`` of 2 means half the working set cannot be resident, so roughly half of
+all cache reads must come from L2.
+
+Treat that only as a dial. The idealised share ``1 - 1 / F`` assumes pure LRU
+over uniformly-drawn whole documents and ignores prefetch re-admission and
+chunk-level sharing: 45% was measured at ``F = 1`` on one stack and 36% at
+``F = 2`` on another. Size the pool with it, then read the share that actually
+occurred from the cache's tier counters.
 
 Warmup is a deterministic sweep: the pool is partitioned into
 ``ceil(pool_size / docs_per_request)`` non-overlapping groups and each is sent
@@ -436,13 +444,9 @@ measured across a cold start describes run length, not the system.
      - Default
      - Description
    * - ``--ktp-pool-size``
-     - 0
-     - Total documents in the corpus. ``0`` derives it from
-       ``--kv-cache-volume`` and ``--ktp-overflow-factor``.
-   * - ``--ktp-overflow-factor``
-     - 2.0
-     - Working set as a multiple of ``--kv-cache-volume``. Above 1.0 forces
-       eviction to L2. Ignored when ``--ktp-pool-size`` is given.
+     - *required*, no default
+     - Total documents in the corpus. Sets the working set, and therefore
+       whether the storage tier is reached. See the sizing formula above.
    * - ``--ktp-docs-per-request``
      - 16
      - Documents sampled into each request. Bounded by the engine's context
@@ -472,8 +476,7 @@ measured across a cold start describes run length, not the system.
        dilutes the measurement.
 
 The run reports a **Document pool** section alongside the standard metrics,
-giving the resolved pool size, working set, overflow factor, access skew and
-sweep size. These are inputs: the share of reads actually served by L2 comes
+giving the resolved pool size, working set, access skew and sweep size. These are inputs: the share of reads actually served by L2 comes
 from the cache's own tier counters, not from this workload.
 
 **Example** -- target ~50% of cache reads from L2 against a 100 GB L1:
@@ -484,13 +487,13 @@ from the cache's own tier counters, not from this workload.
        --engine-url http://localhost:8000 \
        --workload kv-tier-pressure \
        --lmcache-url http://localhost:8080 \
-       --kv-cache-volume 100 \
-       --ktp-overflow-factor 2.0 \
+       --ktp-pool-size 910 \
        --ktp-docs-per-request 16 \
+       --ktp-context-length 2560 \
        --ktp-num-requests 200
 
-Raise ``--ktp-overflow-factor`` for a larger share (4.0 targets ~75%), or pin
-``--ktp-pool-size`` directly when reproducing a specific corpus.
+Raise ``--ktp-pool-size`` for a larger share of reads from storage, and keep
+it pinned when reproducing an earlier run so the corpus is identical.
 
 
 prefix-suffix-tuner
