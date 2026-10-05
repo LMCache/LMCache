@@ -553,7 +553,7 @@ class StorageManager:
                     {"keys": keys},
                 )
 
-    @enable_tracing()
+    @enable_tracing(redact=("l1_owners",))
     def finish_read_prefetched(
         self,
         keys: list[ObjectKey],

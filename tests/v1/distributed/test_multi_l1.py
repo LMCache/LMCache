@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from unittest.mock import Mock
 
 # Third Party
@@ -23,9 +24,11 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.storage_controllers.write_policy import OrderedWritePolicy
 from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.v1.mp_observability.event import Event
+from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.trace import codecs
 from lmcache.v1.mp_observability.trace import decorator as trace_decorator
+from lmcache.v1.mp_observability.trace.reader import TraceReader
+from lmcache.v1.mp_observability.trace.recorder import StorageTraceRecorder
 from tests.v1.distributed.utils import single_row_spec
 import lmcache.v1.memory_management as memory_management
 
@@ -352,6 +355,64 @@ def test_single_l1_completion_trace_replays_without_process_local_owners(
             codecs.decode_args(msgspec.msgpack.decode(payload)),
         )
     assert target_l1.get_object_state(key(1)) is not None
+
+
+def test_read_release_trace_redacts_owners_and_replays_on_single_l1(
+    storage_factory: StorageFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Owner redaction preserves live release and a replayable on-disk record."""
+    source, (source_l1,), _ = storage_factory((4096,))
+    target, (target_l1,), _ = storage_factory((4096,))
+    keys = [key(1)]
+    for store, manager in ((source, source_l1), (target, target_l1)):
+        objects = store.reserve_write(keys, LAYOUT)
+        store.finish_write_by_owner(store.prepare_write_completion(objects))
+        assert manager.reserve_read(keys, read_locks=2)[keys[0]][0] == L1Error.SUCCESS
+        assert manager.report_status()["read_locked_count"] == 1
+    assert target_l1.l1_manager_id != source_l1.l1_manager_id
+    owners = {keys[0]: source_l1.l1_manager_id}
+    release = Mock(wraps=source._finish_read_objects)
+    monkeypatch.setattr(source, "_finish_read_objects", release)
+
+    path = str(tmp_path / "read-release.lct")
+    saved_gate = trace_decorator.is_tracing_enabled()
+    recorder = StorageTraceRecorder(path)
+    bus = Mock()
+    # Deliver synchronously through the production subscriber, without a
+    # drain-thread sleep or an alternate serialization path.
+    bus.publish.side_effect = recorder.get_subscriptions()[EventType.TRACE_CALL]
+    try:
+        with monkeypatch.context() as capture:
+            capture.setattr(trace_decorator, "get_event_bus", lambda: bus)
+            source.finish_read_prefetched(keys, read_locks=2, l1_owners=owners)
+    finally:
+        recorder.close()
+        trace_decorator.set_tracing_enabled(saved_gate)
+
+    release.assert_called_once_with(keys, 2, owners)
+    assert release.call_args.args[0] is keys
+    assert release.call_args.args[2] is owners
+    assert source_l1.report_status()["read_locked_count"] == 0
+    with TraceReader(path) as reader:
+        records = list(reader.records())
+    qualname = (
+        "lmcache.v1.distributed.storage_manager.StorageManager.finish_read_prefetched"
+    )
+    assert [record.qualname for record in records] == [qualname]
+    bus.publish.assert_called_once()
+    event = bus.publish.call_args.args[0]
+    assert event.metadata["qualname"] == qualname
+    assert event.metadata["args"] == {"keys": keys, "read_locks": 2}
+    decoded = codecs.decode_args(records[0].args)
+    assert decoded == {"keys": keys, "read_locks": 2}
+    assert recorder.dropped_count == 0
+
+    dispatcher = build_default_dispatcher()
+    assert dispatcher.has(qualname)
+    dispatcher.dispatch(qualname, ReplayContext(target), decoded)
+    assert target_l1.report_status()["read_locked_count"] == 0
 
 
 def test_policy_rejects_repeated_or_unknown_candidates(
