@@ -117,6 +117,9 @@ class _StorageManagerStub:
         self._capacity_publish_lock = threading.Lock()
         self._event_bus = _RecordingBus()
 
+    def _require_single_l1(self) -> None:
+        """This capacity-only stub always represents one L1 manager."""
+
     def _build_capacities(self) -> list[ModuleMemoryCapacity]:
         return StorageManager._build_capacities(cast("StorageManager", self))
 

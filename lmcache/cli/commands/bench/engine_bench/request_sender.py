@@ -7,8 +7,13 @@ import collections.abc
 import os
 import time
 
-# Third Party
-from openai import AsyncOpenAI
+try:
+    # Third Party
+    from openai import AsyncOpenAI
+except ModuleNotFoundError as exc:
+    if exc.name != "openai":
+        raise
+    AsyncOpenAI = None  # type: ignore[assignment]
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.stats import RequestResult
@@ -91,12 +96,21 @@ class RequestSender:
                 options the OpenAI client has no parameter for (notably
                 ``chat_template_kwargs``).  Copied, and sent verbatim, so the
                 caller owns their compatibility with the backend.
+
+        Raises:
+            RuntimeError: If the optional OpenAI dependency is unavailable.
         """
         self._model = model
         self._completions_mode = completions_mode
         self._on_finished = list(on_finished)
         self._ignore_eos = ignore_eos
         self._extra_body = dict(extra_body)
+
+        if AsyncOpenAI is None:
+            raise RuntimeError(
+                "lmcache bench engine requires the optional 'openai' package. "
+                "Install it with `pip install openai`."
+            )
 
         base_url = _normalize_url(engine_url)
         api_key = os.getenv("OPENAI_API_KEY", "")
