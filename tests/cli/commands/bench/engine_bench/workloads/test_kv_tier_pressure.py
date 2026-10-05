@@ -19,7 +19,6 @@ from lmcache.cli.commands.bench.engine_bench.workloads import kv_tier_pressure a
 from lmcache.cli.commands.bench.engine_bench.workloads.kv_tier_pressure import (
     KVTierPressureConfig,
     KVTierPressureWorkload,
-    predicted_l2_read_share,
     sample_requests,
     warmup_sweep,
 )
@@ -231,19 +230,6 @@ class TestSampleRequests:
             sample_requests(pool, docs, n, skew, seed=0)
 
 
-class TestPredictedL2ReadShare:
-    @pytest.mark.parametrize(
-        "factor,expected",
-        [(1.0, 0.0), (2.0, 50.0), (4.0, 75.0), (0.5, 0.0)],
-    )
-    def test_values(self, factor: float, expected: float) -> None:
-        assert predicted_l2_read_share(factor) == pytest.approx(expected)
-
-    def test_rejects_non_positive(self) -> None:
-        with pytest.raises(ValueError, match="overflow_factor must be positive"):
-            predicted_l2_read_share(0.0)
-
-
 # ---------------------------------------------------------------------------
 # Workload
 # ---------------------------------------------------------------------------
@@ -418,7 +404,7 @@ class TestWorkloadBehaviour:
         entries = dict((k, v) for k, _, v in sections[0].entries)
         assert entries["pool_size"] == 12
         assert entries["docs_per_request"] == 3
-        assert entries["predicted_l2_read_share_pct"] == pytest.approx(50.0)
+        assert "predicted_l2_read_share_pct" not in entries
         assert entries["warmup_sweep_requests"] == 4
 
 

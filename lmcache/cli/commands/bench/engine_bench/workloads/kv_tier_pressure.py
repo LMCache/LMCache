@@ -375,29 +375,6 @@ def sample_requests(
     return requests
 
 
-def predicted_l2_read_share(overflow_factor: float) -> float:
-    """Predict the steady-state share of cache reads served by L2.
-
-    Under LRU with uniform access the L1 hit rate approaches the fraction of
-    the working set that fits, so the L2 share is ``1 - 1 / overflow_factor``.
-    A factor at or below 1.0 fits entirely in L1 and yields 0.
-
-    Args:
-        overflow_factor: Working set as a multiple of the KV cache volume.
-
-    Returns:
-        Predicted L2 read share as a percentage, 0.0 to 100.0.
-
-    Raises:
-        ValueError: If ``overflow_factor`` is not positive.
-    """
-    if overflow_factor <= 0:
-        raise ValueError(f"overflow_factor must be positive, got {overflow_factor}")
-    if overflow_factor <= 1.0:
-        return 0.0
-    return 100.0 * (1.0 - 1.0 / overflow_factor)
-
-
 # ---------------------------------------------------------------------------
 # Workload class
 # ---------------------------------------------------------------------------
@@ -509,7 +486,6 @@ class KVTierPressureWorkload(BaseWorkload):
         cyan = "\033[96m"
         yellow = "\033[93m"
         reset = "\033[0m"
-        share = predicted_l2_read_share(c.overflow_factor)
         passes = c.num_requests * c.docs_per_request / c.pool_size
         print(
             f"{bold}{'═' * 50}{reset}\n"
@@ -523,7 +499,6 @@ class KVTierPressureWorkload(BaseWorkload):
             f" tokens\n"
             f"  Overflow factor:     {yellow}{c.overflow_factor:.2f}x{reset} of KV "
             f"cache volume\n"
-            f"  Predicted L2 share:  {yellow}{share:.0f}%{reset} of cache reads\n"
             f"  Access skew:         {yellow}{c.access_skew:.2f}{reset} "
             f"(0 = uniform)\n"
             f"  Warm-up sweep:       {yellow}{len(self._sweep_groups)}{reset} "
@@ -539,18 +514,21 @@ class KVTierPressureWorkload(BaseWorkload):
         )
 
     def extra_metric_sections(self) -> list[MetricSection]:
-        """Report the pool geometry that determines the L2 read share."""
+        """Report the pool geometry that drove the run.
+
+        Deliberately reports the inputs only.  A derived "predicted L2 read
+        share" used to sit here, but ``1 - 1 / overflow_factor`` assumes pure
+        LRU over uniformly-drawn whole documents and was measured 14 points
+        low on one stack and 45 points high on another -- printing it beside
+        real counters invited it being quoted as a result.  Read the share
+        that actually occurred from the cache's tier counters.
+        """
         c = self._config
         entries: list[tuple[str, str, str | int | float]] = [
             ("pool_size", "Document pool", c.pool_size),
             ("docs_per_request", "Docs per request", c.docs_per_request),
             ("working_set_tokens", "Working set (tokens)", self.working_set_tokens),
             ("overflow_factor", "Overflow factor", round(c.overflow_factor, 3)),
-            (
-                "predicted_l2_read_share_pct",
-                "Predicted L2 read share (%)",
-                round(predicted_l2_read_share(c.overflow_factor), 2),
-            ),
             ("access_skew", "Access skew", round(c.access_skew, 3)),
             (
                 "warmup_sweep_requests",

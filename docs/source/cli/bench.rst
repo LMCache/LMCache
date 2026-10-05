@@ -472,8 +472,9 @@ measured across a cold start describes run length, not the system.
        dilutes the measurement.
 
 The run reports a **Document pool** section alongside the standard metrics,
-giving the resolved pool size, working set, overflow factor and the predicted
-L2 read share, so the measured share can be checked against the target.
+giving the resolved pool size, working set, overflow factor, access skew and
+sweep size. These are inputs: the share of reads actually served by L2 comes
+from the cache's own tier counters, not from this workload.
 
 **Example** -- target ~50% of cache reads from L2 against a 100 GB L1:
 
