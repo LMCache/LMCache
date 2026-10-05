@@ -162,9 +162,8 @@ def test_prepare_forward_skips_vanilla_step_outside_observation_window():
 
     state = SimpleNamespace(
         request_id="req",
-        first_block_id=1,
         resident_kv_tokens=33,
-        has_physical_override=False,
+        has_physical_override=True,
         is_genuine_decode=True,
         num_decoded_tokens=1,
         num_new_tokens=1,
@@ -214,24 +213,24 @@ def test_begin_step_only_plans_queries_marked_for_observation():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_prepare_forward_builds_physical_view_and_captures_queries():
+def test_prepare_forward_uses_adaptor_row_order_and_only_captures_queries():
     caches = _new_cache(8)
     worker = RKVWorker(BUDGET, buffer=WINDOW)
     worker.register_kv_caches(caches)
 
     block_table = torch.tensor([[1, 3, 5], [2, 4, 6]], device="cuda")
     query_start_loc = torch.tensor([0, 1, 2], device="cuda")
-    logical_seq_lens = torch.tensor([105, 40], device="cuda")
-    old_slot_mapping = torch.tensor([0, 0], device="cuda")
+    physical_seq_lens = torch.tensor([33, 40], device="cuda")
+    slot_mapping = torch.tensor([5 * BLOCK_SIZE, 6 * BLOCK_SIZE + 7], device="cuda")
 
     attn_metadata = {
         name: SimpleNamespace(
             use_cascade=False,
             query_start_loc=query_start_loc,
-            seq_lens=logical_seq_lens.clone(),
+            seq_lens=physical_seq_lens,
             max_seq_len=105,
-            block_table=block_table.clone(),
-            slot_mapping=old_slot_mapping.clone(),
+            block_table=block_table,
+            slot_mapping=slot_mapping,
         )
         for name in LAYER_NAMES
     }
@@ -239,25 +238,23 @@ def test_prepare_forward_builds_physical_view_and_captures_queries():
     context = SimpleNamespace(
         attn_metadata=attn_metadata,
         no_compile_layers=layers,
-        slot_mapping={name: old_slot_mapping.clone() for name in LAYER_NAMES},
+        slot_mapping={name: slot_mapping for name in LAYER_NAMES},
     )
 
-    # Deliberately reverse metadata order. Worker rows must be matched by their
-    # authoritative first block, not by scheduler metadata order.
+    # The worker adaptor has already ordered scheduler metadata by
+    # GPUModelRunner.input_batch.req_ids and built the physical KV view.
     states = [
         SimpleNamespace(
-            request_id="req-b",
-            first_block_id=2,
-            resident_kv_tokens=40,
+            request_id="req-a",
+            resident_kv_tokens=33,
             has_physical_override=True,
             is_genuine_decode=True,
             num_decoded_tokens=8,
             num_new_tokens=1,
         ),
         SimpleNamespace(
-            request_id="req-a",
-            first_block_id=1,
-            resident_kv_tokens=33,
+            request_id="req-b",
+            resident_kv_tokens=40,
             has_physical_override=True,
             is_genuine_decode=True,
             num_decoded_tokens=8,
@@ -267,18 +264,13 @@ def test_prepare_forward_builds_physical_view_and_captures_queries():
 
     worker.prepare_forward(context, states)
 
-    expected_seq_lens = torch.tensor([33, 40], device="cuda")
-    expected_slots = torch.tensor([5 * BLOCK_SIZE, 6 * BLOCK_SIZE + 7], device="cuda")
-    expected_blocks = torch.tensor([[1, 3, 5], [2, 4, 6]], device="cuda")
-
     assert worker._request_ids == ["req-a", "req-b"]
     for name in LAYER_NAMES:
         metadata = context.attn_metadata[name]
-        assert torch.equal(metadata.seq_lens, expected_seq_lens)
-        assert metadata.max_seq_len == 40
-        assert torch.equal(metadata.block_table[:2, :3], expected_blocks)
-        assert torch.equal(metadata.slot_mapping, expected_slots)
-        assert torch.equal(context.slot_mapping[name], expected_slots)
+        assert metadata.seq_lens is physical_seq_lens
+        assert metadata.max_seq_len == 105
+        assert metadata.block_table is block_table
+        assert metadata.slot_mapping is slot_mapping
 
         query = torch.randn(
             4,

@@ -425,7 +425,6 @@ def test_scheduler_builds_authoritative_rkv_state() -> None:
     assert metadata.rkv_requests == [
         LMCacheMPRKVRequestState(
             request_id="request",
-            first_block_id=10,
             resident_kv_tokens=33,
             has_physical_override=False,
             is_genuine_decode=True,
@@ -440,7 +439,6 @@ def test_scheduler_builds_authoritative_rkv_state() -> None:
     assert metadata.rkv_requests == [
         LMCacheMPRKVRequestState(
             request_id="request",
-            first_block_id=10,
             resident_kv_tokens=33,
             has_physical_override=True,
             is_genuine_decode=True,
@@ -474,7 +472,6 @@ def test_rkv_worker_connector_lifecycle() -> None:
     metadata.rkv_requests.append(
         LMCacheMPRKVRequestState(
             request_id="request",
-            first_block_id=1,
             resident_kv_tokens=None,
         )
     )

@@ -399,7 +399,6 @@ class LMCacheMPRequestMetadata:
 @dataclass
 class LMCacheMPRKVRequestState:
     request_id: str
-    first_block_id: int
     resident_kv_tokens: int | None = None
     has_physical_override: bool = False
     is_genuine_decode: bool = False

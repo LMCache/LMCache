@@ -9,11 +9,6 @@ from typing import Any
 # Third Party
 import torch
 
-# First Party
-from lmcache.integration.vllm.experimental.physical_kv_view import (
-    apply_physical_kv_view,
-)
-
 class RKVWorker:
     """Capture recent queries and compact private FlashAttention KV in place."""
 
@@ -148,18 +143,15 @@ class RKVWorker:
             self._clear_step()
             return
 
-        observe_by_request = {
-            state.request_id: self._policy.should_observe_query(
+        observe_query = [
+            self._policy.should_observe_query(
                 num_decoded_tokens=int(state.num_decoded_tokens),
                 num_new_tokens=int(state.num_new_tokens),
                 is_genuine_decode=bool(state.is_genuine_decode),
             )
             for state in request_states
-        }
-        has_physical_override = any(
-            bool(state.has_physical_override) for state in request_states
-        )
-        if not has_physical_override and not any(observe_by_request.values()):
+        ]
+        if not any(observe_query):
             self.remove_query_hooks()
             self._clear_step()
             return
@@ -173,25 +165,11 @@ class RKVWorker:
         if representative.query_start_loc.shape[0] != num_reqs + 1:
             raise ValueError("R-KV request/attention row count mismatch")
 
-        by_first_block: dict[int, Any] = {}
-        for state in request_states:
-            first_block = int(state.first_block_id)
-            if first_block in by_first_block:
-                raise ValueError("R-KV requires private, uniquely-owned KV blocks")
-            by_first_block[first_block] = state
+        # The worker adaptor orders scheduler metadata by
+        # GPUModelRunner.input_batch.req_ids before vLLM prepares attention.
+        # Keep this path free of GPU->CPU row-identity synchronization.
+        ordered_states = list(request_states)
 
-        # vLLM's model runner owns the authoritative paged-KV block table.
-        # The connector carries only the first block as a stable row identity.
-        block_table = representative.block_table
-        first_blocks = block_table[:num_reqs, 0].tolist()
-        try:
-            ordered_states = [by_first_block[block_id] for block_id in first_blocks]
-        except KeyError as exc:
-            raise ValueError("R-KV could not match worker rows to requests") from exc
-
-        observe_query = [
-            observe_by_request[state.request_id] for state in ordered_states
-        ]
         query_lens = [int(state.num_new_tokens) for state in ordered_states]
         if any(state.resident_kv_tokens is None for state in ordered_states):
             raise RuntimeError("R-KV scheduler metadata is missing resident KV length")
@@ -205,52 +183,6 @@ class RKVWorker:
             )
         ):
             raise ValueError("R-KV received invalid physical/query lengths")
-
-        if any(bool(state.has_physical_override) for state in ordered_states):
-            seq_lens = representative.seq_lens.clone()
-            physical_seq_lens_gpu = torch.as_tensor(
-                physical_seq_lens,
-                dtype=seq_lens.dtype,
-                device=seq_lens.device,
-            )
-            seq_lens[:num_reqs] = physical_seq_lens_gpu
-
-            # Re-map this step's newly written tokens to the compacted physical
-            # frontier in one vectorized paged-KV lookup.
-            query_start_loc = representative.query_start_loc
-            query_lens_gpu = (
-                query_start_loc[1 : num_reqs + 1] - query_start_loc[:num_reqs]
-            ).long()
-            rows = torch.repeat_interleave(
-                torch.arange(num_reqs, device=block_table.device),
-                query_lens_gpu,
-            )
-            flat_positions = torch.arange(
-                sum(query_lens),
-                device=block_table.device,
-                dtype=torch.long,
-            )
-            relative_positions = (
-                flat_positions
-                - query_start_loc[:num_reqs].long().index_select(0, rows)
-            )
-            physical_starts = physical_seq_lens_gpu.long() - query_lens_gpu
-            positions = relative_positions + physical_starts.index_select(0, rows)
-            slot_mapping = (
-                block_table[rows, positions // self._block_size].long()
-                * self._block_size
-                + positions % self._block_size
-            )
-
-            apply_physical_kv_view(
-                forward_context,
-                seq_lens=seq_lens,
-                max_seq_len=max(physical_seq_lens),
-                block_table=block_table,
-                slot_mapping={
-                    layer_name: slot_mapping for layer_name in attn_metadata
-                },
-            )
 
         if not any(observe_query):
             self.remove_query_hooks()

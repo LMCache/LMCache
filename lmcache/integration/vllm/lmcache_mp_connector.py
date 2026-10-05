@@ -70,6 +70,7 @@ from lmcache.integration.vllm.rkv_allocator_adapter import (
     install_rkv_allocator_adapter,
     set_resident_kv_tokens,
 )
+from lmcache.integration.vllm.rkv_worker_adaptor import install_rkv_worker_adaptor
 from lmcache.integration.vllm.lmcache_mp_metrics import (
     LMCacheMPConnectorStats,
     LMCacheMPPromMetrics,
@@ -658,6 +659,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if self._rkv_budget is not None:
             if role == KVConnectorRole.SCHEDULER:
                 install_rkv_allocator_adapter()
+            elif role == KVConnectorRole.WORKER:
+                install_rkv_worker_adaptor()
+            else:
+                raise ValueError(f"Unsupported R-KV connector role: {role}")
             self._can_store = False
             if vllm_config.cache_config.enable_prefix_caching:
                 raise ValueError("R-KV MVP requires prefix caching disabled")
@@ -1584,9 +1589,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if allocation is None:
                 raise RuntimeError(f"Missing R-KV allocation for {request_id}")
             tracker = self._get_request_tracker(request_id)
-            block_ids = tracker.allocated_block_ids.get(0, [])
-            if not block_ids:
-                raise RuntimeError(f"Missing R-KV blocks for {request_id}")
 
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
             is_genuine_decode, num_decoded_tokens = _rkv_step_facts(
@@ -1606,7 +1608,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             metadata.rkv_requests.append(
                 LMCacheMPRKVRequestState(
                     request_id=request_id,
-                    first_block_id=block_ids[0],
                     resident_kv_tokens=resident_kv_tokens,
                     has_physical_override=resident_override is not None,
                     is_genuine_decode=is_genuine_decode,
