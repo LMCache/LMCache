@@ -245,16 +245,21 @@ class RemoteBackend(StorageBackendInterface):
         if self._mla_worker_id_as0_mode:
             return create_immediate_empty_future()
 
-        if self.exists_in_put_tasks(key):
-            return create_immediate_empty_future()
+        with self.lock:
+            if key in self.put_tasks:
+                return create_immediate_empty_future()
+            self.put_tasks.add(key)
 
         memory_obj.ref_count_up()
 
-        with self.lock:
-            self.put_tasks.add(key)
-
-        compressed_memory_obj = self.serializer.serialize(memory_obj)
-        memory_obj.ref_count_down()
+        try:
+            compressed_memory_obj = self.serializer.serialize(memory_obj)
+        except Exception:
+            with self.lock:
+                self.put_tasks.discard(key)
+            raise
+        finally:
+            memory_obj.ref_count_down()
 
         def put_done_callback(f: Future) -> None:
             self.put_callback(f, key)
