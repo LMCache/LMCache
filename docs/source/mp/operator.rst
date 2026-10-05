@@ -1712,9 +1712,14 @@ Prometheus, Scheduling & Overrides
      - Extra CLI flags (appended last, can override any auto-generated flag).
 
 .. note::
-   The coordinator process does **not** yet expose a ``/metrics`` endpoint.  The
-   Prometheus wiring is present for parity but is only useful once metrics are
-   added; ``serviceMonitor.enabled`` defaults to ``false``.
+   The coordinator process exposes ``/metrics`` on the coordinator HTTP port
+   (default ``9300``); no separate metrics port is created. The Key Directory
+   placement-count and reported-logical-byte gauges for the ``l1`` and ``l2``
+   tiers are published by default. See
+   :ref:`Coordinator metrics export <coordinator-metrics-export>` for the
+   endpoint shape and ``--disable-metrics`` / ``--otlp-endpoint`` behaviour.
+   ``serviceMonitor.enabled`` still defaults to ``false``; set it to ``true``
+   to have the chart create a ``ServiceMonitor`` CR.
 
 Coordinator Resources Created
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

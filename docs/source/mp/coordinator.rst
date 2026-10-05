@@ -241,6 +241,8 @@ it:
 
 A name matching no discovered controller raises at startup.
 
+.. _coordinator-metrics-export:
+
 Coordinator metrics export
 --------------------------
 
@@ -1003,6 +1005,60 @@ of ``access`` events applied to the key, ``0`` for unknown keys.
     curl -s -X POST http://localhost:9300/directory/lookup \
       -H 'Content-Type: application/json' \
       -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 0}]}'
+
+``GET /directory/stats``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Point-in-time directory counts. Takes no parameters.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "num_keys": 2,
+      "num_placements": 3,
+      "l1_keys_by_instance": {"server-1": 2, "server-2": 1},
+      "blend": {
+        "num_contents": 2,
+        "num_chunks": 2,
+        "num_claims": 2,
+        "num_namespaces": 1,
+        "table_size": 65536
+      },
+      "l1_count": 2,
+      "l1_size_bytes": 2097152,
+      "l2_count": 1,
+      "l2_size_bytes": 1048576
+    }
+
+``num_keys`` is the number of keys with at least one known placement;
+``num_placements`` is the total across all keys. ``l1_keys_by_instance`` lists
+each MP server by how many L1-placed keys the directory holds for it; its
+Kafka / stream cursor lives on the ingest gate and is **not** reported here.
+``blend`` reports the ``POST /directory/blend-lookup`` index state (see
+below): ``num_contents`` distinct chunk contents, split across ``num_chunks``
+chunks and ``num_claims`` ``(chunk, namespace)`` pairs; ``num_namespaces``
+is the distinct namespace count and ``table_size`` is the occupancy-filter
+capacity (not a live count).
+``l1_count`` / ``l2_count`` are placement counts and
+``l1_size_bytes`` / ``l2_size_bytes`` are the summed reported logical bytes
+on each tier -- these are the gauges the coordinator also exports to
+Prometheus under its ``l1`` and ``l2`` tier labels (see
+:ref:`coordinator-metrics-export`).
+
+**HTTP status codes:**
+
+- ``200``: stats returned.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:9300/directory/stats
+
+The CLI ``lmcache query coordinator --api directory`` is a thin wrapper over
+this endpoint (see :doc:`/cli/query`).
 
 Cache control
 -------------
