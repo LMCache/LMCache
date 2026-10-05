@@ -220,11 +220,8 @@ void rotary_embedding_k_fused(const torch::Tensor& old_positions,
 }
 
 // Fused ramp entry: one launch, up to MAX_FUSED_TRANSFER_CHUNKS slots.
-// `key_dtype` may differ from `cache_dtype` only for fp8 KV caches (the
-// cos/sin cache always stays in the model's float dtype); the rotation then
-// runs dequantize -> rotate -> requantize per element. No scale is involved:
-// rotation commutes with the per-tensor fp8 scale, which is the same on
-// input and output.
+// fp8 keys with a float cos/sin cache rotate as dequant -> rotate -> requant;
+// no scale needed (rotation commutes with it, and it is the same both ways).
 void rotary_embedding_k_fused_ramp_multi_ptr(
     const std::vector<uintptr_t>& key_ptrs, at::ScalarType key_dtype,
     at::ScalarType cache_dtype, int64_t num_tokens,

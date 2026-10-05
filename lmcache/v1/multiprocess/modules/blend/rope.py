@@ -18,10 +18,8 @@ _TORCH_TO_AT_SCALAR = {
     torch.bfloat16: 15,  # at::ScalarType::BFloat16
 }
 
-# Registered fp8 KV flavor -> at::ScalarType. vLLM allocates fp8 KV caches as
-# uint8, so the buffer dtype alone cannot name the bit layout; the client
-# declares it at CB_REGISTER_ROPE. Values are guarded by a static_assert in
-# csrc/cuda/pos_kernels.cu.
+# Declared fp8 flavor -> at::ScalarType (vLLM's uint8 KV can't name its own
+# bit layout). Values pinned by a static_assert in csrc/cuda/pos_kernels.cu.
 _FP8_FLAVOR_TO_AT_SCALAR = {
     "fp8_e4m3": 24,  # at::ScalarType::Float8_e4m3fn
     "fp8_e5m2": 23,  # at::ScalarType::Float8_e5m2
