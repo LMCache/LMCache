@@ -13,6 +13,7 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.gpu_connector.gpu_connectors import (
     SGLangGPUConnector,
+    SGLangLayerwiseGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemGPUConnectorV3,
@@ -925,3 +926,175 @@ def _create_metadata(use_mla, kv_caches, engine_kv_format):
         engine_kv_formats=[engine_kv_format] * len(kv_list),
     )
     return metadata
+
+
+# NOTE: only the staging-buffer path (use_gpu=True) is covered. The direct
+# path (use_gpu=False) cannot round-trip today: batched_from_gpu passes a 3-D
+# per-layer tensor to single_layer_kv_transfer_sgl, which indexes dim 3, so it
+# raises IndexError even with offset=0 and a full-length mapping. That defect
+# is independent of the slot-mapping rebase fixed here.
+@pytest.mark.parametrize("use_gpu", [True])
+def test_sglang_layerwise_connector_partial_slot_mapping(use_gpu):
+    """Load rebases a partial slot map; store indexes a full one absolutely.
+
+    The two SGLang paths carry different slot-mapping contracts, both enforced
+    by ``LMCacheConnector``:
+
+    - load (``load_kv``) requires ``len(token_ids) - offset ==
+      len(slot_mapping)``, i.e. a *partial* map whose element 0 is the slot of
+      token ``offset``. ``starts``/``ends`` stay absolute, so ``batched_to_gpu``
+      must look up token ``i`` at ``slot_mapping[i - offset]``.
+    - store (``store_kv``) requires ``len(token_ids) == len(slot_mapping)``,
+      i.e. a *full-length* map that ``batched_from_gpu`` indexes absolutely.
+
+    A round trip through both, with a nonzero offset, pins each contract: the
+    tokens gathered from ``src`` must land on exactly the destination slots the
+    partial map names.
+    """
+    num_blocks = 100
+    block_size = 16
+    num_layers = 4
+    num_heads = 8
+    head_size = 128
+    device = torch_device_type
+    dtype = torch.bfloat16
+    hidden_dim = num_heads * head_size
+
+    offset = 300
+    num_tokens = 512
+    chunk_size = 256
+
+    allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+
+    gpu_kv_src = generate_sglang_kv_cache_paged_list_tensors(
+        num_layers=num_layers,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_heads=num_heads,
+        head_size=head_size,
+        use_mla=False,
+        device=device,
+        dtype=dtype,
+    )
+    gpu_kv_dst = generate_sglang_kv_cache_paged_list_tensors(
+        num_layers=num_layers,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_heads=num_heads,
+        head_size=head_size,
+        use_mla=False,
+        device=device,
+        dtype=dtype,
+    )
+
+    # The store path sees the whole request; the load path sees only the tail
+    # beginning at `offset`, which is exactly `full_slot_mapping[offset:]`.
+    all_slots = random.sample(range(0, num_blocks * block_size), offset + num_tokens)
+    full_slot_mapping = torch.tensor(all_slots, device=device, dtype=torch.int64)
+    partial_slot_mapping = full_slot_mapping[offset:].clone()
+
+    starts = list(range(offset, offset + num_tokens, chunk_size))
+    ends = [min(start + chunk_size, offset + num_tokens) for start in starts]
+
+    with pytest.raises(AssertionError):
+        check_sglang_paged_kv_cache_equal(
+            gpu_kv_src, gpu_kv_dst, partial_slot_mapping, num_heads, head_size
+        )
+
+    connector = SGLangLayerwiseGPUConnector(
+        hidden_dim,
+        num_layers,
+        use_gpu=use_gpu,
+        chunk_size=chunk_size,
+        dtype=dtype,
+        device=device,
+    )
+
+    memory_objs = []
+    for _ in range(num_layers):
+        layer_objs = []
+        for start, end in zip(starts, ends, strict=False):
+            memory_obj = allocator.allocate(
+                connector.get_shape(end - start), dtype, MemoryFormat.KV_T2D
+            )
+            assert memory_obj is not None
+            layer_objs.append(memory_obj)
+        memory_objs.append(layer_objs)
+
+    gather = connector.batched_from_gpu(
+        memory_objs,
+        starts,
+        ends,
+        kvcaches=gpu_kv_src,
+        slot_mapping=full_slot_mapping,
+        sync=True,
+    )
+    for _ in range(num_layers + 1):
+        next(gather)
+    with pytest.raises(StopIteration):
+        next(gather)
+
+    scatter = connector.batched_to_gpu(
+        starts,
+        ends,
+        kvcaches=gpu_kv_dst,
+        slot_mapping=partial_slot_mapping,
+        offset=offset,
+        sync=True,
+    )
+    next(scatter)
+    for layer_objs in memory_objs:
+        scatter.send(layer_objs)
+    with pytest.raises(StopIteration):
+        next(scatter)
+
+    torch.cuda.synchronize()
+
+    check_sglang_paged_kv_cache_equal(
+        gpu_kv_src, gpu_kv_dst, partial_slot_mapping, num_heads, head_size
+    )
+
+    for layer_objs in memory_objs:
+        for memory_obj in layer_objs:
+            allocator.free(memory_obj)
+    assert allocator.memcheck()
+
+    allocator.close()
+
+
+def test_sglang_layerwise_connector_rejects_start_before_offset():
+    """A chunk starting before ``offset`` cannot be addressed in the map."""
+    num_layers = 2
+    num_heads = 8
+    head_size = 128
+
+    connector = SGLangLayerwiseGPUConnector(
+        num_heads * head_size,
+        num_layers,
+        use_gpu=False,
+        chunk_size=256,
+        dtype=torch.bfloat16,
+        device=torch_device_type,
+    )
+    kvcaches = generate_sglang_kv_cache_paged_list_tensors(
+        num_layers=num_layers,
+        num_blocks=8,
+        block_size=16,
+        num_heads=num_heads,
+        head_size=head_size,
+        use_mla=False,
+        device=torch_device_type,
+        dtype=torch.bfloat16,
+    )
+    slot_mapping = torch.arange(16, device=torch_device_type, dtype=torch.int64)
+
+    scatter = connector.batched_to_gpu(
+        [0],
+        [16],
+        kvcaches=kvcaches,
+        slot_mapping=slot_mapping,
+        offset=8,
+        sync=True,
+    )
+    with pytest.raises(ValueError, match="must not precede"):
+        next(scatter)
