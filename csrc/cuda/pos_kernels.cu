@@ -24,9 +24,7 @@ static_assert(static_cast<int>(at::ScalarType::Float8_e5m2) == 23 &&
 
 namespace lmc {
 
-// scalar_t <-> cache_t conversion: identity when they match (the homogeneous
-// paths keep their exact pre-fp8 numerics); otherwise through float, which
-// every c10 reduced-precision type (including Float8_*) converts via.
+// KV <-> cache dtype conversion: identity when they match, else via float.
 template <typename To, typename From>
 inline __device__ To rope_cvt(From v) {
   if constexpr (std::is_same_v<To, From>) {
