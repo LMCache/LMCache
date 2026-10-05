@@ -105,10 +105,13 @@ Overall data flow:
 
 ### 2.2 Worker Side: TransferContext
 
-`TransferContext` is the worker-side transport abstraction with four methods:
-`register`, `submit_store`, `submit_retrieve`, and `close`.
+`TransferContext` is the worker-side transport abstraction with five methods:
+`register`, `submit_store`, `submit_retrieve`, `close`, and
+`flush_inflight_stores`. `flush_inflight_stores` synchronizes any in-flight
+gather operations so vLLM cannot overwrite paged KV blocks before deferred
+stores read them; contexts with no deferred work implement it as a no-op.
 The contract is intentionally minimal so worker adapters only depend on these
-four lifecycle and transfer operations.
+five lifecycle and transfer operations.
 
 - **LMCacheDrivenTransferContext** keeps the original CUDA IPC behavior:
   worker sends a handle and server performs direct GPU-side transfer.
