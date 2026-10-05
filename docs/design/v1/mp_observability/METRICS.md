@@ -514,8 +514,10 @@ scrape time with `metric_relabel_configs` if storage cost matters).
 ## EventBus Self-Monitoring
 
 Health metrics for the EventBus itself. The two gauges are registered
-inside `EventBus.__init__` via `register_gauge`; the two observable
-counters are registered by `EventBusSelfMetricsSubscriber`. Unlike the
+once per process when `event_bus` is imported, via `register_gauge`, and
+their callbacks read the current bus through `get_event_bus()` at scrape
+time, so they follow `init_event_bus()`; the two observable counters are
+registered by `EventBusSelfMetricsSubscriber`. Unlike the
 other metrics subscribers, these are not driven by events — they observe
 bus state directly via the `EventBus` accessors and report on every OTel
 scrape.
