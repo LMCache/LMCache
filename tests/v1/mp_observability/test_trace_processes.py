@@ -13,7 +13,6 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 import pytest
-import zmq
 
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -23,16 +22,19 @@ from lmcache.v1.mp_observability.subscribers.tracing.mp_server import (
 )
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.rpc import get_rpc_spec
-from lmcache.v1.multiprocess.transport.grpc_impl.client import GrpcMultiprocessClient
-from lmcache.v1.multiprocess.transport.grpc_impl.server import GrpcMultiprocessServer
-from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
-    MessageQueueClient,
-    MessageQueueServer,
+from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from tests.v1.multiprocess.transport_test_utils import (
+    REQUEST_TRANSPORTS,
+    RequestTransport,
+    request_server_url,
+    start_lookup_request_server,
 )
 
 
-def run_server(connection: Connection, transport: str) -> None:
+def run_server(
+    connection: Connection, transport: RequestTransport, endpoint: str
+) -> None:
     """Run a CPU transport/event server; export only numeric span relationships."""
     provider = TracerProvider()
     exporter = InMemorySpanExporter()
@@ -70,71 +72,46 @@ def run_server(connection: Connection, transport: str) -> None:
         def end_session(self, request_id: str) -> None:
             bus.publish(Event(EventType.MP_REQUEST_END, session_id=request_id))
 
-    module = Module()
-    ctx = zmq.Context()
-    server: MessageQueueServer | GrpcMultiprocessServer
-    if transport == "zmq":
-        server = MessageQueueServer("tcp://127.0.0.1:*", ctx)
-        for operation in ("lookup", "end_session"):
-            server.add_blocking_handler(
-                get_rpc_spec(operation), getattr(module, operation)
-            )
-        server.add_normal_thread_pool(["lookup", "end_session"], max_workers=2)
-        endpoint = server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
-    else:
-        server = GrpcMultiprocessServer("grpc://127.0.0.1:0", 2, 1, 4)
-        server.add_modules([module])
-        endpoint = f"grpc://127.0.0.1:{server.bound_port}"
+    server = start_lookup_request_server(transport, endpoint, Module())
     try:
         bus.start()
-        server.start()
         connection.send(endpoint)
         connection.recv()
     finally:
         server.close()
         bus.stop()
         provider.shutdown()
-        ctx.term()
         connection.close()
 
 
-@pytest.mark.parametrize("transport", ["zmq", "grpc"])
+@pytest.mark.parametrize("transport", REQUEST_TRANSPORTS)
 @pytest.mark.parametrize("sampled", [True, False])
 def test_two_process_parent_and_keyless_lifecycle(
-    monkeypatch: pytest.MonkeyPatch, transport: str, sampled: bool
+    monkeypatch: pytest.MonkeyPatch,
+    transport: RequestTransport,
+    sampled: bool,
+    unused_tcp_port: int,
 ) -> None:
     """A later keyless END closes the original parented request in another PID."""
     monkeypatch.setenv("LMCACHE_MP_TRACE_CONTEXT", "1")
     monkeypatch.setenv("LMCACHE_TRACK_USAGE", "false")
     mp = multiprocessing.get_context("spawn")
     parent_conn, child_conn = mp.Pipe()
-    process = mp.Process(target=run_server, args=(child_conn, transport))
+    endpoint = request_server_url(transport, unused_tcp_port)
+    process = mp.Process(target=run_server, args=(child_conn, transport, endpoint))
     process.start()
     child_conn.close()
-    client: MessageQueueClient | GrpcMultiprocessClient | None = None
-    ctx = zmq.Context()
+    client: RequestClient | None = None
     try:
         assert parent_conn.poll(20), "child server did not initialize"
-        endpoint = parent_conn.recv()
-        if transport == "zmq":
-            client = MessageQueueClient(endpoint, ctx)
-        else:
-            # RPC methods are installed at runtime, as in the transport tests.
-            client = GrpcMultiprocessClient(endpoint)  # type: ignore[abstract]
+        assert parent_conn.recv() == endpoint
+        client = RequestClientFactory.create(endpoint)
         request = IPCCacheServerKey.from_token_ids("model", 1, 0, [1], request_id="r")
         span = NonRecordingSpan(SpanContext(123, 456, False, TraceFlags(int(sampled))))
         with trace.use_span(span):
-            future = (
-                client.submit_request("lookup", [request, 1])
-                if isinstance(client, MessageQueueClient)
-                else client.lookup(request, 1)
-            )
+            future = client.lookup(request, 1)
         assert future.result(10) is None
-        end = (
-            client.submit_request("end_session", ["r"])
-            if isinstance(client, MessageQueueClient)
-            else client.end_session("r")
-        )
+        end = client.end_session("r")
         assert end.result(10) is None
         assert parent_conn.poll(10)
         pid, spans = parent_conn.recv()
@@ -157,5 +134,4 @@ def test_two_process_parent_and_keyless_lifecycle(
             process.terminate()
             process.join(5)
         parent_conn.close()
-        ctx.term()
     assert process.exitcode == 0
