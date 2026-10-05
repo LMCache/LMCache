@@ -243,6 +243,7 @@ class StatsCollector:
             "config": asdict(config),
             "results": asdict(final),
         }
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump(output, f, indent=2)
         logger.debug("Exported JSON summary to: %s", path)
