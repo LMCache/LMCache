@@ -2,7 +2,7 @@
 
 use super::{
     check_nvme_ioctl_result, fail_submissions, placement_id_to_u16, prepare_iouring_write_buffer,
-    record_submission_result, RawBlockDevice, SubmissionRetry, UringNotify,
+    record_submission_result, submission_capacity, RawBlockDevice, SubmissionRetry, UringNotify,
     SUBMISSION_RETRY_INITIAL_DELAY, SUBMISSION_RETRY_MAX_DELAY, SUBMISSION_STALL_TIMEOUT,
 };
 use pyo3::prelude::*;
@@ -16,6 +16,32 @@ use std::time::{Duration, Instant};
 enum ShutdownMethod {
     Close,
     Drop,
+}
+
+#[test]
+fn submitted_requests_reserve_completion_capacity() {
+    // SQ consumption must not admit a second ring-sized outstanding batch.
+    assert_eq!(submission_capacity(4, 4, 0), 0);
+    assert_eq!(submission_capacity(4, 3, 0), 1);
+    assert_eq!(submission_capacity(4, 1, 3), 1);
+    assert_eq!(submission_capacity(4, 0, 0), 4);
+    assert_eq!(submission_capacity(4, 5, 0), 0);
+    assert_eq!(submission_capacity(4, 0, 5), 0);
+}
+
+#[test]
+fn repeated_submission_and_reaping_stays_within_ring_depth() {
+    for depth in [1, 2, 4, 64, 256] {
+        let mut outstanding = 0;
+        let mut remaining = depth * 16;
+        while remaining > 0 {
+            let admitted = submission_capacity(depth, outstanding, 0).min(remaining);
+            outstanding += admitted;
+            remaining -= admitted;
+            assert!(outstanding <= depth);
+            outstanding = outstanding.saturating_sub(1);
+        }
+    }
 }
 
 enum ShutdownWait {
