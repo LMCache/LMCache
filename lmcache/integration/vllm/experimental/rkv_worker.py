@@ -9,13 +9,19 @@ from typing import Any
 # Third Party
 import torch
 
+# First Party
+from lmcache.integration.vllm.token_drop import (
+    TokenDropSpec,
+    build_token_drop_algorithm,
+)
+
 
 class RKVWorker:
     """Capture recent queries and compact private FlashAttention KV in place."""
 
     def __init__(self) -> None:
-        self._request_rkv: dict[str, Any] = {}
-        self._max_window_size = 0
+        self._request_algorithms: dict[str, Any] = {}
+        self._max_observation_tokens = 0
         self._kv_caches: dict[str, torch.Tensor] = {}
         self._layer_names: list[str] = []
         self._block_size = 0
@@ -41,34 +47,39 @@ class RKVWorker:
         self._query_hooks_installed = False
         self._query_hook_originals: dict[str, tuple[Any, Any]] = {}
 
-    @staticmethod
-    def _build_rkv(config: dict[str, Any]) -> Any:
-        try:
-            from rkv import R1KV
-        except ImportError as exc:
-            raise ImportError(
-                "R-KV is enabled but the optional 'rkv' package is not installed"
-            ) from exc
-        return R1KV.from_serving_config(config)
+    def _algorithm_from_state(self, state: Any) -> Any:
+        spec = TokenDropSpec(
+            algorithm=str(state.algorithm),
+            config=dict(state.config),
+        )
+        existing = self._request_algorithms.get(state.request_id)
+        if existing is not None:
+            return existing
 
-    def _rkv_from_state(self, state: Any) -> Any:
-        algorithm = getattr(state, "algorithm", "rkv")
-        if algorithm != "rkv":
-            raise ValueError(f"Unsupported token-drop algorithm: {algorithm!r}")
+        algorithm = build_token_drop_algorithm(spec)
+        observation_tokens = int(algorithm.observation_window_tokens)
+        if observation_tokens <= 0:
+            raise ValueError(
+                "Token-drop algorithm requires a positive observation window"
+            )
 
-        rkv = self._build_rkv(dict(state.config))
-        self._request_rkv[state.request_id] = rkv
-        self._max_window_size = max(self._max_window_size, int(rkv.window_size))
-        return rkv
+        self._request_algorithms[state.request_id] = algorithm
+        self._max_observation_tokens = max(
+            self._max_observation_tokens,
+            observation_tokens,
+        )
+        return algorithm
 
-    def _rkv_for_request(self, request_id: str) -> Any:
-        rkv = self._request_rkv.get(request_id)
-        if rkv is None:
-            raise RuntimeError(f"Missing R-KV config for request {request_id!r}")
-        return rkv
+    def _algorithm_for_request(self, request_id: str) -> Any:
+        algorithm = self._request_algorithms.get(request_id)
+        if algorithm is None:
+            raise RuntimeError(
+                f"Missing token-drop algorithm for request {request_id!r}"
+            )
+        return algorithm
 
     def is_token_drop_request(self, request_id: str) -> bool:
-        return request_id in self._request_rkv
+        return request_id in self._request_algorithms
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         # Registration is shared with normal LMCache serving. Do not impose
@@ -110,7 +121,7 @@ class RKVWorker:
             if slot is not None:
                 self._free_query_slots.append(slot)
             self._query_counts.pop(request_id, None)
-            self._request_rkv.pop(request_id, None)
+            self._request_algorithms.pop(request_id, None)
             self._compacted_requests.discard(request_id)
 
     def prepare_forward(
@@ -124,14 +135,14 @@ class RKVWorker:
             return
 
         self._ensure_kv_caches_compatible()
-        rkv_instances = [self._rkv_from_state(state) for state in request_states]
+        algorithms = [self._algorithm_from_state(state) for state in request_states]
         observe_query = [
-            rkv.should_observe_query(
+            algorithm.should_observe_query(
                 num_decoded_tokens=int(state.num_decoded_tokens),
                 num_new_tokens=int(state.num_new_tokens),
                 is_genuine_decode=bool(state.is_genuine_decode),
             )
-            for state, rkv in zip(request_states, rkv_instances, strict=True)
+            for state, algorithm in zip(request_states, algorithms, strict=True)
         ]
         if not any(observe_query):
             self.remove_query_hooks()
@@ -222,7 +233,7 @@ class RKVWorker:
 
         num_reqs = len(self._request_ids)
         for request_id in self._request_ids:
-            self._rkv_for_request(request_id)
+            self._algorithm_for_request(request_id)
         self._is_genuine_decode = (
             [True] * num_reqs
             if is_genuine_decode is None
@@ -357,11 +368,11 @@ class RKVWorker:
                 self._query_slots[request_id] = slot
                 self._query_counts[request_id] = 0
 
-            rkv = self._rkv_for_request(request_id)
+            algorithm = self._algorithm_for_request(request_id)
             count = self._query_counts[request_id]
             active_rows.append(worker_row)
             active_slots.append(slot)
-            cursors.append(count % int(rkv.window_size))
+            cursors.append(count % int(algorithm.observation_window_tokens))
             self._query_counts[request_id] = count + 1
 
         if not active_rows:
@@ -403,12 +414,12 @@ class RKVWorker:
         ring = self._query_rings.get(layer_name)
         if (
             ring is None
-            or ring.shape[0] < self._max_window_size
+            or ring.shape[0] < self._max_observation_tokens
             or ring.shape[1] < self._query_ring_width
         ):
             new_ring = last_q.new_zeros(
                 (
-                    self._max_window_size,
+                    self._max_observation_tokens,
                     self._query_ring_width,
                     last_q.shape[1],
                     last_q.shape[2],
@@ -420,7 +431,7 @@ class RKVWorker:
             self._query_rings[layer_name] = ring
 
         ring.view(
-            self._max_window_size * self._query_ring_width,
+            self._max_observation_tokens * self._query_ring_width,
             last_q.shape[1],
             last_q.shape[2],
         ).index_copy_(0, self._query_write_indices, last_q)
@@ -437,54 +448,62 @@ class RKVWorker:
         request_id: str,
         worker_row: int,
         seq_len: int,
-        rkv: Any,
-    ) -> None:
-        """Compact one token-drop request independently."""
+        algorithm: Any,
+    ) -> int:
+        """Apply one algorithm-selected retained-position set to all KV layers."""
         slots = self._slots_for_request(worker_row, seq_len)
         blocks = slots // self._block_size
         offsets = slots % self._block_size
+        observation_tokens = int(algorithm.observation_window_tokens)
 
-        shared_scores: torch.Tensor | None = None
+        layer_keys: list[torch.Tensor] = []
+        layer_queries: list[torch.Tensor] = []
         for name in self._layer_names:
-            keys = (
+            layer_keys.append(
                 self._kv_caches[name][:, 0][blocks, offsets]
                 .permute(1, 0, 2)
                 .unsqueeze(0)
                 .contiguous()
             )
-            queries = (
+            layer_queries.append(
                 self._query_rings[name][
-                    : rkv.window_size,
+                    :observation_tokens,
                     self._query_slots[request_id],
                 ]
                 .permute(1, 0, 2)
                 .unsqueeze(0)
                 .contiguous()
             )
-            layer_score = rkv.score_kv(keys, queries).mean(dim=1)[0]
-            shared_scores = (
-                layer_score
-                if shared_scores is None
-                else shared_scores + layer_score
+
+        kept = algorithm.select_kept_positions(layer_keys, layer_queries)
+        if not isinstance(kept, torch.Tensor):
+            raise RuntimeError("Token-drop algorithm must return a tensor of positions")
+        if kept.device != slots.device:
+            raise RuntimeError("Token-drop kept positions must stay on the KV device")
+        if kept.ndim != 1 or kept.numel() == 0:
+            raise RuntimeError(
+                "Token-drop kept positions must be a non-empty 1-D tensor"
+            )
+        if kept.dtype not in (torch.int32, torch.int64):
+            raise RuntimeError(
+                "Token-drop kept positions must use an integer index dtype"
+            )
+        if kept.numel() > seq_len:
+            raise RuntimeError(
+                "Token-drop kept positions exceed the resident KV length"
+            )
+        if (kept < 0).any() or (kept >= seq_len).any():
+            raise RuntimeError(
+                "Token-drop kept positions are outside resident KV bounds"
+            )
+        if kept.numel() > 1 and not torch.all(kept[1:] > kept[:-1]):
+            raise RuntimeError(
+                "Token-drop kept positions must be unique and in logical order"
             )
 
-        assert shared_scores is not None
-        if not torch.isfinite(shared_scores).all():
-            raise RuntimeError("R-KV computed non-finite scores; refusing to compact")
-
-        past_idx = shared_scores.topk(
-            rkv.budget - rkv.window_size,
-            dim=-1,
-        ).indices
-        window_idx = torch.arange(
-            seq_len - rkv.window_size,
-            seq_len,
-            device=past_idx.device,
-        )
-        kept = torch.sort(torch.cat([past_idx, window_idx], dim=-1)).values
-
+        new_resident_len = int(kept.numel())
         source_slots = slots[kept]
-        destination_slots = slots[: rkv.budget]
+        destination_slots = slots[:new_resident_len]
         src_blocks = source_slots // self._block_size
         src_offsets = source_slots % self._block_size
         dst_blocks = destination_slots // self._block_size
@@ -498,6 +517,8 @@ class RKVWorker:
             key_cache[dst_blocks, dst_offsets] = kept_keys
             value_cache[dst_blocks, dst_offsets] = kept_values
 
+        return new_resident_len
+
     def compact(self) -> dict[str, int]:
         if self._seq_lens is None or self._block_table is None:
             return {}
@@ -510,21 +531,22 @@ class RKVWorker:
         for local_row, (request_id, worker_row) in enumerate(
             zip(self._request_ids, self._request_rows, strict=True)
         ):
-            rkv = self._rkv_for_request(request_id)
+            algorithm = self._algorithm_for_request(request_id)
             seq_len = self._seq_lens[local_row]
+            observation_tokens = int(algorithm.observation_window_tokens)
             query_window_tokens = min(
                 self._query_counts.get(request_id, 0),
-                int(rkv.window_size),
+                observation_tokens,
             )
             if (
                 request_id in self._compacted_requests
-                and query_window_tokens < rkv.window_size
+                and query_window_tokens < observation_tokens
             ):
                 raise RuntimeError(
-                    "R-KV lost its observation window after compaction"
+                    "Token-drop algorithm lost its observation window after compaction"
                 )
 
-            if not rkv.should_compact(
+            if not algorithm.should_compact(
                 resident_len=seq_len,
                 num_decoded_tokens=self._num_decoded_tokens[local_row],
                 num_new_tokens=self._num_new_tokens[local_row],
@@ -533,8 +555,12 @@ class RKVWorker:
             ):
                 continue
 
-            self._compact_request(request_id, worker_row, seq_len, rkv)
-            updates[request_id] = int(rkv.budget)
+            updates[request_id] = self._compact_request(
+                request_id,
+                worker_row,
+                seq_len,
+                algorithm,
+            )
             self._compacted_requests.add(request_id)
 
         return updates

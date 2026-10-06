@@ -4,6 +4,7 @@ import pytest
 
 from lmcache.integration.vllm.token_drop import (
     TokenDropSpec,
+    build_token_drop_algorithm,
     parse_token_drop_spec,
 )
 
@@ -36,15 +37,30 @@ def test_parse_request_local_rkv_config_is_opaque_to_lmcache() -> None:
     )
 
 
+def test_algorithm_factory_owns_rkv_dispatch() -> None:
+    algorithm = build_token_drop_algorithm(
+        TokenDropSpec(
+            algorithm="rkv",
+            config={"budget": 32, "buffer": 16},
+        )
+    )
+    assert type(algorithm).__name__ == "R1KV"
+    assert algorithm.observation_window_tokens == 8
+
+    other = parse_token_drop_spec(
+        {"lmcache.token_drop": {"algorithm": "other", "config": {}}}
+    )
+    assert other is not None
+    assert other == TokenDropSpec(algorithm="other", config={})
+    with pytest.raises(ValueError, match="Unsupported token-drop algorithm"):
+        build_token_drop_algorithm(other)
+
+
 @pytest.mark.parametrize(
     ("raw", "match"),
     [
         ("rkv", "JSON object"),
         ({"config": {"budget": 32, "buffer": 16}}, "algorithm"),
-        (
-            {"algorithm": "other", "config": {"budget": 32, "buffer": 16}},
-            "Unsupported",
-        ),
         ({"algorithm": "rkv"}, "config"),
         ({"algorithm": "rkv", "config": []}, "config"),
         (

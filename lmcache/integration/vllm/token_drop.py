@@ -21,6 +21,20 @@ class TokenDropSpec:
     config: dict[str, Any]
 
 
+def build_token_drop_algorithm(spec: TokenDropSpec) -> Any:
+    """Construct the selected token-dropping algorithm at the dispatch boundary."""
+    if spec.algorithm == "rkv":
+        try:
+            from rkv import R1KV
+        except ImportError as exc:
+            raise ImportError(
+                "R-KV is enabled but the optional 'rkv' package is not installed"
+            ) from exc
+        return R1KV.from_serving_config(spec.config)
+
+    raise ValueError(f"Unsupported token-drop algorithm: {spec.algorithm!r}")
+
+
 def parse_token_drop_spec(
     request_configs: Mapping[str, Any] | None,
 ) -> TokenDropSpec | None:
@@ -40,8 +54,6 @@ def parse_token_drop_spec(
     algorithm = raw.get("algorithm")
     if not isinstance(algorithm, str) or not algorithm:
         raise ValueError("lmcache.token_drop.algorithm must be a non-empty string")
-    if algorithm != "rkv":
-        raise ValueError(f"Unsupported token-drop algorithm: {algorithm!r}")
 
     config = raw.get("config")
     if not isinstance(config, Mapping):

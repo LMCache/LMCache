@@ -1240,30 +1240,27 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         tracker: LMCacheMPRequestTracker,
     ) -> None:
         """Validate engine capabilities only for this token-dropping request."""
-        spec = tracker.token_drop_spec
-        if spec is None:
+        if tracker.token_drop_spec is None:
             return
-        if spec.algorithm != "rkv":
-            raise ValueError(f"Unsupported token-drop algorithm: {spec.algorithm!r}")
 
         vllm_config = self._vllm_config
         if getattr(vllm_config.scheduler_config, "enable_chunked_prefill", False):
-            raise ValueError("R-KV MVP does not support chunked prefill")
+            raise ValueError("Token dropping MVP does not support chunked prefill")
         if getattr(vllm_config, "speculative_config", None) is not None:
-            raise ValueError("R-KV MVP does not support speculative decoding")
+            raise ValueError("Token dropping MVP does not support speculative decoding")
         if getattr(vllm_config.scheduler_config, "async_scheduling", False):
-            raise ValueError("R-KV MVP requires synchronous scheduling")
+            raise ValueError("Token dropping MVP requires synchronous scheduling")
         if not getattr(vllm_config.model_config, "enforce_eager", False):
             cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
             if cudagraph_mode != CUDAGraphMode.PIECEWISE:
                 raise ValueError(
-                    "R-KV requires either enforce_eager=True or "
+                    "Token dropping requires either enforce_eager=True or "
                     "cudagraph_mode=PIECEWISE"
                 )
         if vllm_config.parallel_config.world_size != 1:
-            raise ValueError("R-KV MVP requires a single GPU")
+            raise ValueError("Token dropping MVP requires a single GPU")
         if len(self._group_tokens_per_block) != 1:
-            raise ValueError("R-KV MVP requires exactly one KV cache group")
+            raise ValueError("Token dropping MVP requires exactly one KV cache group")
 
     def get_num_new_matched_tokens(
         self,
@@ -1676,23 +1673,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         for request_id, num_tokens in updates.items():
             row = self._require_private_token_drop_blocks(request_id)
             tracker = self._get_request_tracker(request_id)
-            spec = tracker.token_drop_spec
-            if spec is None or spec.algorithm != "rkv":
+            if tracker.token_drop_spec is None:
                 raise RuntimeError(
-                    f"Resident R-KV update for non-R-KV request {request_id!r}"
+                    "Resident token-drop update for non-token-drop request "
+                    f"{request_id!r}"
                 )
             current_tokens = get_resident_kv_tokens(request_id)
             if current_tokens is None:
                 current_tokens = tracker.num_scheduled_tokens
             if not 0 < num_tokens <= current_tokens:
                 raise ValueError(
-                    f"Invalid R-KV resident length {num_tokens} for "
+                    f"Invalid token-drop resident length {num_tokens} for "
                     f"{request_id}: current={current_tokens}"
                 )
 
             keep_blocks = (num_tokens + block_size - 1) // block_size
             if keep_blocks > len(row):
-                raise ValueError("R-KV resident length exceeds allocated KV capacity")
+                raise ValueError(
+                    "Token-drop resident length exceeds allocated KV capacity"
+                )
 
             # Reclaim exactly to the current resident frontier. Any future
             # headroom comes from vanilla vLLM allocation, not token-drop state.

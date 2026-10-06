@@ -5,8 +5,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from rkv import R1KV
-
 from lmcache.integration.vllm.experimental.rkv_worker import RKVWorker
 
 BLOCK_SIZE = 16
@@ -39,18 +37,6 @@ class _FakeAttention:
         self.impl = _FakeAttentionImpl()
 
 
-def _reference_rkv():
-    return R1KV(
-        budget=BUDGET,
-        window_size=WINDOW,
-        kernel_size=7,
-        mix_lambda=0.1,
-        retain_ratio=0.1,
-        retain_direction="last",
-    )
-
-
-
 def _slots(block_ids: list[int], length: int) -> torch.Tensor:
     positions = torch.arange(length, device="cuda")
     blocks = torch.tensor(block_ids, device="cuda")
@@ -80,41 +66,6 @@ def _new_cache(num_blocks: int) -> dict[str, torch.Tensor]:
         )
         for name in LAYER_NAMES
     }
-
-
-def _shared_kept_indices(
-    original: dict[str, torch.Tensor],
-    slots: torch.Tensor,
-    recent_queries: dict[str, torch.Tensor],
-) -> torch.Tensor:
-    rkv = _reference_rkv()
-    shared_scores = None
-    for name in LAYER_NAMES:
-        keys = (
-            original[name][:, 0][slots // BLOCK_SIZE, slots % BLOCK_SIZE]
-            .permute(1, 0, 2)
-            .unsqueeze(0)
-            .contiguous()
-        )
-        queries = (
-            recent_queries[name]
-            .permute(1, 0, 2)
-            .unsqueeze(0)
-            .contiguous()
-        )
-        layer_score = rkv.score_kv(keys, queries).mean(dim=1)
-        shared_scores = (
-            layer_score if shared_scores is None else shared_scores + layer_score
-        )
-
-    assert shared_scores is not None
-    past_idx = shared_scores.topk(BUDGET - WINDOW, dim=-1).indices
-    window_idx = torch.arange(
-        slots.numel() - WINDOW,
-        slots.numel(),
-        device=slots.device,
-    ).expand(1, WINDOW)
-    return torch.sort(torch.cat([past_idx, window_idx], dim=-1), dim=-1).values[0]
 
 
 def _seed_query_windows(
@@ -160,7 +111,7 @@ def _register_rkv(
     buffer: int = WINDOW,
     config: dict | None = None,
 ):
-    return worker._rkv_from_state(
+    return worker._algorithm_from_state(
         SimpleNamespace(
             request_id=request_id,
             algorithm="rkv",
@@ -328,7 +279,7 @@ def test_prepare_forward_uses_adaptor_row_order_and_only_captures_queries():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_rkv_worker_compacts_all_layers_matches_upstream_update_kv():
+def test_token_drop_worker_applies_kept_positions_and_reports_absolute_p():
     length = BUDGET + WINDOW
     block_ids = [1, 3, 5]
     caches = _new_cache(8)
@@ -345,15 +296,29 @@ def test_rkv_worker_compacts_all_layers_matches_upstream_update_kv():
     }
 
     slots = _slots(block_ids, length)
-    destination_slots = slots[:BUDGET]
-    recent_queries = {
-        name: queries[name][-WINDOW:].clone() for name in LAYER_NAMES
-    }
-    kept = _shared_kept_indices(original, slots, recent_queries)
+    kept = torch.cat(
+        [
+            torch.arange(0, 15, device="cuda"),
+            torch.arange(25, 40, device="cuda"),
+        ]
+    )
+    destination_slots = slots[: kept.numel()]
     source_slots = slots[kept]
 
     worker = RKVWorker()
-    _register_rkv(worker)
+    algorithm = _register_rkv(worker)
+
+    def select_kept_positions(layer_keys, layer_queries):
+        assert len(layer_keys) == len(LAYER_NAMES)
+        assert len(layer_queries) == len(LAYER_NAMES)
+        assert all(keys.shape == (1, KV_HEADS, length, HEAD_DIM) for keys in layer_keys)
+        assert all(
+            queries.shape == (1, Q_HEADS, WINDOW, HEAD_DIM)
+            for queries in layer_queries
+        )
+        return kept
+
+    algorithm.select_kept_positions = select_kept_positions
     worker.register_kv_caches(caches)
     metadata = _metadata(block_ids, length, length)
     worker.begin_step(
@@ -373,7 +338,7 @@ def test_rkv_worker_compacts_all_layers_matches_upstream_update_kv():
         },
     )
 
-    assert worker.compact() == {"req": BUDGET}
+    assert worker.compact() == {"req": kept.numel()}
 
     for name in LAYER_NAMES:
         actual_k = caches[name][:, 0][
@@ -506,21 +471,32 @@ def test_rkv_worker_compacts_two_requests_independently():
         block_table=torch.tensor(request_blocks, device="cuda"),
     )
 
-    expected_sources = {}
-    for req_index, request_id in enumerate(request_ids):
-        slots = _slots(request_blocks[req_index], length)
-        start = req_index * length
-        end = start + length
-        recent_queries = {
-            name: queries_by_layer[name][start:end][-WINDOW:].clone()
-            for name in LAYER_NAMES
-        }
-        kept = _shared_kept_indices(original, slots, recent_queries)
-        expected_sources[request_id] = slots[kept]
+    kept_by_request = {
+        "req-a": torch.cat(
+            [
+                torch.arange(0, 16, device="cuda"),
+                torch.arange(24, 40, device="cuda"),
+            ]
+        ),
+        "req-b": torch.cat(
+            [
+                torch.arange(0, 8, device="cuda"),
+                torch.arange(16, 40, device="cuda"),
+            ]
+        ),
+    }
+    expected_sources = {
+        request_id: _slots(request_blocks[req_index], length)[
+            kept_by_request[request_id]
+        ]
+        for req_index, request_id in enumerate(request_ids)
+    }
 
     worker = RKVWorker()
     for request_id in request_ids:
-        _register_rkv(worker, request_id)
+        algorithm = _register_rkv(worker, request_id)
+        kept = kept_by_request[request_id]
+        algorithm.select_kept_positions = lambda *_args, kept=kept: kept
     worker.register_kv_caches(caches)
     worker.begin_step(
         request_ids,
@@ -571,11 +547,11 @@ def test_rkv_worker_compacts_two_requests_independently():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_rkv_worker_rejects_non_finite_scores():
+def test_token_drop_worker_propagates_algorithm_selection_failure():
     length = BUDGET + WINDOW
     caches = _new_cache(8)
     worker = RKVWorker()
-    rkv = _register_rkv(worker)
+    algorithm = _register_rkv(worker)
     worker.register_kv_caches(caches)
     worker.begin_step(
         ["req"],
@@ -601,27 +577,13 @@ def test_rkv_worker_rejects_non_finite_scores():
         },
     )
 
-    def non_finite_score(keys, queries):
-        return keys.new_full(
-            (keys.shape[0], keys.shape[1], keys.shape[2] - WINDOW),
-            float("nan"),
-        )
+    def reject_selection(*_args):
+        raise RuntimeError("algorithm selection failed")
 
-    rkv.score_kv = non_finite_score
+    algorithm.select_kept_positions = reject_selection
 
-    with pytest.raises(RuntimeError, match="non-finite"):
+    with pytest.raises(RuntimeError, match="algorithm selection failed"):
         worker.compact()
-
-
-def test_rkv_worker_uses_rkv_serving_defaults():
-    worker = RKVWorker()
-    rkv = _register_rkv(worker, buffer=128)
-    assert rkv.buffer == 128
-    assert rkv.window_size == 8
-    assert rkv.kernel_size == 7
-    assert rkv.mix_lambda == 0.1
-    assert rkv.retain_ratio == 0.1
-    assert rkv.retain_direction == "last"
 
 
 def test_normal_registration_does_not_require_rkv_compatible_kv_layout():
@@ -657,14 +619,27 @@ def test_request_local_rkv_configs_stay_independent():
         config={"budget": 48, "buffer": 24, "window_size": 8},
     )
 
-    rkv_a = worker._rkv_from_state(state_a)
-    rkv_b = worker._rkv_from_state(state_b)
+    rkv_a = worker._algorithm_from_state(state_a)
+    rkv_b = worker._algorithm_from_state(state_b)
 
     assert rkv_a is not rkv_b
-    assert (rkv_a.budget, rkv_a.buffer, rkv_a.window_size) == (32, 16, 4)
-    assert (rkv_b.budget, rkv_b.buffer, rkv_b.window_size) == (48, 24, 8)
-    assert worker._rkv_for_request("a") is rkv_a
-    assert worker._rkv_for_request("b") is rkv_b
+    assert worker._algorithm_for_request("a") is rkv_a
+    assert worker._algorithm_for_request("b") is rkv_b
+
+
+def test_live_request_reuses_algorithm_until_request_reset():
+    worker = RKVWorker()
+    state = SimpleNamespace(
+        request_id="req",
+        algorithm="rkv",
+        config={"budget": 32, "buffer": 16},
+    )
+
+    first = worker._algorithm_from_state(state)
+    assert worker._algorithm_from_state(state) is first
+
+    worker.drop_requests({"req"})
+    assert worker._algorithm_from_state(state) is not first
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -685,7 +660,7 @@ def test_two_different_rkv_configs_compact_in_same_batch():
         ),
     ]
     for state in states:
-        worker._rkv_from_state(state)
+        worker._algorithm_from_state(state)
 
     metadata = SimpleNamespace(
         use_cascade=False,
