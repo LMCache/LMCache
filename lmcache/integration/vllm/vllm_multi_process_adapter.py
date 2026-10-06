@@ -33,6 +33,7 @@ from lmcache.utils import (
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
+    COVERED_CHUNKS_CONFIG_KEY,
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
@@ -817,6 +818,7 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
+        covered_chunks: int = 0,
     ) -> None:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
@@ -835,6 +837,10 @@ class LMCacheMPSchedulerAdapter:
                 the IPC key.
             reserve_last_token: Whether to exclude the final token before
                 aligning the lookup range.
+            covered_chunks: Leading LMCache chunks the serving engine's prefix
+                cache already covers. The server touches them (keeps them warm)
+                but skips read-locking / L2-prefetching them. 0 disables the
+                optimization for this request.
 
         Returns:
             None
@@ -859,6 +865,17 @@ class LMCacheMPSchedulerAdapter:
         aligned_end = (
             lookup_tokens // self.lmcache_tokens_per_chunk
         ) * self.lmcache_tokens_per_chunk
+
+        # Clamp covered_chunks to the aligned lookup range (server clamps too).
+        covered_chunks = max(
+            0, min(covered_chunks, aligned_end // self.lmcache_tokens_per_chunk)
+        )
+        # Carry covered_chunks in request_configs only when non-zero (copied dict).
+        if covered_chunks > 0:
+            request_configs = {
+                **(request_configs or {}),
+                COVERED_CHUNKS_CONFIG_KEY: covered_chunks,
+            }
 
         key = self._create_key(
             token_ids,
@@ -1112,7 +1129,7 @@ class LMCacheMPSchedulerAdapter:
         request_id: str,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> dict[str, "MessagingFuture[None]"]:
         """Release read locks acquired during lookup without a full retrieve.
 
         Use this when some chunks matched by lookup overlap with blocks that
@@ -1134,9 +1151,14 @@ class LMCacheMPSchedulerAdapter:
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+
+        Returns:
+            Per-server-url release futures (empty when unhealthy). Callers that
+            do not need to wait may ignore them; ``free_lookup_locks_blocking``
+            awaits them.
         """
         if not self.is_healthy:
-            return
+            return {}
 
         # Free [start, end) on every server.
         base_key = self._create_key(
@@ -1147,8 +1169,46 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         ).no_worker_id_version()
-        for url in self._server_urls:
-            self.req_clients[url].free_lookup_locks(base_key, self.tp_size)
+        return {
+            url: self.req_clients[url].free_lookup_locks(base_key, self.tp_size)
+            for url in self._server_urls
+        }
+
+    def free_lookup_locks_blocking(
+        self,
+        token_ids: list[int],
+        start: int,
+        end: int,
+        request_id: str,
+        cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
+    ) -> None:
+        """Release read locks via ``free_lookup_locks`` but block until every
+        server has processed the release.
+
+        The covered-lookup shrink path must release the stale lookup's locks
+        before it submits the replacement full lookup for the same request: on a
+        server with ``max_cpu_workers > 1`` a fire-and-forget release could be
+        reordered after the replacement's ``begin_lookup`` (both share the normal
+        thread pool), over-releasing the covered prefix and leaking the stale
+        locks. Args mirror ``free_lookup_locks``.
+        """
+        futures = self.free_lookup_locks(
+            token_ids, start, end, request_id, cache_salt, request_configs
+        )
+        deadline = time.monotonic() + self._mq_timeout
+        for url, future in futures.items():
+            try:
+                future.result(timeout=max(0.0, deadline - time.monotonic()))
+            except TimeoutError:
+                logger.warning(
+                    "FREE_LOOKUP_LOCKS to %s did not complete within %ss; the "
+                    "covered-lookup re-lookup may race it.",
+                    url,
+                    self._mq_timeout,
+                )
+            except Exception:
+                logger.warning("FREE_LOOKUP_LOCKS to %s failed.", url, exc_info=True)
 
     def end_session(self, request_id: str) -> None:
         """
@@ -1229,7 +1289,8 @@ class LMCacheMPSchedulerAdapter:
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
-                the IPC key.
+                the IPC key. The APC-covered chunk count (if any) is carried
+                here under ``COVERED_CHUNKS_CONFIG_KEY``.
 
         Returns:
             IPCCacheServerKey: The constructed key.
