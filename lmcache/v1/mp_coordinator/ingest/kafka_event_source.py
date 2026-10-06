@@ -62,8 +62,9 @@ class KafkaCacheEventSource(CacheEventSource):
     order. A record's offset is recorded into ``position`` only after the
     gate has seen it, so delivery is at-least-once; the gate's sequence
     dedup makes redelivery harmless. A record that cannot be decoded, or
-    that makes a consumer raise, is logged and skipped -- and still
-    recorded -- so one bad record cannot stall its partition.
+    whose ingest raises, is logged and skipped -- and still recorded -- so
+    one bad record cannot stall its partition. A consumer that raises is
+    handled by the broadcaster and does not reach here.
 
     ``confluent-kafka`` is the optional ``lmcache[kafka]`` extra and is
     imported only here.
@@ -205,8 +206,8 @@ class KafkaCacheEventSource(CacheEventSource):
     def _ingest(self, message: "Message") -> None:
         """Decode one record and offer its batches to the gate.
 
-        Decode failures and consumer exceptions are logged and swallowed; the
-        caller records the offset either way so the partition keeps moving.
+        Decode and ingest failures are logged and swallowed; the caller
+        records the offset either way so the partition keeps moving.
         """
         position = f"{message.topic()}[{message.partition()}]@{message.offset()}"
         try:
