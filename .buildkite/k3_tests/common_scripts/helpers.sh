@@ -50,9 +50,11 @@ pr_has_label() {
     [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",${wanted_label},"* ]]
 }
 
-# An "adapter only" PR may skip K3 only if every change stays in the L2 adapter
-# folder (plus its tests and docs) and avoids the adapters K3 exercises: P2P,
-# NIXL, and the mock adapter and shared adapter code the MP tests run through.
+# An "adapter only" PR may skip K3 only if every change is an individual
+# *_l2_adapter.py file (plus its tests and docs) other than the adapters K3
+# exercises: P2P, NIXL, and the mock adapter the MP tests use. Any other file
+# in l2_adapters/ may be shared MP-server code (e.g. serde_wrapper.py is
+# imported by storage_manager.py), so it blocks the skip by default.
 # Uses path-filter.sh helpers, so callers must source path-filter.sh.
 pr_is_k3_untested_adapter_change() {
     local changed_files f
@@ -62,21 +64,17 @@ pr_is_k3_untested_adapter_change() {
         [[ -z "$f" ]] && continue
         case "$f" in
             *p2p*|*nixl*|\
-            lmcache/v1/distributed/l2_adapters/__init__.py|\
-            lmcache/v1/distributed/l2_adapters/base.py|\
-            lmcache/v1/distributed/l2_adapters/config.py|\
-            lmcache/v1/distributed/l2_adapters/factory.py|\
             lmcache/v1/distributed/l2_adapters/mock_l2_adapter.py)
                 echo "--- :label: '${f}' is exercised by K3 tests; not skipping"
                 return 1
                 ;;
-            lmcache/v1/distributed/l2_adapters/*|\
+            lmcache/v1/distributed/l2_adapters/*_l2_adapter.py|\
             tests/v1/distributed/l2_adapters/*|\
             tests/v1/distributed/test_*l2_adapter*)
                 ;;
             *)
                 if ! _path_filter_is_trivial "$f"; then
-                    echo "--- :label: '${f}' is outside the L2 adapter folder; not skipping"
+                    echo "--- :label: '${f}' is not an individual L2 adapter; not skipping"
                     return 1
                 fi
                 ;;
