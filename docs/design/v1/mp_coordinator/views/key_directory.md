@@ -199,6 +199,25 @@ frozen dataclass). The RFC's 16-byte
 `key_hash` with interned `model_id`/`salt_id` is a memory/native-port
 optimization (M6), not a semantic change.
 
+## Object groups
+
+Under `--separate-object-groups` a model's KV is split into object groups --
+full attention, each sliding window, each recurrent layer -- and a chunk is
+stored once per group. Token-addressed operations resolve group `0`, then
+reach the rest without the coordinator knowing how many groups there are:
+
+- **Lookup and delete** act only on what is stored, so
+  `get_keys_across_object_groups` expands each resolved key to its stored
+  copies in other groups, through the chunk-hash index above. A chunk in
+  two groups is looked up and deleted in two.
+- **Pins** match regardless of group: the pin table clears
+  `object_group_id` on every entry and check. One pin covers the chunk in
+  every group, including groups it is not stored in yet.
+
+Blend is still excluded: its namespace omits `object_group_id`, and blend
+servers must not enable `--separate-object-groups` (see
+[blend_index.md](../blend_index.md)).
+
 ## HTTP surface
 
 - `POST /events` — offer `CacheEventBatch` batches to the
@@ -209,7 +228,8 @@ See [ingest.md](ingest.md).
 ids, in either direction (POST because the payload rides in the body).
 Supply exactly one of: `keys` (resolve keys directly) or `token_ids`
 (prefix-exact resolution via the fleet `TokenHasher` + per-rank fan-out,
-as the pin APIs do; requires `model_name` / `world_size` / `cache_salt`
+expanded to every stored object group -- see *Object groups* above;
+requires `model_name` / `world_size` / `cache_salt`
 since key identity includes them — and the sequence must be the
 request's whole prefix, since chunk hashes are prefix-chained). One
 result per resolved key, request order, with placements, token ids,
