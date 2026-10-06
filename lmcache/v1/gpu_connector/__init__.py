@@ -166,11 +166,8 @@ def CreateGPUConnector(
             VLLMPagedMemLayerwiseGPUConnector,
         )
 
-        # vLLM binds each worker to its device in Worker.init_device, before
-        # the KV connector is created. metadata.local_worker_id is the rank
-        # inside one engine's TP/PP group, so it is 0 on every data-parallel
-        # rank and is not a device index.
-        local_worker_id = torch_dev.current_device()
+        local_worker_id = metadata.local_worker_id
+        torch_dev.set_device(local_worker_id)
         device = torch.device(f"{torch_device_type}:{local_worker_id}")
 
         if torch_device_type == "cuda":
