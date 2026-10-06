@@ -25,6 +25,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
 )
@@ -220,6 +221,24 @@ class TestStorageManagerBasic:
 
         # Should not have any error
         storage_manager.finish_write([object_key])
+
+        storage_manager.close()
+
+    def test_abort_write_discards_staging_object(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """An aborted reservation never becomes a resident L1 object."""
+        storage_manager = StorageManager(basic_storage_manager_config)
+        object_key = make_object_key(chunk_hash=12345)
+
+        result = storage_manager.reserve_write_with_status([object_key], basic_layout)
+        assert result[object_key][0] == L1Error.SUCCESS
+        assert result[object_key][1] is not None
+
+        assert storage_manager.abort_write([object_key]) == {
+            object_key: L1Error.SUCCESS
+        }
+        assert storage_manager.delete_l1_keys([object_key]) == (0, 0)
 
         storage_manager.close()
 
