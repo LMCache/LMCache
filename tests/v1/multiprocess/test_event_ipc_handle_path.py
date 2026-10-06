@@ -2,9 +2,9 @@
 """Tests for platform event IPC use in the LMCache-driven handle path."""
 
 # Standard
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any, Iterator, cast
+from typing import Any, cast
 from unittest.mock import MagicMock
 import inspect
 
@@ -80,6 +80,9 @@ class _FakeStorageManager:
         """Accept the owner-tagged callback registered by the transfer module."""
         return None
 
+    def finish_read_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
+        return None
+
     def finish_read_prefetched(self, keys: list[object]) -> None:
         return None
 
@@ -90,9 +93,11 @@ class _FakeStorageManager:
     ) -> dict[object, object]:
         return {}
 
-    @contextmanager
-    def read_prefetched_results(self, keys: list[object]) -> Iterator[list[object]]:
-        yield []
+    def prepare_read_completion(self, keys, l1_owners=None):
+        return []
+
+    def unsafe_read(self, keys, l1_owners=None):
+        return [], []
 
 
 def _resolved_future(result: object) -> MessagingFuture[object]:
@@ -244,6 +249,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         chunk_size=1,
         null_block_id=0,
         storage_manager=storage_manager,
+        get_read_owners=lambda request_id: None,
         event_bus=SimpleNamespace(
             publish=lambda event: None,
             publish_on_stream=lambda stream, event: None,

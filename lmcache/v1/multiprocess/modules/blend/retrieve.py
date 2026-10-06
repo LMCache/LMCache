@@ -527,6 +527,7 @@ class RetrieveMixin:
         all_obj_keys: list[ObjectKey],
         n_read: int,
         stream: Any,
+        l1_owners: dict[ObjectKey, int] | None = None,
     ) -> int:
         """Release the sparse-prefetch read locks of the scattered matches.
 
@@ -546,7 +547,17 @@ class RetrieveMixin:
             for g in range(n_read)
         ]
         if release_keys:
-            submit_callback_to_stream(stream, "finish_read_prefetched", release_keys)
+            if l1_owners is None:
+                submit_callback_to_stream(
+                    stream, "finish_read_prefetched", release_keys
+                )
+            else:
+                groups: dict[int, list[ObjectKey]] = {}
+                for key in release_keys:
+                    groups.setdefault(l1_owners[key], []).append(key)
+                submit_callback_to_stream(
+                    stream, "finish_read_by_owner", list(groups.items())
+                )
         return len(release_keys)
 
     @request_handler(
@@ -748,6 +759,13 @@ class RetrieveMixin:
         )
         cached = _stash["per_hash"] if _stash else None
         stash_read_locks = _stash["read_locks"] if _stash else 1
+        l1_owners = (
+            _stash.get("l1_owners")
+            if _stash
+            else session.extras.get("cb.sparse_l1_owners")
+            if session
+            else None
+        )
         if cached is not None and all(r.hash in cached for r in cb_match_result):
             # The lookup cached all-ranks obj keys (group-major, rank-minor);
             # select THIS rank's key per read group or TP>1 mispairs ranks.
@@ -778,7 +796,7 @@ class RetrieveMixin:
                 # Nothing will read these keys: release every lock the lookup
                 # took (N per key).
                 self._ctx.storage_manager.finish_read_prefetched(
-                    orphan_keys, read_locks=stash_read_locks
+                    orphan_keys, read_locks=stash_read_locks, l1_owners=l1_owners
                 )
                 logger.debug(
                     "CB released %d prefetched-but-unretrieved keys (req=%s)",
@@ -887,7 +905,7 @@ class RetrieveMixin:
             scatter_open = False
             try:
                 with self._ctx.storage_manager.read_prefetched_results(
-                    all_obj_keys
+                    all_obj_keys, l1_owners=l1_owners
                 ) as memory_objs:
                     _stage_ms["fetch"] = (time.perf_counter() - _stage_t) * 1000
                     if memory_objs is None:
@@ -1026,6 +1044,7 @@ class RetrieveMixin:
                         all_obj_keys,
                         n_read,
                         retrieve_cupy_stream,
+                        l1_owners,
                     )
 
                     # Record this retrieve's device work for the next
