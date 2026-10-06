@@ -259,56 +259,13 @@ class SGLangUnifiedKVAdapter:
         return tensors
 
     def _resolve_dsv4_full_page_tensors(self, kv_pool) -> tuple[torch.Tensor, ...]:
-        """Resolve DS V4 C4/C128 sidecars that share FULL block IDs."""
+        """Resolve DS V4-family sidecars that share FULL block IDs."""
         if getattr(kv_pool, "_unified_kv", False):
             raise NotImplementedError(
                 "LMCache DeepSeek V4 does not yet support ROCm unified_kv_triton; "
                 "its request-scoped SWA ring has no content-stable block-id space"
             )
 
-        c4_pool = getattr(kv_pool, "c4_kv_pool", None)
-        if c4_pool is not None and hasattr(
-            c4_pool, "full_to_hisparse_device_index_mapping"
-        ):
-            raise NotImplementedError(
-                "LMCache DeepSeek V4 does not yet support HiSparse C4 remapping"
-            )
-
-        tensors: list[torch.Tensor] = []
-        c4_buffers = getattr(c4_pool, "kv_buffer", None)
-        if c4_buffers:
-            tensors.extend(tensor for tensor in c4_buffers if tensor.numel() > 0)
-
-        indexer_pool = getattr(kv_pool, "c4_indexer_kv_pool", None)
-        if indexer_pool is not None:
-            if getattr(indexer_pool, "uses_aiter_fp4_layout", False):
-                payload_buffers = getattr(indexer_pool, "index_k_payload_buffer", None)
-                scale_buffers = getattr(indexer_pool, "index_k_scale_buffer", None)
-                if not payload_buffers or not scale_buffers:
-                    raise NotImplementedError(
-                        "DeepSeek V4 AITER FP4 indexer is missing payload or scale "
-                        "buffers"
-                    )
-                for buffers in (payload_buffers, scale_buffers):
-                    tensors.extend(
-                        tensor.view(torch.uint8).reshape(tensor.shape[0], -1)
-                        for tensor in buffers
-                        if tensor.numel() > 0
-                    )
-            else:
-                buffers = getattr(indexer_pool, "index_k_with_scale_buffer", None)
-                if buffers:
-                    tensors.extend(tensor for tensor in buffers if tensor.numel() > 0)
-
-        c128_pool = getattr(kv_pool, "c128_kv_pool", None)
-        c128_buffers = getattr(c128_pool, "kv_buffer", None)
-        if c128_buffers:
-            tensors.extend(tensor for tensor in c128_buffers if tensor.numel() > 0)
-
-        # Compressed pools reserve the dummy FULL page in their own physical
-        # page units, so C4, C128, and indexer buffers may have different
-        # amounts of trailing padding. Their valid row IDs still share the
-        # FULL allocator's logical block space, including dummy block 0.
         full_size = kv_pool.full_size
         if full_size is None or full_size % self.page_size != 0:
             raise ValueError(
@@ -316,24 +273,84 @@ class SGLangUnifiedKVAdapter:
                 f"full_size={full_size}, page_size={self.page_size}"
             )
         full_block_count = full_size // self.page_size + 1
-        short_tensors = [
-            tuple(tensor.shape)
-            for tensor in tensors
-            if tensor.shape[0] < full_block_count
-        ]
-        if short_tensors:
-            raise ValueError(
-                "DeepSeek V4 FULL sidecar buffers are shorter than the logical "
-                f"FULL block space {full_block_count}: {short_tensors}"
-            )
-        tensors = [tensor[:full_block_count] for tensor in tensors]
+
+        tensors: list[torch.Tensor] = []
+        # Preserve V4's existing wire order, then append V4.1 source pools.
+        for ratio in (4, 128, 1, 2):
+            compressed_pool = kv_pool.kv_pools.get(ratio)
+            if compressed_pool is not None:
+                if ratio == 4 and hasattr(
+                    compressed_pool, "full_to_hisparse_device_index_mapping"
+                ):
+                    raise NotImplementedError(
+                        "LMCache DeepSeek V4 does not yet support HiSparse C4 remapping"
+                    )
+                for tensor in compressed_pool.kv_buffer:
+                    if tensor.numel() > 0:
+                        tensors.append(
+                            self._fold_dsv4_full_page_rows(
+                                f"C{ratio}",
+                                tensor,
+                                rows_per_full_block=1,
+                                full_block_count=full_block_count,
+                            )
+                        )
+
+            indexer_pool = kv_pool.index_pools.get(ratio)
+            if indexer_pool is None:
+                continue
+            slots_per_full_block = self.page_size // ratio
+            if slots_per_full_block % indexer_pool.page_size:
+                raise ValueError(
+                    f"DeepSeek V4 C{ratio} index pages of "
+                    f"{indexer_pool.page_size} slots do not tile a FULL page "
+                    f"of {slots_per_full_block} slots"
+                )
+            rows_per_full_block = slots_per_full_block // indexer_pool.page_size
+            for tensor in indexer_pool.contiguous_page_row_buffers():
+                if tensor.numel() > 0:
+                    tensors.append(
+                        self._fold_dsv4_full_page_rows(
+                            f"C{ratio} indexer",
+                            tensor,
+                            rows_per_full_block=rows_per_full_block,
+                            full_block_count=full_block_count,
+                        )
+                    )
 
         resolved = self._validate_page_native_tensors("FULL sidecar", tuple(tensors))
         if not resolved:
             raise NotImplementedError(
-                "DeepSeek V4 pool has no locally owned C4/C128/indexer buffers"
+                "DeepSeek V4 pool has no locally owned compressed/indexer buffers"
             )
         return resolved
+
+    def _fold_dsv4_full_page_rows(
+        self,
+        pool_name: str,
+        tensor: torch.Tensor,
+        *,
+        rows_per_full_block: int,
+        full_block_count: int,
+    ) -> torch.Tensor:
+        """Expose physical sidecar rows in the logical FULL-page address space."""
+        if tensor.dim() != 2 or not tensor.is_contiguous():
+            raise NotImplementedError(
+                f"LMCache MP requires a contiguous 2-D {pool_name} buffer, got "
+                f"shape={tuple(tensor.shape)}, contiguous={tensor.is_contiguous()}"
+            )
+        if rows_per_full_block <= 0:
+            raise ValueError(
+                f"DeepSeek V4 {pool_name} has invalid rows per FULL block: "
+                f"{rows_per_full_block}"
+            )
+        required_rows = full_block_count * rows_per_full_block
+        if tensor.shape[0] < required_rows:
+            raise ValueError(
+                f"DeepSeek V4 {pool_name} buffer is shorter than the logical FULL "
+                f"block space: rows={tensor.shape[0]}, required={required_rows}"
+            )
+        return tensor[:required_rows].view(torch.uint8).reshape(full_block_count, -1)
 
     def _resolve_dsv4_swa_page_tensors(self, kv_pool) -> tuple[torch.Tensor, ...]:
         """Resolve DS V4 SWA KV and C4 state with shared SWA block IDs."""

@@ -64,6 +64,7 @@ def _request(request_id: str = "request") -> Request:
             request_id=request_id,
             cache_salt="",
             all_token_ids=list(range(12)),
+            num_prompt_tokens=12,
             status=RequestStatus.WAITING,
             num_computed_tokens=0,
             kv_transfer_params=None,
@@ -172,6 +173,61 @@ def connectors(
     finally:
         worker.shutdown()
         scheduler.shutdown()
+
+
+@pytest.mark.parametrize("save_decode_cache", [None, False, True])
+@pytest.mark.parametrize("lazy", [False, True])
+def test_decode_store_policy_through_scheduler(
+    mock_io: SimpleNamespace, save_decode_cache: bool | None, lazy: bool
+) -> None:
+    """The configured write policy applies before immediate or lazy storage."""
+    options = {"lmcache.mp.lazy_offload": lazy}
+    if save_decode_cache is not None:
+        options["lmcache.mp.save_decode_cache"] = save_decode_cache
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config=options,
+        )
+    )
+    connector = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    connector.bind_gpu_block_pool(mock_io.pool)
+    request = _request()
+    request.num_prompt_tokens = 6
+    try:
+        assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+        connector.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([0, 1, 2],)), 0
+        )
+        connector.build_connector_meta(_schedule(num_tokens=6, new=True))
+        # Decode finishes the partial prompt chunk and one all-output chunk.
+        metadata = connector.build_connector_meta(_schedule(num_tokens=6))
+        tracker = connector.request_trackers[request.request_id]
+        assert tracker.num_stored_tokens == (12 if save_decode_cache else 4)
+        if not lazy:
+            if save_decode_cache:
+                assert [(m.op.start, m.op.end) for m in metadata.requests] == [(4, 12)]
+            else:
+                assert metadata.requests == []
+    finally:
+        connector.shutdown()
+
+
+@pytest.mark.parametrize("value", ["false", "true", 0, 1, None])
+def test_decode_store_policy_rejects_non_boolean(
+    mock_io: SimpleNamespace, value: object
+) -> None:
+    """A string 'false' must never silently enable decode storage."""
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"lmcache.mp.save_decode_cache": value},
+        )
+    )
+    with pytest.raises(ValueError, match="save_decode_cache must be a boolean"):
+        LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
 
 
 def test_chunked_prefill_stores_and_completion(

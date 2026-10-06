@@ -35,7 +35,10 @@ from lmcache.v1.distributed.api import (
     PrefetchResult,
     PrefetchTaskSpec,
 )
-from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
+from lmcache.v1.distributed.bitmap_ops.fold import (
+    all_grouped,
+    fold_unfold_grouped,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -346,6 +349,9 @@ class InFlightPrefetchRequest:
     fetching_policy: FetchingPolicy
     lock_mode: PrefetchLockMode
     num_kv_readers: int
+
+    # What the L2 lookups pinned; reported as found_cells at finish.
+    l2_found_cells: "Bitmap2D | None" = None
 
     # The locked and reserved keys during the prefetch lifecycle.
     key_states: PrefetchKeyState = field(default_factory=PrefetchKeyState)
@@ -1153,6 +1159,14 @@ class PrefetchController(StorageControllerInterface):
             l2_found_bitmap = _scatter_bitmaps_full_global(result, num_rows, num_cols)
             request.key_states.l2_locked_keys[adapter_idx] = l2_found_bitmap
 
+            # Snapshot before the load plan trims it, so the result can
+            # tell "found but not staged" from "absent".
+            if request.fetching_policy == "full":
+                if request.l2_found_cells is None:
+                    request.l2_found_cells = l2_found_bitmap.copy()
+                else:
+                    request.l2_found_cells += l2_found_bitmap
+
             # Remove the completed lookup task from inflight_lookup_tasks
             del request.inflight_lookup_tasks[adapter_idx]
 
@@ -1194,6 +1208,22 @@ class PrefetchController(StorageControllerInterface):
             l1_reserved_keys[l1_idx] = success
             reserved_objs.update(objs)
             num_failed_reservations += l1_failed_count
+
+        # Step 3.5: a whole-columns request can use a column only if every
+        # row reserved; trim to whole columns and release the rest.
+        if request.fetching_policy == "full" and num_failed_reservations > 0:
+            merged = l1_reserved_keys.merge()
+            if len(merged) > 0:
+                kept = Bitmap2D(all_grouped(merged.to_list()))
+                for l1_idx, grid in l1_reserved_keys.items():
+                    release_keys = _gather_keys(request.key_groups, grid - kept)
+                    if release_keys:
+                        self._l1_managers[l1_idx].finish_write_and_delete(
+                            release_keys, tag=tag
+                        )
+                        for key in release_keys:
+                            reserved_objs.pop(key, None)
+                        l1_reserved_keys[l1_idx] = grid & kept
         states.l1_reserved_keys = l1_reserved_keys
 
         # Steps 4 and 5 only matter when some reservation failed; otherwise the
@@ -1469,9 +1499,12 @@ class PrefetchController(StorageControllerInterface):
             )
 
         windows = [group.sliding_window_size for group in request.key_groups]
-        hit_length, retain_rows = fold_unfold_grouped(found.to_list(), windows)
+        _hit_length, retain_rows = fold_unfold_grouped(found.to_list(), windows)
         if request.fetching_policy == "prefix":
             hit_cells = Bitmap2D(retain_rows) & found
+        elif request.fetching_policy == "full":
+            # A split column is not a hit; the release below returns its rows.
+            hit_cells = Bitmap2D(all_grouped(found.to_list()))
         else:
             hit_cells = found
 
@@ -1491,29 +1524,26 @@ class PrefetchController(StorageControllerInterface):
             if hit_keys:
                 self._l1_managers[l1_idx].touch_keys(hit_keys)
 
-        # TODO(ApostaC): the lookup hit is no longer reported separately;
-        # remove this event and the ``prefetch_lookup_hit`` metric and log
-        # handlers that consume it.
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
-                metadata={
-                    "request_id": request.request_id,
-                    "prefix_hit_count": hit_length,
-                },
-            )
-        )
         if len(request.l2_loaded_cells) > 0:
             l2_hit_cells = hit_cells & request.l2_loaded_cells
         else:
             l2_hit_cells = hit_cells.zeros_like()
         l1_hit_cells = hit_cells - l2_hit_cells
+
+        # Whole-column callers only: landed-in-L1 union pinned-in-L2.
+        found_cells = None
+        if request.fetching_policy == "full":
+            found_cells = found
+            if request.l2_found_cells is not None:
+                found_cells = found_cells + request.l2_found_cells
+
         self._publish_result(
             request,
             PrefetchResult(
                 hit_cells=hit_cells.to_list(),
                 l1_hit_cells=l1_hit_cells.to_list(),
                 l2_hit_cells=l2_hit_cells.to_list(),
+                found_cells=None if found_cells is None else found_cells.to_list(),
             ),
         )
         logger.debug(
