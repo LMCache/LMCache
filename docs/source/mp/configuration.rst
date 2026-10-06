@@ -324,6 +324,12 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--l1-align-bytes``
      - ``4096``
      - Alignment size in bytes (default 4 KB).
+   * - ``--l1-use-hugepages`` / ``--no-l1-use-hugepages``
+     - ``False``
+     - Allocate the L1 pool from the 2 MiB hugepage pool instead of regular
+       pinned memory. It requires pre-allocated hugepages
+       (``sysctl vm.nr_hugepages``). Mutually exclusive with ``--shm-name``
+       and ``--l1-use-lazy`` (enabling it auto-disables lazy).
    * - ``--l1-devdax-path``
      - *(not set)*
      - Optional ``/dev/dax*`` device or mmap-able file to use as the L1
@@ -733,6 +739,14 @@ Connector ``extra_config`` Keys
 All connector-level options are passed through
 ``kv_connector_extra_config`` and use the ``lmcache.mp.`` prefix.
 
+By default, MP caches only prompt tokens, avoiding new cache entries from
+sampled output when fixed prompts are replayed.
+
+Set ``"lmcache.mp.save_decode_cache": true`` in ``kv_connector_extra_config``
+for resumable or streaming sessions, where generated tokens become part of a
+growing prompt across turns within the same request. This setting is separate
+from the in-process connector's ``save_decode_cache`` YAML/environment setting.
+
 .. list-table::
    :header-rows: 1
    :widths: 30 15 55
@@ -740,6 +754,9 @@ All connector-level options are passed through
    * - Key
      - Default
      - Description
+   * - ``lmcache.mp.save_decode_cache``
+     - ``false``
+     - Cache generated tokens in addition to prompt tokens.
    * - ``lmcache.mp.server_urls``
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of

@@ -44,7 +44,6 @@ class EventType(Enum):
 
     # L2 Prefetch Controller events
     L2_PREFETCH_LOOKUP_SUBMITTED = "l2.prefetch.lookup.submitted"
-    L2_PREFETCH_LOOKUP_COMPLETED = "l2.prefetch.lookup.completed"
     L2_PREFETCH_LOAD_SUBMITTED = "l2.prefetch.load.submitted"
     L2_PREFETCH_LOAD_COMPLETED = "l2.prefetch.load.completed"
     # Per-adapter load task events, for throughput correlation.  Fire once
@@ -56,10 +55,10 @@ class EventType(Enum):
     # L2 Eviction Controller events
     L2_KEYS_EVICTED = "l2.keys.evicted"
 
-    # L2 adapter key-level events.
-    # Capacity topology changed (adapter added/removed/reconfigured).
+    # StorageManager capacity topology changed (L1 arena or L2 adapter).
     SM_CAPACITY_CHANGED = "sm.capacity.changed"
 
+    # L2 adapter key-level events.
     L2_KEYS_STORED = "l2.keys.stored"
     L2_KEYS_ACCESSED = "l2.keys.accessed"
     L2_KEYS_DELETED = "l2.keys.deleted"

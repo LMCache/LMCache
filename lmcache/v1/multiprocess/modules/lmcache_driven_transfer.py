@@ -18,6 +18,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
+from lmcache.v1.distributed.storage_manager import L1WriteCompletion
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
@@ -188,11 +189,32 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             payload_type=list[ObjectKey],
         )
         self._device_host_func_dispatcher.register(
+            "finish_write_by_owner",
+            self._ctx.storage_manager.finish_write_by_owner,
+            payload_type=L1WriteCompletion,
+        )
+        self._device_host_func_dispatcher.register(
             "finish_read_prefetched",
             self._ctx.storage_manager.finish_read_prefetched,
             payload_type=list[ObjectKey],
         )
+        self._device_host_func_dispatcher.register(
+            "release_imported_event",
+            self._release_imported_event,
+            payload_type=tuple[int, int],
+        )
         self._device_host_func_dispatcher.start()
+
+    def _release_imported_event(self, payload: tuple[int, int]) -> None:
+        """Drop an imported worker event; the stream wait queued on it has run.
+
+        Args:
+            payload: ``(instance_id, import_token)`` of the imported event.
+        """
+        instance_id, import_token = payload
+        entry = self.get_and_touch_context_entry(instance_id)
+        if entry is not None:
+            entry.cache_context.release_imported_event(import_token)
 
     def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
         """Register *handler* for *kind* on the per-process device host-func
@@ -533,6 +555,19 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
+        """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask."""
+        handle, ok, _ = self.store_with_chunk_mask(
+            key, instance_id, gpu_block_ids, event_ipc_handle
+        )
+        return handle, ok
+
+    def store_with_chunk_mask(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool, list[bool]]:
         """Store the GPU KV cache blocks to CPU.
 
         Args:
@@ -549,6 +584,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             element indicates whether the store operation completed without a
             fatal error (not whether every requested chunk was stored; see
             Notes). The event handle is empty when no device work was submitted.
+            The third element marks per chunk whether every object group
+            committed it.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -556,10 +593,13 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         Notes:
             All-or-nothing. If ``gpu_block_ids`` do not fully cover every chunk
             ``key`` resolves to for every LMCache group (e.g. a caller/protocol
-            bug), or a copy fails, the whole store is skipped and nothing is
-            committed (logged at WARNING); a subsequent retrieve simply misses
+            bug), a copy fails, or completion ownership is invalid, the whole
+            store is skipped and nothing is committed; a subsequent retrieve misses
             and the engine recomputes. The boolean result reports whether the
             store completed without such a failure.
+            Failed copies or completion preparation retain staging reservations
+            under the existing write-TTL rules; queued GPU writes may still
+            reference those buffers.
         """
         st = time.perf_counter()
 
@@ -575,7 +615,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 "Rejecting STORE for unregistered GPU instance ID %d",
                 instance_id,
             )
-            return b"", False
+            return b"", False, []
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
@@ -626,7 +666,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     blocks_per_chunk,
                 )
                 event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+                return (
+                    event_backend.export_event(event, cache_context.device),
+                    False,
+                    [],
+                )
 
             # Chunks whose block ids are all the null block (e.g. align-mode
             # Mamba chunks holding no real state) carry no valid KV and must not
@@ -649,6 +693,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 event_ipc_handle, cache_context.device
             )
             event_backend.wait_event(producer_event, cache_context.stream)
+            import_token = cache_context.hold_imported_event(producer_event)
+            submit_callback_to_stream(
+                cache_context.cupy_stream,
+                "release_imported_event",
+                (instance_id, import_token),
+            )
 
             # CPU-synchronous sentinel: a GPU store is about to be enqueued.
             # Must be published via publish() (not publish_on_stream) so the
@@ -730,6 +780,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         block_ids_host=gpu_block_ids,
                     )
 
+                completion = (
+                    self._ctx.storage_manager.prepare_write_completion(all_dict)
+                    if all_dict
+                    else []
+                )
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
@@ -741,8 +796,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 if stored_count:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
-                        "finish_write",
-                        list(all_dict.keys()),
+                        "finish_write_by_owner",
+                        completion,
                     )
                 else:
                     total_bytes = 0
@@ -771,9 +826,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
+
+        # A chunk is stored only when every object group committed its key.
+        stored_mask = [
+            store_succeeded
+            and all(keys[i] in all_dict for keys in obj_keys_per_obj_group)
+            for i in range(num_chunks)
+        ]
         return (
             event_backend.export_event(event, cache_context.device),
             store_succeeded,
+            stored_mask,
         )
 
     @request_handler(
@@ -916,6 +979,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 event_ipc_handle, cache_context.device
             )
             event_backend.wait_event(producer_event, cache_context.stream)
+            import_token = cache_context.hold_imported_event(producer_event)
+            submit_callback_to_stream(
+                cache_context.cupy_stream,
+                "release_imported_event",
+                (instance_id, import_token),
+            )
 
             # Per object group, the prefetch only locked the in-window suffix
             # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full

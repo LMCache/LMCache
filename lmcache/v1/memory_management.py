@@ -229,6 +229,32 @@ class MemoryObj(metaclass=abc.ABCMeta):
 
     def __init__(self, metadata: MemoryObjMetadata):
         self.meta = metadata
+        self._l1_manager_id: int | None = None
+
+    def set_l1_manager(self, owner_tag: int) -> None:
+        """Assign the process-local L1 owner, not the writer's reservation tag.
+
+        Args:
+            owner_tag: Stable integer identity of the responsible L1 manager.
+
+        Raises:
+            ValueError: If this allocation already belongs to another manager.
+        """
+        if self._l1_manager_id is not None and self._l1_manager_id != owner_tag:
+            raise ValueError("Memory object already belongs to another L1 manager")
+        self._l1_manager_id = owner_tag
+
+    def get_l1_manager(self) -> int | None:
+        """Return the process-local L1 owner, or ``None`` outside the L1 path."""
+        return self._l1_manager_id
+
+    def reset_l1_manager(self) -> None:
+        """Clear ownership when an allocator starts a recycled object's lifetime.
+
+        Only call after the previous allocation and all its users have drained.
+        This identity is intentionally separate from serialized metadata.
+        """
+        self._l1_manager_id = None
 
     @abc.abstractmethod
     def invalidate(self):

@@ -4,8 +4,10 @@ Tests for the DAX MP L2 adapter.
 """
 
 # Standard
+from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Callable, cast
+import os
 import select
 import threading
 import time
@@ -28,6 +30,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L2AdapterListener
+from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
@@ -237,6 +240,7 @@ def test_dax_hotplug_remove_migrate_preserves_loadability(tmp_path):
                 "device_path": source_path,
                 "mode": "migrate",
             },
+            device_owners=lambda _path: [],
         )
 
         assert result["state"] == "removed"
@@ -259,7 +263,7 @@ def test_dax_adapter_implements_generic_reconfigure_status(tmp_path):
     adapter = make_hotplug_adapter(tmp_path)
     try:
         assert isinstance(adapter, L2ReconfigurableAdapter)
-        status = adapter.reconfigure("status", {})
+        status = adapter.reconfigure("status", {}, device_owners=lambda _path: [])
         assert status == {
             "backend": "dax",
             "supported_operations": ["status", "add", "remove", "resize"],
@@ -362,7 +366,53 @@ def test_dax_hotplug_remove_evict_notifies_logical_delete(tmp_path):
         adapter.close()
 
 
-def test_dax_hotplug_add_sanitizes_mapping_errors(tmp_path):
+def test_dax_hotplug_add_duplicate_device(tmp_path: Path) -> None:
+    adapter = make_hotplug_adapter(tmp_path)
+    device = tmp_path / "extra.bin"
+    device.write_bytes(bytes(4096))
+    alias = tmp_path / "extra-alias.bin"
+    os.link(device, alias)
+    registered = str(device)
+    requested = str(alias)
+    try:
+        added = adapter.hotplug_add_device(registered, 4096)
+        repeated = adapter.hotplug_add_device(requested, 4096)
+        assert repeated["device"]["device_id"] == added["device"]["device_id"]
+        assert repeated["device"]["device_path"] == registered
+        assert len(adapter.hotplug_status()["devices"]) == 3
+
+        with pytest.raises(L2ReconfigureError) as exc_info:
+            adapter.hotplug_add_device(requested, 2048)
+        assert exc_info.value.status_code == 409
+        assert len(adapter.hotplug_status()["devices"]) == 3
+    finally:
+        adapter.close()
+
+
+def test_dax_duplicate_config_rejected(tmp_path: Path) -> None:
+    device = tmp_path / "device.bin"
+    device.write_bytes(bytes(4096))
+    alias = tmp_path / "alias.bin"
+    os.link(device, alias)
+    with pytest.raises(ValueError, match="already mapped"):
+        DaxL2Adapter(
+            DaxL2AdapterConfig(
+                devices=[
+                    DaxDeviceConfig(str(p), 4096 / (1024**3)) for p in (device, alias)
+                ],
+                slot_bytes=4096,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "path_type, expected_error",
+    [
+        ("missing", "failed to identify DAX device"),
+        ("too_small", "failed to map DAX device"),
+    ],
+)
+def test_dax_hotplug_add_sanitizes_mapping_errors(tmp_path, path_type, expected_error):
     adapter = DaxL2Adapter(
         DaxL2AdapterConfig(
             devices=[],
@@ -373,14 +423,18 @@ def test_dax_hotplug_add_sanitizes_mapping_errors(tmp_path):
             num_load_workers=1,
         )
     )
-    missing_path = str(tmp_path / "missing_dax.bin")
+    candidate = tmp_path / "invalid_dax"
+    if path_type == "too_small":
+        candidate.write_bytes(bytes(1024))
+    device_path = str(candidate)
     try:
+        assert not adapter.owns_device(device_path)
         with pytest.raises(L2ReconfigureError) as exc_info:
-            adapter.hotplug_add_device(missing_path, 2048)
+            adapter.hotplug_add_device(device_path, 2048)
 
         assert exc_info.value.status_code == 400
-        assert exc_info.value.payload == {"error": "failed to map DAX device"}
-        assert missing_path not in str(exc_info.value.payload)
+        assert exc_info.value.payload == {"error": expected_error}
+        assert device_path not in str(exc_info.value.payload)
     finally:
         adapter.close()
 
@@ -434,7 +488,13 @@ class _FakeReconfigurableAdapter:
             "status": {"ready": True},
         }
 
-    def reconfigure(self, operation: str, payload: dict[str, object]) -> dict:
+    def reconfigure(
+        self,
+        operation: str,
+        payload: dict[str, object],
+        *,
+        device_owners: Callable[[str], list[str]],
+    ) -> dict:
         self.calls.append((operation, payload))
         return {"status": "ok", "operation": operation, "payload": payload}
 
@@ -470,16 +530,18 @@ def _wire_capacity_publishing(sm: StorageManager) -> None:
     """Give a bare StorageManager the state its capacity publish needs.
 
     Reconfiguring an adapter also announces the new topology, which reads
-    the L1 config, the adapter descriptors, and the event bus.
+    the L1 manager, the adapter descriptors, and the event bus.
 
     Args:
         sm: The partially-constructed storage manager to wire up.
     """
     sm._lifecycle_lock = threading.Lock()
+    sm._capacity_publish_lock = threading.Lock()
     sm._event_bus = cast(EventBus, _RecordingBus())
     # Declares no L1, keeping these tests about the L2 path.
-    sm._l1_config = L1ManagerConfig(
-        memory_config=L1MemoryManagerConfig(size_in_bytes=0, use_lazy=True)
+    sm._l1_manager = cast(
+        L1Manager,
+        SimpleNamespace(get_capacity_bytes_by_backend=lambda: {}),
     )
     if not hasattr(sm, "_adapter_descriptors"):
         sm._adapter_descriptors = {
