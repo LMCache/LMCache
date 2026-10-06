@@ -233,6 +233,11 @@ def _return_future_from_request_methods(
     for name, method in RequestClient.__dict__.items():
         if not name.startswith("_") and name != "close" and callable(method):
             getattr(client, name).return_value = future
+    # pin_status is the one reply register() unpacks; (0, 0) means the
+    # server has nothing to wait for.
+    pin_status_future = MagicMock(name="pin_status_future")
+    pin_status_future.result.return_value = (0, 0)
+    client.pin_status.return_value = pin_status_future
 
 
 @pytest.fixture

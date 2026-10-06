@@ -73,6 +73,9 @@ class _NoopDispatcher:
 class _FakeStorageManager:
     """Minimal storage surface used by the server handle-path test."""
 
+    # No deferred host pinning here, so the transfer module has nothing to pace.
+    pin_pacer = None
+
     def finish_write(self, keys: list[object]) -> None:
         return None
 

@@ -138,6 +138,8 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     num_object_groups = len(num_chunks_in_sw)
 
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
+    # Set by __init__ from the storage manager; None means no pacing.
+    module._pin_pacer = None
 
     kvlgm = SimpleNamespace(
         num_object_groups=num_object_groups,
