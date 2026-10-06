@@ -148,6 +148,16 @@ class ManagementModule:
         return self._ctx.chunk_size
 
     @request_handler()
+    def pin_status(self) -> tuple[int, int]:
+        """Report deferred L1 host-pinning progress as (pinned, total) bytes.
+
+        Workers poll this after REGISTER and finish startup only once the
+        pool is fully pinned, so no registration overlaps their traffic.
+        Cheap enough for the SYNC lane: two integer reads.
+        """
+        return self._ctx.storage_manager.pin_status()
+
+    @request_handler()
     def get_experimental(self) -> list[str]:
         """Return the experimental intermediate tensor transfer built in the
         server.
