@@ -26,6 +26,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (  # no
     MultiConnector,
 )
 from vllm.v1.core.sched.output import SchedulerOutput  # noqa: E402
+from vllm.v1.kv_cache_interface import (  # noqa: E402
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.outputs import KVConnectorOutput  # noqa: E402
 from vllm.v1.request import Request, RequestStatus  # noqa: E402
 
@@ -38,6 +43,7 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
 )
+from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -393,6 +399,84 @@ def test_lookup_retrieve_and_cleanup(
     sending, receiving = worker.get_finished({"request"})
     assert (sending or set()) == ({"request"} if delay_free else set())
     assert not receiving
+
+
+@pytest.mark.parametrize("num_groups,legacy_api", [(1, False), (2, False), (2, True)])
+@pytest.mark.parametrize("retrieve_success", [False, True])
+def test_receive_failure_reporting(
+    mock_io: SimpleNamespace,
+    lazy_offload: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    num_groups: int,
+    legacy_api: bool,
+    retrieve_success: bool,
+) -> None:
+    """Hybrid failures use request IDs; single-group and old engines keep blocks."""
+    if legacy_api:
+        monkeypatch.setattr(
+            connector_mod, "KVConnectorTransferResults", None, raising=False
+        )
+    elif not hasattr(KVConnectorBase_V1, "get_transfer_results"):
+        pytest.skip("vLLM does not expose request-level transfer results")
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_consumer",
+            kv_connector_extra_config={"lmcache.mp.lazy_offload": lazy_offload},
+        )
+    )
+    spec = FullAttentionSpec(
+        block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32
+    )
+    cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer{i}"], spec) for i in range(num_groups)
+        ],
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER, cache_config)
+    try:
+        worker.register_kv_caches(
+            {f"layer{i}": mock_io.kv_caches["layer"].clone() for i in range(num_groups)}
+        )
+        future = mock_io.transfer.submit_retrieve.return_value
+        future.query.return_value = False
+        future.result.return_value = retrieve_success
+        worker.worker_adapter.submit_retrieve_request(
+            "request",
+            LoadStoreOp(
+                token_ids=[1, 2, 3, 4], block_ids=[[2]] * num_groups, start=0, end=4
+            ),
+            None,
+        )
+        assert not any(worker.get_finished(set()))
+        future.query.return_value = True
+        if legacy_api:
+            sending, receiving = worker.get_finished(set())
+        else:
+            result = worker.get_transfer_results(set())
+            sending, receiving = result.finished_sending, result.finished_recving
+            assert result.failed_recving == (
+                {"request"} if num_groups > 1 and not retrieve_success else set()
+            )
+        assert not sending
+        assert receiving == {"request"}
+        assert worker.get_block_ids_with_load_errors() == (
+            {2} if not retrieve_success and (legacy_api or num_groups == 1) else set()
+        )
+        if legacy_api:
+            assert not any(worker.get_finished(set()))
+        else:
+            result = worker.get_transfer_results(set())
+            assert not (
+                result.finished_sending
+                or result.finished_recving
+                or result.failed_recving
+            )
+        assert worker.get_block_ids_with_load_errors() == set()
+    finally:
+        worker.shutdown()
 
 
 @pytest.mark.parametrize("mp_role", ["kv_both", "kv_consumer"])
