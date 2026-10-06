@@ -116,6 +116,12 @@ class MPServerConfig:
     engine adapter's heartbeat interval so a few missed pings never reap a live
     worker."""
 
+    session_ttl_seconds: float = 600.0
+    """Seconds a request session may stay idle before it is reaped. A session
+    carries the lookup state ``free_lookup_locks`` needs, so it must outlive
+    the longest time a request can wait in the engine's queue between its
+    lookup and its admission (minutes under deep agentic backlogs)."""
+
     worker_registration_grace_seconds: float = 3600.0
     """Silence budget (seconds) for a worker that registered but has never
     sent a PING (model warmup, or death before its first request). Must be
@@ -493,6 +499,13 @@ def add_mp_server_args(
         "engine adapter's heartbeat interval. Default is 120.",
     )
     mp_group.add_argument(
+        "--session-ttl-seconds",
+        type=float,
+        default=600.0,
+        help="Seconds a request session may stay idle before it is reaped. "
+        "Raise it above the longest engine queueing delay. Default is 600.",
+    )
+    mp_group.add_argument(
         "--worker-registration-grace-seconds",
         type=float,
         default=3600.0,
@@ -572,6 +585,7 @@ def parse_args_to_mp_server_config(
         script_allowed_imports=args.script_allowed_imports or [],
         run_script_api_enabled=args.run_script_api_enabled,
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
+        session_ttl_seconds=args.session_ttl_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
     )
