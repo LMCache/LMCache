@@ -23,6 +23,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 
 try:
     # Third Party
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorTransferResults,
+    )
+except ImportError:
+    # Older engines consume get_finished() and block-level errors instead.
+    KVConnectorTransferResults = None  # type: ignore[assignment,misc]
+
+try:
+    # Third Party
     from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
 except ImportError:
     # Older vLLM builds do not expose HMA. They cannot route per-group
@@ -567,6 +576,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config = getattr(self, "_kv_cache_config", None)
         validate_mamba_step_alignment(vllm_config, kv_cache_config)
         validate_kv_cache_groups(kv_cache_config)
+        # Flat block errors cannot describe multi-group failures on new vLLM.
+        # Keep single-group reporting so valid partial prefixes remain reusable.
+        self._report_request_errors = (
+            KVConnectorTransferResults is not None
+            and kv_cache_config is not None
+            and len(kv_cache_config.kv_cache_groups) > 1
+        )
 
         group_tokens_per_block = get_group_tokens_per_block(
             vllm_config, kv_cache_config
@@ -1043,6 +1059,32 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> "KVConnectorTransferResults":
+        """Poll completed transfers and report multi-group failures by request.
+
+        Args:
+            finished_req_ids: Requests whose generation has finished in vLLM.
+
+        Returns:
+            Completed sends and receives, with failed multi-group receives also
+            in ``failed_recving``. vLLM aggregates all workers' completions
+            before recovering the request. Single-group errors remain available
+            through ``get_block_ids_with_load_errors``.
+        """
+        assert KVConnectorTransferResults is not None
+        sending, receiving = self.get_finished(finished_req_ids)
+        return KVConnectorTransferResults(
+            finished_sending=set(sending or ()),
+            finished_recving=set(receiving or ()),
+            failed_recving=(
+                self.worker_adapter.get_failed_request_ids()
+                if self._report_request_errors
+                else set()
+            ),
+        )
+
     def build_connector_worker_meta(self):
         if not self.lazy_offload:
             return None
@@ -1058,11 +1100,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
-        Get the set of block IDs that failed to load.
+        Get failed block IDs for single-group or legacy vLLM recovery.
 
         Returns:
             Set of block IDs that encountered load errors.
-            Empty set if no load errors occurred.
+            Empty if no load errors occurred or failures are reported by request.
 
         Notes:
             - Applies to both sync- and async-loading requests.
@@ -1074,6 +1116,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             - Sync loading: failed blocks should be reported in the forward
               pass in which they are detected.
         """
+        if self._report_request_errors:
+            return set()
         return self.worker_adapter.get_block_ids_with_load_errors()
 
     def get_kv_connector_kv_cache_events(self) -> LMCacheMPKVEvents | None:
