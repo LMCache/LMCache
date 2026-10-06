@@ -15,7 +15,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 import threading
 
@@ -255,6 +255,43 @@ class KeyDirectory(View):
                     )
                 )
             return results
+
+    def get_keys_across_object_groups(self, keys: list[ObjectKey]) -> list[ObjectKey]:
+        """Return each key with its stored copies in other object groups.
+
+        Token-addressed lookups and deletes resolve object group ``0``; under
+        ``--separate-object-groups`` the same chunk is also stored in other
+        groups, and this reaches them through the chunk-hash index.
+
+        Args:
+            keys: The resolved keys.
+
+        Returns:
+            Each key with the stored keys that differ from it only in
+            ``object_group_id``, in ascending group order.
+        """
+        with self._lock:
+            expanded_keys: list[ObjectKey] = []
+            for key in keys:
+                key_in_each_group = [key, *self._get_stored_keys_in_other_groups(key)]
+                key_in_each_group.sort(key=lambda group_key: group_key.object_group_id)
+                expanded_keys.extend(key_in_each_group)
+            return expanded_keys
+
+    def _get_stored_keys_in_other_groups(self, key: ObjectKey) -> list[ObjectKey]:
+        """Return the stored keys that differ from ``key`` only in object group.
+
+        Call under the directory lock.
+        """
+        chunk_binding = self._token_bindings.get(key.chunk_hash)
+        if chunk_binding is None:
+            return []
+        return [
+            stored_key
+            for stored_key in chunk_binding.keys
+            if stored_key.object_group_id != key.object_group_id
+            and replace(stored_key, object_group_id=key.object_group_id) == key
+        ]
 
     def get_token_ids(self, chunk_hashes: list[bytes]) -> list[tuple[int, ...]]:
         """Return the known token ids for each requested chunk hash.

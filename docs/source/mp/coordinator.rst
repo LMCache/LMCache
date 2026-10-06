@@ -1162,9 +1162,10 @@ pinned keys from quota-based eviction. L2 pins are fleet-wide (per
 Local resolution requires the coordinator's ``chunk_size`` and
 ``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
 / ``--hash-algorithm``; otherwise the resolved keys will not match what was
-stored and the pin protects nothing. It also requires the MP servers to be
-launched with ``--no-separate-object-groups`` (the coordinator resolves keys in
-a single object group).
+stored and the pin protects nothing. Under ``--separate-object-groups`` a chunk
+is stored once per object group; a pin covers the chunk in every group,
+including groups it is not stored in yet, so ``GET /cache/pins`` lists one entry
+per chunk and rank rather than per group.
 
 ``POST /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -390,3 +390,9 @@ def test_deprecated_flags_log_warning():
 def test_deprecated_flush_interval_flag_rejects_nonpositive():
     with pytest.raises(ValueError):
         _parse(["--coordinator-l2-event-flush-interval", "0"])
+
+
+def test_session_ttl_seconds_default_and_flag():
+    """Session TTL defaults to 600 s and is settable for deep queueing."""
+    assert _parse_mp([]).session_ttl_seconds == 600.0
+    assert _parse_mp(["--session-ttl-seconds", "7200"]).session_ttl_seconds == 7200.0

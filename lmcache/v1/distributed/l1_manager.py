@@ -5,6 +5,7 @@ Managing objects and memory for L1 cache
 
 # Standard
 from dataclasses import dataclass
+from itertools import count
 import threading
 
 # First Party
@@ -33,6 +34,7 @@ from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
+_l1_manager_ids = count()
 
 
 # Internal classes and helper functions
@@ -178,6 +180,7 @@ class L1Manager:
     _gauge_target: "L1Manager | None" = None
 
     def __init__(self, config: L1ManagerConfig):
+        self._l1_manager_id = next(_l1_manager_ids)
         self._lock = threading.Lock()
 
         # Resident objects: readable, never write-locked.
@@ -251,6 +254,11 @@ class L1Manager:
                 "Bytes held by L1 staging objects (write-reserved, not admitted)",
                 lambda: _l1_staging_bytes_or_zero(L1Manager._gauge_target),
             )
+
+    @property
+    def l1_manager_id(self) -> int:
+        """Return this manager's stable process-local memory-object owner tag."""
+        return self._l1_manager_id
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.
@@ -526,6 +534,7 @@ class L1Manager:
             for (key, is_temp), mem_obj in zip(
                 need_to_allocate, allocated_objs, strict=True
             ):
+                mem_obj.set_l1_manager(self._l1_manager_id)
                 entry = L1ObjectState(
                     memory_obj=mem_obj,
                     write_lock=TTLLock(self._write_ttl_seconds),
