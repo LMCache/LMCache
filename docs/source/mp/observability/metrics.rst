@@ -191,9 +191,6 @@ L2 Metrics
      - Counter (attr: ``cache_salt``)
      - Number of chunks submitted for L2 prefetch lookup, grouped by
        tenant.
-   * - ``lmcache_mp.l2_prefetch_hit``
-     - Counter
-     - Number of prefix chunks found in L2 lookup.
    * - ``lmcache_mp.l2_prefetch_load_submitted``
      - Counter
      - Number of L2 prefetch load requests submitted.

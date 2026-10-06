@@ -2,7 +2,7 @@
 """Tests for the coordinator's Kafka cache-event source."""
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 import asyncio
 import time
 
@@ -29,6 +29,7 @@ from lmcache.v1.mp_coordinator.ingest.event_source import EventReplayCapability
 from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
     KafkaCacheEventSource,
 )
+from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest
 import lmcache.v1.mp_coordinator.ingest.kafka_event_source as kafka_event_source
@@ -139,6 +140,7 @@ def _source(
     monkeypatch: pytest.MonkeyPatch,
     broker: FakeKafkaBroker,
     recording: _RecordingConsumer | None = None,
+    position: StreamPosition | None = None,
 ) -> tuple[KafkaCacheEventSource, FakeKafkaConsumer, _RecordingConsumer]:
     """Build a Kafka source over the fake consumer, feeding one recorder.
 
@@ -147,6 +149,8 @@ def _source(
         broker: Broker the fake consumer reads.
         recording: Cache-event consumer to register; a fresh recorder when
             ``None``.
+        position: Checkpoint position to seek from; a fresh (empty) one
+            when ``None`` -- pass one in to inspect or pre-populate it.
 
     Returns:
         The source, its fake Kafka consumer, and the cache-event consumer.
@@ -160,9 +164,12 @@ def _source(
 
     install_fake_confluent_kafka(monkeypatch, consumer_factory=_consumer_factory)
     recording = recording if recording is not None else _RecordingConsumer()
+    position = position if position is not None else StreamPosition()
     broadcaster = CacheEventBroadcaster()
     broadcaster.register_consumer(recording)
-    source = KafkaCacheEventSource(EventGate(broadcaster, QuiesceLock()), _config())
+    source = KafkaCacheEventSource(
+        EventGate(broadcaster, QuiesceLock()), _config(), position
+    )
     if kafka_consumer is None:
         raise RuntimeError("Kafka consumer factory was not called")
     return source, kafka_consumer, recording
@@ -191,13 +198,14 @@ def test_kafka_source_ingests_records_in_partition_order(
     broker = FakeKafkaBroker()
     _record(broker, _batch(1))
     _record(broker, _batch(2), _batch(3))
-    source, kafka_consumer, recording = _source(monkeypatch, broker)
+    position = StreamPosition()
+    source, kafka_consumer, recording = _source(monkeypatch, broker, position=position)
 
     assert asyncio.run(_run_until(source, lambda: len(recording.batches) == 3))
 
     assert [batch.seq for batch in recording.batches] == [1, 2, 3]
     assert kafka_consumer.subscribed == (_TOPIC,)
-    assert kafka_consumer.stored_offsets == (0, 1)
+    assert position.next_offset(_TOPIC, 0) == 2
     assert kafka_consumer.closed is True
 
 
@@ -220,13 +228,81 @@ def test_kafka_source_consumes_records_produced_after_start(
     assert asyncio.run(_produce_while_running())
 
 
+def test_a_seeked_position_skips_what_it_already_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A position that already reached record 1 makes a fresh source
+    resume at record 2 -- not at the start of the topic."""
+    broker = FakeKafkaBroker()
+    _record(broker, _batch(1))
+    _record(broker, _batch(2))
+    position = StreamPosition()
+    position.record(_TOPIC, 0, 0)  # record 1 landed at offset 0
+    source, _, recording = _source(monkeypatch, broker, position=position)
+
+    assert asyncio.run(_run_until(source, lambda: len(recording.batches) == 1))
+
+    assert [batch.seq for batch in recording.batches] == [2]
+
+
+def test_restart_from_a_stale_checkpoint_replays_the_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bug this exists to close: the checkpoint that gets restored is
+    older than what was actually consumed before a crash, because the two
+    save on independent timers -- a checkpoint taken after record 1 is
+    already stale once records 2 and 3 are applied afterward, with no
+    second checkpoint before the crash. Resuming from Kafka's own
+    tracking (this fake's own ``_positions``, a fresh instance's the
+    moment a new process attaches) would skip the gap for good; resuming
+    from the checkpoint's own position replays it instead.
+    """
+    broker = FakeKafkaBroker()
+    _record(broker, _batch(1))
+    position = StreamPosition()
+    first_source, _, first_recording = _source(monkeypatch, broker, position=position)
+
+    async def _run_first() -> Mapping[str, object]:
+        await first_source.start()
+        try:
+            await asyncio.to_thread(
+                _wait_until, lambda: len(first_recording.batches) == 1
+            )
+            checkpoint = position.capture()  # stale the moment more arrives
+            _record(broker, _batch(2))
+            _record(broker, _batch(3))
+            await asyncio.to_thread(
+                _wait_until, lambda: len(first_recording.batches) == 3
+            )
+            return checkpoint
+        finally:
+            await first_source.stop()
+
+    stale_checkpoint = asyncio.run(_run_first())
+
+    # A fresh process: a new consumer (this fake never persists a group's
+    # committed offset across instances), and a position restored from
+    # the stale checkpoint rather than the live one above.
+    restored_position = StreamPosition()
+    restored_position.restore(stale_checkpoint)
+    second_source, _, second_recording = _source(
+        monkeypatch, broker, position=restored_position
+    )
+
+    assert asyncio.run(
+        _run_until(second_source, lambda: len(second_recording.batches) == 2)
+    )
+    assert [batch.seq for batch in second_recording.batches] == [2, 3]
+
+
 def test_kafka_source_skips_undecodable_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     broker = FakeKafkaBroker()
     broker.append(_TOPIC, key=None, value=b"not json")
     _record(broker, _batch(1))
-    source, kafka_consumer, recording = _source(monkeypatch, broker)
+    position = StreamPosition()
+    source, _, recording = _source(monkeypatch, broker, position=position)
     warnings: list[str] = []
     monkeypatch.setattr(
         kafka_event_source.logger,
@@ -236,8 +312,8 @@ def test_kafka_source_skips_undecodable_record(
 
     assert asyncio.run(_run_until(source, lambda: len(recording.batches) == 1))
 
-    # The bad record's offset is stored too, so the partition keeps moving.
-    assert kafka_consumer.stored_offsets == (0, 1)
+    # The bad record's offset is recorded too, so the partition keeps moving.
+    assert position.next_offset(_TOPIC, 0) == 2
     [warning] = warnings
     assert warning.startswith(f"Dropping undecodable cache-event record {_TOPIC}[0]@0")
 
@@ -247,7 +323,8 @@ def test_kafka_source_logs_consumer_errors_and_keeps_polling(
 ) -> None:
     broker = FakeKafkaBroker()
     _record(broker, _batch(1))
-    source, kafka_consumer, recording = _source(monkeypatch, broker)
+    position = StreamPosition()
+    source, kafka_consumer, recording = _source(monkeypatch, broker, position=position)
     kafka_consumer.inject_error("broker transport failure")
     warnings: list[str] = []
     monkeypatch.setattr(
@@ -261,30 +338,24 @@ def test_kafka_source_logs_consumer_errors_and_keeps_polling(
     assert warnings == [
         f"Kafka cache-event consumer error on topic {_TOPIC}: broker transport failure"
     ]
-    assert kafka_consumer.stored_offsets == (0,)
+    assert position.next_offset(_TOPIC, 0) == 1
 
 
-def test_kafka_source_skips_record_that_makes_a_consumer_raise(
+def test_kafka_source_moves_past_a_record_that_makes_a_consumer_raise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     broker = FakeKafkaBroker()
     _record(broker, _batch(1))
     _record(broker, _batch(2))
-    source, kafka_consumer, recording = _source(
-        monkeypatch, broker, _FailingOnceConsumer()
-    )
-    failures: list[str] = []
-    monkeypatch.setattr(
-        kafka_event_source.logger,
-        "exception",
-        lambda msg, *args: failures.append(msg % args),
+    position = StreamPosition()
+    source, _, recording = _source(
+        monkeypatch, broker, _FailingOnceConsumer(), position=position
     )
 
     assert asyncio.run(_run_until(source, lambda: len(recording.batches) == 1))
 
     assert [batch.seq for batch in recording.batches] == [2]
-    assert failures == [f"Cache-event consumers failed on record {_TOPIC}[0]@0"]
-    assert kafka_consumer.stored_offsets == (0, 1)
+    assert position.next_offset(_TOPIC, 0) == 2
 
 
 def test_kafka_source_reports_seekable_status(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -306,7 +377,7 @@ def test_kafka_source_configures_resumable_consumer(
         "group.id": _GROUP_ID,
         "client.id": "lmcache-coordinator",
         "auto.offset.reset": "earliest",
-        "enable.auto.commit": True,
+        "enable.auto.commit": False,
         "enable.auto.offset.store": False,
     }
 
@@ -326,7 +397,7 @@ def test_kafka_source_requires_the_kafka_extra(monkeypatch: pytest.MonkeyPatch) 
     gate = EventGate(CacheEventBroadcaster(), QuiesceLock())
 
     with pytest.raises(ImportError, match=r"pip install 'lmcache\[kafka\]'"):
-        KafkaCacheEventSource(gate, _config())
+        KafkaCacheEventSource(gate, _config(), StreamPosition())
 
 
 # -- App wiring -------------------------------------------------------------------
@@ -384,6 +455,23 @@ def test_app_consumes_kafka_topic_into_the_directory_and_closes_http_door(
     [kafka_consumer] = kafka_consumers
     assert kafka_consumer.subscribed == (_TOPIC,)
     assert kafka_consumer.closed is True
+
+
+def test_app_drains_a_backlog_that_predates_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backlog already on the topic before the app exists is read from
+    the start of the partition, not from whenever the app joined."""
+    broker = FakeKafkaBroker()
+    _record(broker, _batch(1))
+    _record(broker, _batch(2))
+    install_fake_confluent_kafka(
+        monkeypatch,
+        consumer_factory=lambda config: FakeKafkaConsumer(broker, config),
+    )
+
+    with TestClient(create_app(_app_config(_config()))) as client:
+        assert _wait_until(lambda: client.get("/directory/keys").json()["total"] == 2)
 
 
 def test_app_defaults_to_http_source_and_builds_no_consumer(

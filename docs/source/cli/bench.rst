@@ -1371,6 +1371,12 @@ support a clean store -> load round-trip.
    payload size (``--data-size-kb * 1024``) must be a multiple of the
    selected alignment.
 
+   To benchmark against a hugepage-backed L1 tier, pass
+   ``--l1-use-hugepages``. The buffer is then allocated from the 2 MiB
+   hugepage pool. Pre-allocate enough pages with ``sysctl vm.nr_hugepages``;
+   the buffer needs ``ceil(2 * in_flight * num_keys * data_size / 2 MiB)``
+   pages.
+
 
 Quick start
 ~~~~~~~~~~~

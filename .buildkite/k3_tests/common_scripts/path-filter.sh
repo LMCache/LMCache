@@ -184,7 +184,10 @@ _path_filter_should_skip_for_pipeline() {
             ;;
         sglang)
             case "$changed_file" in
-                .buildkite/k3_harness/setup-sglang-env.sh|lmcache/integration/sglang/*|.buildkite/k3_tests/sglang/*)
+                .buildkite/k3_harness/resolve-pinned-sglang.sh|\
+                .buildkite/k3_harness/setup-sglang-env.sh|\
+                lmcache/integration/sglang/*|\
+                .buildkite/k3_tests/sglang/*)
                     return 1
                     ;;
                 examples/*)

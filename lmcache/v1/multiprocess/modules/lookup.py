@@ -108,9 +108,8 @@ class LookupModule:
     """Handles lookup, prefetch polling, lock release, and session lifecycle.
 
     Owns the prefetch-job bookkeeping (``_prefetch_jobs``) and exposes
-    handlers for the LOOKUP, QUERY_PREFETCH_STATUS,
-    QUERY_PREFETCH_LOOKUP_HITS, FREE_LOOKUP_LOCKS, and END_SESSION
-    request types.
+    handlers for the LOOKUP, QUERY_PREFETCH_STATUS, FREE_LOOKUP_LOCKS, and
+    END_SESSION request types.
 
     Args:
         ctx: Shared engine context providing storage manager, token hasher,
@@ -318,35 +317,6 @@ class LookupModule:
         )
 
     @request_handler(HandlerType.BLOCKING)
-    def query_prefetch_lookup_hits(
-        self,
-        request_id: str,
-    ) -> int | None:
-        """Query the number of hits for a prefetch request before it's finished.
-
-        Args:
-            request_id: The external request ID passed in the lookup key.
-
-        Returns:
-            The number of hits for the prefetched keys if the lookup phase is
-            done. None if the lookup phase is still in progress. 0 if the
-            request_id is unknown (already completed and consumed, or invalid).
-        """
-        with self._prefetch_job_lock:
-            job = self._prefetch_jobs.get(request_id)
-
-        if job is None:
-            logger.warning(
-                "Prefetch job for request %s not found (already completed or invalid)",
-                request_id,
-            )
-            return 0
-
-        # The storage manager reports the prefix hit in chunks once the
-        # prefetch has finished, and None before that.
-        return self._ctx.storage_manager.query_prefetch_lookup_hits(job.handle)
-
-    @request_handler(HandlerType.BLOCKING)
     def query_prefetch_status(
         self,
         request_id: str,
@@ -491,11 +461,19 @@ class LookupModule:
             key.request_id
         ).prefetch_hit_chunks
         if hit_chunks < 0:
+            # Without the recorded hit length the locked range is unknown in
+            # every group: [start, end) can extend past what the prefetch
+            # locked (e.g. the vLLM-hit prefix exceeds the LMCache hit), and
+            # object keys are shared across requests, so releasing it would
+            # strip concurrent readers' locks and their RETRIEVE then fails
+            # with KEY_NOT_READABLE. Fail closed; held locks expire with the
+            # L1 read TTL.
             logger.warning(
-                "free_lookup_locks for request %s before its prefetch result "
-                "was consumed; releasing full-attention groups only",
+                "free_lookup_locks for request %s without a recorded prefetch "
+                "result; leaving its locks to the read TTL",
                 key.request_id,
             )
+            return
 
         # Release exactly the groups the prefetch locked (std lookup: all;
         # CB prefix leg: its prefix set) -- releasing an unlocked group
