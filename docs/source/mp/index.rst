@@ -5,6 +5,7 @@ Overview
    :hidden:
 
    request_transport
+   multi_l1
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
 vLLM instances reach through a configurable ZMQ or gRPC request transport.
@@ -222,11 +223,6 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - (SGLang only) Block until a prefetch job completes, then return its
        loaded chunk count, or ``None`` on timeout. The blocking alternative
        to polling ``QUERY_PREFETCH_STATUS``.
-   * - ``QUERY_PREFETCH_LOOKUP_HITS``
-     - BLOCKING
-     - Query the lookup-phase hit chunk count by request_id, before the
-       prefetch finishes. Returns ``None`` while the lookup is still
-       running.
    * - ``FREE_LOOKUP_LOCKS``
      - BLOCKING
      - Release read locks from a cancelled lookup without doing a full
@@ -348,6 +344,9 @@ methods:
 - ``read_prefetched_results()`` / ``finish_read_prefetched()`` -- Read
   prefetched data from L1 with automatic lock management.
 
+See :doc:`multi_l1` for the internal write-overflow and ownership foundations.
+Normal serving still uses one L1.
+
 L1Manager
 ~~~~~~~~~
 
@@ -380,7 +379,7 @@ tiers selected at startup (all satisfy ``L1ManagerProtocol``):
   The bytes live on disk; reads/writes DMA directly between the GPU staging
   buffer and the slab, driven by the process-global ``GDSContext``
   (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The DMA
-  backend is selected by platform via ``gpu_connector/_gds_async.py`` --
+  backend is selected by platform via ``gpu_connector/_gds_backends.py`` --
   cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on AMD
   ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the
   vendor-specific requirements. The CPU tier is disabled in this mode.

@@ -160,6 +160,15 @@ def test_transport_flag_is_parsed_without_starting_grpc():
     assert _parse_mp(["--transport", "grpc"]).transport == "grpc"
 
 
+def test_null_block_id_defaults_to_zero():
+    assert _parse_mp([]).null_block_id == 0
+    assert MPServerConfig().null_block_id == 0
+
+
+def test_null_block_id_flag_is_parsed():
+    assert _parse_mp(["--null-block-id", "-1"]).null_block_id == -1
+
+
 def test_grpc_server_workers_are_parsed():
     assert _parse_mp([]).grpc_server_workers == 32
     assert MPServerConfig().grpc_server_workers == 32
@@ -381,3 +390,9 @@ def test_deprecated_flags_log_warning():
 def test_deprecated_flush_interval_flag_rejects_nonpositive():
     with pytest.raises(ValueError):
         _parse(["--coordinator-l2-event-flush-interval", "0"])
+
+
+def test_session_ttl_seconds_default_and_flag():
+    """Session TTL defaults to 600 s and is settable for deep queueing."""
+    assert _parse_mp([]).session_ttl_seconds == 600.0
+    assert _parse_mp(["--session-ttl-seconds", "7200"]).session_ttl_seconds == 7200.0

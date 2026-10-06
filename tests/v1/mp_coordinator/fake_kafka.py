@@ -2,11 +2,14 @@
 """In-memory stand-ins for the confluent-kafka surface LMCache uses.
 
 Modelled: ``Producer.produce`` / ``flush`` with delivery callbacks, and a
-single-reader ``Consumer`` (``subscribe`` / ``poll`` / ``store_offsets`` /
-``close``) over one logical partition per topic. Consumer groups, retention,
-and rebalancing are out of scope. :func:`install_fake_confluent_kafka` swaps
-the stand-ins in for the real module, so tests run without ``confluent-kafka``
-installed.
+single-reader ``Consumer`` (``subscribe`` / ``assign`` / ``poll`` /
+``close``) over one logical partition per topic. Consumer groups,
+retention, and rebalancing are out of scope; the single partition is
+assigned once, synchronously, in :meth:`FakeKafkaConsumer.subscribe`.
+Offset commits are not modelled at all -- the coordinator does not
+commit, because its checkpoint is its cursor. :func:`install_fake_confluent_kafka`
+swaps the stand-ins in for the real module, so tests run without
+``confluent-kafka`` installed.
 """
 
 # Standard
@@ -22,6 +25,27 @@ import pytest
 DeliveryCallback = Callable[[object | None, "FakeKafkaRecord"], None]
 ProducerFactory = Callable[[dict[str, str | int | bool]], "FakeKafkaProducer"]
 ConsumerFactory = Callable[[dict[str, str | int | bool]], "FakeKafkaConsumer"]
+AssignCallback = Callable[[object, list["FakeTopicPartition"]], None]
+
+OFFSET_INVALID = -1001
+"""Stands in for ``confluent_kafka.OFFSET_INVALID``."""
+
+
+@dataclass
+class FakeTopicPartition:
+    """Stands in for ``confluent_kafka.TopicPartition``.
+
+    Attributes:
+        topic: The partition's topic.
+        partition: The partition number (always ``0``: one logical
+            partition per topic).
+        offset: Where to resume the partition from, as
+            :meth:`FakeKafkaConsumer.assign` reads it.
+    """
+
+    topic: str
+    partition: int = 0
+    offset: int = OFFSET_INVALID
 
 
 class FakeKafkaException(Exception):
@@ -222,7 +246,6 @@ class FakeKafkaConsumer:
         self._topics: list[str] = []
         self._positions: dict[str, int] = {}
         self._errors: list[object] = []
-        self._stored_offsets: list[int] = []
         self._closed = False
 
     @property
@@ -234,11 +257,6 @@ class FakeKafkaConsumer:
     def subscribed(self) -> tuple[str, ...]:
         """Return the topics passed to :meth:`subscribe`."""
         return tuple(self._topics)
-
-    @property
-    def stored_offsets(self) -> tuple[int, ...]:
-        """Return the offsets passed to :meth:`store_offsets`, in call order."""
-        return tuple(self._stored_offsets)
 
     @property
     def closed(self) -> bool:
@@ -253,13 +271,36 @@ class FakeKafkaConsumer:
         """
         self._errors.append(error)
 
-    def subscribe(self, topics: list[str]) -> None:
+    def subscribe(
+        self, topics: list[str], on_assign: "AssignCallback | None" = None
+    ) -> None:
         """Subscribe to ``topics``, polled in list order.
 
         Args:
             topics: Topics to read from their first record.
+            on_assign: If given, called once, synchronously, with the
+                single partition assigned for each topic -- this fake
+                never rebalances, so there is only ever one assignment,
+                and it never happens later on ``poll()`` the way a real
+                consumer's does.
         """
         self._topics = list(topics)
+        if on_assign is not None:
+            partitions = [
+                FakeTopicPartition(topic, offset=self._positions.get(topic, 0))
+                for topic in self._topics
+            ]
+            on_assign(self, partitions)
+
+    def assign(self, partitions: list[FakeTopicPartition]) -> None:
+        """Seek each partition to the offset given, as a real consumer's
+        ``assign`` does when called from an ``on_assign`` callback.
+
+        Args:
+            partitions: Partitions with the position to resume each from.
+        """
+        for partition in partitions:
+            self._positions[partition.topic] = partition.offset
 
     def poll(self, timeout: float | None = None) -> FakeKafkaMessage | None:
         """Return the next error or unread record, or ``None`` when caught up.
@@ -282,14 +323,6 @@ class FakeKafkaConsumer:
                 return FakeKafkaMessage(records[position])
         time.sleep(min(timeout or 0.0, 0.005))
         return None
-
-    def store_offsets(self, message: FakeKafkaMessage) -> None:
-        """Record ``message``'s offset as stored for the next commit.
-
-        Args:
-            message: The message whose offset the caller has finished with.
-        """
-        self._stored_offsets.append(message.offset())
 
     def close(self) -> None:
         """Mark the consumer closed."""

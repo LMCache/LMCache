@@ -98,6 +98,11 @@ class MPServerConfig:
     script_allowed_imports: list[str] = field(default_factory=list)
     """Modules that /run_script endpoint is allowed to import."""
 
+    run_script_api_enabled: bool = False
+    """Enable the /run_script HTTP endpoint. It executes caller-supplied
+    Python in-process (the restricted builtins are not a security boundary),
+    so it is disabled by default; only enable on a trusted network."""
+
     instance_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     """Stable identity of this MP server, the single source of truth for who
     this server is. Used as the coordinator membership key and projected onto
@@ -111,6 +116,12 @@ class MPServerConfig:
     engine adapter's heartbeat interval so a few missed pings never reap a live
     worker."""
 
+    session_ttl_seconds: float = 600.0
+    """Seconds a request session may stay idle before it is reaped. A session
+    carries the lookup state ``free_lookup_locks`` needs, so it must outlive
+    the longest time a request can wait in the engine's queue between its
+    lookup and its admission (minutes under deep agentic backlogs)."""
+
     worker_registration_grace_seconds: float = 3600.0
     """Silence budget (seconds) for a worker that registered but has never
     sent a PING (model warmup, or death before its first request). Must be
@@ -119,6 +130,11 @@ class MPServerConfig:
     enable: list[str] = field(default_factory=list)
     """List of experimental transfer modules to enable. Options: transfer_query
     (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
+
+    null_block_id: int = 0
+    """Engine block ID that denotes absent KV data. The default ``0`` keeps
+    compatibility with vLLM; engines where block zero is valid can select a
+    different sentinel, for example ``-1``."""
 
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
@@ -207,7 +223,7 @@ DEFAULT_MP_SERVER_CONFIG = MPServerConfig()
 class HTTPFrontendConfig:
     """Configuration for the HTTP frontend (uvicorn/FastAPI)."""
 
-    http_host: str = "0.0.0.0"
+    http_host: str = "127.0.0.1"
     """HTTP server host."""
 
     http_port: int = 8080
@@ -352,6 +368,12 @@ def add_mp_server_args(
         help="Chunk size for KV cache operations. Default is 256.",
     )
     mp_group.add_argument(
+        "--null-block-id",
+        type=int,
+        default=0,
+        help="Engine block ID that denotes absent KV data. Default is 0.",
+    )
+    mp_group.add_argument(
         "--max-workers",
         type=int,
         default=1,
@@ -453,6 +475,15 @@ def add_mp_server_args(
         "import. Example: --script-allowed-imports numpy pandas",
     )
     mp_group.add_argument(
+        "--run-script-api-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable the /run_script HTTP endpoint, which executes "
+        "caller-supplied Python in-process (full remote code execution; the "
+        "restricted builtins are not a security boundary). Default is False. "
+        "Only enable it on a trusted network.",
+    )
+    mp_group.add_argument(
         "--separate-object-groups",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -466,6 +497,13 @@ def add_mp_server_args(
         help="Silence budget (s) before a ping-proven worker's KV cache "
         "registration is reaped. 0 disables reaping. Must be >= 3 x the "
         "engine adapter's heartbeat interval. Default is 120.",
+    )
+    mp_group.add_argument(
+        "--session-ttl-seconds",
+        type=float,
+        default=600.0,
+        help="Seconds a request session may stay idle before it is reaped. "
+        "Raise it above the longest engine queueing delay. Default is 600.",
     )
     mp_group.add_argument(
         "--worker-registration-grace-seconds",
@@ -526,6 +564,7 @@ def parse_args_to_mp_server_config(
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,
+        null_block_id=args.null_block_id,
         max_workers=base,
         max_gpu_workers=max_gpu,
         max_cpu_workers=max_cpu,
@@ -544,7 +583,9 @@ def parse_args_to_mp_server_config(
         p2p_config=parse_args_to_p2p_config(args),
         shm_name=args.shm_name,
         script_allowed_imports=args.script_allowed_imports or [],
+        run_script_api_enabled=args.run_script_api_enabled,
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
+        session_ttl_seconds=args.session_ttl_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
     )
@@ -637,8 +678,10 @@ def add_http_frontend_args(
     http_group.add_argument(
         "--http-host",
         type=str,
-        default="0.0.0.0",
-        help="Host to bind the HTTP server. Default is 0.0.0.0.",
+        default="127.0.0.1",
+        help="Host to bind the HTTP server. Default is 127.0.0.1; the admin "
+        "API has no authentication, so only bind a non-loopback address on a "
+        "trusted network.",
     )
     http_group.add_argument(
         "--http-port",

@@ -359,7 +359,8 @@ def validate_mamba_step_alignment(
     the end of each scheduler step, on the last block the step advanced. A step
     advancing more than one block fills the skipped block-table positions with
     the null block (``MambaManager.allocate_new_blocks``); LMCache handles those
-    safely -- ``store`` never commits an all-null-block chunk and ``retrieve``
+    safely -- the request tracker nulls the slot of a relocated speculative
+    block, ``store`` never commits an all-null-block chunk and ``retrieve``
     loads only each object group's sliding-window suffix -- so
     ``max_num_batched_tokens`` may exceed ``2 * block_size`` (with
     ``--separate-object-groups``). Only the lower bound remains: a step must
@@ -531,7 +532,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
       enters vLLM's waiting queue. Disabled by default.
+    - lmcache.mp.save_decode_cache: also store chunks containing generated
+      tokens. Defaults to False; only complete prompt chunks are stored.
     """
+
+    # Tail block slots vLLM may relocate for one request; 0 means vLLM only
+    # appends. The scheduler role sets it from the vLLM config.
+    _mamba_relocation_window: int = 0
 
     def __init__(
         self,
@@ -573,6 +580,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
+        self._save_decode_cache = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.save_decode_cache", False
+        )
+        if not isinstance(self._save_decode_cache, bool):
+            raise ValueError("lmcache.mp.save_decode_cache must be a boolean")
 
         self._enable_kv_events = bool(
             getattr(vllm_config, "kv_events_config", None) is not None
@@ -700,6 +712,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
             self._kv_cache_events: LMCacheMPKVEvents | None = None
+
+            # Align-mode Mamba keeps one speculative block per draft token at
+            # the tail of a request's block list.
+            spec_config = getattr(vllm_config, "speculative_config", None)
+            self._mamba_relocation_window = (
+                spec_config.num_speculative_tokens or 0
+                if mamba_cache_mode == "align" and spec_config is not None
+                else 0
+            )
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
@@ -1171,9 +1192,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             into account.
         """
         tracker = self._get_or_create_request_tracker(request)
-        # TODO: support loading KV for preempted requests in the future
-        if request.status == RequestStatus.PREEMPTED:
-            return 0, False
 
         # A failed asynchronous load is bypassed until vLLM admits the request
         # for local computation via update_state_after_alloc().  The scheduler
@@ -1243,12 +1261,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
-        # Update num stored tokens for the tracker
-        tracker.increase_num_stored_tokens(ret)
-
+        tracker.num_stored_tokens = ret
         tracker.num_lmcache_hit_tokens = ret
 
         need_to_load = max(0, ret - num_computed_tokens)
+
+        if request.status == RequestStatus.PREEMPTED:
+            logger.info(
+                "<resume-load> req=%s apc=%d lmcache=%d load=%d",
+                request.request_id,
+                num_computed_tokens,
+                ret,
+                need_to_load,
+            )
 
         # In full-prompt-hit case, we need to recompute the last token.
         # Without this, num_computed_tokens would equal request.num_tokens,
@@ -1320,7 +1345,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             existing = existing_counts.get(engine_group_idx, 0)
             new_block_ids.append(list(group_blocks[existing:]))
         if any(new_block_ids):
-            tracker.append_block_ids(tuple(new_block_ids))
+            tracker.append_block_ids(
+                tuple(new_block_ids), self._mamba_relocation_window
+            )
 
         # Update the state of the tracker
         if tracker.state == LMCacheMPRequestState.BYPASS_LMCACHE:
@@ -1623,6 +1650,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
+                save_decode_cache=self._save_decode_cache,
             )
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
@@ -1645,7 +1673,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # Update block ids
             new_block_ids = cached_reqs.new_block_ids[idx] or ()
             if request_id not in cached_reqs.resumed_req_ids:
-                request_tracker.append_block_ids(new_block_ids)
+                request_tracker.append_block_ids(
+                    new_block_ids, self._mamba_relocation_window
+                )
 
             # Use the incremental num_scheduled_tokens to
             # stay consistent with _process_new_requests.
@@ -1659,6 +1689,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
+                save_decode_cache=self._save_decode_cache,
             )
 
             if r_meta is not None:

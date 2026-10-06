@@ -68,7 +68,14 @@ class _FakeStorageManager:
         if self._polls < self.delay_polls:
             self._polls += 1
             return None
-        return [_FakeBitmap(self.found)]
+        # First Party
+        from lmcache.v1.distributed.api import PrefetchResult
+
+        return PrefetchResult(
+            hit_cells=[_FakeBitmap(self.found)],
+            l1_hit_cells=[_FakeBitmap(0)],
+            l2_hit_cells=[_FakeBitmap(self.found)],
+        )
 
     def finish_read_prefetched(self, keys, read_locks: int = 1) -> None:
         # Must never be called: the warm holds no lock.

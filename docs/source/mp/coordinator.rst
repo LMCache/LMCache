@@ -144,9 +144,10 @@ keeps the default below.
        ``--event-transport kafka``.
    * - ``--kafka-group-id``
      - ``lmcache-coordinator``
-     - Consumer group whose committed offsets a restart resumes from. A new
-       group reads the whole retained stream. Ignored unless
-       ``--event-transport kafka``.
+     - Consumer group the coordinator joins, which decides how partitions
+       are shared between members. Where a restart *resumes* comes from
+       the checkpoint, not the group; with no checkpoint it reads the
+       whole retained stream. Ignored unless ``--event-transport kafka``.
 
 Loading your own controllers
 ----------------------------
@@ -253,9 +254,10 @@ created:
 
 Set ``--otlp-endpoint http://collector:4317`` to push metrics to an
 OpenTelemetry Collector instead. In OTLP push mode, and when
-``--disable-metrics`` is set, ``GET /metrics`` returns 404. This infrastructure
-does not itself define coordinator business metrics; instruments register with
-the shared OpenTelemetry provider as coordinator capabilities add them.
+``--disable-metrics`` is set, ``GET /metrics`` returns 404. The Coordinator
+exports Key Directory placement-count and reported-logical-byte gauges for the
+``l1`` and ``l2`` tiers. See :doc:`observability/metrics` for their exact names
+and semantics.
 
 Connecting MP servers
 ---------------------
@@ -1160,9 +1162,10 @@ pinned keys from quota-based eviction. L2 pins are fleet-wide (per
 Local resolution requires the coordinator's ``chunk_size`` and
 ``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
 / ``--hash-algorithm``; otherwise the resolved keys will not match what was
-stored and the pin protects nothing. It also requires the MP servers to be
-launched with ``--no-separate-object-groups`` (the coordinator resolves keys in
-a single object group).
+stored and the pin protects nothing. Under ``--separate-object-groups`` a chunk
+is stored once per object group; a pin covers the chunk in every group,
+including groups it is not stored in yet, so ``GET /cache/pins`` lists one entry
+per chunk and rank rather than per group.
 
 ``POST /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1372,10 +1375,10 @@ of a backing medium, or one L2 adapter. It is identified by
 
 Two inputs are joined, and both ride the cache-event stream. **Usage** is
 derived from the events the servers already publish. **Capacity** arrives as
-a capacity report on the same stream -- once at startup, then whenever an
-adapter is added, removed, or reconfigured. Both are automatic; there is
-nothing to configure beyond pointing servers at a coordinator and leaving
-event reporting enabled.
+a capacity report on the same stream -- after registration, when a Device-DAX
+L1 arena is added or starts draining, and whenever an L2 adapter is added,
+removed, or reconfigured. Both are automatic; there is nothing to configure
+beyond pointing servers at a coordinator and leaving event reporting enabled.
 
 .. note::
 
@@ -1395,9 +1398,9 @@ on them.
    ``capacity_bytes``. A ``null`` means *unknown*, never *empty* -- do not
    treat it as ``0``.
 
-   Ratios above ``1.0`` are reported as-is rather than capped. A compartment
-   holding more than its declared capacity means the declaration is wrong, and
-   that is worth seeing.
+   Ratios above ``1.0`` are reported as-is rather than capped. They can expose
+   an incorrect declaration, and are also expected while a draining Device-DAX
+   arena still holds live bytes that no longer count as usable capacity.
 
 ``GET /instances/usage``
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1473,6 +1476,8 @@ above.
 A server whose L1 pool uses the default lazy allocator grows its heap on
 demand. Capacity here is the **configured** size, not the grown heap, so a
 freshly started server correctly reads near ``0``\% rather than near full.
+Device-DAX L1 capacity is the sum of active arenas; draining arenas are
+excluded.
 
 CacheBlend fragment lookup
 --------------------------
