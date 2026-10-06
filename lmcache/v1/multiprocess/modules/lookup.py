@@ -461,11 +461,19 @@ class LookupModule:
             key.request_id
         ).prefetch_hit_chunks
         if hit_chunks < 0:
+            # Without the recorded hit length the locked range is unknown in
+            # every group: [start, end) can extend past what the prefetch
+            # locked (e.g. the vLLM-hit prefix exceeds the LMCache hit), and
+            # object keys are shared across requests, so releasing it would
+            # strip concurrent readers' locks and their RETRIEVE then fails
+            # with KEY_NOT_READABLE. Fail closed; held locks expire with the
+            # L1 read TTL.
             logger.warning(
-                "free_lookup_locks for request %s before its prefetch result "
-                "was consumed; releasing full-attention groups only",
+                "free_lookup_locks for request %s without a recorded prefetch "
+                "result; leaving its locks to the read TTL",
                 key.request_id,
             )
+            return
 
         # Release exactly the groups the prefetch locked (std lookup: all;
         # CB prefix leg: its prefix set) -- releasing an unlocked group

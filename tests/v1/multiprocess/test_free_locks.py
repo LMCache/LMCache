@@ -228,13 +228,13 @@ def test_server_free_lookup_locks_caps_release_at_hit_length():
     assert released == {(0, b"h0"), (0, b"h1")}
 
 
-def test_server_free_lookup_locks_unknown_hit_skips_window_groups():
-    """Without a recorded hit length, window groups release nothing.
+def test_server_free_lookup_locks_unknown_hit_releases_nothing():
+    """Without a recorded hit length, no group releases anything.
 
-    Full-attention groups keep the legacy full-range release; a
-    sliding-window group's locked suffix is unknown, so it is skipped
-    (leaked locks expire with the TTL, over-releasing could strip a
-    concurrent reader's lock).
+    The locked range is unknown in every group: for full-attention groups the
+    freed range can extend past the prefetch hit, and object keys are shared,
+    so releasing it could strip a concurrent reader's lock. Leaked locks
+    expire with the L1 read TTL instead.
     """
     # First Party
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
@@ -245,8 +245,7 @@ def test_server_free_lookup_locks_unknown_hit_skips_window_groups():
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
-    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
-    assert released == {(1, b"h0"), (1, b"h1"), (1, b"h2")}
+    ctx.storage_manager.finish_read_prefetched.assert_not_called()
 
 
 def test_server_free_lookup_locks_no_matching_chunks():

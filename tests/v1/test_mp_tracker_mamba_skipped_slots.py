@@ -29,6 +29,7 @@ def _tracker() -> LMCacheMPRequestTracker:
         cache_salt="",
         prompt_token_ids=list(range(337)),
         all_token_ids=ConstantList(list(range(337))),
+        num_prompt_tokens=337,
         mm_features=[],
         sampling_params=SimpleNamespace(extra_args=None),
     )
