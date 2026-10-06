@@ -2,6 +2,7 @@
 """OpenTelemetry metrics initialization for the MP coordinator."""
 
 # Standard
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 # First Party
@@ -10,6 +11,7 @@ from lmcache.v1.mp_observability.otel_init import init_otel_metrics, register_ga
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
     from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 _METER_NAME = "lmcache.mp_coordinator"
@@ -81,3 +83,47 @@ def _placement_size_observations(
         (stats.l1_size_bytes, {"tier": "l1"}),
         (stats.l2_size_bytes, {"tier": "l2"}),
     ]
+
+
+def register_event_gate_metrics(event_gate: "EventGate") -> None:
+    """Register per-instance gauges for cache-event loss at the gate.
+
+    Each covers the emitter's current incarnation, since this coordinator
+    started tracking it (see ``InstanceStreamStats``).
+
+    Args:
+        event_gate: The gate admitting the coordinator's cache events.
+    """
+
+    def _per_instance(
+        field: str,
+    ) -> Callable[[], list[tuple[int | float, dict[str, object]]]]:
+        def _observe() -> list[tuple[int | float, dict[str, object]]]:
+            return [
+                (getattr(stream, field), {"instance_id": instance_id})
+                for instance_id, stream in event_gate.stats().items()
+            ]
+
+        return _observe
+
+    register_gauge(
+        _METER_NAME,
+        "lmcache_mp.cache_event_loss_incidents_total",
+        "Admitted cache-event batches showing loss (a seq gap or a rise in "
+        "the emitter-reported lost count), per emitter. Counts incidents, "
+        "not events.",
+        _per_instance("loss_incidents_total"),
+    )
+    register_gauge(
+        _METER_NAME,
+        "lmcache_mp.cache_event_lost_events_total",
+        "Cache events lost before reaching the coordinator, per emitter. "
+        "Counts only loss the emitter reported.",
+        _per_instance("lost_events_total"),
+    )
+    register_gauge(
+        _METER_NAME,
+        "lmcache_mp.cache_event_admitted_events_total",
+        "Cache events (batch entries) admitted, per emitter.",
+        _per_instance("admitted_events_total"),
+    )

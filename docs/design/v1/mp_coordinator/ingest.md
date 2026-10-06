@@ -48,7 +48,8 @@ entries[], ts)`. The gate enforces, in order:
 | --- | --- | --- |
 | Incarnation fencing | `incarnation <` current → drop batch (`STALE_INCARNATION`). `incarnation >` current → `fence_instance(id)` on every consumer, then start a fresh cursor. | A restart empties the reporter's *memory* — its L1 placements must not survive. L2 bytes persist on disk across restarts, so L2 is deliberately not fenced (consumers that track L2 only no-op the hook). |
 | Seq dedup | `seq <=` last admitted (same incarnation) → drop batch (`DUPLICATE`). | Replays (retry, event-bus redelivery) must be idempotent. |
-| Gap detection | `seq >` last admitted `+ 1` → set the emitter's `gap_detected` flag, admit anyway. | Events may be lost; the flag marks the emitter's slice as stale until the stream is replayed (durable-transport retention). Consumer application is idempotent, so admitting past a gap is safe. |
+| Gap detection | `seq >` last admitted `+ 1`, or `dropped_events` grew → set the emitter's `gap_detected` flag, admit anyway. | Events may be lost; the flag marks the emitter's slice as stale until the stream is replayed (durable-transport retention). Consumer application is idempotent, so admitting past a gap is safe. |
+| Loss accounting | Per admitted batch: a `seq` jump or a `dropped_events` increase is one loss incident; the increase is added to the lost-event count; the batch's entries are added to the admitted-event count. | A gap tells how often a stream lost events; only the emitter knows how many, so it reports a cumulative count and the gate takes deltas. |
 
 Per-instance FIFO by `seq` is the **only** ordering the design needs:
 each instance is the sole writer of its own facts, so there is no
@@ -172,9 +173,17 @@ registration order.
 | How many bytes is this salt using? What should be evicted? | `FleetEvictionController` |
 
 `EventGate.stats()` has **no HTTP endpoint yet** — `GET /directory/stats`
-deliberately reports directory contents only. So `gap_detected` is
-currently invisible to operators; exposing it is part of the replay
-follow-up below.
+deliberately reports directory contents only. Its loss counters are
+exported as per-`instance_id` gauges (with metrics enabled):
+`lmcache_mp.cache_event_loss_incidents_total`,
+`lmcache_mp.cache_event_lost_events_total` and
+`lmcache_mp.cache_event_admitted_events_total`. They cover the
+emitter's current incarnation and are not checkpointed. The first
+batch of a stream the gate joins midway (first `seq > 1`) counts no
+loss. After a restore, the first batch only sets the `dropped_events`
+baseline (the checkpoint does not hold it); `seq` jumps are still
+measured from the restored cursor. `gap_detected` itself is still not
+exported; exposing it is part of the replay follow-up below.
 
 ## Deliberately out of scope (follow-ups)
 

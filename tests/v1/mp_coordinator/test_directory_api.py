@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
-from lmcache.v1.mp_coordinator.schemas import encode_tokens
+from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest, encode_tokens
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
@@ -465,6 +465,24 @@ def test_tier_all_is_rejected():
 def test_seq_zero_is_rejected():
     with _client() as client:
         resp = client.post("/events", json={"batches": [_batch(seq=0)]})
+        assert resp.status_code == 422
+
+
+def test_batch_without_dropped_events_reads_as_zero():
+    """Emitters predating the field omit it."""
+    batch = _batch()
+    assert "dropped_events" not in batch
+    request = CacheEventsRequest.model_validate({"batches": [batch]})
+    assert request.batches[0].dropped_events == 0
+    with _client() as client:
+        assert _post_events(client, [batch])["applied"] == 1
+
+
+def test_negative_dropped_events_is_rejected():
+    with _client() as client:
+        resp = client.post(
+            "/events", json={"batches": [{**_batch(), "dropped_events": -1}]}
+        )
         assert resp.status_code == 422
 
 

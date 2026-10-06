@@ -172,6 +172,12 @@ class CacheEventBatch:
             all sharing a revision, so the consumer can tell a fresh
             declaration from a continuation and drop compartments the new
             one omits.
+        dropped_events: Cumulative number of cache events (entries) this
+            emitter incarnation had lost before they reached the
+            coordinator, as of when the batch was built. Lets the gate
+            count lost events, which a ``seq`` gap cannot: a ``seq``
+            numbers a batch, not an event. ``0`` from emitters that do
+            not report it.
     """
 
     instance_id: str
@@ -185,6 +191,7 @@ class CacheEventBatch:
     ts: float = 0.0
     capacity_bytes: int = 0
     capacity_revision: int = 0
+    dropped_events: int = 0
 
     def __post_init__(self) -> None:
         """Enforce intrinsic invariants.
@@ -192,10 +199,10 @@ class CacheEventBatch:
         Raises:
             ValueError: If ``instance_id`` is empty, ``backend`` is empty
                 on a placement-bearing batch (``store``/``delete``) or on
-                ``config``, ``incarnation``, ``ts``, ``capacity_bytes`` or
-                ``capacity_revision`` is negative, ``seq`` < 1, ``tier`` is
-                not a concrete tier (``l1``/``l2``), or a ``config`` batch
-                carries entries.
+                ``config``, ``incarnation``, ``ts``, ``capacity_bytes``,
+                ``capacity_revision`` or ``dropped_events`` is negative,
+                ``seq`` < 1, ``tier`` is not a concrete tier
+                (``l1``/``l2``), or a ``config`` batch carries entries.
         """
         if not self.instance_id:
             raise ValueError("instance_id must be non-empty")
@@ -213,6 +220,8 @@ class CacheEventBatch:
             )
         if self.incarnation < 0:
             raise ValueError(f"incarnation must be >= 0 (got {self.incarnation})")
+        if self.dropped_events < 0:
+            raise ValueError(f"dropped_events must be >= 0 (got {self.dropped_events})")
         if self.seq < 1:
             raise ValueError(f"seq must be >= 1 (got {self.seq})")
         if self.tier not in (Tier.L1, Tier.L2):

@@ -367,6 +367,28 @@ def test_coordinator_target_registers_reports_and_deregisters(tmp_path):
     assert after_stop == []
 
 
+def test_a_trace_without_dropped_events_replays(tmp_path):
+    """Files recorded before the field existed omit it."""
+    old_batch = _batch("node-a", 1, 1)
+    del old_batch["dropped_events"]
+    path = _write(
+        str(tmp_path / "old.lct"),
+        [
+            (1.0, EVENTS_TRACE_LIFECYCLE, _start("node-a", 1)),
+            (2.0, EVENTS_TRACE_BATCH, old_batch),
+        ],
+    )
+
+    async def scenario() -> Any:
+        async with (
+            _client(_app()) as client,
+            CoordinatorTarget(client, "http://coordinator") as target,
+        ):
+            return await replay(EventsTrace.load([path]), target)
+
+    assert asyncio.run(scenario()).ingested == Ingested(applied=1)
+
+
 def test_coordinator_target_registers_at_the_recorded_address(tmp_path):
     mark = {**_start("node-a", 1, http_port=8123), "ip": "10.0.0.9"}
     path = _write(str(tmp_path / "a.lct"), [(1.0, EVENTS_TRACE_LIFECYCLE, mark)])

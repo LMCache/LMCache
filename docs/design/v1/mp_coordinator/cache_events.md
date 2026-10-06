@@ -91,6 +91,15 @@ One `CacheEventSubscriber` per MP-server process owns the buffer, the
   if a durable transport retained the failed batch; HTTP did not.
   Reusing the seqs instead would hide partial-delivery ambiguity (an
   HTTP timeout after the coordinator applied the batch).
+- **`dropped_events` says how much was lost.** A `seq` numbers a
+  batch, so a gap shows that something was lost, not how much. Every
+  batch also carries `dropped_events`: the cumulative number of cache
+  events (entries) this incarnation lost before they reached the
+  coordinator, as of when the batch was built. The gate counts its
+  increases as lost events (see [ingest.md](ingest.md)). The field is
+  optional on the wire (default 0), so older emitters and trace files
+  still parse. The subscriber does not count any drop yet, so it sends
+  0.
 - **`incarnation` = server start time** (`int(time.time())` at
   lifespan startup). A restarted server's first batch fences out the
   **L1** placements its previous incarnation reported, matching the

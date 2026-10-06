@@ -14,6 +14,7 @@ from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadca
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate, IngestResult
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
+import lmcache.v1.mp_coordinator.ingest.event_gate as event_gate
 
 
 class _RecordingConsumer:
@@ -44,6 +45,7 @@ def _batch(
     keys: list[ObjectKey] | None = None,
     size_bytes: int = 1024,
     shared: bool = False,
+    dropped_events: int = 0,
 ) -> CacheEventBatch:
     return CacheEventBatch(
         instance_id=instance_id,
@@ -57,6 +59,7 @@ def _batch(
             for k in (keys or [_key(0xAA)])
         ],
         shared=shared,
+        dropped_events=dropped_events,
     )
 
 
@@ -168,6 +171,132 @@ def test_seq_gap_sets_the_gap_flag_but_admits():
     assert stream.gap_detected is True
     assert stream.last_seq == 5
     assert len(consumer.batches) == 2
+
+
+# -- Loss accounting -----------------------------------------------------------
+
+
+def _loss(gate: EventGate) -> tuple[int, int, int]:
+    stream = gate.stats()["node-a"]
+    return (
+        stream.loss_incidents_total,
+        stream.lost_events_total,
+        stream.admitted_events_total,
+    )
+
+
+def test_every_seq_gap_is_an_incident():
+    """The flag latches on the first gap; the counter keeps counting."""
+    gate = _gate()
+    gate.ingest(_batch(seq=1))
+    gate.ingest(_batch(seq=4))  # 2..3 missing
+    gate.ingest(_batch(seq=5))
+    gate.ingest(_batch(seq=7))  # 6 missing
+
+    assert gate.stats()["node-a"].gap_detected is True
+    assert _loss(gate) == (2, 0, 4)
+
+
+def test_lost_events_are_the_reported_count_deltas():
+    gate = _gate()
+    gate.ingest(_batch(seq=1))
+    gate.ingest(_batch(seq=2, dropped_events=3))
+    gate.ingest(_batch(seq=3, dropped_events=3))
+    gate.ingest(_batch(seq=4, dropped_events=10))
+
+    assert _loss(gate) == (2, 10, 4)
+
+
+def test_reported_loss_sets_the_gap_flag_and_warns_once(monkeypatch):
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        event_gate.logger, "warning", lambda msg, *args: warnings.append(msg % args)
+    )
+    gate = _gate()
+    gate.ingest(_batch(seq=1))
+    gate.ingest(_batch(seq=2, dropped_events=2))
+    gate.ingest(_batch(seq=3, dropped_events=5))
+
+    assert gate.stats()["node-a"].gap_detected is True
+    assert warnings == [
+        "Event loss for instance node-a (incarnation 1): seq 1 -> 2, "
+        "2 events reported lost; slice needs replay"
+    ]
+
+
+def test_seq_jump_and_reported_loss_in_one_batch_are_one_incident():
+    gate = _gate()
+    gate.ingest(_batch(seq=1))
+    gate.ingest(_batch(seq=3, dropped_events=4))
+
+    assert _loss(gate) == (1, 4, 2)
+
+
+def test_first_batch_of_an_unseen_stream_only_sets_the_baseline():
+    """Seqs and losses from before the gate first saw the stream (e.g.
+    before a coordinator restart) are not counted; the flag still marks
+    the slice stale."""
+    gate = _gate()
+    gate.ingest(_batch(seq=1000, dropped_events=5))
+    assert gate.stats()["node-a"].gap_detected is True
+    assert _loss(gate) == (0, 0, 1)
+
+    gate.ingest(_batch(seq=1001, dropped_events=7))
+    assert _loss(gate) == (1, 2, 2)
+
+
+def test_loss_before_a_streams_first_seq_is_counted():
+    """Nothing precedes seq 1, so its reported loss is all real."""
+    gate = _gate()
+    gate.ingest(_batch(seq=1, dropped_events=3))
+
+    assert gate.stats()["node-a"].gap_detected is True
+    assert _loss(gate) == (1, 3, 1)
+
+
+def test_a_restored_cursor_only_sets_the_loss_baseline():
+    """The checkpoint holds no baseline, so the first batch after a
+    restore sets it; a seq jump is still measured from the restored
+    ``last_seq``."""
+    gate = _gate()
+    gate.ingest(_batch(seq=1, dropped_events=2))
+    state = gate.capture()
+
+    restored = _gate()
+    restored.restore(state)
+    restored.ingest(_batch(seq=2, dropped_events=6))
+    assert _loss(restored) == (0, 0, 1)
+
+    restored.ingest(_batch(seq=4, dropped_events=9))  # seq 3 missing too
+    assert _loss(restored) == (1, 3, 2)
+
+
+def test_a_new_incarnation_counts_loss_from_zero():
+    gate = _gate()
+    gate.ingest(_batch(incarnation=1, seq=1, dropped_events=4))
+    gate.ingest(_batch(incarnation=2, seq=1, dropped_events=2))
+
+    stream = gate.stats()["node-a"]
+    assert stream.incarnation == 2
+    assert _loss(gate) == (1, 2, 1)
+
+
+def test_gap_at_the_start_of_a_new_incarnation_is_counted():
+    gate = _gate()
+    gate.ingest(_batch(incarnation=1, seq=1))
+    gate.ingest(_batch(incarnation=2, seq=3))  # 1..2 of the restart lost
+
+    assert _loss(gate) == (1, 0, 1)
+
+
+def test_duplicates_count_nothing():
+    gate = _gate()
+    gate.ingest(_batch(seq=1, keys=[_key(1), _key(2)]))
+    gate.ingest(_batch(seq=2, dropped_events=3))
+    gate.ingest(_batch(seq=1, keys=[_key(1), _key(2)]))
+    gate.ingest(_batch(seq=2, dropped_events=3))
+
+    assert _loss(gate) == (1, 3, 3)
 
 
 def test_contiguous_seqs_do_not_flag_gap():
