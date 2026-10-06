@@ -1203,6 +1203,25 @@ class GDSMemoryObject(MemoryObj):
 
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
+    def warm_up(self, device: Union[int, "torch.device"]) -> None:  # noqa: B027
+        """Start any deferred initialization for ``device``.
+
+        Default is a no-op. Allocators with deferred host pinning
+        (e.g. the lazy allocator) override this to begin pinning in the
+        background before the first allocation arrives.
+
+        :param device: Device whose context the deferred initialization
+            should run under.
+        """
+
+    def pin_status(self) -> Tuple[int, int]:
+        """Return (pinned bytes, total bytes to pin) for deferred pinning.
+
+        Default is ``(0, 0)``: nothing is pinned lazily, so there is
+        nothing to wait for.
+        """
+        return (0, 0)
+
     @abc.abstractmethod
     def allocate(
         self,
