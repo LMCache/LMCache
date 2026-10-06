@@ -10,7 +10,9 @@ Backed by the native C++ filesystem connector wrapped with
 from __future__ import annotations
 
 # Standard
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Optional
+import os
 
 if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import (
@@ -31,6 +33,51 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 )
 
 logger = init_logger(__name__)
+
+
+def delete_cache_files(base_path: str, tmp_dir: str = "") -> int:
+    """Delete fs_native object files and interrupted writes.
+
+    Removes regular ``*.data`` and ``*.tmp`` files directly under
+    ``base_path`` and ``tmp_dir``. In-flight writes staged in ``tmp_dir``
+    keep the ``.data`` name until the final rename, so both suffixes are
+    swept in both places. Subdirectories and other files are left alone; a
+    missing directory counts as empty.
+
+    Args:
+        base_path: Directory holding the ``*.data`` files.
+        tmp_dir: Directory for in-flight writes, or ``""`` when writes
+            stage inside ``base_path``.
+
+    Returns:
+        Number of files removed.
+    """
+    removed = 0
+    for directory in (base_path, tmp_dir):
+        if not directory or not os.path.isdir(directory):
+            continue
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.is_file(follow_symlinks=False) and entry.name.endswith(
+                    (".data", ".tmp")
+                ):
+                    os.unlink(entry.path)
+                    removed += 1
+    return removed
+
+
+def validate_persist_config(config: "FSNativeL2AdapterConfig") -> None:
+    """Reject ``persist_enabled: false`` on a shared adapter.
+
+    Other servers serve the same files, so one server must not delete them.
+
+    Raises:
+        ValueError: If the adapter is shared and not persistent.
+    """
+    if config.shared and not config.persist_config.persist_enabled:
+        raise ValueError(
+            "fs_native: persist_enabled=false cannot be combined with shared=true"
+        )
 
 
 class FSNativeL2AdapterConfig(L2AdapterConfigBase):
@@ -133,7 +180,10 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "- max_capacity_gb (float): declared L2 capacity in GB "
             "for usage accounting (default 0 = disabled). Does not "
             "bound disk usage by itself; add an 'eviction' block "
-            "to enforce it"
+            "to enforce it\n"
+            "- persist_enabled (bool): keep data files across restarts "
+            "(default true). false deletes leftovers at start and all "
+            "files at shutdown; not allowed with shared=true"
         )
 
 
@@ -161,6 +211,37 @@ def _create_fs_native_l2_adapter(
     )
 
     assert isinstance(config, FSNativeL2AdapterConfig)
+    validate_persist_config(config)
+    tmp_dir = ""
+    if config.relative_tmp_dir:
+        tmp_dir = os.path.join(config.base_path, config.relative_tmp_dir)
+    on_close: Callable[[], None] | None = None
+    if not config.persist_config.persist_enabled:
+        # Files must not outlive this server. Clear at start as well: a
+        # crash skips close(), and the next process would otherwise serve
+        # the previous one's files without counting them.
+        removed = delete_cache_files(config.base_path, tmp_dir)
+        logger.info(
+            "fs_native: persist_enabled=False, removed %d leftover files from %s",
+            removed,
+            config.base_path,
+        )
+
+        def on_close() -> None:
+            # Best effort: shutdown must go on even if the disk refuses.
+            try:
+                removed = delete_cache_files(config.base_path, tmp_dir)
+            except OSError:
+                logger.exception(
+                    "fs_native: failed to delete data files from %s", config.base_path
+                )
+                return
+            logger.info(
+                "fs_native: persist_enabled=False, deleted %d data files from %s",
+                removed,
+                config.base_path,
+            )
+
     native_client = LMCacheFSClient(
         config.base_path,
         config.num_workers,
@@ -180,8 +261,10 @@ def _create_fs_native_l2_adapter(
         max_capacity_gb=config.max_capacity_gb,
         type_name="FSNativeL2Adapter",
         pad_buffers_to_alignment=config.use_odirect,
+        on_close=on_close,
         extra_status={
             "base_path": config.base_path,
+            "persist_enabled": config.persist_config.persist_enabled,
             "use_odirect": config.use_odirect,
             "num_workers": config.num_workers,
             "read_ahead_size": config.read_ahead_size,
