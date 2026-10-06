@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Optional, Tuple
 import functools
@@ -560,6 +561,53 @@ def calculate_draft_layers(vllm_config: "VllmConfig") -> int:
                 )
                 num_draft_layers = 1
     return num_draft_layers
+
+
+def set_dp_rank_controller_identity(config, vllm_config) -> None:
+    """Give each vLLM data-parallel engine its own controller identity.
+
+    Every DP engine's TP world starts at rank 0, so without this all DP
+    engines on a host bind ``lmcache_worker_ports[worker_id]`` (the same
+    port) and, with a configured ``lmcache_instance_id``, register the same
+    ``(instance_id, worker_id)`` with the controller. Each DP engine now uses
+    ``<lmcache_instance_id>-dp<rank>`` and the ports starting at index
+    ``local_dp_rank * world_size`` (the list is rotated, so the per-worker
+    port selection in the cache controller worker is unchanged). Nothing
+    changes without data parallelism.
+    """
+    parallel_config = vllm_config.parallel_config
+    dp_size = getattr(parallel_config, "data_parallel_size", 1) or 1
+    if dp_size <= 1 or not config.lmcache_instance_id:
+        return
+    ktc = getattr(vllm_config, "kv_transfer_config", None)
+    # vLLM appends _dp<rank> to engine_id for DP engines (MultiConnector
+    # passes it on to its children).
+    match = re.search(r"_dp(\d+)$", str(getattr(ktc, "engine_id", "") or ""))
+    dp_rank = int(match.group(1)) if match else parallel_config.data_parallel_rank
+    suffix = f"-dp{dp_rank}"
+    if config.lmcache_instance_id.endswith(suffix):
+        return  # already applied in this process (the config is a singleton)
+    config.lmcache_instance_id = f"{config.lmcache_instance_id}{suffix}"
+    ports = list(config.lmcache_worker_ports or [])
+    if not ports:
+        return
+    local_dp_rank = getattr(parallel_config, "data_parallel_rank_local", None)
+    if local_dp_rank is None:
+        local_dp_rank = dp_rank
+    world_size = parallel_config.world_size
+    local_dp_size = (
+        getattr(parallel_config, "data_parallel_size_local", None) or dp_size
+    )
+    if len(ports) < local_dp_size * world_size:
+        logger.warning(
+            "lmcache_worker_ports has %d port(s) for %d data-parallel engine(s) "
+            "x %d worker(s) on this host; ports will be shared",
+            len(ports),
+            local_dp_size,
+            world_size,
+        )
+    start = (local_dp_rank * world_size) % len(ports)
+    config.lmcache_worker_ports = ports[start:] + ports[:start]
 
 
 def is_dp_rank0(vllm_config: "VllmConfig") -> bool:
