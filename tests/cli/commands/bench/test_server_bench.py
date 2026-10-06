@@ -761,6 +761,73 @@ class TestAllocShapeContract:
 class TestClientMultiWorker:
     """Test scheduler LOOKUP and per-rank STORE/RETRIEVE fan-out."""
 
+    def test_close_preserves_worker_resources_when_store_completion_is_unknown(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Benchmark teardown cannot free KV tensors after a failed store fence."""
+        # First Party
+        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
+        from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
+        from lmcache.cli.commands.bench.server_bench.config import BenchConfig
+        from lmcache.v1.multiprocess import transfer_context as tc
+
+        allocated = [torch.ones(1)]
+        tensor_ref = weakref.ref(allocated[0])
+        context = MagicMock(spec=tc.LMCacheDrivenTransferContext)
+        context.flush_inflight_stores.side_effect = RuntimeError("unknown")
+        request_client = MagicMock()
+        zmq_context = MagicMock()
+        monkeypatch.setattr(zmq, "Context", lambda: zmq_context)
+        monkeypatch.setattr(
+            RequestClientFactory,
+            "create",
+            lambda *_args, **_kwargs: request_client,
+        )
+        monkeypatch.setattr(sv_helpers, "_get_chunk_size", lambda _client: 2)
+        monkeypatch.setattr(
+            sv_helpers,
+            "_allocate_kv_cache",
+            lambda **_kwargs: list(allocated),
+        )
+        monkeypatch.setattr(
+            tc,
+            "create_transfer_context",
+            lambda *_args, **_kwargs: context,
+        )
+        bench = ServerBenchClient(
+            BenchConfig(
+                rpc_url="ipc:///tmp/test-bench-failed-close",
+                http_url="",
+                mode="cpu",
+                transfer_mode="lmcache_driven",
+                tp_size=1,
+                use_mla=False,
+                num_tokens=3,
+                kvcache_shape_spec="(2,8,2,1,4):float16:1",
+                num_blocks=8,
+                block_size=2,
+            ),
+            lambda _message: None,
+        )
+        bench.start()
+        allocated.clear()
+
+        with pytest.raises(RuntimeError, match="completion is unknown"):
+            bench.close()
+
+        context.unregister.assert_not_called()
+        context.close.assert_not_called()
+        request_client.close.assert_not_called()
+        zmq_context.term.assert_not_called()
+        gc.collect()
+        assert tensor_ref() is not None
+
+        context.flush_inflight_stores.side_effect = None
+        bench.close()
+        gc.collect()
+        assert tensor_ref() is None
+
     @pytest.mark.parametrize(
         ("mode", "transfer_mode", "num_groups"),
         [
@@ -1265,6 +1332,7 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
         record_event=record_event,
         export_event=export_event,
         import_event=lambda handle, device: handle,
+        query_event=lambda event: True,
         synchronize_event=synchronize_event,
     )
 
@@ -1310,6 +1378,7 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
         lambda message: None,
     )
     bench.start()
+    release_after_close = False
     try:
         request = bench.create_request(0, "req-event", "test")
         assert request is not None
@@ -1326,11 +1395,19 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
         assert event_ref is not None
         gc.collect()
         if times_out:
-            # The device wrapper has gone out of scope; only transport remains.
+            # A timed-out store remains owned by the transfer context until
+            # close proves it terminal. Retrieves have no reuse fence here.
             assert event_ref() is not None
             raw_future.set_result((b"", True))
-            raw_future.release_references()
-            gc.collect()
-        assert event_ref() is None
+            if operation == "store":
+                release_after_close = True
+            else:
+                raw_future.release_references()
+                gc.collect()
+        assert (event_ref() is not None) is release_after_close
     finally:
         bench.close()
+    if release_after_close:
+        raw_future.release_references()
+        gc.collect()
+        assert event_ref() is None

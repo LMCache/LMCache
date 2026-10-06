@@ -804,12 +804,59 @@ def test_lazy_store_kv_events_preserve_completion_and_failure_reporting(
 
     adapter.get_finished_with_lazy_offload()
 
+    if store_result is None:
+        assert adapter.get_kv_events() == []
+        assert adapter.get_completed_store_requests() is None
+        assert adapter.get_failed_store_requests() is None
+        assert "req-1" in adapter.store_futures
+        FakeHeartbeatThread.instances[-1].simulate_successful_ping()
+        adapter.get_finished_with_lazy_offload()
+
     assert len(adapter.get_kv_events()) == (1 if store_result else 0)
     assert adapter.get_kv_events() == []
     assert adapter.get_completed_store_requests() == {"req-1": 1}
     assert adapter.get_completed_store_requests() is None
     assert adapter.get_failed_store_requests() == (None if store_result else {"req-1"})
     assert adapter.get_failed_store_requests() is None
+
+
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_unhealthy_poll_preserves_submitted_transfer_ownership(
+    fake_adapter,
+    lazy_offload: bool,
+) -> None:
+    """Heartbeat loss cannot turn completion-unknown work into completion."""
+    adapter, _send_mock, _ = fake_adapter
+    adapter.lazy_offload = lazy_offload
+    store_event = MagicMock(name="store_event")
+    retrieve_event = MagicMock(name="retrieve_event")
+    store_future = MagicMock(name="store_future")
+    retrieve_future = MagicMock(name="retrieve_future")
+    transfer_ctx = MagicMock()
+    transfer_ctx.submit_store.return_value = store_future
+    transfer_ctx.submit_retrieve.return_value = retrieve_future
+    adapter.transfer_ctx = transfer_ctx
+    adapter.submit_store_request("store", _op([[1]]), store_event)
+    adapter.submit_retrieve_request("retrieve", _op([[7, 8]]), retrieve_event)
+    FakeHeartbeatThread.instances[-1].health_event.clear()
+
+    if lazy_offload:
+        finished_stores, finished_retrieves = adapter.get_finished_with_lazy_offload()
+        assert finished_stores is None
+        assert adapter.get_completed_store_requests() is None
+        assert adapter.get_failed_store_requests() is None
+    else:
+        finished_stores, finished_retrieves = adapter.get_finished({"store"})
+        assert finished_stores == set()
+
+    assert finished_retrieves == set()
+    assert adapter.store_futures == {"store": store_future}
+    assert adapter.retrieve_futures == {"retrieve": (retrieve_future, [7, 8])}
+    assert adapter.store_events == {"store": store_event}
+    assert adapter.retrieve_events == {"retrieve": retrieve_event}
+    assert adapter.get_block_ids_with_load_errors() == set()
+    store_future.query.assert_not_called()
+    retrieve_future.query.assert_not_called()
 
 
 @pytest.mark.parametrize("lazy_offload", [False, True])
@@ -1446,9 +1493,87 @@ def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
     adapter.shutdown()
 
     assert "stop" in heartbeat.calls
+    transfer_context.flush_inflight_stores.assert_called()
     assert stop_state_at_unregister == [True]
     transfer_context.unregister.assert_called_once_with()
     req_client.unregister_kv_cache.assert_not_called()
+
+
+def test_shutdown_keeps_resources_when_unregister_is_unacknowledged(
+    fake_adapter,
+) -> None:
+    """An unregister timeout cannot discard completion-unknown IPC state."""
+    adapter, req_client, future = fake_adapter
+    transfer_context = MagicMock()
+    transfer_context.unregister.return_value = future
+    future.result.side_effect = TimeoutError("unacknowledged")
+    adapter.transfer_ctx = transfer_context
+
+    with pytest.raises(RuntimeError, match="did not acknowledge unregister"):
+        adapter.shutdown()
+
+    transfer_context.flush_inflight_stores.assert_called_once_with()
+    transfer_context.close.assert_not_called()
+    req_client.close.assert_not_called()
+    assert adapter.transfer_ctx is transfer_context
+
+
+def test_shutdown_keeps_resources_when_store_completion_is_unknown(
+    fake_adapter,
+) -> None:
+    """A failed store fence aborts shutdown before unregister or teardown."""
+    adapter, req_client, _future = fake_adapter
+    transfer_context = MagicMock()
+    transfer_context.flush_inflight_stores.side_effect = RuntimeError(
+        "completion unknown"
+    )
+    adapter.transfer_ctx = transfer_context
+
+    with pytest.raises(RuntimeError, match="completion unknown"):
+        adapter.shutdown()
+
+    transfer_context.flush_inflight_stores.assert_called_once_with()
+    transfer_context.unregister.assert_not_called()
+    transfer_context.close.assert_not_called()
+    req_client.close.assert_not_called()
+    assert adapter.transfer_ctx is transfer_context
+
+
+def test_preemption_flushes_even_while_heartbeat_is_unhealthy(
+    fake_adapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Heartbeat state cannot bypass the device-completion reuse fence."""
+    adapter, _req_client, _future = fake_adapter
+    transfer_context = MagicMock()
+    adapter.transfer_ctx = transfer_context
+    FakeHeartbeatThread.start_hook = lambda hb: hb.health_event.clear()
+    adapter.submit_store_request("dropped", _op([[0]]), MagicMock())
+    synchronize = MagicMock()
+    monkeypatch.setattr(adapter_mod.torch_dev, "synchronize", synchronize)
+
+    adapter.handle_preemptions(True)
+
+    transfer_context.flush_inflight_stores.assert_called_once_with()
+    synchronize.assert_called_once_with()
+
+
+def test_preemption_propagates_unknown_completion_without_device_reuse(
+    fake_adapter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed store join aborts preemption before the device reuse fence."""
+    adapter, _req_client, _future = fake_adapter
+    transfer_context = MagicMock()
+    transfer_context.flush_inflight_stores.side_effect = RuntimeError("unknown")
+    adapter.transfer_ctx = transfer_context
+    synchronize = MagicMock()
+    monkeypatch.setattr(adapter_mod.torch_dev, "synchronize", synchronize)
+
+    with pytest.raises(RuntimeError, match="unknown"):
+        adapter.handle_preemptions(True)
+
+    synchronize.assert_not_called()
 
 
 def test_cold_shutdown_skips_unregister(fake_adapter) -> None:
@@ -1631,12 +1756,10 @@ def test_startup_does_not_warn_for_default_heartbeat_interval(
     assert not any("reap" in msg for msg in warnings)
 
 
-def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
+def test_recover_callback_reuses_transfer_ctx_with_pending_ownership(
     fake_adapter, monkeypatch
 ) -> None:
-    """Pin current behavior: every recover-callback invocation rebuilds
-    ``transfer_ctx`` without closing the previous context (known IPC leak;
-    in-flight submissions may still hold a reference to the old context)."""
+    """Recovery must retain the context that owns in-flight store fences."""
     adapter, _send_mock, _ = fake_adapter
     contexts = _patch_transfer_context_factory(monkeypatch)
 
@@ -1650,18 +1773,17 @@ def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
     assert len(contexts) == 1
     assert adapter.transfer_ctx is contexts[0]
 
-    # Each recover-callback invocation rebuilds transfer_ctx without closing
-    # the previous context (known IPC leak; in-flight submissions may still
-    # hold a reference to the old context).
+    # Re-registration must use the same context. Replacing it would discard
+    # ownership records for submissions made before the health transition.
     assert heartbeat.recover_callback() is True
-    assert len(contexts) == 2
-    assert adapter.transfer_ctx is contexts[1]
-    contexts[0].close.assert_not_called()
+    assert len(contexts) == 1
+    assert adapter.transfer_ctx is contexts[0]
+    assert contexts[0].register.call_count == 2
 
     assert heartbeat.recover_callback() is True
-    assert len(contexts) == 3
-    assert adapter.transfer_ctx is contexts[2]
-    contexts[1].close.assert_not_called()
+    assert len(contexts) == 1
+    assert adapter.transfer_ctx is contexts[0]
+    assert contexts[0].register.call_count == 3
 
 
 # For the experimental dispatcher

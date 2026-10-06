@@ -413,6 +413,39 @@ def test_direct_rejects_out_of_range_block_and_short_object() -> None:
         )
 
 
+def test_direct_validates_later_objects_before_first_copy() -> None:
+    """A bad later object cannot leave an earlier H2D copy in flight."""
+    device = torch.device("cuda:0")
+    g = _GEOMETRIES["mla"]
+    paged = [_paged_tensors(g, device)]
+    before = _clone_paged(paged)
+    hosts = _pinned_objects([g], fill=True)[:2]
+    blocks_per_chunk = _CHUNK_TOKENS // g.bs
+    block_ids = list(range(2 * blocks_per_chunk))
+    block_ids[-1] = _NB
+    spec = cuda_ops.DirectCopyGroupSpec(
+        [t.data_ptr() for t in paged[0]],
+        _shape_desc(g),
+        g.fmt,
+        _CHUNK_TOKENS,
+        0,
+        block_ids,
+    )
+    objects = [
+        cuda_ops.DirectCopyObject(host.data_ptr(), 0, host.nbytes, idx, [0])
+        for idx, host in enumerate(hosts)
+    ]
+
+    with pytest.raises(RuntimeError, match="block id"):
+        cuda_ops.execute_direct_copy_transfer(
+            H2D, device, _PIN_ALIGNMENT, [spec], objects
+        )
+    torch.cuda.synchronize(device)
+
+    for actual, original in zip(_flat_paged(paged), _flat_paged(before), strict=True):
+        assert _bitwise_equal(actual, original)
+
+
 def test_format_eligibility_table() -> None:
     """Token-major contiguous-block layouts qualify; HND/blocked-scale do not."""
     eligible = {

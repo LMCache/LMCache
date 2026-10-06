@@ -11,6 +11,7 @@ name encodes all key fields so it can be reversed on startup.
 from __future__ import annotations
 
 # Standard
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 import asyncio
@@ -55,6 +56,8 @@ _KEY_SEP = "@"
 # csrc/storage_backends/fs/connector.cpp.
 _PATH_SLASH_REPLACEMENT = "-SEP-"
 _FILE_EXT = ".data"
+_DELETE_COMPLETION_WARNING_S = 30.0
+_CLOSE_COMPLETION_WARNING_S = 30.0
 
 
 def _readinto_full(
@@ -295,6 +298,11 @@ class FSL2Adapter(L2AdapterInterface):
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()
+        # A coroutine's cancellation does not stop its executor's I/O.
+        # Close admission before draining work that can still touch buffers.
+        self._lifecycle_lock = threading.Lock()
+        self._closed = False
+        self._close_complete = threading.Event()
 
         # Background asyncio event loop
         self._loop = asyncio.new_event_loop()
@@ -333,14 +341,17 @@ class FSL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        with self._lock:
-            task_id = self._get_next_task_id()
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("FSL2Adapter is closed")
+            with self._lock:
+                task_id = self._get_next_task_id()
 
-        asyncio.run_coroutine_threadsafe(
-            self._execute_store(keys, objects, task_id),
-            self._loop,
-        )
-        return task_id
+            asyncio.run_coroutine_threadsafe(
+                self._execute_store(keys, objects, task_id),
+                self._loop,
+            )
+            return task_id
 
     def pop_completed_store_tasks(
         self,
@@ -364,14 +375,17 @@ class FSL2Adapter(L2AdapterInterface):
     def submit_lookup_and_lock_task(
         self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
-        with self._lock:
-            task_id = self._get_next_task_id()
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("FSL2Adapter is closed")
+            with self._lock:
+                task_id = self._get_next_task_id()
 
-        asyncio.run_coroutine_threadsafe(
-            self._execute_lookup(keys, task_id),
-            self._loop,
-        )
-        return task_id
+            asyncio.run_coroutine_threadsafe(
+                self._execute_lookup(keys, task_id),
+                self._loop,
+            )
+            return task_id
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
         with self._lock:
@@ -391,14 +405,17 @@ class FSL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        with self._lock:
-            task_id = self._get_next_task_id()
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("FSL2Adapter is closed")
+            with self._lock:
+                task_id = self._get_next_task_id()
 
-        asyncio.run_coroutine_threadsafe(
-            self._execute_load(keys, objects, task_id),
-            self._loop,
-        )
-        return task_id
+            asyncio.run_coroutine_threadsafe(
+                self._execute_load(keys, objects, task_id),
+                self._loop,
+            )
+            return task_id
 
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
         with self._lock:
@@ -431,16 +448,37 @@ class FSL2Adapter(L2AdapterInterface):
         Note:
             No per-key locks: a delete racing a load turns that load
             into a miss; racing a store of the same key may leave the
-            key re-stored.
+            key re-stored. The method does not return while an unlink is
+            pending. Callers may therefore use its return as the physical
+            completion boundary before permitting a same-key replacement.
         """
         if not keys:
             return
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            delete_coro = self._execute_delete(keys)
+            try:
+                fut = asyncio.run_coroutine_threadsafe(delete_coro, self._loop)
+            except Exception:
+                # Submission failure leaves ownership with this caller.
+                delete_coro.close()
+                logger.exception("FSL2Adapter could not submit delete")
+                return
         try:
-            fut = asyncio.run_coroutine_threadsafe(
-                self._execute_delete(keys),
-                self._loop,
-            )
-            deleted_keys, deleted_sizes = fut.result(timeout=30.0)
+            try:
+                deleted_keys, deleted_sizes = fut.result(
+                    timeout=_DELETE_COMPLETION_WARNING_S
+                )
+            except FutureTimeoutError:
+                # Returning while an unlink can still run would allow it to
+                # remove a same-key replacement after the caller reuses it.
+                logger.warning(
+                    "FSL2Adapter delete still pending after %.1f seconds; "
+                    "waiting for physical completion",
+                    _DELETE_COMPLETION_WARNING_S,
+                )
+                deleted_keys, deleted_sizes = fut.result()
         except Exception as e:
             logger.warning("FSL2Adapter delete failed: %s", e)
             return
@@ -459,32 +497,53 @@ class FSL2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        async def _stop_tasks():
+        """Drain physical I/O before releasing the adapter's resources.
+
+        Reject new submissions before waiting for every accepted task to
+        finish. Cancelling an awaiting coroutine cannot stop an executor's
+        read, write, or unlink; returning early would let it touch a caller's
+        recycled buffer or replacement file. Wait beyond the warning
+        threshold when an operation remains pending.
+        """
+
+        async def _drain_tasks() -> None:
             tasks = [
-                t
-                for t in asyncio.all_tasks(self._loop)
-                if t is not asyncio.current_task()
+                task
+                for task in asyncio.all_tasks(self._loop)
+                if task is not asyncio.current_task()
             ]
-            for task in tasks:
-                task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-        if self._loop.is_running():
-            fut = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
+        with self._lifecycle_lock:
+            close_owner = not self._closed
+            if close_owner:
+                self._closed = True
+                future = asyncio.run_coroutine_threadsafe(_drain_tasks(), self._loop)
+
+        if not close_owner:
+            self._close_complete.wait()
+            return
+
+        try:
             try:
-                fut.result(timeout=5)
-            except Exception:
-                pass
+                future.result(timeout=_CLOSE_COMPLETION_WARNING_S)
+            except FutureTimeoutError:
+                logger.warning(
+                    "FSL2Adapter close still pending after %.1f seconds; "
+                    "waiting for physical completion",
+                    _CLOSE_COMPLETION_WARNING_S,
+                )
+                future.result()
             self._loop.call_soon_threadsafe(self._loop.stop)
-
-        self._loop_thread.join()
-        self._loop.close()
-
-        self._store_efd.close()
-        self._lookup_efd.close()
-        self._load_efd.close()
-        logger.info("FSL2Adapter closed")
+            self._loop_thread.join()
+            self._loop.close()
+            self._store_efd.close()
+            self._lookup_efd.close()
+            self._load_efd.close()
+            logger.info("FSL2Adapter closed")
+        finally:
+            self._close_complete.set()
 
     # ------------------------------------------------------------------
     # Internal helpers

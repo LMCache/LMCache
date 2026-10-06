@@ -463,6 +463,9 @@ class TransferContext(ABC):
         defer GPU->CPU gather work must block until all in-flight stores
         have completed, so that vLLM cannot overwrite paged KV blocks
         before they are read.
+
+        Raises:
+            RuntimeError: If completion cannot be established safely.
         """
 
 
@@ -492,21 +495,24 @@ class LMCacheDrivenTransferContext(TransferContext):
     def _store_settled(future: MessagingFuture) -> bool:
         """Whether the server is done with this store's engine KV blocks.
 
-        ``query()`` raises when the store's RPC failed, so a failed store is
-        reported as settled: it is no longer reading the blocks, and its error
-        is surfaced by the request path that owns it rather than here.
+        An RPC failure is not evidence that the server stopped reading the
+        blocks. Such futures stay unresolved so preemption and shutdown fail
+        closed instead of allowing the serving engine to reuse their storage.
 
         Args:
             future: A store future returned by ``submit_store``.
 
         Returns:
-            True if the store completed or failed, False if still in flight.
+            True only if the store reached device-terminal completion.
         """
         try:
             return future.query()
         except Exception:
-            logger.debug("Treating a failed store as settled", exc_info=True)
-            return True
+            logger.warning(
+                "Cannot prove that an in-flight store reached device completion",
+                exc_info=True,
+            )
+            return False
 
     def register(
         self,
@@ -741,22 +747,39 @@ class LMCacheDrivenTransferContext(TransferContext):
         whose forward pass would overwrite blocks the server is still reading
         and commit the wrong KV under the preempted request's keys.
 
-        A timeout is logged rather than raised, so a slow server degrades to a
-        possibly stale store instead of a crashed engine.
+        Raises:
+            RuntimeError: If any submitted store does not reach terminal
+                device completion before the request timeout, or if its
+                completion cannot be queried. Unresolved futures remain
+                tracked so a later call can retry the proof.
         """
         with self._inflight_lock:
-            pending = [f for f in self._inflight_stores if not self._store_settled(f)]
-            self._inflight_stores = []
+            self._inflight_stores = [
+                f for f in self._inflight_stores if not self._store_settled(f)
+            ]
+            pending = list(self._inflight_stores)
         for future in pending:
             try:
                 if not future.wait(timeout=self._mq_timeout):
-                    logger.warning(
-                        "A store did not finish within %.1fs; its KV blocks may "
-                        "be overwritten while the server is still reading them",
-                        self._mq_timeout,
+                    raise RuntimeError(
+                        "Cannot reuse KV blocks: an in-flight store did not "
+                        f"finish within {self._mq_timeout:.1f}s"
                     )
-            except Exception:
-                logger.exception("Failed waiting for an in-flight store")
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(
+                    "Cannot reuse KV blocks: failed to establish terminal "
+                    "completion for an in-flight store"
+                ) from exc
+        if pending:
+            completed = set(pending)
+            with self._inflight_lock:
+                self._inflight_stores = [
+                    future
+                    for future in self._inflight_stores
+                    if future not in completed
+                ]
 
 
 class EngineDrivenTransferContext(TransferContext):
