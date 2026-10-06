@@ -1,4 +1,4 @@
-0.30.1rc1.dev647+ge8a53a55e
-short_sha=e8a53a55e
-full_sha=e8a53a55e6ffe92645d8183066aa72e228ba7181
-archive_index_url=https://wheels.vllm.ai/e8a53a55e6ffe92645d8183066aa72e228ba7181/cu130
+0.31.0
+short_sha=
+full_sha=
+archive_index_url=
