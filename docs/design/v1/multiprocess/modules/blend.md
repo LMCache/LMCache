@@ -36,7 +36,7 @@ change requires a **new operation name**, never a changed existing contract.
 
 | RPC | Payload → Response | Semantics |
 |---|---|---|
-| `CB_REGISTER_ROPE` | `(instance_id, cos_sin_ipc[], head_size, is_neox, group_to_cache[], group_rot[][])` → `None` | idempotent; strips baked mscale; MLA must declare its rope window; zero caches = NoPE |
+| `CB_REGISTER_ROPE` | `(instance_id, cos_sin_ipc[], head_size, is_neox, group_to_cache[], group_rot[][], group_head_size[], kv_quant)` → `None` | idempotent; strips baked mscale; MLA must declare its rope window; per-group scatter head size is distinct from the rotation window; `kv_quant` names the paged-KV fp8 flavor (`"fp8_e4m3"` / `"fp8_e5m2"`, `""` = unquantized); zero caches = NoPE |
 | `CB_UNREGISTER_ROPE` | `(instance_id)` → `None` | KV cache stays registered |
 | `CB_UNIFIED_LOOKUP` | `(key, tp_size)` → `CBUnifiedLookupResult \| None` | submit-once / poll-on-recall; `None` = defer, client re-issues |
 | `CB_RETRIEVE_PRE_COMPUTED` | `(key, matches[], gpu_block_ids[][], instance_id, event_ipc)` → `(event_ipc, scatter_ran)` | event is server-recorded; may be called more than once per request |
