@@ -12,8 +12,11 @@ import threading
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.rpc import get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -110,6 +113,7 @@ def _make_free_locks_ctx(
         The configured MagicMock context.
     """
     ctx = MagicMock()
+    ctx.get_read_owners.return_value = None
     ctx.chunk_size = 256
     ctx.token_hasher.chunk_size = 256
     ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
@@ -143,7 +147,7 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
         module.free_lookup_locks(key, 1)
 
     module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
-        sentinel_obj_keys, read_locks=1
+        sentinel_obj_keys, read_locks=1, l1_owners=None
     )
 
 
@@ -164,7 +168,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
 def _released_chunks(finish_read_mock: MagicMock) -> set[tuple[int, bytes]]:
     """Collect (object_group_id, chunk_hash) pairs released by the module."""
     (obj_keys,), kwargs = finish_read_mock.call_args
-    assert kwargs == {"read_locks": 1}
+    assert kwargs == {"read_locks": 1, "l1_owners": None}
     return {(k.object_group_id, k.chunk_hash) for k in obj_keys}
 
 
@@ -228,13 +232,11 @@ def test_server_free_lookup_locks_caps_release_at_hit_length():
     assert released == {(0, b"h0"), (0, b"h1")}
 
 
-def test_server_free_lookup_locks_unknown_hit_releases_nothing():
-    """Without a recorded hit length, no group releases anything.
+def test_server_free_lookup_locks_without_result_releases_nothing():
+    """Without a lookup result there is no ownership record.
 
-    The locked range is unknown in every group: for full-attention groups the
-    freed range can extend past the prefetch hit, and object keys are shared,
-    so releasing it could strip a concurrent reader's lock. Leaked locks
-    expire with the L1 read TTL instead.
+    Nothing is released and the locks expire with the TTL; guessing could
+    strip a concurrent reader's lock.
     """
     # First Party
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
@@ -248,12 +250,84 @@ def test_server_free_lookup_locks_unknown_hit_releases_nothing():
     ctx.storage_manager.finish_read_prefetched.assert_not_called()
 
 
+def test_server_free_lookup_locks_consumes_pending_result_first():
+    """An unconsumed result supplies the exact hit length and retained owners."""
+    ctx = _make_free_locks_ctx([b"h0", b"h1", b"h2"], windows=[-1], hit_chunks=-1)
+    session = ctx.session_manager.get_or_create.return_value
+    session.record_prefetch_result.side_effect = lambda hit, gids, owners=None: (
+        setattr(session, "prefetch_hit_chunks", hit),
+        setattr(session, "prefetch_locked_gids", gids),
+    )
+    owners = {"owner-map": 1}
+    ctx.get_read_owners.return_value = owners
+    ctx.storage_manager.query_prefetch_status.return_value = PrefetchResult(
+        hit_cells=[Bitmap(3, 2)],
+        l1_hit_cells=[Bitmap(3, 2)],
+        l2_hit_cells=[Bitmap(3)],
+        l1_owners=owners,
+    )
+    module = LookupModule(ctx)
+    module._prefetch_jobs["req-sw"] = _PrefetchJob(
+        handle=PrefetchHandle(
+            prefetch_request_id=0,
+            external_request_id="req-sw",
+            total_requested_keys=3,
+            submit_time=0.0,
+        ),
+        row_windows=(-1,),
+        request_id="req-sw",
+        requested_tokens=768,
+    )
+
+    module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
+
+    session.record_prefetch_result.assert_called_once_with(2, (0,), owners)
+    assert "req-sw" not in module._prefetch_jobs
+    ctx.event_bus.publish.assert_called_once()
+    assert (
+        ctx.event_bus.publish.call_args.args[0].event_type
+        == EventType.MP_LOOKUP_PREFETCH_END
+    )
+    ctx.storage_manager.finish_read_prefetched.assert_called_once()
+    (obj_keys,), kwargs = ctx.storage_manager.finish_read_prefetched.call_args
+    assert {(k.object_group_id, k.chunk_hash) for k in obj_keys} == {
+        (0, b"h0"),
+        (0, b"h1"),
+    }
+    assert kwargs == {"read_locks": 1, "l1_owners": owners}
+
+
+def test_server_free_lookup_locks_while_prefetch_running_releases_nothing():
+    """A running prefetch retains its locks and can still be polled later."""
+    ctx = _make_free_locks_ctx([b"h0", b"h1", b"h2"], windows=[-1], hit_chunks=-1)
+    ctx.storage_manager.query_prefetch_status.return_value = None
+    module = LookupModule(ctx)
+    module._prefetch_jobs["req-sw"] = _PrefetchJob(
+        handle=PrefetchHandle(
+            prefetch_request_id=0,
+            external_request_id="req-sw",
+            total_requested_keys=3,
+            submit_time=0.0,
+        ),
+        row_windows=(-1,),
+        request_id="req-sw",
+        requested_tokens=768,
+    )
+
+    module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
+
+    ctx.storage_manager.finish_read_prefetched.assert_not_called()
+    assert "req-sw" in module._prefetch_jobs
+    ctx.session_manager.get_or_create.return_value.record_prefetch_result.assert_not_called()
+
+
 def test_server_free_lookup_locks_no_matching_chunks():
     """LookupModule.free_lookup_locks with no chunks in range should be a no-op."""
     # First Party
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
     ctx = MagicMock()
+    ctx.get_read_owners.return_value = None
     ctx.token_hasher.chunk_size = 256
     ctx.token_hasher.compute_chunk_hashes.return_value = []
 
