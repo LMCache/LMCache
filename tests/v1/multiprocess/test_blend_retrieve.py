@@ -631,7 +631,7 @@ class _LockCountingStorageManager:
             l2_hit_cells=rows(),
         )
 
-    def finish_read_prefetched(self, keys, read_locks: int = 1) -> None:
+    def finish_read_prefetched(self, keys, read_locks: int = 1, l1_owners=None) -> None:
         for key in keys:
             held = self.locks.get(key, 0)
             if held < read_locks:
@@ -884,7 +884,8 @@ def _classify_match(col: int, h: bytes):
     )
 
 
-def test_sparse_classify_partial_column_releases_and_takes_no_strike():
+@pytest.mark.parametrize("l1_owners", [None, {"k-partial-r0": 1}])
+def test_sparse_classify_partial_column_releases_and_takes_no_strike(l1_owners):
     """A chunk with some but not all rows loaded is not blendable and not
     stale: its landed keys' locks are released immediately (not held for the
     read TTL) and it takes no eviction strike -- the content is still stored,
@@ -906,13 +907,18 @@ def test_sparse_classify_partial_column_releases_and_takes_no_strike():
     row1.set(0)
 
     found = eng._sparse_classify(
-        key, matches, [row0, row1], per_hash_obj_keys, hash_to_col
+        key,
+        matches,
+        [row0, row1],
+        per_hash_obj_keys,
+        hash_to_col,
+        l1_owners=l1_owners,
     )
 
     assert [r.hash for r in found] == [b"whole"]
     # The partial chunk's landed key released the whole reservation, now.
     eng._ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
-        ["k-partial-r0"], read_locks=8
+        ["k-partial-r0"], read_locks=8, l1_owners=l1_owners
     )
     # No strike and no matcher eviction for the partial chunk.
     assert eng._stale_strike == {}

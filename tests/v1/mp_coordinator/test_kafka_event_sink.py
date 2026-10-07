@@ -32,6 +32,7 @@ import lmcache.v1.mp_coordinator.cache_events as cache_events
 # Local
 from .fake_kafka import (
     FakeKafkaBroker,
+    FakeKafkaException,
     FakeKafkaProducer,
     install_fake_confluent_kafka,
     uninstall_confluent_kafka,
@@ -93,8 +94,8 @@ def _sink(
     monkeypatch: pytest.MonkeyPatch,
     broker: FakeKafkaBroker,
     delivery_error: object | None = None,
-    remaining_after_flush: int = 0,
     produce_error: Exception | None = None,
+    max_queued: int | None = None,
 ) -> tuple[KafkaCacheEventSink, FakeKafkaProducer]:
     """Build a Kafka sink on top of the in-memory producer.
 
@@ -102,8 +103,8 @@ def _sink(
         monkeypatch: Fixture scoping the ``confluent_kafka`` module swap.
         broker: Shared fake broker.
         delivery_error: Error the fake producer reports for every record.
-        remaining_after_flush: Undelivered count the fake ``flush`` returns.
         produce_error: Error the fake ``produce`` raises instead of queueing.
+        max_queued: Records the fake buffer holds before ``BufferError``.
 
     Returns:
         The sink and its fake producer.
@@ -118,8 +119,8 @@ def _sink(
             broker,
             config,
             delivery_error=delivery_error,
-            remaining_after_flush=remaining_after_flush,
             produce_error=produce_error,
+            max_queued=max_queued,
         )
         return producer
 
@@ -222,6 +223,7 @@ def test_kafka_sink_configures_durable_ordered_producer(
         "enable.idempotence": True,
         "acks": "all",
         "message.timeout.ms": 3000,
+        "queue.buffering.max.kbytes": 64 * 1024,
     }
 
 
@@ -261,52 +263,124 @@ def test_http_sink_factory_requires_coordinator_url() -> None:
         create_cache_event_sink(CoordinatorConfig())
 
 
-def test_kafka_sink_raises_on_delivery_failure(
+def _capture_warnings(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the module logger's warnings; it does not propagate to root.
+
+    Args:
+        monkeypatch: Fixture scoping the logger patch.
+
+    Returns:
+        The list each formatted warning is appended to.
+    """
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        cache_events.logger,
+        "warning",
+        lambda msg, *args: warnings.append(msg % args),
+    )
+    return warnings
+
+
+def test_kafka_sink_publish_does_not_wait_for_an_unreachable_broker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The producer holds records through an outage and sends them in order."""
     broker = FakeKafkaBroker()
-    sink, _ = _sink(monkeypatch, broker, delivery_error=RuntimeError("delivery failed"))
+    sink, producer = _sink(monkeypatch, broker)
+    batches = [_batch("node-a", seq) for seq in (1, 2, 3)]
+    producer.reachable = False
 
-    with pytest.raises(CacheEventPublishError, match="rejected 1 of 1"):
-        sink.publish([_batch("node-a", 1)])
+    sink.publish(batches[:2])
+    sink.publish(batches[2:])
+
     assert broker.records(_TOPIC) == ()
+    assert producer.queued == 3
+
+    producer.reachable = True
+    sink.publish([_batch("node-a", 4)])
+
+    delivered = [
+        CacheEventsRequest.model_validate_json(record.value or b"").batches[0].seq
+        for record in broker.records(_TOPIC)
+    ]
+    assert delivered == [1, 2, 3, 4]
+    assert sink.dropped_batches == 0
+
+
+def test_kafka_sink_counts_a_record_the_producer_gave_up_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed delivery report does not raise; it is counted and logged."""
+    broker = FakeKafkaBroker()
+    sink, _ = _sink(monkeypatch, broker, delivery_error=RuntimeError("timed out"))
+    warnings = _capture_warnings(monkeypatch)
+
+    sink.publish([_batch("node-a", 1)])
+
+    assert broker.records(_TOPIC) == ()
+    assert sink.dropped_batches == 1
+    assert len(warnings) == 1
+    assert "1 dropped so far" in warnings[0]
+    assert "timed out" in warnings[0]
+
+
+def test_kafka_sink_drops_what_does_not_fit_the_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full buffer refuses the rest of the call; what was queued still goes."""
+    broker = FakeKafkaBroker()
+    sink, producer = _sink(monkeypatch, broker, max_queued=1)
+    producer.reachable = False
+
+    with pytest.raises(CacheEventPublishError, match="refused 1 of 2"):
+        sink.publish([_batch("node-a", 1), _batch("node-a", 2)])
+
+    assert sink.dropped_batches == 1
+    producer.reachable = True
+    sink.close()
+    delivered = [
+        CacheEventsRequest.model_validate_json(record.value or b"").batches[0].seq
+        for record in broker.records(_TOPIC)
+    ]
+    assert delivered == [1]
 
 
 def test_kafka_sink_wraps_producer_enqueue_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     broker = FakeKafkaBroker()
-    sink, _ = _sink(monkeypatch, broker, produce_error=BufferError("queue full"))
+    sink, _ = _sink(
+        monkeypatch, broker, produce_error=FakeKafkaException("unknown topic")
+    )
 
-    with pytest.raises(CacheEventPublishError, match="queue full"):
+    with pytest.raises(CacheEventPublishError, match="unknown topic"):
         sink.publish([_batch("node-a", 1)])
     assert broker.records(_TOPIC) == ()
+    assert sink.dropped_batches == 1
 
 
-def test_kafka_sink_raises_when_flush_times_out(
+def test_kafka_sink_close_delivers_queued_records(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     broker = FakeKafkaBroker()
-    sink, _ = _sink(monkeypatch, broker, remaining_after_flush=1)
+    sink, producer = _sink(monkeypatch, broker)
+    producer.reachable = False
+    sink.publish([_batch("node-a", 1)])
+    producer.reachable = True
 
-    with pytest.raises(CacheEventPublishError, match="not acknowledged"):
-        sink.publish([_batch("node-a", 1)])
-    assert broker.records(_TOPIC) == ()
+    sink.close()
+
+    assert len(broker.records(_TOPIC)) == 1
 
 
 def test_kafka_sink_close_warns_about_unacknowledged_records(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shutdown flushes what it can and reports records the broker never acked."""
-    sink, _ = _sink(monkeypatch, FakeKafkaBroker(), remaining_after_flush=2)
-    warnings: list[str] = []
-    # The module logger does not propagate (see ``lmcache.logging``), so
-    # record the call instead of relying on root-handler capture.
-    monkeypatch.setattr(
-        cache_events.logger,
-        "warning",
-        lambda msg, *args: warnings.append(msg % args),
-    )
+    sink, producer = _sink(monkeypatch, FakeKafkaBroker())
+    producer.reachable = False
+    sink.publish([_batch("node-a", 1), _batch("node-a", 2)])
+    warnings = _capture_warnings(monkeypatch)
 
     sink.close()
 

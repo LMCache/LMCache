@@ -41,11 +41,19 @@ storage layer ──► EventBus ──► CacheEventSubscriber ──► CacheE
   `docs/design/v1/mp_observability/trace.md` §12.
 - **`KafkaCacheEventSink`** produces one JSON record per batch with the
   message key set to `instance_id`, so Kafka assigns one instance's
-  records to one partition. The producer enables idempotence, requires
-  `acks=all`, and waits for every delivery report before `publish`
-  succeeds. The JSON value uses the existing `CacheEventsRequest`
-  envelope with exactly one batch, keeping the HTTP and Kafka wire
-  vocabulary identical.
+  records to one partition. The producer enables idempotence and
+  requires `acks=all`. The JSON value uses the existing
+  `CacheEventsRequest` envelope with exactly one batch, keeping the HTTP
+  and Kafka wire vocabulary identical.
+
+  `publish` does not wait for the broker. It hands records to the
+  producer's buffer and serves earlier delivery reports. The producer
+  retries in order for up to the delivery timeout (5 minutes by
+  default), so a broker restart delays events instead of losing them.
+  The buffer is capped at 64 MB. A record that does not fit, or that the
+  producer gives up on, is dropped and counted. Its `seq` is already
+  spent, so the coordinator sees a gap. `close` waits up to 10 seconds
+  for what is still queued.
 
 A coordinator started with `--event-transport kafka` consumes the topic
 through `KafkaCacheEventSource` (see [ingest.md](ingest.md)) instead of
@@ -200,8 +208,9 @@ event-driven flushes (default 1s).
 
 `--coordinator-event-transport kafka` selects Kafka instead of HTTP and
 requires `--coordinator-kafka-bootstrap-servers`. The topic defaults to
-`lmcache-cache-events`; `--coordinator-kafka-delivery-timeout` bounds how
-long one flush waits for broker acknowledgement. These flags have no
+`lmcache-cache-events`. `--coordinator-kafka-delivery-timeout` (default
+300 s) is how long the producer retries a record before dropping it.
+These flags have no
 environment-variable fallback. `confluent-kafka` ships as the optional
 `lmcache[kafka]` extra and is imported only when the Kafka sink is built,
 so HTTP-only deployments never load it.
@@ -211,7 +220,11 @@ so HTTP-only deployments never load it.
 - **Bus overflow drops events before sequencing** (bounded queue,
   rate-limited warning), so the gate cannot detect the loss. A durable
   transport also cannot replay an event that never reached its producer;
-  producer retry/backpressure or a local spool is separate future work.
+  a local spool is separate future work.
+- **A Kafka declaration dropped after it was queued is not re-sent.** The
+  subscriber restores a capacity declaration only when `publish` raises.
+  When the producer drops it later, the coordinator lacks that
+  instance's capacity until the next declaration.
 - **The flush pump is coupled to the eviction loop's tick** — decouple
   it (e.g. a bus-owned periodic hook) so tail freshness does not depend
   on that loop's cadence.
