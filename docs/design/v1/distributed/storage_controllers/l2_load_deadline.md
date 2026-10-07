@@ -15,6 +15,11 @@ number (including `nan` and `inf`) is rejected at
 startup. It is threaded into `PrefetchController(l2_load_timeout=, clock=)`; the
 clock is injectable so tests can advance time without sleeping.
 
+The same deadline applies with repeatable `--l1-manager` configurations. L2
+loads retain their configured L1 affinity; fallback results carry the owner of
+each retained read lock in `l1_owners`. Draining releases only the timed-out
+request's resources in each pool, without consuming caller-owned read locks.
+
 This is a **server-side cache policy** and is independent of the client-side
 transport bound `lmcache.mp.mq_timeout`. Set `mq_timeout` comfortably larger, so
 the fallback result returns over a healthy RPC rather than the transport timing

@@ -509,6 +509,10 @@ class PrefetchController(StorageControllerInterface):
             desc.index: desc for desc in adapter_descriptors
         }
         self._policy = policy
+        by_tag = {d.config.tag: d.index for d in l1_manager_descriptors}
+        self._l2_affinity = {
+            d.index: by_tag[d.config.affinity_tag] for d in adapter_descriptors
+        }
 
         # TODO: remove max_in_flight and make it dynamic
         self._max_in_flight = max_in_flight
@@ -524,12 +528,6 @@ class PrefetchController(StorageControllerInterface):
         # In-flight read-locked requests with an active caller deadline.
         self._armed: dict[PrefetchRequestId, float] = {}
         self._status_deadline_timeouts = 0
-        if len(self._l1_managers) != 1:
-            logger.error(
-                "PrefetchController supports exactly one L1 manager for now; "
-                "got %d. L2 loads land in the first one.",
-                len(self._l1_managers),
-            )
 
         # Adapters being removed: adapter id -> event set once detached.
         self._draining: dict[int, threading.Event] = {}
@@ -850,6 +848,11 @@ class PrefetchController(StorageControllerInterface):
             RuntimeError: If the background loop did not apply the op in
                 time (e.g. the loop is not running).
         """
+        by_tag = {d.config.tag: d.index for d in self._l1_manager_descriptors.values()}
+        if descriptor.config.affinity_tag not in by_tag:
+            raise ValueError(
+                f"Unknown L1 affinity_tag: {descriptor.config.affinity_tag}"
+            )
         op = AddAdapterOp(
             adapter_id=adapter_id,
             adapter=adapter,
@@ -1025,6 +1028,11 @@ class PrefetchController(StorageControllerInterface):
             self._pending_adapter_ops = []
         for op in ops:
             if isinstance(op, AddAdapterOp):
+                self._l2_affinity[op.adapter_id] = next(
+                    d.index
+                    for d in self._l1_manager_descriptors.values()
+                    if d.config.tag == op.descriptor.config.affinity_tag
+                )
                 self._l2_adapters[op.adapter_id] = op.adapter
                 self._adapter_descriptors[op.adapter_id] = op.descriptor
                 lookup_efd = op.adapter.get_lookup_and_lock_event_fd()
@@ -1071,6 +1079,7 @@ class PrefetchController(StorageControllerInterface):
                 continue
             adapter = self._l2_adapters.pop(adapter_id)
             self._adapter_descriptors.pop(adapter_id, None)
+            self._l2_affinity.pop(adapter_id, None)
             lookup_efd = adapter.get_lookup_and_lock_event_fd()
             load_efd = adapter.get_load_event_fd()
             self._lookup_efd_to_adapter.pop(lookup_efd, None)
@@ -1108,10 +1117,16 @@ class PrefetchController(StorageControllerInterface):
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
             request_id, spec, deadline_at = self._pending_queue.popleft()
-            if deadline_at is not None and deadline_at <= self._clock():
-                self._expire_queued_request(request_id, spec, deadline_at)
-            else:
-                self._start_lookup_phase(request_id, spec, deadline_at)
+            try:
+                if deadline_at is not None and deadline_at <= self._clock():
+                    self._expire_queued_request(request_id, spec, deadline_at)
+                else:
+                    self._start_lookup_phase(request_id, spec, deadline_at)
+            except Exception:
+                logger.exception("Failed starting prefetch request %d", request_id)
+                request = self._in_flight_requests.get(request_id)
+                if request is not None:
+                    self._abort_request(request)
 
     # =========================================================================
     # Lookup phase
@@ -1132,6 +1147,9 @@ class PrefetchController(StorageControllerInterface):
                 ``None`` when deadlines are disabled or this is ``NO_LOCK``.
         """
         request = _build_request(request_id, spec, deadline_at)
+        self._in_flight_requests[request_id] = request
+        if deadline_at is not None:
+            self._armed[request_id] = deadline_at
         flattened_keys = request.get_flattened_keys()
         self._lock_l1_keys(request)
 
@@ -1154,16 +1172,14 @@ class PrefetchController(StorageControllerInterface):
             )
             request.inflight_lookup_tasks[adapter_idx] = task_id
 
-        # No live L2 adapter: serve from L1 alone, on this thread.
+        # No live L2 adapter: serve from L1 alone, on this thread. The
+        # request was registered before locking so a failed start can be
+        # aborted; retire it here like _advance_request does.
         if not active_adapters:
             self._plan_load(request, {})
             self._finish_request(request)
+            self._retire_request_once(request)
             return
-
-        # Add the inflight request to the tracking dict and publish the events
-        self._in_flight_requests[request_id] = request
-        if deadline_at is not None:
-            self._armed[request_id] = deadline_at
 
         self._event_bus.publish(
             Event(
@@ -1191,17 +1207,23 @@ class PrefetchController(StorageControllerInterface):
         flattened_keys = request.get_flattened_keys()
         num_rows = len(request.key_groups)
         num_cols = len(request.key_groups[0].keys)
-        for l1_idx, l1_manager in self._l1_managers.items():
-            result = l1_manager.reserve_read(flattened_keys, request.num_kv_readers)
-            res_bitmap = Bitmap(len(flattened_keys))
-            for i, key in enumerate(flattened_keys):
-                error, _obj = result[key]
-                if error != L1Error.SUCCESS:
-                    continue
-                res_bitmap.set(i)
-            request.key_states.l1_locked_keys[l1_idx] = _scatter_bitmaps_full_global(
-                res_bitmap, num_rows, num_cols
-            )
+        completed = False
+        try:
+            for l1_idx, l1_manager in self._l1_managers.items():
+                result = l1_manager.reserve_read(flattened_keys, request.num_kv_readers)
+                res_bitmap = Bitmap(len(flattened_keys))
+                for i, key in enumerate(flattened_keys):
+                    error, _obj = result[key]
+                    if error != L1Error.SUCCESS:
+                        continue
+                    res_bitmap.set(i)
+                request.key_states.l1_locked_keys[l1_idx] = (
+                    _scatter_bitmaps_full_global(res_bitmap, num_rows, num_cols)
+                )
+            completed = True
+        finally:
+            if not completed:
+                self._release_all_locks(request)
 
     def _plan_load(
         self,
@@ -1498,9 +1520,7 @@ class PrefetchController(StorageControllerInterface):
             The index of the L1 manager that has affinity with the given L2 adapter
             index.
         """
-        # TODO: right now we only support one L1 manager. Update this after we have
-        # multi-tier L1 support
-        return next(iter(self._l1_managers))
+        return self._l2_affinity[l2_adapter_idx]
 
     def _poll_load_results(
         self,
@@ -1694,6 +1714,13 @@ class PrefetchController(StorageControllerInterface):
                 l1_hit_cells=l1_hit_cells.to_list(),
                 l2_hit_cells=l2_hit_cells.to_list(),
                 found_cells=None if found_cells is None else found_cells.to_list(),
+                l1_owners={
+                    key: self._l1_managers[idx].l1_manager_id
+                    for idx, locked in states.l1_locked_keys.items()
+                    for key in _gather_keys(request.key_groups, locked & hit_cells)
+                }
+                if request.lock_mode == PrefetchLockMode.LOCK
+                else {},
             ),
             timed_out=timed_out,
         )
@@ -1995,6 +2022,8 @@ class PrefetchController(StorageControllerInterface):
         if request.inflight_lookup_tasks or request.inflight_load_tasks:
             return
         self._retire_request_once(request)
+
+        request.key_states = PrefetchKeyState()
 
     def _cleanup_in_flight_requests(self) -> None:
         """Release resources for any in-flight requests during shutdown."""
