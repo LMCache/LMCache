@@ -37,6 +37,7 @@ from lmcache.v1.multiprocess.modules.blend.read_set import (
     _classify_cb_read_groups,
 )
 from lmcache.v1.multiprocess.modules.blend.rope import (
+    _FP8_FLAVOR_TO_AT_SCALAR,
     _TORCH_TO_AT_SCALAR,
     _cb_group_rope_geometry,
     _CBRopeState,
@@ -258,7 +259,14 @@ class RetrieveMixin:
                     )
                 )
                 continue
-            at_scalar = _TORCH_TO_AT_SCALAR.get(buf0.dtype)
+            # uint8 K planes are rope-able only with a declared fp8 flavor;
+            # the kernel then dequant-rotates-requants, scale-free (rotation
+            # commutes with the per-tensor scale).
+            at_scalar = _TORCH_TO_AT_SCALAR.get(buf0.dtype) or (
+                _FP8_FLAVOR_TO_AT_SCALAR.get(rope_state.kv_quant)
+                if buf0.dtype == torch.uint8
+                else None
+            )
             if at_scalar is None:
                 return None
             try:
@@ -277,6 +285,11 @@ class RetrieveMixin:
             # NoPE took the skipped-group branch above, so non-None here.
             group_cos_sin = rope_state.cache_for_group(group.engine_group_idx)
             assert group_cos_sin is not None
+            # The cos/sin cache keeps the model's float dtype; under fp8 KV
+            # it diverges from the K plane's, so the kernel takes both.
+            cache_at_scalar = _TORCH_TO_AT_SCALAR.get(group_cos_sin.dtype)
+            if cache_at_scalar is None:
+                return None
             if rot_offset > 0 and int(group_cos_sin.shape[1]) != rot[1]:
                 # Registration-level inconsistency: rotating with the wrong
                 # width would corrupt KV.
@@ -293,6 +306,7 @@ class RetrieveMixin:
                     rope_num_kv_heads=n_heads,
                     rope_head_stride=per_head,
                     key_scalar_type=at_scalar,
+                    cache_scalar_type=cache_at_scalar,
                     rope_base_offset=rot_offset * buf0.element_size(),
                     **spec_common,
                 )
@@ -513,6 +527,7 @@ class RetrieveMixin:
         all_obj_keys: list[ObjectKey],
         n_read: int,
         stream: Any,
+        l1_owners: dict[ObjectKey, int] | None = None,
     ) -> int:
         """Release the sparse-prefetch read locks of the scattered matches.
 
@@ -532,7 +547,17 @@ class RetrieveMixin:
             for g in range(n_read)
         ]
         if release_keys:
-            submit_callback_to_stream(stream, "finish_read_prefetched", release_keys)
+            if l1_owners is None:
+                submit_callback_to_stream(
+                    stream, "finish_read_prefetched", release_keys
+                )
+            else:
+                groups: dict[int, list[ObjectKey]] = {}
+                for key in release_keys:
+                    groups.setdefault(l1_owners[key], []).append(key)
+                submit_callback_to_stream(
+                    stream, "finish_read_by_owner", list(groups.items())
+                )
         return len(release_keys)
 
     @request_handler(
@@ -734,6 +759,13 @@ class RetrieveMixin:
         )
         cached = _stash["per_hash"] if _stash else None
         stash_read_locks = _stash["read_locks"] if _stash else 1
+        l1_owners = (
+            _stash.get("l1_owners")
+            if _stash
+            else session.extras.get("cb.sparse_l1_owners")
+            if session
+            else None
+        )
         if cached is not None and all(r.hash in cached for r in cb_match_result):
             # The lookup cached all-ranks obj keys (group-major, rank-minor);
             # select THIS rank's key per read group or TP>1 mispairs ranks.
@@ -764,7 +796,7 @@ class RetrieveMixin:
                 # Nothing will read these keys: release every lock the lookup
                 # took (N per key).
                 self._ctx.storage_manager.finish_read_prefetched(
-                    orphan_keys, read_locks=stash_read_locks
+                    orphan_keys, read_locks=stash_read_locks, l1_owners=l1_owners
                 )
                 logger.debug(
                     "CB released %d prefetched-but-unretrieved keys (req=%s)",
@@ -873,7 +905,7 @@ class RetrieveMixin:
             scatter_open = False
             try:
                 with self._ctx.storage_manager.read_prefetched_results(
-                    all_obj_keys
+                    all_obj_keys, l1_owners=l1_owners
                 ) as memory_objs:
                     _stage_ms["fetch"] = (time.perf_counter() - _stage_t) * 1000
                     if memory_objs is None:
@@ -1012,6 +1044,7 @@ class RetrieveMixin:
                         all_obj_keys,
                         n_read,
                         retrieve_cupy_stream,
+                        l1_owners,
                     )
 
                     # Record this retrieve's device work for the next
