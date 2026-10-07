@@ -1375,7 +1375,7 @@ def test_server_store_and_retrieve_cpu_chunks(
     mock_storage.reserve_write.return_value = {"obj": mock_memory_obj}
 
     @contextmanager
-    def _read_prefetched_results(_keys: Any) -> Any:
+    def _read_prefetched_results(_keys: Any, l1_owners: Any = None) -> Any:
         yield [mock_memory_obj]
 
     mock_storage.read_prefetched_results.side_effect = _read_prefetched_results
