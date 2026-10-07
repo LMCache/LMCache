@@ -199,6 +199,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             payload_type=list[ObjectKey],
         )
         self._device_host_func_dispatcher.register(
+            "finish_read_by_owner",
+            self._ctx.storage_manager.finish_read_by_owner,
+            payload_type=L1WriteCompletion,
+        )
+        self._device_host_func_dispatcher.register(
             "release_imported_event",
             self._release_imported_event,
             payload_type=tuple[int, int],
@@ -290,7 +295,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # particular, do not release the scheduler's whole MLA
             # reservation here: the remaining TP workers and concurrent
             # requests still own their independent read locks.
-            self._ctx.storage_manager.finish_read_prefetched(obj_keys, read_locks=1)
+            self._ctx.storage_manager.finish_read_prefetched(
+                obj_keys,
+                read_locks=1,
+                l1_owners=self._ctx.get_read_owners(key.request_id),
+            )
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
@@ -1015,6 +1024,18 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
 
             prefetched_keys: list[ObjectKey] = []
+            read_owners = self._ctx.get_read_owners(key.request_id)
+            retained_keys = [
+                obj_key
+                for group, keys in enumerate(obj_keys_per_obj_group)
+                if group not in skipped_groups
+                for obj_key in keys[group_skips[group] :]
+            ]
+            # Capture every retained lock before enqueuing GPU work, including
+            # groups that a later transfer failure may leave unvisited.
+            read_completion = self._ctx.storage_manager.prepare_read_completion(
+                retained_keys, read_owners
+            )
             total_bytes = 0
             retrieve_succeeded = True
             try:
@@ -1023,48 +1044,39 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         continue
                     skip = group_skips[obj_group_id]
                     in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
-                    with self._ctx.storage_manager.read_prefetched_results(
-                        in_window_keys
-                    ) as window_objs:
-                        if not window_objs or len(window_objs) != len(in_window_keys):
-                            logger.error("Some keys not found during retrieve!")
-                            retrieve_succeeded = False
-                            break
+                    found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
+                        in_window_keys, l1_owners=read_owners
+                    )
+                    if not window_objs or found_keys != in_window_keys:
+                        logger.error("Some keys not found during retrieve!")
+                        retrieve_succeeded = False
+                        break
 
-                        total_bytes += sum(mo.get_size() for mo in window_objs)
-
-                        # None-pad the skipped prefix to full length so the
-                        # transfer's ``num_objects_to_skip`` and block-id slicing
-                        # line up unchanged; the None entries are never read.
-                        memory_objs: list[MemoryObj | None] = [None] * skip + list(
-                            window_objs
-                        )
-
-                        transfer_kv_per_object_group(
-                            cache_context,
-                            block_ids_per_group_gpu,
-                            memory_objs,
-                            object_group_id=obj_group_id,
-                            batch_size=cache_context.max_batch_size,
-                            skip_first_n_tokens=skip_first_n_tokens,
-                            direction=lmcache_native.TransferDirection.H2D,
-                            transfer_key=transfer_key,
-                            block_ids_host=gpu_block_ids,
-                        )
-                        # Extend only after the copy is enqueued: on exception,
-                        # read_prefetched_results releases this group's locks
-                        # itself, and a key must not be released twice.
-                        prefetched_keys.extend(in_window_keys)
+                    total_bytes += sum(mo.get_size() for mo in window_objs)
+                    # None-pad the skipped prefix so block-id slicing is unchanged.
+                    memory_objs: list[MemoryObj | None] = [None] * skip + window_objs
+                    transfer_kv_per_object_group(
+                        cache_context,
+                        block_ids_per_group_gpu,
+                        memory_objs,
+                        object_group_id=obj_group_id,
+                        batch_size=cache_context.max_batch_size,
+                        skip_first_n_tokens=skip_first_n_tokens,
+                        direction=lmcache_native.TransferDirection.H2D,
+                        transfer_key=transfer_key,
+                        block_ids_host=gpu_block_ids,
+                    )
+                    prefetched_keys.extend(in_window_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
             finally:
                 event_backend.record_event(event, cache_context.stream)
-                if prefetched_keys:
+                if retained_keys:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
-                        "finish_read_prefetched",
-                        prefetched_keys,
+                        "finish_read_by_owner",
+                        read_completion,
                     )
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size

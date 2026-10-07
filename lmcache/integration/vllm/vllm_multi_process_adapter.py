@@ -1409,8 +1409,9 @@ class LMCacheMPWorkerAdapter:
         self.store_events: dict[str, _IpcEvent] = {}
         self.retrieve_events: dict[str, _IpcEvent] = {}
 
-        # Block IDs that failed due to retrieve timeout
+        # Alternative error reports, drained together by either public getter.
         self.error_block_ids: set[int] = set()
+        self._failed_request_ids: set[str] = set()
 
         # Retrieve request ids dropped by the unhealthy early-return of
         # submit_retrieve_request. get_finished must still report each id
@@ -1830,8 +1831,8 @@ class LMCacheMPWorkerAdapter:
         Submit a KV cache retrieve request to LMCache
 
         When the server is unhealthy the request is not submitted: blocks
-        are flagged via ``error_block_ids`` (vLLM recomputes) and the id is
-        recorded so ``get_finished`` still reports it exactly once.
+        and request IDs are flagged for vLLM recovery, and ``get_finished``
+        still reports the dropped receive exactly once.
 
         Args:
             request_id: The ID of the request
@@ -1846,6 +1847,7 @@ class LMCacheMPWorkerAdapter:
 
         if not self.is_healthy:
             self.error_block_ids.update(op.flat_block_ids)
+            self._failed_request_ids.add(request_id)
             self._dropped_retrieves.add(request_id)
             return
 
@@ -2032,6 +2034,7 @@ class LMCacheMPWorkerAdapter:
             ) in self.retrieve_futures.items():
                 finished_retrieves.add(request_id)
                 self.error_block_ids.update(r_block_ids)
+                self._failed_request_ids.add(request_id)
             self.store_futures.clear()
             self.retrieve_futures.clear()
             self.store_events.clear()
@@ -2086,6 +2089,7 @@ class LMCacheMPWorkerAdapter:
 
             if not r_result:
                 self.error_block_ids.update(r_block_ids)
+                self._failed_request_ids.add(request_id)
                 logger.error(
                     "Something went wrong when processing the "
                     "retrieve request for request_id=%s, result=%s",
@@ -2164,6 +2168,7 @@ class LMCacheMPWorkerAdapter:
             ) in self.retrieve_futures.items():
                 finished_retrieves.add(request_id)
                 self.error_block_ids.update(r_block_ids)
+                self._failed_request_ids.add(request_id)
             self.store_futures.clear()
             self.retrieve_futures.clear()
             self.store_events.clear()
@@ -2215,6 +2220,7 @@ class LMCacheMPWorkerAdapter:
 
             if not r_result:
                 self.error_block_ids.update(r_block_ids)
+                self._failed_request_ids.add(request_id)
                 logger.error(
                     "Something went wrong when processing the "
                     "retrieve request for request_id=%s, result=%s",
@@ -2305,11 +2311,27 @@ class LMCacheMPWorkerAdapter:
         return self.blocks_in_chunk
 
     def get_block_ids_with_load_errors(self) -> set[int]:
-        """
-        Returns the block IDs that failed due to retrieve timeout,
-        then clears the internal set.
+        """Drain failed receive blocks for single-group or legacy recovery.
+
+        Returns:
+            Failed block IDs since the last drain. Also discards the equivalent
+            request-ID report; call only one of the two error getters per poll.
         """
         errors = self.error_block_ids.copy()
+        self.error_block_ids.clear()
+        self._failed_request_ids.clear()
+        return errors
+
+    def get_failed_request_ids(self) -> set[str]:
+        """Drain failed receives for request-level recovery after polling.
+
+        Returns:
+            Failed request IDs, also reported as completed receives by
+            ``get_finished`` or ``get_finished_with_lazy_offload``. Discards
+            the equivalent block-ID report, which multi-group vLLM rejects.
+        """
+        errors = self._failed_request_ids
+        self._failed_request_ids = set()
         self.error_block_ids.clear()
         return errors
 

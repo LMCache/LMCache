@@ -23,7 +23,10 @@ if TYPE_CHECKING:
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.gds_context import get_gds_context
+from lmcache.v1.gpu_connector.gds_context import (
+    deregister_gds_gpu_buffer,
+    register_gds_gpu_buffer,
+)
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_device,
