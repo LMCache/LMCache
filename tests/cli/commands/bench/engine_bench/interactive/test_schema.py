@@ -173,12 +173,15 @@ class TestWorkloadFlagsAreReachable:
         assert workload is not None
         assert "kv-tier-pressure" in [value for value, _ in workload.choices]
 
-    def test_pool_size_is_registered_as_required(self) -> None:
-        """Without this the config path accepts a pool-less config."""
+    def test_pool_size_is_optional_because_it_can_be_derived(self) -> None:
+        """It is sized from the server's L1 capacity when omitted, so it must
+        not be declared required -- that would force it in interactive mode."""
         # First Party
         from lmcache.cli.commands.bench.engine_bench.command import (
             _REQUIRED_WORKLOAD_ARGS,
         )
 
-        required = dict(_REQUIRED_WORKLOAD_ARGS.get("kv-tier-pressure", ()))
-        assert required.get("ktp_pool_size") == "--ktp-pool-size"
+        assert "kv-tier-pressure" not in _REQUIRED_WORKLOAD_ARGS
+        item = get_item("ktp_pool_size")
+        assert item is not None
+        assert not item.required

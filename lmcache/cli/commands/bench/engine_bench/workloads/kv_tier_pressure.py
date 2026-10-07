@@ -42,6 +42,27 @@ chunk-level sharing and intra-request re-reads: 45% was measured at ``F = 1``
 on one stack and 36% at ``F = 2`` on another.  Size the pool with it, then
 read the share that actually occurred from the cache's tier counters.
 
+Requires blending
+-----------------
+This workload assumes **CacheBlend** (``enable_blending``).  Each request
+concatenates a random subset of the pool in random order, so a document sits
+at a different offset in almost every prompt it appears in.  Without
+blending, cache keys are prefix-chained and a connector can only load a
+contiguous hit prefix, so a document is reused only when everything before it
+in the prompt also matches -- which these prompts almost never satisfy.  The
+result is a run that writes a great deal to the storage tier and reads very
+little back, while the *share* of reads served by that tier still looks
+healthy.
+
+That share cannot detect the problem: it is a ratio between two tiers and
+reads much the same whether the cache is serving most of each prompt or
+almost none of it.  Watch **cache-hit tokens per request** instead, which the
+workload reports whenever ``--lmcache-url`` is given.
+
+Without blending, use ``docs_per_request=1``.  Each prompt is then
+``[system prompt][document]``, which is prefix-stable, so repeat draws of the
+same document hit cache normally.
+
 Warm-up
 -------
 Warm-up is a DETERMINISTIC SWEEP, not a dummy request, for two reasons:
@@ -62,7 +83,10 @@ stored exactly once before measurement starts.
 # Standard
 from dataclasses import dataclass
 import asyncio
+import math
 import random
+import urllib.error
+import urllib.request
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
@@ -91,6 +115,7 @@ class KVTierPressureConfig:
     context_length: int = 2560
     system_prompt_length: int = 256
     num_requests: int = 200
+    overflow_factor: float = 2.0
     access_skew: float = 0.0
     vocab_size: int = 8000
     num_inflight_requests: int = 8
@@ -130,6 +155,10 @@ class KVTierPressureConfig:
             )
         if self.num_requests < 1:
             raise ValueError(f"num_requests must be >= 1, got {self.num_requests}")
+        if self.overflow_factor <= 0:
+            raise ValueError(
+                f"overflow_factor must be positive, got {self.overflow_factor}"
+            )
         if self.access_skew < 0:
             raise ValueError(f"access_skew must be >= 0, got {self.access_skew}")
         if self.vocab_size < 1:
@@ -146,7 +175,10 @@ class KVTierPressureConfig:
     @classmethod
     def resolve(
         cls,
-        pool_size: int,
+        pool_size: int = 0,
+        l1_capacity_gb: float = 0.0,
+        tokens_per_gb_kvcache: int = 0,
+        overflow_factor: float = 2.0,
         docs_per_request: int = 16,
         context_length: int = 2560,
         system_prompt_length: int = 256,
@@ -156,13 +188,22 @@ class KVTierPressureConfig:
         num_inflight_requests: int = 8,
         max_output_length: int = 1,
     ) -> "KVTierPressureConfig":
-        """Create a config from the provided parameters.
+        """Create a config, deriving ``pool_size`` when it is not given.
+
+        A pool size of 0 means "size the corpus against the cache": the
+        working set is set to ``overflow_factor`` times the server's actual
+        L1 capacity, which is what makes the storage tier reachable without
+        the caller converting GB to tokens to documents by hand.
 
         Args:
-            pool_size: Total documents in the corpus.  This is what sets the
-                working set, and therefore whether the storage tier is
-                reached; see the module docstring for how to size it against
-                a given cache volume.
+            pool_size: Total documents in the corpus.  0 derives it from
+                ``l1_capacity_gb`` and ``overflow_factor``.
+            l1_capacity_gb: Host-memory capacity reported by the LMCache
+                server.  Only consulted when ``pool_size`` is 0.
+            tokens_per_gb_kvcache: Tokens fitting in 1 GB of KV cache.  Only
+                consulted when ``pool_size`` is 0.
+            overflow_factor: Working set as a multiple of L1.  Values above
+                1.0 force eviction to the storage tier.
             docs_per_request: Documents sampled into each request.  Bounded
                 above by the engine's context limit, not by ``pool_size``.
             context_length: Exact token length of each document.
@@ -186,8 +227,35 @@ class KVTierPressureConfig:
         Raises:
             ValueError: If any value fails validation.
         """
+        resolved_pool_size = pool_size
+        if resolved_pool_size < 1:
+            if l1_capacity_gb <= 0 or tokens_per_gb_kvcache <= 0:
+                raise ValueError(
+                    "pool_size was not given and cannot be derived: no L1 "
+                    "capacity was available from the LMCache server. Pass "
+                    "--ktp-pool-size explicitly, or point --lmcache-url at a "
+                    "running server."
+                )
+            if context_length <= 0:
+                raise ValueError(
+                    f"context_length must be positive to derive pool_size, "
+                    f"got {context_length}"
+                )
+            budget_tokens = overflow_factor * l1_capacity_gb * tokens_per_gb_kvcache
+            resolved_pool_size = max(math.ceil(budget_tokens / context_length), 1)
+            logger.debug(
+                "Derived pool_size=%d from l1_capacity_gb=%.2f, "
+                "tokens_per_gb_kvcache=%d, context_length=%d, "
+                "overflow_factor=%.2f",
+                resolved_pool_size,
+                l1_capacity_gb,
+                tokens_per_gb_kvcache,
+                context_length,
+                overflow_factor,
+            )
         return cls(
-            pool_size=pool_size,
+            pool_size=resolved_pool_size,
+            overflow_factor=overflow_factor,
             docs_per_request=docs_per_request,
             context_length=context_length,
             system_prompt_length=system_prompt_length,
@@ -343,6 +411,58 @@ def sample_requests(
     return requests
 
 
+# Counters that reveal whether the cache is actually being reused.  The L2
+# share of reads cannot do this on its own: it is a ratio between two tiers,
+# so it reads the same whether the cache is serving most of each prompt or
+# almost none of it.  Hit tokens per request is the figure that separates
+# those two cases.
+_HIT_TOKENS = "lmcache_mp_lookup_hit_tokens_total"
+_REQUESTED_TOKENS = "lmcache_mp_lookup_requested_tokens_total"
+
+
+def scrape_lookup_tokens(metrics_url: str) -> dict[str, float]:
+    """Read the lookup hit/requested token counters from an LMCache server.
+
+    Args:
+        metrics_url: Base URL of the LMCache HTTP server, or its ``/metrics``
+            endpoint directly.
+
+    Returns:
+        Mapping with ``hit`` and ``requested`` totals.  Both are 0.0 when the
+        server is unreachable or does not expose the counters, so a missing
+        metrics endpoint degrades the report rather than failing the run.
+    """
+    url = metrics_url.rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        url = f"http://{url}"
+    if not url.endswith("/metrics"):
+        url = f"{url}/metrics"
+    totals = {"hit": 0.0, "requested": 0.0}
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            body = resp.read().decode()
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        logger.debug("Could not scrape %s: %s", url, exc)
+        return totals
+    for line in body.splitlines():
+        if line.startswith("#"):
+            continue
+        name, _, value = line.partition(" ")
+        base = name.split("{", 1)[0]
+        key = (
+            "hit"
+            if base == _HIT_TOKENS
+            else ("requested" if base == _REQUESTED_TOKENS else "")
+        )
+        if not key:
+            continue
+        try:
+            totals[key] += float(value)
+        except ValueError:
+            continue
+    return totals
+
+
 # ---------------------------------------------------------------------------
 # Workload class
 # ---------------------------------------------------------------------------
@@ -366,6 +486,7 @@ class KVTierPressureWorkload(BaseWorkload):
         progress_monitor: ProgressMonitor,
         seed: int = 42,
         model_name: str | None = None,
+        lmcache_url: str = "",
     ) -> None:
         """Build the document pool, the warm-up sweep and the request stream.
 
@@ -377,6 +498,8 @@ class KVTierPressureWorkload(BaseWorkload):
             seed: Random seed for corpus generation and sampling.
             model_name: Model whose tokenizer sizes the documents.  Omitted
                 means auto-detected from the engine.
+            lmcache_url: LMCache HTTP server, used to read cache-hit counters
+                across the measured phase.  Empty disables that reporting.
 
         Raises:
             ValueError: If no tokenizer can be loaded for ``model_name``.
@@ -428,6 +551,8 @@ class KVTierPressureWorkload(BaseWorkload):
         self._semaphore = asyncio.Semaphore(config.num_inflight_requests)
         self._pending_tasks: set[asyncio.Task] = set()
         self._request_index = 0
+        self._lmcache_url = lmcache_url
+        self._lookup_at_boundary: dict[str, float] = {"hit": 0.0, "requested": 0.0}
 
         logger.debug(
             "KVTierPressure: pool=%d docs, %d per request, %d sweep + "
@@ -502,12 +627,49 @@ class KVTierPressureWorkload(BaseWorkload):
             ),
             ("tokens_per_request", "Tokens per request", self._tokens_per_request),
         ]
+        entries.extend(self._hit_token_entries())
         return [
             MetricSection(
                 key="kv_tier_pressure",
                 label="Document pool",
                 entries=entries,
             )
+        ]
+
+    def _hit_token_entries(self) -> list[tuple[str, str, str | int | float]]:
+        """Cache-hit tokens over the measured phase, as counter deltas.
+
+        Reported alongside the pool geometry because the share of reads
+        served by the storage tier cannot distinguish a cache that is
+        serving most of each prompt from one serving almost none of it --
+        it is a ratio between tiers, and reads much the same either way.
+        Hit tokens per request is the figure that separates them.
+
+        Returns:
+            Entries to append to the metric section.  Empty when no LMCache
+            URL was supplied or the counters were unavailable.
+        """
+        if not self._lmcache_url:
+            return []
+        after = scrape_lookup_tokens(self._lmcache_url)
+        hit = after["hit"] - self._lookup_at_boundary["hit"]
+        requested = after["requested"] - self._lookup_at_boundary["requested"]
+        if requested <= 0:
+            return []
+        per_request = hit / max(len(self._measured_groups), 1)
+        return [
+            ("hit_tokens_total", "Cache-hit tokens", int(hit)),
+            ("requested_tokens_total", "Tokens looked up", int(requested)),
+            (
+                "hit_tokens_per_request",
+                "Cache-hit tokens per request",
+                round(per_request, 1),
+            ),
+            (
+                "hit_token_rate_pct",
+                "Prompt served from cache (%)",
+                round(100.0 * hit / requested, 2),
+            ),
         ]
 
     # ------------------------------------------------------------------
@@ -562,6 +724,10 @@ class KVTierPressureWorkload(BaseWorkload):
 
         await asyncio.gather(*[send(i, g) for i, g in enumerate(self._sweep_groups)])
         self._progress_monitor.log_message("Warm-up sweep complete")
+        # Snapshot here, not at construction: everything the sweep stored is
+        # warm-up, and counting it would inflate the measured hit rate.
+        if self._lmcache_url:
+            self._lookup_at_boundary = scrape_lookup_tokens(self._lmcache_url)
 
     # ------------------------------------------------------------------
     # Benchmark dispatch

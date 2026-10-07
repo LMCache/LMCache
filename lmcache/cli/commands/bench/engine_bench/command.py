@@ -60,7 +60,6 @@ _LDQA_MAX_OUTPUT_LENGTH_DEFAULT = 128
 # general missing-argument path gives --no-interactive, the TUI, and --config
 # replay consistent handling.
 _REQUIRED_WORKLOAD_ARGS: dict[str, tuple[tuple[str, str], ...]] = {
-    "kv-tier-pressure": (("ktp_pool_size", "--ktp-pool-size"),),
     "rag-qa-quality": (("rag_dataset", "--rag-dataset"),),
 }
 
@@ -239,10 +238,21 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
     # --- KV-tier-pressure workload args ---
     ktp_group = parser.add_argument_group("kv-tier-pressure workload options")
     ktp_group.add_argument(
+        "--ktp-overflow-factor",
+        type=float,
+        default=2.0,
+        help="Working set as a multiple of the LMCache server's L1 capacity "
+        "(default: 2.0). Used only when --ktp-pool-size is omitted: the pool "
+        "is then sized from the capacity reported by --lmcache-url, so you "
+        "do not have to convert GB to tokens to documents yourself. Above "
+        "1.0 forces eviction to the storage tier.",
+    )
+    ktp_group.add_argument(
         "--ktp-pool-size",
         type=int,
         default=None,
-        help="Total documents in the corpus. Required for this workload. "
+        help="Total documents in the corpus. Derived from the server's L1 "
+        "capacity and --ktp-overflow-factor when omitted. "
         "This sets the working "
         "set -- pool_size x --ktp-context-length tokens -- independently of "
         "how large one prompt is, and only what exceeds L1 can reach the "

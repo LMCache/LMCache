@@ -20,6 +20,7 @@ from lmcache.cli.commands.bench.engine_bench.workloads.kv_tier_pressure import (
     KVTierPressureConfig,
     KVTierPressureWorkload,
     sample_requests,
+    scrape_lookup_tokens,
     warmup_sweep,
 )
 
@@ -74,26 +75,56 @@ class TestKVTierPressureConfig:
 
 
 class TestResolve:
-    def test_passes_values_through(self) -> None:
+    def test_explicit_pool_size_wins(self) -> None:
         cfg = KVTierPressureConfig.resolve(
-            pool_size=80,
-            docs_per_request=4,
-            context_length=2500,
-            num_requests=50,
+            pool_size=80, l1_capacity_gb=999.0, tokens_per_gb_kvcache=9999
         )
         assert cfg.pool_size == 80
-        assert cfg.docs_per_request == 4
-        assert cfg.context_length == 2500
-        assert cfg.num_requests == 50
 
-    def test_pool_size_is_required(self) -> None:
-        """There is no derivation any more: the caller must size the pool."""
-        with pytest.raises(TypeError):
-            KVTierPressureConfig.resolve()  # type: ignore[call-arg]
+    def test_derives_from_queried_l1_capacity(self) -> None:
+        """2.0 x 100 GB x 1000 tok/GB / 2500 tok = 80 documents."""
+        cfg = KVTierPressureConfig.resolve(
+            l1_capacity_gb=100.0,
+            tokens_per_gb_kvcache=1000,
+            context_length=2500,
+            overflow_factor=2.0,
+        )
+        assert cfg.pool_size == 80
 
-    def test_resolve_validates(self) -> None:
-        with pytest.raises(ValueError, match="pool_size must be >= 1"):
-            KVTierPressureConfig.resolve(pool_size=0)
+    def test_overflow_factor_scales_the_pool(self) -> None:
+        def pool_for(factor: float) -> int:
+            return KVTierPressureConfig.resolve(
+                l1_capacity_gb=100.0,
+                tokens_per_gb_kvcache=1000,
+                context_length=2500,
+                overflow_factor=factor,
+            ).pool_size
+
+        assert pool_for(1.0) == 40
+        assert pool_for(2.0) == 80
+        assert pool_for(4.0) == 160
+
+    def test_pool_is_rounded_up(self) -> None:
+        cfg = KVTierPressureConfig.resolve(
+            l1_capacity_gb=1.0,
+            tokens_per_gb_kvcache=1000,
+            context_length=300,
+            overflow_factor=1.0,
+            docs_per_request=1,
+        )
+        # ceil(1000 / 300) = 4, never 3: rounding down would under-fill L1
+        assert cfg.pool_size == 4
+
+    def test_errors_when_neither_pool_nor_capacity_available(self) -> None:
+        """Silently running a pool of 1 would do no storage I/O at all."""
+        with pytest.raises(ValueError, match="cannot be derived"):
+            KVTierPressureConfig.resolve()
+
+    def test_rejects_non_positive_overflow_factor(self) -> None:
+        with pytest.raises(ValueError, match="overflow_factor must be positive"):
+            KVTierPressureConfig.resolve(
+                pool_size=10, docs_per_request=1, overflow_factor=0.0
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -484,3 +515,92 @@ class TestPermutatorEquivalence:
         sampler, _ = self._pair()
         assert len(sampler._sweep_groups) == 1
         assert sorted(sampler._sweep_groups[0]) == list(range(self.N))
+
+
+class TestScrapeLookupTokens:
+    """Parsing the counters that reveal whether the cache is being reused."""
+
+    BODY = (
+        "# HELP lmcache_mp_lookup_hit_tokens_total hits\n"
+        "# TYPE lmcache_mp_lookup_hit_tokens_total counter\n"
+        "lmcache_mp_lookup_hit_tokens_total 1234.0\n"
+        'lmcache_mp_lookup_requested_tokens_total{instance="a"} 4000.0\n'
+        'lmcache_mp_lookup_requested_tokens_total{instance="b"} 1000.0\n'
+        "lmcache_mp_l1_read_chunks_total 99.0\n"
+    )
+
+    def _scrape(self, body: str) -> dict[str, float]:
+        payload = MagicMock()
+        payload.read.return_value = body.encode()
+        payload.__enter__ = lambda self_: payload
+        payload.__exit__ = lambda self_, *a: False
+        with patch.object(ktp.urllib.request, "urlopen", return_value=payload):
+            return scrape_lookup_tokens("http://localhost:8080")
+
+    def test_reads_both_counters(self) -> None:
+        totals = self._scrape(self.BODY)
+        assert totals["hit"] == 1234.0
+
+    def test_sums_labelled_series(self) -> None:
+        """Counters arrive per-instance; the total is the sum."""
+        assert self._scrape(self.BODY)["requested"] == 5000.0
+
+    def test_ignores_unrelated_counters(self) -> None:
+        totals = self._scrape(self.BODY)
+        assert set(totals) == {"hit", "requested"}
+
+    def test_unreachable_server_degrades_quietly(self) -> None:
+        """A missing metrics endpoint must not fail the benchmark."""
+        with patch.object(
+            ktp.urllib.request, "urlopen", side_effect=OSError("refused")
+        ):
+            assert scrape_lookup_tokens("http://localhost:9999") == {
+                "hit": 0.0,
+                "requested": 0.0,
+            }
+
+    def test_absent_counters_give_zero(self) -> None:
+        assert self._scrape("lmcache_mp_l1_read_chunks_total 7.0\n") == {
+            "hit": 0.0,
+            "requested": 0.0,
+        }
+
+
+class TestHitTokenReporting:
+    """The metric that distinguishes a reusing cache from a broken one."""
+
+    def test_absent_without_an_lmcache_url(self) -> None:
+        w, *_ = _make_workload()
+        keys = {k for k, _, _ in w.extra_metric_sections()[0].entries}
+        assert "hit_tokens_per_request" not in keys
+
+    def test_reported_as_a_measured_phase_delta(self) -> None:
+        """Warm-up stores must not count toward the measured hit rate."""
+        cfg = _make_config(pool_size=12, docs_per_request=3, num_requests=10)
+        tokenizer = make_fake_tokenizer()
+        sender = _make_mock_sender()
+        with patch.object(ktp, "try_load_tokenizer", return_value=tokenizer):
+            w = KVTierPressureWorkload(
+                cfg,
+                sender,
+                MagicMock(),
+                MagicMock(),
+                seed=42,
+                model_name="fake-model",
+                lmcache_url="http://localhost:8080",
+            )
+        # boundary snapshot, then end-of-run totals
+        with patch.object(
+            ktp,
+            "scrape_lookup_tokens",
+            side_effect=[
+                {"hit": 1000.0, "requested": 2000.0},
+                {"hit": 1800.0, "requested": 4000.0},
+            ],
+        ):
+            asyncio.run(w.warmup())
+            entries = dict((k, v) for k, _, v in w.extra_metric_sections()[0].entries)
+        assert entries["hit_tokens_total"] == 800
+        assert entries["requested_tokens_total"] == 2000
+        assert entries["hit_tokens_per_request"] == pytest.approx(80.0)
+        assert entries["hit_token_rate_pct"] == pytest.approx(40.0)

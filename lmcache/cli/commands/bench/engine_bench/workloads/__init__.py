@@ -12,13 +12,17 @@ import argparse
 import os
 
 # First Party
-from lmcache.cli.commands.bench.engine_bench.config import EngineBenchConfig
+from lmcache.cli.commands.bench.engine_bench.config import (
+    EngineBenchConfig,
+    resolve_l1_capacity_gb,
+)
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
 from lmcache.cli.commands.bench.engine_bench.request_sender import (
     RequestSender,
 )
 from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
 from lmcache.cli.commands.bench.engine_bench.workloads.base import BaseWorkload
+from lmcache.logging import init_logger
 from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_permutator import (
     LongDocPermutatorConfig,
     LongDocPermutatorWorkload,
@@ -71,6 +75,8 @@ __all__ = [
     "parse_template_kwargs",
     "validate_max_output_length_supported",
 ]
+
+logger = init_logger(__name__)
 
 _WORKLOAD_NAMES = (
     "kv-tier-pressure",
@@ -159,8 +165,21 @@ def create_workload(
         )
 
     if config.workload == "kv-tier-pressure":
+        # Query the server for its real L1 capacity so the pool can be sized
+        # against the cache rather than against a figure the user retyped.
+        # Only needed when no explicit pool size was given.
+        lmcache_url = getattr(args, "lmcache_url", None) or ""
+        l1_capacity_gb = 0.0
+        if not args.ktp_pool_size and lmcache_url:
+            try:
+                l1_capacity_gb = resolve_l1_capacity_gb(lmcache_url)
+            except RuntimeError as exc:
+                logger.warning("Could not read L1 capacity: %s", exc)
         ktp_workload_config = KVTierPressureConfig.resolve(
-            pool_size=args.ktp_pool_size,
+            pool_size=args.ktp_pool_size or 0,
+            l1_capacity_gb=l1_capacity_gb,
+            tokens_per_gb_kvcache=config.tokens_per_gb_kvcache,
+            overflow_factor=args.ktp_overflow_factor,
             docs_per_request=args.ktp_docs_per_request,
             context_length=args.ktp_context_length,
             system_prompt_length=args.ktp_system_prompt_length,
@@ -177,6 +196,7 @@ def create_workload(
             progress_monitor=progress_monitor,
             seed=config.seed,
             model_name=config.model,
+            lmcache_url=lmcache_url,
         )
 
     if config.workload == "long-doc-qa":

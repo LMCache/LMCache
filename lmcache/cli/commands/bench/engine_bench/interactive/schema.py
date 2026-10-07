@@ -195,20 +195,6 @@ ALL_ITEMS: list[ConfigItem] = [
         condition=_workload_is("rag-qa-quality"),
         phase=PHASE_REQUIRED,
     ),
-    ConfigItem(
-        key="ktp_pool_size",
-        display_name="Document pool size",
-        description=(
-            "Total documents in the corpus. Sets the working set "
-            "(pool size x document length), and therefore whether the "
-            "storage tier is reached at all."
-        ),
-        input_type="int",
-        default=None,
-        required=True,
-        condition=_workload_is("kv-tier-pressure"),
-        phase=PHASE_REQUIRED,
-    ),
     # ── Phase 2: General ──────────────────────────────────────────────
     ConfigItem(
         key="model",
@@ -254,6 +240,33 @@ ALL_ITEMS: list[ConfigItem] = [
         phase=PHASE_GENERAL,
     ),
     # ── Phase 3: kv-tier-pressure ────────────────────────────────────
+    ConfigItem(
+        key="ktp_pool_size",
+        display_name="Document pool size",
+        description=(
+            "Total documents in the corpus. Sets the working set "
+            "(pool size x document length), and therefore whether the "
+            "storage tier is reached. Leave empty to size it from the "
+            "LMCache server's L1 capacity and the overflow factor."
+        ),
+        input_type="int",
+        default=None,
+        condition=_workload_is("kv-tier-pressure"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ktp_overflow_factor",
+        display_name="Overflow factor",
+        description=(
+            "Working set as a multiple of the server's L1 capacity. Used "
+            "only when no pool size is given. Above 1.0 forces eviction to "
+            "the storage tier."
+        ),
+        input_type="float",
+        default=2.0,
+        condition=_workload_is("kv-tier-pressure"),
+        phase=PHASE_WORKLOAD,
+    ),
     ConfigItem(
         key="ktp_docs_per_request",
         display_name="Documents per request",

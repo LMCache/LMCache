@@ -410,10 +410,28 @@ cache and samples a subset into each request:
 
    [System Prompt] + [Doc_a] + [Doc_b] + ... + [Doc_k]   (k of D, k << D)
 
+.. important::
+
+   This workload assumes **CacheBlend** (``enable_blending``). Each request
+   concatenates a random subset of the pool in random order, so without
+   blending a document is reused only when everything before it in the prompt
+   also matches — which these prompts almost never satisfy. Such a run writes
+   a great deal to storage and reads very little back, while the *share* of
+   reads served by storage still looks healthy.
+
+   Watch **cache-hit tokens per request**, reported whenever ``--lmcache-url``
+   is given, rather than the storage read share — the share is a ratio between
+   tiers and cannot tell the two cases apart.
+
+   Without blending, use ``--ktp-docs-per-request 1``. Each prompt is then
+   ``[system prompt][document]``, which is prefix-stable and reuses normally.
+
 ``--ktp-pool-size`` is what decides whether the storage tier is reached: the
 working set is ``pool_size x --ktp-context-length`` tokens, and only what
-exceeds L1 can be evicted and read back. To overflow a cache of ``V`` GB by a
-factor of ``F``:
+exceeds cache capacity can be evicted and read back. Omit it and the pool is
+sized automatically from the capacity the LMCache server reports via
+``--lmcache-url``, multiplied by ``--ktp-overflow-factor``. To size it by hand
+against a cache of ``V`` GB with a factor of ``F``:
 
 .. code-block:: text
 
@@ -444,9 +462,15 @@ measured across a cold start describes run length, not the system.
      - Default
      - Description
    * - ``--ktp-pool-size``
-     - *required*, no default
+     - derived
      - Total documents in the corpus. Sets the working set, and therefore
-       whether the storage tier is reached. See the sizing formula above.
+       whether the storage tier is reached. Derived from the server's cache
+       capacity and ``--ktp-overflow-factor`` when omitted.
+   * - ``--ktp-overflow-factor``
+     - 2.0
+     - Working set as a multiple of the server's cache capacity. Used only
+       when ``--ktp-pool-size`` is omitted. Above 1.0 forces eviction to
+       storage.
    * - ``--ktp-docs-per-request``
      - 16
      - Documents sampled into each request. Bounded by the engine's context
@@ -1655,7 +1679,7 @@ Example for the local-filesystem adapter:
    }
 
 See the source under ``lmcache/v1/distributed/l2_adapters/`` for the
-full list of adapter types and their accepted fiektp.
+full list of adapter types and their accepted fields.
 
 
 Example output

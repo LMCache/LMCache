@@ -177,6 +177,42 @@ def _find_model_meta(
     )
 
 
+def resolve_l1_capacity_gb(lmcache_url: str) -> float:
+    """Query the LMCache server for the configured host-memory capacity.
+
+    Reads ``storage_manager.l1_manager.memory_total_bytes`` from ``/status``.
+    Workloads that size themselves against the cache need the real capacity,
+    not a figure the user retyped; a mistyped value silently produces a
+    working set that never exceeds L1, and a run that does no L2 I/O at all.
+
+    Args:
+        lmcache_url: URL of the LMCache HTTP server.
+
+    Returns:
+        Configured L1 capacity in GB.
+
+    Raises:
+        RuntimeError: If the server is unreachable, or ``/status`` does not
+            report an L1 capacity.
+    """
+    data = _fetch_lmcache_status(lmcache_url)
+    total = (
+        data.get("storage_manager", {}).get("l1_manager", {}).get("memory_total_bytes")
+    )
+    if total is None:
+        # Older servers report it directly on storage_manager.
+        total = data.get("storage_manager", {}).get("memory_total_bytes")
+    if not isinstance(total, (int, float)) or total <= 0:
+        raise RuntimeError(
+            f"LMCache at {lmcache_url} did not report an L1 capacity "
+            f"(storage_manager.l1_manager.memory_total_bytes). Pass an "
+            f"explicit pool size instead."
+        )
+    capacity_gb = float(total) / (1024**3)
+    logger.debug("Resolved L1 capacity %.2f GB from %s", capacity_gb, lmcache_url)
+    return capacity_gb
+
+
 def resolve_tokens_per_gb(lmcache_url: str, model_name: str) -> int:
     """Query the LMCache server and compute tokens per GB of KV cache.
 
