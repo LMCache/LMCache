@@ -122,8 +122,8 @@ def test_key_directory_gauges_report_the_registered_directory() -> None:
     points = _by_tier(read_values(reader))
     expected_placements = {"l1": 2, "l2": 1}
     expected_bytes = {"l1": 200, "l2": 400}
-    assert points[observability.KEY_DIRECTORY_PLACEMENTS] == expected_placements
-    assert points[observability.KEY_DIRECTORY_PLACEMENT_BYTES] == expected_bytes
+    assert points["lmcache_coordinator.key_directory.placements"] == expected_placements
+    assert points["lmcache_coordinator.key_directory.placement_bytes"] == expected_bytes
 
 
 def test_key_directory_gauges_keep_the_pre_rename_names_for_one_release() -> None:
@@ -149,4 +149,4 @@ def test_key_directory_gauges_follow_later_changes() -> None:
     directory.consume(_batch(tier=Tier.L1, keys=[_key(1)], size_bytes=100, seq=1))
 
     points = _by_tier(read_values(reader))
-    assert points[observability.KEY_DIRECTORY_PLACEMENTS] == {"l1": 1, "l2": 0}
+    assert points["lmcache_coordinator.key_directory.placements"] == {"l1": 1, "l2": 0}
