@@ -16,14 +16,14 @@ from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
+from lmcache.v1.multiprocess.ext_server_module import (
+    TransportServiceRegistrar,
+    register_grpc_services,
+)
 from lmcache.v1.multiprocess.request_handler import (
     BoundRequestHandler,
     HandlerType,
     iter_request_handlers,
-)
-from lmcache.v1.multiprocess.server_module import (
-    TransportServiceRegistrar,
-    register_grpc_services,
 )
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target

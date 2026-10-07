@@ -29,6 +29,7 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
 from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
@@ -49,7 +50,6 @@ from lmcache.v1.multiprocess.request_handler import (
     iter_request_handlers,
     request_handler,
 )
-from lmcache.v1.multiprocess.server_module import ServerModuleRouter
 from lmcache.v1.multiprocess.transport.grpc_impl import server as grpc_server_module
 from lmcache.v1.multiprocess.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
@@ -326,7 +326,7 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
         EngineDrivenTransferModule,
         QStoreModule,
         BlendModule,
-        ServerModuleRouter,
+        ExtServerModuleRouter,
     )
     handlers = {
         registered.operation: registered.handler

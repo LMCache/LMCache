@@ -13,12 +13,12 @@ import zmq
 # First Party
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
-from lmcache.v1.multiprocess.request_handler import HandlerType, iter_request_handlers
-from lmcache.v1.multiprocess.rpc import RpcOperation
-from lmcache.v1.multiprocess.server_module import (
+from lmcache.v1.multiprocess.ext_server_module import (
     TransportServiceRegistrar,
     register_zmq_services,
 )
+from lmcache.v1.multiprocess.request_handler import HandlerType, iter_request_handlers
+from lmcache.v1.multiprocess.rpc import RpcOperation
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueServer
 
 

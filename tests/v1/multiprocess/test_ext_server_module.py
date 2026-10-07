@@ -13,12 +13,10 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
-from lmcache.v1.multiprocess.request_handler import iter_request_handlers
-from lmcache.v1.multiprocess.server_module import (
-    ServerModuleBuildContext,
-    ServerModuleComponents,
-    ServerModuleSpec,
+from lmcache.v1.multiprocess.ext_server_module import (
+    ExtServerModuleBuildContext,
+    ExtServerModuleComponents,
+    ExtServerModuleSpec,
     build_server_module_router,
     load_server_module_components,
     load_server_modules,
@@ -27,6 +25,8 @@ from lmcache.v1.multiprocess.server_module import (
     register_zmq_services,
     server_module_handler,
 )
+from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
+from lmcache.v1.multiprocess.request_handler import iter_request_handlers
 
 
 class _FakeLMCacheDriven:
@@ -134,9 +134,9 @@ def test_load_server_modules_passes_context_and_accumulates_modules(
     built_module = MagicMock(name="built_module")
     first_plugin = _FakePluginModule(ctx)
     second_plugin = _FakePluginModule(ctx)
-    seen_contexts: list[ServerModuleBuildContext] = []
+    seen_contexts: list[ExtServerModuleBuildContext] = []
 
-    def factory(build_context: ServerModuleBuildContext):
+    def factory(build_context: ExtServerModuleBuildContext):
         seen_contexts.append(build_context)
         if len(seen_contexts) == 1:
             return first_plugin
@@ -144,8 +144,8 @@ def test_load_server_modules_passes_context_and_accumulates_modules(
 
     module_name = _install_fake_factory(monkeypatch, factory)
     specs = [
-        ServerModuleSpec(module_name, config={"name": "first"}),
-        ServerModuleSpec(module_name, config={"name": "second"}),
+        ExtServerModuleSpec(module_name, config={"name": "first"}),
+        ExtServerModuleSpec(module_name, config={"name": "second"}),
     ]
 
     modules = load_server_modules(
@@ -171,7 +171,7 @@ def test_load_server_modules_rejects_non_module_return(
 
     with pytest.raises(TypeError, match="must return an EngineModule"):
         load_server_modules(
-            [ServerModuleSpec(module_name)],
+            [ExtServerModuleSpec(module_name)],
             server_context=MagicMock(name="ctx"),
             mp_config=MPServerConfig(),
             coordinator_config=MagicMock(url=""),
@@ -185,16 +185,16 @@ def test_load_server_module_components_accepts_service_only_return(
     grpc_registrar = MagicMock(name="grpc_registrar")
     zmq_registrar = MagicMock(name="zmq_registrar")
 
-    def factory(build_context: ServerModuleBuildContext):
+    def factory(build_context: ExtServerModuleBuildContext):
         assert build_context.config == {"mode": "service-only"}
-        return ServerModuleComponents(
+        return ExtServerModuleComponents(
             grpc_service_registrars=[grpc_registrar],
             zmq_service_registrars=[zmq_registrar],
         )
 
     module_name = _install_fake_factory(monkeypatch, factory)
     components = load_server_module_components(
-        [ServerModuleSpec(module_name, config={"mode": "service-only"})],
+        [ExtServerModuleSpec(module_name, config={"mode": "service-only"})],
         server_context=MagicMock(name="ctx"),
         mp_config=MPServerConfig(),
         coordinator_config=MagicMock(url=""),
@@ -211,14 +211,14 @@ def test_load_server_module_components_rejects_non_callable_service_registrar(
 ) -> None:
     module_name = _install_fake_factory(
         monkeypatch,
-        lambda _: ServerModuleComponents(
+        lambda _: ExtServerModuleComponents(
             grpc_service_registrars=[cast(Any, "not-callable")]
         ),
     )
 
     with pytest.raises(TypeError, match="grpc_service_registrars"):
         load_server_module_components(
-            [ServerModuleSpec(module_name)],
+            [ExtServerModuleSpec(module_name)],
             server_context=MagicMock(name="ctx"),
             mp_config=MPServerConfig(),
             coordinator_config=MagicMock(url=""),
@@ -304,7 +304,7 @@ def test_build_modules_loads_plugin_and_registers_liveness_target(
     ctx = MagicMock(name="ctx")
     plugin_module = _FakePluginModule(ctx)
 
-    def factory(build_context: ServerModuleBuildContext):
+    def factory(build_context: ExtServerModuleBuildContext):
         assert build_context.server_context is ctx
         return plugin_module
 
@@ -318,7 +318,7 @@ def test_build_modules_loads_plugin_and_registers_liveness_target(
 
     modules = server_mod._build_modules(
         ctx,
-        MPServerConfig(server_modules=[ServerModuleSpec(module_name)]),
+        MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
         MagicMock(url=""),
     )
 
@@ -332,7 +332,7 @@ def test_build_modules_adds_server_module_router(
     ctx = MagicMock(name="ctx")
     plugin_module = _FakePluginProtocolModule(ctx)
 
-    def factory(build_context: ServerModuleBuildContext):
+    def factory(build_context: ExtServerModuleBuildContext):
         assert build_context.server_context is ctx
         return plugin_module
 
@@ -345,7 +345,7 @@ def test_build_modules_adds_server_module_router(
 
     modules = server_mod._build_modules(
         ctx,
-        MPServerConfig(server_modules=[ServerModuleSpec(module_name)]),
+        MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
         MagicMock(url=""),
     )
 
@@ -360,9 +360,9 @@ def test_build_server_components_collects_transport_service_registrars(
     grpc_registrar = MagicMock(name="grpc_registrar")
     zmq_registrar = MagicMock(name="zmq_registrar")
 
-    def factory(build_context: ServerModuleBuildContext):
+    def factory(build_context: ExtServerModuleBuildContext):
         assert build_context.server_context is ctx
-        return ServerModuleComponents(
+        return ExtServerModuleComponents(
             grpc_service_registrars=[grpc_registrar],
             zmq_service_registrars=[zmq_registrar],
         )
@@ -376,7 +376,7 @@ def test_build_server_components_collects_transport_service_registrars(
 
     components = server_mod._build_server_components(
         ctx,
-        MPServerConfig(server_modules=[ServerModuleSpec(module_name)]),
+        MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
         MagicMock(url=""),
     )
 

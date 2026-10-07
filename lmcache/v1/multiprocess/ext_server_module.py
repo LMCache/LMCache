@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-ServerModuleMethod = Callable[[bytes], bytes]
+ExtServerModuleMethod = Callable[[bytes], bytes]
 TransportServiceRegistrar = Callable[[Any], None]
 _ServerModuleDecorated = TypeVar(
     "_ServerModuleDecorated",
@@ -40,7 +40,7 @@ _ZMQ_SERVICE_REGISTRAR = "register_zmq_services"
 
 
 @dataclass(frozen=True)
-class ServerModuleSpec:
+class ExtServerModuleSpec:
     """Configuration for one dynamically loaded server-module factory.
 
     Args:
@@ -48,7 +48,7 @@ class ServerModuleSpec:
         factory_name: Name of the callable inside ``module_path``. Defaults to
             ``build_server_modules``.
         config: Plugin-specific JSON-compatible configuration passed to the
-            factory in :class:`ServerModuleBuildContext`.
+            factory in :class:`ExtServerModuleBuildContext`.
     """
 
     module_path: str
@@ -56,7 +56,7 @@ class ServerModuleSpec:
     config: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ServerModuleSpec":
+    def from_dict(cls, data: dict[str, Any]) -> "ExtServerModuleSpec":
         """Create a spec from a parsed ``--server-module`` JSON object.
 
         Args:
@@ -64,7 +64,7 @@ class ServerModuleSpec:
                 ``factory_name`` / ``config`` fields.
 
         Returns:
-            A validated :class:`ServerModuleSpec`.
+            A validated :class:`ExtServerModuleSpec`.
 
         Raises:
             ValueError: If the object has invalid field types.
@@ -89,7 +89,7 @@ class ServerModuleSpec:
 
 
 @dataclass(frozen=True)
-class ServerModuleBuildContext:
+class ExtServerModuleBuildContext:
     """Context passed to an out-of-tree server-module factory.
 
     Args:
@@ -99,7 +99,7 @@ class ServerModuleBuildContext:
         coordinator_config: Parsed coordinator configuration.
         modules: Built-in modules already assembled before this plugin runs.
         config: Plugin-specific JSON-compatible configuration from the
-            corresponding :class:`ServerModuleSpec`.
+            corresponding :class:`ExtServerModuleSpec`.
     """
 
     server_context: MPCacheServerContext
@@ -110,7 +110,7 @@ class ServerModuleBuildContext:
 
 
 @dataclass(frozen=True)
-class ServerModuleComponents:
+class ExtServerModuleComponents:
     """Out-of-tree server extension components returned by a factory.
 
     Args:
@@ -127,14 +127,14 @@ class ServerModuleComponents:
     zmq_service_registrars: Sequence[TransportServiceRegistrar] = ()
 
 
-ServerModuleFactory = Callable[
-    [ServerModuleBuildContext],
-    EngineModule | Sequence[EngineModule] | ServerModuleComponents | None,
+ExtServerModuleFactory = Callable[
+    [ExtServerModuleBuildContext],
+    EngineModule | Sequence[EngineModule] | ExtServerModuleComponents | None,
 ]
 
 
 @dataclass(frozen=True)
-class ServerModuleHandlerOptions:
+class ExtServerModuleHandlerOptions:
     """Metadata for one namespaced server-module extension handler.
 
     Args:
@@ -145,11 +145,11 @@ class ServerModuleHandlerOptions:
 
 
 @dataclass(frozen=True)
-class BoundServerModuleHandler:
+class ExtServerModuleBoundHandler:
     """Pair a bound extension handler with its namespaced method."""
 
     method: str
-    handler: ServerModuleMethod
+    handler: ExtServerModuleMethod
 
 
 def server_module_handler(
@@ -174,7 +174,7 @@ def server_module_handler(
     if not method or "." not in method:
         raise ValueError("server module handler method must be namespaced")
 
-    options = ServerModuleHandlerOptions(method=method)
+    options = ExtServerModuleHandlerOptions(method=method)
 
     def decorate(func: _ServerModuleDecorated) -> _ServerModuleDecorated:
         setattr(func, _SERVER_MODULE_HANDLER_ATTR, options)
@@ -183,13 +183,13 @@ def server_module_handler(
     return decorate
 
 
-class ServerModuleRouter:
+class ExtServerModuleRouter:
     """Dispatch the stable server-module envelope to extension handlers."""
 
     def __init__(
         self,
         ctx: MPCacheServerContext,
-        handlers: Sequence[BoundServerModuleHandler],
+        handlers: Sequence[ExtServerModuleBoundHandler],
     ) -> None:
         self._ctx = ctx
         self._handlers = {handler.method: handler.handler for handler in handlers}
@@ -249,7 +249,7 @@ class ServerModuleRouter:
         return ServerModuleCallResponse(success=True, payload=payload, error="")
 
 
-def parse_server_module_specs(raw_specs: Sequence[str]) -> list[ServerModuleSpec]:
+def parse_server_module_specs(raw_specs: Sequence[str]) -> list[ExtServerModuleSpec]:
     """Parse ``--server-module`` JSON strings into validated specs.
 
     Args:
@@ -263,7 +263,7 @@ def parse_server_module_specs(raw_specs: Sequence[str]) -> list[ServerModuleSpec
     Raises:
         ValueError: If JSON parsing fails or any entry has an invalid shape.
     """
-    specs: list[ServerModuleSpec] = []
+    specs: list[ExtServerModuleSpec] = []
     for raw_spec in raw_specs:
         try:
             parsed = json.loads(raw_spec)
@@ -274,12 +274,12 @@ def parse_server_module_specs(raw_specs: Sequence[str]) -> list[ServerModuleSpec
         for entry in entries:
             if not isinstance(entry, dict):
                 raise ValueError("--server-module entries must be JSON objects")
-            specs.append(ServerModuleSpec.from_dict(entry))
+            specs.append(ExtServerModuleSpec.from_dict(entry))
     return specs
 
 
 def load_server_modules(
-    specs: Sequence[ServerModuleSpec],
+    specs: Sequence[ExtServerModuleSpec],
     *,
     server_context: MPCacheServerContext,
     mp_config: MPServerConfig,
@@ -315,13 +315,13 @@ def load_server_modules(
 
 
 def load_server_module_components(
-    specs: Sequence[ServerModuleSpec],
+    specs: Sequence[ExtServerModuleSpec],
     *,
     server_context: MPCacheServerContext,
     mp_config: MPServerConfig,
     coordinator_config: CoordinatorConfig,
     built_modules: Sequence[EngineModule],
-) -> ServerModuleComponents:
+) -> ExtServerModuleComponents:
     """Load out-of-tree modules and service registrars from factories.
 
     Args:
@@ -352,7 +352,7 @@ def load_server_module_components(
                 % (spec.module_path, spec.factory_name)
             )
 
-        build_context = ServerModuleBuildContext(
+        build_context = ExtServerModuleBuildContext(
             server_context=server_context,
             mp_config=mp_config,
             coordinator_config=coordinator_config,
@@ -363,7 +363,7 @@ def load_server_module_components(
         loaded.extend(components.modules)
         grpc_service_registrars.extend(components.grpc_service_registrars)
         zmq_service_registrars.extend(components.zmq_service_registrars)
-    return ServerModuleComponents(
+    return ExtServerModuleComponents(
         modules=tuple(loaded),
         grpc_service_registrars=tuple(grpc_service_registrars),
         zmq_service_registrars=tuple(zmq_service_registrars),
@@ -373,7 +373,7 @@ def load_server_module_components(
 def build_server_module_router(
     ctx: MPCacheServerContext,
     modules: Sequence[EngineModule],
-) -> ServerModuleRouter | None:
+) -> ExtServerModuleRouter | None:
     """Build a dispatcher for extension handlers exposed by modules.
 
     Args:
@@ -387,7 +387,7 @@ def build_server_module_router(
     Raises:
         ValueError: If two modules register the same extension method.
     """
-    handlers_by_method: dict[str, BoundServerModuleHandler] = {}
+    handlers_by_method: dict[str, ExtServerModuleBoundHandler] = {}
     for module in modules:
         for handler in iter_server_module_handlers(module):
             if handler.method in handlers_by_method:
@@ -396,7 +396,7 @@ def build_server_module_router(
 
     if not handlers_by_method:
         return None
-    return ServerModuleRouter(ctx, tuple(handlers_by_method.values()))
+    return ExtServerModuleRouter(ctx, tuple(handlers_by_method.values()))
 
 
 def register_grpc_services(
@@ -441,7 +441,9 @@ def register_zmq_services(
     _register_transport_services(modules, server, _ZMQ_SERVICE_REGISTRAR)
 
 
-def iter_server_module_handlers(module: object) -> tuple[BoundServerModuleHandler, ...]:
+def iter_server_module_handlers(
+    module: object,
+) -> tuple[ExtServerModuleBoundHandler, ...]:
     """Discover namespaced extension handlers exposed by a module.
 
     Args:
@@ -450,20 +452,20 @@ def iter_server_module_handlers(module: object) -> tuple[BoundServerModuleHandle
     Returns:
         Bound extension handlers ordered by method name.
     """
-    handlers: list[BoundServerModuleHandler] = []
+    handlers: list[ExtServerModuleBoundHandler] = []
     module_type = module if inspect.isclass(module) else type(module)
     for name, source in inspect.getmembers(module_type, predicate=callable):
         options = getattr(source, _SERVER_MODULE_HANDLER_ATTR, None)
         if options is None:
             continue
-        if not isinstance(options, ServerModuleHandlerOptions):
+        if not isinstance(options, ExtServerModuleHandlerOptions):
             raise TypeError(
                 f"{module_type.__name__}.{name} has invalid server-module "
                 "handler metadata"
             )
-        handler = cast(ServerModuleMethod, getattr(module, name))
+        handler = cast(ExtServerModuleMethod, getattr(module, name))
         handlers.append(
-            BoundServerModuleHandler(
+            ExtServerModuleBoundHandler(
                 method=options.method,
                 handler=handler,
             )
@@ -500,12 +502,12 @@ def _call_transport_service_registrars(
 
 
 def _coerce_components(
-    value: EngineModule | Sequence[EngineModule] | ServerModuleComponents | None,
-    spec: ServerModuleSpec,
-) -> ServerModuleComponents:
+    value: EngineModule | Sequence[EngineModule] | ExtServerModuleComponents | None,
+    spec: ExtServerModuleSpec,
+) -> ExtServerModuleComponents:
     """Normalize one factory return value into extension components."""
-    if isinstance(value, ServerModuleComponents):
-        return ServerModuleComponents(
+    if isinstance(value, ExtServerModuleComponents):
+        return ExtServerModuleComponents(
             modules=tuple(_coerce_modules(value.modules, spec)),
             grpc_service_registrars=tuple(
                 _coerce_service_registrars(
@@ -522,12 +524,12 @@ def _coerce_components(
                 )
             ),
         )
-    return ServerModuleComponents(modules=tuple(_coerce_modules(value, spec)))
+    return ExtServerModuleComponents(modules=tuple(_coerce_modules(value, spec)))
 
 
 def _coerce_modules(
     value: EngineModule | Sequence[EngineModule] | None,
-    spec: ServerModuleSpec,
+    spec: ExtServerModuleSpec,
 ) -> list[EngineModule]:
     """Normalize one factory return value into a list of engine modules."""
     if value is None:
@@ -553,7 +555,7 @@ def _coerce_modules(
 
 def _coerce_service_registrars(
     values: Sequence[TransportServiceRegistrar],
-    spec: ServerModuleSpec,
+    spec: ExtServerModuleSpec,
     field_name: str,
 ) -> list[TransportServiceRegistrar]:
     """Validate transport service registrars from one components object."""

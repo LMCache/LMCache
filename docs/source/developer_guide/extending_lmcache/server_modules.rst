@@ -80,21 +80,23 @@ JSON list of module specs.
 Factory contract
 ----------------
 
-The factory receives one ``ServerModuleBuildContext`` and returns
-``ServerModuleComponents``. For backwards compatibility, returning one module,
-a sequence of modules, or ``None`` is also accepted:
+The factory receives one ``ExtServerModuleBuildContext`` and returns
+``ExtServerModuleComponents``. For backwards compatibility, returning one
+module, a sequence of modules, or ``None`` is also accepted:
 
 .. code-block:: python
 
-   from lmcache.v1.multiprocess.server_module import (
-       ServerModuleBuildContext,
-       ServerModuleComponents,
+   from lmcache.v1.multiprocess.ext_server_module import (
+       ExtServerModuleBuildContext,
+       ExtServerModuleComponents,
    )
 
 
-   def build_server_modules(ctx: ServerModuleBuildContext) -> ServerModuleComponents:
+   def build_server_modules(
+       ctx: ExtServerModuleBuildContext,
+   ) -> ExtServerModuleComponents:
        module = MyServerModule(ctx.server_context, ctx.config)
-       return ServerModuleComponents(
+       return ExtServerModuleComponents(
            modules=[module],
            grpc_service_registrars=[module.register_grpc_services],
            zmq_service_registrars=[module.register_zmq_services],
@@ -104,12 +106,14 @@ A service-only package can return no modules:
 
 .. code-block:: python
 
-   def build_server_modules(ctx: ServerModuleBuildContext) -> ServerModuleComponents:
-       return ServerModuleComponents(
+   def build_server_modules(
+       ctx: ExtServerModuleBuildContext,
+   ) -> ExtServerModuleComponents:
+       return ExtServerModuleComponents(
            grpc_service_registrars=[build_echo_grpc_service(ctx)],
        )
 
-``ServerModuleBuildContext`` contains:
+``ExtServerModuleBuildContext`` contains:
 
 - ``server_context``: the shared ``MPCacheServerContext``.
 - ``mp_config``: parsed ``MPServerConfig``.
@@ -164,7 +168,7 @@ Plugin modules can also expose extension protocol methods with
 
    import msgspec
 
-   from lmcache.v1.multiprocess.server_module import server_module_handler
+   from lmcache.v1.multiprocess.ext_server_module import server_module_handler
 
 
    class EchoRequest(msgspec.Struct):
@@ -192,7 +196,7 @@ Transport-specific services
 ---------------------------
 
 When an extension owns its protocol, return transport registrars in
-``ServerModuleComponents``. LMCache calls the registrar that matches the
+``ExtServerModuleComponents``. LMCache calls the registrar that matches the
 configured transport before the request server starts.
 
 For gRPC, register generated services against the concrete ``grpc.Server``:
@@ -229,7 +233,7 @@ module whose ``close()`` method stops that sidecar. Do not use
 For compatibility with simple module-shaped plugins, LMCache also calls
 ``register_grpc_services(server)`` and ``register_zmq_services(server)``
 methods when a returned module exposes them. New packages should prefer the
-explicit ``ServerModuleComponents`` fields so modules and transport services
+explicit ``ExtServerModuleComponents`` fields so modules and transport services
 stay separate.
 
 Envelope client calls

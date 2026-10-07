@@ -13,8 +13,8 @@ import uuid
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.server_module import (
-    ServerModuleSpec,
+from lmcache.v1.multiprocess.ext_server_module import (
+    ExtServerModuleSpec,
     parse_server_module_specs,
 )
 
@@ -140,7 +140,7 @@ class MPServerConfig:
     compatibility with vLLM; engines where block zero is valid can select a
     different sentinel, for example ``-1``."""
 
-    server_modules: list[ServerModuleSpec] = field(default_factory=list)
+    server_modules: list[ExtServerModuleSpec] = field(default_factory=list)
     """Out-of-tree server-module factories to load after built-in modules."""
 
     def __post_init__(self) -> None:

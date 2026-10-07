@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.multiprocess.config import MPServerConfig
     from lmcache.v1.multiprocess.engine_module import EngineModule
-    from lmcache.v1.multiprocess.server_module import TransportServiceRegistrar
+    from lmcache.v1.multiprocess.ext_server_module import TransportServiceRegistrar
     from lmcache.v1.multiprocess.transport.base import RequestServer
 
 
