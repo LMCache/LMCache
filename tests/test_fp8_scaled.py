@@ -55,9 +55,11 @@ def test_scaled_beats_scale_free(mode, block):
     cuda_ops.fp8_quantize_scaled(xf, fp8, scales, mode, block, 0.0)
 
     deq = fp8.to(torch.float32)
-    if mode == 1:
+    if mode == 0:
+        deq = deq * scales[0]
+    elif mode == 1:
         deq = deq * scales.view(*([1] * (x.dim() - 1)), -1)
-    elif mode == 2:
+    else:
         deq = deq * scales.repeat_interleave(block).view_as(deq)
 
     assert _rel_rms(deq, x) <= ref_err + 1e-6
