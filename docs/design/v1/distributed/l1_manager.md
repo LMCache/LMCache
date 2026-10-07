@@ -57,7 +57,11 @@ lock expires the reservation is abandoned:
   staging objects too.
 
 The eviction policy learns about the key from `on_l1_keys_reserved_write`
-(`L1EvictionPolicy` maps it to `on_keys_created`), so the regular eviction
+(`L1EvictionPolicy` maps it to `on_keys_reserved`, whose default delegates
+to `on_keys_created` for policies that do not distinguish reservation from
+admission; `ARCEvictionPolicy` overrides it to place reservations in `T1`
+and skip the T1->T2 promotion when the admission notification later arrives),
+so the regular eviction
 loop -- `get_eviction_actions(key_eligible_filter=is_key_evictable)` followed
 by `delete` -- covers abandoned reservations with no special casing. Policies
 and controllers only ever see original keys; tags never leave the manager.
