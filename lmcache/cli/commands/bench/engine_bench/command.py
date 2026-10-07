@@ -60,6 +60,7 @@ _LDQA_MAX_OUTPUT_LENGTH_DEFAULT = 128
 # general missing-argument path gives --no-interactive, the TUI, and --config
 # replay consistent handling.
 _REQUIRED_WORKLOAD_ARGS: dict[str, tuple[tuple[str, str], ...]] = {
+    "kv-tier-pressure": (("ktp_pool_size", "--ktp-pool-size"),),
     "rag-qa-quality": (("rag_dataset", "--rag-dataset"),),
 }
 
@@ -240,7 +241,7 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
     ktp_group.add_argument(
         "--ktp-pool-size",
         type=int,
-        default=0,
+        default=None,
         help="Total documents in the corpus. Required for this workload. "
         "This sets the working "
         "set -- pool_size x --ktp-context-length tokens -- independently of "
@@ -539,6 +540,20 @@ def _resolve_args(args: argparse.Namespace) -> argparse.Namespace:
             cli_val = getattr(args, attr, None)
             if cli_val is not None:
                 setattr(resolved, attr, cli_val)
+        # A config file can omit a workload-specific required value -- it is
+        # only written when the flag was supplied. Catch it here rather than
+        # letting None reach the workload and surface as a TypeError.
+        missing = [
+            flag
+            for attr, flag in _REQUIRED_WORKLOAD_ARGS.get(resolved.workload, ())
+            if getattr(resolved, attr, None) is None
+        ]
+        if missing:
+            raise SystemExit(
+                f"Config {config_path} is missing required arguments for the "
+                f"{resolved.workload!r} workload: " + ", ".join(missing) + ". "
+                "Add them to the config, or pass them on the command line."
+            )
         return resolved
 
     # Case 2: --no-interactive or --export-config — error if missing

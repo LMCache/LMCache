@@ -366,3 +366,57 @@ class TestSummary:
         labels = [label for label, _ in state.summary_lines()]
         assert "Queries per second" not in labels  # mrc item
         assert "Number of requests" not in labels  # rp item
+
+
+class TestKVTierPressureConfigRoundTrip:
+    """A --config replay must reproduce the workload exactly.
+
+    The flags only survive the round trip because they are declared in the
+    interactive schema; without that, ``to_namespace`` omits them and the
+    workload factory raises ``AttributeError``.
+    """
+
+    VALUES = {
+        "ktp_pool_size": 188,
+        "ktp_docs_per_request": 4,
+        "ktp_context_length": 64,
+        "ktp_system_prompt_length": 16,
+        "ktp_num_requests": 8,
+        "ktp_access_skew": 1.5,
+        "ktp_num_inflight_requests": 4,
+        "ktp_max_output_length": 1,
+    }
+
+    def _state(self) -> InteractiveState:
+        state = InteractiveState()
+        state.set("engine_url", "http://localhost:8000")
+        state.set("workload", "kv-tier-pressure")
+        state.set("tokens_per_gb_kvcache", 6000)
+        for key, value in self.VALUES.items():
+            state.set(key, value)
+        return state
+
+    def test_namespace_carries_every_flag(self) -> None:
+        namespace = self._state().to_namespace()
+        for key, value in self.VALUES.items():
+            assert getattr(namespace, key) == value, f"{key} lost"
+
+    def test_json_carries_every_flag(self) -> None:
+        exported = self._state().to_json()
+        for key, value in self.VALUES.items():
+            assert exported.get(key) == value, f"{key} missing from exported config"
+
+    def test_round_trip_through_json(self, tmp_path) -> None:
+        path = tmp_path / "cfg.json"
+        path.write_text(json.dumps(self._state().to_json()))
+        namespace = InteractiveState.load_json(str(path)).to_namespace()
+        for key, value in self.VALUES.items():
+            assert getattr(namespace, key) == value, f"{key} lost in round trip"
+
+    def test_pool_size_absent_when_not_supplied(self) -> None:
+        """The required check relies on this being None, not 0."""
+        state = InteractiveState()
+        state.set("engine_url", "http://localhost:8000")
+        state.set("workload", "kv-tier-pressure")
+        state.set("tokens_per_gb_kvcache", 6000)
+        assert getattr(state.to_namespace(), "ktp_pool_size", "absent") is None

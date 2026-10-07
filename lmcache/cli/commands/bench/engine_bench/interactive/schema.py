@@ -113,6 +113,11 @@ ALL_ITEMS: list[ConfigItem] = [
         required=True,
         choices=[
             (
+                "kv-tier-pressure",
+                "Retrieval over a corpus too large to cache, exercising the "
+                "storage tier",
+            ),
+            (
                 "long-doc-permutator",
                 "Query the same set of long documents with different orders",
             ),
@@ -190,6 +195,20 @@ ALL_ITEMS: list[ConfigItem] = [
         condition=_workload_is("rag-qa-quality"),
         phase=PHASE_REQUIRED,
     ),
+    ConfigItem(
+        key="ktp_pool_size",
+        display_name="Document pool size",
+        description=(
+            "Total documents in the corpus. Sets the working set "
+            "(pool size x document length), and therefore whether the "
+            "storage tier is reached at all."
+        ),
+        input_type="int",
+        default=None,
+        required=True,
+        condition=_workload_is("kv-tier-pressure"),
+        phase=PHASE_REQUIRED,
+    ),
     # ── Phase 2: General ──────────────────────────────────────────────
     ConfigItem(
         key="model",
@@ -233,6 +252,76 @@ ALL_ITEMS: list[ConfigItem] = [
         input_type="bool",
         default=False,
         phase=PHASE_GENERAL,
+    ),
+    # ── Phase 3: kv-tier-pressure ────────────────────────────────────
+    ConfigItem(
+        key="ktp_docs_per_request",
+        display_name="Documents per request",
+        description="Documents sampled into each request from the pool.",
+        input_type="int",
+        default=16,
+        condition=_workload_is("kv-tier-pressure"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ktp_context_length",
+        display_name="Document length (tokens)",
+        description="Token length of each document in the pool.",
+        input_type="int",
+        default=2560,
+        condition=_workload_is("kv-tier-pressure"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ktp_system_prompt_length",
+        display_name="System prompt length (tokens)",
+        description="Token length of the shared system prompt. Use 0 for none.",
+        input_type="int",
+        default=256,
+        condition=_workload_is("kv-tier-pressure"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ktp_num_requests",
+        display_name="Measured requests",
+        description=(
+            "Requests to measure. The warm-up sweep is separate and sized "
+            "automatically from the pool."
+        ),
+        input_type="int",
+        default=200,
+        condition=_workload_is("kv-tier-pressure"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ktp_access_skew",
+        display_name="Access skew",
+        description=(
+            "Zipf exponent for document popularity. 0 samples uniformly; "
+            "larger values concentrate reads on a hot subset."
+        ),
+        input_type="float",
+        default=0.0,
+        condition=_workload_is("kv-tier-pressure"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ktp_num_inflight_requests",
+        display_name="Max inflight requests",
+        description="Maximum concurrent in-flight requests.",
+        input_type="int",
+        default=8,
+        condition=_workload_is("kv-tier-pressure"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ktp_max_output_length",
+        display_name="Max output length (tokens)",
+        description="Max tokens per request. Use 1 to measure prefill alone.",
+        input_type="int",
+        default=1,
+        condition=_workload_is("kv-tier-pressure"),
+        phase=PHASE_WORKLOAD,
     ),
     # ── Phase 3: long-doc-permutator ─────────────────────────────────
     ConfigItem(
