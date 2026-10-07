@@ -22,10 +22,18 @@ if TYPE_CHECKING:
     from opentelemetry.metrics import CallbackOptions, Meter, Observation
 
     # First Party
+    from lmcache.v1.mp_coordinator.ingest.event_gate import (
+        EventGate,
+        InstanceStreamStats,
+    )
     from lmcache.v1.mp_coordinator.views.key_directory import (
         DirectoryStats,
         KeyDirectory,
     )
+
+
+# Shared by every coordinator component that creates instruments.
+METER_NAME = "lmcache.mp_coordinator"
 
 
 def init_coordinator_metrics(config: MPCoordinatorConfig) -> None:
@@ -67,7 +75,7 @@ def register_key_directory_metrics(
             coordinator meter; tests pass one from a private provider.
     """
     if meter is None:
-        meter = metrics.get_meter("lmcache.mp_coordinator")
+        meter = metrics.get_meter(METER_NAME)
     placements_callback = _make_tier_gauge_callback(
         key_directory, lambda stats: (stats.l1_count, stats.l2_count)
     )
@@ -102,6 +110,55 @@ def register_key_directory_metrics(
     )
 
 
+def register_event_gate_metrics(
+    event_gate: "EventGate", meter: "Meter | None" = None
+) -> None:
+    """Register per-server gauges over the gate's stream cursors.
+
+    One series per emitter the gate tracks; a series disappears when its
+    emitter's cursor goes (departure or timeout), which is why per-server
+    values are gauges rather than counters. Each covers the emitter's
+    current incarnation.
+
+    Args:
+        event_gate: The gate admitting the coordinator's cache events.
+        meter: Meter to register on. Defaults to the global provider's
+            coordinator meter; tests pass one from a private provider.
+    """
+    if meter is None:
+        meter = metrics.get_meter(METER_NAME)
+    meter.create_observable_gauge(
+        "lmcache_coordinator.ingest.server_event_batches_missing",
+        callbacks=[
+            _make_server_gauge_callback(
+                event_gate, lambda stream: stream.missing_batches
+            )
+        ],
+        description="Cache-event batches from this server that never arrived, "
+        "in its current run.",
+    )
+    meter.create_observable_gauge(
+        "lmcache_coordinator.ingest.server_events_dropped",
+        callbacks=[
+            _make_server_gauge_callback(
+                event_gate, lambda stream: stream.events_dropped
+            )
+        ],
+        description="Cache events this server reported dropping before they "
+        "reached the coordinator, in its current run.",
+    )
+    meter.create_observable_gauge(
+        "lmcache_coordinator.ingest.server_view_incomplete",
+        callbacks=[
+            _make_server_gauge_callback(
+                event_gate, lambda stream: int(stream.gap_detected)
+            )
+        ],
+        description="1 while the coordinator knows it is missing part of this "
+        "server's cache.",
+    )
+
+
 def _make_tier_gauge_callback(
     key_directory: "KeyDirectory",
     read_l1_and_l2: Callable[["DirectoryStats"], tuple[int, int]],
@@ -125,3 +182,27 @@ def _make_tier_gauge_callback(
         ]
 
     return _observe_tiers
+
+
+def _make_server_gauge_callback(
+    event_gate: "EventGate",
+    read_value: Callable[["InstanceStreamStats"], int],
+) -> Callable[["CallbackOptions"], list["Observation"]]:
+    """Return a gauge callback that reports one value per mp server.
+
+    Args:
+        event_gate: The gate whose stream cursors the callback reads.
+        read_value: Picks the value to report out of one server's cursor.
+
+    Returns:
+        A callback observing each tracked server's value under its
+        ``instance_id``; a server the gate stopped tracking is not reported.
+    """
+
+    def _observe_servers(_options: "CallbackOptions") -> list["Observation"]:
+        return [
+            metrics.Observation(read_value(stream), {"instance_id": instance_id})
+            for instance_id, stream in event_gate.stats().items()
+        ]
+
+    return _observe_servers

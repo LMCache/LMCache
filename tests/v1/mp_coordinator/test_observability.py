@@ -14,11 +14,14 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
+from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.observability import init_coordinator_metrics
+from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 # Local
-from .otel_reader import private_meter, read_values
+from .otel_reader import labels, private_meter, read_values
 
 
 def _key(hash_byte: int) -> ObjectKey:
@@ -43,6 +46,21 @@ def _batch(
             CacheEventEntry(key=k.to_encoded_object_key(), size_bytes=size_bytes)
             for k in keys
         ],
+    )
+
+
+def _stream_batch(
+    instance_id: str, seq: int, dropped_events: int = 0
+) -> CacheEventBatch:
+    return CacheEventBatch(
+        instance_id=instance_id,
+        incarnation=1,
+        seq=seq,
+        event_type=CacheEventType.STORE,
+        tier=Tier.L1,
+        backend="dram",
+        entries=[CacheEventEntry(key=_key(1).to_encoded_object_key(), size_bytes=1)],
+        dropped_events=dropped_events,
     )
 
 
@@ -150,3 +168,42 @@ def test_key_directory_gauges_follow_later_changes() -> None:
 
     points = _by_tier(read_values(reader))
     assert points["lmcache_coordinator.key_directory.placements"] == {"l1": 1, "l2": 0}
+
+
+def test_event_gate_gauges_report_each_tracked_server() -> None:
+    gate = EventGate(CacheEventBroadcaster(), QuiesceLock())
+    gate.ingest(_stream_batch("node-a", seq=1))
+    gate.ingest(_stream_batch("node-a", seq=4, dropped_events=6))
+    gate.ingest(_stream_batch("node-b", seq=1))
+    meter, reader = private_meter()
+
+    observability.register_event_gate_metrics(gate, meter)
+
+    values = read_values(reader)
+    assert values["lmcache_coordinator.ingest.server_event_batches_missing"] == {
+        labels(instance_id="node-a"): 2,
+        labels(instance_id="node-b"): 0,
+    }
+    assert values["lmcache_coordinator.ingest.server_events_dropped"] == {
+        labels(instance_id="node-a"): 6,
+        labels(instance_id="node-b"): 0,
+    }
+    assert values["lmcache_coordinator.ingest.server_view_incomplete"] == {
+        labels(instance_id="node-a"): 1,
+        labels(instance_id="node-b"): 0,
+    }
+
+
+def test_event_gate_gauges_drop_a_server_that_leaves() -> None:
+    gate = EventGate(CacheEventBroadcaster(), QuiesceLock())
+    gate.ingest(_stream_batch("node-a", seq=1))
+    gate.ingest(_stream_batch("node-b", seq=1))
+    meter, reader = private_meter()
+    observability.register_event_gate_metrics(gate, meter)
+
+    gate.drop_instance("node-a")
+
+    values = read_values(reader)
+    assert values["lmcache_coordinator.ingest.server_view_incomplete"] == {
+        labels(instance_id="node-b"): 0
+    }

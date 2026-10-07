@@ -47,7 +47,10 @@ from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
     KafkaCacheEventSource,
 )
 from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
-from lmcache.v1.mp_coordinator.observability import register_key_directory_metrics
+from lmcache.v1.mp_coordinator.observability import (
+    register_event_gate_metrics,
+    register_key_directory_metrics,
+)
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
     save_checkpoint,
@@ -156,6 +159,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     load_checkpoint(checkpoint_store, checkpoint_components)
     if config.metrics_enabled:
         register_key_directory_metrics(views.get(KeyDirectory))
+        register_event_gate_metrics(event_gate)
 
     ctx = CoordinatorContext(
         views=views,

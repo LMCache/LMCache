@@ -9,11 +9,20 @@ See ``docs/design/v1/mp_coordinator/ingest.md``.
 """
 
 # Standard
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+import time
+
+# Third Party
+from opentelemetry import metrics
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
+from lmcache.v1.mp_coordinator.observability import METER_NAME
+
+if TYPE_CHECKING:
+    # Third Party
+    from opentelemetry.metrics import Meter
 
 logger = init_logger(__name__)
 
@@ -50,13 +59,46 @@ class CacheEventConsumer(Protocol):
 class CacheEventBroadcaster:
     """Fans one gate-admitted cache-event batch out to every consumer.
 
-    A consumer that raises is logged, and the rest still run,
-    so only that consumer misses the batch. Keeps no locks: fan-out is
-    thread-safe as long as each consumer is.
+    A consumer that raises is logged and counted, and the rest still run,
+    so only that consumer misses the batch -- which leaves it disagreeing
+    with the others, the failure ``ingest.batch_apply_failures`` exists to
+    page on. Keeps no locks: fan-out is thread-safe as long as each
+    consumer is.
+
+    Args:
+        meter: Meter for the per-consumer instruments. Defaults to the
+            global provider's coordinator meter; tests pass a private one.
     """
 
-    def __init__(self) -> None:
-        self._consumers: list[CacheEventConsumer] = []
+    def __init__(self, meter: "Meter | None" = None) -> None:
+        # Each consumer with its metric attributes, built once at
+        # registration rather than on every batch.
+        self._consumers: list[tuple[CacheEventConsumer, dict[str, str]]] = []
+        if meter is None:
+            meter = metrics.get_meter(METER_NAME)
+        self._apply_duration = meter.create_histogram(
+            "lmcache_coordinator.ingest.batch_apply_duration_seconds",
+            unit="s",
+            description="Time for one consumer to apply one admitted batch.",
+            # In-memory work: sub-millisecond normally, seconds only when
+            # something is badly wrong (blend hashing a huge batch).
+            explicit_bucket_boundaries_advisory=(
+                0.0005,
+                0.001,
+                0.005,
+                0.01,
+                0.05,
+                0.1,
+                0.5,
+                1,
+                5,
+            ),
+        )
+        self._apply_failures = meter.create_counter(
+            "lmcache_coordinator.ingest.batch_apply_failures",
+            description="Batches or fences a consumer failed to apply; that "
+            "consumer now disagrees with the others.",
+        )
 
     def register_consumer(self, consumer: CacheEventConsumer) -> None:
         """Register a consumer for all subsequently broadcast batches.
@@ -68,7 +110,7 @@ class CacheEventBroadcaster:
         Args:
             consumer: The consumer to fan batches out to.
         """
-        self._consumers.append(consumer)
+        self._consumers.append((consumer, {"consumer": type(consumer).__name__}))
 
     def broadcast(self, batch: CacheEventBatch) -> None:
         """Deliver one gate-admitted batch to every consumer.
@@ -76,10 +118,12 @@ class CacheEventBroadcaster:
         Args:
             batch: The admitted batch.
         """
-        for consumer in self._consumers:
+        for consumer, attributes in self._consumers:
+            started = time.perf_counter()
             try:
                 consumer.consume(batch)
             except Exception:
+                self._apply_failures.add(1, {**attributes, "op": "consume"})
                 logger.exception(
                     "Cache-event consumer %s failed on batch %s/%d/%d",
                     type(consumer).__name__,
@@ -87,6 +131,8 @@ class CacheEventBroadcaster:
                     batch.incarnation,
                     batch.seq,
                 )
+            finally:
+                self._apply_duration.record(time.perf_counter() - started, attributes)
 
     def fence_instance(self, instance_id: str) -> None:
         """Tell every consumer that ``instance_id``'s L1 state is void.
@@ -94,10 +140,11 @@ class CacheEventBroadcaster:
         Args:
             instance_id: The restarted or departed instance.
         """
-        for consumer in self._consumers:
+        for consumer, attributes in self._consumers:
             try:
                 consumer.fence_instance(instance_id)
             except Exception:
+                self._apply_failures.add(1, {**attributes, "op": "fence"})
                 logger.exception(
                     "Cache-event consumer %s failed to fence %s",
                     type(consumer).__name__,

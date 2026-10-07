@@ -12,5 +12,8 @@ import pytest
 @pytest.fixture(autouse=True)
 def _isolate_key_directory_metric_registration() -> Iterator[None]:
     """Avoid registering process-global OTel instruments in app tests."""
-    with patch("lmcache.v1.mp_coordinator.app.register_key_directory_metrics"):
+    with (
+        patch("lmcache.v1.mp_coordinator.app.register_key_directory_metrics"),
+        patch("lmcache.v1.mp_coordinator.app.register_event_gate_metrics"),
+    ):
         yield

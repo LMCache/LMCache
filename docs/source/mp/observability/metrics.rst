@@ -842,3 +842,49 @@ The same two gauges are also emitted under their previous names,
 ``lmcache_mp.key_directory_placement_size_bytes``, for one release so
 dashboards can migrate.  The previous names will be removed in the next
 release.
+
+The ingest metrics say whether the coordinator's view of the fleet is
+complete.  Two kinds of loss are counted separately: batches that never
+arrived (a skipped ``seq``), and events an MP server reports it dropped
+before sending (each batch carries the server's running count in
+``dropped_events``).  The first batch of a stream the coordinator was not
+already tracking counts no missing batches: earlier batches were sent before
+it was listening.  Fleet-wide counters drive alerts; the per-server gauges,
+one series per ``instance_id`` the coordinator currently tracks, show which
+server, and cover that server's current run.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.ingest.event_batches_received``
+     - Counter (attr: ``result``)
+     - Cache-event batches received from MP servers: ``applied``,
+       ``duplicate`` (seq already seen) or ``stale`` (older incarnation).
+   * - ``lmcache_coordinator.ingest.event_batches_missing``
+     - Counter
+     - Batches that never arrived: skipped ``seq`` values.
+   * - ``lmcache_coordinator.ingest.events_dropped_by_servers``
+     - Counter
+     - Cache events the MP servers reported dropping before they reached the
+       coordinator.
+   * - ``lmcache_coordinator.ingest.server_event_batches_missing``
+     - ObservableGauge (attr: ``instance_id``)
+     - Missing batches for one server's current run.
+   * - ``lmcache_coordinator.ingest.server_events_dropped``
+     - ObservableGauge (attr: ``instance_id``)
+     - Dropped events for one server's current run.
+   * - ``lmcache_coordinator.ingest.server_view_incomplete``
+     - ObservableGauge (attr: ``instance_id``)
+     - ``1`` while the coordinator knows it is missing part of this server's
+       cache.  Clears when the server restarts or leaves.
+   * - ``lmcache_coordinator.ingest.batch_apply_failures``
+     - Counter (attrs: ``consumer``, ``op``)
+     - A view or controller failed to apply a batch (``op="consume"``) or a
+       fence (``op="fence"``); it now disagrees with the others.
+   * - ``lmcache_coordinator.ingest.batch_apply_duration_seconds``
+     - Histogram (attr: ``consumer``)
+     - Time for one view or controller to apply one batch.

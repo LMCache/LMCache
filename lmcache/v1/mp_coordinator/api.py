@@ -172,6 +172,12 @@ class CacheEventBatch:
             all sharing a revision, so the consumer can tell a fresh
             declaration from a continuation and drop compartments the new
             one omits.
+        dropped_events: Events (entries) this emitter incarnation had
+            dropped before they reached the coordinator, as of when the
+            batch was built: a full Kafka buffer, a failed delivery, a
+            failed HTTP post. Cumulative, so a loss is reported by the
+            next batch that does get through. ``0`` from emitters that do
+            not report it.
     """
 
     instance_id: str
@@ -185,6 +191,7 @@ class CacheEventBatch:
     ts: float = 0.0
     capacity_bytes: int = 0
     capacity_revision: int = 0
+    dropped_events: int = 0
 
     def __post_init__(self) -> None:
         """Enforce intrinsic invariants.
@@ -221,3 +228,5 @@ class CacheEventBatch:
             )
         if self.ts < 0.0:
             raise ValueError(f"ts must be >= 0 (got {self.ts})")
+        if self.dropped_events < 0:
+            raise ValueError(f"dropped_events must be >= 0 (got {self.dropped_events})")
