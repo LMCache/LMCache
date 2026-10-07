@@ -170,11 +170,6 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
                 self.reqs_status[lookup_id] = None
                 self.first_lookup_time[lookup_id] = time.time()
             elif req_status is None:
-                # A missing first_lookup_time means this request already timed
-                # out on an earlier lookup_cache() call (the timestamp is
-                # popped on timeout below) while its status is still pending.
-                # Report a miss immediately so vllm recomputes, without
-                # re-sleeping under the lock or re-running timeout handling.
                 first_lookup_time = self.first_lookup_time.get(lookup_id)
                 if first_lookup_time is None:
                     return 0
