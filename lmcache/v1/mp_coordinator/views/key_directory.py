@@ -562,17 +562,18 @@ class KeyDirectory(View):
                 }
 
     def stats(self) -> DirectoryStats:
-        """Return a point-in-time summary of directory contents."""
+        """Return a point-in-time summary of directory contents.
+
+        Reads running totals, so its cost does not grow with the number of
+        keys: a metrics scrape calls it while ingest waits on the same lock.
+        """
         blend = self._blend_index.stats()
         with self._lock:
             l1_stats = self._placement_stats[Tier.L1]
             l2_stats = self._placement_stats[Tier.L2]
-            num_placements = sum(
-                len(record.placements) for record in self._directory.values()
-            )
             return DirectoryStats(
                 num_keys=len(self._directory),
-                num_placements=num_placements,
+                num_placements=l1_stats.count + l2_stats.count,
                 l1_keys_by_instance={
                     instance_id: len(keys)
                     for instance_id, keys in self._l1_keys_by_instance.items()
