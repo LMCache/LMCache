@@ -3,6 +3,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
+#include "fp8_quantize.cuh"
 #include "mem_kernels.cuh"
 #include "mp_mem_kernels.cuh"
 #include "phase_timing_recorder.cuh"
@@ -387,6 +388,11 @@ PYBIND11_MODULE(cuda_ops, m) {
         py::call_guard<py::gil_scoped_release>());
   // Return each payload as py::bytes; pybind11 utf-8-decodes std::string
   // by default, corrupting binary payloads (e.g. msgpack).
+  m.def("fp8_quantize_scaled", &lmcache::fp8QuantizeScaled,
+        "Fused amax+scale+fp8 cast (0=per-tensor, 1=rowwise, 2=blockwise)",
+        py::arg("x"), py::arg("fp8_out"), py::arg("scales"),
+        py::arg("scale_mode") = 2, py::arg("block_size") = 128,
+        py::arg("amax_ceiling") = 0.0);
   m.def("drain_recorded_completions", []() {
     auto items = drain_recorded_completions();
     py::list out;
