@@ -93,8 +93,8 @@ Commonly used flags include:
    * - ``--coordinator-kafka-topic TOPIC``
      - Kafka topic receiving cache events (default ``lmcache-cache-events``).
    * - ``--coordinator-kafka-delivery-timeout SECONDS``
-     - Seconds one flush waits for broker acknowledgement (``> 0``, default
-       ``10``).
+     - Seconds the producer retries a record before dropping it (``> 0``,
+       default ``300``).
    * - ``--p2p-advertise-url HOST:PORT``
      - Enable P2P KV cache sharing and advertise this server's
        transfer-channel endpoint to peers (e.g. ``10.0.0.1:8500``). Setting it

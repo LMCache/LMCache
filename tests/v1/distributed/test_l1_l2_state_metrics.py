@@ -207,17 +207,26 @@ class TestL1MemoryUsageGauge:
 
     def test_gauge_reports_zero_initially(self, l1_manager):
         # A fresh L1 with no writes should report 0 used bytes.
-        before = _value_for("lmcache_mp.l1_memory_usage_bytes")
+        before = _value_for(
+            "lmcache_mp.l1_memory_usage_bytes",
+            {"l1_tag": "_default", "backend": "dram"},
+        )
         assert before == 0
 
     def test_gauge_grows_after_writes(self, l1_manager):
-        before = _value_for("lmcache_mp.l1_memory_usage_bytes")
+        before = _value_for(
+            "lmcache_mp.l1_memory_usage_bytes",
+            {"l1_tag": "_default", "backend": "dram"},
+        )
 
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         write_keys_to_l1(l1_manager, keys, layout)
 
-        after = _value_for("lmcache_mp.l1_memory_usage_bytes")
+        after = _value_for(
+            "lmcache_mp.l1_memory_usage_bytes",
+            {"l1_tag": "_default", "backend": "dram"},
+        )
         assert after > before, "Gauge should reflect bytes written to L1"
 
 
@@ -405,3 +414,69 @@ class TestNumInflightL2Loads:
         )
 
         adapter.close()
+
+
+@pytest.mark.no_shared_allocator
+def test_peer_l1_gauges_are_separate_and_removed_on_close() -> None:
+    managers = [
+        L1Manager(
+            L1ManagerConfig(L1MemoryManagerConfig(8192, False, shm_name=""), tag=tag)
+        )
+        for tag in ("metric-a", "metric-b")
+    ]
+    try:
+        layout = MemoryLayoutDesc([torch.Size([4096])], [torch.uint8])
+        for count, manager in enumerate(managers, 1):
+            keys = [make_object_key(i) for i in range(count)]
+            manager.reserve_write(keys, [False] * count, layout)
+            manager.finish_write(keys)
+        for count, manager in enumerate(managers, 1):
+            assert (
+                _value_for(
+                    "lmcache_mp.l1_memory_usage_bytes",
+                    {"l1_tag": manager.config.tag, "backend": "dram"},
+                )
+                == count * 4096
+            )
+    finally:
+        for manager in managers:
+            manager.close()
+    for tag in ("metric-a", "metric-b"):
+        assert (
+            _value_for(
+                "lmcache_mp.l1_memory_usage_bytes", {"l1_tag": tag, "backend": "dram"}
+            )
+            == 0
+        )
+
+
+@pytest.mark.no_shared_allocator
+def test_legacy_hybrid_usage_is_labeled_as_both_media(tmp_path) -> None:
+    path = tmp_path / "dax"
+    path.write_bytes(b"\0" * 8192)
+    manager = L1Manager(
+        L1ManagerConfig(
+            L1MemoryManagerConfig(
+                8192,
+                False,
+                shm_name="",
+                devdax_path=str(path),
+                devdax_size_in_bytes=8192,
+            ),
+            tag="metric-mixed",
+        )
+    )
+    try:
+        keys = [make_object_key(0)]
+        layout = MemoryLayoutDesc([torch.Size([4096])], [torch.uint8])
+        manager.reserve_write(keys, [False], layout)
+        manager.finish_write(keys)
+        assert (
+            _value_for(
+                "lmcache_mp.l1_memory_usage_bytes",
+                {"l1_tag": "metric-mixed", "backend": "dram+devdax"},
+            )
+            == 4096
+        )
+    finally:
+        manager.close()
