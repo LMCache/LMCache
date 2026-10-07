@@ -47,6 +47,14 @@ request metadata throughout the request lifecycle.
    feature explicitly documents support for it.  The in-process
    ``LMCacheConnectorV1`` may interpret these values differently.
 
+The MP server's default ``--kv-load-policy`` acts on ``lmcache.skip_load``: a
+request that sets it to ``true`` gets a lookup miss and is recomputed by the
+engine.  ``LMCacheMPConnector`` (vLLM) also sets
+``lmcache.hint.engine_computed_tokens`` on its lookups to vLLM's own
+prefix-cache hit, for load policies to read; on those lookups a
+client-supplied value under that key is replaced or dropped.  Other engine
+adapters do not set the hint and forward any client value unchanged.
+
 MP Server
 ---------
 
@@ -181,6 +189,16 @@ Source: ``lmcache/v1/multiprocess/config.py``
        sent a PING (still warming up, or died before its first request).
        Must be >= ``--worker-reap-timeout-seconds``. Generous by default so
        slow model warmup is never mistaken for a dead worker.
+   * - ``--kv-load-policy``
+     - ``DEFAULT``
+     - Per-request choice between serving a lookup and letting the engine
+       recompute the prompt. The policy runs before the prefetch, so a
+       declined lookup fetches nothing from L2 and takes no locks; the engine
+       sees a miss. ``DEFAULT`` serves every lookup unless the request sets
+       ``"lmcache.skip_load": true`` in ``kv_transfer_params``. A
+       ``package.module:ClassName`` value loads a custom
+       ``lmcache.v1.multiprocess.kv_load_policy.KVLoadPolicy`` subclass from
+       the server's environment, constructed with ``--runtime-plugin-config``.
    * - ``--enable-segmented-prefix``
      - ``False``
      - CacheBlend (``--engine-type blend``) only: on a mid-prefix L2 retrieve

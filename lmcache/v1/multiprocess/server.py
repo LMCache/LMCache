@@ -46,6 +46,7 @@ from lmcache.v1.multiprocess.config import (
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import EngineModule, InstanceLivenessTarget
+from lmcache.v1.multiprocess.kv_load_policy import create_kv_load_policy
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
@@ -164,7 +165,12 @@ def _build_modules(
         ValueError: If blend engine is requested with
         supported_transfer_mode="engine_driven".
     """
-    lookup_module = LookupModule(ctx)
+    lookup_module = LookupModule(
+        ctx,
+        create_kv_load_policy(
+            mp_config.kv_load_policy, mp_config.runtime_plugin_config.extra_config
+        ),
+    )
     p2p_controller = P2PController(
         ctx,
         mp_config.p2p_config,

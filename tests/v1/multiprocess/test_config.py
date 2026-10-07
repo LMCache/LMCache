@@ -396,3 +396,12 @@ def test_session_ttl_seconds_default_and_flag():
     """Session TTL defaults to 600 s and is settable for deep queueing."""
     assert _parse_mp([]).session_ttl_seconds == 600.0
     assert _parse_mp(["--session-ttl-seconds", "7200"]).session_ttl_seconds == 7200.0
+
+
+def test_kv_load_policy_default_and_flag():
+    """The KV load policy defaults to DEFAULT and accepts a module path."""
+    assert _parse_mp([]).kv_load_policy == "DEFAULT"
+    assert (
+        _parse_mp(["--kv-load-policy", "my_pkg.policies:Custom"]).kv_load_policy
+        == "my_pkg.policies:Custom"
+    )

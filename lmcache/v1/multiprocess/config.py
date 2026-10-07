@@ -122,6 +122,13 @@ class MPServerConfig:
     the longest time a request can wait in the engine's queue between its
     lookup and its admission (minutes under deep agentic backlogs)."""
 
+    kv_load_policy: str = "DEFAULT"
+    """Per-request choice between serving a lookup and letting the engine
+    recompute the prompt: a built-in name ("DEFAULT") or
+    "package.module:ClassName" naming a
+    ``lmcache.v1.multiprocess.kv_load_policy.KVLoadPolicy`` subclass. The
+    policy is constructed with ``runtime_plugin_config.extra_config``."""
+
     worker_registration_grace_seconds: float = 3600.0
     """Silence budget (seconds) for a worker that registered but has never
     sent a PING (model warmup, or death before its first request). Must be
@@ -507,6 +514,15 @@ def add_mp_server_args(
         "Raise it above the longest engine queueing delay. Default is 600.",
     )
     mp_group.add_argument(
+        "--kv-load-policy",
+        type=str,
+        default="DEFAULT",
+        help="Per-request choice between serving a lookup and letting the "
+        "engine recompute the prompt. DEFAULT serves every lookup unless the "
+        "request sets lmcache.skip_load; 'package.module:ClassName' loads a "
+        "custom KVLoadPolicy, constructed with --runtime-plugin-config.",
+    )
+    mp_group.add_argument(
         "--worker-registration-grace-seconds",
         type=float,
         default=3600.0,
@@ -587,6 +603,7 @@ def parse_args_to_mp_server_config(
         run_script_api_enabled=args.run_script_api_enabled,
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         session_ttl_seconds=args.session_ttl_seconds,
+        kv_load_policy=args.kv_load_policy,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
     )

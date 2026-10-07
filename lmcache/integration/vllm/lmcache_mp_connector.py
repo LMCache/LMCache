@@ -82,6 +82,7 @@ from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.multiprocess.kv_load_policy import ENGINE_COMPUTED_TOKENS_HINT_KEY
 
 try:
     # First Party
@@ -139,6 +140,32 @@ def _convert_kv_event_hash(block_hash: bytes | int | None) -> bytes | int | None
     if isinstance(block_hash, bytes):
         return maybe_convert_block_hash(BlockHash(block_hash))
     return block_hash
+
+
+def _lookup_request_configs(
+    request_configs: dict[str, Any] | None,
+    engine_computed_tokens: int | None,
+) -> dict[str, Any] | None:
+    """Build the request configs sent with a LOOKUP.
+
+    Attaches vLLM's prefix-cache hit as a hint for the server's KV load
+    policy. Only the connector may set the hint, so a client-supplied value is
+    dropped when the count is not known yet.
+
+    Args:
+        request_configs: The request's ``lmcache.*`` configs.
+        engine_computed_tokens: Tokens vLLM already holds in its prefix
+            cache, or None before vLLM has checked it (eager prefetch).
+
+    Returns:
+        A new dict with the hint set or removed, or None if it would be empty.
+    """
+    configs = dict(request_configs or {})
+    if engine_computed_tokens is None:
+        configs.pop(ENGINE_COMPUTED_TOKENS_HINT_KEY, None)
+    else:
+        configs[ENGINE_COMPUTED_TOKENS_HINT_KEY] = engine_computed_tokens
+    return configs or None
 
 
 class LMCacheMPKVEvents(KVConnectorKVEvents):
@@ -1277,7 +1304,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request.request_id,
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
-            request_configs=tracker.request_configs,
+            request_configs=_lookup_request_configs(
+                tracker.request_configs, num_computed_tokens
+            ),
             reserve_last_token=self._reserve_last_token_for_lookup,
         )
 
@@ -1349,7 +1378,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request.request_id,
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
-            request_configs=tracker.request_configs,
+            request_configs=_lookup_request_configs(tracker.request_configs, None),
             reserve_last_token=self._reserve_last_token_for_lookup,
         )
 
