@@ -14,6 +14,7 @@ from vllm.v1.utils import ConstantList
 import torch
 
 # First Party
+from lmcache.integration.vllm.token_drop import TokenDropSpec, parse_token_drop_spec
 from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
@@ -51,6 +52,7 @@ class LMCacheMPRequestTracker:
 
     # Read-only list to track the token ids
     all_token_ids: ConstantList[int]
+    num_prompt_tokens: int = 0
 
     # Block ids will be updated at update_states_after_alloc and
     # during generation. Keyed by engine_group_idx; non-HMA models use 0.
@@ -74,6 +76,7 @@ class LMCacheMPRequestTracker:
 
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    token_drop_spec: TokenDropSpec | None = None
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
@@ -83,11 +86,13 @@ class LMCacheMPRequestTracker:
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.request_configs = extract_request_configs_from_request(request)
+        self.token_drop_spec = parse_token_drop_spec(self.request_configs)
         self.max_offload_tokens = (self.request_configs or {}).get(
             "lmcache.max_offload_tokens"
         )
         self.lookup_started_at = None
         self.all_token_ids = request.all_token_ids
+        self.num_prompt_tokens = len(request.prompt_token_ids)
         self.allocated_block_ids = {}
         self.num_stored_tokens = 0
         self.num_vllm_hit_tokens = 0
@@ -394,11 +399,26 @@ class LMCacheMPRequestMetadata:
         return None
 
 
+@dataclass
+class LMCacheMPTokenDropRequestState:
+    request_id: str
+    algorithm: str
+    config: dict[str, Any]
+    resident_kv_tokens: int | None = None
+    has_physical_override: bool = False
+    is_genuine_decode: bool = False
+    num_decoded_tokens: int = 0
+    num_new_tokens: int = 0
+    worker_row: int = -1
+
+
 class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
         self.need_flush_before_forward: bool = False
+        self.token_drop_requests: list[LMCacheMPTokenDropRequestState] = []
+        self.token_drop_reset_ids: set[str] = set()
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)
@@ -443,10 +463,13 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             breaks the request's stored-prefix chain so later chunks are not
             stored unreachable. ``aggregate()`` unions the sets: one rank's
             failure breaks the chain even when the other ranks succeeded.
+        resident_kv_updates: Absolute resident KV lengths produced by worker-side
+            compaction in this step.
     """
 
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
+    resident_kv_updates: dict[str, int] = field(default_factory=dict)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -464,9 +487,19 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
+
+        resident_kv_updates = self.resident_kv_updates or other.resident_kv_updates
+        if (
+            self.resident_kv_updates
+            and other.resident_kv_updates
+            and self.resident_kv_updates != other.resident_kv_updates
+        ):
+            raise ValueError("Workers reported different resident KV lengths")
+
         return LMCacheMPWorkerMetadata(
             completed_store_requests=merged,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
             ),
+            resident_kv_updates=dict(resident_kv_updates),
         )
