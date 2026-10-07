@@ -2,6 +2,7 @@
 """Tests for the key rows the LOOKUP handler submits to the storage manager."""
 
 # Standard
+from typing import Any
 from unittest.mock import MagicMock
 
 # First Party
@@ -33,7 +34,11 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
 
 
 def _captured_lookup_key_groups(
-    world_size: int, num_groups: int, chunk_hashes: list[bytes]
+    world_size: int,
+    num_groups: int,
+    chunk_hashes: list[bytes],
+    group_layout_descs: dict[int, Any] | None = None,
+    worker_group_layout_descs: dict[int, dict[int, Any]] | None = None,
 ) -> list[GroupedObjectKeys]:
     """Drive the public ``lookup()`` and return the key rows it submits.
 
@@ -51,9 +56,14 @@ def _captured_lookup_key_groups(
     ctx.layout_desc_registry.find.return_value = MagicMock()  # non-None layout
     # lookup() requires a registered per-group layout map (it error-returns
     # without one); one entry per object group, keyed by object_group_id.
-    ctx.layout_desc_registry.find_group_layout_descs.return_value = {
-        gid: MagicMock() for gid in range(num_groups)
-    }
+    ctx.layout_desc_registry.find_group_layout_descs.return_value = (
+        group_layout_descs
+        if group_layout_descs is not None
+        else {gid: MagicMock() for gid in range(num_groups)}
+    )
+    ctx.layout_desc_registry.find_worker_group_layout_descs.return_value = (
+        worker_group_layout_descs or {}
+    )
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1] * num_groups
     )
@@ -88,6 +98,20 @@ def test_lookup_submits_one_row_per_group_and_rank_group_major():
     assert [r.keys[0].kv_rank for r in rows[:2]] == [
         r.keys[0].kv_rank for r in rows[2:]
     ]
+
+
+def test_lookup_sizes_each_workers_rows_from_its_own_layout():
+    """Each worker's rows carry its own layout, or the pair-wide one."""
+    pair_wide, stage1 = MagicMock(), MagicMock()
+    rows = _captured_lookup_key_groups(
+        world_size=2,
+        num_groups=1,
+        chunk_hashes=[b"c0"],
+        group_layout_descs={0: pair_wide},
+        worker_group_layout_descs={1: {0: stage1}},
+    )
+
+    assert [row.layout_desc for row in rows] == [pair_wide, stage1]
 
 
 def test_lookup_single_group_matches_single_group_expansion():

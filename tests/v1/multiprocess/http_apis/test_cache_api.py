@@ -447,6 +447,11 @@ class _FakeLayoutRegistry:
         self.lookup_calls.append((model_name, world_size))
         return None if self.layout is None else {0: self.layout}
 
+    def find_worker_group_layout_descs(
+        self, model_name: str, world_size: int
+    ) -> dict[int, dict[int, object]]:
+        return {}
+
     def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
         if self.layout is None:
             raise ValueError(f"no attention-window descriptor for {model_name!r}")

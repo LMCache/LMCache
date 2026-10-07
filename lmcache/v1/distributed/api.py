@@ -40,32 +40,29 @@ group: serving a prefix needs every chunk of it present."""
 _VALID_FETCHING_POLICIES = frozenset(get_args(FetchingPolicy))
 
 
-def _lookup_kv_ranks(ipc_key: "IPCCacheServerKey") -> list[int]:
-    """The kv ranks an IPC key addresses, in rank order.
+def _lookup_worker_ids(ipc_key: "IPCCacheServerKey") -> list[int]:
+    """The worker ids an IPC key addresses, in rank order.
 
     A key without a ``worker_id`` (a lookup) fans out to every worker of its
     world size; a worker-specific key addresses that worker's shard only.
     """
     if ipc_key.worker_id is None:
-        # For look up request, we want to expand to all workers
-        # TODO (ApostaC): include local world size/rank info
-        # in the future once it's in IPCCacheServerKey
-        return [
-            ObjectKey.ComputeKVRank(
-                world_size=ipc_key.world_size,
-                global_rank=worker_id,
-                local_world_size=ipc_key.world_size,
-                local_rank=worker_id,
-            )
-            for worker_id in range(ipc_key.world_size)
-        ]
+        return list(range(ipc_key.world_size))
+    return [ipc_key.worker_id]
+
+
+def _lookup_kv_ranks(ipc_key: "IPCCacheServerKey") -> list[int]:
+    """The kv ranks of :func:`_lookup_worker_ids`, in the same order."""
+    # TODO (ApostaC): include local world size/rank info
+    # in the future once it's in IPCCacheServerKey
     return [
         ObjectKey.ComputeKVRank(
             world_size=ipc_key.world_size,
-            global_rank=ipc_key.worker_id,
+            global_rank=worker_id,
             local_world_size=ipc_key.world_size,
-            local_rank=ipc_key.worker_id,
+            local_rank=worker_id,
         )
+        for worker_id in _lookup_worker_ids(ipc_key)
     ]
 
 
@@ -448,7 +445,8 @@ class GroupedObjectKeys:
         keys: Chunk-ordered object keys in this ``(object group, kv rank)``
             group (one row of the request).
         object_group_id: The object group these keys belong to.
-        layout_desc: Memory layout of this object group's objects.
+        layout_desc: Memory layout of this row's objects; rows of one object
+            group can differ.
         sliding_window_size: Number of trailing prefix chunks this object group
             needs present to serve a prefix: ``FULL_ATTENTION_WINDOW_CHUNKS``
             (``-1``) for full attention, ``w >= 1`` for a sliding window of
@@ -523,7 +521,8 @@ class PrefetchTaskSpec:
 
     @property
     def group_layout_descs(self) -> dict[int, MemoryLayoutDesc]:
-        """Map each object group id to its memory layout."""
+        """Map each object group id to one of its rows' layouts; only a hint
+        for L2 lookup, as rows of one group can differ."""
         return {row.object_group_id: row.layout_desc for row in self.key_groups}
 
 
@@ -661,6 +660,7 @@ def ipc_key_to_grouped_object_keys(
     object_group_ids: list[int],
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
+    worker_group_layout_descs: dict[int, dict[int, MemoryLayoutDesc]] | None = None,
 ) -> list[GroupedObjectKeys]:
     """Expand an IPC key and its chunk hashes into prefetch key rows.
 
@@ -678,6 +678,10 @@ def ipc_key_to_grouped_object_keys(
         group_layout_descs: Maps each object group id to its memory layout.
         attn_desc: Registration-wide attention windows; the window of object
             group ``g`` is ``attn_desc.num_chunks_in_sw[g]``.
+        worker_group_layout_descs: Per-worker ``{object_group_id: layout}``
+            (from ``LayoutDescRegistry.find_worker_group_layout_descs``) used
+            for that worker's rows; workers or groups missing here use
+            ``group_layout_descs``.
 
     Returns:
         ``len(object_group_ids) * num_ranks`` rows, group-major / rank-minor.
@@ -691,6 +695,8 @@ def ipc_key_to_grouped_object_keys(
         size; a worker-specific key yields that rank only. ``cache_salt`` is
         taken from ``ipc_key``.
     """
+    worker_layouts = worker_group_layout_descs or {}
+    worker_ids = _lookup_worker_ids(ipc_key)
     kv_ranks = _lookup_kv_ranks(ipc_key)
     rows: list[GroupedObjectKeys] = []
     for object_group_id in object_group_ids:
@@ -706,7 +712,7 @@ def ipc_key_to_grouped_object_keys(
                 f"outside attn_desc's {attn_desc.num_object_groups} groups"
             )
         window = attn_desc.num_chunks_in_sw[object_group_id]
-        for kv_rank in kv_ranks:
+        for worker_id, kv_rank in zip(worker_ids, kv_ranks, strict=True):
             rows.append(
                 GroupedObjectKeys(
                     keys=[
@@ -720,7 +726,9 @@ def ipc_key_to_grouped_object_keys(
                         for chunk_hash in chunk_hashes
                     ],
                     object_group_id=object_group_id,
-                    layout_desc=layout_desc,
+                    layout_desc=worker_layouts.get(worker_id, {}).get(
+                        object_group_id, layout_desc
+                    ),
                     sliding_window_size=window,
                 )
             )
