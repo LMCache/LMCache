@@ -3,13 +3,14 @@
 
 # Standard
 from types import SimpleNamespace
-import logging
+from unittest.mock import MagicMock
 
 # Third Party
 import pytest
 
 # First Party
 from lmcache.integration.vllm.utils import set_dp_rank_controller_identity
+import lmcache.integration.vllm.utils as lmcache_vllm_utils
 
 PORTS = [8001, 8002, 8003, 8004, 8005, 8006, 8007, 8008]
 
@@ -82,11 +83,15 @@ def test_tp_workers_offset_and_local_rank_used_for_ports():
     assert config.lmcache_worker_ports[:4] == [8005, 8006, 8007, 8008]
 
 
-def test_warns_when_ports_are_shared(caplog: pytest.LogCaptureFixture):
+def test_warns_when_ports_are_shared(monkeypatch: pytest.MonkeyPatch):
+    # Assert on the logger call: LMCache loggers do not propagate and other tests
+    # change logger state, so caplog misses the warning in the full suite.
+    warn = MagicMock()
+    monkeypatch.setattr(lmcache_vllm_utils.logger, "warning", warn)
     config, vllm_config = _configs(
         dp_size=8, dp_rank=1, engine_id="x_dp1", world_size=2
     )
-    with caplog.at_level(logging.WARNING):
-        set_dp_rank_controller_identity(config, vllm_config)
+    set_dp_rank_controller_identity(config, vllm_config)
     assert config.lmcache_worker_ports[0] == 8003
-    assert "ports will be shared" in caplog.text
+    warn.assert_called_once()
+    assert "ports will be shared" in warn.call_args.args[0]
