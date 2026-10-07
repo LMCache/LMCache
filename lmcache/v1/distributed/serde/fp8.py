@@ -19,8 +19,6 @@ from lmcache.v1.distributed.serde.factory import register_serde_factory
 from lmcache.v1.memory_management import MemoryObj
 
 
-
-
 def _fused_scaled_cast(
     t: torch.Tensor,
     fp8_dtype: torch.dtype,
@@ -40,7 +38,7 @@ def _fused_scaled_cast(
     if t.dtype not in (torch.float32, torch.bfloat16):
         return t.to(fp8_dtype).contiguous()
 
-    x = t.contiguous()
+    x = t.contiguous().to(torch.float32)
     n = x.numel()
     # blockwise needs at least one full group
     if block_size <= 0 or n % block_size != 0:
@@ -50,10 +48,7 @@ def _fused_scaled_cast(
 
     fp8 = torch.empty_like(x, dtype=fp8_dtype)
     scales = torch.empty(n_scales, dtype=torch.float32, device=x.device)
-    cuda_ops.fp8_quantize_scaled(
-        x.contiguous().to(torch.float32), fp8, scales,
-        scale_mode, block_size, amax_ceiling,
-    )
+    cuda_ops.fp8_quantize_scaled(x, fp8, scales, scale_mode, block_size, amax_ceiling)
     return fp8
 
 
@@ -103,9 +98,9 @@ class Fp8QuantizationSerializer(Serializer):
             raise ValueError("Fp8 serde requires src and dst to have tensors")
 
         if self._scaled and src_tensor.is_cuda:
-            fp8_tensor = _fused_scaled_cast(src_tensor, self._fp8_dtype,
-                                            self._block_size,
-                                            self._amax_ceiling)
+            fp8_tensor = _fused_scaled_cast(
+                src_tensor, self._fp8_dtype, self._block_size, self._amax_ceiling
+            )
         else:
             # Cast to fp8 (1 byte per element), scale-free
             fp8_tensor = src_tensor.to(self._fp8_dtype).contiguous()

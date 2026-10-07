@@ -18,8 +18,12 @@ def _kv_like(num_tokens=64, num_heads=8, head_size=128, seed=0):
     """KV-shaped tensor with occasional large outliers."""
     g = torch.Generator(device="cuda").manual_seed(seed)
     x = torch.randn(
-        num_tokens, num_heads, head_size,
-        generator=g, device="cuda", dtype=torch.float32,
+        num_tokens,
+        num_heads,
+        head_size,
+        generator=g,
+        device="cuda",
+        dtype=torch.float32,
     )
     flat = x.view(-1)
     flat[::977] *= 40.0  # outliers, like real post-RoPE K
@@ -37,17 +41,15 @@ def test_scaled_beats_scale_free(mode, block):
     n = x.numel()
 
     # current path
-    ref_err = _rel_rms(
-        x.to(torch.float8_e4m3fn).to(torch.float32), x
-    )
+    ref_err = _rel_rms(x.to(torch.float8_e4m3fn).to(torch.float32), x)
 
     # fused path
+    xf = x.to(torch.float32).contiguous()
     fp8 = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     n_scales = 1 if mode == 0 else (n // block if mode == 2 else x.size(-1))
     scales = torch.empty(max(1, n_scales), dtype=torch.float32, device="cuda")
-    cuda_ops.fp8_quantize_scaled(x, fp8, scales, mode, block, 0.0)
+    cuda_ops.fp8_quantize_scaled(xf, fp8, scales, mode, block, 0.0)
 
-    inv = scales[0] if mode == 0 else None
     deq = fp8.to(torch.float32)
     if mode == 1:
         deq = deq * scales.view(*([1] * (x.dim() - 1)), -1)
