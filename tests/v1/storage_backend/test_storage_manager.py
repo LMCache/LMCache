@@ -262,6 +262,18 @@ class TestStorageManagerPrefetchCallback:
         for obj in tier2_objs:
             assert obj.ref_count_down_called
 
+        # The released tail must be dropped from the published result so the
+        # downstream consumers do not free it a second time (#5391).
+        published = [
+            obj
+            for tier in storage_manager.event_manager.get_event_future(
+                EventType.LOADING, "test_lookup_2"
+            ).result()
+            for _, obj in tier
+        ]
+        for obj in tier2_objs:
+            assert obj not in published
+
     def test_first_tier_partial_retrieval(self, storage_manager):
         """
         Test Case 3: First tier only got partial chunks,
@@ -536,3 +548,15 @@ class TestStorageManagerPrefetchCallback:
             )
             == EventStatus.DONE
         )
+
+        # The released tail must not remain on the LOADING event, otherwise the
+        # downstream consumers (async retrieval / abort cleanup) release it a
+        # second time and the returned pages are freed twice (#5391).
+        event_future = storage_manager.event_manager.get_event_future(
+            EventType.LOADING, "test_failed_tier"
+        )
+        published = [obj for tier in event_future.result() for _, obj in tier]
+        for obj in tier2_objs:
+            assert obj not in published
+        for obj in tier0_objs:
+            assert obj in published

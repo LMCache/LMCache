@@ -633,18 +633,25 @@ class StorageManager:
             expected_chunks = tier_expected_chunks[tier_idx]
             total_retrieved_chunks += actual_chunks
 
-            # Release the tail rounded off by actual_chunks; else staging buffer leaks.
+            # Release the tail rounded off by actual_chunks; else staging buffer
+            # leaks. The released objects are also dropped from ``res`` (which
+            # is the result published on the LOADING event) so downstream
+            # consumers do not release them a second time (#5391).
             tail_start = actual_chunks * keys_per_chunk
             for _, mem_obj in tier_result[tail_start:]:
                 mem_obj.ref_count_down()
+            del tier_result[tail_start:]
 
             # If a tier retrieved fewer chunks than expected, we stop counting
             # because subsequent chunks are not contiguous
             if actual_chunks < expected_chunks:
-                # Release all chunks in subsequent tiers since they won't be used
+                # Release all chunks in subsequent tiers since they won't be
+                # used, and drop them from the published result for the same
+                # single-ownership reason as above.
                 for subsequent_tier in res[tier_idx + 1 :]:
                     for _, mem_obj in subsequent_tier:
                         mem_obj.ref_count_down()
+                    subsequent_tier.clear()
                 break
 
         retrieved_length = cum_chunk_lengths_total[total_retrieved_chunks]
