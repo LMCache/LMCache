@@ -133,7 +133,9 @@ def _create_nixl_native_l2_adapter(
     Raises:
         ValueError: If the L1 descriptor is invalid or configured eviction is
             unsupported by the inferred storage strategy.
-        RuntimeError: If the optional C++ extension is unavailable.
+        RuntimeError: If the optional C++ extension cannot be loaded, either
+            directly or after importing the nixl package; the message
+            includes both import errors.
     """
     if l1_memory_desc is None:
         raise ValueError("nixl_native requires an L1MemoryDesc")
@@ -142,28 +144,31 @@ def _create_nixl_native_l2_adapter(
     if l1_memory_desc.align_bytes <= 0:
         raise ValueError("nixl_native requires a positive L1 alignment")
 
-    try:
-        # Third Party
-        # Importing the nixl wheel loads libnixl (and lets it find its plugins
-        # next to itself); the extension below links libnixl by SONAME and
-        # resolves it from that already-loaded copy, so a wheel install needs
-        # no rpath or LD_LIBRARY_PATH. Best effort: a source build may already
-        # have libnixl on the loader path, and the extension import below is
-        # the real gate either way.
-        import nixl  # noqa: F401
-    except ImportError:
-        pass
-
+    # Import the extension directly first, so a source build loads the NIXL SDK
+    # it was linked against through its RUNPATH. A published wheel carries no
+    # RUNPATH, so that fails; only then import the nixl wheel, which loads its
+    # libnixl, and retry -- the extension links libnixl by SONAME and resolves
+    # it from that already-loaded copy.
     try:
         # First Party
         from lmcache.lmcache_nixl import LMCacheNixlClient
-    except ImportError as exc:
-        raise RuntimeError(
-            "nixl_native requires the nixl package (pip install lmcache[nixl]) "
-            "and LMCache's C++ NIXL extension. The published wheels include "
-            "the extension; a source build needs BUILD_WITH_NIXL=1, "
-            "NIXL_INCLUDE_DIR, and NIXL_LIBRARY_DIR set before installing."
-        ) from exc
+    except ImportError as direct_exc:
+        try:
+            # Third Party
+            import nixl  # noqa: F401
+
+            # First Party
+            from lmcache.lmcache_nixl import LMCacheNixlClient
+        except ImportError as exc:
+            raise RuntimeError(
+                "nixl_native requires the nixl package (pip install "
+                "lmcache[nixl]) and LMCache's C++ NIXL extension. The published "
+                "wheels include the extension; a source build needs "
+                "BUILD_WITH_NIXL=1, NIXL_INCLUDE_DIR, and NIXL_LIBRARY_DIR set "
+                f"before installing. Loading the extension failed with: "
+                f"{direct_exc}; then importing nixl and retrying failed with: "
+                f"{exc}"
+            ) from exc
 
     # First Party
     from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
