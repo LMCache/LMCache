@@ -28,23 +28,6 @@ if TYPE_CHECKING:
     )
 
 
-def _per_tier(
-    key_directory: "KeyDirectory",
-    select: Callable[["DirectoryStats"], tuple[int, int]],
-) -> Callable[["CallbackOptions"], list["Observation"]]:
-    """Return a gauge callback observing ``select``'s ``(l1, l2)`` pair of
-    the directory's stats as one value per tier."""
-
-    def _observe(_options: "CallbackOptions") -> list["Observation"]:
-        l1, l2 = select(key_directory.stats())
-        return [
-            metrics.Observation(l1, {"tier": "l1"}),
-            metrics.Observation(l2, {"tier": "l2"}),
-        ]
-
-    return _observe
-
-
 def init_coordinator_metrics(config: MPCoordinatorConfig) -> None:
     """Initialize the coordinator's OpenTelemetry metrics pipeline.
 
@@ -85,20 +68,22 @@ def register_key_directory_metrics(
     """
     if meter is None:
         meter = metrics.get_meter("lmcache.mp_coordinator")
-    placements = _per_tier(key_directory, lambda s: (s.l1_count, s.l2_count))
-    placement_bytes = _per_tier(
-        key_directory, lambda s: (s.l1_size_bytes, s.l2_size_bytes)
+    placements_callback = _make_tier_gauge_callback(
+        key_directory, lambda stats: (stats.l1_count, stats.l2_count)
+    )
+    placement_bytes_callback = _make_tier_gauge_callback(
+        key_directory, lambda stats: (stats.l1_size_bytes, stats.l2_size_bytes)
     )
     meter.create_observable_gauge(
         "lmcache_coordinator.key_directory.placements",
-        callbacks=[placements],
+        callbacks=[placements_callback],
         description="Placements recorded in the key directory, by tier. A "
         "placement is one place a key is stored: L1 on one server, or one L2 "
         "backend.",
     )
     meter.create_observable_gauge(
         "lmcache_coordinator.key_directory.placement_bytes",
-        callbacks=[placement_bytes],
+        callbacks=[placement_bytes_callback],
         description="Reported logical bytes of the placements recorded in the "
         "key directory, by tier.",
     )
@@ -106,12 +91,37 @@ def register_key_directory_metrics(
     # lmcache_coordinator.* names ship.
     meter.create_observable_gauge(
         "lmcache_mp.key_directory_placement_count",
-        callbacks=[placements],
+        callbacks=[placements_callback],
         description="Deprecated: use lmcache_coordinator.key_directory.placements.",
     )
     meter.create_observable_gauge(
         "lmcache_mp.key_directory_placement_size_bytes",
-        callbacks=[placement_bytes],
+        callbacks=[placement_bytes_callback],
         description="Deprecated: use "
         "lmcache_coordinator.key_directory.placement_bytes.",
     )
+
+
+def _make_tier_gauge_callback(
+    key_directory: "KeyDirectory",
+    read_l1_and_l2: Callable[["DirectoryStats"], tuple[int, int]],
+) -> Callable[["CallbackOptions"], list["Observation"]]:
+    """Return a gauge callback that reports one value per cache tier.
+
+    Args:
+        key_directory: The directory whose stats the callback reads.
+        read_l1_and_l2: Picks the ``(l1, l2)`` values out of the stats.
+
+    Returns:
+        A callback observing the L1 value under ``tier="l1"`` and the L2
+        value under ``tier="l2"``.
+    """
+
+    def _observe_tiers(_options: "CallbackOptions") -> list["Observation"]:
+        l1_value, l2_value = read_l1_and_l2(key_directory.stats())
+        return [
+            metrics.Observation(l1_value, {"tier": "l1"}),
+            metrics.Observation(l2_value, {"tier": "l2"}),
+        ]
+
+    return _observe_tiers
