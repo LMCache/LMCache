@@ -825,6 +825,7 @@ class EngineDrivenTransferContext(TransferContext):
         )
         dtype = getattr(torch, dtype_str)
         layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+        kv_worker_id = layout_hints.get("kv_worker_id") if layout_hints else None
 
         future = self._submit_registration(
             lambda: self._req_client.register_kv_cache_engine_driven_context(
@@ -838,6 +839,7 @@ class EngineDrivenTransferContext(TransferContext):
                     dtype_str=dtype_str,
                     use_mla=use_mla_flag,
                     num_physical_slots=blocks_in_chunk * block_size,
+                    kv_worker_id=kv_worker_id,
                 )
             )
         )

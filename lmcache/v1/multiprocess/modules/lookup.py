@@ -289,6 +289,12 @@ class LookupModule:
             )
             return
 
+        # Pipeline stages differ, so each worker's rows use its own layouts.
+        worker_group_layout_descs = (
+            self._ctx.layout_desc_registry.find_worker_group_layout_descs(
+                model_name, world_size
+            )
+        )
         spec = PrefetchTaskSpec(
             key_groups=ipc_key_to_grouped_object_keys(
                 key,
@@ -296,6 +302,7 @@ class LookupModule:
                 list(range(attn_desc.num_object_groups)),
                 group_layout_descs,
                 attn_desc,
+                worker_group_layout_descs=worker_group_layout_descs,
             ),
             num_kv_readers=num_kv_readers,
         )

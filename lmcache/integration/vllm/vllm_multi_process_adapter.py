@@ -1555,8 +1555,9 @@ class LMCacheMPWorkerAdapter:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
-            layout_hints: Engine layout hints forwarded to the server; built
-                here from the ambient vLLM config when not provided.
+            layout_hints: Engine layout hints forwarded to the server with
+                this worker's ``kv_worker_id`` added; built here from the
+                ambient vLLM config when not provided.
 
         Raises:
             ConnectionError: if the server does not respond within
@@ -1578,10 +1579,12 @@ class LMCacheMPWorkerAdapter:
                 )
         self.kv_caches = kv_caches
         self.engine_group_infos = list(engine_group_infos)
-        # Reused when heartbeat recovery re-registers.
-        self._layout_hints = (
+        hints = (
             layout_hints if layout_hints is not None else vllm_layout_hints()
-        )
+        ).copy()
+        hints["kv_worker_id"] = self.worker_id
+        # Reused when heartbeat recovery re-registers.
+        self._layout_hints = hints
         self._send_register_kv_caches_request(kv_caches)
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:

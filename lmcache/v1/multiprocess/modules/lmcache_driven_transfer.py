@@ -459,7 +459,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             engine_type: Which serving engine produced the caches.
                 Forwarded to GPUCacheContext for format detection.
             layout_hints: See LayoutHints.  Forwarded to
-                GPUCacheContext for GPU KV format detection.
+                GPUCacheContext for GPU KV format detection; its
+                ``kv_worker_id`` goes to the layout registry.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
         """
@@ -510,6 +511,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             layout_desc,
             attn_desc,
             group_layout_descs=group_layout_descs,
+            worker_id=layout_hints.get("kv_worker_id"),
         )
 
         with self._lock:
