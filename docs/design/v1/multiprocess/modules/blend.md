@@ -121,6 +121,21 @@ the rest of the request proceeds. The found set's object keys are stashed in
 `Session.extras` for the retrieve; whatever no retrieve consumes is released
 by the session-destroy listener.
 
+**Fingerprint index.** `BlendTokenRangeMatcher` is a direct-address table
+holding one chunk per slot (`poly_hash & mask`). Several live chunks can
+share a slot: chunk hashes are prefix-chained, so the same text stored
+behind two prefixes is two chunks (unless `--enable-dedup-content`), and
+distinct text can collide on the slot bits. The slot holds the newest;
+the others are shadowed, and a probe returns only the holder. Eviction
+passes the slot to the newest remaining chunk, so evicting one copy of a
+document never hides another copy that is still stored:
+
+```text
+store D behind P1  -> chunk c1 holds slot S
+store D behind P2  -> chunk c2 holds S, c1 shadowed
+evict c2 (stale)   -> c1 holds S          evict c1 instead -> c2 keeps S
+```
+
 ## Retrieve (plan-then-execute, all-or-nothing)
 
 `cb_retrieve_pre_computed` fills temp slots from L1 (H2D), K-only re-RoPEs
