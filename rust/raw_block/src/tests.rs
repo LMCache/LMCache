@@ -119,7 +119,8 @@ fn prepare_iouring_write_buffer_keeps_fixed_buffer_for_zero_tail() {
     buf[..4].copy_from_slice(b"data");
     let ptr = buf.as_ptr() as usize;
 
-    let prepared = prepare_iouring_write_buffer(ptr, 4096, 4, 4096, false, 4096, Some(3)).unwrap();
+    let prepared =
+        prepare_iouring_write_buffer(ptr, 4096, 4, 4096, false, 4096, Some(3), false).unwrap();
 
     assert_eq!(prepared.ptr_addr, ptr);
     assert!(prepared.bounce.is_none());
@@ -374,4 +375,270 @@ fn normal_shutdown_does_not_report_a_terminal_worker_error() {
         device.call_method0("close").unwrap();
         assert!(device.call_method0("worker_error").unwrap().is_none());
     });
+}
+
+// Padded-transfer shape shared by the tests below: a two-block direct prefix
+// followed by a partial final block.
+const ALIGN: usize = 4096;
+const PAYLOAD: usize = 2 * ALIGN + 1808;
+const PREFIX: usize = PAYLOAD / ALIGN * ALIGN;
+const TOTAL: usize = PAYLOAD.div_ceil(ALIGN) * ALIGN;
+const TAIL_PAYLOAD: usize = PAYLOAD - PREFIX;
+
+#[test]
+fn padded_write_bounces_only_tail_without_modifying_source() {
+    // Inspect the preparation helper to assert allocation size, which a
+    // device round trip cannot distinguish from a full-buffer copy.
+    let source = super::AlignedBuf::new(TOTAL, ALIGN).unwrap();
+    unsafe { std::ptr::write_bytes(source.as_mut_ptr(), 0xa5, TOTAL) };
+    let ptr = source.as_ptr() as usize;
+    let prepared =
+        prepare_iouring_write_buffer(ptr, PAYLOAD, PAYLOAD, TOTAL, true, ALIGN, None, false)
+            .unwrap();
+    assert_eq!(prepared.bounce.as_ref().unwrap().len, ALIGN);
+    let vectors = prepared.iovecs.as_ref().unwrap();
+    assert_eq!(vectors[0].base_addr, ptr);
+    assert_eq!(vectors[0].len, PREFIX);
+    assert_eq!(vectors[1].len, ALIGN);
+    let tail =
+        unsafe { std::slice::from_raw_parts(prepared.bounce.as_ref().unwrap().as_ptr(), ALIGN) };
+    assert!(tail[..TAIL_PAYLOAD].iter().all(|v| *v == 0xa5));
+    assert!(tail[TAIL_PAYLOAD..].iter().all(|v| *v == 0));
+    assert!(
+        unsafe { std::slice::from_raw_parts(source.as_ptr(), TOTAL) }
+            .iter()
+            .all(|v| *v == 0xa5)
+    );
+}
+
+#[test]
+fn padded_read_prepares_tail_copyback() {
+    let target = super::AlignedBuf::new(TOTAL, ALIGN).unwrap();
+    let ptr = target.as_mut_ptr() as usize;
+    let prepared =
+        super::prepare_iouring_read_buffer(ptr, PAYLOAD, PAYLOAD, TOTAL, true, false, ALIGN, None)
+            .unwrap();
+    assert_eq!(prepared.bounce.as_ref().unwrap().len, ALIGN);
+    assert_eq!(prepared.original_ptr, Some(ptr + PREFIX));
+    assert_eq!(prepared.payload_len, Some(TAIL_PAYLOAD));
+    assert_eq!(prepared.iovecs.as_ref().unwrap()[0].len, PREFIX);
+}
+
+#[test]
+fn tail_preparation_preserves_fallbacks_and_aligned_fast_path() {
+    let source_len = TOTAL + ALIGN;
+    let source = super::AlignedBuf::new(source_len, ALIGN).unwrap();
+    unsafe { std::ptr::write_bytes(source.as_mut_ptr(), 7, source_len) };
+    let ptr = source.as_ptr() as usize;
+    for size in [17, ALIGN, ALIGN + 1, 2 * ALIGN - 1, 2 * ALIGN, PAYLOAD] {
+        let total = super::round_up(size, ALIGN);
+        let prepared =
+            prepare_iouring_write_buffer(ptr, size, size, total, true, ALIGN, Some(3), false)
+                .unwrap();
+        if size == total {
+            assert!(prepared.bounce.is_none());
+            assert!(prepared.iovecs.is_none());
+            assert_eq!(prepared.fixed_buffer_idx, Some(3));
+        } else {
+            assert_eq!(prepared.bounce.as_ref().unwrap().len, ALIGN);
+            assert_eq!(prepared.iovecs.is_some(), size > ALIGN);
+            assert_eq!(prepared.fixed_buffer_idx, None);
+        }
+    }
+    for (address, total, cmd) in [
+        // Unaligned address.
+        (ptr + 1, TOTAL, false),
+        // More than one block of padding.
+        (ptr, TOTAL + ALIGN, false),
+        // io_uring_cmd takes one buffer per command.
+        (ptr, TOTAL, true),
+    ] {
+        let prepared =
+            prepare_iouring_write_buffer(address, PAYLOAD, PAYLOAD, total, true, ALIGN, None, cmd)
+                .unwrap();
+        assert!(prepared.iovecs.is_none());
+        assert_eq!(prepared.bounce.as_ref().unwrap().len, total);
+    }
+}
+
+#[test]
+fn vectored_completion_copies_tail_only_on_success() {
+    for is_write in [false, true] {
+        for result in [-libc::EIO, 0, PREFIX as i32, TOTAL as i32] {
+            let target = super::AlignedBuf::new(TOTAL, ALIGN).unwrap();
+            unsafe { std::ptr::write_bytes(target.as_mut_ptr(), 0xcc, TOTAL) };
+            let ptr = target.as_ptr() as usize;
+            let prepared = super::prepare_iouring_read_buffer(
+                ptr, PAYLOAD, PAYLOAD, TOTAL, true, false, ALIGN, None,
+            )
+            .unwrap();
+            unsafe {
+                std::ptr::write_bytes(prepared.bounce.as_ref().unwrap().as_mut_ptr(), 7, ALIGN)
+            };
+            let weak = std::sync::Arc::downgrade(prepared.bounce.as_ref().unwrap());
+            let mut submission = super::IoSubmission {
+                len: TOTAL,
+                is_write,
+                iovecs: prepared.iovecs,
+                bounce: prepared.bounce,
+                original_ptr: prepared.original_ptr,
+                payload_len: prepared.payload_len,
+                ..Default::default()
+            };
+            let outcome = super::handle_completion_result(&mut submission, result, false);
+            assert_eq!(outcome.is_ok(), result == TOTAL as i32);
+            let bytes = unsafe { std::slice::from_raw_parts(target.as_ptr(), TOTAL) };
+            let expected = if !is_write && result == TOTAL as i32 {
+                7
+            } else {
+                0xcc
+            };
+            assert!(bytes[PREFIX..PAYLOAD]
+                .iter()
+                .all(|value| *value == expected));
+            assert!(bytes[PAYLOAD..].iter().all(|value| *value == 0xcc));
+            assert!(weak.upgrade().is_none());
+        }
+    }
+}
+
+#[test]
+fn short_vectored_retries_advance_across_prefix_and_tail() {
+    // Inject completion lengths at the worker transition: device round trips
+    // cannot deterministically produce each positive-short boundary.
+    let align = ALIGN as i32;
+    let prefix = PREFIX as i32;
+    let partial = 512;
+    let target_len = TOTAL + ALIGN;
+    let base_offset = (4 * ALIGN) as u64;
+    for is_write in [false, true] {
+        for completed in [
+            &[align, align, partial][..],
+            &[prefix][..],
+            &[prefix + partial][..],
+        ] {
+            let target = super::AlignedBuf::new(target_len, ALIGN).unwrap();
+            unsafe { std::ptr::write_bytes(target.as_mut_ptr(), 0xcc, target_len) };
+            let ptr = target.as_ptr() as usize;
+            let prepared = super::prepare_iouring_read_buffer(
+                ptr, PAYLOAD, PAYLOAD, TOTAL, true, false, ALIGN, None,
+            )
+            .unwrap();
+            let tail_ptr = prepared.bounce.as_ref().unwrap().as_ptr() as usize;
+            unsafe { std::ptr::write_bytes(tail_ptr as *mut u8, 7, ALIGN) };
+            let weak = Arc::downgrade(prepared.bounce.as_ref().unwrap());
+            let mut sub = super::IoSubmission {
+                offset: base_offset,
+                len: TOTAL,
+                is_write,
+                iovecs: prepared.iovecs,
+                bounce: prepared.bounce,
+                original_ptr: prepared.original_ptr,
+                payload_len: prepared.payload_len,
+                ..Default::default()
+            };
+            let mut total = 0;
+            let snapshot = Arc::clone(sub.iovecs.as_ref().unwrap());
+            for &count in completed {
+                assert!(super::prepare_short_iouring_retry(&mut sub, count));
+                total += count as usize;
+                assert_eq!(sub.offset, base_offset + total as u64);
+                assert_eq!(sub.len, TOTAL - total);
+                let vectors = sub.iovecs.as_ref().unwrap();
+                assert_eq!(vectors.iter().map(|v| v.len).sum::<usize>(), sub.len);
+                assert!(vectors.iter().all(|v| v.len > 0));
+                let expected_ptr = if total < PREFIX {
+                    ptr + total
+                } else {
+                    tail_ptr + total - PREFIX
+                };
+                assert_eq!(vectors[0].base_addr, expected_ptr);
+                assert_eq!(vectors.len(), if total < PREFIX { 2 } else { 1 });
+                assert_eq!(sub.original_ptr, Some(ptr + PREFIX));
+                assert_eq!(sub.payload_len, Some(TAIL_PAYLOAD));
+                assert!(weak.upgrade().is_some());
+                let bytes = unsafe { std::slice::from_raw_parts(target.as_ptr(), target_len) };
+                assert!(bytes.iter().all(|v| *v == 0xcc));
+                assert_eq!(snapshot[0].base_addr, ptr);
+                assert_eq!(snapshot[0].len, PREFIX);
+                assert_eq!(snapshot[1].base_addr, tail_ptr);
+                assert_eq!(snapshot[1].len, ALIGN);
+            }
+            let remaining = sub.len as i32;
+            assert!(!super::prepare_short_iouring_retry(&mut sub, remaining));
+            super::handle_completion_result(&mut sub, remaining, false).unwrap();
+            let bytes = unsafe { std::slice::from_raw_parts(target.as_ptr(), target_len) };
+            let expected = if is_write { 0xcc } else { 7 };
+            assert!(bytes[PREFIX..PAYLOAD].iter().all(|v| *v == expected));
+            assert!(bytes[PAYLOAD..].iter().all(|v| *v == 0xcc));
+            assert!(weak.upgrade().is_none());
+        }
+    }
+}
+
+#[test]
+fn short_vectored_retry_then_failure_does_not_copy_tail() {
+    for (result, shutdown) in [(0, false), (-libc::EIO, false), (512, true)] {
+        let target = super::AlignedBuf::new(TOTAL, ALIGN).unwrap();
+        unsafe { std::ptr::write_bytes(target.as_mut_ptr(), 0xcc, TOTAL) };
+        let ptr = target.as_ptr() as usize;
+        let prepared = super::prepare_iouring_read_buffer(
+            ptr, PAYLOAD, PAYLOAD, TOTAL, true, false, ALIGN, None,
+        )
+        .unwrap();
+        let weak = Arc::downgrade(prepared.bounce.as_ref().unwrap());
+        let mut sub = super::IoSubmission {
+            len: TOTAL,
+            iovecs: prepared.iovecs,
+            bounce: prepared.bounce,
+            original_ptr: prepared.original_ptr,
+            payload_len: prepared.payload_len,
+            ..Default::default()
+        };
+        assert!(super::prepare_short_iouring_retry(&mut sub, PREFIX as i32));
+        if !shutdown {
+            assert!(!super::prepare_short_iouring_retry(&mut sub, result));
+        }
+        assert_eq!(sub.len, TOTAL - PREFIX);
+        assert_eq!(sub.offset, PREFIX as u64);
+        assert!(super::handle_completion_result(&mut sub, result, shutdown).is_err());
+        let bytes = unsafe { std::slice::from_raw_parts(target.as_ptr(), TOTAL) };
+        assert!(bytes.iter().all(|v| *v == 0xcc));
+        assert!(weak.upgrade().is_none());
+    }
+}
+
+#[test]
+fn short_retry_preserves_scalar_and_nvme_completion_rules() {
+    let (ptr_addr, offset, len) = (4 * ALIGN, (8 * ALIGN) as u64, 2 * ALIGN);
+    let initial = (ptr_addr, offset, len);
+    let advanced = (ptr_addr + ALIGN, offset + ALIGN as u64, len - ALIGN);
+    for is_write in [false, true] {
+        let mut sub = super::IoSubmission {
+            ptr_addr,
+            offset,
+            len,
+            is_write,
+            fixed_buffer_idx: Some(3),
+            ..Default::default()
+        };
+        for result in [-libc::EIO, 0, len as i32] {
+            assert!(!super::prepare_short_iouring_retry(&mut sub, result));
+            assert_eq!((sub.ptr_addr, sub.offset, sub.len), initial);
+        }
+        assert!(super::prepare_short_iouring_retry(&mut sub, ALIGN as i32));
+        assert_eq!((sub.ptr_addr, sub.offset, sub.len), advanced);
+        assert_eq!(sub.fixed_buffer_idx, Some(3));
+        sub.nvme_cmd_data = Some(super::NvmeCmdData {
+            nsid: 1,
+            lba_shift: 9,
+            dtype: 0,
+            dspec: 0,
+        });
+        for result in [0, 1, -libc::EIO] {
+            assert!(!super::prepare_short_iouring_retry(&mut sub, result));
+            assert_eq!((sub.ptr_addr, sub.offset, sub.len), advanced);
+        }
+        super::handle_completion_result(&mut sub, 0, false).unwrap();
+    }
 }
