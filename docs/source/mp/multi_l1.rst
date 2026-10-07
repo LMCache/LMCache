@@ -1,96 +1,150 @@
-L1 Write Overflow and Ownership
-===============================
+Multiple L1 Managers
+====================
 
-This change adds two foundations for multi-L1 support: ordered write overflow
-and an owner tag on each L1 memory object. It does **not** enable multi-L1
-serving through the CLI.
+The MP server can serve KV objects from independently configured DRAM,
+Device-DAX, and GDS L1 managers. Each manager has its own capacity, eviction
+controller, and store controller. L2 adapters use a fixed L1 affinity tag.
 
-What changes for users?
------------------------
+Configuration
+-------------
 
-Keep using the existing single-L1 configuration. No CLI migration is needed.
-The DRAM, Device-DAX, and GDS options in :doc:`configuration` remain unchanged,
-including the legacy ``--gds-l1-path`` options. There is no new public multi-L1
-configuration or L1--L2 affinity setting.
+Repeat ``--l1-manager`` in write-placement order. Each JSON object requires
+``type``, a unique non-empty ``tag``, and ``size_gb`` (GiB). The types are
+``DRAM``, ``DEVDAX``, and ``GDS``. The ``_default`` tag is reserved for DRAM
+in this interface and is the default affinity target for L2 adapters.
 
-The internal construction path accepts an ordered set of existing L1 managers
-for allocation and ownership tests. It requires no L2 adapters and ``noop``
-eviction. Serving reads and prefetch are rejected with multiple managers.
-``memcheck()``, ``get_l1_usage()``, ``report_status()``, and
-``publish_capacity()`` also raise ``ValueError`` in this internal mode rather
-than report only the primary L1.
-Multi-L1 read selection, cancellation, eviction, and L2 integration are deferred.
+For example, use a dedicated Device-DAX device and a GDS-capable directory:
 
-How overflow works
-------------------
+.. code-block:: bash
 
-``StorageManager.reserve_write()`` tries the primary L1 first. It retries only
-keys that returned ``OUT_OF_MEMORY`` on the next eligible L1, in explicit order.
-Calls are synchronous. Each candidate is visited at most once per reservation.
-The candidate order is validated and captured at construction, so later changes
-to the supplied policy object do not change an existing manager's write order.
+   lmcache server --chunk-size 256 --eviction-policy LRU \
+       --l1-manager '{"type":"DRAM","tag":"_default","size_gb":8}' \
+       --l1-manager '{"type":"DEVDAX","tag":"dax","size_gb":16,"path":"/dev/dax0.0"}' \
+       --l1-manager '{"type":"GDS","tag":"gds","size_gb":32,"path":"/mnt/nvme/lmcache"}' \
+       --l2-adapter '{"type":"fs","base_path":"/mnt/archive/lmcache","affinity_tag":"dax"}'
 
-.. code-block:: text
+A Device-DAX L1 in this interface has no implicit DRAM pool. Its size applies
+to the mapped device. Use dedicated, physically disjoint regions: different
+Device-DAX paths can alias the same CXL memory. Independent managers must not
+write those aliases concurrently. GDS uses
+an ephemeral slab that is cleared at initialization; it does not restore
+cached objects after a server restart.
 
-    Reserve a batch
-         |
-         v
-    Primary L1 ---- OUT_OF_MEMORY keys ----> Fallback L1 ----> Next L1
-         |                                       |
-         +-- keep successes                      +-- keep successes
-         +-- stop on other errors                +-- stop on other errors
+Use these combinations of ``--l1-manager`` arguments for the six profiles:
 
-Successful keys stay on their selected L1. They are not allocated again on a
-fallback. Conflicts and exceptions do not trigger overflow. If every candidate
-is full, failed keys are omitted from the returned object mapping, as before.
-This does not add cross-L1 deduplication.
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
 
-Existing allocation batches are preserved. Overflow is **not perfect packing**.
-For example, a new two-object batch may fail when each L1 has space for only one
-object, even though their combined free space is sufficient. The allocator frees
-partial allocations before reporting that batch as out of memory; overflow
-passes the failed subset to the next L1 without splitting it into single-key
-allocations.
+   * - Profile
+     - Managers in placement order
+   * - DRAM only
+     - ``DRAM``
+   * - GDS only
+     - ``GDS``
+   * - Device-DAX only
+     - ``DEVDAX``
+   * - DRAM + GDS
+     - ``DRAM``, ``GDS``
+   * - DRAM + Device-DAX
+     - ``DRAM``, ``DEVDAX``
+   * - DRAM + Device-DAX + GDS
+     - ``DRAM``, ``DEVDAX``, ``GDS``
 
-Why each object has an owner
-----------------------------
+Common optional JSON fields are ``align_bytes`` (4096),
+``read_ttl_seconds`` (300), ``write_ttl_seconds`` (600), and ``eviction``.
+Alignment must be a positive power of two; GDS requires at least 4096 bytes.
+TTLs must be positive integers. Unknown fields are rejected.
 
-Each L1 stamps its objects with a process-local integer identity. Objects
-created outside L1 start without an owner. The identity belongs to the manager,
-not its position in the placement order. It is separate from the writer tag
-and is not part of keys, hashes, or serialized KV metadata.
+.. list-table::
+   :header-rows: 1
+   :widths: 20 80
 
-Completion captures owner identities from the objects returned by reservation.
-It never repeats placement or searches for another copy of the key.
+   * - Type
+     - Backend fields
+   * - ``DRAM``
+     - ``use_lazy`` (true), ``init_size_gb`` (20, capped at capacity),
+       ``shm_name`` (empty), ``use_hugepages`` (false). Shared memory and
+       hugepages require eager allocation. Shared-memory names must be unique.
+   * - ``DEVDAX``
+     - Required ``path``; the allocator checks mapping size and device alignment.
+   * - ``GDS``
+     - Required ``path``; ``backend`` (``auto``), ``direct_io`` (true).
+       See :doc:`configuration` for backend requirements and location semantics.
 
-.. code-block:: text
+The global eviction flags supply defaults. Override them per manager with,
+for example, ``"eviction":{"eviction_policy":"LRU","trigger_watermark":0.9,
+"eviction_ratio":0.1}``. Without global defaults each manager must specify
+an eviction policy. ``noop`` is useful for controlled overflow tests; an LRU
+manager may free space before a later write needs to overflow.
 
-    Reserved objects --> group keys by object owner
-                                  |
-                          GPU copy completes
-                                  |
-                                  v
-                         Stream-ordered callback
-                                  |
-                                  v
-                     Finish on each captured owner
+Legacy single-L1 flags, including ``--l1-size-gb``, remain supported. Do not
+combine ``--l1-manager`` with legacy capacity or backend-selection flags.
+Python callers can use ``DRAML1ManagerConfig``, ``DevDaxL1ManagerConfig``, and
+``GDSL1ManagerConfig``; their ``from_dict`` methods implement the JSON schema.
 
-The internal callback carries only owner integers and keys, not memory objects,
-tensors, or Python pointers. Existing L1 staging keeps allocations alive. An
-unknown or unset owner is an error; multi-manager completion does not guess the
-primary L1. Existing single-L1 callers can still finish writes using keys alone.
-Single-L1 trace recording also keeps the existing key-only completion format,
-so traces can be replayed against a fresh manager with a different owner ID.
+Placement, affinity, and reads
+------------------------------
 
-The owner tag does not replace writer validation, read locks, reference counts,
-or GPU completion ordering. It is not a write generation or a crash-recovery
-token. Two copies of the same key can have different owners; finishing one
-does not publish the other.
+Writes try managers in argument order. Only ``OUT_OF_MEMORY`` results move to
+the next manager; conflicts and exceptions do not. Allocation remains atomic
+within each batch, so a batch can fail even when combined free space across
+managers would suffice. This does not add cross-L1 deduplication or migration.
 
-Not included
-------------
+An L2 adapter's ``affinity_tag`` selects the host-backed L1 used for both
+stores and reloads. It defaults to ``_default`` and must name a configured
+manager. An adapter sees completed stores from that manager only. Set the tag
+explicitly for a Device-DAX-only configuration. GDS cannot be an affinity
+target for the existing host-buffer L2 adapters. Affinity is fixed; runtime
+adapter additions are validated against the same tags.
 
-Backend rewiring, GPU L1, public multi-L1 configuration, L1--L2 affinity,
-per-L1 reporting, concurrent lookup, migration, and shared-CXL services remain
-follow-up work. CPU allocation tests do not qualify multi-L1 serving, GPU
-transfers, or cross-host sharing.
+Lookups visit L1 managers synchronously. Prefetch selects one owner per key
+and keeps that selection in the request's result. GPU completion releases
+locks on those exact owners, including when another request finds a different
+copy of the same key. Every manager has independent read and write locks.
+
+Status and Prometheus
+---------------------
+
+``GET /status`` includes these fields under ``storage_manager``:
+
+- ``l1_managers``: status keyed by L1 tag, including object/lock counts,
+  staging bytes, used/allocated/configured memory, and capacity by medium.
+- ``store_controllers`` and ``l1_eviction_controllers``: controller health
+  and progress keyed by tag.
+- ``l1_usage``: aggregate ``[used_bytes, allocated_bytes]``. For lazy DRAM,
+  allocated bytes can be below configured capacity.
+- ``l1_capacity_bytes_by_backend``: configured/live capacity summed by
+  ``dram``, ``devdax``, and ``gds``. Draining Device-DAX arenas are excluded.
+
+The legacy singular status fields remain available when there is one manager.
+``GET /config`` includes every L1 configuration and each adapter's affinity.
+
+Prometheus exports ``lmcache_mp_l1_memory_usage_bytes``,
+``lmcache_mp_l1_usage_ratio``, and ``lmcache_mp_l1_staging_bytes`` with
+``l1_tag`` and ``backend`` labels. L1 read, write, and eviction counters carry
+``l1_tag`` alongside existing cache-salt labels. Optional lifecycle histograms
+also use ``l1_tag`` and track each manager's copy independently. Sum across
+``l1_tag`` for server totals; do not sum usage ratios. A legacy manager that combines DRAM
+and Device-DAX reports ``backend="dram+devdax"`` for its combined usage.
+
+Limits and serving validation
+-----------------------------
+
+Only **one GDS slab per process** is supported. The native GDS libraries
+register CUDA streams process-wide; adding a second slab currently conflicts
+with that registration. This limit permits every profile listed above.
+A successful cuFile compatibility-mode transfer does not establish native
+GPUDirect DMA support; check the deployment's driver and filesystem.
+
+L1 topology is fixed at startup. The legacy single-region descriptor,
+shared-memory transfer channel, P2P registration, and Device-DAX hotplug API
+require a single compatible L1. Multi-L1 GPU serving uses the existing
+LMCache-driven IPC transfer path. Hybrid models additionally require their
+engine's supported recurrent-state connector and matching block/chunk
+geometry; see :doc:`hybrid_models`.
+
+Storage profiles alone do not qualify an engine/model/TP combination. Validate
+external-cache hits after clearing engine-local prefix state, token outputs,
+per-tag writes and reads, and zero remaining locks. Exercise every configured
+backend under pressure, and restart the engine and server for a second run.
