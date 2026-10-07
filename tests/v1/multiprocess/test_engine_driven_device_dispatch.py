@@ -3,6 +3,8 @@
 
 # Standard
 from unittest.mock import MagicMock
+import ctypes
+import mmap
 
 # Third Party
 import pytest
@@ -13,6 +15,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
+from lmcache.v1.platform import current_device_spec
 import lmcache
 
 
@@ -101,3 +104,53 @@ def test_cpu_and_cuda_kv_can_share_one_process(
     devices = ("cuda", "cpu", "cuda") if gpu_first else ("cpu", "cuda", "cpu")
     for device in devices:
         _assert_roundtrip(device, torch.float16, output_kind)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+def test_cuda_kv_roundtrips_through_registered_host_memory() -> None:
+    """Gather/scatter must work on slot views of a ``pin_memory``-registered
+    pool, as used by ``EngineDrivenContextShm``."""
+    native = pytest.importorskip("lmcache.cuda_ops")
+    if (
+        lmcache.device_ops.multi_layer_block_kv_transfer
+        is not native.multi_layer_block_kv_transfer
+    ):
+        pytest.skip("requires the native CUDA transfer backend")
+    source = {
+        f"layer.{i}": (
+            torch.arange(2 * 6 * 4 * 2 * 8).reshape(2, 6, 4, 2, 8) + i * 1024
+        ).to(device="cuda", dtype=torch.float16)
+        for i in range(2)
+    }
+    expected = torch.stack(
+        [tensor[:, [1, 3]].reshape(2, 8, 16).cpu() for tensor in source.values()],
+        dim=1,
+    )
+    slot_offset = mmap.PAGESIZE + 256
+    pool_size = slot_offset + expected.numel() * expected.element_size()
+    pool = mmap.mmap(-1, pool_size)
+    pool_ptr = ctypes.addressof(ctypes.c_char.from_buffer(pool))
+    assert current_device_spec.pin_memory(pool_ptr, pool_size)
+    try:
+        slot = torch.frombuffer(
+            pool, dtype=expected.dtype, count=expected.numel(), offset=slot_offset
+        ).view(expected.shape)
+        assert slot.is_pinned()
+
+        chunks = gather_paged_kv_to_cpu(
+            source, [1, 3], 2, layout_hints={"kv_layout": "NHD"}, out=[slot]
+        )
+        torch.cuda.synchronize()
+        assert chunks[0] is slot
+        assert torch.equal(slot, expected)
+
+        destination = {name: torch.zeros_like(t) for name, t in source.items()}
+        scatter_cpu_to_paged_kv(
+            destination, [2, 4], [slot], 2, layout_hints={"kv_layout": "NHD"}
+        )
+        torch.cuda.synchronize()
+        for name, tensor in destination.items():
+            assert torch.equal(tensor[:, [2, 4]], source[name][:, [1, 3]])
+            assert torch.count_nonzero(tensor[:, [0, 1, 3, 5]]).item() == 0
+    finally:
+        current_device_spec.unpin_memory(pool_ptr)
