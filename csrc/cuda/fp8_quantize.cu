@@ -36,6 +36,7 @@
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 
 #ifdef USE_ROCM
@@ -86,8 +87,8 @@ __device__ __forceinline__ float blockReduceMax(float v, float* scratch,
 // One block per row; grid.x == rows.
 __global__ void fp8QuantRowwiseKernel(const float* __restrict__ x,
                                       __nv_fp8_storage_t* __restrict__ q,
-                                      float* __restrict__ inv_scales, int cols,
-                                      float amax_ceiling) {
+                                      float* __restrict__ dequant_scales,
+                                      int cols, float amax_ceiling) {
   const int row = blockIdx.x;
   const int tid = threadIdx.x;
   const float* xr = x + (size_t)row * cols;
@@ -102,10 +103,12 @@ __global__ void fp8QuantRowwiseKernel(const float* __restrict__ x,
 
   if (tid == 0) {
     if (amax_ceiling > 0.0f) s_amax = fmaxf(s_amax, amax_ceiling);
-    inv_scales[row] = (s_amax > kFp8MinNormal) ? (kFp8Max / s_amax) : 1.0f;
+    // Store the dequant multiplier (amax / FP8_MAX), matching blockwise.
+    dequant_scales[row] = (s_amax > kFp8MinNormal) ? (s_amax / kFp8Max) : 1.0f;
   }
   __syncthreads();
-  const float inv = inv_scales[row];
+  const float sc = dequant_scales[row];
+  const float inv = (sc > 0.0f) ? (1.0f / sc) : 1.0f;
 
   for (int i = tid; i < cols; i += blockDim.x) {
     qr[i] = __nv_cvt_float_to_fp8(xr[i] * inv, __NV_SATFINITE, __NV_E4M3);

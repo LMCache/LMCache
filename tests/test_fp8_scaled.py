@@ -11,6 +11,10 @@ import torch
 
 pytest.importorskip("lmcache.cuda_ops")
 
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="requires a CUDA device"
+)
+
 from lmcache import cuda_ops  # noqa: E402
 
 
@@ -66,7 +70,7 @@ def test_scale_uses_actual_amax():
     scales = torch.empty(x.size(-1), dtype=torch.float32, device="cuda")
     cuda_ops.fp8_quantize_scaled(x, fp8, scales, 1, 128, 0.0)
 
-    # amax=2 -> dequant multiplier should be 2/448, not 1.0
+    # scales[] holds the dequant multiplier amax/448, not the quant inverse
     assert torch.allclose(scales, torch.full_like(scales, 2.0 / 448.0), atol=1e-6)
 
 

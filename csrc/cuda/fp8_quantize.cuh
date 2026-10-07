@@ -8,8 +8,8 @@ namespace lmcache {
 
 // Fused amax + scale + FP8 e4m3 cast.
 //
-// Returns (fp8_tensor, scales) where `scales` holds the dequant
-// multiplier for the chosen granularity:
+// Returns (fp8_tensor, scales) where `scales` holds the DEQUANT
+// multiplier (amax / 448.0), so x ~= fp8 * scales for the chosen granularity:
 //   scale_mode 0 -> per-tensor : scales[0]
 //   scale_mode 1 -> rowwise    : scales[rows], one per x.size(-1) slice
 //   scale_mode 2 -> blockwise  : scales[ceil(numel/block_size)]
