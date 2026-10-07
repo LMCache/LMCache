@@ -60,7 +60,9 @@ lmcache/cli/commands/bench/
     ├── tokenizers.py              # TokenPool, single-token word pools
     ├── interactive/               # Guided TUI (schema, state, terminal)
     ├── quality/                   # Answer-quality measurement
+    │   ├── alignment.py           # ChunkAligner: pad blocks to whole chunks
     │   ├── dataset.py             # Sample, hub registry, schema adapters
+    │   ├── prompts.py             # QA prompt text and message composition
     │   └── scoring.py             # F1, answer extraction, QualityAggregator
     └── workloads/
         ├── __init__.py            # create_workload() factory
@@ -504,6 +506,10 @@ chat-template prefix plus system block is also a whole multiple. Documents
 then start on a chunk boundary in both the prefill and the composite, so
 their chunks hold document content alone and match. Without this they land
 off-phase and nothing matches, silently.
+
+The padding lives in `quality/alignment.py` (`ChunkAligner`) and the prompt
+text in `quality/prompts.py`, outside the workload, so other answer-quality
+benchmarks can build byte-identical prompts.
 
 **Set it to the deployment's LMCache chunk size** — the default 256 is
 LMCache's own default, not a detected value. It is configured rather than
