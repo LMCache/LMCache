@@ -866,10 +866,99 @@ def test_duplicate_content_registers_twice_by_default():
     assert [m.hash for m in matches] == [second]
     assert matches[0].old_st == CHUNK_SIZE
 
-    # The first entry is orphaned: evicting the second loses the text.
+    # The first copy is shadowed, not lost: evicting the second exposes it.
+    matcher.remove_chunks([second])
+    matches = matcher.match_sub_sequence(_content_chunk(1))
+    assert [m.hash for m in matches] == [first]
+    assert matches[0].old_st == 0
+
+
+def test_evicting_an_older_duplicate_keeps_the_newer_one():
+    """Evicting a stale older copy must not hide the copy holding the slot."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    first, second = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
+
+    _register_content(matcher, _content_chunk(1), [101])
+    _register_content(matcher, _content_chunk(1), [202], position_offset=CHUNK_SIZE)
+
+    matcher.remove_chunks([first])
+    assert _matched_hashes(matcher, _content_chunk(1)) == {second}
+    # Re-registering the live copy is a no-op, so it could not repair a
+    # wiped slot either.
+    _register_content(matcher, _content_chunk(1), [202], position_offset=CHUNK_SIZE)
+    assert _matched_hashes(matcher, _content_chunk(1)) == {second}
+
     matcher.remove_chunks([second])
     assert matcher.match_sub_sequence(_content_chunk(1)) == []
-    assert first not in _matched_hashes(matcher, _content_chunk(1))
+
+
+def test_eviction_passes_the_slot_to_the_newest_remaining_duplicate():
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    for seed in (101, 202, 303):
+        _register_content(matcher, _content_chunk(1), [seed])
+
+    matcher.remove_chunks([ObjectKey.IntHash2Bytes(303)])
+    assert _matched_hashes(matcher, _content_chunk(1)) == {ObjectKey.IntHash2Bytes(202)}
+    matcher.remove_chunks([ObjectKey.IntHash2Bytes(101)])
+    assert _matched_hashes(matcher, _content_chunk(1)) == {ObjectKey.IntHash2Bytes(202)}
+    matcher.remove_chunks([ObjectKey.IntHash2Bytes(202)])
+    assert matcher.match_sub_sequence(_content_chunk(1)) == []
+
+
+def test_content_matches_again_after_all_copies_are_evicted_and_restored():
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    first, second = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
+    _register_content(matcher, _content_chunk(1), [101])
+    _register_content(matcher, _content_chunk(1), [202])
+
+    matcher.remove_chunks([first, second])
+    assert matcher.match_sub_sequence(_content_chunk(1)) == []
+
+    _register_content(matcher, _content_chunk(1), [101])
+    assert _matched_hashes(matcher, _content_chunk(1)) == {first}
+
+
+class _SmallTableMatcher(BlendTokenRangeMatcher):
+    """An 8-slot table, so distinct chunks collide on a slot."""
+
+    _TABLE_BITS = 3
+    _TABLE_SIZE = 1 << _TABLE_BITS
+
+
+def _colliding_content_seed(seed: int) -> int:
+    """A content seed whose chunk shares ``seed``'s slot in a
+    :class:`_SmallTableMatcher`, found by observing that registering it
+    shadows ``seed``."""
+    for other in range(seed + 1, seed + 1000):
+        matcher = _SmallTableMatcher(chunk_size=CHUNK_SIZE)
+        _register_content(matcher, _content_chunk(seed), [101])
+        _register_content(matcher, _content_chunk(other), [202])
+        if not matcher.match_sub_sequence(_content_chunk(seed)):
+            return other
+    raise AssertionError("no colliding chunk found")
+
+
+def test_evicting_a_shadowed_collision_keeps_the_slot_holder():
+    other = _colliding_content_seed(1)
+    matcher = _SmallTableMatcher(chunk_size=CHUNK_SIZE)
+    _register_content(matcher, _content_chunk(1), [101])
+    _register_content(matcher, _content_chunk(other), [202])
+
+    matcher.remove_chunks([ObjectKey.IntHash2Bytes(101)])
+    assert _matched_hashes(matcher, _content_chunk(other)) == {
+        ObjectKey.IntHash2Bytes(202)
+    }
+
+
+def test_evicting_the_slot_holder_exposes_a_shadowed_collision():
+    other = _colliding_content_seed(1)
+    matcher = _SmallTableMatcher(chunk_size=CHUNK_SIZE)
+    _register_content(matcher, _content_chunk(1), [101])
+    _register_content(matcher, _content_chunk(other), [202])
+
+    matcher.remove_chunks([ObjectKey.IntHash2Bytes(202)])
+    assert _matched_hashes(matcher, _content_chunk(1)) == {ObjectKey.IntHash2Bytes(101)}
+    assert matcher.match_sub_sequence(_content_chunk(other)) == []
 
 
 # -- Enabled ------------------------------------------------------------------

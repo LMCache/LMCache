@@ -46,6 +46,10 @@ class BlendTokenRangeMatcher:
         self._lock = threading.Lock()
         # compact_chunk_id -> full poly hash, for collision reject.
         self._chunk_poly_hash: list[int] = []
+        # table slot -> live compact ids hashing to it, oldest first (dict as
+        # an ordered set, O(1) removal). The table holds only the newest; the
+        # others are shadowed, not evicted, so eviction can pass the slot on.
+        self._slot_live_ids: dict[int, dict[int, None]] = {}
 
     def on_new_token_hashes(
         self,
@@ -127,6 +131,7 @@ class BlendTokenRangeMatcher:
                 )
                 self._compact_id_to_slot[cid] = slot
                 self._token_hash_to_compact_id[th] = cid
+                self._slot_live_ids.setdefault(slot, {})[cid] = None
         return n_new
 
     def _poly_hash_registered(self, poly_hash: int) -> bool:
@@ -205,7 +210,18 @@ class BlendTokenRangeMatcher:
 
     def remove_chunks(self, token_hashes: list[bytes]) -> None:
         """Evict the given chunks so later probes cannot match them.
-        Thread-safe."""
+
+        A table slot holds one chunk: the newest live registration hashing
+        to it. Several live chunks can share a slot — the same text stored
+        behind different prefixes (without ``dedup_content``), or a bucket
+        collision. Evicting a chunk the slot does not hold leaves the slot
+        alone; evicting the holder passes the slot to the newest remaining
+        chunk, or empties it if none is left. Thread-safe.
+
+        Args:
+            token_hashes: Token hashes of the chunks to evict; unknown or
+                already-evicted hashes are ignored.
+        """
         with self._lock:
             for th in token_hashes:
                 cid = self._token_hash_to_compact_id.get(th)
@@ -219,7 +235,15 @@ class BlendTokenRangeMatcher:
                         cid,
                     )
                     continue
-                self._table_id[slot] = -1
+                # The slot always holds the newest live id hashing to it, so
+                # re-pointing it is a no-op unless cid held it.
+                live = self._slot_live_ids[slot]
+                del live[cid]
+                if live:
+                    self._table_id[slot] = next(reversed(live))
+                else:
+                    self._table_id[slot] = -1
+                    del self._slot_live_ids[slot]
                 self._compact_id_to_slot[cid] = -1
                 self._chunk_token_hash[cid] = None
                 self._chunk_poly_hash[cid] = 0

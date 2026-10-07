@@ -14,7 +14,9 @@ import pytest
 
 # First Party
 from lmcache import device_ops  # noqa: F401
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
+from lmcache.v1.multiprocess.modules.blend.matcher import BlendTokenRangeMatcher
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
 import lmcache.lmcache_native as lmcache_native
@@ -952,6 +954,34 @@ def test_sparse_classify_fully_missing_chunk_still_strikes():
     )
     eng._token_range_matcher.remove_chunks.assert_called_once_with([b"gone"])
     assert eng._stale_strike == {}
+
+
+def test_striking_out_one_copy_keeps_the_content_matchable():
+    """The same document stored behind two prefixes is indexed twice. When
+    lookups strike out the copy the probe returns (its KV left every tier),
+    the document must still match through the other copy."""
+    # First Party
+    from lmcache.lmcache_native import Bitmap
+
+    chunk = 256
+    doc = [7 * chunk + i for i in range(chunk)]
+    older, newer = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
+    matcher = BlendTokenRangeMatcher(chunk_size=chunk)
+    matcher.on_new_token_hashes(doc, [older], position_offset=chunk)
+    matcher.on_new_token_hashes(doc, [newer], position_offset=2 * chunk)
+    eng = _classify_engine()
+    eng._token_range_matcher = matcher
+    key = _classify_key()
+
+    for _ in range(eng._STALE_STRIKE_THRESHOLD):
+        matches = matcher.match_sub_sequence(doc)
+        assert [m.hash for m in matches] == [newer]
+        found = eng._sparse_classify(
+            key, matches, [Bitmap(1)], {newer: ["k-newer"]}, {newer: 0}
+        )
+        assert found == []
+
+    assert [m.hash for m in matcher.match_sub_sequence(doc)] == [older]
 
 
 def test_sparse_classify_unstaged_but_found_chunk_takes_no_strike():
