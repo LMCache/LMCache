@@ -1105,7 +1105,7 @@ class GDSMemoryObject(MemoryObj):
         return self.valid
 
     def get_size(self) -> int:
-        return self.meta.phy_size
+        return self.meta.get_size()
 
     def get_shape(self) -> torch.Size:
         return self.meta.shape
@@ -1114,16 +1114,18 @@ class GDSMemoryObject(MemoryObj):
         return self.meta.dtype
 
     def get_shapes(self) -> list[torch.Size]:
-        raise NotImplementedError(
-            "GDSMemoryObject.get_shapes: per-group shapes are not tracked on "
-            "the GDS path (only the singular meta.shape is); use get_shape()"
+        return (
+            list(self.meta.shapes)
+            if self.meta.shapes is not None
+            else [self.meta.shape]
         )
 
     def get_dtypes(self) -> list[torch.dtype]:
-        raise NotImplementedError(
-            "GDSMemoryObject.get_dtypes: per-group dtypes are not tracked on "
-            "the GDS path (only the singular meta.dtype is); use get_dtype()"
-        )
+        if self.meta.dtypes is not None:
+            return list(self.meta.dtypes)
+        if self.meta.dtype is None:
+            raise ValueError("GDS object has no dtype")
+        return [self.meta.dtype]
 
     def get_memory_format(self) -> MemoryFormat:
         return self.meta.fmt
