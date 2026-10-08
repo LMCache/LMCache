@@ -807,12 +807,19 @@ you — see :doc:`index`.
 Coordinator Metrics
 ~~~~~~~~~~~~~~~~~~~
 
-The Coordinator Key Directory gauges always emit one observation for each
-``tier`` value, ``l1`` and ``l2``, including zero-valued observations for an
-empty tier.  They describe the directory's current placements.  Placement
-bytes are the sum of the logical object sizes reported for those placements,
-not unique-object bytes, physical allocation, or storage capacity.  The same
-object is therefore included once for every placement recorded for it.
+Coordinator metrics use the ``lmcache_coordinator.`` prefix, so a series'
+origin is clear from its name even when the coordinator and the MP servers
+share one Prometheus.  The coordinator's resource carries
+``service.name=lmcache-mp-coordinator`` and ``service.instance.id`` set to the
+host name (the pod name under Kubernetes).
+
+The Key Directory gauges always emit one observation for each ``tier`` value,
+``l1`` and ``l2``, including zero-valued observations for an empty tier.  A
+placement is one place a key is stored: L1 on one server, or one L2 backend.
+Placement bytes are the sum of the logical object sizes reported for those
+placements, not unique-object bytes, physical allocation, or storage capacity.
+The same object is therefore included once for every placement recorded for
+it.
 
 .. list-table::
    :header-rows: 1
@@ -821,11 +828,17 @@ object is therefore included once for every placement recorded for it.
    * - Metric
      - Type
      - Description
-   * - ``lmcache_mp.key_directory_placement_count``
+   * - ``lmcache_coordinator.key_directory.placements``
      - ObservableGauge (attr: ``tier``)
-     - Placements currently recorded in the Coordinator Key Directory for
-       each cache tier.
-   * - ``lmcache_mp.key_directory_placement_size_bytes``
+     - Placements currently recorded in the Key Directory for each cache
+       tier.
+   * - ``lmcache_coordinator.key_directory.placement_bytes``
      - ObservableGauge (attr: ``tier``)
      - Reported logical object bytes summed across the placements currently
        recorded in each cache tier.
+
+The same two gauges are also emitted under their previous names,
+``lmcache_mp.key_directory_placement_count`` and
+``lmcache_mp.key_directory_placement_size_bytes``, for one release so
+dashboards can migrate.  The previous names will be removed in the next
+release.
