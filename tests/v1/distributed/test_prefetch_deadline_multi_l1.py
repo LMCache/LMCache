@@ -4,11 +4,11 @@
 # Standard
 from collections.abc import Iterator
 from dataclasses import replace
+from unittest.mock import Mock
 import json
 import uuid
 
 # Third Party
-from pytest_mock import MockerFixture
 import pytest
 
 # First Party
@@ -101,7 +101,10 @@ def test_multi_l1_cli_rejects_invalid_deadline(timeout: str) -> None:
 
 @pytest.mark.parametrize("policy, kept", [("prefix", [0]), ("full", [0, 2])])
 def test_partial_deadline_keeps_affinity_and_drains_without_store(
-    managers: list[L1Manager], policy: str, kept: list[int], mocker: MockerFixture
+    managers: list[L1Manager],
+    policy: str,
+    kept: list[int],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     configs = [MockL2AdapterConfig(0.05, 10.0) for _ in managers]
     for config, manager in zip(configs, managers, strict=True):
@@ -139,7 +142,11 @@ def test_partial_deadline_keeps_affinity_and_drains_without_store(
         keys = [make_object_key(index) for index in range(3)]
         store_keys_in_l2(slow, [keys[1]], layout)
         store_keys_in_l2(fast, [keys[0], keys[2]], layout)
-        store_calls = [mocker.spy(adapter, "submit_store_task") for adapter in adapters]
+        store_calls = []
+        for adapter in adapters:
+            recorder = Mock(wraps=adapter.submit_store_task)
+            monkeypatch.setattr(adapter, "submit_store_task", recorder)
+            store_calls.append(recorder)
         fast.release_loads()
         request_id = submit(controller, keys, layout, policy)
         assert slow.load_entered.wait(10)
