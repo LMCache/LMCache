@@ -119,10 +119,13 @@ def test_every_registered_device_has_all_ops(isolated_registry: Any) -> None:
 # -- Dispatch (MRO) --------------------------------------------------------
 
 
-def test_cpu_inherits_baseline_verbatim() -> None:
-    """CpuDeviceOps adds no overrides: every method resolves to the base."""
+def test_cpu_overrides_pointer_construction_only() -> None:
+    """CPU owns pointer construction and inherits the remaining baseline."""
     for name in _OP_NAMES:
-        assert getattr(CpuDeviceOps, name) is getattr(DeviceOps, name), name
+        if name == "tensor_from_ptr":
+            assert getattr(CpuDeviceOps, name) is not getattr(DeviceOps, name)
+        else:
+            assert getattr(CpuDeviceOps, name) is getattr(DeviceOps, name), name
 
 
 @pytest.mark.musa
@@ -142,6 +145,7 @@ def test_musa_overrides_transfer_and_stream_ordering_ops() -> None:
         "multi_layer_block_kv_transfer",
         "record_completion_on_stream",
         "record_event_on_stream",
+        "tensor_from_ptr",
     ]
 
 

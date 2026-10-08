@@ -3194,10 +3194,10 @@ def test_alloc_pinned_ptr_is_page_aligned(size: int) -> None:
         _py_ops.free_pinned_ptr(ptr)
 
 
-def test_tensor_from_ptr_routes_musa_pointer(
+def test_tensor_from_ptr_routes_through_device_ops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """MUSA pointers are routed through the MUSA pointer helper."""
+    """Pointer construction delegates to the resolved DeviceOps strategy."""
 
     class FakeDevice:
         """Minimal fake device type for hosts without TorchMUSA installed."""
@@ -3207,24 +3207,28 @@ def test_tensor_from_ptr_routes_musa_pointer(
 
     captured: dict[str, object] = {}
 
-    def fake_musa_ptr(
-        ptr: int,
-        shape: tuple[int, ...],
-        dtype: torch.dtype,
-        device: Any,
-        total_bytes: int,
-    ) -> torch.Tensor:
-        captured.update(
-            ptr=ptr,
-            shape=shape,
-            dtype=dtype,
-            device_type=device.type,
-            total_bytes=total_bytes,
-        )
-        return torch.empty(shape, dtype=dtype)
+    class FakeDeviceOps:
+        def tensor_from_ptr(
+            self,
+            ptr: int,
+            shape: tuple[int, ...],
+            dtype: torch.dtype,
+            device: Any,
+        ) -> torch.Tensor:
+            captured.update(
+                ptr=ptr,
+                shape=shape,
+                dtype=dtype,
+                device_type=device.type,
+            )
+            return torch.empty(shape, dtype=dtype)
 
     monkeypatch.setattr(tensor_from_ptr.torch, "device", FakeDevice)
-    monkeypatch.setattr(tensor_from_ptr, "_tensor_from_musa_ptr", fake_musa_ptr)
+    monkeypatch.setattr(
+        tensor_from_ptr,
+        "resolve_device_ops",
+        lambda _device_type: FakeDeviceOps(),
+    )
 
     tensor = _py_ops._tensor_from_ptr(0x1000, (2, 3), torch.float16, "musa:0")
 
@@ -3234,98 +3238,4 @@ def test_tensor_from_ptr_routes_musa_pointer(
         "shape": (2, 3),
         "dtype": torch.float16,
         "device_type": "musa",
-        "total_bytes": 12,
     }
-
-
-def test_tensor_from_musa_ptr_uses_external_storage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """MUSA pointer reconstruction returns a non-owning storage view."""
-
-    fake_device = object()
-    captured: dict[str, object] = {}
-
-    class FakeStorage:
-        def __init__(self, device: object) -> None:
-            self.device = device
-
-    class FakeTensor:
-        def set_(
-            self,
-            storage: object,
-            offset: int,
-            shape: tuple[int, ...],
-            stride: tuple[int, ...],
-        ) -> None:
-            captured["storage"] = storage
-            captured["offset"] = offset
-            captured["shape"] = shape
-            captured["stride"] = stride
-
-    fake_storage = FakeStorage(fake_device)
-    fake_tensor = FakeTensor()
-
-    def fake_construct_storage(ptr: int, device: object, total_bytes: int) -> object:
-        captured["ptr"] = ptr
-        captured["device"] = device
-        captured["total_bytes"] = total_bytes
-        return fake_storage
-
-    def fake_empty(
-        size: int,
-        *,
-        dtype: torch.dtype,
-        device: object,
-    ) -> FakeTensor:
-        captured["empty_size"] = size
-        captured["dtype"] = dtype
-        captured["empty_device"] = device
-        return fake_tensor
-
-    monkeypatch.setattr(
-        tensor_from_ptr.torch._C,
-        "_construct_storage_from_data_pointer",
-        fake_construct_storage,
-        raising=False,
-    )
-    monkeypatch.setattr(tensor_from_ptr.torch, "empty", fake_empty)
-
-    result = _py_ops._tensor_from_musa_ptr(
-        0x1000, (2, 3), torch.float16, fake_device, 12
-    )
-
-    assert result is fake_tensor
-    assert captured == {
-        "ptr": 0x1000,
-        "device": fake_device,
-        "total_bytes": 12,
-        "empty_size": 0,
-        "dtype": torch.float16,
-        "empty_device": fake_device,
-        "storage": fake_storage,
-        "offset": 0,
-        "shape": (2, 3),
-        "stride": (3, 1),
-    }
-
-
-def test_tensor_from_musa_ptr_fails_without_external_storage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """MUSA pointer reconstruction fails instead of returning a copy."""
-
-    fake_device = object()
-
-    def fake_construct_storage(_ptr: int, _device: object, _total_bytes: int) -> object:
-        raise RuntimeError("storage construction unavailable")
-
-    monkeypatch.setattr(
-        tensor_from_ptr.torch._C,
-        "_construct_storage_from_data_pointer",
-        fake_construct_storage,
-        raising=False,
-    )
-
-    with pytest.raises(RuntimeError, match="failed to construct"):
-        _py_ops._tensor_from_musa_ptr(0x1000, (2, 3), torch.float16, fake_device, 12)
