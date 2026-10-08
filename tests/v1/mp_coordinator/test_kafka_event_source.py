@@ -4,6 +4,7 @@
 # Standard
 from collections.abc import Callable, Mapping
 import asyncio
+import json
 import time
 
 # Third Party
@@ -207,6 +208,21 @@ def test_kafka_source_ingests_records_in_partition_order(
     assert kafka_consumer.subscribed == (_TOPIC,)
     assert position.next_offset(_TOPIC, 0) == 2
     assert kafka_consumer.closed is True
+
+
+def test_kafka_record_without_dropped_events_reads_as_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Emitters predating the field omit it from the record."""
+    envelope = CacheEventsRequest(batches=[_batch(1)]).model_dump(mode="json")
+    del envelope["batches"][0]["dropped_events"]
+    broker = FakeKafkaBroker()
+    broker.append(_TOPIC, key=b"node-a", value=json.dumps(envelope).encode())
+    source, _, recording = _source(monkeypatch, broker)
+
+    assert asyncio.run(_run_until(source, lambda: len(recording.batches) == 1))
+
+    assert recording.batches[0].dropped_events == 0
 
 
 def test_kafka_source_consumes_records_produced_after_start(

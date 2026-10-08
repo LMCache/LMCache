@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 # First Party
 from lmcache.v1.mp_coordinator import observability
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate, InstanceStreamStats
 from lmcache.v1.mp_coordinator.observability import init_coordinator_metrics
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
@@ -93,3 +94,37 @@ def test_key_directory_gauges_bind_registered_directory() -> None:
         (300, {"tier": "l1"}),
         (400, {"tier": "l2"}),
     ]
+
+
+def test_event_gate_gauges_report_loss_per_instance() -> None:
+    gate = MagicMock(spec=EventGate)
+    gate.stats.return_value = {
+        "node-a": InstanceStreamStats(
+            incarnation=1,
+            last_seq=9,
+            gap_detected=True,
+            loss_incidents_total=2,
+            lost_events_total=7,
+            admitted_events_total=40,
+        ),
+        "node-b": InstanceStreamStats(incarnation=1, last_seq=4, gap_detected=False),
+    }
+
+    with patch.object(observability, "register_gauge") as mock_register:
+        observability.register_event_gate_metrics(gate)
+
+    observed = {call.args[1]: call.args[3]() for call in mock_register.call_args_list}
+    assert observed == {
+        "lmcache_mp.cache_event_loss_incidents_total": [
+            (2, {"instance_id": "node-a"}),
+            (0, {"instance_id": "node-b"}),
+        ],
+        "lmcache_mp.cache_event_lost_events_total": [
+            (7, {"instance_id": "node-a"}),
+            (0, {"instance_id": "node-b"}),
+        ],
+        "lmcache_mp.cache_event_admitted_events_total": [
+            (40, {"instance_id": "node-a"}),
+            (0, {"instance_id": "node-b"}),
+        ],
+    }

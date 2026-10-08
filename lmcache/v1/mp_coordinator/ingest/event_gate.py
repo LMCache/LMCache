@@ -55,21 +55,66 @@ class CacheEventIngestSummary:
 
 @dataclass(frozen=True)
 class InstanceStreamStats:
-    """The gate's cursor for one emitter stream. ``gap_detected`` marks
-    the emitter's slice stale until its stream is replayed."""
+    """The gate's cursor for one emitter stream.
+
+    The loss counters cover the emitter's current incarnation and are
+    not checkpointed. A *loss incident* is an admitted batch that shows
+    loss: its ``seq`` skips ahead, or its ``dropped_events`` (the
+    emitter's own count of events it lost) grew. Both signals need a
+    known starting point. A stream's first batch since the gate started
+    tracking it counts no ``seq`` jump: the seqs before it were sent
+    before the gate was listening, so they are not transport loss. Its
+    ``dropped_events`` only sets the baseline, unless its ``seq`` is 1
+    (nothing was sent before it). A cursor restored from a checkpoint
+    knows its ``last_seq`` but not its baseline. A new incarnation
+    starts from baseline 0.
+
+    Attributes:
+        incarnation: The emitter incarnation the cursor belongs to.
+        last_seq: Highest ``seq`` admitted from that incarnation.
+        gap_detected: Marks the emitter's slice stale until its stream is
+            replayed. Set by the first batch that skips a ``seq`` or
+            raises ``dropped_events``, including a first batch that joins
+            the stream midway (which counts no incident).
+        loss_incidents_total: Number of loss incidents. Counts how often
+            the stream lost events, not how many.
+        lost_events_total: Number of events the emitter reported lost
+            (sum of ``dropped_events`` increases). Loss the emitter did
+            not see is not included.
+        admitted_events_total: Number of entries in admitted batches.
+    """
 
     incarnation: int
     last_seq: int
     gap_detected: bool
+    loss_incidents_total: int = 0
+    lost_events_total: int = 0
+    admitted_events_total: int = 0
 
 
 @dataclass
 class _StreamCursor:
-    """Mutable form of :class:`InstanceStreamStats`."""
+    """Mutable form of :class:`InstanceStreamStats`.
+
+    Attributes:
+        incarnation: See :class:`InstanceStreamStats`.
+        last_seq: See :class:`InstanceStreamStats`.
+        gap_detected: See :class:`InstanceStreamStats`.
+        dropped_baseline: ``dropped_events`` of the last admitted batch;
+            ``None`` until the gate knows it (a stream joined midway, or
+            a cursor restored from a checkpoint).
+        loss_incidents_total: See :class:`InstanceStreamStats`.
+        lost_events_total: See :class:`InstanceStreamStats`.
+        admitted_events_total: See :class:`InstanceStreamStats`.
+    """
 
     incarnation: int
     last_seq: int = 0
     gap_detected: bool = False
+    dropped_baseline: int | None = None
+    loss_incidents_total: int = 0
+    lost_events_total: int = 0
+    admitted_events_total: int = 0
 
 
 class EventGate:
@@ -97,7 +142,7 @@ class EventGate:
 
     def ingest(self, batch: CacheEventBatch) -> IngestResult:
         """Offer one batch to the consumers, applying incarnation
-        fencing, ``seq`` dedup, and gap detection.
+        fencing, ``seq`` dedup, and loss detection.
 
         Args:
             batch: The batch to offer.
@@ -108,6 +153,7 @@ class EventGate:
         """
         with self._quiesce.applying(), self._lock:
             cursor = self._cursors.get(batch.instance_id)
+            tracked = cursor is not None
             if cursor is not None:
                 if batch.incarnation < cursor.incarnation:
                     return IngestResult.STALE_INCARNATION
@@ -119,18 +165,33 @@ class EventGate:
                 elif batch.seq <= cursor.last_seq:
                     return IngestResult.DUPLICATE
             if cursor is None:
-                cursor = _StreamCursor(incarnation=batch.incarnation)
+                cursor = _StreamCursor(
+                    incarnation=batch.incarnation,
+                    # A restart, or the stream's first seq, starts from no
+                    # loss; otherwise the gate joined the stream midway.
+                    dropped_baseline=0 if tracked or batch.seq == 1 else None,
+                )
                 self._cursors[batch.instance_id] = cursor
 
-            if batch.seq > cursor.last_seq + 1 and not cursor.gap_detected:
+            seq_jump = batch.seq > cursor.last_seq + 1
+            lost = 0
+            if cursor.dropped_baseline is not None:
+                lost = max(0, batch.dropped_events - cursor.dropped_baseline)
+            cursor.dropped_baseline = batch.dropped_events
+            if (seq_jump and tracked) or lost:
+                cursor.loss_incidents_total += 1
+                cursor.lost_events_total += lost
+            cursor.admitted_events_total += len(batch.entries)
+            if (seq_jump or lost) and not cursor.gap_detected:
                 cursor.gap_detected = True
                 logger.warning(
-                    "Event gap for instance %s (incarnation %d): "
-                    "seq jumped %d -> %d; slice needs replay",
+                    "Event loss for instance %s (incarnation %d): seq "
+                    "%d -> %d, %d events reported lost; slice needs replay",
                     batch.instance_id,
                     batch.incarnation,
                     cursor.last_seq,
                     batch.seq,
+                    lost,
                 )
             cursor.last_seq = batch.seq
             self._broadcaster.broadcast(batch)
@@ -247,6 +308,9 @@ class EventGate:
                     incarnation=cursor.incarnation,
                     last_seq=cursor.last_seq,
                     gap_detected=cursor.gap_detected,
+                    loss_incidents_total=cursor.loss_incidents_total,
+                    lost_events_total=cursor.lost_events_total,
+                    admitted_events_total=cursor.admitted_events_total,
                 )
                 for instance_id, cursor in self._cursors.items()
             }
