@@ -202,7 +202,6 @@ def test_shard_store_enabled_gates():
     assert not ps.shard_store_enabled(cfg(off_sofr), True, 8)
     for flag in [
         "use_layerwise",
-        "enable_async_loading",
         "enable_blending",
         "enable_scheduler_bypass_lookup",
         "enable_pd",
@@ -214,6 +213,8 @@ def test_shard_store_enabled_gates():
         assert not ps.shard_store_enabled(cfg({}, **{flag: True}), True, 8)
     with pytest.raises(ValueError, match="external_lookup_client"):
         ps.shard_store_enabled(cfg(on, external_lookup_client="x://y"), True, 8)
+    # async loading is supported: every rank prefetches the chunks it owns
+    assert ps.shard_store_enabled(cfg(on, enable_async_loading=True), True, 8)
 
 
 def test_check_broadcast_group():
