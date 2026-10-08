@@ -1421,6 +1421,33 @@ class LMCacheEngine:
         # storage backend hot_cache lookups match the same key type.
         keys_per_chunk = self.num_layers if self.use_layerwise else 1
 
+        if self._pcp_shard:  # prefetch only the chunks this rank owns
+            shard_keys, shard_cum = pcp_shard.async_lookup_keys(
+                list(
+                    self.token_database.process_tokens(
+                        tokens=tokens,
+                        hashes=hashes,
+                        offsets=offsets,
+                        request_configs=request_configs,
+                    )
+                ),
+                self.config.chunk_size,
+                self.metadata.world_size,
+                self.metadata.worker_id,
+            )
+            asyncio.run_coroutine_threadsafe(
+                self.storage_manager.async_lookup_and_prefetch(
+                    lookup_id,
+                    shard_keys,
+                    shard_cum,
+                    search_range,
+                    pin,
+                    keys_per_chunk=1,
+                ),
+                self.storage_manager.loop,
+            )
+            return
+
         # TODO(Jiayi): make token database able to return list.
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
@@ -2109,6 +2136,40 @@ class LMCacheEngine:
                 memory_obj.ref_count_down()
         return kept, first_fail
 
+    def _pcp_shard_take_prefetched(self, owned, n_chunks, kwargs):
+        """This rank's owned chunks from its async prefetch.
+
+        Same contract as _pcp_shard_fetch_owned. The prefetch event is popped,
+        so lookup_unpin -> cleanup_memory_objs finds nothing left to release;
+        prefetched objects not kept are released here. A rank whose lookup hit
+        nothing has no event and contributes no chunk. Never raises.
+        """
+        by_key: Dict[CacheEngineKey, MemoryObj] = {}
+        req_id = kwargs.get("req_id")
+        try:
+            if (
+                req_id is not None
+                and self.event_manager.get_event_status(EventType.LOADING, req_id)
+                == EventStatus.DONE
+            ):
+                future = self.event_manager.pop_event(EventType.LOADING, req_id)
+                for backend_results in future.result():
+                    for key, memory_obj in backend_results:
+                        by_key[key] = memory_obj
+        except Exception as e:
+            logger.error(
+                "pcp_shard: rank %d: no prefetched chunks for %s: %s",
+                self.metadata.worker_id,
+                req_id,
+                e,
+            )
+        kept, first_fail, unused = pcp_shard.select_prefetched(owned, n_chunks, by_key)
+        for memory_obj in unused:
+            if memory_obj.is_pinned:
+                memory_obj.unpin()
+            memory_obj.ref_count_down()
+        return kept, first_fail
+
     def _pcp_shard_retrieve(self, tokens, mask=None, **kwargs) -> torch.Tensor:
         """Load a prefix with every rank fetching its own chunks.
 
@@ -2166,7 +2227,11 @@ class LMCacheEngine:
                     if owners[pos] == rank
                 ]
                 healthy = self.is_healthy()
-                if healthy:
+                if healthy and self.async_loading:
+                    local_objs, first_fail = self._pcp_shard_take_prefetched(
+                        owned, n_chunks, kwargs
+                    )
+                elif healthy:
                     local_objs, first_fail = self._pcp_shard_fetch_owned(
                         owned, n_chunks, kwargs
                     )
@@ -2278,6 +2343,9 @@ class LMCacheEngine:
                 except Exception as e:
                     logger.error("PCP shard store: stream synchronize failed: %s", e)
             for memory_obj in local_objs.values():
+                # prefetched objects: as the default async path.
+                if self.async_loading and memory_obj.is_pinned:
+                    memory_obj.unpin()
                 memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)

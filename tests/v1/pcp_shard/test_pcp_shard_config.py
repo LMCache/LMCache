@@ -56,9 +56,17 @@ def test_lmcache_worker_ids():
 
 
 def test_unsupported_combination_is_loud():
-    c, _ = make({"pcp_shard_store": True}, enable_async_loading=True)
-    with pytest.raises(ValueError, match="enable_async_loading"):
+    c, _ = make({"pcp_shard_store": True}, enable_p2p=True)
+    with pytest.raises(ValueError, match="enable_p2p"):
         c.get_lookup_server_worker_ids(True, 8)
+    c, _ = make({}, enable_p2p=True)
+    assert c.get_lookup_server_worker_ids(True, 8) == [0]
+
+
+def test_async_loading_supported():
+    # Every rank runs an (async) lookup server and prefetches its own chunks.
+    c, _ = make({"pcp_shard_store": True}, enable_async_loading=True)
+    assert c.get_lookup_server_worker_ids(True, 8) == list(range(8))
     c, _ = make({}, enable_async_loading=True)
     assert c.get_lookup_server_worker_ids(True, 8) == [0]
 
