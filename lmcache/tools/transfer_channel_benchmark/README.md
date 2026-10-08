@@ -79,6 +79,8 @@ the transferred bytes against that pattern (no `--verify` needed on the server).
 | `--seed` | client | RNG seed for the read subset. |
 | `--verify` | client | Verify transferred bytes against the server's known pattern. |
 | `--use-lazy` | both | Use the lazy L1 allocator (experimental for registration). |
+| `--use-hugepages` | both | Use eager 2 MiB HugeTLB DRAM; requires a provisioned pool and disables SHM. |
+| `--disable-shm` | both | Use eager anonymous pinned DRAM for a comparable baseline. |
 | `--server-timeout` | server | Seconds to serve catalog requests before exiting. |
 
 ## Notes
@@ -88,6 +90,27 @@ the transferred bytes against that pattern (no `--verify` needed on the server).
 - With the default (non-lazy) allocator the whole `--buffer-size` is allocated up
   front and may be CUDA-pinned; keep it within available host memory.
 - Requires a working transfer channel runtime (for `nixl`, a UCX backend).
+
+### Comparing HugeTLB with anonymous DRAM
+
+Run the server and client commands above twice with identical sizes, object
+counts, backend, placement, and warmup. For the baseline, append
+`--disable-shm` to **both** commands. For HugeTLB, append `--use-hugepages` to
+both commands. Use a provisioned 2 MiB pool large enough for both arenas:
+
+```bash
+# Baseline: add to the server and client commands
+--disable-shm
+
+# HugeTLB: use instead on the server and client commands
+--use-hugepages
+```
+
+The server's `--buffer-size` controls its logical L1 capacity. The client
+allocates a separate destination arena sized for its transfer batch. Compare
+five measured runs after warmup at each capacity; record the individual results
+and startup allocation/registration times. This tool measures transfer reads,
+not serving TTFT, so use a serving workload separately for the TTFT gate.
 
 ## Performance: NUMA placement
 

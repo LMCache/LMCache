@@ -6,9 +6,11 @@ Configuration for distributed storage manager
 
 # Standard
 from dataclasses import dataclass, field
+from importlib import import_module
 from typing import Any, Literal, cast
 import argparse
 import os
+import sys
 
 # First Party
 from lmcache.logging import init_logger
@@ -111,7 +113,7 @@ class L1MemoryManagerConfig:
     size_in_bytes: int
     """ The size of L1 memory in bytes. """
 
-    use_lazy: bool
+    use_lazy: bool | None = None
     """ Whether to use lazy initialization for L1 memory. """
 
     init_size_in_bytes: int = field(default=20 << 30)
@@ -120,7 +122,7 @@ class L1MemoryManagerConfig:
     align_bytes: int = field(default=0x1000)
     """ The alignment size in bytes. Default is 4KB. """
 
-    shm_name: str = field(default_factory=lambda: f"lmcache_l1_pool_{os.getpid()}")
+    shm_name: str | None = None
     """ POSIX shared-memory segment name for L1 pool. Empty disables SHM. """
 
     devdax_path: str | None = None
@@ -129,7 +131,50 @@ class L1MemoryManagerConfig:
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
 
-    def __post_init__(self):
+    use_hugepages: bool = False
+    """Allocate the DRAM arena from explicit 2 MiB Linux HugeTLB pages."""
+
+    def __post_init__(self) -> None:
+        if self.use_hugepages:
+            if self.use_lazy is True:
+                raise ValueError("--l1-use-hugepages conflicts with --l1-use-lazy")
+            if self.shm_name:
+                raise ValueError("--l1-use-hugepages conflicts with --shm-name")
+            if sys.platform != "linux" or current_device_spec.device_type != "cuda":
+                raise ValueError(
+                    "--l1-use-hugepages requires Linux and the CUDA native backend"
+                )
+            if self.size_in_bytes <= 0:
+                raise ValueError("--l1-use-hugepages requires --l1-size-gb > 0")
+            if self.size_in_bytes > sys.maxsize - ((2 << 20) - 1):
+                raise ValueError("--l1-use-hugepages size exceeds safe native rounding")
+            try:
+                native_ops = import_module("lmcache.cuda_ops")
+            except ImportError as error:
+                raise ValueError(
+                    "--l1-use-hugepages requires the lmcache.cuda_ops native "
+                    "extension; install LMCache with CUDA extensions"
+                ) from error
+            if not all(
+                hasattr(native_ops, name)
+                for name in (
+                    "alloc_hugepage_pinned_ptr",
+                    "free_hugepage_pinned_ptr",
+                    "alloc_hugepage_pinned_numa_ptr",
+                    "free_hugepage_pinned_numa_ptr",
+                )
+            ):
+                raise ValueError(
+                    "--l1-use-hugepages requires CUDA native hugepage allocator ops"
+                )
+        if self.use_lazy is None:
+            self.use_lazy = not self.use_hugepages
+        if self.shm_name is None:
+            self.shm_name = (
+                "" if self.use_hugepages else f"lmcache_l1_pool_{os.getpid()}"
+            )
+        if self.use_hugepages:
+            logger.info("Hugepage L1 configured: eager allocation, POSIX SHM disabled")
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
 
         if self.devdax_path is not None:
@@ -214,6 +259,10 @@ class L1ManagerConfig:
 
     read_ttl_seconds: int = field(default=300)
     """ Time to live for each object's read lock. Default is 300s (5 minutes). """
+
+    def __post_init__(self) -> None:
+        if self.gds_l1_config is not None and self.memory_config.use_hugepages:
+            raise ValueError("--l1-use-hugepages cannot be used with --gds-l1-path")
 
 
 def get_configured_capacity_bytes(
@@ -360,6 +409,17 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
 
     memory_config = config.l1_manager_config.memory_config
+    if memory_config.use_hugepages:
+        if memory_config.use_lazy:
+            raise ValueError("--l1-use-hugepages conflicts with --l1-use-lazy")
+        if memory_config.shm_name:
+            raise ValueError("--l1-use-hugepages conflicts with --shm-name")
+    if memory_config.use_hugepages and memory_config.devdax_path:
+        if not memory_config.devdax_size_in_bytes:
+            raise ValueError(
+                "--l1-use-hugepages requires DRAM; pure --l1-devdax-path L1 "
+                "has no DRAM arena"
+            )
     if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
         return
 
@@ -436,8 +496,14 @@ def add_storage_manager_args(
     memory_group.add_argument(
         "--l1-use-lazy",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Whether to use lazy loading for L1 memory. (Default is True)",
+    )
+    memory_group.add_argument(
+        "--l1-use-hugepages",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use 2 MiB Linux HugeTLB pages for eager CUDA L1 DRAM.",
     )
     memory_group.add_argument(
         "--l1-init-size-gb",
@@ -628,6 +694,7 @@ def parse_args_to_config(
         memory_config = L1MemoryManagerConfig(
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
             use_lazy=args.l1_use_lazy,
+            use_hugepages=getattr(args, "l1_use_hugepages", False),
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
             devdax_path=args.l1_devdax_path,
@@ -636,6 +703,7 @@ def parse_args_to_config(
         memory_config = L1MemoryManagerConfig(
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
             use_lazy=args.l1_use_lazy,
+            use_hugepages=getattr(args, "l1_use_hugepages", False),
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
             shm_name=shm_name,

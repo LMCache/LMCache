@@ -22,6 +22,7 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
     parse_args_to_config,
+    validate_storage_manager_config,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.config import (
@@ -323,6 +324,12 @@ def run_cache_server(
     # the setting is observed by every resolver in this process.
     set_isolated_ipc(mp_config.isolated_ipc)
 
+    mem_cfg = storage_manager_config.l1_manager_config.memory_config
+    if mp_config.supported_transfer_mode != "lmcache_driven":
+        if mp_config.shm_name is not None:
+            mem_cfg.shm_name = mp_config.shm_name
+    validate_storage_manager_config(storage_manager_config)
+
     # mp_config.instance_id is this server's single source of identity (set via
     # --instance-id, else a random UUID v4). Project it onto the OTel
     # service.instance.id unless observability set that attribute explicitly, so
@@ -343,9 +350,6 @@ def run_cache_server(
     # When the engine-driven path is loaded (auto or engine_driven):
     # apply shm_name from mp_config and verify capacity.
     if mp_config.supported_transfer_mode != "lmcache_driven":
-        mem_cfg = storage_manager_config.l1_manager_config.memory_config
-        if mp_config.shm_name is not None:
-            mem_cfg.shm_name = mp_config.shm_name
         if mem_cfg.shm_name and sys.platform.startswith("linux"):
             logger.info("Checking if shm capacity is larger than L1 request")
             try:

@@ -73,6 +73,8 @@ class BenchmarkConfig:
         num_source_objects: Number of source objects the server allocates. The
             client reads a random ``num_objects``-sized subset of these.
         use_lazy: Whether the L1 memory manager uses lazy allocation.
+        use_hugepages: Whether to back the L1 DRAM arena with HugeTLB pages.
+        disable_shm: Whether to use an anonymous L1 arena without POSIX SHM.
         iters: Number of measured read iterations.
         warmup: Number of warmup read iterations (not measured).
         seed: RNG seed for selecting the read subset.
@@ -92,6 +94,8 @@ class BenchmarkConfig:
     num_objects: int = 100
     num_source_objects: int = 0
     use_lazy: bool = False
+    use_hugepages: bool = False
+    disable_shm: bool = False
     iters: int = 5
     warmup: int = 1
     seed: int = 0
@@ -104,6 +108,8 @@ class BenchmarkConfig:
         Raises:
             ValueError: If any field is out of range or mutually inconsistent.
         """
+        if self.use_hugepages and self.use_lazy:
+            raise ValueError("--use-hugepages conflicts with --use-lazy")
         if self.num_source_objects <= 0:
             self.num_source_objects = 5 * self.num_objects
 
@@ -203,6 +209,16 @@ def add_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
         help="use the lazy L1 allocator (experimental for registration).",
     )
     parser.add_argument(
+        "--use-hugepages",
+        action="store_true",
+        help="use a 2 MiB HugeTLB L1 arena; implies eager allocation and no SHM.",
+    )
+    parser.add_argument(
+        "--disable-shm",
+        action="store_true",
+        help="use anonymous pinned DRAM for the baseline, without POSIX SHM.",
+    )
+    parser.add_argument(
         "--iters", type=int, default=5, help="measured read iterations."
     )
     parser.add_argument("--warmup", type=int, default=1, help="warmup read iterations.")
@@ -244,6 +260,8 @@ def build_config(args: argparse.Namespace) -> BenchmarkConfig:
         num_objects=args.num_objects,
         num_source_objects=args.num_source_objects,
         use_lazy=args.use_lazy,
+        use_hugepages=args.use_hugepages,
+        disable_shm=args.disable_shm,
         iters=args.iters,
         warmup=args.warmup,
         seed=args.seed,

@@ -75,6 +75,8 @@ def _create_l1_manager(cfg: BenchmarkConfig, size_bytes: int) -> L1MemoryManager
     manager_config = L1MemoryManagerConfig(
         size_in_bytes=size_bytes,
         use_lazy=cfg.use_lazy,
+        use_hugepages=cfg.use_hugepages,
+        shm_name="" if cfg.disable_shm or cfg.use_hugepages else None,
         init_size_in_bytes=min(_LARGE_LAZY_INIT, size_bytes),
         align_bytes=cfg.page_size,
     )

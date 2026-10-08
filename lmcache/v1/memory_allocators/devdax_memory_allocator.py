@@ -159,9 +159,26 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         *,
         local_allocator: MixedMemoryAllocator | None = None,
         local_size: int = 0,
+        local_use_hugepages: bool = False,
         shm_name: str | None = None,
         align_bytes: int = AddressManager.ALIGN_BYTES,
     ) -> None:
+        """Create the Device-DAX arena pool and optional local DRAM pool.
+
+        Args:
+            size: Initial Device-DAX arena size in bytes.
+            device_path: Path to the initial Device-DAX device.
+            local_allocator: Existing local DRAM allocator, if any.
+            local_size: Size of a new local DRAM pool in bytes.
+            local_use_hugepages: Use HugeTLB backing for the new DRAM pool.
+            shm_name: Optional SHM name for ordinary local DRAM.
+            align_bytes: Alignment of individual objects in bytes.
+
+        Raises:
+            ValueError: If sizes, alignment, or allocator options conflict.
+            OSError: If the Device-DAX arena cannot be mapped.
+            RuntimeError: If local DRAM allocation or registration fails.
+        """
         if not device_path:
             raise ValueError("device_path must be a non-empty string")
         if size <= 0:
@@ -170,6 +187,8 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError("local_size must be >= 0")
         if local_size and local_allocator is not None:
             raise ValueError("local_size cannot be used with local_allocator")
+        if local_use_hugepages and not local_size:
+            raise ValueError("local_use_hugepages requires local_size")
         if align_bytes <= 0 or align_bytes & (align_bytes - 1) != 0:
             raise ValueError("align_bytes must be a positive power of two")
 
@@ -184,6 +203,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
                 local_size,
                 align_bytes=self.align_bytes,
                 shm_name=shm_name,
+                use_hugepages=local_use_hugepages,
             )
         self.host_mem_lock = threading.Lock()
         self.buffer_allocator = BufferAllocator("cpu")
