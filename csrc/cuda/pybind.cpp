@@ -3,13 +3,13 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
-#include "fp8_quantize.cuh"
 #include "mem_kernels.cuh"
 #include "mp_mem_kernels.cuh"
 #include "phase_timing_recorder.cuh"
 #include "blend_kernels.cuh"
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
+#include "fp8_quantize.cuh"
 #include "mem_alloc.h"
 #include "utils.h"
 #include "event_recorder.h"
