@@ -24,9 +24,12 @@ ALL_COMMANDS: list[BaseCommand]
 
 
 def _discover_commands() -> list[BaseCommand]:
-    """Return one instance per concrete :class:`BaseCommand` subclass in this
-    package's direct submodules; a broken wrapper module must raise loudly,
-    not silently vanish from the CLI.
+    """Scan direct submodules of this package and collect all concrete
+    :class:`BaseCommand` subclasses, returning one instance per class.
+
+    Import errors are intentionally re-raised: a broken CLI command
+    module should fail loudly rather than silently disappear from the
+    CLI.
     """
 
     def _raise(module_name: str, exc: Exception) -> None:
