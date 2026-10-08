@@ -19,7 +19,6 @@ from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
 )
 from lmcache.v1.distributed.memory_manager.l1_memory_manager import L1MemoryManager
 from lmcache.v1.memory_allocators.devdax_memory_allocator import DevDaxMemoryAllocator
-from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 import lmcache.v1.distributed.config as config_module
 import lmcache.v1.memory_management as memory_management
 
@@ -173,6 +172,7 @@ def test_hybrid_l1_keeps_dram_and_devdax_backends(
     mapped_size = 2 * HUGEPAGE_SIZE if use_hugepages else LOGICAL_SIZE
     assert native_hugepages.freed == [(desc.ptr, mapped_size)]
 
+
 def test_hybrid_mapping_failure_releases_dram(
     native_hugepages: SimpleNamespace, tmp_path: Path
 ) -> None:
@@ -225,13 +225,3 @@ def test_native_allocation_failure_has_no_fallback(
     with pytest.raises(RuntimeError, match=message):
         L1MemoryManager(_config(True))
     assert native_hugepages.mapped == []
-
-@pytest.mark.parametrize(
-    ("native_error", "action"),
-    [
-        ("mmap failed (errno=12): Cannot allocate memory", "Check the 2 MiB pool"),
-        ("mmap failed (errno=1): Operation not permitted", "permission denied"),
-        ("mbind failed (errno=1): Operation not permitted", "NUMA binding failed"),
-        ("cudaHostRegister failed: invalid argument", "GPU registration failed"),
-    ],
-)

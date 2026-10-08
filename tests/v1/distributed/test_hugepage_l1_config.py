@@ -11,7 +11,6 @@ import sys
 import pytest
 
 # First Party
-import lmcache.v1.distributed.config as config_module
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     GdsL1Config,
@@ -22,6 +21,7 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.multiprocess.config import add_mp_server_args
+import lmcache.v1.distributed.config as config_module
 
 
 @pytest.fixture
@@ -120,17 +120,25 @@ def test_hugepage_cli_rejects_conflicts_in_both_orders(
 
 
 @pytest.mark.parametrize(
-    "settings, conflict",
+    "use_lazy, shm_name, conflict",
     [
-        ({"use_lazy": True}, "--l1-use-lazy"),
-        ({"shm_name": "named"}, "--shm-name"),
+        (True, None, "--l1-use-lazy"),
+        (None, "named", "--shm-name"),
     ],
 )
 def test_hugepage_direct_config_rejects_conflicts(
-    cuda_backend: None, settings: dict[str, object], conflict: str
+    cuda_backend: None,
+    use_lazy: bool | None,
+    shm_name: str | None,
+    conflict: str,
 ) -> None:
     with pytest.raises(ValueError, match=conflict):
-        L1MemoryManagerConfig(size_in_bytes=1 << 30, use_hugepages=True, **settings)
+        L1MemoryManagerConfig(
+            size_in_bytes=1 << 30,
+            use_hugepages=True,
+            use_lazy=use_lazy,
+            shm_name=shm_name,
+        )
 
 
 def test_hugepage_accepts_hybrid_but_rejects_pure_devdax_and_gds(

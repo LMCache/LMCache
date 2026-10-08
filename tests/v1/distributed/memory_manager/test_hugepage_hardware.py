@@ -6,8 +6,8 @@ runner with a fixed 2 MiB HugeTLB pool. Skips never qualify as phase 3 evidence.
 """
 
 # Standard
-from pathlib import Path
 from multiprocessing.connection import Connection
+from pathlib import Path
 import ctypes
 import gc
 import multiprocessing
@@ -36,6 +36,7 @@ from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.transfer_channel.impl.nixl_impl import (
     NixlTransferChannelContext,
 )
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import consume_fd
 
 PAGE_SIZE = 2 * 1024 * 1024
@@ -57,6 +58,13 @@ def require_hugepage_runner() -> None:
     assert torch.cuda.is_available()
     assert int((POOL / "nr_overcommit_hugepages").read_text()) == 0
     assert int((POOL / "nr_hugepages").read_text()) >= 512
+
+
+def _tensor(obj: MemoryObj) -> torch.Tensor:
+    """Return an allocated object's tensor after checking it is present."""
+    tensor = obj.raw_tensor
+    assert tensor is not None
+    return tensor
 
 
 def _free_pages() -> int:
@@ -137,12 +145,12 @@ def _nixl_source_process(pipe: Connection, url: str) -> None:
     """Serve one HugeTLB-backed NIXL object from a spawned process."""
     manager = _manager(PAGE_SIZE)
     context = None
-    objects = []
+    objects: list[MemoryObj] = []
     try:
         layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
         error, objects = manager.allocate(layout, 1)
         assert error == L1Error.SUCCESS
-        objects[0].raw_tensor.copy_(
+        _tensor(objects[0]).copy_(
             torch.arange(4096, dtype=torch.int32).remainder(251).to(torch.uint8)
         )
         context = NixlTransferChannelContext(manager.get_l1_memory_desc(), url, url)
@@ -215,9 +223,9 @@ def test_gpu_roundtrip_and_reuse(shape: tuple[int, ...], dtype: torch.dtype) -> 
             try:
                 source = torch.full(shape, iteration % 251, dtype=dtype, device="cuda")
                 source_bytes = source.view(torch.uint8)
-                obj.raw_tensor.copy_(source_bytes, non_blocking=True)
+                _tensor(obj).copy_(source_bytes, non_blocking=True)
                 restored = torch.empty_like(source_bytes)
-                restored.copy_(obj.raw_tensor, non_blocking=True)
+                restored.copy_(_tensor(obj), non_blocking=True)
                 torch.cuda.synchronize()
                 assert torch.equal(source_bytes, restored)
             finally:
@@ -234,15 +242,15 @@ def test_two_nixl_contexts_transfer_hugepage_objects() -> None:
     destination_manager = _manager(PAGE_SIZE)
     contexts: list[NixlTransferChannelContext] = []
     layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
-    source_objects = []
-    destination_objects = []
+    source_objects: list[MemoryObj] = []
+    destination_objects: list[MemoryObj] = []
     try:
         source_error, source_objects = source_manager.allocate(layout, 1)
         destination_error, destination_objects = destination_manager.allocate(layout, 1)
         assert source_error == destination_error == L1Error.SUCCESS
         expected = torch.arange(4096, dtype=torch.int32).remainder(251).to(torch.uint8)
-        source_objects[0].raw_tensor.copy_(expected)
-        destination_objects[0].raw_tensor.zero_()
+        _tensor(source_objects[0]).copy_(expected)
+        _tensor(destination_objects[0]).zero_()
         source_desc = source_manager.get_l1_memory_desc()
         destination_desc = destination_manager.get_l1_memory_desc()
         _assert_hugetlb(source_desc.ptr, PAGE_SIZE)
@@ -265,7 +273,7 @@ def test_two_nixl_contexts_transfer_hugepage_objects() -> None:
             result = client.query_read_status(task_id)
         assert result.is_finished()
         assert result.succeeded_mask == [True]
-        assert torch.equal(destination_objects[0].raw_tensor, expected)
+        assert torch.equal(_tensor(destination_objects[0]), expected)
     finally:
         for context in reversed(contexts):
             context.close()
@@ -291,7 +299,7 @@ def test_two_process_nixl_transfer_hugepage_objects() -> None:
     manager = _manager(PAGE_SIZE)
     context = None
     client = None
-    objects = []
+    objects: list[MemoryObj] = []
     try:
         assert parent_pipe.poll(30), "source server did not start"
         assert parent_pipe.recv() == "ready"
@@ -313,7 +321,7 @@ def test_two_process_nixl_transfer_hugepage_objects() -> None:
         assert result.is_finished()
         assert result.succeeded_mask == [True]
         expected = torch.arange(4096, dtype=torch.int32).remainder(251).to(torch.uint8)
-        assert torch.equal(objects[0].raw_tensor, expected)
+        assert torch.equal(_tensor(objects[0]), expected)
         parent_pipe.send("close")
         source_process.join(timeout=30)
         assert source_process.exitcode == 0
@@ -338,7 +346,7 @@ def test_nixl_l2_reload_after_l1_eviction(tmp_path: Path) -> None:
     baseline = _free_pages()
     manager = _manager(PAGE_SIZE)
     adapter = None
-    objects = []
+    objects: list[MemoryObj] = []
     try:
         desc = manager.get_l1_memory_desc()
         _assert_hugetlb(desc.ptr, PAGE_SIZE)
@@ -367,7 +375,7 @@ def test_nixl_l2_reload_after_l1_eviction(tmp_path: Path) -> None:
             assert error == L1Error.SUCCESS
             source = torch.full(shape, iteration % 251, dtype=dtype, device="cuda")
             source_bytes = source.view(torch.uint8)
-            objects[0].raw_tensor.copy_(source_bytes, non_blocking=True)
+            _tensor(objects[0]).copy_(source_bytes, non_blocking=True)
             torch.cuda.synchronize()
             store_id = adapter.submit_store_task([key], objects)
             _wait_event(adapter.get_store_event_fd())
@@ -376,12 +384,14 @@ def test_nixl_l2_reload_after_l1_eviction(tmp_path: Path) -> None:
             objects = []
             error, objects = manager.allocate(layout, 1)
             assert error == L1Error.SUCCESS
-            objects[0].raw_tensor.zero_()
+            _tensor(objects[0]).zero_()
             load_id = adapter.submit_load_task([key], objects)
             _wait_event(adapter.get_load_event_fd())
-            assert adapter.query_load_result(load_id).test(0)
+            result = adapter.query_load_result(load_id)
+            assert result is not None
+            assert result.test(0)
             restored = torch.empty_like(source_bytes)
-            restored.copy_(objects[0].raw_tensor, non_blocking=True)
+            restored.copy_(_tensor(objects[0]), non_blocking=True)
             torch.cuda.synchronize()
             assert torch.equal(restored, source_bytes)
             assert manager.free(objects) == L1Error.SUCCESS
