@@ -23,10 +23,7 @@ from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.devices.npu import NpuDeviceSpec
 from lmcache.v1.platform.devices.npu.ipc_wrapper import NpuIPCWrapper, PlaneRecord
 
-pytestmark = [
-    pytest.mark.npu,
-    pytest.mark.no_shared_allocator,
-]
+pytestmark = pytest.mark.no_shared_allocator
 
 requires_npu = pytest.mark.skipif(
     not (hasattr(torch, "npu") and torch.npu.is_available()),
@@ -243,6 +240,7 @@ def _spawn_worker(encoded: bytes, result_queue: mp.Queue) -> None:
 
 
 @requires_npu
+@pytest.mark.npu
 def test_multiprocess_roundtrip_preserves_registration_form() -> None:
     """Real IPC round-trip keeps the registered form: bare stays bare, a
     1-tuple stays a 1-tuple."""

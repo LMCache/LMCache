@@ -80,6 +80,7 @@ class NpuIPCWrapper(DeviceIPCWrapper):
                 planes must live on the same NPU device.
 
         Raises:
+            ValueError: If ``value`` is an empty plane sequence.
             RuntimeError: If a plane's storage cannot be shared through
                 torch_npu storage IPC.
         """

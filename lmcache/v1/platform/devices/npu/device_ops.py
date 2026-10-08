@@ -7,6 +7,9 @@ torch baseline. All NPU-specific kernels live in the ``lmcache_ascend``
 plugin, which curates an ops-only binding surface (``lmcache_ascend.ops``,
 mirroring ``lmcache.cuda_ops``); this package only wires detection and
 backend selection. If the plugin is missing, :meth:`ensure_native` raises
+:class:`ImportError`: the torch baseline would reconstruct pointer-mode
+staging buffers as CPU tensors and silently transfer in the wrong
+address space.
 """
 
 # Future
@@ -21,6 +24,7 @@ import math
 import torch
 
 # First Party
+from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 import lmcache.lmcache_native as lmcache_native
 
@@ -163,7 +167,9 @@ class NpuDeviceOps(DeviceOps):
                 ptr, device, numel * dtype.itemsize
             )
             tensor = torch.empty(0, dtype=dtype, device=storage.device)
-            tensor.set_(storage, 0, shape)
+            # Runtime accepts the 3-arg form (contiguous stride); the stubs
+            # only declare the 4-arg overload.
+            tensor.set_(storage, 0, shape)  # type: ignore[call-overload]
             return tensor
         except (RuntimeError, TypeError, ValueError) as exc:
             raise RuntimeError(
@@ -172,8 +178,8 @@ class NpuDeviceOps(DeviceOps):
 
     def lmcache_memcpy_async(
         self,
-        dest: int,
-        src: int,
+        dest: int | torch.Tensor,
+        src: int | torch.Tensor,
         nbytes: int,
         direction: lmcache_native.TransferDirection,
         host_buffer_offset: int,
@@ -181,7 +187,8 @@ class NpuDeviceOps(DeviceOps):
     ) -> None:
         """Copy ``nbytes`` between an NPU device pointer and host memory.
 
-        The torch baseline's pointer mode drives ``cudaMemcpy`` through
+        Tensor operands delegate to the torch baseline (``copy_``-based).
+        Pointer mode must not: the baseline drives ``cudaMemcpy`` through
         libcudart, which cannot address NPU memory and crashes the process.
         Instead build zero-copy views over both pointers and issue one
         stream-ordered ``copy_`` on the current stream. The CUDA-specific
@@ -190,17 +197,30 @@ class NpuDeviceOps(DeviceOps):
         splitting.
 
         Args:
-            dest: Destination address. Host for D2H, device for H2D.
-            src: Source address. Device for D2H, host for H2D.
+            dest: Destination address or tensor. Host for D2H, device for
+                H2D.
+            src: Source address or tensor. Device for D2H, host for H2D.
             nbytes: Number of bytes to copy.
             direction: H2D or D2H; selects which side is host memory.
-            host_buffer_offset: Unused (CUDA chunking parameter).
-            host_buffer_alignments: Unused (CUDA chunking parameter).
+            host_buffer_offset: Unused in pointer mode (CUDA chunking
+                parameter).
+            host_buffer_alignments: Unused in pointer mode (CUDA chunking
+                parameter).
 
         Raises:
             ValueError: If ``nbytes`` is not positive or the direction is
                 unsupported.
         """
+        if isinstance(dest, torch.Tensor) or isinstance(src, torch.Tensor):
+            torch_ops.lmcache_memcpy_async(
+                dest,
+                src,
+                nbytes,
+                direction,
+                host_buffer_offset,
+                host_buffer_alignments,
+            )
+            return
         if nbytes <= 0:
             raise ValueError(f"nbytes must be positive, got {nbytes}")
         is_d2h = int(direction) == int(lmcache_native.TransferDirection.D2H)

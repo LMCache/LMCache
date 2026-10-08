@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 
 
 def wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
-    """Dispatch by ``tensor.device.type`` via the platform registry.
+    """Dispatch by the layer KVCache's device type via the platform registry.
 
     Concrete factories are supplied by the registered ``DeviceSpec`` objects,
     so this call site stays free of if/elif chains and external accelerators
@@ -46,13 +46,13 @@ def _layer_shape_and_dtype(value: Any) -> tuple[object, str]:
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
-    """Wrap every KV cache tensor for IPC transport.
+    """Wrap every KV cache value for IPC transport.
 
     Args:
-        kv_caches: Mapping from layer name to worker-owned KV cache tensor.
+        kv_caches: Mapping from layer name to worker-owned KV cache value.
 
     Returns:
-        The list of per-tensor IPC wrappers, ready for the msgspec wire.
+        The list of per-layer IPC wrappers, ready for the msgspec wire.
     """
     # Emit a per-layer (name, shape, dtype) summary so the operator can
     # verify the exact layer set & tensor geometry being shipped to the
@@ -69,15 +69,15 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
         ),
     )
     logger.info("Wrapping %d KV cache tensors for IPC", len(kv_caches))
-    # Per-iteration resource management: if wrapping the N-th tensor
+    # Per-iteration resource management: if wrapping the N-th value
     # raises, ``shm_unlink`` whatever earlier iterations already
     # registered with POSIX SHM so the named segments do not outlive
     # the failed batch. CUDA wrappers do not own a named segment and
     # are skipped via the duck-typed ``shm_name`` check.
     wrappers: KVCache = []
     try:
-        for tensor in kv_caches.values():
-            wrappers.append(wrap_one_kv_cache(tensor))
+        for value in kv_caches.values():
+            wrappers.append(wrap_one_kv_cache(value))
     except BaseException:
         _release_partial_kv_wrappers(wrappers)
         raise
