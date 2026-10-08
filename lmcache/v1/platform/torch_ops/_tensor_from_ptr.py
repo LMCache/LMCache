@@ -8,9 +8,6 @@ import ctypes
 # Third party
 import torch
 
-# First Party
-from lmcache.v1.platform import resolve_device_ops
-
 __all__ = [
     "_get_copy_lib",
     "_tensor_from_ptr",
@@ -80,6 +77,9 @@ def _tensor_from_ptr(
     """
     if ptr == 0:
         raise ValueError("Pointer must be non-zero")
+
+    # First Party
+    from lmcache.v1.platform import resolve_device_ops
 
     resolved_device = torch.device("cpu" if device is None else device)
     return resolve_device_ops(resolved_device.type).tensor_from_ptr(

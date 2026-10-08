@@ -19,6 +19,7 @@ from lmcache.v1.multiprocess.native_completion import (
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform import torch_ops as _py_ops
 import lmcache.lmcache_native as lmcache_native
+import lmcache.v1.platform as platform_pkg
 
 tensor_from_ptr = sys.modules["lmcache.v1.platform.torch_ops._tensor_from_ptr"]
 
@@ -3225,7 +3226,7 @@ def test_tensor_from_ptr_routes_through_device_ops(
 
     monkeypatch.setattr(tensor_from_ptr.torch, "device", FakeDevice)
     monkeypatch.setattr(
-        tensor_from_ptr,
+        platform_pkg,
         "resolve_device_ops",
         lambda _device_type: FakeDeviceOps(),
     )
