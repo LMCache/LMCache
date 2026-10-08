@@ -2,7 +2,9 @@
 """Tests for the RBLN build profile's selection and build contract."""
 
 # Standard
-import importlib.util
+from pathlib import Path
+import os
+import sys
 
 # Third Party
 import pytest
@@ -12,25 +14,32 @@ from setup_extensions import BuildPolicy
 from setup_extensions.build_profiles.rbln import RblnProfile
 
 
-@pytest.mark.parametrize("installed", [True, False])
-def test_detect_follows_torch_rbln_installation(
-    monkeypatch: pytest.MonkeyPatch, installed: bool
+def test_detects_an_importable_torch_rbln(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``detect()`` is true exactly when ``torch_rbln`` is importable."""
-    real_find_spec = importlib.util.find_spec
+    """``detect()`` is true when a ``torch_rbln`` package is importable."""
+    (tmp_path / "torch_rbln").mkdir()
+    (tmp_path / "torch_rbln" / "__init__.py").write_text("")
+    monkeypatch.syspath_prepend(str(tmp_path))
 
-    def fake_find_spec(name: str, *args: object, **kwargs: object) -> object:
-        if name == "torch_rbln":
-            return object() if installed else None
-        return real_find_spec(name, *args, **kwargs)  # type: ignore[arg-type]
+    assert RblnProfile().detect()
 
-    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
 
-    assert RblnProfile().detect() is installed
+def test_does_not_detect_without_torch_rbln(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``detect()`` is false when ``torch_rbln`` cannot be imported."""
+    # A None entry in sys.modules is Python's marker for "import blocked".
+    monkeypatch.setitem(sys.modules, "torch_rbln", None)
+
+    assert not RblnProfile().detect()
 
 
 def test_build_with_rbln_selects_the_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     """``BUILD_WITH_RBLN=1`` selects the RBLN profile."""
+    # Other lanes export their own BUILD_WITH_* (e.g. BUILD_WITH_HIP=1 on AMD),
+    # which would make the selection ambiguous.
+    for env_var in list(os.environ):
+        if env_var.startswith("BUILD_WITH_"):
+            monkeypatch.delenv(env_var)
     for env_var in ("NO_NATIVE_EXT", "NO_CUDA_EXT", "NO_GPU_EXT"):
         monkeypatch.delenv(env_var, raising=False)
     monkeypatch.setenv("BUILD_WITH_RBLN", "1")

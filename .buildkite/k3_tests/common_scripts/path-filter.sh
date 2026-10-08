@@ -219,16 +219,11 @@ _path_filter_should_skip_for_pipeline() {
             return 1
             ;;
         rbln)
-            case "$changed_file" in
-                .buildkite/k3_tests/rbln/*)
-                    return 1
-                    ;;
-                examples/*|.buildkite/k3_tests/*)
-                    # Examples and other suites' pipeline files do not affect
-                    # the RBLN smoke.
-                    return 0
-                    ;;
-            esac
+            if declare -F "_path_filter_rbln_should_skip" >/dev/null 2>&1; then
+                _path_filter_rbln_should_skip "$changed_file"
+                return $?
+            fi
+            return 1
             ;;
         neuron)
             # Placeholder only: no dedicated Neuron pipeline dir is introduced here.
@@ -267,7 +262,7 @@ _path_filter_load_device_filter() {
     local script_dir repo_root filter_script
 
     case "$pipeline_kind" in
-        xpu|amd) ;;
+        xpu|amd|rbln) ;;
         *) return 0 ;;
     esac
 
