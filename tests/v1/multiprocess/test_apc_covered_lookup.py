@@ -14,8 +14,10 @@ backend:
 
 # Standard
 from unittest.mock import MagicMock
+import threading
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import (
     COVERED_CHUNKS_CONFIG_KEY,
     IPCCacheServerKey,
@@ -107,3 +109,51 @@ def test_resolve_sliding_window_clamped_by_covered():
         ctx, key, hit_chunks=4, locked_gids=(), group_windows=(2,), covered_chunks=3
     )
     assert len(obj_keys) == 1
+
+
+def test_l2_adapter_touch_keys_refreshes_recency_without_io():
+    """``L2AdapterInterface.touch_keys`` marks keys accessed and moves no bytes.
+
+    The covered prefix is skipped instead of loaded, so without this refresh L2
+    would see those keys as cold and evict data a non-skipping lookup kept.
+    """
+    # First Party
+    from lmcache.v1.distributed.eviction import L2EvictionPolicy
+    from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
+    from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+
+    policy = LRUEvictionPolicy()
+    listener = L2EvictionPolicy(policy)
+    keys = [
+        ObjectKey(chunk_hash=ObjectKey.IntHash2Bytes(i), model_name="m", kv_rank=0)
+        for i in range(3)
+    ]
+    policy.on_keys_created(keys)
+
+    adapter = MagicMock(spec=L2AdapterInterface)
+    adapter._listeners = [listener]
+    # Drive the real implementation; it must reach the eviction listener and
+    # perform no read/load call on the adapter.
+    L2AdapterInterface.touch_keys(adapter, [keys[0]])
+
+    adapter._notify_keys_accessed.assert_called_once_with([keys[0]])
+    adapter.submit_load_task.assert_not_called()
+
+
+def test_touch_cached_keys_hits_both_tiers():
+    """``StorageManager.touch_cached_keys`` refreshes L1 *and* every L2 adapter."""
+    # First Party
+    from lmcache.v1.distributed.storage_manager import StorageManager
+
+    sm = MagicMock(spec=StorageManager)
+    l2_a, l2_b = MagicMock(), MagicMock()
+    sm._adapters_lock = threading.Lock()
+    sm._l2_adapters = {0: l2_a, 1: l2_b}
+    sm.touch_l1_keys = MagicMock()
+
+    keys = [ObjectKey(chunk_hash=ObjectKey.IntHash2Bytes(7), model_name="m", kv_rank=0)]
+    StorageManager.touch_cached_keys(sm, keys)
+
+    sm.touch_l1_keys.assert_called_once_with(keys)
+    l2_a.touch_keys.assert_called_once_with(keys)
+    l2_b.touch_keys.assert_called_once_with(keys)

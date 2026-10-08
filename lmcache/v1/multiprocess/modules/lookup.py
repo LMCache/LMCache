@@ -392,9 +392,11 @@ class LookupModule:
     ) -> None:
         """Touch the APC-covered prefix in L1 so a busy prefix is not evicted.
 
-        Marks every covered key as recently used (LRU) without read-locking or
-        fetching. Absent keys are ignored by the eviction policy, so no presence
-        probe is needed.
+        Marks every covered key as recently used in both L1 and L2 without
+        read-locking or fetching, matching the recency a non-skipping lookup
+        would have given them -- otherwise L2 sees the skipped keys as cold and
+        evicts data that would otherwise have been kept. Absent keys are ignored
+        by the eviction policies, so no presence probe is needed.
 
         Args:
             key: The lookup IPC key (``worker_id=None`` fans out to all ranks).
@@ -410,7 +412,7 @@ class LookupModule:
         )
         all_keys = [obj_key for group_keys in per_group for obj_key in group_keys]
         if all_keys:
-            self._ctx.storage_manager.touch_l1_keys(all_keys)
+            self._ctx.storage_manager.touch_cached_keys(all_keys)
 
     @request_handler(HandlerType.BLOCKING)
     def query_prefetch_status(
