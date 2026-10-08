@@ -219,9 +219,16 @@ _path_filter_should_skip_for_pipeline() {
             return 1
             ;;
         rbln)
-            # Placeholder only: no dedicated RBLN pipeline dir is introduced here.
-            # Keep the platform kind explicit for future CI extension.
-            return 1
+            case "$changed_file" in
+                .buildkite/k3_tests/rbln/*)
+                    return 1
+                    ;;
+                examples/*|.buildkite/k3_tests/*)
+                    # Examples and other suites' pipeline files do not affect
+                    # the RBLN smoke.
+                    return 0
+                    ;;
+            esac
             ;;
         neuron)
             # Placeholder only: no dedicated Neuron pipeline dir is introduced here.
@@ -248,6 +255,7 @@ _path_filter_pipeline_kind() {
         *k3_tests/sglang/pipeline.yml) echo sglang ;;
         *k3_tests/xpu/*/pipeline.yml) echo xpu ;;
         *k3_tests/musa/pipeline.yml) echo musa ;;
+        *k3_tests/rbln/pipeline.yml) echo rbln ;;
         *k3_tests/amd/pipeline.yml) echo amd ;;
         *k3_tests/comprehensive/pipeline.yml) echo comprehensive ;;
         *) echo generic ;;
