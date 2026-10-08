@@ -116,6 +116,12 @@ class MPServerConfig:
     engine adapter's heartbeat interval so a few missed pings never reap a live
     worker."""
 
+    session_ttl_seconds: float = 600.0
+    """Seconds a request session may stay idle before it is reaped. A session
+    carries the lookup state ``free_lookup_locks`` needs, so it must outlive
+    the longest time a request can wait in the engine's queue between its
+    lookup and its admission (minutes under deep agentic backlogs)."""
+
     worker_registration_grace_seconds: float = 3600.0
     """Silence budget (seconds) for a worker that registered but has never
     sent a PING (model warmup, or death before its first request). Must be
@@ -230,7 +236,7 @@ class HTTPFrontendConfig:
 DEFAULT_HTTP_FRONTEND_CONFIG = HTTPFrontendConfig()
 
 DEFAULT_KAFKA_CACHE_EVENT_TOPIC = "lmcache-cache-events"
-DEFAULT_KAFKA_DELIVERY_TIMEOUT = 10.0
+DEFAULT_KAFKA_DELIVERY_TIMEOUT = 300.0
 
 
 @dataclass(frozen=True)
@@ -245,7 +251,8 @@ class KafkaCacheEventSinkConfig:
     Attributes:
         bootstrap_servers: Comma-separated Kafka bootstrap servers.
         topic: Topic receiving cache-event records.
-        delivery_timeout: Seconds to wait for broker acknowledgement.
+        delivery_timeout: Seconds the producer retries a record before
+            dropping it.
     """
 
     bootstrap_servers: str
@@ -496,6 +503,13 @@ def add_mp_server_args(
         "engine adapter's heartbeat interval. Default is 120.",
     )
     mp_group.add_argument(
+        "--session-ttl-seconds",
+        type=float,
+        default=600.0,
+        help="Seconds a request session may stay idle before it is reaped. "
+        "Raise it above the longest engine queueing delay. Default is 600.",
+    )
+    mp_group.add_argument(
         "--worker-registration-grace-seconds",
         type=float,
         default=3600.0,
@@ -582,6 +596,7 @@ def parse_args_to_mp_server_config(
         script_allowed_imports=args.script_allowed_imports or [],
         run_script_api_enabled=args.run_script_api_enabled,
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
+        session_ttl_seconds=args.session_ttl_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
         kv_event_log_size=args.kv_event_log_size,
@@ -790,8 +805,9 @@ def add_coordinator_args(
         "--coordinator-kafka-delivery-timeout",
         type=float,
         default=DEFAULT_KAFKA_DELIVERY_TIMEOUT,
-        help="Seconds to wait for Kafka broker acknowledgement (must be > 0). "
-        f"Default is {DEFAULT_KAFKA_DELIVERY_TIMEOUT}.",
+        help="Seconds the Kafka producer keeps retrying a cache-event record "
+        "before dropping it (must be > 0). Default is "
+        f"{DEFAULT_KAFKA_DELIVERY_TIMEOUT}.",
     )
     group.add_argument(
         "--coordinator-blend-timeout",

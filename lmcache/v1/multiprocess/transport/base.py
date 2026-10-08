@@ -178,6 +178,7 @@ class RequestClient(Protocol):
         group_to_cache: list[int],
         group_rot: list[list[int]],
         group_head_size: list[int],
+        kv_quant: str = "",
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -226,6 +227,7 @@ class RequestClient(Protocol):
         self, instance_id: int, model_name: str, cursor: int, max_events: int
     ) -> MessagingStream[KVEventBatch]: ...
 
+    # Deprecated alias (#4878), frozen: new params go on cb_register_rope.
     def cb_register_rope_v3(
         self,
         instance_id: int,

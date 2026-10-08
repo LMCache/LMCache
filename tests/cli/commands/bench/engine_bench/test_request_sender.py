@@ -178,6 +178,14 @@ class TestRequestSenderInit:
         _, kwargs = mock_openai_cls.call_args
         assert kwargs["base_url"] == "http://localhost:8000/v1"
 
+    @patch(
+        "lmcache.cli.commands.bench.engine_bench.request_sender.AsyncOpenAI",
+        None,
+    )
+    def test_missing_openai_is_actionable(self) -> None:
+        with pytest.raises(RuntimeError, match="pip install openai"):
+            RequestSender("http://localhost:8000", "test-model")
+
 
 # ---------------------------------------------------------------------------
 # RequestSender — send_request (chat mode)

@@ -229,6 +229,32 @@ class MemoryObj(metaclass=abc.ABCMeta):
 
     def __init__(self, metadata: MemoryObjMetadata):
         self.meta = metadata
+        self._l1_manager_id: int | None = None
+
+    def set_l1_manager(self, owner_tag: int) -> None:
+        """Assign the process-local L1 owner, not the writer's reservation tag.
+
+        Args:
+            owner_tag: Stable integer identity of the responsible L1 manager.
+
+        Raises:
+            ValueError: If this allocation already belongs to another manager.
+        """
+        if self._l1_manager_id is not None and self._l1_manager_id != owner_tag:
+            raise ValueError("Memory object already belongs to another L1 manager")
+        self._l1_manager_id = owner_tag
+
+    def get_l1_manager(self) -> int | None:
+        """Return the process-local L1 owner, or ``None`` outside the L1 path."""
+        return self._l1_manager_id
+
+    def reset_l1_manager(self) -> None:
+        """Clear ownership when an allocator starts a recycled object's lifetime.
+
+        Only call after the previous allocation and all its users have drained.
+        This identity is intentionally separate from serialized metadata.
+        """
+        self._l1_manager_id = None
 
     @abc.abstractmethod
     def invalidate(self):
@@ -1079,7 +1105,7 @@ class GDSMemoryObject(MemoryObj):
         return self.valid
 
     def get_size(self) -> int:
-        return self.meta.phy_size
+        return self.meta.get_size()
 
     def get_shape(self) -> torch.Size:
         return self.meta.shape
@@ -1088,16 +1114,18 @@ class GDSMemoryObject(MemoryObj):
         return self.meta.dtype
 
     def get_shapes(self) -> list[torch.Size]:
-        raise NotImplementedError(
-            "GDSMemoryObject.get_shapes: per-group shapes are not tracked on "
-            "the GDS path (only the singular meta.shape is); use get_shape()"
+        return (
+            list(self.meta.shapes)
+            if self.meta.shapes is not None
+            else [self.meta.shape]
         )
 
     def get_dtypes(self) -> list[torch.dtype]:
-        raise NotImplementedError(
-            "GDSMemoryObject.get_dtypes: per-group dtypes are not tracked on "
-            "the GDS path (only the singular meta.dtype is); use get_dtype()"
-        )
+        if self.meta.dtypes is not None:
+            return list(self.meta.dtypes)
+        if self.meta.dtype is None:
+            raise ValueError("GDS object has no dtype")
+        return [self.meta.dtype]
 
     def get_memory_format(self) -> MemoryFormat:
         return self.meta.fmt
