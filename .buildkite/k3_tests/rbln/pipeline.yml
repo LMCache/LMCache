@@ -12,10 +12,6 @@ steps:
     timeout_in_minutes: 60
     agents:
       queue: "rbln-queue"
-    env:
-      RBLN_CI_ARTIFACT_DIR: "rbln-ci-artifacts/smoke"
-    artifact_paths:
-      - "rbln-ci-artifacts/smoke/**/*"
     plugins:
       - kubernetes:
           podSpec:
