@@ -15,13 +15,13 @@ from dataclasses import dataclass
 import enum
 import select
 import threading
+import weakref
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerListener
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerListener
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
@@ -222,10 +222,13 @@ class StoreController(StorageControllerInterface):
     # instance via ``_gauge_target``.
     _gauge_registered: bool = False
     _gauge_target: "StoreController | None" = None
+    _gauge_targets: weakref.WeakValueDictionary[str, "StoreController"] = (
+        weakref.WeakValueDictionary()
+    )
 
     def __init__(
         self,
-        l1_manager: L1Manager,
+        l1_manager: L1ManagerInterface,
         l2_adapters: list[L2AdapterInterface],
         adapter_descriptors: list[L2AdapterDescriptor],
         policy: StorePolicy,
@@ -263,17 +266,18 @@ class StoreController(StorageControllerInterface):
         self._status_in_flight_count: int = 0
 
         StoreController._gauge_target = self
+        StoreController._gauge_targets[l1_manager.config.tag] = self
         if not StoreController._gauge_registered:
             StoreController._gauge_registered = True
             register_gauge(
                 "lmcache.l2_store",
                 "lmcache_mp.num_inflight_l2_stores",
                 "L2 store tasks currently executing, per adapter",
-                lambda: (
-                    StoreController._gauge_target.get_inflight_stores_observations()
-                    if StoreController._gauge_target is not None
-                    else []
-                ),
+                lambda: [
+                    observation
+                    for c in list(StoreController._gauge_targets.values())
+                    for observation in c.get_inflight_stores_observations()
+                ],
             )
             register_gauge(
                 "lmcache.l2_store",
@@ -282,11 +286,11 @@ class StoreController(StorageControllerInterface):
                     "Count of L2 adapters attached to the store controller, "
                     "tagged by ``state`` (active or draining)."
                 ),
-                lambda: (
-                    StoreController._gauge_target.get_adapter_state_observations()
-                    if StoreController._gauge_target is not None
-                    else []
-                ),
+                lambda: [
+                    (count, {**attrs, "l1_tag": tag})
+                    for tag, c in list(StoreController._gauge_targets.items())
+                    for count, attrs in c.get_adapter_state_observations()
+                ],
             )
 
         # Map store eventfd -> adapter id for quick lookup in poll results
@@ -319,6 +323,8 @@ class StoreController(StorageControllerInterface):
         self._cleanup_in_flight_tasks()
         self._listener.close()
         self._adapter_ctrl_efd.close()
+        if StoreController._gauge_targets.get(self._l1_manager.config.tag) is self:
+            del StoreController._gauge_targets[self._l1_manager.config.tag]
 
     def report_status(self) -> dict:
         """Return a status dict for the store controller."""
