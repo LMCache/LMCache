@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.modules.blend.read_set import (
+    _cb_chunks_available,
+    _classify_cb_read_groups,
+)
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -69,14 +73,19 @@ class StoreMixin:
 
         Delegates the KV write to ``LMCacheDrivenTransfer.store``, then
         (worker 0 only) enqueues chunk hashes for async fingerprint
-        registration ordered after the L1 commit. Fingerprint failures are
-        logged, never raised — they do not affect store correctness.
+        registration ordered after the L1 commit. Each reader of the store
+        applies one rule (``_cb_chunks_available``): a chunk is available to
+        a reader iff every object group that reader reads committed a valid
+        object for it. Fingerprints follow the blend read set; the reorder
+        planner's prompt record follows the prefix read set. Fingerprint
+        failures are logged, never raised — they do not affect store
+        correctness.
 
         Returns:
             The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
-        handle, store_ok, stored_mask = self._transfer_module.store_with_chunk_mask(
+        handle, store_ok, committed = self._transfer_module.store_with_chunk_mask(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
         result = (handle, store_ok)
@@ -100,19 +109,43 @@ class StoreMixin:
                 TokenHasher.hash_to_bytes(h)
                 for h in session.get_hashes(key.start, key.end)
             ]
-            if not chunk_hashes:
+            if not chunk_hashes or not any(any(group) for group in committed):
                 return result
-            # Record prompts whose KV was stored, for the reorder planner.
-            if getattr(self, "_prompt_store", None) is not None and any(stored_mask):
+            # The read sets are the ones the lookup resolves for this (model,
+            # world size).
+            attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
+                key.model_name, key.world_size
+            )
+            try:
+                read = _classify_cb_read_groups(
+                    attn_desc.num_object_groups, attn_desc.group_kinds
+                )
+            except RuntimeError:
+                # Neither blend leg can read this layout (the lookup reports
+                # why), so no chunk of it is available to either.
+                logger.debug(
+                    "CB store side effects skipped for %s: no blend read set",
+                    key.request_id,
+                    exc_info=True,
+                )
+                return result
+            # The reorder planner's copies are served as exact-prefix hits, so
+            # it records a prompt only once a store committed a chunk a prefix
+            # hit can end on.
+            if getattr(self, "_prompt_store", None) is not None and any(
+                _cb_chunks_available(committed, read.prefix_gids)
+            ):
                 self._record_prompt(key, session)
             tokens_in_range = list(key.token_ids)[key.start : key.end]
             # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.
             start_chunk_idx = 0 if key.start != 0 else 1
 
-            # Register only committed chunks: a fingerprint for a skipped
-            # chunk would advertise content that was never persisted.
+            # A fingerprint for a chunk the blend leg cannot read back would
+            # advertise content the sparse lookup never finds.
+            blendable = _cb_chunks_available(committed, read.blend_gids)
+
             def _stored(i: int) -> bool:
-                return stored_mask[i] if i < len(stored_mask) else False
+                return blendable[i] if i < len(blendable) else False
 
             jobs: list[FpJob] = []
             chunk_size = self._ctx.chunk_size

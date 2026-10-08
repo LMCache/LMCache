@@ -76,6 +76,36 @@ def _classify_cb_read_groups(
     )
 
 
+def _cb_chunks_available(
+    committed: list[list[bool]], read_gids: tuple[int, ...]
+) -> list[bool]:
+    """Mark the chunks of one store that a reader of ``read_gids`` can use.
+
+    The rule: a chunk is available to a reader iff every object group that
+    reader reads committed a valid object for it. The transfer commits only
+    valid objects (``all_null_chunk_masks`` skips a chunk whose pages are all
+    null or whose recurrent-state page is null), so ``committed`` already
+    encodes validity; this applies the reader's read set. The blend leg reads
+    ``blend_gids`` at every chunk it matches. The prefix leg reads
+    ``prefix_gids`` at the chunk its hit ends on (recurrent state has a
+    one-chunk window), so over ``prefix_gids`` this marks where a prefix hit
+    can end.
+
+    Args:
+        committed: ``committed[g][i]`` from the store, per object group.
+        read_gids: The object groups the reader reads.
+
+    Returns:
+        Per chunk, whether every group in ``read_gids`` committed it; empty
+        when ``committed`` is.
+    """
+    if not committed:
+        return []
+    return [
+        all(committed[gid][i] for gid in read_gids) for i in range(len(committed[0]))
+    ]
+
+
 def _cb_chunk_major_object_keys(
     key: IPCCacheServerKey, chunk_hashes: list[bytes], gids: tuple[int, ...]
 ) -> list:

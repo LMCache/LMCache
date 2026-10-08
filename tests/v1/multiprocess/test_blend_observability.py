@@ -278,7 +278,7 @@ class TestFingerprintJobTuple:
         eng._transfer_module.store_with_chunk_mask.return_value = (
             b"handle",
             True,
-            [True, True],
+            [[True, True]],
         )
         eng._transfer_module.get_and_touch_context_entry.return_value = None
         eng._pending_fp_lock = threading.Lock()
@@ -286,6 +286,9 @@ class TestFingerprintJobTuple:
         eng._coordinator = None
         eng._ctx = MagicMock()
         eng._ctx.chunk_size = 256
+        eng._ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
+            num_chunks_in_sw=[-1]
+        )
         eng._ctx.session_manager.get_or_create.return_value.get_hashes.return_value = [
             123,
             456,
@@ -294,6 +297,8 @@ class TestFingerprintJobTuple:
         eng._fingerprint_queue = Queue()
         key = SimpleNamespace(
             request_id="req-store",
+            model_name="m",
+            world_size=1,
             worker_id=0,
             token_ids=list(range(512)),
             start=0,
