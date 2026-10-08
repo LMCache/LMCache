@@ -570,7 +570,7 @@ class LMCacheConnectorV1Impl:
         )
         self.current_layer = 0
 
-        self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
+        self.force_skip_save = os.getenv("LMCACHE_FORCE_SKIP_SAVE", "").lower() in ("1", "true", "yes")
         self._requests_priority: dict[str, int] = {}
 
         # Chunked KV loading: cap the number of external tokens
