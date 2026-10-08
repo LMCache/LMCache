@@ -1,4 +1,4 @@
-0.31.1rc1.dev23+g43b4aaea3
-short_sha=43b4aaea3
-full_sha=43b4aaea3e40e20ef53ce2bfecfa1b72060bf2b5
-archive_index_url=https://wheels.vllm.ai/43b4aaea3e40e20ef53ce2bfecfa1b72060bf2b5/cu130
+0.31.1rc1.dev88+g81198e97b
+short_sha=81198e97b
+full_sha=81198e97ba7eee2a22540caaa756b7fdddcb4d93
+archive_index_url=https://wheels.vllm.ai/81198e97ba7eee2a22540caaa756b7fdddcb4d93/cu130
