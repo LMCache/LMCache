@@ -571,11 +571,16 @@ def test_classify_read_groups_recurrent_first_layout():
 # ---------------------------------------------------------------------------
 
 
-def _store_hook_engine(stored_mask):
+def _store_hook_engine(committed, group_kinds=()):
     """Engine with the real ``store`` bound; transfer and session mocked.
-    No GPU context -> fingerprint jobs land on the plain queue."""
+    ``committed[g][i]`` is what the transfer reports per object group;
+    ``group_kinds`` labels the registered object groups (empty: one fused
+    group). No GPU context -> fingerprint jobs land on the plain queue."""
     # Standard
     from queue import Queue
+
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
 
     eng = MagicMock(spec=BlendModule)
     eng.store = BlendModule.store.__get__(eng)
@@ -583,13 +588,16 @@ def _store_hook_engine(stored_mask):
     eng._transfer_module.store_with_chunk_mask.return_value = (
         b"evt",
         True,
-        stored_mask,
+        committed,
     )
     eng._transfer_module.get_and_touch_context_entry.return_value = None
     eng._ctx = MagicMock()
     eng._ctx.chunk_size = 4
+    eng._ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=[-1] * len(committed), group_kinds=tuple(group_kinds)
+    )
     session = MagicMock()
-    session.get_hashes.return_value = list(range(100, 100 + len(stored_mask)))
+    session.get_hashes.return_value = list(range(100, 100 + len(committed[0])))
     eng._ctx.session_manager.get_or_create.return_value = session
     eng._pending_fp_lock = threading.Lock()
     eng._pending_fp_hashes = set()
@@ -614,6 +622,15 @@ def _store_hook_key(num_chunks: int, chunk_size: int = 4):
     )
 
 
+def _store_hook_jobs(eng):
+    """Drain the queued fingerprint jobs as ``(start_chunk_idx,
+    position_offset, num_hashes)``."""
+    jobs = []
+    while not eng._fingerprint_queue.empty():
+        jobs.append(eng._fingerprint_queue.get_nowait())
+    return [(j[2], j[3], len(j[1])) for j in jobs]
+
+
 def test_store_registers_fingerprints_only_for_committed_chunks():
     """A chunk the storage manager skipped (hole in the stored mask) gets no
     fingerprint: one registration job per contiguous stored run, offsets
@@ -621,17 +638,14 @@ def test_store_registers_fingerprints_only_for_committed_chunks():
     # First Party
     from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
-    eng = _store_hook_engine([True, True, False, True])
+    eng = _store_hook_engine([[True, True, False, True]])
     key = _store_hook_key(4)
 
     result = eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
 
     assert result == (b"evt", True)
-    jobs = []
-    while not eng._fingerprint_queue.empty():
-        jobs.append(eng._fingerprint_queue.get_nowait())
     # Runs: chunks [0,2) with chunk 0 skipped (prefix leg), and chunk [3,4).
-    assert [(j[2], j[3], len(j[1])) for j in jobs] == [(1, 0, 2), (0, 12, 1)]
+    assert _store_hook_jobs(eng) == [(1, 0, 2), (0, 12, 1)]
     expected = {TokenHasher.hash_to_bytes(101), TokenHasher.hash_to_bytes(103)}
     assert eng._pending_fp_hashes == expected
 
@@ -639,7 +653,7 @@ def test_store_registers_fingerprints_only_for_committed_chunks():
 def test_store_registers_nothing_when_no_chunk_committed():
     """A store whose every chunk was skipped (or that failed) must not
     advertise any fingerprint -- those entries could never be served."""
-    eng = _store_hook_engine([False, False, False])
+    eng = _store_hook_engine([[False, False, False]])
     key = _store_hook_key(3)
 
     result = eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
@@ -647,3 +661,115 @@ def test_store_registers_nothing_when_no_chunk_committed():
     assert result == (b"evt", True)
     assert eng._fingerprint_queue.empty()
     assert eng._pending_fp_hashes == set()
+
+
+def test_store_registers_nothing_for_a_rejected_store():
+    """A rejected store reports no group at all; nothing is registered and
+    the read set is never resolved."""
+    eng = _store_hook_engine([[True]])
+    eng._transfer_module.store_with_chunk_mask.return_value = (b"", False, [])
+
+    result = eng.store(
+        _store_hook_key(1), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    assert result == (b"", False)
+    assert eng._fingerprint_queue.empty()
+    eng._ctx.layout_desc_registry.find_attn_desc.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "group_kinds",
+    [("attention", "recurrent", "aux"), ("recurrent", "attention", "aux")],
+)
+def test_store_registers_chunks_without_a_recurrent_state(group_kinds):
+    """Separated object groups under vLLM's align mode: the recurrent group
+    commits a state only at a step's last chunk (chunk 3 here), while the
+    attention and aux groups commit every chunk. The blend leg never reads
+    recurrent state, so every chunk is blendable, not just the step end."""
+    # First Party
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
+    rec = group_kinds.index("recurrent")
+    committed = [[True] * 4 for _ in group_kinds]
+    committed[rec] = [False, False, False, True]
+    eng = _store_hook_engine(committed, group_kinds)
+
+    eng.store(
+        _store_hook_key(4), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    # One run over all four chunks; chunk 0 still belongs to the prefix leg.
+    assert _store_hook_jobs(eng) == [(1, 0, 4)]
+    assert eng._pending_fp_hashes == {
+        TokenHasher.hash_to_bytes(h) for h in (101, 102, 103)
+    }
+
+
+def test_store_skips_chunks_a_blend_read_group_did_not_commit():
+    """The aux group is part of the blend read set: a chunk it did not
+    commit is not blendable even though attention and recurrent state did."""
+    committed = [
+        [True, True, True, True],  # attention
+        [True, True, True, True],  # recurrent ("all" mode: every chunk)
+        [True, True, False, True],  # aux
+    ]
+    eng = _store_hook_engine(committed, ("attention", "recurrent", "aux"))
+
+    eng.store(
+        _store_hook_key(4), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    assert _store_hook_jobs(eng) == [(1, 0, 2), (0, 12, 1)]
+
+
+def test_store_shared_hybrid_object_needs_its_state():
+    """Without separated groups the state shares the attention object, which
+    is the blend read group: a chunk whose shared object was not committed
+    stays unregistered."""
+    eng = _store_hook_engine([[True, False, False, True]])
+
+    eng.store(
+        _store_hook_key(4), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    assert _store_hook_jobs(eng) == [(0, 12, 1)]
+
+
+def test_store_registers_nothing_without_a_blend_read_set(monkeypatch):
+    """A layout the blend leg cannot read (two attention groups) registers no
+    fingerprint and logs no error on the store path."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend import store as store_mod
+
+    logger = MagicMock()
+    monkeypatch.setattr(store_mod, "logger", logger)
+    eng = _store_hook_engine([[True] * 3, [True] * 3], ("attention", "attention"))
+
+    result = eng.store(
+        _store_hook_key(3), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    assert result == (b"evt", True)
+    assert eng._fingerprint_queue.empty()
+    assert eng._pending_fp_hashes == set()
+    logger.exception.assert_not_called()
+
+
+def test_blend_readable_chunks_reads_only_blend_groups():
+    """The predicate itself: every blend read group, nothing else."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend.read_set import (
+        _cb_blend_readable_chunks,
+    )
+
+    read = _classify_cb_read_groups(3, ("attention", "recurrent", "aux"))
+    committed = [
+        [True, True, False],
+        [False, False, False],
+        [True, False, True],
+    ]
+    assert _cb_blend_readable_chunks(committed, read) == [True, False, False]
+    assert _cb_blend_readable_chunks([], read) == []
+    fused = _classify_cb_read_groups(1, ())
+    assert _cb_blend_readable_chunks([[False, True]], fused) == [False, True]
