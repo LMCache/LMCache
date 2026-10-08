@@ -259,11 +259,28 @@ void RedisConnector::do_single_get(WorkerConn& conn, const std::string& key,
 
   // parse response in 3 steps
 
-  // 1. recv size header
-  std::vector<char> recv_size_header_buf(size_header.size());
-  conn.recv_exactly(recv_size_header_buf.data(), size_header.size());
-  if (std::memcmp(recv_size_header_buf.data(), size_header.data(),
-                  size_header.size()) != 0) {
+  // 1. recv the bulk string header up to CRLF: "$<len>\r\n", or "$-1\r\n" when
+  //    the key does not exist. Reading a fixed size_header.size() bytes here
+  //    used to block forever on the shorter nil reply and wedge this
+  //    connection.
+  std::string recv_header;
+  recv_header.reserve(size_header.size());
+  for (;;) {
+    char c;
+    conn.recv_exactly(&c, 1);
+    recv_header.push_back(c);
+    if (c == '\n') {
+      break;
+    }
+    if (recv_header.size() > size_header.size() + 32) {
+      throw std::runtime_error("GET: response header too long");
+    }
+  }
+  if (recv_header == "$-1\r\n") {
+    // nil reply fully consumed: the connection stays in sync
+    throw std::runtime_error("GET: key not found");
+  }
+  if (recv_header != size_header) {
     throw std::runtime_error("GET: size header mismatch");
   }
 
