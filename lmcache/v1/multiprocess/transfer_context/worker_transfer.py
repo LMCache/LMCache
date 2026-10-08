@@ -286,15 +286,14 @@ class TransferContext(ABC):
             kv_caches: Worker KV cache tensors keyed by layer name.
             model_name: Model name used by cache keys.
             world_size: KV world size.
-            blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+            blocks_in_chunk: Number of engine blocks per LMCache chunk.
             mq_timeout: Timeout in seconds for synchronous request wait.
             layout_hints: Optional inference-engine-provided layout hints.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
-            engine_type: Serving engine that produced the caches. Only
-                consumed by the handle path; adapters should pass their
-                own :class:`EngineType` so this transport stays engine-
-                neutral. Defaults to :attr:`EngineType.VLLM` for
-                backwards compatibility.
+            engine_type: Serving engine that produced the caches. Transfer
+                contexts use it to normalize engine-specific KV layouts.
+                Adapters should pass their own :class:`EngineType`; the
+                default is :attr:`EngineType.VLLM` for backwards compatibility.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -411,10 +410,10 @@ class TransferContext(ABC):
             request_id: External request identifier.
             key: LMCache key object for the store range.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to store, indexed by LMCache KV group id.
+            block_ids: Engine block IDs to store, indexed by LMCache KV group id.
             event: Synchronization event object, or ``None`` when the concrete
                 context does not require one.
-            blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+            blocks_in_chunk: Number of engine blocks per LMCache chunk.
 
         Returns:
             A future compatible with adapter-side ``query()``/``result()`` flow.
@@ -440,11 +439,11 @@ class TransferContext(ABC):
             request_id: External request identifier.
             key: LMCache key object for the retrieve range.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to retrieve into, indexed by LMCache KV
+            block_ids: Engine block IDs to retrieve into, indexed by LMCache KV
                 group id.
             event: Synchronization event object, or ``None`` when the concrete
                 context does not require one.
-            blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+            blocks_in_chunk: Number of engine blocks per LMCache chunk.
             skip_first_n_tokens: Number of initial tokens to skip when writing.
 
         Returns:
@@ -764,7 +763,7 @@ class LMCacheDrivenTransferContext(TransferContext):
 
 
 class EngineDrivenTransferContext(TransferContext):
-    """Engine-driven transfer context for non-CUDA workers.
+    """Transfer context for worker-managed KV copies.
 
     In this mode the engine (worker side) owns the data movement: the
     worker adapter gathers/packs KV into CPU buffers, commits via
@@ -808,12 +807,12 @@ class EngineDrivenTransferContext(TransferContext):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
     ) -> None:
-        """Register KV caches with the non-GPU context server.
+        """Register KV caches with the engine-driven context server.
 
-        ``engine_group_infos`` and ``engine_type`` are accepted to satisfy
-        the base interface but are currently a no-op: the non-GPU transfer
-        path does not support hybrid KV cache groups and rejects multi-
-        group transfers at store / retrieve time (see
+        ``engine_type`` selects the KV layout normalization used during
+        registration and subsequent gather/scatter operations.
+        ``engine_group_infos`` is currently unused because this path rejects
+        multi-group transfers at store/retrieve time (see
         ``_single_group_block_ids``).
         """
         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
@@ -886,7 +885,7 @@ class EngineDrivenTransferContext(TransferContext):
         )
         supported_transfer_mode = "SHM" if shm_name and pool_size > 0 else "pickle"
         logger.info(
-            "Worker non-GPU transfer context registered (instance_id=%d, mode=%s)",
+            "Worker engine-driven context registered (instance_id=%d, mode=%s)",
             self._instance_id,
             supported_transfer_mode,
         )

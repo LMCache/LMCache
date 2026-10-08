@@ -4,7 +4,7 @@
 This module deliberately talks to LMCache's engine-neutral MP protocol.  It
 does not use LMCache's legacy SGLang integration and it never constructs an
 in-process LMCache engine.  The registered SGLang GPU KV tensors remain owned
-by SGLang; LMCache accesses them through device-memory and event IPC handles.
+by SGLang; the selected transfer context moves their KV data.
 """
 
 # Future
@@ -323,9 +323,10 @@ class UnifiedLMCacheMPConnector:
                 f"LMCache chunk size {self.chunk_size} must be a positive "
                 "multiple of every SGLang group tokens_per_block"
             )
-        # LMCache-driven MP ignores this compatibility argument; per-group
-        # block counts are derived from EngineGroupInfo.tokens_per_block.
-        self.blocks_in_chunk = self.chunk_size
+        # Engine-driven currently accepts one transfer group and needs its
+        # physical block count. LMCache-driven derives per-group counts from
+        # EngineGroupInfo and ignores this compatibility argument.
+        self.blocks_in_chunk = self.chunk_size // self._kv_groups[0].tokens_per_block
         self.register_kv_cache()
         logger.info("UnifiedLMCacheMPConnector initialized succeed.")
 
@@ -527,7 +528,7 @@ class UnifiedLMCacheMPConnector:
             dist.all_reduce(tensor, op=op, group=self.pp_group)
 
     def register_kv_cache(self) -> None:
-        """Export the SGLang GPU tensors to the LMCache MP server once."""
+        """Register SGLang KV tensors with the selected transfer context."""
         # First Party
         from lmcache.utils import EngineType
         from lmcache.v1.multiprocess.group_view import EngineGroupInfo

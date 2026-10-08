@@ -87,6 +87,67 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.connector = object.__new__(UnifiedLMCacheMPConnector)
         self.connector.page_size = 4
 
+    def test_init_converts_chunk_tokens_to_sglang_blocks(self) -> None:
+        source_tensor = Mock(
+            device=torch.device("cuda"),
+            dtype=torch.float16,
+            shape=(32, 2, 3),
+        )
+        source_tensor.dim.return_value = 3
+        source_tensor.is_contiguous.return_value = True
+        wire_tensor = Mock(
+            device=torch.device("cuda"),
+            dtype=torch.float16,
+            shape=(8, 4, 2, 3),
+        )
+        source_tensor.view.return_value = wire_tensor
+        adapter = Mock()
+        adapter.resolve_registered_groups.return_value = [
+            SGLangKVComponentGroup(
+                "full",
+                (source_tensor,),
+                tokens_per_block=4,
+                slots_per_block=4,
+                tensor_rows_per_block=(4,),
+            )
+        ]
+        adapter.is_mla_enabled.return_value = False
+        config = SimpleNamespace(mp_host="127.0.0.1", mp_port=5555)
+        config.get_extra_config_value = lambda _key, default: default
+        request_client = Mock()
+        request_client.get_chunk_size.return_value.result.return_value = 8
+
+        with (
+            patch(
+                "lmcache.integration.sglang.unified_kv_adapter.SGLangUnifiedKVAdapter",
+                return_value=adapter,
+            ),
+            patch(
+                "lmcache.v1.config.load_engine_config_with_overrides",
+                return_value=config,
+            ),
+            patch(
+                "lmcache.v1.multiprocess.transport.factory.RequestClientFactory.create",
+                return_value=request_client,
+            ),
+            patch.object(UnifiedLMCacheMPConnector, "register_kv_cache"),
+        ):
+            connector = UnifiedLMCacheMPConnector(
+                config_file=None,
+                model_config=SimpleNamespace(model_path="test-model"),
+                tp_size=1,
+                tp_rank=0,
+                tp_group=None,
+                page_size=4,
+                token_to_kv_pool_allocator=object(),
+                req_to_token_pool=object(),
+                tree_components=(object(),),
+                mamba_component=None,
+                sliding_window_size=None,
+            )
+
+        self.assertEqual(connector.blocks_in_chunk, 2)
+
     def test_slots_to_blocks_accepts_noncontiguous_pages(self):
         slots = torch.tensor([4, 5, 6, 7, 12, 13, 14, 15])
         self.assertEqual(self.connector._slots_to_blocks(slots), [1, 3])
