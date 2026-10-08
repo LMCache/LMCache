@@ -8,6 +8,13 @@ paged KV lives on ``rbln``. These tests store from device-resident paged KV
 into host chunks and retrieve them into a zeroed device cache, then compare
 both the chunks and the restored cache against the CPU result.
 
+The paged KV must really be on the device. torch-rbln allocates device memory
+lazily and keeps a tensor made with ``.to("rbln")`` host-latest, so a
+transfer over it is served from the host copy and never crosses to the NPU.
+The tests therefore bind each paged layer's device memory up front, as a
+vLLM-RBLN device-tensor KV cache is, and run the transfer under
+``torch.rbln.explain()`` to fail if any copy is served on the host instead.
+
 They skip unless ``torch.rbln`` reports a usable NPU, so they run only on the
 ``rbln-mp-test`` Buildkite lane.
 """
@@ -56,6 +63,14 @@ def _shape_desc(kv_size: int, num_heads: int, head_size: int) -> PageBufferShape
     return desc
 
 
+def _bound_device_tensor(source: torch.Tensor) -> torch.Tensor:
+    """Copy ``source`` into a new ``rbln:0`` tensor with bound device memory."""
+    tensor = torch.empty(source.shape, dtype=source.dtype, device="rbln:0")
+    torch.rbln.bind_device_memory(tensor)
+    tensor.copy_(source)
+    return tensor
+
+
 def _transfer(
     layers: list[torch.Tensor],
     chunks: list[torch.Tensor],
@@ -97,19 +112,21 @@ def _assert_device_round_trip(
         shape_desc,
     )
 
-    device = torch.device("rbln", 0)
-    device_layers = [layer.to(device) for layer in cpu_layers]
-    chunks = [torch.zeros(chunk_shape, dtype=DTYPE) for _ in range(num_chunks)]
-    _transfer(
-        device_layers, chunks, TransferDirection.D2H, engine_kv_format, shape_desc
-    )
+    device_layers = [_bound_device_tensor(layer) for layer in cpu_layers]
+    restored = [_bound_device_tensor(torch.zeros_like(layer)) for layer in cpu_layers]
     torch.rbln.synchronize()
+    chunks = [torch.zeros(chunk_shape, dtype=DTYPE) for _ in range(num_chunks)]
+    with torch.rbln.explain() as region:
+        _transfer(
+            device_layers, chunks, TransferDirection.D2H, engine_kv_format, shape_desc
+        )
+        torch.rbln.synchronize()
+        _transfer(restored, chunks, TransferDirection.H2D, engine_kv_format, shape_desc)
+        torch.rbln.synchronize()
+    assert region.verdict()["clean"], region.report()
+
     for chunk, expected in zip(chunks, expected_chunks, strict=True):
         assert torch.equal(chunk, expected)
-
-    restored = [torch.zeros_like(layer) for layer in device_layers]
-    _transfer(restored, chunks, TransferDirection.H2D, engine_kv_format, shape_desc)
-    torch.rbln.synchronize()
     for layer, expected in zip(restored, cpu_layers, strict=True):
         assert torch.equal(layer.cpu(), expected)
 
