@@ -10,7 +10,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, cast
 import asyncio
 import contextlib
@@ -170,18 +170,24 @@ class FleetEvictionController(Controller):
         self._policy.on_keys_removed([key])
 
     def pin(self, keys: list[ObjectKey]) -> None:
-        """Increment each key's pin count, excluding it from eviction."""
+        """Increment each key's pin count, excluding it from eviction.
+
+        A pin covers the key's chunk in every object group (see
+        :func:`_pinned_chunk_key`).
+        """
         for key in keys:
-            self._pin_counts[key] = self._pin_counts.get(key, 0) + 1
+            chunk_key = _pinned_chunk_key(key)
+            self._pin_counts[chunk_key] = self._pin_counts.get(chunk_key, 0) + 1
 
     def unpin(self, keys: list[ObjectKey]) -> None:
         """Decrement each key's pin count, floored at 0."""
         for key in keys:
-            count = self._pin_counts.get(key, 0)
+            chunk_key = _pinned_chunk_key(key)
+            count = self._pin_counts.get(chunk_key, 0)
             if count <= 1:
-                self._pin_counts.pop(key, None)
+                self._pin_counts.pop(chunk_key, None)
             else:
-                self._pin_counts[key] = count - 1
+                self._pin_counts[chunk_key] = count - 1
 
     @classmethod
     def from_config(
@@ -265,20 +271,24 @@ class FleetEvictionController(Controller):
                 counts are dropped.
         """
         entries = cast("list[Mapping[str, object]]", state["entries"])
-        restored = (_decode_pin(entry) for entry in entries)
-        self._pin_counts = {key: count for key, count in restored if count > 0}
+        pin_counts: dict[ObjectKey, int] = {}
+        for key, count in (_decode_pin(entry) for entry in entries):
+            if count > 0:
+                chunk_key = _pinned_chunk_key(key)
+                pin_counts[chunk_key] = pin_counts.get(chunk_key, 0) + count
+        self._pin_counts = pin_counts
 
     def filter_unpinned(self, keys: list[ObjectKey]) -> list[ObjectKey]:
         """Return the subset of ``keys`` with no active L2 pin, in input order.
 
         Used by non-force delete to skip L2-pinned keys.
         """
-        return [key for key in keys if key not in self._pin_counts]
+        return [key for key in keys if _pinned_chunk_key(key) not in self._pin_counts]
 
     def drop_pins(self, keys: list[ObjectKey]) -> None:
         """Remove each key from the L2 pin set (used by force delete; idempotent)."""
         for key in keys:
-            self._pin_counts.pop(key, None)
+            self._pin_counts.pop(_pinned_chunk_key(key), None)
 
     def list_pins(
         self, cache_salt: str, model_name: str, offset: int, limit: int
@@ -334,7 +344,9 @@ class FleetEvictionController(Controller):
             actions = self._policy.get_eviction_actions(
                 effective_ratio,
                 cache_salt=cache_salt,
-                key_eligible_filter=lambda key: key not in self._pin_counts,
+                key_eligible_filter=lambda key: (
+                    _pinned_chunk_key(key) not in self._pin_counts
+                ),
             )
             keys_to_evict: list[ObjectKey] = []
             for action in actions:
@@ -496,3 +508,12 @@ def _decode_pin(entry: Mapping[str, object]) -> tuple[ObjectKey, int]:
         cache_salt=str(fields["cache_salt"]),
     )
     return encoded.to_object_key(), cast(int, entry["count"])
+
+
+def _pinned_chunk_key(key: ObjectKey) -> ObjectKey:
+    """Return ``key`` without its object group, as the pin table stores it.
+
+    A pin is on a chunk, which ``--separate-object-groups`` stores once per
+    object group; dropping the group makes one pin cover them all.
+    """
+    return replace(key, object_group_id=0) if key.object_group_id else key

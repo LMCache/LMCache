@@ -2,7 +2,7 @@
 """Blend unified lookup FSM: prefix, local-match, coordinator, and sparse legs."""
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 import threading
 import time
@@ -22,6 +22,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
+    ObjectKey,
     PrefetchTaskSpec,
     ipc_key_to_grouped_object_keys,
 )
@@ -75,7 +76,9 @@ class _CBUnifiedJob:
     non_prefix: list[CBMatchResult] | None = None
     per_hash_obj_keys: dict | None = None
     hash_to_col: dict[bytes, int] | None = None  # sparse: chunk hash -> row column
+    l1_owners: dict[ObjectKey, int] = field(default_factory=dict)
     found_rows: list[Bitmap] | None = None  # stashed when the sparse poll completes
+    avail_rows: list[Bitmap] | None = None  # cells found in L1/L2, loaded or not
     l2_keys: int = 0  # sparse keys needing an L2 load (0 => no L2 read, span skipped)
     coord_submitted: bool = False  # coordinator match query was issued
     coord_deadline: float = 0.0  # time.monotonic() wall-clock cutoff for the leg
@@ -213,32 +216,56 @@ class LookupMixin:
         found_rows: list[Bitmap],
         per_hash_obj_keys: dict[bytes, list],
         hash_to_col: dict[bytes, int],
+        avail_rows: list[Bitmap] | None = None,
+        l1_owners: dict[ObjectKey, int] | None = None,
     ) -> list[CBMatchResult]:
-        """Classify each prefetched chunk as found or stale, and finalize state.
+        """Classify each prefetched chunk: found (every key loaded),
+        skipped (exists per ``avail_rows`` but not fully staged: no strike,
+        loaded keys released now), or stale (absent: eviction strike).
+        Without ``avail_rows``, any-key-loaded approximates existence.
 
-        A chunk is found only if every (read group x rank) key loaded — a
-        partially loaded chunk cannot be blended, so it is dropped whole and
-        takes an eviction strike (evicted at threshold, kept while still
-        in-flight). Stashes the found chunks' obj_keys for the retrieve path.
-
-        Returns:
-            The found subset, in cur_st order.
-        """
+        Returns the found subset, in cur_st order."""
         found_cb_match_result: list[CBMatchResult] = []
         stale_hashes: list[bytes] = []
+        partial_release_keys: list = []
+        partial_seen: set[bytes] = set()
         for r in matches:
             col = hash_to_col.get(r.hash)
-            if col is not None and all(row.test(col) for row in found_rows):
+            if col is None:
+                stale_hashes.append(r.hash)
+                continue
+            landed = [row.test(col) for row in found_rows]
+            if all(landed):
                 found_cb_match_result.append(r)
+                continue
+            if avail_rows is not None:
+                exists = all(row.test(col) for row in avail_rows)
+            else:
+                exists = any(landed)
+            if exists:
+                if r.hash not in partial_seen:
+                    partial_seen.add(r.hash)
+                    keys = per_hash_obj_keys.get(r.hash, ())
+                    partial_release_keys.extend(
+                        k for k, hit in zip(keys, landed, strict=False) if hit
+                    )
             else:
                 stale_hashes.append(r.hash)
-        # Stale drops silently shrink coverage — log so it is diagnosable.
-        if stale_hashes:
+        if partial_release_keys:
+            self._ctx.storage_manager.finish_read_prefetched(
+                partial_release_keys,
+                read_locks=key.require_num_kv_readers(),
+                l1_owners=l1_owners,
+            )
+        # Dropped chunks silently shrink coverage — log for diagnosis.
+        if stale_hashes or partial_seen:
             logger.warning(
-                "CB sparse classify for %s: %d found, %d stale of %d submitted",
+                "CB sparse classify for %s: %d found, %d stale, %d partial "
+                "of %d submitted",
                 key.request_id,
                 len(found_cb_match_result),
                 len(stale_hashes),
+                len(partial_seen),
                 len(matches),
             )
 
@@ -284,11 +311,14 @@ class LookupMixin:
                 self._ctx.storage_manager.finish_read_prefetched(
                     [k for ks in prev["per_hash"].values() for k in ks],
                     read_locks=prev["read_locks"],
+                    l1_owners=prev.get("l1_owners"),
                 )
             session.extras[self.UNRETRIEVED_KEYS_EXTRA] = {
                 "read_locks": key.require_num_kv_readers(),
                 "per_hash": cache_entry,
+                "l1_owners": l1_owners,
             }
+            session.extras["cb.sparse_l1_owners"] = l1_owners
 
         return found_cb_match_result
 
@@ -389,11 +419,13 @@ class LookupMixin:
             while still loading. ``retained`` is the full gapped chunk set
             under SEGMENTED_PREFIX, else None.
         """
+        owners: dict[ObjectKey, int] = {}
         if job.prefix_handle is not None:
             result = self._ctx.storage_manager.query_prefetch_status(job.prefix_handle)
             if result is None:
                 return None  # still loading
             rows = result.hit_cells
+            owners = result.l1_owners
             # Window-aware fold: a windowed group's out-of-window keys are
             # trimmed from the load (bits legitimately unset), so a plain
             # count_leading_ones would read those bits as a miss.
@@ -414,7 +446,7 @@ class LookupMixin:
         # Publish the lock model so free_lookup_locks releases exactly what
         # this leg locked.
         session = self._ctx.session_manager.get_or_create(rid)
-        session.record_prefetch_result(leading, job.prefix_lock_gids)
+        session.record_prefetch_result(leading, job.prefix_lock_gids, owners)
         self._event_bus.publish(
             Event(
                 event_type=EventType.CB_PREFIX_LOOKUP_END,
@@ -595,6 +627,8 @@ class LookupMixin:
             if result is None:
                 return None  # sparse still loading -> defer
             job.found_rows = result.hit_cells
+            job.avail_rows = result.found_cells
+            job.l1_owners = result.l1_owners
             if job.l2_keys > 0:
                 self._event_bus.publish(
                     Event(
@@ -615,6 +649,8 @@ class LookupMixin:
                 job.found_rows or [],
                 job.per_hash_obj_keys or {},
                 job.hash_to_col or {},
+                job.avail_rows,
+                l1_owners=job.l1_owners,
             )
             # Overlap dedup over the retrievable candidates; dropped
             # candidates' keys are released by the retrieve's orphan sweep.

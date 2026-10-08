@@ -543,6 +543,7 @@ def _wire_capacity_publishing(sm: StorageManager) -> None:
         L1Manager,
         SimpleNamespace(get_capacity_bytes_by_backend=lambda: {}),
     )
+    sm._l1_managers_by_id = {0: sm._l1_manager}
     if not hasattr(sm, "_adapter_descriptors"):
         sm._adapter_descriptors = {
             adapter_id: cast(L2AdapterDescriptor, _FakeAdapterDescriptor("fake"))

@@ -945,3 +945,70 @@ def test_same_backend_private_and_shared_are_distinct_placements():
     )
     [placements] = directory.lookup([_key(1)])
     assert sorted(p.shared for p in placements) == [False, True]
+
+
+# -- Object groups ------------------------------------------------------------
+
+
+def _grouped_key(hash_byte: int, group: int, rank: int = 0) -> ObjectKey:
+    return ObjectKey(
+        chunk_hash=bytes([hash_byte]) * 4,
+        model_name="m",
+        kv_rank=rank,
+        object_group_id=group,
+    )
+
+
+def test_a_key_expands_to_its_stored_copies_in_other_groups():
+    directory = KeyDirectory()
+    directory.consume(
+        _batch(keys=[_grouped_key(1, 0), _grouped_key(1, 2), _grouped_key(1, 1)])
+    )
+
+    assert directory.get_keys_across_object_groups([_grouped_key(1, 0)]) == [
+        _grouped_key(1, 0),
+        _grouped_key(1, 1),
+        _grouped_key(1, 2),
+    ]
+
+
+def test_expansion_reaches_only_groups_this_chunk_is_stored_in():
+    """Exact, not inferred: another chunk's groups say nothing about this one."""
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[_grouped_key(1, 0), _grouped_key(1, 1)]))
+    directory.consume(_batch(seq=2, keys=[_grouped_key(2, 0)]))
+
+    assert directory.get_keys_across_object_groups([_grouped_key(2, 0)]) == [
+        _grouped_key(2, 0)
+    ]
+
+
+def test_expansion_keeps_rank_and_namespace_apart():
+    """Only the object group may differ: another rank of the same chunk is a
+    different key, not another group of this one."""
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[_grouped_key(1, 1, rank=1)]))
+
+    assert directory.get_keys_across_object_groups([_grouped_key(1, 0)]) == [
+        _grouped_key(1, 0)
+    ]
+
+
+def test_an_unstored_key_expands_to_itself():
+    """A lookup of content nobody holds still answers for the key it asked
+    about, with no placements, as it did before."""
+    assert KeyDirectory().get_keys_across_object_groups([_grouped_key(9, 0)]) == [
+        _grouped_key(9, 0)
+    ]
+
+
+def test_expansion_drops_groups_once_their_copies_are_deleted():
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[_grouped_key(1, 0), _grouped_key(1, 1)]))
+    directory.consume(
+        _batch(seq=2, event_type=CacheEventType.DELETE, keys=[_grouped_key(1, 1)])
+    )
+
+    assert directory.get_keys_across_object_groups([_grouped_key(1, 0)]) == [
+        _grouped_key(1, 0)
+    ]
