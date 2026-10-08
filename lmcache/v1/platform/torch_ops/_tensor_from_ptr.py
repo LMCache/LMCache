@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from typing import cast
+from typing import Optional
 import ctypes
-import ctypes.util
 
 # Third Party
+# Third party
 import torch
 
 # First Party
@@ -18,14 +18,14 @@ __all__ = [
 ]
 
 # Cached copy library for lmcache_memcpy_async (lazy-initialized)
-_COPY_LIB_NOT_LOADED = object()
-_copy_lib: ctypes.CDLL | object | None = _COPY_LIB_NOT_LOADED
+_copy_lib_NOT_LOADED = object()
+_copy_lib: Optional[ctypes.CDLL] = _copy_lib_NOT_LOADED  # type: ignore
 
 
-def _get_copy_lib() -> ctypes.CDLL | None:
+def _get_copy_lib() -> Optional[ctypes.CDLL]:
     """Lazily load and cache the CUDA/ROCm runtime library, or None for CPU fallback."""
     global _copy_lib
-    if _copy_lib is _COPY_LIB_NOT_LOADED:
+    if _copy_lib is _copy_lib_NOT_LOADED:
         # Try to load GPU runtime libraries in priority order: CUDA first, then ROCm
         # TODO: ROCm path to be validated on real device
         for name, fallback in [
@@ -44,7 +44,7 @@ def _get_copy_lib() -> ctypes.CDLL | None:
         else:
             # All GPU libraries failed to load, fall back to CPU
             _copy_lib = None
-    return cast("ctypes.CDLL | None", _copy_lib)
+    return _copy_lib
 
 
 def _tensor_from_ptr(
