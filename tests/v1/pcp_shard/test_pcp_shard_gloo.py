@@ -45,6 +45,13 @@ ENGINE_CASES = [
     ("random", 8),
     ("cpu_budget", 4),
     ("default", 4),
+    ("async_full", 2),
+    ("async_full", 4),
+    ("async_full", 8),
+    ("async_evict", 4),
+    ("async_evict", 8),
+    ("async_owner_miss", 3),
+    ("async_owner_miss", 4),
 ]
 
 

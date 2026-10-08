@@ -14,6 +14,7 @@ import json
 import os
 import random
 import sys
+import threading
 import traceback
 
 os.environ.setdefault("LMCACHE_TRACK_USAGE", "false")
@@ -73,7 +74,15 @@ def bcast_obj(obj, src):
     return box[0]
 
 
-def make_engine(rank, world, shard=True, max_cpu_gb=0.05, extra=None, unfull=False):
+def make_engine(
+    rank,
+    world,
+    shard=True,
+    max_cpu_gb=0.05,
+    extra=None,
+    unfull=False,
+    async_loading=False,
+):
     # First Party
     from lmcache.v1.cache_engine import LMCacheEngine
     from lmcache.v1.config import LMCacheEngineConfig
@@ -87,6 +96,7 @@ def make_engine(rank, world, shard=True, max_cpu_gb=0.05, extra=None, unfull=Fal
         lmcache_instance_id="pcp_shard_test",
     )
     config.save_unfull_chunk = unfull
+    config.enable_async_loading = async_loading
     config.extra_config = {"save_only_first_rank": True}
     if shard:
         config.extra_config["pcp_shard_store"] = True
@@ -478,6 +488,125 @@ SCENARIOS = {
     "cpu_budget": sc_cpu_budget,
     "default": sc_default,
 }
+
+
+# ------------------------------------------------------------ async loading
+class _ReplyStub:
+    """Stands in for LMCacheAsyncLookupServer: records what this rank would
+    send to the scheduler's async lookup client."""
+
+    def __init__(self):
+        self.replies = {}
+        self.cv = threading.Condition()
+
+    def send_response_to_scheduler(self, lookup_id, num_hit_tokens):
+        with self.cv:
+            self.replies[lookup_id] = num_hit_tokens
+            self.cv.notify_all()
+
+    def wait(self, lookup_id, timeout=30):
+        with self.cv:
+            assert self.cv.wait_for(lambda: lookup_id in self.replies, timeout), (
+                f"no async lookup reply for {lookup_id}"
+            )
+            return self.replies[lookup_id]
+
+
+def make_async_engine(rank, world, **kw):
+    engine, conn = make_engine(rank, world, async_loading=True, **kw)
+    stub = _ReplyStub()
+    engine.storage_manager.async_lookup_server = stub
+    return engine, conn, stub
+
+
+def async_combined_lookup(engine, stub, tokens, lookup_id):
+    """What LMCacheAsyncLookupClient sees: min over every rank's async reply."""
+    engine.async_lookup_and_prefetch(lookup_id=lookup_id, tokens=tokens, pin=True)
+    mine = stub.wait(lookup_id)
+    allres = [None] * dist.get_world_size()
+    dist.all_gather_object(allres, mine)
+    return min(allres), allres
+
+
+def _assert_l1_released(engine):
+    be = engine.storage_manager.storage_backends["LocalCPUBackend"]
+    for k, mo in be.hot_cache.items():
+        assert mo.get_ref_count() == 1 and not mo.is_pinned, (
+            k,
+            mo.get_ref_count(),
+            mo.metadata.pin_count,
+        )
+
+
+def sc_async_full(rank, world):
+    """Async lookup + prefetch: each rank prefetches its owned chunks, the
+    min over ranks is the whole prompt, the load is byte-exact, and nothing
+    stays pinned or referenced afterwards."""
+    engine, conn, stub = make_async_engine(rank, world, unfull=True)
+    n = 10 * CHUNK + 7
+    toks = tokens_for(11, n)
+    engine.store(toks, seq=11)
+    hit, per_rank = async_combined_lookup(engine, stub, toks, "areq-1")
+    assert hit == n, (hit, per_rank)
+    ret = engine.retrieve(toks, torch.ones(n, dtype=torch.bool), req_id="areq-1")
+    assert bool(ret.all()), ret
+    check_loaded(conn, 11, chunk_ranges(n))
+    engine.lookup_unpin("areq-1")
+    _assert_l1_released(engine)
+    return {"lookup": per_rank, "retrieved": int(ret.sum())}
+
+
+def sc_async_evict(rank, world):
+    """Owner of chunk 5 lost it: every rank agrees on 5 chunks."""
+    engine, conn, stub = make_async_engine(rank, world)
+    n = 12 * CHUNK
+    toks = tokens_for(12, n)
+    engine.store(toks, seq=12)
+    chunks = keys_of(engine, toks)
+    if rank == 5 % world:
+        assert engine.storage_manager.remove(chunks[5][2]) > 0
+    dist.barrier()
+    hit, per_rank = async_combined_lookup(engine, stub, toks, "areq-2")
+    assert hit == 5 * CHUNK, (hit, per_rank)
+    ret = engine.retrieve(toks, torch.ones(n, dtype=torch.bool), req_id="areq-2")
+    assert int(ret.sum()) == 5 * CHUNK and bool(ret[: 5 * CHUNK].all())
+    check_loaded(conn, 12, chunk_ranges(n, 0, 5 * CHUNK))
+    engine.lookup_unpin("areq-2")
+    _assert_l1_released(engine)
+    return {"lookup": per_rank, "retrieved": int(ret.sum())}
+
+
+def sc_async_owner_miss(rank, world):
+    """Rank 1 has no hit at all (its first owned chunk, chunk 1, is gone).
+    It must answer the start of chunk 1, not 0, so the prefix is chunk 0."""
+    engine, conn, stub = make_async_engine(rank, world)
+    n = 6 * CHUNK
+    toks = tokens_for(13, n)
+    engine.store(toks, seq=13)
+    chunks = keys_of(engine, toks)
+    if rank == 1:
+        for pos in range(1, len(chunks), world):
+            assert engine.storage_manager.remove(chunks[pos][2]) > 0
+    dist.barrier()
+    hit, per_rank = async_combined_lookup(engine, stub, toks, "areq-3")
+    assert hit == CHUNK, (hit, per_rank)
+    if rank == 1:
+        assert per_rank[1] == CHUNK, per_rank
+    ret = engine.retrieve(toks, torch.ones(n, dtype=torch.bool), req_id="areq-3")
+    assert int(ret.sum()) == CHUNK and bool(ret[:CHUNK].all())
+    check_loaded(conn, 13, chunk_ranges(n, 0, CHUNK))
+    engine.lookup_unpin("areq-3")
+    _assert_l1_released(engine)
+    return {"lookup": per_rank, "retrieved": int(ret.sum())}
+
+
+SCENARIOS.update(
+    {
+        "async_full": sc_async_full,
+        "async_evict": sc_async_evict,
+        "async_owner_miss": sc_async_owner_miss,
+    }
+)
 
 
 def _worker(rank, world, scenario, port, q):

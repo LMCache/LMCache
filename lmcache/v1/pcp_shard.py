@@ -72,7 +72,6 @@ def shard_store_enabled(config: Any, use_mla: bool, world_size: int) -> bool:
         name
         for name, on in (
             ("use_layerwise", getattr(config, "use_layerwise", False)),
-            ("enable_async_loading", getattr(config, "enable_async_loading", False)),
             ("enable_blending", getattr(config, "enable_blending", False)),
             (
                 "enable_scheduler_bypass_lookup",
@@ -249,3 +248,54 @@ def broadcast_chunks(
         broadcast_fn(tensor, src)
         out[j] = tensor
     return out
+
+
+# ------------------------------------------------------------ async loading
+def async_lookup_keys(
+    chunks: Sequence[Tuple[int, int, Any]],
+    chunk_size: int,
+    world_size: int,
+    rank: int,
+) -> Tuple[List[Any], List[int]]:
+    """Keys and cum_chunk_lengths for this rank's async lookup + prefetch.
+
+    ``chunks``: (start, end, key) of every chunk of the request, from token 0.
+    Returns (owned keys, cum) with cum[k] = start of this rank's k-th owned chunk
+    and cum[len(owned)] = end of the last chunk, so cum[number of owned chunks
+    found and prefetched] equals rank_lookup_tokens(): the async client's minimum
+    over ranks is the sharded prefix. No chunks: ([], [0]).
+    """
+    bounds = [(start, end) for start, end, _ in chunks]
+    if not bounds:
+        return [], [0]
+    owned = owned_positions(
+        [start for start, _ in bounds], chunk_size, world_size, rank
+    )
+    keys = [chunks[pos][2] for pos in owned]
+    cum = [bounds[pos][0] for pos in owned] + [bounds[-1][1]]
+    return keys, cum
+
+
+def select_prefetched(
+    owned: Sequence[Tuple[int, Any, int, int]],
+    n_chunks: int,
+    by_key: Dict[Any, Any],
+) -> Tuple[Dict[int, Any], int, List[Any]]:
+    """This rank's prefetched chunks for a sharded load.
+
+    ``owned``: (pos, key, start, end) of the chunks this rank owns, in order.
+    ``by_key``: key -> memory object from this rank's prefetch.
+    Returns ({pos: obj} for the owned chunks before the first owned miss,
+    position of that miss or n_chunks, prefetched objects not kept).
+    """
+    kept: Dict[int, Any] = {}
+    first_fail = n_chunks
+    for pos, key, _, _ in owned:
+        obj = by_key.get(key)
+        if obj is None:
+            first_fail = pos
+            break
+        kept[pos] = obj
+    kept_ids = {id(obj) for obj in kept.values()}
+    unused = [obj for obj in by_key.values() if id(obj) not in kept_ids]
+    return kept, first_fail, unused

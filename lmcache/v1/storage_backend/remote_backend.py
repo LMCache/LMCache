@@ -574,6 +574,11 @@ class RemoteBackend(StorageBackendInterface):
                 "Connection is None in batched_get_non_blocking, returning empty list"
             )
             return []
+        # read under the worker-0 key, as batched_async_contains and
+        # the blocking get do (MLA: chunks are stored under worker 0). Without it every
+        # rank != 0 asks for keys that do not exist.
+        if self._mla_worker_id_as0_mode:
+            keys = [key.with_new_worker_id(0) for key in keys]
         try:
             # warning, this timeout will not actually stop the
             # scheduler from waiting for the result

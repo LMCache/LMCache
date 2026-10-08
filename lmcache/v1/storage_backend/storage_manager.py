@@ -790,7 +790,12 @@ class StorageManager:
         # If no chunks were hit across all backends, respond immediately and return.
         if num_total_hit_chunks == 0:
             if self.async_lookup_server is not None:
-                self.async_lookup_server.send_response_to_scheduler(lookup_id, 0)
+                # cum_chunk_lengths[0] is 0 except in pcp shard
+                # mode, where it is the start of this rank's first owned chunk.
+                self.async_lookup_server.send_response_to_scheduler(
+                    lookup_id,
+                    cum_chunk_lengths_total[0] if cum_chunk_lengths_total else 0,
+                )
             return
 
         # gather_with_keys() here make a pair of (key, memory_obj) for each chunk
