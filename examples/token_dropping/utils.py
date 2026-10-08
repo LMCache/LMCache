@@ -197,18 +197,16 @@ def rerotate_k_cache(
     return kv_tensor
 
 
-def _extract_token_id(choice: dict) -> int:
-    """Pull the generated token id from a streaming choice.
+def _extract_token_id(choice: dict) -> list[int]:
+    """Pull every generated token id from a streaming choice.
 
     Requires the vLLM server to be started with --return-tokens-as-token-ids,
     so logprobs token strings look like "token_id:123".
     """
     logprobs = choice.get("logprobs") or {}
-    toks = logprobs.get("tokens") or []
-    if not toks:
-        return -1
-    last = toks[-1]
-    return int(last.split(":")[-1]) if ":" in last else -1
+    return [
+        int(tok.split(":")[-1]) for tok in (logprobs.get("tokens") or []) if ":" in tok
+    ]
 
 
 def extract_answer_choice(response: str) -> str:
@@ -299,9 +297,13 @@ def make_post_completion(
                 if not choices:
                     continue
                 choice = choices[0]
-                yield lmc_request.TokenEvent(
-                    token_id=_extract_token_id(choice),
-                    text=choice.get("text", ""),
-                )
+                token_ids = _extract_token_id(choice)
+                text = choice.get("text", "")
+                for i, token_id in enumerate(token_ids):
+                    yield lmc_request.TokenEvent(
+                        token_id=token_id,
+                        # the event's text belongs to the whole delta
+                        text=text if i == len(token_ids) - 1 else "",
+                    )
 
     return post_completion

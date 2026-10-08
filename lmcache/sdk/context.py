@@ -8,6 +8,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 import time
 import uuid
 
@@ -17,22 +18,30 @@ import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
-from lmcache.sdk.cache_kind import (
-    ALL_SPAN,
-    LMCacheSDKCacheKind,
-    LMCacheSDKCacheSpan,
+from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
+from lmcache.sdk.hybrid_layout import (
+    ATTENTION,
+    GroupPlan,
+    HybridLayoutError,
+    plan_hybrid_groups,
+    text_config,
 )
-from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
-from lmcache.v1.gpu_connector.utils import (
-    DiscoverableKVCache,
-    LayoutHints,
-    get_block_size,
-    get_num_heads,
+from lmcache.sdk.wrapper.paged_pool import (
+    NULL_BLOCK_ID,
+    PagedPoolTransferWrapper,
+    PoolCapacityError,
+    PoolGroup,
+    RecurrentState,
 )
+from lmcache.v1.gpu_connector.kv_format.types import KVLayoutName
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.transfer_context.base import compute_kv_layout
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-    EngineDrivenTransferContext,
+    LMCacheDrivenTransferContext,
+    MPTransferMode,
     create_transfer_context,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -41,15 +50,306 @@ import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
+FULL_WINDOW = -1
+"""``sw_size_tokens`` of a kind that keeps and returns its whole window."""
+
 
 class LMCacheSDKError(RuntimeError):
     """Raised when an SDK KV-cache operation fails."""
 
 
+class ModifyTensors(dict[LMCacheSDKCacheKind, torch.Tensor]):
+    """The cached tensors a modify function edits, keyed by cache kind.
+
+    A plain ``dict`` of the tensors, plus where the stream's latest decoded
+    segment begins. A windowed query tensor covers only the end of that
+    segment, so its length does not tell where the segment starts.
+
+    Attributes:
+        segment_start_token_id: First token the latest generate() pass
+            computed (chunk-aligned); tokens before it came from the cache.
+    """
+
+    def __init__(
+        self,
+        tensors: Mapping[LMCacheSDKCacheKind, torch.Tensor],
+        segment_start_token_id: int,
+    ) -> None:
+        super().__init__(tensors)
+        self.segment_start_token_id = segment_start_token_id
+
+
 ModifyFnType = Callable[
-    [Mapping[LMCacheSDKCacheKind, torch.Tensor], Sequence[int]],
+    [ModifyTensors, Sequence[int]],
     tuple[torch.Tensor, Sequence[int]],
 ]
+
+
+def _layer_labels(engine_kv_shape: str) -> list[str]:
+    """Return the axis labels of one layer's tensor in a shape legend.
+
+    Args:
+        engine_kv_shape: The server-reported legend of a format, e.g.
+            ``"NL x [NB, BS, NH, CS]"``.
+
+    Returns:
+        The per-layer labels, e.g. ``["NB", "BS", "NH", "CS"]``.
+
+    Raises:
+        LMCacheSDKError: If the format is not one tensor per layer.
+    """
+    prefix, bracket, rest = engine_kv_shape.partition("[")
+    if not bracket or prefix.strip() != "NL x":
+        raise LMCacheSDKError(
+            f"unsupported KV shape {engine_kv_shape!r}: the SDK pool needs "
+            "one tensor per layer"
+        )
+    return [label.strip() for label in rest.rstrip("] ").split(",")]
+
+
+def _hf_config(hf_model_name: str) -> Any:
+    """Return a model's Hugging Face config.
+
+    Args:
+        hf_model_name: Hugging Face repo id of the model.
+
+    Returns:
+        The config; multimodal ones (e.g. Qwen3.5) nest the language model's
+        under ``text_config``.
+    """
+    # Third Party
+    from transformers import AutoConfig
+
+    return AutoConfig.from_pretrained(hf_model_name)
+
+
+def _hf_head_sizes(hf_model_name: str, world_size: int) -> dict[str, int]:
+    """Return one worker's KV head sizes from the model's Hugging Face config.
+
+    Args:
+        hf_model_name: Hugging Face repo id of the model.
+        world_size: Tensor-parallel world size the heads are split over.
+
+    Returns:
+        Sizes of the ``NH``, ``HS`` and fused-K/V ``CS`` (``2 * HS``) axes.
+    """
+    hf_config = text_config(_hf_config(hf_model_name))
+    head_dim = getattr(
+        hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads
+    )
+    num_kv_heads = getattr(
+        hf_config, "num_key_value_heads", hf_config.num_attention_heads
+    )
+    return {"NH": num_kv_heads // world_size, "HS": head_dim, "CS": 2 * head_dim}
+
+
+def _pool_layer_shape(
+    kernel_group: Mapping[str, str | int],
+    labels: Sequence[str],
+    kind: LMCacheSDKCacheKind,
+    num_blocks: int,
+    world_size: int,
+    hf_model_name: str,
+) -> tuple[int, ...]:
+    """Return the per-layer shape of a pool mirroring a registered layout.
+
+    Args:
+        kernel_group: The engine's kernel group entry from ``/status``.
+        labels: Per-layer axis labels of the group's format.
+        kind: The cache kind the pool serves.
+        num_blocks: Blocks the pool holds.
+        world_size: Tensor-parallel world size the layout is registered under.
+        hf_model_name: Hugging Face repo id used when the concrete shape is
+            unknown.
+
+    Returns:
+        The shape of one layer's pool tensor.
+
+    Raises:
+        LMCacheSDKError: If the format has no ``NB``/``BS`` axes, an axis
+            cannot be sized, or its block size differs from the engine's.
+    """
+    if "NB" not in labels or "BS" not in labels:
+        raise LMCacheSDKError(f"layout {labels} has no separate NB and BS axes")
+    tokens_per_block = int(kernel_group["tokens_per_block"])
+    concrete = str(kernel_group["engine_kv_concrete_shape"])
+    if concrete.startswith("Unknown"):
+        # The config only describes KV heads; a query ring must be reported.
+        if kind is LMCacheSDKCacheKind.QUERY:
+            raise LMCacheSDKError(f"no concrete shape for the query ring: {concrete}")
+        sizes = {
+            "NB": num_blocks,
+            "BS": tokens_per_block,
+            **_hf_head_sizes(hf_model_name, world_size),
+        }
+        dims = []
+        for label in labels:
+            if label in sizes:
+                dims.append(sizes[label])
+            elif label.isdigit():
+                dims.append(int(label))
+            else:
+                raise LMCacheSDKError(f"cannot size axis {label!r} of {labels}")
+        return tuple(dims)
+    dims = [int(size) for size in concrete.partition("[")[2].rstrip("] ").split(",")]
+    if len(dims) != len(labels):
+        raise LMCacheSDKError(f"concrete shape {concrete!r} does not match {labels}")
+    dims[labels.index("NB")] = num_blocks
+    if dims[labels.index("BS")] != tokens_per_block:
+        raise LMCacheSDKError(
+            f"block size {dims[labels.index('BS')]} of {concrete!r} is not "
+            f"tokens_per_block {tokens_per_block}"
+        )
+    return tuple(dims)
+
+
+def _pool_num_blocks(data_blocks: int) -> int:
+    """Return a pool's block count for ``data_blocks`` blocks of data.
+
+    Block 0 is the null block, which the server treats as "no data", so the
+    data starts at block 1.
+
+    Args:
+        data_blocks: Blocks the pool must hold data in.
+
+    Returns:
+        ``data_blocks + 1``, plus a spare block when that would be 2: a
+        leading dim of 2 would detect as the K/V axis of ``[2, NB, ...]``.
+    """
+    num_blocks = NULL_BLOCK_ID + 1 + data_blocks
+    return num_blocks + 1 if num_blocks == 2 else num_blocks
+
+
+def _kv_layout(labels: Sequence[str]) -> KVLayoutName:
+    """Return the vLLM layout hint for a format's per-layer labels.
+
+    Args:
+        labels: Per-layer axis labels, which include ``BS``.
+
+    Returns:
+        ``"HND"`` when the heads axis precedes the block tokens, else ``"NHD"``.
+    """
+    if "NH" in labels and labels.index("NH") < labels.index("BS"):
+        return "HND"
+    return "NHD"
+
+
+def _server_extra_config(mp_conf: Mapping[str, object], key: str, default: int) -> int:
+    """Return an integer entry of the server's ``--runtime-plugin-config``.
+
+    Args:
+        mp_conf: The ``mp`` section of the server's ``/config``.
+        key: The entry to read.
+        default: Value when the server does not set ``key``.
+
+    Returns:
+        The entry, or ``default``.
+
+    Raises:
+        LMCacheSDKError: If the entry is not an integer.
+    """
+    plugin_config = mp_conf.get("runtime_plugin_config")
+    extra = (
+        plugin_config.get("extra_config") if isinstance(plugin_config, dict) else None
+    )
+    value = extra.get(key, default) if isinstance(extra, dict) else default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise LMCacheSDKError(f"server {key}={value!r} must be an integer")
+    return value
+
+
+def _server_pool_chunks(mp_conf: Mapping[str, object], default: int = 4) -> int:
+    """Return the pool size the server advertises, else ``default``.
+
+    Args:
+        mp_conf: The ``mp`` section of the server's ``/config``.
+        default: Pool size when the server does not set one.
+
+    Returns:
+        The ``sdk.pool_chunks`` entry of the server's
+        ``--runtime-plugin-config``, or ``default``.
+
+    Raises:
+        LMCacheSDKError: If the server's value is not a positive integer.
+    """
+    value = _server_extra_config(mp_conf, "sdk.pool_chunks", default)
+    if value < 1:
+        raise LMCacheSDKError(
+            f"server sdk.pool_chunks={value!r} must be a positive integer"
+        )
+    return value
+
+
+def _resolve_window(
+    kind: LMCacheSDKCacheKind,
+    sw_size_tokens: int | None,
+    mp_conf: Mapping[str, object],
+    chunk_size: int,
+) -> int:
+    """Return the ``sw_size_tokens``: window of last N tokens to be retrieved
+    for each chunk. Only works for QUERY.
+
+    Args:
+        kind: The cache kind the pool serves.
+        sw_size_tokens: The requested window, `FULL_WINDOW`, matching
+            ``lmcache.mp.q.sw_size_tokens``.
+        mp_conf: The ``mp`` section of the server's ``/config``.
+        chunk_size: Tokens per LMCache chunk.
+
+    Returns:
+        The window in tokens, or :data:`FULL_WINDOW`.
+
+    Raises:
+        LMCacheSDKError: If a KV window is requested, the window is invalid,
+            or a window spanning whole chunks is requested from a server
+            without ``--separate-object-groups`` (it would be ignored).
+    """
+    if sw_size_tokens is None:
+        sw_size_tokens = (
+            _server_extra_config(mp_conf, "sdk.q_sw_size_tokens", FULL_WINDOW)
+            if kind is LMCacheSDKCacheKind.QUERY
+            else FULL_WINDOW
+        )
+    if sw_size_tokens != FULL_WINDOW and kind is not LMCacheSDKCacheKind.QUERY:
+        raise LMCacheSDKError(
+            f"only the QUERY kind can be windowed, got sw_size_tokens="
+            f"{sw_size_tokens} for {kind.name}"
+        )
+    if sw_size_tokens != FULL_WINDOW and sw_size_tokens < 1:
+        raise LMCacheSDKError(
+            f"sw_size_tokens must be positive or {FULL_WINDOW}, got {sw_size_tokens}"
+        )
+    if sw_size_tokens >= chunk_size and not mp_conf.get(
+        "separate_object_groups", False
+    ):
+        raise LMCacheSDKError(
+            f"sw_size_tokens={sw_size_tokens} spans whole chunks, which the "
+            "server only honors with --separate-object-groups"
+        )
+    return sw_size_tokens
+
+
+def _resolve_device(device: str | torch.device) -> torch.device:
+    """Return the accelerator device the pool lives on.
+
+    Args:
+        device: An accelerator device; without an index, the current one.
+
+    Returns:
+        The device with an explicit index.
+
+    Raises:
+        LMCacheSDKError: If ``device`` is a CPU device.
+    """
+    resolved = torch.device(device)
+    if resolved.type == "cpu":
+        raise LMCacheSDKError(
+            "the SDK pool needs an accelerator device: the server's "
+            "lmcache-driven path cannot map a CPU pool on accelerator hosts"
+        )
+    if resolved.index is None:
+        resolved = torch.device(resolved.type, torch_dev.current_device())
+    return resolved
 
 
 class LMCacheSDKContext:
@@ -57,12 +357,10 @@ class LMCacheSDKContext:
     Retrieve and store KV cache tensors through an LMCache MP request client.
 
     The model layout must already be registered in the running LMCache server
-    (e.g. by a vllm instance that called REGISTER_KV_CACHE).
-    Getting the layout information from server requires inference engine running
-    with GPU so that SDK can derive the shapes.
-
-    SDK is running on CPU, so the allocated paged KV cache is on CPU, and the
-    geometry is always in HND order regardless of the inference engine's.
+    by an inference engine (e.g. a vLLM instance). The SDK registers a small
+    paged pool on an accelerator in the engine's own layout, in lmcache-driven
+    mode: the server copies cached chunks into the pool over device IPC, and
+    the SDK hands them to the caller as contiguous CPU tensors.
     """
 
     def __init__(
@@ -71,8 +369,10 @@ class LMCacheSDKContext:
         http_url: str,
         model_name: str,
         kind: LMCacheSDKCacheKind = LMCacheSDKCacheKind.KV,
-        span: LMCacheSDKCacheSpan = ALL_SPAN,
         timeout: float = 60.0,
+        device: str | torch.device = torch_device_type,
+        pool_chunks: int | None = None,
+        sw_size_tokens: int | None = None,
     ) -> None:
         """
         Initialize the SDK context and register the SDK transfer strategy.
@@ -83,15 +383,26 @@ class LMCacheSDKContext:
             http_url: HTTP endpoint URL for fetching information.
             model_name: Model name used by the running LMCache server instance.
             kind: The type of cache.
-            span: Which part of this kind's addressable window ``modify_kv``
-                reads. Defaults to all of it.
             timeout: Timeout in seconds for blocking MQ calls. Defaults to 60.
+            device: Accelerator device the transfer pool is allocated on.
+                Defaults to the current device.
+            pool_chunks: LMCache chunks the transfer pool holds.
+            sw_size_tokens: window of last N tokens retrieved @ each chunk.
 
         Returns:
             LMCacheSDKContext instance.
+
+        Raises:
+            LMCacheSDKError: If ``device`` is not an accelerator,
+                ``pool_chunks`` (or the server's value) is not positive, the
+                window is invalid for this kind or server, or the server
+                cannot be reached.
         """
+        if pool_chunks is not None and pool_chunks < 1:
+            raise LMCacheSDKError(f"pool_chunks must be >= 1, got {pool_chunks}")
+        self._device = _resolve_device(device)
+        self._transfer_ctx: PagedPoolTransferWrapper | None = None
         self._kind = kind
-        self._span = span
         self._zmq_context = zmq.Context()
         self._req_client: RequestClient = RequestClientFactory.create(
             url,
@@ -112,17 +423,24 @@ class LMCacheSDKContext:
                 f"failed to fetch server config from {self._http_url}/config"
             ) from err
         self._chunk_size: int = int(mp_conf["chunk_size"])
-        self.shm_name: str = str(mp_conf.get("shm_name", "")).lstrip("/")
-        if self.shm_name and not self.shm_name.startswith("lmcache_l1_pool_"):
-            self.shm_name = f"lmcache_l1_pool_{self.shm_name}"
+        self._mp_conf = mp_conf
+        # Resolved at registration, where a hybrid layout changes the default.
+        self._pool_chunks_arg = pool_chunks
+        self._pool_chunks = (
+            pool_chunks if pool_chunks is not None else _server_pool_chunks(mp_conf)
+        )
+        self._sw_size_tokens = _resolve_window(
+            kind, sw_size_tokens, mp_conf, self._chunk_size
+        )
+        # The server reads only a window's last chunks with separation on.
+        self._chunk_windowed = bool(mp_conf.get("separate_object_groups", False))
 
-        self._cache_context_meta_conf = {}
+        # Engine registrations of this kind's layout, keyed by instance ID.
+        self._engine_meta_conf = {}
         try:
             response = requests.get(f"{self._http_url}/status", timeout=timeout)
             response.raise_for_status()
-            self._cache_context_meta_conf = response.json().get(
-                "cache_context_meta", {}
-            )
+            self._engine_meta_conf = response.json().get(kind.status_meta_field(), {})
         except (requests.RequestException, KeyError, ValueError) as err:
             raise LMCacheSDKError(
                 f"failed to fetch server config from {self._http_url}/status"
@@ -134,7 +452,8 @@ class LMCacheSDKContext:
         logger.info(
             f"Initialized LMCacheSDKContext with instance_id={self.instance_id}, "
             f"model_name={self._model_name}, chunk_size={self._chunk_size}, "
-            f"shm_name={self.shm_name}, kind={self._kind}"
+            f"device={self._device}, kind={self._kind}, "
+            f"sw_size_tokens={self._sw_size_tokens}"
         )
 
     @property
@@ -143,129 +462,359 @@ class LMCacheSDKContext:
         return self._kind
 
     @property
-    def span(self) -> LMCacheSDKCacheSpan:
-        """The retrieval span used for this kind by ``modify_kv``."""
-        return self._span
+    def sw_size_tokens(self) -> int:
+        """The window this kind's pool is registered with, or ``FULL_WINDOW``."""
+        return self._sw_size_tokens
+
+    def windowed_range(self, window_tokens: int) -> tuple[int, int]:
+        """Return the range of tokens this kind's addressable window covers.
+        The addressable window is ``[key_origin, cached_len)`` (see
+        ``LMCacheSDKCacheKind.key_origin``).
+
+        Args:
+            window_tokens: Tokens the addressable window covers.
+
+        Returns:
+            ``(start_offset, expected_rows)``: the chunk-aligned offset of the
+            first chunk the server returns, and the rows it returns from
+            there (each chunk's kept tokens).
+        """
+        chunk_size = self._chunk_size
+        aligned = window_tokens // chunk_size * chunk_size
+        if self._sw_size_tokens == FULL_WINDOW:
+            return 0, aligned
+        start = 0
+        if self._chunk_windowed:
+            num_chunks = -(-self._sw_size_tokens // chunk_size)
+            start = max(0, aligned - num_chunks * chunk_size)
+        rows_per_chunk = min(self._sw_size_tokens, chunk_size)
+        return start, (aligned - start) // chunk_size * rows_per_chunk
 
     def register_caches(
         self,
     ) -> None:
-        """Register the cache layout for the model with the SDK context."""
-        entry = None
-        for e in self._cache_context_meta_conf.values():
-            if e.get("model_name") == self._kind.base_model_name(self._model_name):
-                entry = e
-                break
-        if not entry:
-            raise LMCacheSDKError(
-                f"no registered GPU layout for model_name={self._model_name!r}; "
-                "MP mode cannot derive geometry from model_name alone — "
-                "register from a vLLM instance first, or pass the geometry explicitly."
-            )
+        """Register a transfer pool mirroring the engine's layout.
 
+        The engine's kernel groups are planned first: one attention group for
+        a dense model or the query ring, or each group's role for a hybrid
+        model (see :mod:`lmcache.sdk.hybrid_layout`). One pool tensor per
+        layer is then allocated in its group's engine format and registered
+        with the same groups, windows included, as the engine registered.
+
+        Raises:
+            LMCacheSDKError: If no engine registered this kind's layout for
+                the model, the layout is unsupported, or the pool does not
+                reproduce the engine's format.
+        """
+        entry = next(
+            (
+                e
+                for e in self._engine_meta_conf.values()
+                if e.get("model_name") == self._model_name
+            ),
+            None,
+        )
+        if entry is None:
+            raise LMCacheSDKError(
+                f"no engine registered a {self._kind.name} layout for "
+                f"model_name={self._model_name!r}; start the inference engine "
+                "(with query transfer enabled for QUERY) first."
+            )
         try:
             self._world_size = int(entry.get("world_size", 1))
             # Readers per stored object; registrations that do not publish it
             # get 1 (single reader).
             self._num_kv_readers = int(entry.get("num_kv_readers", 1))
-            kv_cache_layout = entry.get("kv_cache_layout", {})
-            if not kv_cache_layout:
+            layout = entry.get(self._kind.status_layout_field(), {})
+            if not layout:
                 raise LMCacheSDKError(
-                    f"no registered KV cache layout for {self._model_name!r}."
+                    f"no registered {self._kind.name} layout for {self._model_name!r}."
                 )
-            num_layers = kv_cache_layout.get("num_layers", 0)
-
-            kernel_groups = kv_cache_layout.get("kernel_groups", [])
-            if len(kernel_groups) != 1:
+            num_layers = int(layout["num_layers"])
+            kernel_groups = layout.get("kernel_groups", [])
+            if not kernel_groups:
                 raise LMCacheSDKError(
-                    "Currently not supporting hybrid models with multiple "
-                    f"kernel groups; found {len(kernel_groups)} "
-                    f"for model_name={self._model_name!r}."
+                    f"the {self._kind.name} layout of {self._model_name!r} "
+                    "reports no kernel groups"
                 )
-            kernel_group = kernel_groups[0]
-            dtype = getattr(torch, kernel_group["dtype"].replace("torch.", ""))
-            tokens_per_block = kernel_group.get("tokens_per_block", 0)
-
-            inner = [
-                int(x)
-                for x in kernel_group["engine_kv_concrete_shape"]
-                .split("[")[1]
-                .rstrip("] ")
-                .split(",")
-            ]
-
-            fmt = getattr(
-                lmcache_native.EngineKVFormat, kernel_group["engine_kv_format"]
+            plans, pool_chunks = self._plan_groups(num_layers, kernel_groups)
+            pool, pool_groups, layout_hints, num_planes = self._allocate_pool(
+                plans, kernel_groups, num_layers, pool_chunks
             )
-            probe: list[DiscoverableKVCache] = [torch.empty(inner, device="meta")]
-            use_mla = lmcache_native.is_mla(fmt)
-            single_tensor = use_mla or self._kind is LMCacheSDKCacheKind.QUERY
-            num_kv_heads = 1 if single_tensor else get_num_heads(probe, fmt)
-            block_size = get_block_size(probe, fmt)
-            head_dim = inner[-1]
-            if block_size != tokens_per_block:
-                raise LMCacheSDKError(
-                    f"decoded block_size {block_size} != tokens_per_block "
-                    f"{tokens_per_block} for model_name={self._model_name!r}"
-                )
+        except LMCacheSDKError:
+            raise
         except Exception as err:
             raise LMCacheSDKError(
-                f"failed to decode KV cache layout for model_name={self._model_name!r}"
+                f"failed to decode the registered layout for "
+                f"model_name={self._model_name!r}"
             ) from err
 
-        # SDK runs on CPU, LMCache's detects HND (gpu_connector/utils.py:663).
-        # Build in HND-physical order [NB, 2, NH, BS, HS] (flip from GPU order)
-        # So, no matter the inference engine runs on CPU or GPU, SDK will always
-        # use HND.
-        # Hardcode number of blocks to 1 (dummy shape) only for registering
-        num_blocks = 1
-        if single_tensor:
-            self._kv_caches = {
-                f"layer.{i}": torch.zeros(
-                    (num_blocks, block_size, head_dim), dtype=dtype, device="cpu"
-                )
-                for i in range(num_layers)
-            }
-        else:
-            self._kv_caches = {
-                f"layer.{i}": torch.zeros(
-                    (num_blocks, 2, num_kv_heads, block_size, head_dim),
-                    dtype=dtype,
-                    device="cpu",
-                )
-                for i in range(num_layers)
-            }
-
         transfer_ctx = create_transfer_context(
-            self._kv_caches,
+            pool,
             instance_id=self.instance_id,
             req_client=self._req_client,
+            mode=MPTransferMode.LMCACHE_DRIVEN,
         )
-        self.blocks_in_chunk = self._chunk_size // block_size
-        layout_hints = LayoutHints(
-            kv_layout="HND",
-            num_kv_heads=num_kv_heads,
-            tokens_per_block=block_size,
-            head_dim=head_dim,
-        )
-
-        transfer_ctx.register(
-            self._kv_caches,
-            self._model_name,
-            self._world_size,
-            self.blocks_in_chunk,
-            self._mq_timeout,
-            layout_hints=layout_hints,
-        )
-
-        if not isinstance(transfer_ctx, EngineDrivenTransferContext):
+        if not isinstance(transfer_ctx, LMCacheDrivenTransferContext):
             raise LMCacheSDKError(
-                "SDK requires an engine-driven transfer context, got "
+                "SDK requires an lmcache-driven transfer context, got "
                 f"{type(transfer_ctx).__name__}."
             )
-        self._transfer_ctx = ContiguousTransferWrapper(
-            transfer_ctx.engine_driven_context, self._chunk_size
+        with torch_dev.device(self._device):
+            transfer_ctx.register(
+                pool,
+                self._model_name,
+                self._world_size,
+                self._chunk_size // plans[0].tokens_per_block,
+                self._mq_timeout,
+                layout_hints=layout_hints,
+                # The same groups and windows as the engine registered: the
+                # server keeps one layout per model, the latest registration's.
+                engine_group_infos=[plan.engine_group_info() for plan in plans],
+            )
+        sw_size_tokens = self._sw_size_tokens
+        self._transfer_ctx = PagedPoolTransferWrapper(
+            transfer_ctx,
+            self.instance_id,
+            pool,
+            pool_groups,
+            layout_hints,
+            self._chunk_size,
+            num_chunks=pool_chunks,
+            num_planes=num_planes,
+            # A sub-chunk window keeps each chunk's last tokens only.
+            tokens_per_chunk=(
+                self._chunk_size
+                if sw_size_tokens == FULL_WINDOW
+                else min(sw_size_tokens, self._chunk_size)
+            ),
+            req_client=self._req_client,
+            timeout=self._mq_timeout,
         )
+        pool_bytes = sum(t.numel() * t.element_size() for t in pool.values())
+        logger.info(
+            "Registered %s pool for model_name=%s on %s: %d kernel group(s), "
+            "%d layers, %d tokens (%d chunks) per transfer, sw_size_tokens=%d, "
+            "%.2f GiB",
+            self._kind.name,
+            self._model_name,
+            self._device,
+            len(plans),
+            num_layers,
+            pool_chunks * self._chunk_size,
+            pool_chunks,
+            sw_size_tokens,
+            pool_bytes / 2**30,
+        )
+
+    def _plan_groups(
+        self, num_layers: int, kernel_groups: Sequence[Mapping[str, Any]]
+    ) -> tuple[list[GroupPlan], int]:
+        """Plan how the pool mirrors the engine's kernel groups.
+
+        A single group is one attention group with this kind's window. Several
+        groups are a hybrid model, whose roles are inferred from its Hugging
+        Face config; its recurrent state cannot be transferred in batches, so
+        its pool holds a whole prefix.
+
+        Args:
+            num_layers: Registered layers of the engine's layout.
+            kernel_groups: The layout's kernel groups, in kernel-group order.
+
+        Returns:
+            ``(plans, pool_chunks)``: one plan per kernel group, and the
+            chunks the pool's attention groups hold.
+
+        Raises:
+            LMCacheSDKError: If the groups cannot be mirrored.
+        """
+        if len(kernel_groups) == 1:
+            group = kernel_groups[0]
+            tokens_per_block = int(group["tokens_per_block"])
+            if int(group["slots_per_block"]) != tokens_per_block:
+                raise LMCacheSDKError(
+                    "compressed layouts (slots_per_block != tokens_per_block) "
+                    "are not supported"
+                )
+            sw_size_tokens = self._sw_size_tokens
+            if sw_size_tokens != FULL_WINDOW and sw_size_tokens % tokens_per_block:
+                raise LMCacheSDKError(
+                    f"sw_size_tokens {sw_size_tokens} is not a multiple of "
+                    f"tokens_per_block {tokens_per_block}"
+                )
+            plans = [
+                GroupPlan(
+                    kernel_group_idx=int(group.get("kernel_group_idx", 0)),
+                    engine_group_idx=int(group.get("engine_group_idx", 0)),
+                    object_group_idx=int(group.get("object_group_idx", 0)),
+                    layer_indices=tuple(range(num_layers)),
+                    tokens_per_block=tokens_per_block,
+                    role=ATTENTION,
+                    sw_size_tokens=sw_size_tokens,
+                    kernel_block_size=tokens_per_block,
+                    source="single group",
+                )
+            ]
+            pool_chunks = self._pool_chunks
+        else:
+            if self._kind is not LMCacheSDKCacheKind.KV:
+                raise LMCacheSDKError(
+                    f"the {self._kind.name} layout has {len(kernel_groups)} "
+                    "kernel groups; only the KV kind supports hybrid layouts"
+                )
+            if not self._mp_conf.get("separate_object_groups", False):
+                raise LMCacheSDKError(
+                    "a hybrid model's KV needs the server's "
+                    "--separate-object-groups (recurrent state and attention "
+                    "KV are stored per object group)"
+                )
+            hf_config = _hf_config(self._kind.base_model_name(self._model_name))
+            try:
+                plans = plan_hybrid_groups(
+                    kernel_groups,
+                    hf_config,
+                    self._world_size,
+                    _server_extra_config(self._mp_conf, "sdk.kernel_block_size", 0),
+                )
+            except HybridLayoutError as err:
+                raise LMCacheSDKError(
+                    f"cannot mirror the hybrid layout of {self._model_name!r}: {err}"
+                ) from err
+            covered = sorted(i for plan in plans for i in plan.layer_indices)
+            if covered != list(range(num_layers)):
+                raise LMCacheSDKError(
+                    f"the kernel groups of {self._model_name!r} do not cover its "
+                    f"{num_layers} registered layers exactly once"
+                )
+            pool_chunks = self._hybrid_pool_chunks(hf_config)
+        for plan in plans:
+            if self._chunk_size % plan.tokens_per_block:
+                raise LMCacheSDKError(
+                    f"chunk_size {self._chunk_size} is not a multiple of kernel "
+                    f"group {plan.kernel_group_idx}'s tokens_per_block "
+                    f"{plan.tokens_per_block}"
+                )
+        return plans, pool_chunks
+
+    def _allocate_pool(
+        self,
+        plans: Sequence[GroupPlan],
+        kernel_groups: Sequence[Mapping[str, Any]],
+        num_layers: int,
+        pool_chunks: int,
+    ) -> tuple[dict[str, torch.Tensor], list[PoolGroup], LayoutHints, int]:
+        """Allocate one pool tensor per layer in its group's engine format.
+
+        Block 0 of every group is the null block; attention groups hold
+        ``pool_chunks`` chunks, recurrent groups one (only the state at the
+        end of a prefix is ever stored or read).
+
+        Args:
+            plans: One plan per kernel group (see :meth:`_plan_groups`).
+            kernel_groups: The layout's kernel groups from ``/status``.
+            num_layers: Registered layers of the engine's layout.
+            pool_chunks: Chunks the attention groups hold.
+
+        Returns:
+            ``(pool, groups, layout_hints, num_planes)``: the tensors keyed
+            ``layer.<i>`` in registration order, the wrapper's groups, the
+            layout hints they are registered with, and the planes of the
+            attention groups' contiguous tensors.
+
+        Raises:
+            LMCacheSDKError: If a group's pool does not reproduce the engine's
+                format.
+        """
+        by_index = {int(g.get("kernel_group_idx", 0)): g for g in kernel_groups}
+        hf_model_name = self._kind.base_model_name(self._model_name)
+        layout_hints = LayoutHints(
+            kv_layout=_kv_layout(
+                _layer_labels(str(kernel_groups[0]["engine_kv_shape"]))
+            )
+        )
+        tensors: dict[int, torch.Tensor] = {}
+        pool_groups: list[PoolGroup] = []
+        num_planes = 0
+        for plan in plans:
+            group = by_index[plan.kernel_group_idx]
+            blocks_per_chunk = self._chunk_size // plan.tokens_per_block
+            num_blocks = _pool_num_blocks(
+                blocks_per_chunk * (1 if plan.recurrent else pool_chunks)
+            )
+            layer_shape = _pool_layer_shape(
+                group,
+                _layer_labels(str(group["engine_kv_shape"])),
+                self._kind,
+                num_blocks,
+                self._world_size,
+                hf_model_name,
+            )
+            dtype = getattr(torch, str(group["dtype"]).replace("torch.", ""))
+            group_tensors = {
+                f"layer.{i}": torch.zeros(layer_shape, dtype=dtype, device=self._device)
+                for i in plan.layer_indices
+            }
+            fmt = getattr(lmcache_native.EngineKVFormat, str(group["engine_kv_format"]))
+            block_size, _, _, _, pool_fmt, planes = compute_kv_layout(
+                group_tensors, layout_hints=layout_hints
+            )
+            if pool_fmt != fmt or block_size != plan.tokens_per_block:
+                raise LMCacheSDKError(
+                    f"kernel group {plan.kernel_group_idx}'s pool of per-layer "
+                    f"shape {layer_shape} detects as {pool_fmt.name} with block "
+                    f"size {block_size}, not the engine's {fmt.name} with block "
+                    f"size {plan.tokens_per_block}"
+                )
+            if not plan.recurrent and not num_planes:
+                num_planes = planes
+            tensors.update(
+                {int(name.split(".")[1]): t for name, t in group_tensors.items()}
+            )
+            pool_groups.append(
+                PoolGroup(
+                    layer_names=tuple(group_tensors),
+                    tokens_per_block=plan.tokens_per_block,
+                    recurrent=plan.recurrent,
+                    kernel_block_size=plan.kernel_block_size,
+                )
+            )
+        pool = {f"layer.{i}": tensors[i] for i in range(num_layers)}
+        return pool, pool_groups, layout_hints, num_planes
+
+    def _hybrid_pool_chunks(self, hf_config: Any) -> int:
+        """Chunks a hybrid pool holds: one whole prefix.
+
+        Args:
+            hf_config: The model's Hugging Face config.
+
+        Returns:
+            The explicit ``pool_chunks``, else the server's
+            ``sdk.pool_chunks``, else the model's context length in chunks.
+
+        Raises:
+            LMCacheSDKError: If none is available.
+        """
+        if self._pool_chunks_arg is not None:
+            return self._pool_chunks_arg
+        # 0: the server does not set sdk.pool_chunks.
+        if _server_extra_config(self._mp_conf, "sdk.pool_chunks", 0):
+            return _server_pool_chunks(self._mp_conf)
+        max_tokens = getattr(text_config(hf_config), "max_position_embeddings", None)
+        if not max_tokens:
+            raise LMCacheSDKError(
+                "the model config has no max_position_embeddings to size the "
+                "hybrid pool; pass pool_chunks"
+            )
+        return -(-int(max_tokens) // self._chunk_size)
+
+    @property
+    def is_hybrid(self) -> bool:
+        """Whether the pool mirrors a hybrid (attention + recurrent) layout.
+
+        A hybrid retrieve also returns the recurrent state at the end of the
+        range (see :meth:`retrieve_with_state`), and a hybrid store needs it.
+        """
+        return self._transfer_ctx is not None and self._transfer_ctx.has_recurrent_state
 
     @property
     def chunk_size(self) -> int:
@@ -278,13 +827,24 @@ class LMCacheSDKContext:
         return self._mq_timeout
 
     @property
-    def transfer_ctx(self) -> ContiguousTransferWrapper:
-        """Return the contiguous transfer context."""
+    def transfer_ctx(self) -> PagedPoolTransferWrapper:
+        """Return the pool transfer wrapper.
+
+        Raises:
+            LMCacheSDKError: If ``register_caches`` has not been called.
+        """
+        if self._transfer_ctx is None:
+            raise LMCacheSDKError("register_caches() must be called first")
         return self._transfer_ctx
 
     def close(self) -> None:
-        """Close the request client and release its transport resources."""
-        self._req_client.close()
+        """Unregister the transfer pool, if any, and close the request client."""
+        try:
+            if self._transfer_ctx is not None:
+                self._transfer_ctx.close()
+                self._transfer_ctx = None
+        finally:
+            self._req_client.close()
 
     def maybe_submit_lookup_request(
         self,
@@ -446,8 +1006,9 @@ class LMCacheSDKContext:
         self,
         tokens: Sequence[int],
         cache_salt: str = "",
-        request_configs: dict[str, object] | None = None,
         start_token_id: int = 0,
+        *,
+        request_configs: dict[str, object] | None = None,
     ) -> torch.Tensor | None:
         """Retrieve KV/Query cache tensors for the given token IDs.
 
@@ -464,13 +1025,64 @@ class LMCacheSDKContext:
         Returns:
             A contiguous CPU tensor holding the cached chunks from
             start_token_id onwards. It stops at the first uncached chunk, so it
-            may cover fewer tokens than requested.
+            may cover fewer tokens than requested. A windowed kind (see
+            ``window``) starts no earlier than the window, and returns only
+            the tokens each chunk keeps.
             None if retrieval fails, there are no tokens to retrieve, or
             nothing is cached at start_token_id.
 
         Raises:
             LMCacheSDKError: If start_token_id is not a multiple of chunk_size,
             or if the LOOKUP request does not complete successfully.
+        """
+        result = self._retrieve_range(
+            tokens, cache_salt, start_token_id, request_configs
+        )
+        return result[0] if result is not None else None
+
+    def retrieve_with_state(
+        self,
+        tokens: Sequence[int],
+        cache_salt: str = "",
+        start_token_id: int = 0,
+        *,
+        request_configs: dict[str, object] | None = None,
+    ) -> tuple[torch.Tensor, RecurrentState | None] | None:
+        """Retrieve KV tensors and, for a hybrid model, the recurrent state.
+
+        Args:
+            tokens: The token IDs the cache keys are chained from.
+            cache_salt: Optional cache salt string for the lookup.
+            start_token_id: The starting token ID for the retrieval.
+            request_configs: Optional LMCache request configs to include in
+                the IPC key.
+
+        Returns:
+            ``(kv, state)`` as :meth:`retrieve` returns ``kv``; ``state`` is
+            the recurrent state at the end of ``kv`` for a hybrid model, else
+            None. None if nothing is retrieved.
+
+        Raises:
+            LMCacheSDKError: As :meth:`retrieve`, or if a hybrid range
+                exceeds the pool.
+        """
+        result = self._retrieve_range(
+            tokens, cache_salt, start_token_id, request_configs
+        )
+        return result
+
+    def _retrieve_range(
+        self,
+        tokens: Sequence[int],
+        cache_salt: str,
+        start_token_id: int,
+        request_configs: dict[str, object] | None,
+    ) -> tuple[torch.Tensor, RecurrentState | None] | None:
+        """Retrieve the cached range; see :meth:`retrieve`.
+
+        Returns:
+            ``(tensor, state)`` from the pool (``state`` is None unless the
+            model is hybrid), or None if nothing is retrieved.
         """
         if not tokens:
             logger.info("No tokens provided for retrieval; returning None.")
@@ -520,11 +1132,13 @@ class LMCacheSDKContext:
             return None
 
         end = min(total_tokens, num_prefetched_tokens)
+        # A windowed kind only has its trailing chunks readable.
+        start = max(start_token_id, self.windowed_range(end)[0])
 
         # Phase 1: retrieve the cached range as one contiguous tensor.
         key = self._create_key(
             token_ids=list(tokens[:end]),
-            start=start_token_id,
+            start=start,
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
@@ -533,13 +1147,15 @@ class LMCacheSDKContext:
         )
         try:
             return self.transfer_ctx.retrieve(key, self.instance_id)
+        except PoolCapacityError as err:
+            raise LMCacheSDKError(str(err)) from err
         except LMCacheSDKError:
             logger.info(
                 "Retrieve failed for kind %s request_id=%s at [%d, %d); "
                 "returning None.",
                 self.kind.name,
                 request_id,
-                start_token_id,
+                start,
                 end,
                 exc_info=True,
             )
@@ -553,19 +1169,35 @@ class LMCacheSDKContext:
         tokens: Sequence[int],
         cache_salt: str = "",
         request_configs: dict[str, object] | None = None,
+        recurrent_state: RecurrentState | None = None,
     ) -> bool:
         """Store KV cache tensors for the given token IDs.
 
         Args:
-            kv: The KV cache tensor to store, of shape [2, L, T, D].
+            kv: The KV cache tensor to store, of shape [2, L, T, D]; for a
+                hybrid model, the attention layers only.
             tokens: The list of token IDs corresponding to the KV cache tensor.
             cache_salt: Optional cache salt string for the store.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+            recurrent_state: Hybrid models only: the recurrent state stored
+                as the state at the end of the chunk-aligned ``tokens``
+                (e.g. the state :meth:`retrieve_with_state` returned).
 
         Returns:
             True if the store operation is successful, False otherwise.
+
+        Raises:
+            LMCacheSDKError: If the tokens do not match ``kv``, or a hybrid
+                store has no ``recurrent_state`` or exceeds the pool.
         """
+        if self.is_hybrid and recurrent_state is None:
+            raise LMCacheSDKError(
+                "a hybrid model's store needs recurrent_state: without the "
+                "state at the prefix end, the engine cannot hit the prefix"
+            )
+        if not self.is_hybrid and recurrent_state is not None:
+            raise LMCacheSDKError("recurrent_state only applies to hybrid models")
         if len(tokens) != kv.shape[2]:
             raise LMCacheSDKError(
                 f"Number of tokens ({len(tokens)}) does not match KV tensor's "
@@ -590,7 +1222,11 @@ class LMCacheSDKContext:
 
         # Phase 1: store the KV cache tensor
         try:
-            return self.transfer_ctx.store(key, self.instance_id, kv_cpu)
+            return self.transfer_ctx.store(
+                key, self.instance_id, kv_cpu, recurrent_state
+            )
+        except PoolCapacityError as err:
+            raise LMCacheSDKError(str(err)) from err
         finally:
             self.end_session(request_id)
 

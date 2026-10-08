@@ -20,18 +20,27 @@ import pytest
 import torch
 
 # First Party
-from lmcache.sdk.cache_kind import (
-    LMCacheSDKCacheKind,
-    LMCacheSDKCacheSpan,
-    LMCacheSDKCacheSpanKind,
-)
-from lmcache.sdk.context import LMCacheSDKContext
+from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
+from lmcache.sdk.context import FULL_WINDOW, LMCacheSDKContext
 from lmcache.sdk.qringbuffer import QRingBufferAdapter
 from lmcache.sdk.request import LMCacheRequestStream, LMCacheRequestStreamError
+from lmcache.sdk.wrapper.paged_pool import RecurrentState
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 CHUNK = 4
+
+
+def windowed_range(
+    window_tokens: int, sw_size_tokens: int, chunk_size: int, chunk_windowed: bool
+) -> tuple[int, int]:
+    """Run the context's window math against bare state."""
+    state = SimpleNamespace(
+        _sw_size_tokens=sw_size_tokens,
+        _chunk_size=chunk_size,
+        _chunk_windowed=chunk_windowed,
+    )
+    return LMCacheSDKContext.windowed_range(state, window_tokens)  # type: ignore[arg-type]
 
 
 def test_kv_chains_from_token_zero():
@@ -44,39 +53,30 @@ def test_query_chains_from_the_segment():
     assert LMCacheSDKCacheKind.QUERY.key_origin(segment_start=512) == 512
 
 
-def test_all_span_reads_the_whole_window():
-    """ALL starts at the window's first token, whichever kind it belongs to."""
-    span = LMCacheSDKCacheSpan()
-
-    assert span.kind is LMCacheSDKCacheSpanKind.ALL
-    assert span.start_offset(window_tokens=20, chunk_size=CHUNK) == 0
-    assert span.expected_tokens(window_tokens=20, chunk_size=CHUNK) == 20
+def test_full_window_reads_everything():
+    """The full window starts at the first token, whichever kind it serves."""
+    assert windowed_range(20, FULL_WINDOW, CHUNK, chunk_windowed=False) == (0, 20)
 
 
-def test_trailing_span_starts_a_fixed_number_of_chunks_from_the_end():
-    """TRAILING takes its last trailing_chunks chunks."""
-    span = LMCacheSDKCacheSpan(kind=LMCacheSDKCacheSpanKind.TRAILING, trailing_chunks=2)
-
-    assert span.start_offset(window_tokens=20, chunk_size=CHUNK) == 12
-    assert span.expected_tokens(window_tokens=20, chunk_size=CHUNK) == 8
+def test_chunk_window_reads_its_trailing_chunks():
+    """With object-group separation, a two-chunk window reads the last two."""
+    assert windowed_range(20, 2 * CHUNK, CHUNK, chunk_windowed=True) == (12, 8)
 
 
-def test_trailing_span_clamps_to_the_window():
-    """A range longer than the window stops at its first token: nothing before
-    the window exists under this kind's key chain."""
-    span = LMCacheSDKCacheSpan(
-        kind=LMCacheSDKCacheSpanKind.TRAILING, trailing_chunks=10
-    )
-
-    assert span.start_offset(window_tokens=20, chunk_size=CHUNK) == 0
-    assert span.expected_tokens(window_tokens=20, chunk_size=CHUNK) == 20
+def test_chunk_window_clamps_to_the_addressable_window():
+    """A window longer than what is addressable stops at its first token:
+    nothing before it exists under this kind's key chain."""
+    assert windowed_range(20, 10 * CHUNK, CHUNK, chunk_windowed=True) == (0, 20)
 
 
-def test_every_span_kind_is_handled():
-    """No span kind falls through to the unhandled-kind raise."""
-    for kind in LMCacheSDKCacheSpanKind:
-        span = LMCacheSDKCacheSpan(kind=kind)
-        assert span.start_offset(window_tokens=20, chunk_size=CHUNK) >= 0
+def test_sub_chunk_window_keeps_the_tail_of_every_chunk():
+    """Without object-group separation, every chunk keeps its last rows."""
+    assert windowed_range(20, 2, CHUNK, chunk_windowed=False) == (0, 5 * 2)
+
+
+def test_sub_chunk_window_reads_only_the_last_chunk_when_separated():
+    """With separation, a sub-chunk window is the tail of the last chunk."""
+    assert windowed_range(20, 2, CHUNK, chunk_windowed=True) == (16, 2)
 
 
 class _FakeOp:
@@ -106,7 +106,7 @@ def _q_adapter() -> tuple[QRingBufferAdapter, MagicMock]:
             cache_salt=kw.get("cache_salt", ""),
         )
     )
-    q_adapter = QRingBufferAdapter(worker, "m##query", MagicMock())
+    q_adapter = QRingBufferAdapter(worker, "m##query")
     q_adapter.q_ring = MagicMock()
     return q_adapter, worker
 
@@ -191,15 +191,19 @@ class _RecordingContext:
         self,
         kind: LMCacheSDKCacheKind,
         tensor: torch.Tensor | None,
-        span: LMCacheSDKCacheSpan | None = None,
+        window: tuple[int, bool] = (FULL_WINDOW, False),
     ) -> None:
         self.kind = kind
-        self.span = span if span is not None else LMCacheSDKCacheSpan()
+        self._window = window
         self.chunk_size = CHUNK
+        self.is_hybrid = False
         self._tensor = tensor
         self.calls: list[tuple[tuple[int, ...], int]] = []
         self.stored: list[tuple[int, ...]] = []
         self.cached_tokens = 0
+
+    def windowed_range(self, window_tokens: int) -> tuple[int, int]:
+        return windowed_range(window_tokens, self._window[0], CHUNK, self._window[1])
 
     def lookup(self, tokens, cache_salt: str = "") -> int:
         return min(self.cached_tokens, (len(tokens) // CHUNK) * CHUNK)
@@ -210,7 +214,7 @@ class _RecordingContext:
         self.calls.append((tuple(tokens), start_token_id))
         return self._tensor
 
-    def store(self, kv, tokens, cache_salt: str = "") -> bool:
+    def store(self, kv, tokens, cache_salt: str = "", recurrent_state=None) -> bool:
         self.stored.append(tuple(tokens))
         self.cached_tokens = (len(tokens) // CHUNK) * CHUNK
         return True
@@ -220,7 +224,7 @@ def _stream(
     tokens: list[int],
     segment_start: int,
     q_tensor: torch.Tensor | None,
-    q_span: LMCacheSDKCacheSpan | None = None,
+    q_window: tuple[int, bool] = (FULL_WINDOW, False),
 ) -> tuple[LMCacheRequestStream, _RecordingContext]:
     """A stream that has run a pass computing tokens[segment_start:].
 
@@ -230,7 +234,7 @@ def _stream(
     kv_ctx = _RecordingContext(
         LMCacheSDKCacheKind.KV, torch.zeros(2, 2, len(tokens), 8)
     )
-    q_ctx = _RecordingContext(LMCacheSDKCacheKind.QUERY, q_tensor, span=q_span)
+    q_ctx = _RecordingContext(LMCacheSDKCacheKind.QUERY, q_tensor, window=q_window)
     tail = tokens[segment_start:]
     stream = LMCacheRequestStream(
         contexts=[kv_ctx, q_ctx],  # type: ignore[list-item]
@@ -262,7 +266,7 @@ def _modify(stream: LMCacheRequestStream, timeout: float = 0.0) -> list[int]:
 
 
 def test_modify_addresses_the_segment_window():
-    """modify_kv reads the query span through the segment's own chain: the
+    """modify_kv reads the query window through the segment's own chain: the
     window starts at the segment and the offset is relative to it, while KV
     keeps its chain at token 0."""
     tokens = list(range(40))
@@ -282,9 +286,7 @@ def test_modify_offsets_a_trailing_window_within_the_segment():
         tokens,
         segment_start=20,
         q_tensor=torch.zeros(1, 2, 8, 8),
-        q_span=LMCacheSDKCacheSpan(
-            kind=LMCacheSDKCacheSpanKind.TRAILING, trailing_chunks=2
-        ),
+        q_window=(2 * CHUNK, True),
     )
 
     _modify(stream)
@@ -294,8 +296,45 @@ def test_modify_offsets_a_trailing_window_within_the_segment():
     assert relative_start == 12
 
 
-def test_modify_fails_fast_on_an_empty_span():
-    """A span with nothing to read raises instead of polling until timeout."""
+def test_modify_expects_the_rows_a_sub_chunk_window_keeps():
+    """A sub-chunk window returns fewer rows than tokens: 5 chunks x 2 rows."""
+    tokens = list(range(40))
+    stream, q_ctx = _stream(
+        tokens,
+        segment_start=20,
+        q_tensor=torch.zeros(1, 2, 10, 8),
+        q_window=(2, False),
+    )
+
+    _modify(stream)
+
+    assert q_ctx.calls == [(tuple(tokens[20:40]), 0)]
+
+
+def test_modify_tells_the_editor_where_the_decoded_segment_starts():
+    """A windowed query covers only the segment's end, so the editor is told
+    the segment start instead of inferring it from the query length."""
+    tokens = list(range(40))
+    stream, _ = _stream(
+        tokens,
+        segment_start=20,
+        q_tensor=torch.zeros(1, 2, 2, 8),
+        q_window=(2, True),
+    )
+    seen: list[int] = []
+
+    def keep(tensors, tokens):
+        seen.append(tensors.segment_start_token_id)
+        assert set(tensors) == {LMCacheSDKCacheKind.KV, LMCacheSDKCacheKind.QUERY}
+        return tensors[LMCacheSDKCacheKind.KV], tokens
+
+    stream.modify_kv(keep, timeout=0.0, poll_interval=0.0)
+
+    assert seen == [20]
+
+
+def test_modify_fails_fast_on_an_empty_window():
+    """A window with nothing to read raises instead of polling until timeout."""
     tokens = list(range(40))
     stream, _ = _stream(tokens, segment_start=40, q_tensor=None)
 
@@ -303,7 +342,7 @@ def test_modify_fails_fast_on_an_empty_span():
         _modify(stream, timeout=30.0)
 
 
-def test_modify_reports_the_chain_root_when_the_span_is_missing():
+def test_modify_reports_the_chain_root_when_the_window_is_missing():
     """The error names the chain root, since a mismatched root is the way this
     fails."""
     tokens = list(range(40))
@@ -381,11 +420,10 @@ def test_stored_and_retrieved_chunks_hash_identically():
         list(store_key.token_ids), start=store_key.start, end=store_key.end
     )
 
-    # Retrieve side: the modify that follows reads the same span.
-    span = LMCacheSDKCacheSpan()
+    # Retrieve side: the modify that follows reads the same window.
     origin = LMCacheSDKCacheKind.QUERY.key_origin(segment_start)
     window_tokens = len(tokens) - origin
-    start_offset = span.start_offset(window_tokens, CHUNK)
+    start_offset, _ = windowed_range(window_tokens, FULL_WINDOW, CHUNK, False)
     requested = hasher.compute_chunk_hashes(
         tokens[origin:], start=start_offset, end=window_tokens
     )
@@ -409,14 +447,23 @@ def test_chain_rooted_at_zero_would_not_match():
 class _StubSDKContext:
     """Bare LMCacheSDKContext state for exercising retrieve() alone."""
 
-    def __init__(self, hit_tokens: int) -> None:
+    def __init__(
+        self, hit_tokens: int, window: tuple[int, bool] = (FULL_WINDOW, False)
+    ) -> None:
         self.chunk_size = CHUNK
         self.kind = LMCacheSDKCacheKind.QUERY
+        self._window = window
         self.instance_id = 1
         self._hit_tokens = hit_tokens
         self.ended: list[str] = []
         self.retrieved_keys: list[IPCCacheServerKey] = []
         self.transfer_ctx = SimpleNamespace(retrieve=self._retrieve)
+
+    # retrieve() runs the context's own range logic against this stub state.
+    _retrieve_range = LMCacheSDKContext._retrieve_range
+
+    def windowed_range(self, window_tokens: int) -> tuple[int, int]:
+        return windowed_range(window_tokens, self._window[0], CHUNK, self._window[1])
 
     def maybe_submit_lookup_request(self, request_id, token_ids, cache_salt, **kw):
         self.lookup_tokens = list(token_ids)
@@ -441,14 +488,16 @@ class _StubSDKContext:
 
     def _retrieve(self, key, instance_id):
         self.retrieved_keys.append(key)
-        return torch.zeros(1, 2, key.end - key.start, 8)
+        return torch.zeros(1, 2, key.end - key.start, 8), None
 
 
 def _context_retrieve(
-    hit_tokens: int, start_token_id: int
+    hit_tokens: int,
+    start_token_id: int,
+    window: tuple[int, bool] = (FULL_WINDOW, False),
 ) -> tuple[_StubSDKContext, torch.Tensor | None]:
     """Call the real retrieve() against stub state."""
-    ctx = _StubSDKContext(hit_tokens)
+    ctx = _StubSDKContext(hit_tokens, window)
     result = LMCacheSDKContext.retrieve(
         ctx,  # type: ignore[arg-type]
         list(range(40)),
@@ -468,7 +517,18 @@ def test_retrieve_stops_at_the_lookup_hit():
     assert (key.start, key.end) == (8, 24)
 
 
-def test_retrieve_returns_none_when_the_hit_misses_the_span():
+def test_retrieve_clamps_to_a_chunk_window():
+    """Only a chunk window's trailing chunks are readable, so a retrieve from
+    token 0 starts at the window instead of asking for unwritten chunks."""
+    window = (2 * CHUNK, True)
+    ctx, result = _context_retrieve(hit_tokens=24, start_token_id=0, window=window)
+
+    assert result is not None
+    key = ctx.retrieved_keys[0]
+    assert (key.start, key.end) == (16, 24)
+
+
+def test_retrieve_returns_none_when_the_hit_misses_the_start():
     """A hit that stops before the requested start yields nothing readable."""
     ctx, result = _context_retrieve(hit_tokens=8, start_token_id=8)
 
@@ -481,3 +541,48 @@ def test_retrieve_never_exceeds_the_chunk_aligned_range():
     ctx, result = _context_retrieve(hit_tokens=400, start_token_id=0)
 
     assert ctx.retrieved_keys[0].end == 40
+
+
+class _HybridContext:
+    """A hybrid KV context recording what modify_kv stores."""
+
+    kind = LMCacheSDKCacheKind.KV
+    chunk_size = CHUNK
+    is_hybrid = True
+
+    def __init__(self, kv: torch.Tensor, state: RecurrentState) -> None:
+        self._result = (kv, state)
+        self.stored: list[tuple[tuple[int, ...], RecurrentState | None]] = []
+
+    def lookup(self, tokens, cache_salt: str = "") -> int:
+        return (len(tokens) // CHUNK) * CHUNK
+
+    def retrieve_with_state(self, tokens, cache_salt: str = ""):
+        return self._result
+
+    def store(self, kv, tokens, cache_salt: str = "", recurrent_state=None) -> bool:
+        self.stored.append((tuple(tokens), recurrent_state))
+        return True
+
+
+def test_modify_carries_the_retrieved_state_to_the_edited_prefix():
+    """A hybrid edit only sees attention K/V; the recurrent state at the end
+    of the retrieved prefix is stored as the edited prefix's."""
+    kv = torch.randn(2, 2, 2 * CHUNK, 8)
+    state = RecurrentState((torch.randn(1, 2, CHUNK, 1, 8),))
+    ctx = _HybridContext(kv, state)
+    stream = LMCacheRequestStream(
+        contexts=[ctx],  # type: ignore[list-item]
+        post_completion=MagicMock(),
+        prompt_token_ids=list(range(2 * CHUNK + 3)),
+    )
+    seen = {}
+
+    def drop_first_chunk(tensors, tokens):
+        seen["kv"] = tensors[LMCacheSDKCacheKind.KV]
+        return seen["kv"][:, :, CHUNK:], tokens[CHUNK:]
+
+    stream.modify_kv(drop_first_chunk, timeout=0.0, poll_interval=0.0)
+
+    assert seen["kv"] is kv
+    assert ctx.stored == [(tuple(range(CHUNK, 2 * CHUNK)), state)]
