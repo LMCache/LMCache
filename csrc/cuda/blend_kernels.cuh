@@ -46,6 +46,9 @@ struct CBGroupSpec {
   int rope_num_kv_heads;
   int64_t rope_head_stride;  // == head_size, or 2*head_size for fused packed
   int key_scalar_type;       // at::ScalarType of the KV data
+  // at::ScalarType of the cos/sin cache; equals key_scalar_type except for
+  // fp8 KV caches, whose cache stays in the model's float dtype.
+  int cache_scalar_type;
   bool is_neox;
   // Byte offset from the slot's K-plane base to the first rope-carrying
   // element: 0 unless MLA, where rope dims trail the latent row.

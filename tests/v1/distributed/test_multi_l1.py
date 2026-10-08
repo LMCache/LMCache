@@ -1,0 +1,523 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Ordered L1 placement, owner completion, and overlapping read contracts."""
+
+# Standard
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from unittest.mock import Mock
+
+# Third Party
+import msgspec
+import pytest
+import torch
+
+# First Party
+from lmcache.cli.commands.trace._dispatch import ReplayContext, build_default_dispatcher
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
+from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.storage_controllers.write_policy import OrderedWritePolicy
+from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.trace import codecs
+from lmcache.v1.mp_observability.trace import decorator as trace_decorator
+from lmcache.v1.mp_observability.trace.reader import TraceReader
+from lmcache.v1.mp_observability.trace.recorder import StorageTraceRecorder
+from tests.v1.distributed.utils import single_row_spec
+import lmcache.v1.memory_management as memory_management
+
+pytestmark = pytest.mark.no_shared_allocator
+
+LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([1024])], dtypes=[torch.float32])
+StorageFactory = Callable[
+    [tuple[int, ...]], tuple[StorageManager, tuple[L1Manager, ...], OrderedWritePolicy]
+]
+
+
+def key(index: int) -> ObjectKey:
+    """Return a deterministic test key."""
+    return ObjectKey(ObjectKey.IntHash2Bytes(index), "overflow-test", 0)
+
+
+@pytest.fixture
+def storage_factory(monkeypatch: pytest.MonkeyPatch) -> Iterator[StorageFactory]:
+    """Use real CPU allocators and L1 lifecycle; replace only host pinning."""
+    monkeypatch.setattr(
+        memory_management,
+        "_allocate_cpu_memory",
+        lambda size, *args, **kwargs: torch.empty(size, dtype=torch.uint8),
+    )
+    monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **k: None)
+    stores: list[StorageManager] = []
+
+    def create(
+        sizes: tuple[int, ...] = (4096, 4096),
+    ) -> tuple[StorageManager, tuple[L1Manager, ...], OrderedWritePolicy]:
+        configs = [
+            L1ManagerConfig(
+                L1MemoryManagerConfig(size_in_bytes=size, use_lazy=False, shm_name=""),
+                tag="_default" if index == 0 else f"l1-{index}",
+            )
+            for index, size in enumerate(sizes)
+        ]
+        managers = tuple(L1Manager(config) for config in configs)
+        policy = OrderedWritePolicy(tuple(m.l1_manager_id for m in managers))
+        store = StorageManager(
+            StorageManagerConfig(configs[0], EvictionConfig("noop")),
+            _l1_managers=managers,
+            _write_policy=policy,
+        )
+        stores.append(store)
+        return store, managers, policy
+
+    yield create
+    for store in reversed(stores):
+        store.close()
+
+
+def test_primary_success_does_not_try_fallback(
+    storage_factory: StorageFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, (primary, fallback), _ = storage_factory((4096, 4096))
+    attempt = Mock(wraps=fallback.reserve_write)
+    monkeypatch.setattr(fallback, "reserve_write", attempt)
+    objects = store.reserve_write([key(1)], LAYOUT)
+    assert objects[key(1)].get_l1_manager() == primary.l1_manager_id
+    store.finish_write_by_owner(store.prepare_write_completion(objects))
+    assert primary.get_object_state(key(1)) is not None
+    assert fallback.get_object_state(key(1)) is None
+    attempt.assert_not_called()
+
+
+def test_overflow_order_and_captured_owner_survive_policy_change(
+    storage_factory: StorageFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, managers, policy = storage_factory((4096, 4096, 4096))
+    for index, manager in enumerate(managers[:2]):
+        assert (
+            manager.reserve_write([key(index)], [False], LAYOUT)[key(index)][0]
+            == L1Error.SUCCESS
+        )
+        manager.finish_write([key(index)])
+    attempts = []
+    for manager in managers:
+        attempt = Mock(wraps=manager.reserve_write)
+        monkeypatch.setattr(manager, "reserve_write", attempt)
+        attempts.append(attempt)
+    objects = store.reserve_write([key(2)], LAYOUT)
+    assert objects[key(2)].get_l1_manager() == managers[2].l1_manager_id
+    completion = store.prepare_write_completion(objects)
+    policy.manager_ids = tuple(reversed(policy.manager_ids))
+    store.finish_write_by_owner(completion)
+    assert [m.get_object_state(key(2)) is not None for m in managers] == [
+        False,
+        False,
+        True,
+    ]
+    assert all(attempt.call_count == 1 for attempt in attempts)
+
+
+def test_mixed_results_retry_only_oom_subset(
+    storage_factory: StorageFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, (primary, fallback), _ = storage_factory((8192, 8192))
+    success, conflict, overflow = key(1), key(2), key(3)
+    original_reserve = primary.reserve_write
+
+    def mixed(
+        keys: list[ObjectKey],
+        is_temporary: list[bool],
+        layout_desc: MemoryLayoutDesc,
+        tag: str,
+    ) -> dict[ObjectKey, tuple[L1Error, memory_management.MemoryObj | None]]:
+        assert keys == [success, conflict, overflow]
+        assert is_temporary == [False, False, False]
+        assert layout_desc is LAYOUT
+        response = original_reserve([success], [False], layout_desc, tag=tag)
+        return {
+            success: response[success],
+            conflict: (L1Error.KEY_NOT_WRITABLE, None),
+            overflow: (L1Error.OUT_OF_MEMORY, None),
+        }
+
+    monkeypatch.setattr(primary, "reserve_write", mixed)
+    attempt = Mock(wraps=fallback.reserve_write)
+    monkeypatch.setattr(fallback, "reserve_write", attempt)
+    objects = store.reserve_write([success, conflict, overflow], LAYOUT)
+    assert list(objects) == [success, overflow]
+    assert objects[success].get_l1_manager() == primary.l1_manager_id
+    assert objects[overflow].get_l1_manager() == fallback.l1_manager_id
+    attempt.assert_called_once_with(
+        keys=[overflow],
+        is_temporary=[False],
+        layout_desc=LAYOUT,
+        tag="storage_manager",
+    )
+    store.finish_write_by_owner(store.prepare_write_completion(objects))
+    assert primary.get_object_state(success) is not None
+    assert primary.get_object_state(overflow) is None
+    assert fallback.get_object_state(overflow) is not None
+    assert fallback.get_object_state(conflict) is None
+
+
+@pytest.mark.parametrize("sizes", [(4096, 4096), (4096, 8192)])
+def test_overflow_preserves_batch_atomicity(
+    storage_factory: StorageFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    sizes: tuple[int, ...],
+) -> None:
+    store, (primary, fallback), _ = storage_factory(sizes)
+    attempts = [Mock(wraps=m.reserve_write) for m in (primary, fallback)]
+    for manager, attempt in zip((primary, fallback), attempts, strict=True):
+        monkeypatch.setattr(manager, "reserve_write", attempt)
+    keys = [key(1), key(2)]
+    objects = store.reserve_write(keys, LAYOUT)
+    for attempt in attempts:
+        assert attempt.call_count == 1
+        assert attempt.call_args.kwargs["keys"] == keys
+    assert primary.get_memory_usage()[0] == 0
+    if sizes[1] == 4096:
+        # Combined unused bytes suffice, but neither candidate fits the batch.
+        assert objects == {}
+        assert fallback.get_memory_usage()[0] == 0
+    else:
+        assert set(objects) == set(keys)
+        assert all(
+            o.get_l1_manager() == fallback.l1_manager_id for o in objects.values()
+        )
+        store.finish_write_by_owner(store.prepare_write_completion(objects))
+        assert fallback.get_memory_usage()[0] == 8192
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        L1Error.KEY_NOT_WRITABLE,
+        L1Error.KEY_IS_LOCKED,
+        L1Error.KEY_IN_WRONG_STATE,
+        L1Error.KEY_NOT_READABLE,
+    ],
+)
+def test_terminal_errors_do_not_overflow(
+    storage_factory: StorageFactory, monkeypatch: pytest.MonkeyPatch, error: L1Error
+) -> None:
+    store, (primary, fallback), _ = storage_factory((4096, 4096))
+    monkeypatch.setattr(
+        primary, "reserve_write", Mock(return_value={key(1): (error, None)})
+    )
+    attempt = Mock(wraps=fallback.reserve_write)
+    monkeypatch.setattr(fallback, "reserve_write", attempt)
+    assert store.reserve_write([key(1)], LAYOUT) == {}
+    attempt.assert_not_called()
+
+
+def test_exception_is_not_capacity_failure(
+    storage_factory: StorageFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, (primary, fallback), _ = storage_factory((4096, 4096))
+    monkeypatch.setattr(
+        primary, "reserve_write", Mock(side_effect=RuntimeError("failure"))
+    )
+    attempt = Mock(wraps=fallback.reserve_write)
+    monkeypatch.setattr(fallback, "reserve_write", attempt)
+    with pytest.raises(RuntimeError, match="failure"):
+        store.reserve_write([key(1)], LAYOUT)
+    attempt.assert_not_called()
+
+
+def test_same_key_copies_finish_only_the_selected_owner(
+    storage_factory: StorageFactory,
+) -> None:
+    store, (primary, fallback), _ = storage_factory((4096, 4096))
+    objects = []
+    for manager in (primary, fallback):
+        error, obj = manager.reserve_write(
+            [key(1)], [False], LAYOUT, tag="storage_manager"
+        )[key(1)]
+        assert error == L1Error.SUCCESS and obj is not None
+        objects.append(obj)
+    assert objects[0].get_l1_manager() != objects[1].get_l1_manager()
+    store.finish_write_by_owner(store.prepare_write_completion({key(1): objects[1]}))
+    assert primary.reserve_read([key(1)])[key(1)][0] == L1Error.KEY_NOT_EXIST
+    assert primary.report_status()["write_locked_count"] == 1
+    assert fallback.reserve_read([key(1)])[key(1)][0] == L1Error.SUCCESS
+    fallback.finish_read([key(1)])
+    assert primary.report_status()["write_locked_count"] == 1
+
+
+def test_unknown_or_unset_owner_is_not_guessed(storage_factory: StorageFactory) -> None:
+    store, _, _ = storage_factory((4096, 4096))
+    obj = memory_management.BytesBufferMemoryObj(b"test")
+    with pytest.raises(ValueError, match="registered L1 owner"):
+        store.prepare_write_completion({key(1): obj})
+    obj.set_l1_manager(2**62)
+    with pytest.raises(ValueError, match="registered L1 owner"):
+        store.prepare_write_completion({key(1): obj})
+    with pytest.raises(ValueError, match="registered L1 owner"):
+        store.finish_write_by_owner([(2**62, [key(1)])])
+
+
+def test_multi_manager_requires_explicit_read_owners(
+    storage_factory: StorageFactory,
+) -> None:
+    store, _, _ = storage_factory((4096, 4096))
+    for operation in (
+        store.finish_write,
+        store.finish_read_prefetched,
+        store.unsafe_read,
+    ):
+        with pytest.raises(ValueError, match="single L1"):
+            operation([key(1)])
+    with pytest.raises(ValueError, match="single L1"):
+        with store.read_prefetched_results([key(1)]):
+            pass
+    with pytest.raises(ValueError, match="single L1"):
+        _ = store.l1_memory_desc
+    for legacy_operation in (
+        store.get_l1_devdax_arena_statuses,
+        lambda: store.add_l1_devdax_device("/unused", 4096),
+        lambda: store.remove_l1_devdax_device("/unused"),
+    ):
+        with pytest.raises(ValueError, match="single L1"):
+            legacy_operation()
+    assert store.memcheck()
+    assert store.get_l1_usage() == (0, 8192)
+    assert set(store.report_status()["l1_managers"]) == {"_default", "l1-1"}
+    store.publish_capacity()
+
+
+def test_single_manager_legacy_finish_and_read(storage_factory: StorageFactory) -> None:
+    store, (manager,), _ = storage_factory((4096,))
+    objects = store.reserve_write([key(1)], LAYOUT)
+    tensor = objects[key(1)].tensor
+    assert tensor is not None
+    tensor.fill_(7)
+    store.finish_write([key(1)])
+    handle = store.submit_prefetch_task(single_row_spec([key(1)], LAYOUT), skip_l2=True)
+    result = store.query_prefetch_status(handle)
+    assert result is not None and result.hit_cells[0].popcount() == 1
+    with store.read_prefetched_results([key(1)]) as read:
+        assert read is not None
+        tensor = read[0].tensor
+        assert tensor is not None and torch.all(tensor == 7)
+    store.finish_read_prefetched([key(1)])
+    assert manager.report_status()["read_locked_count"] == 0
+    assert store.memcheck()
+    assert store.get_l1_usage() == (4096, 4096)
+    assert store.report_status()["l1_manager"] == manager.report_status()
+    store.publish_capacity()
+
+
+@pytest.mark.parametrize("owner_completion", [False, True])
+def test_single_l1_completion_trace_replays_without_process_local_owners(
+    storage_factory: StorageFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_completion: bool,
+) -> None:
+    """Both completion entry points retain the existing key-only trace schema."""
+    source, (source_l1,), _ = storage_factory((4096,))
+    events: list[Event] = []
+    bus = Mock()
+    bus.publish.side_effect = events.append
+    monkeypatch.setattr(trace_decorator, "get_event_bus", lambda: bus)
+    trace_decorator.set_tracing_enabled(True)
+    try:
+        objects = source.reserve_write([key(1)], LAYOUT)
+        if owner_completion:
+            source.finish_write_by_owner(source.prepare_write_completion(objects))
+        else:
+            source.finish_write([key(1)])
+    finally:
+        trace_decorator.set_tracing_enabled(False)
+
+    prefix = "lmcache.v1.distributed.storage_manager.StorageManager."
+    assert [event.metadata["qualname"] for event in events] == [
+        prefix + "reserve_write",
+        prefix + "finish_write",
+    ]
+    assert events[-1].metadata["args"] == {"keys": [key(1)]}
+    target, (target_l1,), _ = storage_factory((4096,))
+    assert target_l1.l1_manager_id != source_l1.l1_manager_id
+    dispatcher = build_default_dispatcher()
+    for event in events:
+        qualname = event.metadata["qualname"]
+        assert dispatcher.has(qualname)
+        payload = msgspec.msgpack.encode(codecs.encode_args(event.metadata["args"]))
+        dispatcher.dispatch(
+            qualname,
+            ReplayContext(target),
+            codecs.decode_args(msgspec.msgpack.decode(payload)),
+        )
+    assert target_l1.get_object_state(key(1)) is not None
+
+
+def test_read_release_trace_redacts_owners_and_replays_on_single_l1(
+    storage_factory: StorageFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Owner redaction preserves live release and a replayable on-disk record."""
+    source, (source_l1,), _ = storage_factory((4096,))
+    target, (target_l1,), _ = storage_factory((4096,))
+    keys = [key(1)]
+    for store, manager in ((source, source_l1), (target, target_l1)):
+        objects = store.reserve_write(keys, LAYOUT)
+        store.finish_write_by_owner(store.prepare_write_completion(objects))
+        assert manager.reserve_read(keys, read_locks=2)[keys[0]][0] == L1Error.SUCCESS
+        assert manager.report_status()["read_locked_count"] == 1
+    assert target_l1.l1_manager_id != source_l1.l1_manager_id
+    owners = {keys[0]: source_l1.l1_manager_id}
+    release = Mock(wraps=source._finish_read_objects)
+    monkeypatch.setattr(source, "_finish_read_objects", release)
+
+    path = str(tmp_path / "read-release.lct")
+    saved_gate = trace_decorator.is_tracing_enabled()
+    recorder = StorageTraceRecorder(path)
+    bus = Mock()
+    # Deliver synchronously through the production subscriber, without a
+    # drain-thread sleep or an alternate serialization path.
+    bus.publish.side_effect = recorder.get_subscriptions()[EventType.TRACE_CALL]
+    try:
+        with monkeypatch.context() as capture:
+            capture.setattr(trace_decorator, "get_event_bus", lambda: bus)
+            source.finish_read_prefetched(keys, read_locks=2, l1_owners=owners)
+    finally:
+        recorder.close()
+        trace_decorator.set_tracing_enabled(saved_gate)
+
+    release.assert_called_once_with(keys, 2, owners)
+    assert release.call_args.args[0] is keys
+    assert release.call_args.args[2] is owners
+    assert source_l1.report_status()["read_locked_count"] == 0
+    with TraceReader(path) as reader:
+        records = list(reader.records())
+    qualname = (
+        "lmcache.v1.distributed.storage_manager.StorageManager.finish_read_prefetched"
+    )
+    assert [record.qualname for record in records] == [qualname]
+    bus.publish.assert_called_once()
+    event = bus.publish.call_args.args[0]
+    assert event.metadata["qualname"] == qualname
+    assert event.metadata["args"] == {"keys": keys, "read_locks": 2}
+    decoded = codecs.decode_args(records[0].args)
+    assert decoded == {"keys": keys, "read_locks": 2}
+    assert recorder.dropped_count == 0
+
+    dispatcher = build_default_dispatcher()
+    assert dispatcher.has(qualname)
+    dispatcher.dispatch(qualname, ReplayContext(target), decoded)
+    assert target_l1.report_status()["read_locked_count"] == 0
+
+
+def test_policy_rejects_repeated_or_unknown_candidates(
+    storage_factory: StorageFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, managers, _ = storage_factory((4096, 4096))
+    config = StorageManagerConfig(
+        L1ManagerConfig(L1MemoryManagerConfig(4096, False, shm_name="")),
+        EvictionConfig("noop"),
+    )
+    attempt = Mock(wraps=managers[0].reserve_write)
+    monkeypatch.setattr(managers[0], "reserve_write", attempt)
+    for candidates in [(managers[0].l1_manager_id,) * 2, (2**62,)]:
+        with pytest.raises(ValueError, match="distinct registered"):
+            StorageManager(
+                config,
+                _l1_managers=managers,
+                _write_policy=OrderedWritePolicy(candidates),
+            )
+    attempt.assert_not_called()
+
+
+def test_write_order_is_captured_at_construction(
+    storage_factory: StorageFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, (primary, _), policy = storage_factory((4096, 4096))
+    policy.manager_ids = (2**62,)
+    selection = Mock(side_effect=AssertionError("policy called on write path"))
+    monkeypatch.setattr(policy, "select_write_targets", selection)
+    objects = store.reserve_write([key(1)], LAYOUT)
+    assert objects[key(1)].get_l1_manager() == primary.l1_manager_id
+    store.finish_write_by_owner(store.prepare_write_completion(objects))
+    selection.assert_not_called()
+
+
+def test_overlapping_reads_preserve_each_selected_owner(
+    storage_factory: StorageFactory,
+) -> None:
+    store, (primary, fallback), _ = storage_factory((4096, 4096))
+    # The first lookup retains the fallback copy. A later store creates the
+    # same key in the primary while that earlier read remains in flight.
+    fallback.reserve_write([key(1)], [False], LAYOUT)
+    fallback.finish_write([key(1)])
+    first = store.query_prefetch_status(
+        store.submit_prefetch_task(single_row_spec([key(1)], LAYOUT), skip_l2=True)
+    )
+    primary.reserve_write([key(1)], [False], LAYOUT)
+    primary.finish_write([key(1)])
+    second = store.query_prefetch_status(
+        store.submit_prefetch_task(single_row_spec([key(1)], LAYOUT), skip_l2=True)
+    )
+    assert first is not None and second is not None
+    assert first.l1_owners == {key(1): fallback.l1_manager_id}
+    assert second.l1_owners == {key(1): primary.l1_manager_id}
+    store.finish_read_by_owner(
+        store.prepare_read_completion([key(1)], second.l1_owners)
+    )
+    assert primary.report_status()["read_locked_count"] == 0
+    assert fallback.report_status()["read_locked_count"] == 1
+    store.finish_read_by_owner(store.prepare_read_completion([key(1)], first.l1_owners))
+    assert fallback.report_status()["read_locked_count"] == 0
+
+
+def test_failed_peer_lookup_releases_earlier_locks(
+    storage_factory: StorageFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, (primary, fallback), _ = storage_factory((4096, 4096))
+    objects = store.reserve_write([key(1)], LAYOUT)
+    store.finish_write_by_owner(store.prepare_write_completion(objects))
+    monkeypatch.setattr(
+        fallback, "reserve_read", Mock(side_effect=RuntimeError("lookup failed"))
+    )
+    with pytest.raises(RuntimeError, match="lookup failed"):
+        store.submit_prefetch_task(single_row_spec([key(1)], LAYOUT, num_kv_readers=4))
+    assert primary.report_status()["read_locked_count"] == 0
+    assert store.memcheck()
+
+
+def test_combined_read_completion_keeps_duplicate_key_owners(
+    storage_factory: StorageFactory,
+) -> None:
+    store, managers, _ = storage_factory((4096, 4096))
+    completion = []
+    for manager in managers:
+        manager.reserve_write([key(1)], [False], LAYOUT)
+        manager.finish_write([key(1)])
+        manager.reserve_read([key(1)])
+        completion.append((manager.l1_manager_id, [key(1)]))
+    store.finish_read_by_owner(completion)
+    assert all(
+        manager.report_status()["read_locked_count"] == 0 for manager in managers
+    )
+
+
+@pytest.mark.parametrize("locked_index", [0, 1])
+def test_delete_reports_a_key_as_skipped_while_any_copy_is_locked(
+    storage_factory: StorageFactory, locked_index: int
+) -> None:
+    store, managers, _ = storage_factory((4096, 4096))
+    keys = [key(1)]
+    for manager in managers:
+        manager.reserve_write(keys, [False], LAYOUT)
+        manager.finish_write(keys)
+    managers[locked_index].reserve_read(keys)
+    assert store.delete_l1_keys(keys) == (0, 1)
+    managers[locked_index].finish_read(keys)
+    assert store.delete_l1_keys(keys) == (1, 0)

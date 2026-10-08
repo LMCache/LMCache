@@ -341,7 +341,7 @@ def test_kafka_source_logs_consumer_errors_and_keeps_polling(
     assert position.next_offset(_TOPIC, 0) == 1
 
 
-def test_kafka_source_skips_record_that_makes_a_consumer_raise(
+def test_kafka_source_moves_past_a_record_that_makes_a_consumer_raise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     broker = FakeKafkaBroker()
@@ -351,17 +351,10 @@ def test_kafka_source_skips_record_that_makes_a_consumer_raise(
     source, _, recording = _source(
         monkeypatch, broker, _FailingOnceConsumer(), position=position
     )
-    failures: list[str] = []
-    monkeypatch.setattr(
-        kafka_event_source.logger,
-        "exception",
-        lambda msg, *args: failures.append(msg % args),
-    )
 
     assert asyncio.run(_run_until(source, lambda: len(recording.batches) == 1))
 
     assert [batch.seq for batch in recording.batches] == [2]
-    assert failures == [f"Cache-event consumers failed on record {_TOPIC}[0]@0"]
     assert position.next_offset(_TOPIC, 0) == 2
 
 

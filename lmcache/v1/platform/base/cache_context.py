@@ -15,6 +15,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar
 import array
+import threading
 
 # Third Party
 import torch
@@ -67,6 +68,39 @@ class BaseCacheContext(ABC):
         self.kv_layer_groups_manager_ = kv_layer_groups_manager
         self.block_ids_buffer_ = block_ids_buffer
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        # Imported worker events, held until the stream wait queued on each
+        # has been consumed (see hold_imported_event / release_imported_event).
+        self._held_imports: dict[int, object] = {}
+        self._next_import_token = 0
+        self._held_imports_lock = threading.Lock()
+
+    def hold_imported_event(self, event: object) -> int:
+        """Keep an imported worker event alive until :meth:`release_imported_event`.
+
+        A stream wait queued on an imported event refers to it until the
+        stream has consumed the wait, so the import must outlive the handler
+        that queued it.
+
+        Args:
+            event: The imported event.
+
+        Returns:
+            The token that releases this import.
+        """
+        with self._held_imports_lock:
+            token = self._next_import_token
+            self._next_import_token += 1
+            self._held_imports[token] = event
+            return token
+
+    def release_imported_event(self, token: int) -> None:
+        """Drop the imported event behind ``token``; its stream wait has drained.
+
+        Args:
+            token: Token returned by :meth:`hold_imported_event`.
+        """
+        with self._held_imports_lock:
+            self._held_imports.pop(token, None)
 
     # ------------------------------------------------------------------
     # Abstract -- subclasses MUST implement
