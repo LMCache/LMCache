@@ -59,6 +59,28 @@ def _hipify_wrapper(source_names: list[str]) -> list[str]:
         is_pytorch_extension=True,
         hipify_extra_files_only=True,
     )
+    # torch's bundled hipify map predates the batched-copy API (CUDA 12.8),
+    # so it leaves these tokens untranslated. ROCm 7.x (HIP 7.15) provides
+    # hipMemcpyBatchAsync with the identical signature, so patch the hipified
+    # output directly for the tokens torch's map does not cover.
+    extra_hip_map = {
+        "cudaMemcpyBatchAsync": "hipMemcpyBatchAsync",
+        "cudaMemcpyAttributes": "hipMemcpyAttributes",
+        "cudaMemcpySrcAccessOrderStream": "hipMemcpySrcAccessOrderStream",
+        "cudaStreamPerThread": "hipStreamPerThread",
+    }
+    for patch_root, _patch_dirs, patch_files in os.walk(HIPIFY_OUT_DIR):
+        for patch_name in patch_files:
+            patch_path = Path(patch_root) / patch_name
+            try:
+                original = patch_path.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+            patched = original
+            for cuda_token, hip_token in extra_hip_map.items():
+                patched = patched.replace(cuda_token, hip_token)
+            if patched != original:
+                patch_path.write_text(patched)
     hipified_sources: list[str] = []
     for source_name in source_names:
         s_abs = os.path.abspath(os.path.join(HIPIFY_OUT_DIR, source_name))

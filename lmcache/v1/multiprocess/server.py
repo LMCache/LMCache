@@ -336,11 +336,16 @@ def run_cache_server(
 
     init_gc_monitor(obs_config.gc_monitor)
 
-    maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
+    maybe_initialize_trace_recorder(
+        event_bus, obs_config, storage_manager_config, instance_id=mp_config.instance_id
+    )
 
     # When the engine-driven path is loaded (auto or engine_driven):
     # apply shm_name from mp_config and verify capacity.
-    if mp_config.supported_transfer_mode != "lmcache_driven":
+    if (
+        mp_config.supported_transfer_mode != "lmcache_driven"
+        and len(storage_manager_config.l1_manager_configs) == 1
+    ):
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
         if mp_config.shm_name is not None:
             mem_cfg.shm_name = mp_config.shm_name
@@ -373,8 +378,10 @@ def run_cache_server(
         storage_manager_config=storage_manager_config,
         chunk_size=mp_config.chunk_size,
         hash_algorithm=mp_config.hash_algorithm,
+        null_block_id=mp_config.null_block_id,
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
+        session_ttl_seconds=mp_config.session_ttl_seconds,
     )
 
     modules = _build_modules(ctx, mp_config, coordinator_config)

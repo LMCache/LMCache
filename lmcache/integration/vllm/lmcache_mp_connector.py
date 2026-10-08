@@ -23,6 +23,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 
 try:
     # Third Party
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorTransferResults,
+    )
+except ImportError:
+    # Older engines consume get_finished() and block-level errors instead.
+    KVConnectorTransferResults = None  # type: ignore[assignment,misc]
+
+try:
+    # Third Party
     from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
 except ImportError:
     # Older vLLM builds do not expose HMA. They cannot route per-group
@@ -359,7 +368,8 @@ def validate_mamba_step_alignment(
     the end of each scheduler step, on the last block the step advanced. A step
     advancing more than one block fills the skipped block-table positions with
     the null block (``MambaManager.allocate_new_blocks``); LMCache handles those
-    safely -- ``store`` never commits an all-null-block chunk and ``retrieve``
+    safely -- the request tracker nulls the slot of a relocated speculative
+    block, ``store`` never commits an all-null-block chunk and ``retrieve``
     loads only each object group's sliding-window suffix -- so
     ``max_num_batched_tokens`` may exceed ``2 * block_size`` (with
     ``--separate-object-groups``). Only the lower bound remains: a step must
@@ -531,7 +541,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
       enters vLLM's waiting queue. Disabled by default.
+    - lmcache.mp.save_decode_cache: also store chunks containing generated
+      tokens. Defaults to False; only complete prompt chunks are stored.
     """
+
+    # Tail block slots vLLM may relocate for one request; 0 means vLLM only
+    # appends. The scheduler role sets it from the vLLM config.
+    _mamba_relocation_window: int = 0
 
     def __init__(
         self,
@@ -560,10 +576,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config = getattr(self, "_kv_cache_config", None)
         validate_mamba_step_alignment(vllm_config, kv_cache_config)
         validate_kv_cache_groups(kv_cache_config)
+        # Flat block errors cannot describe multi-group failures on new vLLM.
+        # Keep single-group reporting so valid partial prefixes remain reusable.
+        self._report_request_errors = (
+            KVConnectorTransferResults is not None
+            and kv_cache_config is not None
+            and len(kv_cache_config.kv_cache_groups) > 1
+        )
 
         group_tokens_per_block = get_group_tokens_per_block(
             vllm_config, kv_cache_config
         )
+        mamba_cache_mode = getattr(vllm_config.cache_config, "mamba_cache_mode", "none")
+        self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
         scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
         )
@@ -571,6 +596,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
+        self._save_decode_cache = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.save_decode_cache", False
+        )
+        if not isinstance(self._save_decode_cache, bool):
+            raise ValueError("lmcache.mp.save_decode_cache must be a boolean")
 
         self._enable_kv_events = bool(
             getattr(vllm_config, "kv_events_config", None) is not None
@@ -698,6 +728,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
             self._kv_cache_events: LMCacheMPKVEvents | None = None
+
+            # Align-mode Mamba keeps one speculative block per draft token at
+            # the tail of a request's block list.
+            spec_config = getattr(vllm_config, "speculative_config", None)
+            self._mamba_relocation_window = (
+                spec_config.num_speculative_tokens or 0
+                if mamba_cache_mode == "align" and spec_config is not None
+                else 0
+            )
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
@@ -1020,6 +1059,32 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> "KVConnectorTransferResults":
+        """Poll completed transfers and report multi-group failures by request.
+
+        Args:
+            finished_req_ids: Requests whose generation has finished in vLLM.
+
+        Returns:
+            Completed sends and receives, with failed multi-group receives also
+            in ``failed_recving``. vLLM aggregates all workers' completions
+            before recovering the request. Single-group errors remain available
+            through ``get_block_ids_with_load_errors``.
+        """
+        assert KVConnectorTransferResults is not None
+        sending, receiving = self.get_finished(finished_req_ids)
+        return KVConnectorTransferResults(
+            finished_sending=set(sending or ()),
+            finished_recving=set(receiving or ()),
+            failed_recving=(
+                self.worker_adapter.get_failed_request_ids()
+                if self._report_request_errors
+                else set()
+            ),
+        )
+
     def build_connector_worker_meta(self):
         if not self.lazy_offload:
             return None
@@ -1035,11 +1100,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
-        Get the set of block IDs that failed to load.
+        Get failed block IDs for single-group or legacy vLLM recovery.
 
         Returns:
             Set of block IDs that encountered load errors.
-            Empty set if no load errors occurred.
+            Empty if no load errors occurred or failures are reported by request.
 
         Notes:
             - Applies to both sync- and async-loading requests.
@@ -1051,6 +1116,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             - Sync loading: failed blocks should be reported in the forward
               pass in which they are detected.
         """
+        if self._report_request_errors:
+            return set()
         return self.worker_adapter.get_block_ids_with_load_errors()
 
     def get_kv_connector_kv_cache_events(self) -> LMCacheMPKVEvents | None:
@@ -1169,9 +1236,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             into account.
         """
         tracker = self._get_or_create_request_tracker(request)
-        # TODO: support loading KV for preempted requests in the future
-        if request.status == RequestStatus.PREEMPTED:
-            return 0, False
 
         # A failed asynchronous load is bypassed until vLLM admits the request
         # for local computation via update_state_after_alloc().  The scheduler
@@ -1214,6 +1278,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
+            reserve_last_token=self._reserve_last_token_for_lookup,
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -1240,12 +1305,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
-        # Update num stored tokens for the tracker
-        tracker.increase_num_stored_tokens(ret)
-
+        tracker.num_stored_tokens = ret
         tracker.num_lmcache_hit_tokens = ret
 
         need_to_load = max(0, ret - num_computed_tokens)
+
+        if request.status == RequestStatus.PREEMPTED:
+            logger.info(
+                "<resume-load> req=%s apc=%d lmcache=%d load=%d",
+                request.request_id,
+                num_computed_tokens,
+                ret,
+                need_to_load,
+            )
 
         # In full-prompt-hit case, we need to recompute the last token.
         # Without this, num_computed_tokens would equal request.num_tokens,
@@ -1278,6 +1350,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
+            reserve_last_token=self._reserve_last_token_for_lookup,
         )
 
     def update_state_after_alloc(
@@ -1316,7 +1389,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             existing = existing_counts.get(engine_group_idx, 0)
             new_block_ids.append(list(group_blocks[existing:]))
         if any(new_block_ids):
-            tracker.append_block_ids(tuple(new_block_ids))
+            tracker.append_block_ids(
+                tuple(new_block_ids), self._mamba_relocation_window
+            )
 
         # Update the state of the tracker
         if tracker.state == LMCacheMPRequestState.BYPASS_LMCACHE:
@@ -1619,6 +1694,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
+                save_decode_cache=self._save_decode_cache,
             )
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
@@ -1641,7 +1717,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # Update block ids
             new_block_ids = cached_reqs.new_block_ids[idx] or ()
             if request_id not in cached_reqs.resumed_req_ids:
-                request_tracker.append_block_ids(new_block_ids)
+                request_tracker.append_block_ids(
+                    new_block_ids, self._mamba_relocation_window
+                )
 
             # Use the incremental num_scheduled_tokens to
             # stay consistent with _process_new_requests.
@@ -1655,6 +1733,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
+                save_decode_cache=self._save_decode_cache,
             )
 
             if r_meta is not None:

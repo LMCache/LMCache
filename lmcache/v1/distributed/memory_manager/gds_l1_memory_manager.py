@@ -87,6 +87,8 @@ class GDSL1MemoryManager:
                 address=address,
                 phy_size=allocated,
                 ref_count=0,
+                shapes=list(layout_desc.shapes),
+                dtypes=list(layout_desc.dtypes),
             )
             objects.append(GDSMemoryObject(meta))
         return L1Error.SUCCESS, objects
@@ -103,6 +105,7 @@ class GDSL1MemoryManager:
         """
         for mo in mem_objs:
             self._address_manager.free(mo.metadata.address, mo.get_physical_size())
+            mo.invalidate()
         return L1Error.SUCCESS
 
     def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:

@@ -765,7 +765,10 @@ class LMCacheMPSchedulerAdapter:
         # It will be lazily started on the first lookup
         # request, by which time vLLM is fully ready.
         self._heartbeat_interval = heartbeat_interval
-        self._heartbeats: dict[str, HeartbeatThread] = {}
+        # ``None`` distinguishes "not started" from a populated per-server
+        # heartbeat map.  An empty map cannot be used as the sentinel because
+        # it is also the natural initial value before any heartbeat is made.
+        self._heartbeats: dict[str, HeartbeatThread] | None = None
         self._heartbeat_lock = threading.Lock()
 
         # For TP/PP: track partial store completions across steps.
@@ -795,6 +798,7 @@ class LMCacheMPSchedulerAdapter:
         with self._heartbeat_lock:
             if self._heartbeats is not None:
                 return
+            heartbeats: dict[str, HeartbeatThread] = {}
             for url, client in self.req_clients.items():
                 hb = HeartbeatThread(
                     req_client=client,
@@ -802,7 +806,8 @@ class LMCacheMPSchedulerAdapter:
                     interval=self._heartbeat_interval,
                 )
                 hb.start()
-                self._heartbeats[url] = hb
+                heartbeats[url] = hb
+            self._heartbeats = heartbeats
 
     @_lmcache_nvtx_annotate
     def maybe_submit_lookup_request(
@@ -811,7 +816,8 @@ class LMCacheMPSchedulerAdapter:
         token_ids: list[int],
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
-    ):
+        reserve_last_token: bool = False,
+    ) -> None:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
 
@@ -827,6 +833,8 @@ class LMCacheMPSchedulerAdapter:
                 cache_salt values produce separate cache entries.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+            reserve_last_token: Whether to exclude the final token before
+                aligning the lookup range.
 
         Returns:
             None
@@ -847,8 +855,9 @@ class LMCacheMPSchedulerAdapter:
             # Skip if there is already a lookup request
             return
 
+        lookup_tokens = max(0, len(token_ids) - int(reserve_last_token))
         aligned_end = (
-            len(token_ids) // self.lmcache_tokens_per_chunk
+            lookup_tokens // self.lmcache_tokens_per_chunk
         ) * self.lmcache_tokens_per_chunk
 
         key = self._create_key(
@@ -1091,8 +1100,9 @@ class LMCacheMPSchedulerAdapter:
         for client in self.req_clients.values():
             client.close()
         with self._heartbeat_lock:
-            for hb in self._heartbeats.values():
-                hb.stop()
+            if self._heartbeats is not None:
+                for hb in self._heartbeats.values():
+                    hb.stop()
 
     def free_lookup_locks(
         self,
@@ -1392,8 +1402,9 @@ class LMCacheMPWorkerAdapter:
         self.store_events: dict[str, _IpcEvent] = {}
         self.retrieve_events: dict[str, _IpcEvent] = {}
 
-        # Block IDs that failed due to retrieve timeout
+        # Alternative error reports, drained together by either public getter.
         self.error_block_ids: set[int] = set()
+        self._failed_request_ids: set[str] = set()
 
         # Retrieve request ids dropped by the unhealthy early-return of
         # submit_retrieve_request. get_finished must still report each id
@@ -1812,8 +1823,8 @@ class LMCacheMPWorkerAdapter:
         Submit a KV cache retrieve request to LMCache
 
         When the server is unhealthy the request is not submitted: blocks
-        are flagged via ``error_block_ids`` (vLLM recomputes) and the id is
-        recorded so ``get_finished`` still reports it exactly once.
+        and request IDs are flagged for vLLM recovery, and ``get_finished``
+        still reports the dropped receive exactly once.
 
         Args:
             request_id: The ID of the request
@@ -1828,6 +1839,7 @@ class LMCacheMPWorkerAdapter:
 
         if not self.is_healthy:
             self.error_block_ids.update(op.flat_block_ids)
+            self._failed_request_ids.add(request_id)
             self._dropped_retrieves.add(request_id)
             return
 
@@ -2014,6 +2026,7 @@ class LMCacheMPWorkerAdapter:
             ) in self.retrieve_futures.items():
                 finished_retrieves.add(request_id)
                 self.error_block_ids.update(r_block_ids)
+                self._failed_request_ids.add(request_id)
             self.store_futures.clear()
             self.retrieve_futures.clear()
             self.store_events.clear()
@@ -2068,6 +2081,7 @@ class LMCacheMPWorkerAdapter:
 
             if not r_result:
                 self.error_block_ids.update(r_block_ids)
+                self._failed_request_ids.add(request_id)
                 logger.error(
                     "Something went wrong when processing the "
                     "retrieve request for request_id=%s, result=%s",
@@ -2146,6 +2160,7 @@ class LMCacheMPWorkerAdapter:
             ) in self.retrieve_futures.items():
                 finished_retrieves.add(request_id)
                 self.error_block_ids.update(r_block_ids)
+                self._failed_request_ids.add(request_id)
             self.store_futures.clear()
             self.retrieve_futures.clear()
             self.store_events.clear()
@@ -2197,6 +2212,7 @@ class LMCacheMPWorkerAdapter:
 
             if not r_result:
                 self.error_block_ids.update(r_block_ids)
+                self._failed_request_ids.add(request_id)
                 logger.error(
                     "Something went wrong when processing the "
                     "retrieve request for request_id=%s, result=%s",
@@ -2287,11 +2303,27 @@ class LMCacheMPWorkerAdapter:
         return self.blocks_in_chunk
 
     def get_block_ids_with_load_errors(self) -> set[int]:
-        """
-        Returns the block IDs that failed due to retrieve timeout,
-        then clears the internal set.
+        """Drain failed receive blocks for single-group or legacy recovery.
+
+        Returns:
+            Failed block IDs since the last drain. Also discards the equivalent
+            request-ID report; call only one of the two error getters per poll.
         """
         errors = self.error_block_ids.copy()
+        self.error_block_ids.clear()
+        self._failed_request_ids.clear()
+        return errors
+
+    def get_failed_request_ids(self) -> set[str]:
+        """Drain failed receives for request-level recovery after polling.
+
+        Returns:
+            Failed request IDs, also reported as completed receives by
+            ``get_finished`` or ``get_finished_with_lazy_offload``. Discards
+            the equivalent block-ID report, which multi-group vLLM rejects.
+        """
+        errors = self._failed_request_ids
+        self._failed_request_ids = set()
         self.error_block_ids.clear()
         return errors
 
