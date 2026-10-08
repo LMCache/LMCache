@@ -19,10 +19,21 @@ are weighed in the standalone comparison doc (`apc_covered_lookup_comparison.md`
 Shared covered-skip mechanics:
 
 - The server (`LookupModule.lookup`) reads `covered_chunks` from the key's
-  `request_configs`, **touches** the covered prefix `[0, c0)` in L1 (via
-  `StorageManager`/`L1Manager`) but does **not** read-lock or L2-prefetch it, and
-  submits a prefetch for only the uncovered sub-range `chunk_hashes[c0:]`; hit
-  counts are offset back to absolute at status time.
+  `request_configs`, **touches** the covered prefix `[0, c0)` but does **not**
+  read-lock or L2-prefetch it, and submits a prefetch for only the uncovered
+  sub-range `chunk_hashes[c0:]`; hit counts are offset back to absolute at status
+  time.
+- The touch spans **both tiers** (`StorageManager.touch_cached_keys` → `L1Manager`
+  **and** every L2 adapter). This matters: a lookup that really loads a key
+  refreshes recency in L1 *and* L2, so if the skip only refreshed L1 the covered
+  keys would look cold to L2 and be evicted — losing data a non-skipping lookup
+  would have kept, and lowering later hit rates. The touch moves no bytes and
+  promotes nothing into L1; each tier ignores keys it does not hold.
+- Consequence by design: the covered prefix is no longer *promoted* into L1 on
+  every lookup (that promotion was the redundant read being removed). It stays
+  wherever it already lives, which frees L1 for data that is actually retrieved.
+  Cache **contents** are unchanged versus the feature being off; only the tier
+  placement of the covered prefix differs.
 - Every lock-release resolves through `resolve_prefetched_obj_keys`, whose
   per-group range start is clamped to `c0`, so a release never drops a lock the
   lookup did not take (which would corrupt a concurrent prefix-sharing request).
@@ -77,7 +88,7 @@ sequenceDiagram
     Note over C: c0 = align(num_computed) then covered_chunks (no pin)
     C->>A: maybe_submit_lookup_request(covered_chunks)
     A->>L: LOOKUP(key, covered_chunks)
-    L->>SM: touch covered [0,c0) - no lock / no prefetch
+    L->>SM: touch covered [0,c0) in L1+L2 - no lock / no prefetch
     L->>SM: reserve_read + prefetch uncovered [c0,end)
     C->>A: check_lookup_result
     A-->>C: LookupOutcome(hit, stored)

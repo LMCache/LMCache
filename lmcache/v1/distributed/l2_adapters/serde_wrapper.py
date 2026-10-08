@@ -240,6 +240,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         self._inner.submit_unlock(keys)
 
+    def touch_keys(self, keys: list[ObjectKey]) -> None:
+        self._inner.touch_keys(keys)
+
     # ------------------------------------------------------------------
     # Load
     # ------------------------------------------------------------------
