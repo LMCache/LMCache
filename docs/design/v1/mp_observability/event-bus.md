@@ -48,7 +48,22 @@ class Event:
     timestamp: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
     session_id: str = ""
+    trace_context: dict[str, str] = field(default_factory=capture_trace_context)
 ```
+
+### Request parent snapshot
+
+`Event.trace_context` stores an optional W3C carrier captured on the publishing
+thread when the event is constructed. It is independent of `metadata`, so
+tracing subscribers can attach the request's parent without exporting headers
+as attributes. Only `traceparent` and `tracestate` are carried. Capture and
+remote extraction require `LMCACHE_MP_TRACE_CONTEXT=1`; the default is off.
+
+The MP request span is created from the first request or CPU submission event.
+This retains the parent even when subsequent GPU callback events have no
+Python context. CacheBlend root parenting is outside this propagation change;
+its subscriber keeps its existing behavior. Existing providers and samplers
+decide which spans are recorded.
 
 ### Timestamp semantics
 
@@ -216,3 +231,12 @@ self._event_bus.publish(Event(
 
 `StorageManager`, by contrast, has no business-logic listeners and publishes
 exclusively to the EventBus.
+
+### Shared RPC key schema compatibility
+
+The optional `IPCCacheServerKey.trace_context` field requires a matching
+`encoded_trace_context` protobuf field. The existing gRPC structural codec
+checks that dataclass and protobuf field counts match, even with tracing off.
+The schema alignment is part of the shared key change; gRPC per-call context
+injection and worker attachment remain a separate transport contribution.
+Regenerate bindings with `grpc_impl/_proto_gen/_generate.py`.

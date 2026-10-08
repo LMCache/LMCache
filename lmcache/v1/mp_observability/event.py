@@ -11,6 +11,9 @@ from enum import Enum
 from typing import Any
 import itertools
 
+# First Party
+from lmcache.v1.mp_observability.propagation import capture_trace_context
+
 
 class EventType(Enum):
     """All observable event types in the MP system.
@@ -180,12 +183,19 @@ class Event:
             see the metadata contracts in
             ``docs/design/v1/mp_observability/event-bus.md`` Section 2.7.
         session_id: Caller-provided ID for correlating start/end pairs.
+        trace_context: Optional W3C headers captured at construction for the
+            tracing subscriber; separate from exported metadata.
     """
 
     event_type: EventType
     timestamp: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
     session_id: str = ""
+    # Capture at event creation, before handing off to a stream/drain thread.
+    # Keep headers out of metadata (which subscribers export as attributes).
+    trace_context: dict[str, str] = field(
+        default_factory=capture_trace_context, repr=False
+    )
 
 
 # A request issues several store/retrieve operations (one per chunked-prefill

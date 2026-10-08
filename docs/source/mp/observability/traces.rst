@@ -32,6 +32,44 @@ View traces in any OTel-compatible backend such as **Jaeger** or
         --l1-size-gb 100 --eviction-policy LRU \
         --enable-tracing --otlp-endpoint http://localhost:4317
 
+Propagate a caller trace over RPC
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Set ``LMCACHE_MP_TRACE_CONTEXT=1`` in both the caller and MP server processes.
+Keep the server's existing ``--enable-tracing --otlp-endpoint <URL>`` flags.
+The caller needs an active OpenTelemetry span when it submits a request that
+contains an ``IPCCacheServerKey``.
+
+The client copies only W3C ``traceparent`` and ``tracestate`` into the request
+key. The server restores that parent in the executing worker and restores the
+previous context when the handler returns or raises. The request key's cache
+identity and the original caller object remain unchanged. Existing key maps
+without headers still decode; older map decoders ignore the extra field.
+
+The shared key's optional protobuf field is kept aligned with its Python
+dataclass. This keeps the existing gRPC structural codec usable even when
+propagation is off. gRPC per-call metadata, described below, supplies the
+caller's parent independently of this shared key field.
+
+Events capture the parent before the EventBus drain thread or an asynchronous
+GPU callback runs. The standard MP subscriber's existing ``request`` span uses this
+snapshot; LMCache does not install another tracer provider or change the
+provider's sampling policy. Invalid headers and values longer than 512
+characters are ignored. Headers are separate from event metadata and are not
+exported as attributes. Prompt content, token values, and baggage are not
+carried by this feature.
+
+gRPC sends the same headers in per-call metadata. This also covers calls
+without a cache key, such as ``end_session``. The server restores context
+inside the synchronous, normal-pool, or affinity-pool handler. It keeps the
+existing affinity identifier and worker scheduling rules. Missing or invalid
+headers use an isolated context when propagation is enabled.
+
+The propagation switch is off by default. Without the OpenTelemetry API,
+request handlers use their original path. This boundary covers keyed ZMQ
+requests, gRPC metadata, and CPU event submission. It does not cover
+CacheBlend root spans, L2 scheduling queues, or native storage backends.
+
 Per-Request Hit-Rate Attributes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
