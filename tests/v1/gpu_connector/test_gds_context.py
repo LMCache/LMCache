@@ -41,7 +41,7 @@ from lmcache.v1.memory_management import GDSMemoryObject
 
 def _fake_stream(handle: int):
     """A stand-in for a platform stream (no accelerator needed)."""
-    return SimpleNamespace(cuda_stream=handle, synchronize=lambda: None)
+    return SimpleNamespace(raw_handle=handle, synchronize=lambda: None)
 
 
 def _use_fake_stream(monkeypatch: pytest.MonkeyPatch, handle: int) -> None:
@@ -54,7 +54,7 @@ def _use_fake_stream(monkeypatch: pytest.MonkeyPatch, handle: int) -> None:
     monkeypatch.setattr(
         gds_context.platform_stream,
         "stream_handle",
-        lambda device, stream: stream.cuda_stream,
+        lambda device, stream: stream.raw_handle,
     )
 
 
