@@ -25,6 +25,8 @@ The temporary directory remains available for the lifetime of the job pod.
 Ordinary Buildkite runs still install LMCache from source. Only when
 both nightly Buildkite builds pass does the nightly record its digest on
 `buildkite_latest_tested_vllm`; failures keep the previous pin.
+Both XPU pipelines print the installed vLLM version in the Buildkite job log
+after setting up LMCache, rather than relying on the image tag.
 The same verified run also records the upstream vLLM XPU base image digest on
 `github_nightly_tested_vllm` for provenance; it is distinct from the CI image.
 Candidate builds pass `XPU_CANDIDATE_IMAGE` to the XPU pod; ordinary builds
