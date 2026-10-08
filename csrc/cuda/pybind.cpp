@@ -266,28 +266,19 @@ PYBIND11_MODULE(cuda_ops, m) {
                  int64_t slot_mapping_capacity, uintptr_t cos_sin_cache,
                  int rot_dim, int rope_num_kv_heads, int64_t rope_head_stride,
                  int key_scalar_type, bool is_neox, int64_t rope_base_offset,
-                 int64_t block_stride_elems) {
+                 int64_t block_stride_elems, int cache_scalar_type) {
                 return CBGroupSpec{
-                    paged_kv_ptrs,
-                    std::move(temp_buffer_ptrs),
-                    num_layers,
-                    slot_tokens,
-                    hidden_elems,
-                    element_size,
+                    paged_kv_ptrs, std::move(temp_buffer_ptrs), num_layers,
+                    slot_tokens, hidden_elems, element_size,
                     static_cast<EngineKVFormat>(engine_kv_format),
-                    page_buffer_size,
-                    block_size,
-                    head_size,
-                    block_stride_elems,
-                    slot_mapping_base,
-                    slot_mapping_capacity,
-                    cos_sin_cache,
-                    rot_dim,
-                    rope_num_kv_heads,
-                    rope_head_stride,
+                    page_buffer_size, block_size, head_size, block_stride_elems,
+                    slot_mapping_base, slot_mapping_capacity, cos_sin_cache,
+                    rot_dim, rope_num_kv_heads, rope_head_stride,
                     key_scalar_type,
-                    is_neox,
-                    rope_base_offset};
+                    // Pre-fp8 planners pass no cache type: the cache dtype
+                    // then equals the KV dtype.
+                    cache_scalar_type < 0 ? key_scalar_type : cache_scalar_type,
+                    is_neox, rope_base_offset};
               }),
           py::arg("paged_kv_ptrs"), py::arg("temp_buffer_ptrs"),
           py::arg("num_layers"), py::arg("slot_tokens"),
@@ -298,7 +289,8 @@ PYBIND11_MODULE(cuda_ops, m) {
           py::arg("cos_sin_cache"), py::arg("rot_dim"),
           py::arg("rope_num_kv_heads"), py::arg("rope_head_stride"),
           py::arg("key_scalar_type"), py::arg("is_neox"),
-          py::arg("rope_base_offset") = 0, py::arg("block_stride_elems") = 0)
+          py::arg("rope_base_offset") = 0, py::arg("block_stride_elems") = 0,
+          py::arg("cache_scalar_type") = -1)
       // Mutable so the Python planner can cache one spec per (context, group)
       // and re-stamp only the per-request slot-mapping tensor between calls;
       // every other field is invariant for the life of the paged registration.

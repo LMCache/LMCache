@@ -345,58 +345,7 @@ class LookupModule:
             )
             return 0
 
-        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if result is None:
-            return None
-        if job.row_windows:
-            found_count, _retain = fold_unfold_grouped(
-                result.hit_cells, job.row_windows
-            )
-            l1_found_count, _l1_retain = fold_unfold_grouped(
-                result.l1_hit_cells, job.row_windows
-            )
-        else:
-            # Nothing was submitted (early exit), so nothing can be hit.
-            found_count = 0
-            l1_found_count = 0
-
-        # Record the model-wide hit length on the session so a later
-        # free_lookup_locks can reconstruct which keys the prefetch
-        # read-locked (see ``unfold``: full-attention groups lock the whole
-        # hit prefix, sliding-window groups only its in-window suffix).
-        session = self._ctx.session_manager.get_or_create(job.request_id)
-        session.record_prefetch_result(
-            found_count,
-            tuple(range(job.attn_desc.num_object_groups)),
-        )
-
-        # L1 is credited with the prefix its own cells serve under the same
-        # window rule; L2 with however far it extended that prefix.
-        l1_chunks = min(l1_found_count, found_count)
-        l2_chunks = found_count - l1_chunks
-        self._ctx.event_bus.publish(
-            Event(
-                event_type=EventType.MP_LOOKUP_PREFETCH_END,
-                session_id=job.request_id,
-                metadata={
-                    "found_count": found_count,
-                    "requested_tokens": job.requested_tokens,
-                    "hit_tokens": found_count * self._ctx.chunk_size,
-                    "l1_hit_tokens": l1_chunks * self._ctx.chunk_size,
-                    "l2_hit_tokens": l2_chunks * self._ctx.chunk_size,
-                    "l1_hit_keys": result.l1_hit_count,
-                    "l2_hit_keys": result.l2_hit_count,
-                    "early_exit_reason": job.early_exit_reason,
-                    "model_name": job.model_name,
-                    "cache_salt": job.cache_salt,
-                },
-            )
-        )
-
-        with self._prefetch_job_lock:
-            self._prefetch_jobs.pop(request_id, None)
-
-        return found_count
+        return self._consume_prefetch_result(job)
 
     @request_handler(HandlerType.BLOCKING)
     def wait_prefetch_status(
@@ -450,6 +399,12 @@ class LookupModule:
         Releases the same per-object count the lookup reserved
         (``key.num_kv_readers``).
 
+        The release is derived from the lookup result recorded on the
+        session (hit length, lock model, L1 owners). If that result has not
+        been consumed yet it is handed over here first. While the prefetch
+        is still running nothing is released: its locks still belong to the
+        prefetch controller and expire with the read-lock TTL.
+
         Args:
             key: Cache key whose read locks should be released.
             tp_size: Legacy wire field; ignored (kept for payload arity).
@@ -457,29 +412,50 @@ class LookupModule:
         if key.start >= key.end:
             return
 
-        hit_chunks = self._ctx.session_manager.get_or_create(
-            key.request_id
-        ).prefetch_hit_chunks
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        if session.prefetch_hit_chunks < 0:
+            # The lookup result has not reached the session yet (no
+            # QUERY/WAIT_PREFETCH_STATUS consumed it). Hand it over now so
+            # the release below sees the real hit length, lock model and L1
+            # owners. While the prefetch is still running its locks belong
+            # to the prefetch controller, which settles them itself in
+            # _finish_request; releasing them here would double-decrement,
+            # so leave them to the controller and the read-lock TTL.
+            with self._prefetch_job_lock:
+                job = self._prefetch_jobs.get(key.request_id)
+            if job is not None and self._consume_prefetch_result(job) is None:
+                logger.warning(
+                    "free_lookup_locks for request %s while its prefetch is "
+                    "still running; leaving its locks to the prefetch controller",
+                    key.request_id,
+                )
+                return
+
+        hit_chunks = session.prefetch_hit_chunks
         if hit_chunks < 0:
+            # No lookup result exists (never looked up, or the session was
+            # recreated after END_SESSION). L1 locks are anonymous refcounts:
+            # guessing a range could strip a concurrent reader's lock.
             logger.warning(
-                "free_lookup_locks for request %s before its prefetch result "
-                "was consumed; releasing full-attention groups only",
+                "free_lookup_locks for request %s without a lookup result; "
+                "nothing to release",
                 key.request_id,
             )
+            return
 
         # Release exactly the groups the prefetch locked (std lookup: all;
         # CB prefix leg: its prefix set) -- releasing an unlocked group
         # would drop another request's lock on the shared object key.
-        locked_gids = self._ctx.session_manager.get_or_create(
-            key.request_id
-        ).prefetch_locked_gids
-        obj_keys = resolve_prefetched_obj_keys(self._ctx, key, hit_chunks, locked_gids)
-
+        obj_keys = resolve_prefetched_obj_keys(
+            self._ctx, key, hit_chunks, session.prefetch_locked_gids
+        )
         if not obj_keys:
             return
 
         self._ctx.storage_manager.finish_read_prefetched(
-            obj_keys, read_locks=key.require_num_kv_readers()
+            obj_keys,
+            read_locks=key.require_num_kv_readers(),
+            l1_owners=self._ctx.get_read_owners(key.request_id),
         )
 
     @request_handler(HandlerType.BLOCKING)
@@ -551,6 +527,74 @@ class LookupModule:
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:
         with self._prefetch_job_lock:
             self._prefetch_jobs[job.request_id] = job
+
+    def _consume_prefetch_result(self, job: _PrefetchJob) -> int | None:
+        """Hand a finished prefetch result over to the request's session.
+
+        Takes the result from the storage manager (each result is returned
+        once), records the model-wide hit length, lock model and retained L1
+        owners on the session, emits ``MP_LOOKUP_PREFETCH_END`` and drops the
+        job. This is the only path that moves lookup state into the session,
+        so ``query_prefetch_status`` and ``free_lookup_locks`` cannot disagree
+        about what a lookup locked.
+
+        Returns:
+            The hit chunk count, or None while the prefetch is still running
+            (the job is kept so a later call can resolve it).
+        """
+        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        if result is None:
+            return None
+        if job.row_windows:
+            found_count, _retain = fold_unfold_grouped(
+                result.hit_cells, job.row_windows
+            )
+            l1_found_count, _l1_retain = fold_unfold_grouped(
+                result.l1_hit_cells, job.row_windows
+            )
+        else:
+            # Nothing was submitted (early exit), so nothing can be hit.
+            found_count = 0
+            l1_found_count = 0
+
+        # Record the model-wide hit length on the session so a later
+        # free_lookup_locks can reconstruct which keys the prefetch
+        # read-locked (see ``unfold``: full-attention groups lock the whole
+        # hit prefix, sliding-window groups only its in-window suffix).
+        session = self._ctx.session_manager.get_or_create(job.request_id)
+        session.record_prefetch_result(
+            found_count,
+            tuple(range(job.attn_desc.num_object_groups)),
+            result.l1_owners,
+        )
+
+        # L1 is credited with the prefix its own cells serve under the same
+        # window rule; L2 with however far it extended that prefix.
+        l1_chunks = min(l1_found_count, found_count)
+        l2_chunks = found_count - l1_chunks
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id=job.request_id,
+                metadata={
+                    "found_count": found_count,
+                    "requested_tokens": job.requested_tokens,
+                    "hit_tokens": found_count * self._ctx.chunk_size,
+                    "l1_hit_tokens": l1_chunks * self._ctx.chunk_size,
+                    "l2_hit_tokens": l2_chunks * self._ctx.chunk_size,
+                    "l1_hit_keys": result.l1_hit_count,
+                    "l2_hit_keys": result.l2_hit_count,
+                    "early_exit_reason": job.early_exit_reason,
+                    "model_name": job.model_name,
+                    "cache_salt": job.cache_salt,
+                },
+            )
+        )
+
+        with self._prefetch_job_lock:
+            self._prefetch_jobs.pop(job.request_id, None)
+
+        return found_count
 
     def _active_prefetch_count(self) -> int:
         """Return the number of active prefetch jobs (thread-safe)."""

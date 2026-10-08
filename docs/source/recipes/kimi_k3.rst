@@ -17,6 +17,8 @@ Validated models
 
 - `moonshotai/Kimi-K3 <https://huggingface.co/moonshotai/Kimi-K3>`_
   (8× NVIDIA B300)
+- `moonshotai/Kimi-K3 <https://huggingface.co/moonshotai/Kimi-K3>`_ MXFP4
+  (8× AMD MI355X, ROCm 10, TP 8 / DCP 8, fp8 KV cache)
 
 .. tab-set::
    :sync-group: engine
@@ -151,6 +153,26 @@ Validated models
       needed; ``LMCacheMPConnector`` advertises hybrid support and vLLM
       auto-selects the KDA and MLA backends. For the generic LMCache + vLLM
       wiring (ports, remote hosts), see :doc:`../getting_started/quickstart`.
+
+      **AMD MI355X / ROCm 10 (TP 8, decode context parallel 8).** Validated
+      under a 70-concurrency agentic trace with a 1.8 TB L1:
+
+      - The ``+rocm7.2`` LMCache wheel loads on ROCm 10 (its native extensions
+        link ``libamdhip64.so.7``, which ROCm 10 still ships).
+      - With DCP 8 and fp8 KV the MLA group registers 12288 tokens per block;
+        ``--chunk-size 12288`` (with ``--separate-object-groups``) works.
+      - Set ``--l1-init-size-gb`` equal to ``--l1-size-gb`` for a terabyte-scale
+        L1. With the default lazy expansion the server keeps pinning host
+        memory while vLLM registers its KV caches, and the GPU mappings can
+        stall in the driver for minutes (heartbeats time out and the connector
+        drops into degraded mode). Eager pinning finishes before vLLM starts.
+      - Under deep queues a request can wait many minutes between its lookup
+        and its retrieve. Raise ``--l1-read-ttl-seconds`` and
+        ``--session-ttl-seconds`` above that delay (``7200`` here); with the
+        defaults (300 / 600) the prefetch read locks expire before the
+        retrieve, which fails with ``KEY_NOT_READABLE`` and is reported to vLLM
+        as ``invalid_block_ids`` -- fatal for a hybrid model with several KV
+        cache groups.
 
       If there are any issues with vLLM setup, please refer to the
       `vLLM Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_

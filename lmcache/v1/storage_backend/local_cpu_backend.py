@@ -272,12 +272,31 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return True
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
+        """
+        Remove a memory object from the hot cache.
+
+        A forced remove also releases any lookup pins the object still holds.
+        The lookup ledger tracks keys, so once the key is dropped no later
+        ``unpin(key)`` can reach the object. An internal eviction
+        (``force=False``) keeps the pins: pinned objects are filtered out by
+        ``can_evict`` before they reach this path.
+
+        :param CacheEngineKey key: The key of the MemoryObj.
+        :param bool force: Whether it is a forced remove from the external.
+
+        :return: a bool indicates whether remove is successful.
+        """
         lock_context = self.cpu_lock if force else nullcontext()
         with lock_context:
             if key not in self.hot_cache:
                 return False
 
             memory_obj = self.hot_cache.pop(key)
+            if force:
+                # Forced removal abandons the entry, so no later key-based
+                # unpin can reach it. Release the lookup pins it still holds.
+                while memory_obj.is_pinned:
+                    memory_obj.unpin()
             memory_obj.ref_count_down()
 
             if force:

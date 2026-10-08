@@ -5,6 +5,7 @@ Overview
    :hidden:
 
    request_transport
+   multi_l1
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
 vLLM instances reach through a configurable ZMQ or gRPC request transport.
@@ -342,6 +343,9 @@ methods:
   ``WAIT_PREFETCH_STATUS`` RPC to avoid busy-polling on the load path.
 - ``read_prefetched_results()`` / ``finish_read_prefetched()`` -- Read
   prefetched data from L1 with automatic lock management.
+
+See :doc:`multi_l1` for the internal write-overflow and ownership foundations.
+Normal serving still uses one L1.
 
 L1Manager
 ~~~~~~~~~
