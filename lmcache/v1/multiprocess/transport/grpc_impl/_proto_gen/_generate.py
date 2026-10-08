@@ -1,16 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Generate Python gRPC bindings from the multiprocess service schemas."""
+"""Generate Python gRPC bindings from LMCache service schemas.
+
+Each ``_proto_gen`` package is generated from the ``protos`` directory next to
+it. Without arguments this builds every package in ``GENERATED_PACKAGES``; pass
+package names to build only those.
+"""
 
 # Standard
 from pathlib import Path
+import argparse
 import re
 import subprocess
 import sys
 
 GENERATED_DIR = Path(__file__).resolve().parent
-PROTO_DIR = GENERATED_DIR.parent / "protos"
 PROJECT_ROOT = GENERATED_DIR.parents[5]
 GENERATED_PACKAGE = "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen"
+GENERATED_PACKAGES = (
+    GENERATED_PACKAGE,
+    "lmcache.v1.memory_orchestrator._proto_gen",
+)
 
 SPDX_HEADER = "# SPDX-License-Identifier: Apache-2.0\n"
 MYPY_IGNORE = "# mypy: ignore-errors\n"
@@ -23,6 +32,11 @@ FLAT_PB2_IMPORT_RE = re.compile(
 )
 
 
+def _package_dir(generated_package: str) -> Path:
+    """Return the source directory of a package under ``PROJECT_ROOT``."""
+    return PROJECT_ROOT.joinpath(*generated_package.split("."))
+
+
 def _generated_files(directory: Path) -> tuple[Path, ...]:
     """Return generated protobuf modules, stubs, and gRPC modules."""
     return (
@@ -32,17 +46,17 @@ def _generated_files(directory: Path) -> tuple[Path, ...]:
     )
 
 
-def _cleanup_generated_files() -> None:
+def _cleanup_generated_files(generated_dir: Path, proto_dir: Path) -> None:
     """Remove current output and legacy output next to the proto sources."""
-    for path in _generated_files(GENERATED_DIR) + _generated_files(PROTO_DIR):
+    for path in _generated_files(generated_dir) + _generated_files(proto_dir):
         path.unlink(missing_ok=True)
 
 
-def _patch_generated_file(path: Path) -> None:
+def _patch_generated_file(path: Path, generated_package: str) -> None:
     """Make generated imports package-safe and add repository headers."""
     text = path.read_text()
     text = FLAT_PB2_IMPORT_RE.sub(
-        rf"from {GENERATED_PACKAGE} import \1 as \2",
+        rf"from {generated_package} import \1 as \2",
         text,
     )
     prefix = ""
@@ -61,7 +75,10 @@ def _patch_generated_file(path: Path) -> None:
     path.write_text(prefix + text)
 
 
-def _check_generated_imports(generated_files: tuple[Path, ...]) -> bool:
+def _check_generated_imports(
+    generated_files: tuple[Path, ...],
+    generated_package: str = GENERATED_PACKAGE,
+) -> bool:
     """Import generated modules without importing ``lmcache.__init__``."""
     module_names = tuple(path.stem for path in generated_files if path.suffix == ".py")
     script = f"""
@@ -70,9 +87,9 @@ import importlib
 import sys
 import types
 
-package = {GENERATED_PACKAGE!r}
+package = {generated_package!r}
 project_root = Path({str(PROJECT_ROOT)!r})
-generated_dir = Path({str(GENERATED_DIR)!r})
+generated_dir = Path({str(_package_dir(generated_package))!r})
 parts = package.split(".")
 
 for index in range(1, len(parts) + 1):
@@ -97,45 +114,57 @@ for stem in {module_names!r}:
     return subprocess.call([sys.executable, "-c", script], cwd=PROJECT_ROOT) == 0
 
 
-def generate() -> None:
-    """Generate all protobuf and gRPC modules under ``_proto_gen``.
+def generate(generated_package: str = GENERATED_PACKAGE) -> None:
+    """Generate all protobuf and gRPC modules of one ``_proto_gen`` package.
 
-    Returns:
-        None.
+    Args:
+        generated_package: Dotted name of the package that receives the
+            generated modules; its directory must exist under the project
+            root. Defaults to the multiprocess transport bindings.
 
     Raises:
         RuntimeError: If no schemas exist, compilation fails, or a generated
             module cannot be imported.
     """
-    proto_files = tuple(sorted(PROTO_DIR.glob("*.proto")))
+    generated_dir = _package_dir(generated_package)
+    proto_dir = generated_dir.parent / "protos"
+    proto_files = tuple(sorted(proto_dir.glob("*.proto")))
     if not proto_files:
-        raise RuntimeError(f"No proto sources found under {PROTO_DIR}")
+        raise RuntimeError(f"No proto sources found under {proto_dir}")
 
     # Third Party
     from grpc_tools import protoc
 
-    _cleanup_generated_files()
+    _cleanup_generated_files(generated_dir, proto_dir)
     result = protoc.main(
         [
             "grpc_tools.protoc",
-            f"-I{PROTO_DIR}",
-            f"--python_out={GENERATED_DIR}",
-            f"--pyi_out={GENERATED_DIR}",
-            f"--grpc_python_out={GENERATED_DIR}",
+            f"-I{proto_dir}",
+            f"--python_out={generated_dir}",
+            f"--pyi_out={generated_dir}",
+            f"--grpc_python_out={generated_dir}",
             *(str(path) for path in proto_files),
         ]
     )
     if result != 0:
         raise RuntimeError(f"grpc_tools.protoc failed with exit code {result}")
 
-    generated_files = _generated_files(GENERATED_DIR)
+    generated_files = _generated_files(generated_dir)
     for path in generated_files:
-        _patch_generated_file(path)
+        _patch_generated_file(path, generated_package)
 
-    if not _check_generated_imports(generated_files):
-        _cleanup_generated_files()
+    if not _check_generated_imports(generated_files, generated_package):
+        _cleanup_generated_files(generated_dir, proto_dir)
         raise RuntimeError("Generated gRPC modules failed their import check")
 
 
 if __name__ == "__main__":
-    generate()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "generated_packages",
+        nargs="*",
+        default=GENERATED_PACKAGES,
+        help="Dotted names of the _proto_gen packages to build (default: all).",
+    )
+    for package in parser.parse_args().generated_packages:
+        generate(package)
