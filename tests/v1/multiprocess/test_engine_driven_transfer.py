@@ -15,6 +15,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.custom_types import (
     PrepareRetrieveResponse,
@@ -1021,6 +1022,62 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="kv_caches is empty"):
         compute_kv_layout({})
+
+
+def test_sglang_unified_gather_scatter_roundtrip() -> None:
+    """Engine-driven copies preserve SGLang's independent K/V components."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context.base import (
+        compute_kv_layout,
+        gather_paged_kv_to_cpu,
+        scatter_cpu_to_paged_kv,
+    )
+
+    shape = (8, 4, 2, 3)
+    numel = 8 * 4 * 2 * 3
+    source = {
+        "k_0": torch.arange(numel, dtype=torch.float32)
+        .reshape(shape)
+        .to(torch_device_type),
+        "v_0": torch.arange(numel, dtype=torch.float32)
+        .add(numel)
+        .reshape(shape)
+        .to(torch_device_type),
+    }
+    layout_hints: LayoutHints = {"kv_list_layout": "unified"}
+    block_size, num_layers, hidden_dim, _, engine_kv_format, kv_size = (
+        compute_kv_layout(
+            source,
+            layout_hints=layout_hints,
+            engine_type=EngineType.SGLANG,
+        )
+    )
+
+    assert (block_size, num_layers, hidden_dim, kv_size) == (4, 2, 6, 1)
+    assert engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS
+
+    gathered = gather_paged_kv_to_cpu(
+        source,
+        [0, 1],
+        blocks_per_chunk=2,
+        layout_hints=layout_hints,
+        engine_kv_format=engine_kv_format,
+        engine_type=EngineType.SGLANG,
+    )
+    destination = {name: torch.zeros_like(tensor) for name, tensor in source.items()}
+    scatter_cpu_to_paged_kv(
+        destination,
+        [4, 5],
+        gathered,
+        blocks_per_chunk=2,
+        layout_hints=layout_hints,
+        engine_kv_format=engine_kv_format,
+        engine_type=EngineType.SGLANG,
+    )
+
+    for name in source:
+        assert torch.equal(source[name][0], destination[name][4])
+        assert torch.equal(source[name][1], destination[name][5])
 
 
 @pytest.mark.parametrize(

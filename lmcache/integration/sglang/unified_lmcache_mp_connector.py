@@ -62,7 +62,7 @@ class _ImmediateFuture:
 
 
 class UnifiedLMCacheMPConnector:
-    """Asynchronous, CUDA-IPC connector to a standalone LMCache server."""
+    """Multiprocess connector from SGLang to a standalone LMCache server."""
 
     def __init__(
         self,
@@ -240,6 +240,9 @@ class UnifiedLMCacheMPConnector:
                 _DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
             )
         )
+        self._mp_transfer_mode = config.get_extra_config_value(  # type: ignore[attr-defined]
+            "lmcache.mp.mp_transfer_mode", None
+        )
         if any(
             group.recurrent_state or group.sliding_window_size >= 0
             for group in wire_groups
@@ -302,7 +305,6 @@ class UnifiedLMCacheMPConnector:
         ) = self._build_engine_group_info_specs()
         self._req_client = RequestClientFactory.create(self.server_url)
         self._transfer_ctx: Optional["TransferContext"] = None
-        self._event_backend: Any = None
         self._registered = False
         self._closed = False
         self._lookups: dict[str, LMCacheLookupOperation] = {}
@@ -530,17 +532,14 @@ class UnifiedLMCacheMPConnector:
         from lmcache.utils import EngineType
         from lmcache.v1.multiprocess.group_view import EngineGroupInfo
         from lmcache.v1.multiprocess.transfer_context import create_transfer_context
-        from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 
         if self._registered:
             raise RuntimeError("LMCache KV tensors are already registered")
-        self._event_backend = get_event_ipc_backend(self.device)
-        self._event_backend.check_event_support(self.device)
         transfer_ctx = create_transfer_context(
             self._kv_caches,
             instance_id=self.instance_id,
             req_client=self._req_client,
-            mode="lmcache_driven",
+            mode=self._mp_transfer_mode,
         )
         self._transfer_ctx = transfer_ctx
         engine_group_infos = [
@@ -598,13 +597,6 @@ class UnifiedLMCacheMPConnector:
             heartbeat_thread.start()
             self._heartbeat_thread = heartbeat_thread
             logger.info("LMCache MP heartbeat thread started")
-
-    def _new_event(self, stream: Any = None) -> Any:
-        event = self._event_backend.create_event(self.device)
-        if stream is None:
-            stream = torch.get_device_module(self.device).current_stream()
-        self._event_backend.record_event(event, stream)
-        return event
 
     def _create_key(
         self,
@@ -886,11 +878,7 @@ class UnifiedLMCacheMPConnector:
             transfer_ctx = self._transfer_ctx
             if transfer_ctx is None:
                 raise RuntimeError("LMCache KV tensors are not registered")
-            event = (
-                self._new_event()
-                if producer_stream is None
-                else self._new_event(producer_stream)
-            )
+            event = self._create_recorded_event(transfer_ctx, producer_stream)
             future = transfer_ctx.submit_retrieve(
                 operation.request_id,
                 key,
@@ -941,11 +929,11 @@ class UnifiedLMCacheMPConnector:
             otherwise ``False``.
 
         Notes:
-            Waiting for the raw MQ response imports the LMCache server's
-            completion event. Device completion is then ordered with a stream
-            wait, so the CPU does not wait for H2D. On a cross-rank failure the
-            successful ranks synchronize their local work before the caller
-            releases destination slots.
+            LMCache-driven retrieval imports the server's completion event and
+            orders it on ``stream`` without a CPU device synchronization.
+            Engine-driven retrieval completes its worker-side scatter before
+            returning its plain future. On a cross-rank failure, successful
+            ranks synchronize local work before destination slots are released.
         """
         local_success = False
         try:
@@ -1121,7 +1109,7 @@ class UnifiedLMCacheMPConnector:
                 key = self._create_key(
                     lookup, start=start, end=aligned_end, worker_id=self.kv_worker_id
                 )
-                event = self._new_event()
+                event = transfer_ctx.create_recorded_event()
                 future = transfer_ctx.submit_store(
                     request_id,
                     key,
@@ -1260,3 +1248,13 @@ class UnifiedLMCacheMPConnector:
             transfer_ctx.close()
             self._transfer_ctx = None
         self._req_client.close()
+
+    def _create_recorded_event(
+        self, transfer_ctx: "TransferContext", stream: Any = None
+    ) -> Any:
+        """Create a context-owned event on an optional SGLang producer stream."""
+        if stream is None:
+            return transfer_ctx.create_recorded_event()
+        device_module = torch.get_device_module(self.device)
+        with device_module.stream(stream):
+            return transfer_ctx.create_recorded_event()

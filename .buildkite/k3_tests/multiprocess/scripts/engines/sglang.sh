@@ -4,8 +4,11 @@
 export ENGINE_NAME="SGLang"
 export ENGINE_DEFAULT_MODEL="Qwen/Qwen3-14B"
 
-ENGINE_SUPPORTED_TRANSFER_MODES=(lmcache_driven)
+ENGINE_SUPPORTED_TRANSFER_MODES=(lmcache_driven engine_driven)
 ENGINE_SUPPORTED_REQUEST_TRANSPORTS=(zmq grpc)
+
+# TODO(chunxiaozheng): Enable engine-driven hybrid-model coverage after the
+# shared EngineDrivenTransferContext supports multiple transfer groups.
 
 # These common workloads need engine behavior that the unified SGLang
 # integration does not expose yet. Keep the exceptions explicit so a manual
@@ -41,11 +44,6 @@ engine_configure_defaults() {
     export ENGINE_LOG_FILE="${ENGINE_LOG_FILE:-/tmp/build_${BUILD_ID:-local_$$}_sglang.log}"
     export ENGINE_BASELINE_LOG_FILE="${ENGINE_BASELINE_LOG_FILE:-/tmp/build_${BUILD_ID:-local_$$}_sglang_baseline.log}"
     export SGLANG_LMCACHE_CONFIG_FILE="${SGLANG_LMCACHE_CONFIG_FILE:-/tmp/lmcache_sglang_${BUILD_ID:-local_$$}.yaml}"
-
-    if [[ "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}" != "lmcache_driven" ]]; then
-        echo "SGLang unified LMCache integration supports only lmcache_driven mode" >&2
-        return 1
-    fi
 }
 
 engine_configure_workload() {
@@ -140,6 +138,7 @@ mp_host: ${LMCACHE_REQUEST_SCHEME}://127.0.0.1
 mp_port: ${LMCACHE_PORT}
 extra_config:
   lmcache.mp.mq_timeout: ${LMCACHE_MP_MQ_TIMEOUT:-60}
+  lmcache.mp.mp_transfer_mode: ${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}
 EOF
 }
 

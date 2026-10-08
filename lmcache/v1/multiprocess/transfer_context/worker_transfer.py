@@ -782,6 +782,7 @@ class EngineDrivenTransferContext(TransferContext):
         self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
+        self._engine_type = EngineType.VLLM
 
     @property
     def engine_driven_context(self) -> EngineDrivenContext:
@@ -815,7 +816,6 @@ class EngineDrivenTransferContext(TransferContext):
         group transfers at store / retrieve time (see
         ``_single_group_block_ids``).
         """
-        del engine_type  # unused on the engine-driven path
         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
         # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
         # on the CUDA path. The non-CUDA path is yet to be implemented.
@@ -826,9 +826,14 @@ class EngineDrivenTransferContext(TransferContext):
             dtype_str,
             engine_kv_format,
             kv_size,
-        ) = compute_kv_layout(kv_caches, layout_hints=layout_hints)
+        ) = compute_kv_layout(
+            kv_caches,
+            layout_hints=layout_hints,
+            engine_type=engine_type,
+        )
         self._layout_hints = layout_hints
         self._engine_kv_format = engine_kv_format
+        self._engine_type = engine_type
 
         # The wire field is named use_mla but only drives the object plane
         # count: single-plane (kv_size == 1) covers MLA and fused-K/V formats.
@@ -948,6 +953,7 @@ class EngineDrivenTransferContext(TransferContext):
             engine_kv_format=self._engine_kv_format,
             out=out_buffers,
             chunk_indices=chunk_indices,
+            engine_type=self._engine_type,
         )
         # Gather issues async device->CPU copies on BOTH transports: into the
         # SHM slots when out_buffers is given, otherwise into fresh buffers that
@@ -994,6 +1000,7 @@ class EngineDrivenTransferContext(TransferContext):
                     skip_first_n_tokens=skip_first_n_tokens,
                     layout_hints=self._layout_hints,
                     engine_kv_format=self._engine_kv_format,
+                    engine_type=self._engine_type,
                 )
             except (RuntimeError, ValueError, TypeError, IndexError):
                 logger.exception("Failed to scatter retrieved CPU context chunks")

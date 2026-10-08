@@ -294,6 +294,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             engine_kv_format=self._engine_kv_format,
                             out=gather_target,
                             chunk_indices=chunk_indices,
+                            engine_type=self._engine_type,
                         )
 
                         gather_done = torch_dev.Event()
