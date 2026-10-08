@@ -529,3 +529,42 @@ def test_generated_grpc_services_communicate_end_to_end(
     assert client.p2p_query_lookup_results(task_id).result(5) == [
         TransferChannelAddress(offset=8, size=16)
     ]
+
+
+def test_optional_trace_key_field_is_wire_compatible() -> None:
+    """Old protobuf peers ignore tracing; new peers read keys without it."""
+    # Third Party
+    from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+
+    # First Party
+    from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import common_pb2
+
+    legacy_file = descriptor_pb2.FileDescriptorProto()
+    legacy_file.ParseFromString(common_pb2.DESCRIPTOR.serialized_pb)
+    key_descriptor = next(
+        message
+        for message in legacy_file.message_type
+        if message.name == "IpcCacheServerKey"
+    )
+    assert key_descriptor.field[-1].number == 11
+    assert key_descriptor.oneof_decl[-1].name == "_encoded_trace_context"
+    del key_descriptor.field[-1]
+    del key_descriptor.oneof_decl[-1]
+    pool = descriptor_pool.DescriptorPool()
+    pool.Add(legacy_file)
+    legacy_type = message_factory.GetMessageClass(
+        pool.FindMessageTypeByName("lmcache.mp.IpcCacheServerKey")
+    )
+    current = common_pb2.IpcCacheServerKey(
+        model_name="model",
+        world_size=1,
+        token_ids=[1, 2],
+        encoded_trace_context=b"synthetic trace headers",
+    )
+    legacy = legacy_type()
+    legacy.ParseFromString(current.SerializeToString())
+    assert legacy.model_name == "model" and list(legacy.token_ids) == [1, 2]
+    assert "encoded_trace_context" not in legacy.DESCRIPTOR.fields_by_name
+    old_sender = legacy_type(model_name="model", world_size=1, token_ids=[1, 2])
+    current.ParseFromString(old_sender.SerializeToString())
+    assert not current.HasField("encoded_trace_context")
