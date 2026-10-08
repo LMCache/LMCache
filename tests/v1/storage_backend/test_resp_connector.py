@@ -10,6 +10,7 @@ These tests verify the RESP protocol client implementation, including:
 """
 
 # Standard
+from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
@@ -373,9 +374,23 @@ def test_resp_connector_different_chunk_sizes(resp_url, autorelease_v1):
 
 
 def test_resp_connector_nonexistent_key(
-    resp_url, local_backend, resp_config, autorelease_v1
-):
-    """Test getting a non-existent key returns None."""
+    resp_url: str,
+    local_backend: LocalCPUBackend,
+    resp_config: LMCacheEngineConfig,
+    autorelease_v1: Callable[[Any], Any],
+) -> None:
+    """Verify missing keys return None or raise a RESP error.
+
+    Args:
+        resp_url: Mock RESP endpoint URL.
+        local_backend: CPU backend used to allocate retrieved data.
+        resp_config: Configuration for the RESP connector.
+        autorelease_v1: Fixture factory that registers connectors for cleanup.
+
+    Raises:
+        AssertionError: An operation times out, the key exists, or get returns
+            a non-None result.
+    """
     async_loop, async_thread = init_asyncio_loop()
 
     try:
@@ -399,10 +414,14 @@ def test_resp_connector_nonexistent_key(
 
         try:
             result = _wait_for_future(future, "get", async_loop, async_thread)
-            assert result is None, "Getting non-existent key should return None"
+        except AssertionError:
+            # Preserve timeout failures from the bounded wait.
+            raise
         except Exception:
             # RESP might throw an error for missing keys, which is also acceptable
             pass
+        else:
+            assert result is None, "Getting non-existent key should return None"
 
     finally:
         close_asyncio_loop(async_loop, async_thread)
