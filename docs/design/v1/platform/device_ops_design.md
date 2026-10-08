@@ -40,14 +40,19 @@ what it accelerates and inherits the torch baseline for everything else.
 
 Plain instance methods + inheritance:
 
-- The base defines all 36 ops as **explicit instance methods** that delegate to
-  `torch_ops` (the migrated torch/CPU baseline).
+- The base defines every op as an **explicit instance method**. Portable ops
+  delegate to `torch_ops`; device-only capabilities fail explicitly in the
+  base class.
 - A subclass overrides only what it accelerates with a normal method; everything
   else inherits the baseline via MRO.
 - Whole-module backends (CUDA, XPU) call `self.bind_native(module)` in
   `ensure_native()` — native callables shadow the baseline as instance attrs.
   Partial backends (XPU: 12 SYCL + 24 torch) shadow only what they ship.
-  Single-op backends (MUSA) override one method directly.
+  Focused backends (MUSA) override individual methods directly.
+- Raw-pointer tensor construction is resolved through
+  `DeviceOps.tensor_from_ptr()`. CPU, CUDA, and MUSA override that method, so
+  adding another pointer-capable device does not change the central
+  `_tensor_from_ptr()` entry point.
 
 The one-line base methods are intentional boilerplate: they keep the contract
 visible to type-checkers and IDEs, and `bind_native` shadows them at instance
@@ -135,6 +140,11 @@ class DeviceOps:
   singleton is first created. The `_native_bound` guard prevents repeated
   import attempts.
 
+- **Pointer reconstruction uses the existing device registry.** The generic
+  torch entry point normalizes the device and calls
+  `resolve_device_ops(device.type).tensor_from_ptr(...)`. There is no second
+  device-name registry or `if/elif` dispatch table to keep synchronized.
+
 ### 3.4 What got migrated
 
 | Old | New |
@@ -163,20 +173,23 @@ classDiagram
       +ensure_native()
       +bind_native(module)
     }
-    class CpuDeviceOps { "cpu" - no overrides }
-    class CudaDeviceOps { "cuda"; bind_native(cuda_ops) }
+    class CpuDeviceOps { "cpu"; +tensor_from_ptr() }
+    class CudaDeviceOps { "cuda"; +tensor_from_ptr(); bind_native(cuda_ops) }
     class XpuDeviceOps { "xpu"; bind_native(xpu_ops): 12 SYCL + 24 torch }
-    class MusaDeviceOps { "musa"; +1 native op override }
+    class MusaDeviceOps { "musa"; +tensor_from_ptr(); transfer overrides }
     class HpuDeviceOps { "hpu"; pure inherit }
 ```
 
-### 4.1 CPU — the base (no overrides)
+### 4.1 CPU — torch baseline plus host-pointer construction
 
 ```python
 # platform/devices/cpu/device_ops.py
 class CpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "cpu"
-    # No overrides. Inherited methods -> torch_ops ARE the CPU backend.
+
+    def tensor_from_ptr(self, ptr, shape, dtype, device):
+        buffer_type = ctypes.c_uint8 * (math.prod(shape) * dtype.itemsize)
+        return torch.frombuffer(buffer_type.from_address(ptr), dtype=dtype).view(*shape)
 ```
 
 ### 4.2 CUDA (& ROCm) — bulk-bind the whole module
@@ -185,6 +198,12 @@ class CpuDeviceOps(DeviceOps):
 # platform/devices/cuda/device_ops.py
 class CudaDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "cuda"
+
+    def tensor_from_ptr(self, ptr, shape, dtype, device):
+        try:
+            return _from_cuda_array_interface(ptr, shape, dtype, device)
+        except (RuntimeError, TypeError, ValueError):
+            return _copy_from_device_pointer(ptr, shape, dtype, device)
 
     def ensure_native(self) -> None:
         if self._native_bound:
@@ -220,7 +239,7 @@ class XpuDeviceOps(DeviceOps):
         self.bind_native(sycl)        # 12 SYCL ops shadow base; 24 inherit
 ```
 
-### 4.4 MUSA — one native override, extracted as module-level function
+### 4.4 MUSA — pointer construction and transfer overrides
 
 ```python
 # platform/devices/musa/device_ops.py
@@ -238,6 +257,9 @@ def _musa_multi_layer_block_kv_transfer(...) -> None:
 
 class MusaDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "musa"
+
+    def tensor_from_ptr(self, ptr, shape, dtype, device):
+        return construct_musa_tensor_from_data_pointer(ptr, shape, dtype, device)
 
     def multi_layer_block_kv_transfer(self, *args, **kwargs) -> None:
         _musa_multi_layer_block_kv_transfer(*args, **kwargs)
@@ -353,13 +375,13 @@ lmcache/v1/platform/
   _registry.py
   cpu/
     __init__.py               # CpuDeviceSpec.ops_cls -> CpuDeviceOps
-    device_ops.py             # CpuDeviceOps (no overrides = base)
+    device_ops.py             # CpuDeviceOps + host-pointer tensor view
     cache_context.py
     shm.py
     stub_cpu_device.py
   cuda/
     __init__.py               # CudaDeviceSpec.ops_cls -> CudaDeviceOps
-    device_ops.py             # CudaDeviceOps (bind_native cuda_ops)
+    device_ops.py             # CudaDeviceOps + pointer construction
     cache_context.py
     ipc_wrapper.py
     pin_memory.py
@@ -369,7 +391,8 @@ lmcache/v1/platform/
     torch_kv_transfer.py      # XPU-tuned fast paths
   musa/
     __init__.py               # MusaDeviceSpec.ops_cls -> MusaDeviceOps
-    device_ops.py             # MusaDeviceOps (1 native override)
+    device_ops.py             # MusaDeviceOps transfer + pointer overrides
+    tensor_from_ptr.py        # TorchMUSA external-storage view
     native_kv_transfer.py
   hpu/
     __init__.py               # HpuDeviceSpec.ops_cls -> HpuDeviceOps
@@ -423,10 +446,10 @@ module names and directories.
 
 | Device | DeviceOps subclass | Overrides | Native work | Effort |
 |--------|-------------------|-----------|-------------|--------|
-| CPU | `CpuDeviceOps` | none (base = torch) | none | migrate `python_ops_fallback` -> `torch_ops` |
-| CUDA | `CudaDeviceOps` | native ops via `bind_native(cuda_ops)` | `csrc/cuda/` | **low** |
+| CPU | `CpuDeviceOps` | host-pointer tensors | none | migrate `python_ops_fallback` -> `torch_ops` |
+| CUDA | `CudaDeviceOps` | pointer tensors + native ops via `bind_native(cuda_ops)` | `csrc/cuda/` | **low** |
 | HIP/ROCm | handled by `CudaDeviceOps` | same; ROCm builds `cuda_ops` via hipify | `csrc/cuda/` | N/A |
 | XPU | `XpuDeviceOps` | 12 via `bind_native(xpu_ops)` + 24 torch | existing SYCL | **low** |
-| MUSA | `MusaDeviceOps` | 1 native op | none | **low** |
+| MUSA | `MusaDeviceOps` | pointer tensors + transfer overrides | none | **low** |
 | HPU | `HpuDeviceOps` | none (inherits baseline) | none | **trivial** |
 | Neuron | `NeuronDeviceOps` | none (inherits baseline) | none | **trivial** |
