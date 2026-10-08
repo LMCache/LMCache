@@ -38,6 +38,7 @@ uv pip install -r requirements/common.txt -r requirements/test.txt
 # Includes the mandatory PR-base rebase before installing LMCache.
 export BUILD_WITH_SYCL=1
 source "${REPO_ROOT}/.buildkite/k3_harness/setup-lmcache-only-env.sh"
+python -c "from importlib.metadata import version; print('vLLM version:', version('vllm'))"
 python - <<'PY'
 import lmcache
 import lmcache.xpu_ops

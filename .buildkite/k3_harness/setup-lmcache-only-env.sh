@@ -44,4 +44,3 @@ fi
 
 echo "--- :white_check_mark: Environment ready (LMCache only, no vLLM)"
 python -c "import lmcache; print('LMCache installed')"
-python -c "from importlib.metadata import version; print('vLLM version:', version('vllm'))"
