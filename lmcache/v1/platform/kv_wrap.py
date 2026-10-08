@@ -42,7 +42,7 @@ def _layer_shape_and_dtype(value: Any) -> tuple[object, str]:
     """Shape/dtype summary for a layer value (tensor or plane sequence)."""
     if isinstance(value, torch.Tensor):
         return tuple(value.shape), str(value.dtype)
-    return tuple(tuple(p.shape) for p in value), str(value[0].dtype)
+    return tuple(tuple(p.shape) for p in value), str(tuple(p.dtype for p in value))
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
