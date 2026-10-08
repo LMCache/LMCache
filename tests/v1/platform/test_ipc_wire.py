@@ -23,6 +23,7 @@ from lmcache.v1.platform.base.ipc_wire import (
     VmmCudaIPCData,
     VmmRocmIPCData,
     WireIPCData,
+    XpuIPCData,
 )
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
@@ -86,6 +87,11 @@ DESCRIPTORS = [
         alloc_size=4096,
         alloc_offset=16,
         nbytes=24,
+    ),
+    XpuIPCData(
+        version=1,
+        metadata=METADATA,
+        handle=(0, b"h" * 64, 24, 0, b"/refcounter", 0, b"e" * 64, False),
     ),
 ]
 
