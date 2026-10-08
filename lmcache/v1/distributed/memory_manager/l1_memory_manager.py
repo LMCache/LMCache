@@ -3,6 +3,11 @@
 
 # Standard
 from multiprocessing import shared_memory
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Third Party
+    import torch
 
 # First Party
 from lmcache.logging import init_logger
@@ -217,6 +222,22 @@ class L1MemoryManager:
             size=self._size_in_bytes,
             align_bytes=self._align_bytes,
         )
+
+    def warm_up(self, device: "int | torch.device") -> None:
+        """Begin deferred allocator initialization for ``device``.
+
+        Forwards to the allocator; a no-op for allocators without
+        deferred host pinning.
+
+        Args:
+            device: Device whose context the deferred initialization
+                should run under.
+        """
+        self._allocator.warm_up(device)
+
+    def pin_status(self) -> tuple[int, int]:
+        """Forward the allocator's (pinned, total) deferred-pinning bytes."""
+        return self._allocator.pin_status()
 
     def close(self) -> None:
         """

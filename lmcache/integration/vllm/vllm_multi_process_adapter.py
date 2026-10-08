@@ -113,6 +113,11 @@ class ExtraConfigDefault(enum.Enum):
     # Mirrors the ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config
     # key wins when both are set.
     mp_transfer_mode = "auto"
+    # Block in register_kv_caches until the server's L1 pool is fully
+    # host-pinned, so engine startup absorbs the pinning instead of the
+    # first requests. Set to False to let startup finish while pinning
+    # continues in the background.
+    wait_for_pinned = True
     # Whether IPC mechanisms must work across isolated containers (no
     # shared host IPC namespace or /dev/shm); see
     # lmcache.v1.platform.ipc_policy. Must match the LMCache server's
@@ -1366,12 +1371,14 @@ class LMCacheMPWorkerAdapter:
                 self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
             else:
                 self._mp_transfer_mode = None
+            self._wait_for_pinned: bool = cfg[ExtraConfigDefault.wait_for_pinned.name]
             set_ipc_policy(
                 isolated_ipc=cfg[ExtraConfigDefault.isolated_ipc.name],
                 use_vmm_api=cfg[ExtraConfigDefault.use_vmm_api.name],
             )
         else:
             self._mp_transfer_mode = None
+            self._wait_for_pinned = ExtraConfigDefault.wait_for_pinned.default
         self.req_client = RequestClientFactory.create(server_url, context=context)
         self._mq_timeout = mq_timeout
 
@@ -1623,6 +1630,7 @@ class LMCacheMPWorkerAdapter:
                 layout_hints=layout_hints,
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
+                wait_for_pinned=self._wait_for_pinned,
             )
         except TimeoutError:
             raise ConnectionError(

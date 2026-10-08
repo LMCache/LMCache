@@ -4,10 +4,8 @@ Distributed multi-tier storage manager for MP mode
 """
 
 # Standard
-from collections import defaultdict
-from contextlib import ExitStack, contextmanager, nullcontext
-from dataclasses import replace
-from typing import Any, Iterator, Optional, cast
+from contextlib import contextmanager, nullcontext
+from typing import TYPE_CHECKING, Any, Iterator, Optional, cast
 import threading
 import time
 
@@ -87,6 +85,10 @@ from lmcache.v1.mp_observability.trace.decorator import (
     publish_call_event,
 )
 from lmcache.v1.platform import HAS_EVENTFD
+
+if TYPE_CHECKING:
+    # Third Party
+    import torch
 
 logger = init_logger(__name__)
 
@@ -283,6 +285,24 @@ class StorageManager:
                 self.get_l2_usages,
             )
             cleanup.pop_all()
+
+    def warm_up(self, device: "int | torch.device") -> None:
+        """Begin deferred L1 memory initialization for ``device``.
+
+        Called at worker registration so host pinning overlaps engine
+        startup instead of the first request; a no-op for tiers without
+        deferred pinning.
+
+        Args:
+            device: Device whose context the deferred initialization
+                should run under.
+        """
+        self._l1_manager.warm_up(device)
+
+    def pin_status(self) -> tuple[int, int]:
+        """(pinned, total) bytes of deferred L1 host pinning; equal once the
+        pool is fully pinned, ``(0, 0)`` when nothing is pinned lazily."""
+        return self._l1_manager.pin_status()
 
     # External APIs for serving engine integration code to call
     @enable_tracing()

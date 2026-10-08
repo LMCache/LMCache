@@ -452,9 +452,12 @@ class GPUCacheContext(BaseCacheContext):
         self.cuda_stream_ = torch_dev.Stream(device=self.device_)
 
         # Register the staging buffer with the GDS cuFile context on the
-        # context's CUDA stream.
-        with torch_dev.stream(self.cuda_stream_):
-            register_gds_gpu_buffer(self._temp_buffer.buffer)
+        # context's CUDA stream. Enter the device first: the stream guard
+        # restores the caller's previous stream on exit, and on a thread
+        # still on the default device that restore creates a CUDA context
+        # on cuda:0.
+        with torch_dev.device(self.device_), torch_dev.stream(self.cuda_stream_):
+            get_gds_context().register_gpu_buffer(self._temp_buffer.buffer)
 
         # Third Party
         import cupy
@@ -484,8 +487,8 @@ class GPUCacheContext(BaseCacheContext):
         right after this call.
         """
         self.cuda_stream_.synchronize()
-        with torch_dev.stream(self.cuda_stream_):
-            deregister_gds_gpu_buffer(self._temp_buffer.buffer)
+        with torch_dev.device(self.device_), torch_dev.stream(self.cuda_stream_):
+            get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
         self._close_kv_wrappers()
 
     def _close_kv_wrappers(self) -> None:
