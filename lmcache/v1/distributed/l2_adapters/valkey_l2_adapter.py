@@ -295,6 +295,10 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             ValueError: If required keys are missing or values are
                 invalid.
         """
+        return cls(**cls._kwargs_from_dict(d))
+
+    @classmethod
+    def _kwargs_from_dict(cls, d: dict) -> dict[str, Any]:
         startup_nodes = _parse_startup_nodes(d.get("startup_nodes"))
 
         cluster_mode = bool(d.get("cluster_mode", False))
@@ -332,20 +336,20 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         else:
             ttl_seconds = ttl_raw
 
-        return cls(
-            startup_nodes=startup_nodes,
-            cluster_mode=cluster_mode,
-            username=username,
-            password=password,
-            key_prefix=key_prefix,
-            num_workers=num_workers,
-            tls_enable=tls_enable,
-            database_id=database_id,
-            request_timeout=request_timeout,
-            connection_timeout=connection_timeout,
-            max_capacity_gb=max_capacity_gb,
-            ttl_seconds=ttl_seconds,
-        )
+        return {
+            "startup_nodes": startup_nodes,
+            "cluster_mode": cluster_mode,
+            "username": username,
+            "password": password,
+            "key_prefix": key_prefix,
+            "num_workers": num_workers,
+            "tls_enable": tls_enable,
+            "database_id": database_id,
+            "request_timeout": request_timeout,
+            "connection_timeout": connection_timeout,
+            "max_capacity_gb": max_capacity_gb,
+            "ttl_seconds": ttl_seconds,
+        }
 
     @classmethod
     def help(cls) -> str:
@@ -477,23 +481,13 @@ class ValkeyL2Adapter(L2AdapterInterface):
 
         # Shared glide client pool — owns clients, thread pool, copy-reduced
         # primitives, capability probing, and reliable shutdown.
-        self._pool: ValkeyWorkerPool = ValkeyWorkerPool(
-            addresses=config.startup_nodes,
-            num_workers=config.num_workers,
-            username=config.username,
-            password=config.password,
-            request_timeout=config.request_timeout,
-            connection_timeout=config.connection_timeout,
-            tls_enable=config.tls_enable,
-            cluster_mode=config.cluster_mode,
-            database_id=config.database_id,
-            ttl_seconds=config.ttl_seconds,
-        )
+        self._pool: ValkeyWorkerPool = self._create_pool(config)
 
         self._closed: bool = False
         logger.info(
-            "ValkeyL2Adapter ready: workers=%d cluster_mode=%s nodes=%s "
+            "%s ready: workers=%d cluster_mode=%s nodes=%s "
             "tls=%s buffer_get=%s key_prefix=%r",
+            type(self).__name__,
             config.num_workers,
             config.cluster_mode,
             list(config.startup_nodes),
@@ -501,6 +495,30 @@ class ValkeyL2Adapter(L2AdapterInterface):
             self._pool.has_buffer_get,
             config.key_prefix,
         )
+
+    def _create_pool(self, config: ValkeyL2AdapterConfig) -> ValkeyWorkerPool:
+        """Build the worker pool that moves bytes for this adapter.
+
+        The pool is the transport; a subclass that moves bytes differently
+        overrides this and nothing else.
+        """
+        return ValkeyWorkerPool(**self._pool_kwargs(config))
+
+    @staticmethod
+    def _pool_kwargs(config: ValkeyL2AdapterConfig) -> dict[str, Any]:
+        """The ``ValkeyWorkerPool`` constructor arguments ``config`` names."""
+        return {
+            "addresses": config.startup_nodes,
+            "num_workers": config.num_workers,
+            "username": config.username,
+            "password": config.password,
+            "request_timeout": config.request_timeout,
+            "connection_timeout": config.connection_timeout,
+            "tls_enable": config.tls_enable,
+            "cluster_mode": config.cluster_mode,
+            "database_id": config.database_id,
+            "ttl_seconds": config.ttl_seconds,
+        }
 
     # ---------------------------------------------------------------
     # Event Fd Interface

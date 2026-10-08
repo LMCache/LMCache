@@ -49,6 +49,9 @@ target.
    * - :doc:`Valkey <valkey>`
      - ``valkey``
      - Remote & Distributed
+   * - :doc:`Valkey RDMA <valkey_rdma>`
+     - ``valkey_rdma``
+     - Remote & Distributed
    * - :doc:`Aerospike <aerospike>`
      - ``aerospike``
      - Remote & Distributed
