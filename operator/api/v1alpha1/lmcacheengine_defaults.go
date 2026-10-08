@@ -45,3 +45,15 @@ func (e *LMCacheEngine) SetDefaults() {
 		}
 	}
 }
+
+// IsolatedIPCEnabled resolves spec.isolatedIPC: an explicit value wins;
+// unset means auto — enabled for gpuVendor "nvidia" (the default vendor),
+// disabled for "amd", whose ROCm stack has no isolated-IPC backends.
+// Callers must treat true as overriding spec.hostIPC and the /dev/shm
+// sharing (see the isolatedIPC field documentation).
+func (s *LMCacheEngineSpec) IsolatedIPCEnabled() bool {
+	if s.IsolatedIPC != nil {
+		return *s.IsolatedIPC
+	}
+	return s.GPUVendor == nil || *s.GPUVendor == GPUVendorNvidia
+}

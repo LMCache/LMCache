@@ -51,6 +51,7 @@ class LMCacheMPRequestTracker:
 
     # Read-only list to track the token ids
     all_token_ids: ConstantList[int]
+    num_prompt_tokens: int
 
     # Block ids will be updated at update_states_after_alloc and
     # during generation. Keyed by engine_group_idx; non-HMA models use 0.
@@ -74,6 +75,8 @@ class LMCacheMPRequestTracker:
 
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    max_offload_tokens: int | None = None
+    lookup_started_at: float | None = None
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
@@ -81,7 +84,12 @@ class LMCacheMPRequestTracker:
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.request_configs = extract_request_configs_from_request(request)
+        self.max_offload_tokens = (self.request_configs or {}).get(
+            "lmcache.max_offload_tokens"
+        )
+        self.lookup_started_at = None
         self.all_token_ids = request.all_token_ids
+        self.num_prompt_tokens = request.num_prompt_tokens
         self.allocated_block_ids = {}
         self.num_stored_tokens = 0
         self.num_vllm_hit_tokens = 0
@@ -132,15 +140,45 @@ class LMCacheMPRequestTracker:
     def append_block_ids(
         self,
         new_block_ids: tuple[list[int], ...],
-    ):
-        """Update the block ids for the current request
-        This function will be called when processing the cached requests.
+        relocation_window: int = 0,
+    ) -> None:
+        """Append one step's block ids, per engine group.
+
+        An id already in one of the last ``relocation_window`` tracked
+        slots is a moved block: that slot is set to 0 before the id is
+        appended. The null id 0 is never matched. With
+        ``relocation_window=0`` the ids are appended as-is.
+
+        Examples, each starting from tracked ``[10, 11, 12, 13]`` with
+        ``relocation_window=2``::
+
+            append [12, 14] -> [10, 11, 0, 13, 12, 14]   # 12 was in the last 2
+            append [10, 14] -> [10, 11, 12, 13, 10, 14]  # 10 was not
+
+        Args:
+            new_block_ids: Block ids reported this step, one list per engine
+                group.
+            relocation_window: Number of tail slots checked for a moved
+                block; 0 disables the check.
         """
         for engine_group_idx, group_block_ids in enumerate(new_block_ids):
-            if group_block_ids:
-                self.allocated_block_ids.setdefault(engine_group_idx, []).extend(
-                    group_block_ids
-                )
+            if not group_block_ids:
+                continue
+            block_ids = self.allocated_block_ids.setdefault(engine_group_idx, [])
+            if relocation_window == 0:
+                block_ids.extend(group_block_ids)
+                continue
+            prev_len = len(block_ids)
+            window_start = max(0, prev_len - relocation_window)
+            # A relocated block keeps its id: only its slot changes. An id seen
+            # again within the window is that block, so null its old slot.
+            for block_id in group_block_ids:
+                if block_id != 0:
+                    for slot in range(window_start, prev_len):
+                        if block_ids[slot] == block_id:
+                            block_ids[slot] = 0
+                            break
+                block_ids.append(block_id)
 
     def num_allocated_blocks(self) -> dict[int, int]:
         return {
@@ -189,6 +227,8 @@ class LMCacheMPRequestMetadata:
         tracker: LMCacheMPRequestTracker,
         lmcache_tokens_per_chunk: int,
         group_tokens_per_block: list[int],
+        *,
+        save_decode_cache: bool = False,
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
@@ -199,9 +239,16 @@ class LMCacheMPRequestMetadata:
             group_tokens_per_block: per-engine-group tokens covered by one
                 paged chunk (one block ID) of that group, i.e. the group's
                 KV cache spec ``block_size``. Must each divide
-                ``lmcache_tokens_per_chunk`` (hybrid models can mix different values).
+                ``lmcache_tokens_per_chunk`` (hybrid models can mix different
+                values); ``0`` marks a scratch group that is never stored.
+            save_decode_cache: Whether to store chunks containing generated
+                tokens. Defaults to storing only complete chunks within the
+                initial prompt, including when decode fills its partial tail.
+
+        Returns:
+            Metadata for newly storable chunks, or None when no complete
+            permitted chunk is available. Retrieval is unaffected.
         """
-        num_engine_groups = len(group_tokens_per_block)
         # NOTE: the invariant here is that `num_stored_tokens` should
         # always be a multiple of `lmcache_tokens_per_chunk`
         # TODO: This should be checked every time we update the num_stored_tokens
@@ -231,20 +278,25 @@ class LMCacheMPRequestMetadata:
         # gemma-4 sliding: one 32-token ID covers 2x the tokens of a
         # 16-token full-attention ID).
         allocated_lengths = tracker.num_allocated_blocks()
-        allocated_tokens = (
-            min(
-                allocated_lengths.get(engine_group_idx, 0)
-                * group_tokens_per_block[engine_group_idx]
-                for engine_group_idx in range(num_engine_groups)
-            )
-            if num_engine_groups > 0
-            else 0
+        allocated_tokens = min(
+            (
+                allocated_lengths.get(engine_group_idx, 0) * tokens_per_block
+                for engine_group_idx, tokens_per_block in enumerate(
+                    group_tokens_per_block
+                )
+                if tokens_per_block > 0
+            ),
+            default=0,
         )
         min_available_tokens = min(
             len(tracker.all_token_ids),
             allocated_tokens,
             computed_tokens,
         )
+        if not save_decode_cache:
+            min_available_tokens = min(min_available_tokens, tracker.num_prompt_tokens)
+        if tracker.max_offload_tokens is not None:
+            min_available_tokens = min(min_available_tokens, tracker.max_offload_tokens)
         num_staging_tokens = min_available_tokens - tracker.num_stored_tokens
         num_chunks = num_staging_tokens // lmcache_tokens_per_chunk
 
@@ -294,7 +346,8 @@ class LMCacheMPRequestMetadata:
             group_tokens_per_block: per-engine-group tokens covered by one
                 paged chunk (one block ID) of that group, i.e. the group's
                 KV cache spec ``block_size``. Must each divide
-                ``lmcache_tokens_per_chunk`` (hybrid models can mix different values).
+                ``lmcache_tokens_per_chunk`` (hybrid models can mix different
+                values); ``0`` marks a scratch group that is never retrieved.
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -390,19 +443,43 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
 class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
     """Worker -> Scheduler metadata for completed store events.
 
-    Each worker reports {req_id: 1} for newly completed stores.
-    ``aggregate()`` sums counts across workers within a step.
-    The scheduler-side manager accumulates across steps and processes
-    a store completion only when count reaches ``world_size``.
+    Attributes:
+        completed_store_requests: Newly completed stores of this worker, as
+            ``{request_id: 1}``. ``aggregate()`` sums the counts across the
+            workers of one step; the scheduler-side manager accumulates
+            across steps and settles a store only once its count reaches
+            ``world_size``.
+        failed_store_requests: Requests whose store did not succeed on this
+            worker, either with a failed result or dropped while unhealthy.
+            Their completion receipts are still counted -- the pinned blocks
+            must be unpinned either way -- but the scheduler additionally
+            breaks the request's stored-prefix chain so later chunks are not
+            stored unreachable. ``aggregate()`` unions the sets: one rank's
+            failure breaks the chain even when the other ranks succeeded.
     """
 
     completed_store_requests: dict[str, int]
+    failed_store_requests: set[str] = field(default_factory=set)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
     ) -> "KVConnectorWorkerMetadata":
+        """Merge another worker's report of the same step into this one.
+
+        Args:
+            other: The report of another rank, for the same scheduler step.
+
+        Returns:
+            A new metadata whose completion counts are summed per request
+            and whose failed-request sets are unioned.
+        """
         assert isinstance(other, LMCacheMPWorkerMetadata)
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
-        return LMCacheMPWorkerMetadata(completed_store_requests=merged)
+        return LMCacheMPWorkerMetadata(
+            completed_store_requests=merged,
+            failed_store_requests=(
+                self.failed_store_requests | other.failed_store_requests
+            ),
+        )

@@ -5,6 +5,7 @@
 #include <pybind11/stl.h>
 #include "mem_kernels.cuh"
 #include "mp_mem_kernels.cuh"
+#include "phase_timing_recorder.cuh"
 #include "blend_kernels.cuh"
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
@@ -175,13 +176,82 @@ PYBIND11_MODULE(cuda_ops, m) {
       [](int direction, const torch::Device& device,
          size_t host_buffer_alignment,
          const std::vector<KernelGroupSpec>& kernel_group_specs,
-         const std::vector<BatchStep>& batch_steps) {
+         const std::vector<BatchStep>& batch_steps, bool phase_timing_enabled,
+         const std::string& session_id) {
         return execute_object_group_transfer(
             static_cast<TransferDirection>(direction), device,
-            host_buffer_alignment, kernel_group_specs, batch_steps);
+            host_buffer_alignment, kernel_group_specs, batch_steps,
+            phase_timing_enabled, session_id);
       },
       py::arg("direction"), py::arg("device"), py::arg("host_buffer_alignment"),
       py::arg("kernel_group_specs"), py::arg("batch_steps"),
+      py::arg("phase_timing_enabled") = false, py::arg("session_id") = "",
+      py::call_guard<py::gil_scoped_release>());
+  m.def(
+      "pop_completed_phase_timings",
+      []() {
+        std::vector<PhaseTimingSample> samples;
+        {
+          py::gil_scoped_release release;
+          samples = pop_completed_phase_timings();
+        }
+        py::list out;
+        for (const auto& s : samples) {
+          out.append(py::make_tuple(s.phase, s.direction, s.device_index,
+                                    s.elapsed_ms, s.nbytes, s.session_id,
+                                    s.start_time_s, s.end_time_s));
+        }
+        return out;
+      },
+      "Pop completed (phase, direction, device_index, elapsed_ms, nbytes, "
+      "session_id, start_time_s, end_time_s) samples recorded by "
+      "execute_object_group_transfer.");
+  // Direct copy-engine plan types (see transfer_plan_types.cuh). Built on
+  // the Python side and consumed by execute_direct_copy_transfer.
+  py::class_<DirectCopyGroupSpec>(m, "DirectCopyGroupSpec")
+      .def(py::init([](std::vector<uintptr_t> paged_layer_ptrs,
+                       PageBufferShapeDesc shape_desc, int engine_kv_format,
+                       int slots_per_chunk, size_t byte_offset_in_object,
+                       std::vector<int64_t> block_ids) {
+             return DirectCopyGroupSpec{
+                 std::move(paged_layer_ptrs),
+                 shape_desc,
+                 static_cast<EngineKVFormat>(engine_kv_format),
+                 slots_per_chunk,
+                 byte_offset_in_object,
+                 std::move(block_ids)};
+           }),
+           py::arg("paged_layer_ptrs"), py::arg("shape_desc"),
+           py::arg("engine_kv_format"), py::arg("slots_per_chunk"),
+           py::arg("byte_offset_in_object"), py::arg("block_ids"));
+  py::class_<DirectCopyObject>(m, "DirectCopyObject")
+      .def(py::init([](uintptr_t host_ptr, size_t host_offset, size_t nbytes,
+                       int chunk_idx, std::vector<int> skip_prefix_n_blocks) {
+             return DirectCopyObject{host_ptr, host_offset, nbytes, chunk_idx,
+                                     std::move(skip_prefix_n_blocks)};
+           }),
+           py::arg("host_ptr"), py::arg("host_offset"), py::arg("nbytes"),
+           py::arg("chunk_idx"), py::arg("skip_prefix_n_blocks"));
+  m.def("batch_memcpy_supported", &batch_memcpy_supported);
+  m.def(
+      "direct_copy_format_supported",
+      [](int engine_kv_format) {
+        return direct_copy_format_supported(
+            static_cast<EngineKVFormat>(engine_kv_format));
+      },
+      py::arg("engine_kv_format"));
+  m.def(
+      "execute_direct_copy_transfer",
+      [](int direction, const torch::Device& device,
+         size_t host_buffer_alignment,
+         const std::vector<DirectCopyGroupSpec>& group_specs,
+         const std::vector<DirectCopyObject>& objects) {
+        return execute_direct_copy_transfer(
+            static_cast<TransferDirection>(direction), device,
+            host_buffer_alignment, group_specs, objects);
+      },
+      py::arg("direction"), py::arg("device"), py::arg("host_buffer_alignment"),
+      py::arg("group_specs"), py::arg("objects"),
       py::call_guard<py::gil_scoped_release>());
   // CB retrieve plan spec (see blend_kernels.cuh). Built on the Python side
   // (blend.cb_retrieve_pre_computed) and consumed by
@@ -195,27 +265,20 @@ PYBIND11_MODULE(cuda_ops, m) {
                  int block_size, int head_size, uintptr_t slot_mapping_base,
                  int64_t slot_mapping_capacity, uintptr_t cos_sin_cache,
                  int rot_dim, int rope_num_kv_heads, int64_t rope_head_stride,
-                 int key_scalar_type, bool is_neox, int64_t rope_base_offset) {
+                 int key_scalar_type, bool is_neox, int64_t rope_base_offset,
+                 int64_t block_stride_elems, int cache_scalar_type) {
                 return CBGroupSpec{
-                    paged_kv_ptrs,
-                    std::move(temp_buffer_ptrs),
-                    num_layers,
-                    slot_tokens,
-                    hidden_elems,
-                    element_size,
+                    paged_kv_ptrs, std::move(temp_buffer_ptrs), num_layers,
+                    slot_tokens, hidden_elems, element_size,
                     static_cast<EngineKVFormat>(engine_kv_format),
-                    page_buffer_size,
-                    block_size,
-                    head_size,
-                    slot_mapping_base,
-                    slot_mapping_capacity,
-                    cos_sin_cache,
-                    rot_dim,
-                    rope_num_kv_heads,
-                    rope_head_stride,
+                    page_buffer_size, block_size, head_size, block_stride_elems,
+                    slot_mapping_base, slot_mapping_capacity, cos_sin_cache,
+                    rot_dim, rope_num_kv_heads, rope_head_stride,
                     key_scalar_type,
-                    is_neox,
-                    rope_base_offset};
+                    // Pre-fp8 planners pass no cache type: the cache dtype
+                    // then equals the KV dtype.
+                    cache_scalar_type < 0 ? key_scalar_type : cache_scalar_type,
+                    is_neox, rope_base_offset};
               }),
           py::arg("paged_kv_ptrs"), py::arg("temp_buffer_ptrs"),
           py::arg("num_layers"), py::arg("slot_tokens"),
@@ -226,7 +289,8 @@ PYBIND11_MODULE(cuda_ops, m) {
           py::arg("cos_sin_cache"), py::arg("rot_dim"),
           py::arg("rope_num_kv_heads"), py::arg("rope_head_stride"),
           py::arg("key_scalar_type"), py::arg("is_neox"),
-          py::arg("rope_base_offset") = 0)
+          py::arg("rope_base_offset") = 0, py::arg("block_stride_elems") = 0,
+          py::arg("cache_scalar_type") = -1)
       // Mutable so the Python planner can cache one spec per (context, group)
       // and re-stamp only the per-request slot-mapping tensor between calls;
       // every other field is invariant for the life of the paged registration.

@@ -60,7 +60,9 @@ lmcache/cli/commands/bench/
     ├── tokenizers.py              # TokenPool, single-token word pools
     ├── interactive/               # Guided TUI (schema, state, terminal)
     ├── quality/                   # Answer-quality measurement
+    │   ├── alignment.py           # ChunkAligner: pad blocks to whole chunks
     │   ├── dataset.py             # Sample, hub registry, schema adapters
+    │   ├── prompts.py             # QA prompt text and message composition
     │   └── scoring.py             # F1, answer extraction, QualityAggregator
     └── workloads/
         ├── __init__.py            # create_workload() factory
@@ -505,6 +507,10 @@ then start on a chunk boundary in both the prefill and the composite, so
 their chunks hold document content alone and match. Without this they land
 off-phase and nothing matches, silently.
 
+The padding lives in `quality/alignment.py` (`ChunkAligner`) and the prompt
+text in `quality/prompts.py`, outside the workload, so other answer-quality
+benchmarks can build byte-identical prompts.
+
 **Set it to the deployment's LMCache chunk size** — the default 256 is
 LMCache's own default, not a detected value. It is configured rather than
 queried because the baseline stack a run is compared against has no LMCache
@@ -517,11 +523,12 @@ its output is deliberately agnostic of engine-side metrics. Confirm the cache
 was exercised from the engine's own `/metrics` if a run needs that evidence.
 
 **Scoring.** The model wraps its answer in `<final_answer>…</final_answer>`;
-the *last complete* region is taken, since reasoning models may echo an
-example while thinking. An unterminated region counts as no answer —
-generation was cut off, so scoring the reasoning before it would report an
-answer never produced. Answers are scored by SQuAD-normalized token-overlap
-F1, best over the gold answers.
+the *last* region is considered, including an unfinished one, since reasoning
+models may echo an example while thinking. If that region has no closing
+tag, it counts as no answer; the parser does not fall back to an earlier
+complete region. Such a sample is exported with `parsed: false`, an empty
+answer, and `f1: null`. Completed answers are scored by SQuAD-normalized
+token-overlap F1, best over the gold answers.
 
 `f1_mean` covers **parsed samples only** and is always reported beside
 `parse_rate`: a high F1 over a third of the samples is a different result from

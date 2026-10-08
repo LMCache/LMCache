@@ -15,10 +15,12 @@
 //!   submission/completion loop. All alignment checks are performed before
 //!   enqueuing; violations result in an immediate Python `ValueError`.
 
-use pyo3::exceptions::{PyMemoryError, PyOSError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{
+    PyDeprecationWarning, PyMemoryError, PyOSError, PyRuntimeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::io;
 use std::os::unix::io::RawFd;
@@ -26,7 +28,7 @@ use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use io_uring::cqueue::{Entry, Entry32};
 use io_uring::squeue::{Entry as SqueueEntry, Entry128};
@@ -42,6 +44,13 @@ enum IoUringWrapper {
 }
 
 impl IoUringWrapper {
+    fn submit(&self) -> io::Result<usize> {
+        match self {
+            Self::Standard(ring) => ring.lock().unwrap().submitter().submit(),
+            Self::Big(ring) => ring.lock().unwrap().submitter().submit(),
+        }
+    }
+
     // Get the submission queue length
     fn submission_len(&self) -> usize {
         match self {
@@ -69,6 +78,41 @@ impl IoUringWrapper {
                 let mut ring = ring.lock().unwrap();
                 ring.submission().sync();
             }
+        }
+    }
+
+    fn cancel_submitted(&self) -> io::Result<()> {
+        let timeout = Some(io_uring::types::Timespec::new().sec(1));
+        let cancel = io_uring::types::CancelBuilder::any();
+        match self {
+            Self::Standard(ring) => ring
+                .lock()
+                .unwrap()
+                .submitter()
+                .register_sync_cancel(timeout, cancel),
+            Self::Big(ring) => ring
+                .lock()
+                .unwrap()
+                .submitter()
+                .register_sync_cancel(timeout, cancel),
+        }
+    }
+
+    fn reap_without_submitting(&self) -> io::Result<usize> {
+        let flags = io_uring::EnterFlags::GETEVENTS.bits();
+        match self {
+            Self::Standard(ring) => unsafe {
+                ring.lock()
+                    .unwrap()
+                    .submitter()
+                    .enter::<libc::sigset_t>(0, 0, flags, None)
+            },
+            Self::Big(ring) => unsafe {
+                ring.lock()
+                    .unwrap()
+                    .submitter()
+                    .enter::<libc::sigset_t>(0, 0, flags, None)
+            },
         }
     }
 }
@@ -546,34 +590,6 @@ fn placement_id_to_u16(pid: i32) -> PyResult<u16> {
     u16::try_from(pid).map_err(|_| PyValueError::new_err("placement_id must be in range 1..=65535"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn check_nvme_ioctl_result_accepts_success() {
-        assert!(check_nvme_ioctl_result(0, "NVMe ioctl failed").is_ok());
-    }
-
-    #[test]
-    fn check_nvme_ioctl_result_rejects_nvme_status() {
-        assert!(check_nvme_ioctl_result(1, "NVMe ioctl failed").is_err());
-    }
-
-    #[test]
-    fn placement_id_to_u16_accepts_valid_bounds() {
-        assert_eq!(placement_id_to_u16(1).unwrap(), 1);
-        assert_eq!(placement_id_to_u16(65535).unwrap(), 65535);
-    }
-
-    #[test]
-    fn placement_id_to_u16_rejects_reserved_and_out_of_range_values() {
-        assert!(placement_id_to_u16(0).is_err());
-        assert!(placement_id_to_u16(-1).is_err());
-        assert!(placement_id_to_u16(65536).is_err());
-    }
-}
-
 /// Prepare NVMe uring command for read/write operations
 #[allow(clippy::too_many_arguments)]
 fn nvme_uring_cmd_prep(
@@ -718,6 +734,96 @@ impl Drop for AlignedBuf {
             self.ptr = std::ptr::null_mut();
         }
     }
+}
+
+/// Source description for one prepared io_uring write.
+///
+/// Fields:
+/// - `ptr_addr`: Address to submit, either the caller buffer or the bounce
+/// - `bounce`: Bounce buffer that must stay alive until the write completes
+/// - `fixed_buffer_idx`: Registered fixed-buffer index, cleared when bouncing
+struct PreparedWriteBuffer {
+    ptr_addr: usize,
+    bounce: Option<Arc<AlignedBuf>>,
+    fixed_buffer_idx: Option<u16>,
+}
+
+// Report whether `len` bytes starting at `ptr_addr + offset` are all zero.
+fn buffer_range_is_zero(ptr_addr: usize, offset: usize, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let ptr = (ptr_addr as *const u8).wrapping_add(offset);
+    // SAFETY: callers only pass ranges inside the buffer they hold, so
+    // [offset, offset + len) is readable for the lifetime of this call.
+    unsafe {
+        slice::from_raw_parts(ptr, len)
+            .iter()
+            .all(|byte| *byte == 0)
+    }
+}
+
+// Prepare one regular io_uring write so that `total_len` bytes can be submitted
+// while reading only within the source buffer bounds.
+//
+// The padding region [payload_len, total_len) is always written as zeroes. The
+// caller buffer is submitted directly when it can already satisfy that, which
+// keeps the fixed-buffer zero-copy path. A bounce buffer is used when the
+// source is shorter than `total_len`, its padding tail is not already zero, or
+// O_DIRECT requires an aligned address. The source buffer is never modified.
+fn prepare_iouring_write_buffer(
+    ptr_addr: usize,
+    cap: usize,
+    payload_len: usize,
+    total_len: usize,
+    use_odirect: bool,
+    alignment: usize,
+    fixed_buffer_idx: Option<u16>,
+) -> PyResult<PreparedWriteBuffer> {
+    if cap < payload_len {
+        return Err(PyValueError::new_err(format!(
+            "input buffer too small: cap={cap} need={payload_len}"
+        )));
+    }
+    if total_len < payload_len {
+        return Err(PyValueError::new_err("total_len must be >= payload_len"));
+    }
+
+    let needs_alignment_bounce = use_odirect && !ptr_addr.is_multiple_of(alignment);
+    let needs_capacity_bounce = cap < total_len;
+    let has_padding = payload_len < total_len;
+    let tail_is_zero = !has_padding
+        || (!needs_capacity_bounce
+            && buffer_range_is_zero(ptr_addr, payload_len, total_len - payload_len));
+    let needs_zero_bounce = has_padding && !tail_is_zero;
+    let needs_bounce = needs_alignment_bounce || needs_capacity_bounce || needs_zero_bounce;
+
+    if !needs_bounce {
+        return Ok(PreparedWriteBuffer {
+            ptr_addr,
+            bounce: None,
+            fixed_buffer_idx,
+        });
+    }
+
+    let bounce = AlignedBuf::new(total_len, alignment)?;
+    let bounce_ptr = bounce.as_mut_ptr();
+    // SAFETY: the bounce holds total_len bytes and cap >= payload_len was
+    // checked above, so both the copy and the zero-fill stay in bounds.
+    unsafe {
+        if payload_len > 0 {
+            std::ptr::copy_nonoverlapping(ptr_addr as *const u8, bounce_ptr, payload_len);
+        }
+        if total_len > payload_len {
+            std::ptr::write_bytes(bounce_ptr.add(payload_len), 0u8, total_len - payload_len);
+        }
+    }
+    let bounce_arc = Arc::new(bounce);
+    Ok(PreparedWriteBuffer {
+        ptr_addr: bounce_arc.as_ptr() as usize,
+        bounce: Some(bounce_arc),
+        fixed_buffer_idx: None,
+    })
 }
 
 // Acquire a Python buffer view with the requested mutability.
@@ -936,23 +1042,21 @@ impl UringNotify {
         }
     }
 
-    /// Blocks the worker until either eventfd is readable, then drains
+    /// Blocks until an eventfd is readable or the optional timeout expires, then drains
     /// each fired fd. Drain is required because epoll is level-triggered:
     /// without consuming the counter, the next epoll_wait would return
     /// immediately on the same already-handled signal.
-    fn wait(&self) {
+    fn wait(&self, timeout: Option<Duration>) {
         // A capacity of 2 is enough: only two fds are registered with this
         // epoll instance, so at most two events can come back per call.
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; 2];
 
-        // Timeout = -1 means "block indefinitely". Shutdown wakes us by
-        // writing producer_efd from do_close, so we never need a timeout.
-        let n = unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), 2, -1) };
-
-        // n < 0 is usually EINTR (signal interruption); we just return and
-        // the worker's outer loop will call wait() again. n == 0 should
-        // not happen with timeout=-1 but is handled defensively.
-        if n <= 0 {
+        let timeout_ms = timeout.map_or(-1, |delay| {
+            delay.as_millis().max(1).min(i32::MAX as u128) as i32
+        });
+        let event_count =
+            unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), 2, timeout_ms) };
+        if event_count <= 0 {
             return;
         }
 
@@ -961,7 +1065,7 @@ impl UringNotify {
         // ev.u64 during epoll_ctl registration. We discard the read value
         // (we only care that a signal arrived, not how many).
         let mut buf = [0u8; 8];
-        for ev in &events[..n as usize] {
+        for ev in &events[..event_count as usize] {
             let fd = ev.u64 as RawFd;
             // Discard the result. The wake-up was already delivered by
             // epoll_wait; this read only exists to reset the eventfd
@@ -1020,6 +1124,196 @@ struct IoSubmission {
     nvme_cmd_data: Option<NvmeCmdData>, // NVMe command data for io_uring_cmd
 }
 
+fn enqueue_if_running(
+    queue: &Mutex<Vec<IoSubmission>>,
+    shutdown: &AtomicBool,
+    in_flight: &AtomicU64,
+    submission: IoSubmission,
+) -> PyResult<()> {
+    let mut queue = queue.lock().unwrap();
+    if shutdown.load(Ordering::Relaxed) {
+        return Err(PyRuntimeError::new_err("io_uring worker stopped"));
+    }
+    in_flight.fetch_add(1, Ordering::Relaxed);
+    queue.push(submission);
+    Ok(())
+}
+
+fn stop_submissions(queue: &Mutex<Vec<IoSubmission>>, shutdown: &AtomicBool) {
+    let _queue = queue.lock().unwrap();
+    shutdown.store(true, Ordering::Relaxed);
+}
+
+fn fail_submissions(
+    queue: &Mutex<Vec<IoSubmission>>,
+    shutdown: &AtomicBool,
+    worker_error: &Mutex<Option<String>>,
+    error: io::Error,
+) {
+    let _queue = queue.lock().unwrap();
+    *worker_error.lock().unwrap() = Some(format!("io_uring worker submission failed: {error}"));
+    shutdown.store(true, Ordering::Relaxed);
+}
+
+const SUBMISSION_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(1);
+const SUBMISSION_RETRY_MAX_DELAY: Duration = Duration::from_millis(100);
+const SUBMISSION_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct SubmissionRetry {
+    stalled_since: Option<Instant>,
+    retry_at: Option<Instant>,
+    delay: Duration,
+}
+
+impl SubmissionRetry {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn remaining_delay(&self, now: Instant) -> Option<Duration> {
+        self.retry_at
+            .and_then(|deadline| deadline.checked_duration_since(now))
+            .filter(|delay| !delay.is_zero())
+    }
+
+    fn record_result(&mut self, result: io::Result<usize>, now: Instant) -> io::Result<()> {
+        let error = match result {
+            Ok(submitted) if submitted > 0 => {
+                self.reset();
+                return Ok(());
+            }
+            Ok(_) => io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "io_uring submit accepted no requests",
+            ),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::EAGAIN) | Some(libc::EINTR) | Some(libc::EBUSY)
+                ) =>
+            {
+                error
+            }
+            Err(error) => return Err(error),
+        };
+        let stalled_since = *self.stalled_since.get_or_insert(now);
+        if now.duration_since(stalled_since) >= SUBMISSION_STALL_TIMEOUT {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "io_uring submission made no progress for {}s: {error}",
+                    SUBMISSION_STALL_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        self.delay = if self.delay.is_zero() {
+            SUBMISSION_RETRY_INITIAL_DELAY
+        } else {
+            (self.delay * 2).min(SUBMISSION_RETRY_MAX_DELAY)
+        };
+        self.retry_at = Some(now + self.delay);
+        Ok(())
+    }
+}
+
+fn submit_pending(ring: &IoUringWrapper, pending: &mut VecDeque<u64>) -> io::Result<usize> {
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    record_submission_result(pending, ring.submit())
+}
+
+fn record_submission_result(
+    pending: &mut VecDeque<u64>,
+    result: io::Result<usize>,
+) -> io::Result<usize> {
+    let submitted = result?;
+    pending.drain(..submitted.min(pending.len()));
+    Ok(submitted)
+}
+
+#[cfg(test)]
+mod submission_lifecycle_tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    #[test]
+    fn partial_submission_preserves_the_unaccepted_suffix() {
+        let mut pending = VecDeque::from([10, 11, 12]);
+        record_submission_result(&mut pending, Ok(1)).unwrap();
+        assert_eq!(pending, VecDeque::from([11, 12]));
+        record_submission_result(&mut pending, Ok(0)).unwrap();
+        assert_eq!(pending, VecDeque::from([11, 12]));
+        record_submission_result(&mut pending, Ok(2)).unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn submission_errors_preserve_pending_entries() {
+        for error_code in [libc::EAGAIN, libc::EINTR, libc::EBUSY, libc::EIO] {
+            let mut pending = VecDeque::from([10, 11, 12]);
+            let error = record_submission_result(
+                &mut pending,
+                Err(io::Error::from_raw_os_error(error_code)),
+            )
+            .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(error_code));
+            assert_eq!(pending, VecDeque::from([10, 11, 12]));
+        }
+    }
+
+    #[test]
+    fn fatal_error_after_partial_submission_keeps_only_unaccepted_entries_pending() {
+        let mut pending = VecDeque::from([10, 11, 12]);
+        record_submission_result(&mut pending, Ok(1)).unwrap();
+        assert!(record_submission_result(
+            &mut pending,
+            Err(io::Error::from_raw_os_error(libc::EIO)),
+        )
+        .is_err());
+        assert_eq!(pending, VecDeque::from([11, 12]));
+    }
+
+    #[test]
+    fn stopped_queue_rejects_without_lifecycle_updates() {
+        let queue = Mutex::new(Vec::new());
+        let shutdown = AtomicBool::new(false);
+        let in_flight = AtomicU64::new(0);
+        stop_submissions(&queue, &shutdown);
+        let result = enqueue_if_running(&queue, &shutdown, &in_flight, IoSubmission::default());
+        assert!(result.is_err());
+        assert!(queue.lock().unwrap().is_empty());
+        assert_eq!(in_flight.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn stop_and_enqueue_have_a_single_admission_boundary() {
+        for _ in 0..64 {
+            let queue = Mutex::new(Vec::new());
+            let shutdown = AtomicBool::new(false);
+            let in_flight = AtomicU64::new(0);
+            let barrier = Barrier::new(2);
+            thread::scope(|scope| {
+                let producer = scope.spawn(|| {
+                    barrier.wait();
+                    enqueue_if_running(&queue, &shutdown, &in_flight, IoSubmission::default())
+                        .is_ok()
+                });
+                barrier.wait();
+                stop_submissions(&queue, &shutdown);
+                let accepted = producer.join().unwrap();
+                assert_eq!(queue.lock().unwrap().len(), usize::from(accepted));
+                assert_eq!(in_flight.load(Ordering::Relaxed), u64::from(accepted));
+                assert!(
+                    enqueue_if_running(&queue, &shutdown, &in_flight, IoSubmission::default(),)
+                        .is_err()
+                );
+            });
+        }
+    }
+}
+
 impl Default for IoSubmission {
     fn default() -> Self {
         IoSubmission {
@@ -1066,6 +1360,7 @@ struct RawBlockDevice {
     worker: Option<thread::JoinHandle<()>>,
     // Shutdown signal for worker thread
     shutdown: Option<Arc<AtomicBool>>,
+    worker_error: Arc<Mutex<Option<String>>>,
     // Map from buffer pointer address to registered fixed buffer index
     // Used for zero-copy I/O with pre-registered buffers
     fixed_buffer_map: Arc<Mutex<HashMap<usize, (u16, usize)>>>,
@@ -1211,6 +1506,7 @@ impl RawBlockDevice {
             fd_size_bytes(fd)?
         };
 
+        let worker_error = Arc::new(Mutex::new(None));
         let (
             ring_opt,
             queue_opt,
@@ -1295,6 +1591,7 @@ impl RawBlockDevice {
             let ring_clone = ring.clone();
             let queue_clone = Arc::clone(&queue);
             let shutdown_clone = Arc::clone(&shutdown);
+            let worker_error_clone = Arc::clone(&worker_error);
             let batch_ready_clone = Arc::clone(&batch_ready);
             let in_flight_count_clone = Arc::clone(&in_flight_count);
             let in_flight_cvar_clone = Arc::clone(&in_flight_cvar);
@@ -1529,7 +1826,9 @@ impl RawBlockDevice {
                 .name("rust-rawblock-uring".into())
                 .spawn(move || {
                     let mut in_flight: HashMap<u64, IoSubmission> = HashMap::new();
+                    let mut pending = VecDeque::with_capacity(ring_size);
                     let mut next_user_data: u64 = 1;
+                    let mut submission_retry = SubmissionRetry::default();
 
                     while !shutdown_clone.load(Ordering::Relaxed) {
                         // This drains all completed I/O operations from the completion queue (CQ).
@@ -1548,11 +1847,12 @@ impl RawBlockDevice {
                                 for cqe in completions {
                                     let user_data = cqe.user_data();
                                     if let Some(mut sub) = in_flight.remove(&user_data) {
+                                        submission_retry.reset();
                                         let batch_id = sub.batch_id;
                                         let cqe_result = cqe.result();
 
                                         // Handle short I/O with resubmission (only for regular I/O, not io_uring_cmd)
-                                        if cqe_result >= 0
+                                        if cqe_result > 0
                                             && (cqe_result as usize) < sub.len
                                             && sub.nvme_cmd_data.is_none()
                                         {
@@ -1592,18 +1892,29 @@ impl RawBlockDevice {
                                             // Don't decrement in_flight_count since we're resubmitting
                                             in_flight.insert(user_data, sub.clone());
                                             // Push a new SQE for the remaining data
-                                            let _ =
-                                                build_and_submit_sqe(&ring_clone, &sub, user_data);
-                                            let _ = match &ring_clone {
-                                                IoUringWrapper::Standard(ring) => {
-                                                    let ring = ring.lock().unwrap();
-                                                    ring.submitter().submit()
+                                            if ring_clone.submission_len() < ring_size {
+                                                match build_and_submit_sqe(
+                                                    &ring_clone,
+                                                    &sub,
+                                                    user_data,
+                                                ) {
+                                                    Ok(()) => pending.push_back(user_data),
+                                                    Err(error) => {
+                                                        in_flight.remove(&user_data);
+                                                        sub.completion.set(Err(error));
+                                                        decrement_in_flight(
+                                                            &in_flight_count_clone,
+                                                            &in_flight_cvar_clone,
+                                                            &batch_in_flight_clone,
+                                                            batch_id,
+                                                        );
+                                                    }
                                                 }
-                                                IoUringWrapper::Big(ring) => {
-                                                    let ring = ring.lock().unwrap();
-                                                    ring.submitter().submit()
-                                                }
-                                            };
+                                            } else {
+                                                in_flight.remove(&user_data);
+                                                let mut queue = queue_clone.lock().unwrap();
+                                                queue.push(sub);
+                                            }
                                             continue;
                                         }
 
@@ -1629,11 +1940,12 @@ impl RawBlockDevice {
                                 for cqe in completions {
                                     let user_data = cqe.user_data();
                                     if let Some(mut sub) = in_flight.remove(&user_data) {
+                                        submission_retry.reset();
                                         let batch_id = sub.batch_id;
                                         let cqe_result = cqe.result();
 
                                         // Handle short I/O with resubmission (only for regular I/O, not io_uring_cmd)
-                                        if cqe_result >= 0
+                                        if cqe_result > 0
                                             && (cqe_result as usize) < sub.len
                                             && sub.nvme_cmd_data.is_none()
                                         {
@@ -1673,18 +1985,29 @@ impl RawBlockDevice {
                                             // Don't decrement in_flight_count since we're resubmitting
                                             in_flight.insert(user_data, sub.clone());
                                             // Push a new SQE for the remaining data
-                                            let _ =
-                                                build_and_submit_sqe(&ring_clone, &sub, user_data);
-                                            let _ = match &ring_clone {
-                                                IoUringWrapper::Standard(ring) => {
-                                                    let ring = ring.lock().unwrap();
-                                                    ring.submitter().submit()
+                                            if ring_clone.submission_len() < ring_size {
+                                                match build_and_submit_sqe(
+                                                    &ring_clone,
+                                                    &sub,
+                                                    user_data,
+                                                ) {
+                                                    Ok(()) => pending.push_back(user_data),
+                                                    Err(error) => {
+                                                        in_flight.remove(&user_data);
+                                                        sub.completion.set(Err(error));
+                                                        decrement_in_flight(
+                                                            &in_flight_count_clone,
+                                                            &in_flight_cvar_clone,
+                                                            &batch_in_flight_clone,
+                                                            batch_id,
+                                                        );
+                                                    }
                                                 }
-                                                IoUringWrapper::Big(ring) => {
-                                                    let ring = ring.lock().unwrap();
-                                                    ring.submitter().submit()
-                                                }
-                                            };
+                                            } else {
+                                                in_flight.remove(&user_data);
+                                                let mut queue = queue_clone.lock().unwrap();
+                                                queue.push(sub);
+                                            }
                                             continue;
                                         }
 
@@ -1706,15 +2029,25 @@ impl RawBlockDevice {
                             ring_clone.submission_sync();
                         }
 
+                        if let Some(delay) = submission_retry.remaining_delay(Instant::now()) {
+                            let _ = ring_clone.reap_without_submitting();
+                            batch_ready_clone.wait(Some(delay));
+                            continue;
+                        }
+
                         // Block on epoll only if there's truly nothing pending. The empty +
                         // shutdown checks short-circuit so we don't sleep when a producer or
                         // do_close() already left work for us. Race-free against a late
                         // signal_producer(): eventfd is a counter, so a wake-up between the
                         // check and wait() is buffered, not lost.
+                        if pending.is_empty() && !in_flight.is_empty() {
+                            let _ = ring_clone.submit();
+                        }
                         if !shutdown_clone.load(Ordering::Relaxed)
+                            && pending.is_empty()
                             && queue_clone.lock().unwrap().is_empty()
                         {
-                            batch_ready_clone.wait();
+                            batch_ready_clone.wait(None);
                         }
 
                         let mut q = queue_clone.lock().unwrap();
@@ -1748,22 +2081,16 @@ impl RawBlockDevice {
 
                             drop(q);
 
-                            // Track only successfully built submissions so submit results
-                            // remain aligned even when one build fails in the middle.
-                            let mut user_data_list: Vec<u64> = Vec::with_capacity(to_submit_count);
-                            let mut built_submissions: Vec<IoSubmission> =
-                                Vec::with_capacity(to_submit_count);
                             for sub in batch.iter().take(to_submit_count) {
                                 let user_data = next_user_data;
                                 next_user_data = next_user_data.wrapping_add(1);
                                 match build_and_submit_sqe(&ring_clone, sub, user_data) {
                                     Ok(()) => {
-                                        user_data_list.push(user_data);
-                                        built_submissions.push(sub.clone());
+                                        pending.push_back(user_data);
                                         in_flight.insert(user_data, sub.clone());
                                     }
-                                    Err(e) => {
-                                        sub.completion.set(Err(e));
+                                    Err(error) => {
+                                        sub.completion.set(Err(error));
                                         decrement_in_flight(
                                             &in_flight_count_clone,
                                             &in_flight_cvar_clone,
@@ -1773,79 +2100,20 @@ impl RawBlockDevice {
                                     }
                                 }
                             }
-
-                            let built_count = built_submissions.len();
-                            let submit_result = match &ring_clone {
-                                IoUringWrapper::Standard(ring) => {
-                                    let ring = ring.lock().unwrap();
-                                    ring.submitter().submit()
-                                }
-                                IoUringWrapper::Big(ring) => {
-                                    let ring = ring.lock().unwrap();
-                                    ring.submitter().submit()
-                                }
-                            };
-                            // Handle EAGAIN (ring full) and EINTR (interrupted syscall)
-                            match submit_result {
-                                Ok(submitted) => {
-                                    // Any remaining requests in batch that weren't submitted
-                                    // will be retried in the next iteration of the loop
-                                    if submitted < built_count {
-                                        // Remove in_flight entries for unsubmitted requests
-                                        for user_data in user_data_list[submitted..].iter() {
-                                            in_flight.remove(user_data);
-                                        }
-                                        // Put unsubmitted requests back in the queue for retry
-                                        let unsubmitted: Vec<_> =
-                                            built_submissions[submitted..].to_vec();
-                                        if !unsubmitted.is_empty() {
-                                            let mut q = queue_clone.lock().unwrap();
-                                            // Insert unsubmitted requests back at the front preserving order
-                                            q.splice(0..0, unsubmitted);
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    // Handle submission errors
-                                    let error_code = e.raw_os_error();
-                                    match error_code {
-                                        Some(libc::EAGAIN) | Some(libc::EINTR) => {
-                                            // Ring is full, or the operation was interrupted due
-                                            // to signal. We need to wait for completions and then retry
-                                            // Remove in_flight entries for all submissions in this batch
-                                            for user_data in user_data_list.iter() {
-                                                in_flight.remove(user_data);
-                                            }
-                                            // Put unsubmitted requests back in queue for next iteration
-                                            if built_count > 0 {
-                                                let unsubmitted = built_submissions.clone();
-                                                let mut q = queue_clone.lock().unwrap();
-                                                // Insert unsubmitted requests back at the front preserving order
-                                                q.splice(0..0, unsubmitted);
-                                            }
-                                        }
-                                        _ => {
-                                            // Error: fail all pending submissions in this batch.
-                                            // Remove in_flight entries since these won't generate completions
-                                            for user_data in user_data_list.iter() {
-                                                in_flight.remove(user_data);
-                                            }
-                                            for sub in built_submissions.iter_mut() {
-                                                let batch_id = sub.batch_id;
-                                                sub.completion.set(Err(PyRuntimeError::new_err(
-                                                    format!("io_uring submit error: {:?}", e),
-                                                )));
-                                                let _ = sub.bounce.take();
-                                                decrement_in_flight(
-                                                    &in_flight_count_clone,
-                                                    &in_flight_cvar_clone,
-                                                    &batch_in_flight_clone,
-                                                    batch_id,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                        } else {
+                            drop(q);
+                        }
+                        if !pending.is_empty() {
+                            let result = submit_pending(&ring_clone, &mut pending);
+                            if let Err(error) =
+                                submission_retry.record_result(result, Instant::now())
+                            {
+                                fail_submissions(
+                                    &queue_clone,
+                                    &shutdown_clone,
+                                    &worker_error_clone,
+                                    error,
+                                );
                             }
                         }
                     }
@@ -1871,12 +2139,26 @@ impl RawBlockDevice {
                         }
                     }
 
-                    // Process any remaining in-flight requests
-                    // Wait for kernel to complete the requests or force-cancel them
-                    // Note: This 1000 milliseconds is a rough estimate
-                    let graceful_shutdown = Duration::from_millis(1000);
-                    thread::sleep(graceful_shutdown);
-                    {
+                    for user_data in pending.drain(..) {
+                        if let Some(mut sub) = in_flight.remove(&user_data) {
+                            let batch_id = sub.batch_id;
+                            let _ = sub.bounce.take();
+                            sub.completion.set(Err(PyRuntimeError::new_err(
+                                "io_uring worker stopped before submission",
+                            )));
+                            decrement_in_flight(
+                                &in_flight_count_clone,
+                                &in_flight_cvar_clone,
+                                &batch_in_flight_clone,
+                                batch_id,
+                            );
+                        }
+                    }
+                    if !in_flight.is_empty() {
+                        let _ = ring_clone.cancel_submitted();
+                    }
+                    while !in_flight.is_empty() {
+                        let _ = ring_clone.reap_without_submitting();
                         // Process completions for standard ring
                         if let IoUringWrapper::Standard(ring) = &ring_clone {
                             let completions: Vec<_> = {
@@ -1919,23 +2201,9 @@ impl RawBlockDevice {
                                 }
                             }
                         }
-                        ring_clone.submission_sync();
-                    }
-
-                    // Any remaining in_flight requests, force wake with error
-                    // (these were submitted to kernel but won't get completions)
-                    for (_user_data, mut sub) in in_flight.drain() {
-                        let batch_id = sub.batch_id;
-                        let _ = sub.bounce.take();
-                        sub.completion.set(Err(PyRuntimeError::new_err(
-                            "io_uring worker shutting down - request cancelled",
-                        )));
-                        decrement_in_flight(
-                            &in_flight_count_clone,
-                            &in_flight_cvar_clone,
-                            &batch_in_flight_clone,
-                            batch_id,
-                        );
+                        if !in_flight.is_empty() {
+                            thread::sleep(Duration::from_millis(1));
+                        }
                     }
 
                     // Final notification in case any thread is waiting on in_flight_count
@@ -1982,6 +2250,7 @@ impl RawBlockDevice {
             queue: queue_opt,
             worker: worker_opt,
             shutdown: shutdown_opt,
+            worker_error,
             fixed_buffer_map: Arc::new(Mutex::new(HashMap::new())),
             fixed_buffers_registered: Arc::new(AtomicBool::new(false)),
             in_flight_count: in_flight_count_opt.unwrap_or_else(|| Arc::new(AtomicU64::new(0))),
@@ -2057,6 +2326,16 @@ impl RawBlockDevice {
     // Expose cached size to Python.
     fn size_bytes(&self) -> PyResult<u64> {
         Ok(self.size)
+    }
+
+    /// Return the terminal io_uring submission error, or None if none occurred.
+    ///
+    /// Recoverable errors are retried with 1-100 ms backoff, waking on completions.
+    /// After 30 seconds without submission or completion progress, the worker
+    /// stops accepting requests. The error is available before accepted I/O
+    /// finishes draining. Normal shutdown and POSIX mode do not set an error.
+    fn worker_error(&self) -> Option<String> {
+        self.worker_error.lock().unwrap().clone()
     }
 
     /// Get NVMe namespace ID (only available when use_uring_cmd=true)
@@ -2172,11 +2451,23 @@ impl RawBlockDevice {
     /// All writes are queued to the worker thread, which processes them
     /// in batches to maximize throughput.
     ///
+    /// `total_lens` gives the physical transfer length of each write and
+    /// `payload_lens` the logical length of the source data; omitting
+    /// `payload_lens` makes it equal to `total_lens`. Each source buffer is
+    /// read only within its bounds and is never modified, and the
+    /// padding region `[payload_len, total_len)` is always written as zeroes.
+    ///
     /// Returns a batch ID that must be passed to `wait_iouring()` to wait for
     /// completion and obtain a success bitmap plus sparse completion errors.
     /// Validation or request-preparation errors are raised instead of returning
     /// a batch ID.
-    #[pyo3(signature = (offsets, buffers, total_lens, placement_ids = None))]
+    #[pyo3(signature = (
+        offsets,
+        buffers,
+        total_lens,
+        placement_ids = None,
+        payload_lens = None,
+    ))]
     fn batched_write(
         &self,
         py: Python<'_>,
@@ -2184,12 +2475,20 @@ impl RawBlockDevice {
         buffers: Vec<Bound<'_, PyAny>>,
         total_lens: Vec<usize>,
         placement_ids: Option<Vec<Option<i32>>>,
+        payload_lens: Option<Vec<usize>>,
     ) -> PyResult<u64> {
         if !self.use_iouring {
             return Err(PyRuntimeError::new_err("io_uring not enabled"));
         }
         if self.closed.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("device is closed"));
+        }
+        if self
+            .shutdown
+            .as_ref()
+            .is_some_and(|shutdown| shutdown.load(Ordering::Relaxed))
+        {
+            return Err(PyRuntimeError::new_err("io_uring worker stopped"));
         }
 
         let n = offsets.len();
@@ -2213,6 +2512,39 @@ impl RawBlockDevice {
             vec![None; n]
         };
 
+        // payload_lens carries the logical (unpadded) length of each buffer. When
+        // omitted it equals total_lens, which reproduces the legacy behavior where
+        // the full transfer length is also the valid payload length.
+        let payload_lens: Vec<usize> = match payload_lens {
+            Some(p) => {
+                if p.len() != n {
+                    return Err(PyValueError::new_err(
+                        "payload_lens must have same length as offsets",
+                    ));
+                }
+                p
+            }
+            None => total_lens.clone(),
+        };
+        for i in 0..n {
+            if payload_lens[i] > total_lens[i] {
+                return Err(PyValueError::new_err("total_len must be >= payload_len"));
+            }
+        }
+        let align = self.alignment;
+        if self.use_odirect {
+            for i in 0..n {
+                #[allow(clippy::manual_is_multiple_of)]
+                if (offsets[i] as usize) % align != 0 {
+                    return Err(PyValueError::new_err("O_DIRECT requires aligned offset"));
+                }
+                #[allow(clippy::manual_is_multiple_of)]
+                if total_lens[i] % align != 0 {
+                    return Err(PyValueError::new_err("O_DIRECT requires aligned total_len"));
+                }
+            }
+        }
+
         // Acquire buffer views to keep them alive until wait_iouring() completes
         let mut views = Vec::with_capacity(n);
         for buffer in &buffers {
@@ -2225,6 +2557,25 @@ impl RawBlockDevice {
                 return Err(PyValueError::new_err("null buffer pointer"));
             }
             views.push(view);
+        }
+
+        // Validate buffer capacities before allocating any batch tracking so the
+        // error path stays simple (just release the views).
+        let mut cap_err: Option<(usize, usize)> = None;
+        for (i, view) in views.iter().enumerate() {
+            let cap = view.len as usize;
+            if cap < payload_lens[i] {
+                cap_err = Some((cap, payload_lens[i]));
+                break;
+            }
+        }
+        if let Some((cap, need)) = cap_err {
+            for v in views {
+                release_pybuffer(v);
+            }
+            return Err(PyValueError::new_err(format!(
+                "input buffer too small: cap={cap} need={need}"
+            )));
         }
 
         // Generate a unique batch ID for this batch
@@ -2248,10 +2599,13 @@ impl RawBlockDevice {
             }
         }
 
-        // Extract pointers as usize before releasing GIL (raw pointers are not Send)
+        // Extract pointers and capacities as usize before releasing GIL (raw
+        // pointers are not Send).
         let mut ptrs = Vec::with_capacity(n);
+        let mut caps = Vec::with_capacity(n);
         for view in &views {
             ptrs.push(view.buf as usize);
+            caps.push(view.len as usize);
         }
 
         for view in views {
@@ -2297,8 +2651,9 @@ impl RawBlockDevice {
 
             // Prepare all requests, bounce buffers (if needed) and collect submission data.
             for i in 0..n {
-                let ptr = ptrs[i] as *const u8;
                 let total_len = total_lens[i];
+                let payload_len = payload_lens[i];
+                let cap = caps[i];
                 let offset = offsets[i];
 
                 let comp = Arc::new(IoCompletion::new());
@@ -2306,39 +2661,15 @@ impl RawBlockDevice {
                 // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
                 let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
 
-                if use_odirect {
-                    #[allow(clippy::manual_is_multiple_of)]
-                    if (offset as usize) % alignment != 0 {
-                        return Err(PyValueError::new_err("O_DIRECT requires aligned offset"));
-                    }
-                    #[allow(clippy::manual_is_multiple_of)]
-                    if total_len % alignment != 0 {
-                        return Err(PyValueError::new_err("O_DIRECT requires aligned total_len"));
-                    }
-                }
-
-                // Misaligned pointer is handled via bounce buffer for writes
-                let (final_ptr, bounce_opt, fixed_idx) = if use_odirect {
-                    let align = alignment;
-                    #[allow(clippy::manual_is_multiple_of)]
-                    if ptrs[i] % align != 0 {
-                        let bounce = AlignedBuf::new(total_len, align)?;
-                        unsafe {
-                            libc::memcpy(
-                                bounce.as_mut_ptr() as *mut libc::c_void,
-                                ptr as *const libc::c_void,
-                                total_len,
-                            );
-                        }
-                        let bounce_arc = std::sync::Arc::new(bounce);
-                        let bounce_ptr = bounce_arc.as_ptr();
-                        (bounce_ptr, Some(bounce_arc), None)
-                    } else {
-                        (ptr, None, fixed_idx)
-                    }
-                } else {
-                    (ptr, None, fixed_idx)
-                };
+                let prepared = prepare_iouring_write_buffer(
+                    ptrs[i],
+                    cap,
+                    payload_len,
+                    total_len,
+                    use_odirect,
+                    alignment,
+                    fixed_idx,
+                )?;
 
                 // Build NVMe command data
                 let placement_id_u16 = placement_ids[i];
@@ -2361,11 +2692,11 @@ impl RawBlockDevice {
                     fd,
                     offset,
                     len: total_len,
-                    ptr_addr: final_ptr as usize,
+                    ptr_addr: prepared.ptr_addr,
                     is_write: true,
                     completion: comp.clone(),
-                    fixed_buffer_idx: fixed_idx,
-                    bounce: bounce_opt,
+                    fixed_buffer_idx: prepared.fixed_buffer_idx,
+                    bounce: prepared.bounce,
                     original_ptr: None,
                     payload_len: None,
                     batch_id,
@@ -2375,11 +2706,7 @@ impl RawBlockDevice {
                 submissions.push((sub, comp));
             }
 
-            // Queue all submissions atomically. At this point no further errors can
-            // occur during queuing.
             for (sub, comp) in submissions {
-                in_flight_count.fetch_add(1, Ordering::Relaxed);
-
                 // Increment per-batch in-flight count
                 {
                     let batch_map = batch_in_flight.lock().unwrap();
@@ -2388,8 +2715,20 @@ impl RawBlockDevice {
                     }
                 }
                 {
-                    let mut q = queue.lock().unwrap();
-                    q.push(sub);
+                    if let Err(error) = enqueue_if_running(
+                        &queue,
+                        self.shutdown.as_ref().expect("shutdown must exist"),
+                        &in_flight_count,
+                        sub,
+                    ) {
+                        comp.set(Err(error));
+                        let batch_map = batch_in_flight.lock().unwrap();
+                        if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
+                            if batch_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+                                batch_cvar.notify_all();
+                            }
+                        }
+                    }
                 }
                 batch_ready.signal_producer();
 
@@ -2493,6 +2832,8 @@ impl RawBlockDevice {
     }
 
     /// Synchronous read using io_uring.
+    ///
+    /// Deprecated: use ``batched_read()`` followed by ``wait_iouring()`` instead.
     #[pyo3(signature = (offset, data, payload_len, total_len = None))]
     fn read_uring(
         &self,
@@ -2502,11 +2843,26 @@ impl RawBlockDevice {
         payload_len: usize,
         total_len: Option<usize>,
     ) -> PyResult<()> {
+        PyErr::warn(
+            py,
+            &py.get_type::<PyDeprecationWarning>(),
+            c"RawBlockDevice.read_uring() is deprecated; \
+              use batched_read() followed by wait_iouring() instead.",
+            1,
+        )?;
+
         if !self.use_iouring {
             return Err(PyRuntimeError::new_err("io_uring not enabled"));
         }
         if self.closed.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("device is closed"));
+        }
+        if self
+            .shutdown
+            .as_ref()
+            .is_some_and(|shutdown| shutdown.load(Ordering::Relaxed))
+        {
+            return Err(PyRuntimeError::new_err("io_uring worker stopped"));
         }
 
         let view = get_pybuffer(py, data, true)?;
@@ -2572,7 +2928,6 @@ impl RawBlockDevice {
         let use_bounce = !ptr_aligned || cap < total_len;
 
         let res = if !use_bounce {
-            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
             let comp = Arc::new(IoCompletion::new());
             let sub = IoSubmission {
                 fd: self.fd,
@@ -2588,10 +2943,14 @@ impl RawBlockDevice {
                 batch_id: 0,
                 nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
             };
-            {
-                let q = self.queue.as_ref().expect("queue must exist");
-                let mut q = q.lock().unwrap();
-                q.push(sub);
+            if let Err(error) = enqueue_if_running(
+                self.queue.as_ref().expect("queue must exist"),
+                self.shutdown.as_ref().expect("shutdown must exist"),
+                &self.in_flight_count,
+                sub,
+            ) {
+                release_pybuffer(view);
+                return Err(error);
             }
             if let Some(batch_ready) = &self.batch_ready {
                 batch_ready.signal_producer();
@@ -2601,7 +2960,6 @@ impl RawBlockDevice {
             let bounce = AlignedBuf::new(total_len, align)?;
             let bounce_arc = std::sync::Arc::new(bounce);
             let bounce_ptr = bounce_arc.as_mut_ptr();
-            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
             let comp = Arc::new(IoCompletion::new());
             let sub = IoSubmission {
                 fd: self.fd,
@@ -2617,10 +2975,14 @@ impl RawBlockDevice {
                 batch_id: 0,
                 nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
             };
-            {
-                let q = self.queue.as_ref().expect("queue must exist");
-                let mut q = q.lock().unwrap();
-                q.push(sub);
+            if let Err(error) = enqueue_if_running(
+                self.queue.as_ref().expect("queue must exist"),
+                self.shutdown.as_ref().expect("shutdown must exist"),
+                &self.in_flight_count,
+                sub,
+            ) {
+                release_pybuffer(view);
+                return Err(error);
             }
             if let Some(batch_ready) = &self.batch_ready {
                 batch_ready.signal_producer();
@@ -2634,6 +2996,10 @@ impl RawBlockDevice {
     }
 
     /// Synchronous write using io_uring.
+    ///
+    /// `total_len` defaults to `payload_len`. The source buffer is read only
+    /// within its bounds and is never modified, and the padding region
+    /// `[payload_len, total_len)` is always written as zeroes.
     #[pyo3(signature = (offset, data, payload_len, total_len = None, placement_id = None))]
     fn write_uring(
         &self,
@@ -2649,6 +3015,13 @@ impl RawBlockDevice {
         }
         if self.closed.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("device is closed"));
+        }
+        if self
+            .shutdown
+            .as_ref()
+            .is_some_and(|shutdown| shutdown.load(Ordering::Relaxed))
+        {
+            return Err(PyRuntimeError::new_err("io_uring worker stopped"));
         }
 
         let view = get_pybuffer(py, data, false)?;
@@ -2703,23 +3076,26 @@ impl RawBlockDevice {
         };
 
         let placement_id_u16 = placement_id.map(placement_id_to_u16).transpose()?;
+        let prepared = prepare_iouring_write_buffer(
+            ptr as usize,
+            cap,
+            payload_len,
+            total_len,
+            self.use_odirect,
+            align,
+            fixed_idx,
+        )?;
 
-        // Use bounce buffer if:
-        // Buffer is not aligned (O_DIRECT requirement)
-        // Buffer capacity is less than total_len
-        let use_bounce = !ptr_aligned || cap < total_len;
-
-        let res = if !use_bounce {
-            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
+        let res = if prepared.bounce.is_none() {
             let comp = Arc::new(IoCompletion::new());
             let sub = IoSubmission {
                 fd: self.fd,
                 offset,
                 len: total_len,
-                ptr_addr: ptr as usize,
+                ptr_addr: prepared.ptr_addr,
                 is_write: true,
                 completion: comp.clone(),
-                fixed_buffer_idx: fixed_idx,
+                fixed_buffer_idx: prepared.fixed_buffer_idx,
                 bounce: None,
                 original_ptr: None,
                 payload_len: None,
@@ -2729,34 +3105,31 @@ impl RawBlockDevice {
                     placement_id_u16.unwrap_or(0),
                 )?,
             };
-            {
-                let q = self.queue.as_ref().expect("queue must exist");
-                let mut q = q.lock().unwrap();
-                q.push(sub);
+            if let Err(error) = enqueue_if_running(
+                self.queue.as_ref().expect("queue must exist"),
+                self.shutdown.as_ref().expect("shutdown must exist"),
+                &self.in_flight_count,
+                sub,
+            ) {
+                release_pybuffer(view);
+                return Err(error);
             }
             if let Some(batch_ready) = &self.batch_ready {
                 batch_ready.signal_producer();
             }
             py.allow_threads(move || comp.wait())
         } else {
-            let bounce = AlignedBuf::new(total_len, align)?;
-            let bounce_arc = std::sync::Arc::new(bounce);
-            let bounce_ptr = bounce_arc.as_mut_ptr();
-            // Copy data to bounce buffer before submission
-            unsafe {
-                std::ptr::copy_nonoverlapping(ptr, bounce_ptr, payload_len);
-            }
-            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
+            let bounce = prepared.bounce;
             let comp = Arc::new(IoCompletion::new());
             let sub = IoSubmission {
                 fd: self.fd,
                 offset,
                 len: total_len,
-                ptr_addr: bounce_ptr as usize,
+                ptr_addr: prepared.ptr_addr,
                 is_write: true,
                 completion: comp.clone(),
                 fixed_buffer_idx: None,
-                bounce: Some(bounce_arc),
+                bounce,
                 original_ptr: None,
                 payload_len: Some(payload_len),
                 batch_id: 0,
@@ -2765,10 +3138,14 @@ impl RawBlockDevice {
                     placement_id_u16.unwrap_or(0),
                 )?,
             };
-            {
-                let q = self.queue.as_ref().expect("queue must exist");
-                let mut q = q.lock().unwrap();
-                q.push(sub);
+            if let Err(error) = enqueue_if_running(
+                self.queue.as_ref().expect("queue must exist"),
+                self.shutdown.as_ref().expect("shutdown must exist"),
+                &self.in_flight_count,
+                sub,
+            ) {
+                release_pybuffer(view);
+                return Err(error);
             }
             if let Some(batch_ready) = &self.batch_ready {
                 batch_ready.signal_producer();
@@ -2802,6 +3179,13 @@ impl RawBlockDevice {
         }
         if self.closed.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("device is closed"));
+        }
+        if self
+            .shutdown
+            .as_ref()
+            .is_some_and(|shutdown| shutdown.load(Ordering::Relaxed))
+        {
+            return Err(PyRuntimeError::new_err("io_uring worker stopped"));
         }
 
         let n = offsets.len();
@@ -2970,11 +3354,7 @@ impl RawBlockDevice {
                 submissions.push((sub, comp));
             }
 
-            // Queue all submissions atomically. At this point no further errors can
-            // occur during queuing.
             for (sub, comp) in submissions {
-                in_flight_count.fetch_add(1, Ordering::Relaxed);
-
                 // Increment per-batch in-flight count
                 {
                     let batch_map = batch_in_flight.lock().unwrap();
@@ -2984,8 +3364,20 @@ impl RawBlockDevice {
                 }
 
                 {
-                    let mut q = queue.lock().unwrap();
-                    q.push(sub);
+                    if let Err(error) = enqueue_if_running(
+                        &queue,
+                        self.shutdown.as_ref().expect("shutdown must exist"),
+                        &in_flight_count,
+                        sub,
+                    ) {
+                        comp.set(Err(error));
+                        let batch_map = batch_in_flight.lock().unwrap();
+                        if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
+                            if batch_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+                                batch_cvar.notify_all();
+                            }
+                        }
+                    }
                 }
                 batch_ready.signal_producer();
 
@@ -3280,11 +3672,28 @@ impl RawBlockDevice {
         Ok(())
     }
 
+    /// Close the device after draining accepted I/O, without holding the GIL.
+    ///
+    /// Repeated calls are harmless. This may wait indefinitely if an accepted
+    /// request cannot complete or be cancelled. Raises `OSError` if closing
+    /// the underlying file descriptor fails.
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
+        if !self.closed.load(Ordering::Relaxed) {
+            py.allow_threads(|| self.do_close())?;
+        }
+        Ok(())
+    }
+}
+
+impl RawBlockDevice {
     /// Internal function to perform the cleanup operation.
+    ///
+    /// Accepted io_uring requests retain their buffers until terminal completion.
+    /// Shutdown may wait indefinitely if they cannot complete or be cancelled.
     fn do_close(&mut self) -> Result<(), PyErr> {
         if self.use_iouring {
-            if let Some(shutdown) = &self.shutdown {
-                shutdown.store(true, Ordering::Relaxed);
+            if let (Some(queue), Some(shutdown)) = (&self.queue, &self.shutdown) {
+                stop_submissions(queue, shutdown);
             }
             if let Some(batch_ready) = &self.batch_ready {
                 batch_ready.signal_producer();
@@ -3330,19 +3739,14 @@ impl RawBlockDevice {
         self.closed.store(true, Ordering::Relaxed);
         Ok(())
     }
-
-    fn close(&mut self) -> PyResult<()> {
-        if !self.closed.load(Ordering::Relaxed) {
-            self.do_close()?;
-        }
-        Ok(())
-    }
 }
 
 impl Drop for RawBlockDevice {
     fn drop(&mut self) {
         if !self.closed.load(Ordering::Relaxed) {
-            let _ = self.do_close();
+            Python::with_gil(|py| {
+                let _ = py.allow_threads(|| self.do_close());
+            });
         }
     }
 }
@@ -3352,3 +3756,6 @@ fn lmcache_rust_raw_block_io(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<(
     m.add_class::<RawBlockDevice>()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

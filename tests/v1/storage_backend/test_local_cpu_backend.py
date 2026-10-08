@@ -416,6 +416,32 @@ class TestLocalCPUBackend:
 
         local_cpu_backend.memory_allocator.close()
 
+    def test_allocate_zero_size_does_not_evict(self, local_cpu_backend):
+        """A zero-byte request must fail without evicting cached objects.
+
+        ``allocate()`` treats a failed allocation as memory pressure: it starts
+        evicting hot-cache objects, and with ``busy_loop=True`` it keeps
+        retrying instead of returning. A zero-byte request is a caller bug, so it
+        has to be rejected before that path is entered.
+        """
+        keys = [create_test_key(f"key_{i}") for i in range(3)]
+        memory_objs = [create_test_memory_obj() for _ in keys]
+        for key, memory_obj in zip(keys, memory_objs, strict=True):
+            local_cpu_backend.submit_put_task(key, memory_obj)
+        assert len(local_cpu_backend.hot_cache) == 3
+
+        with pytest.raises(ValueError, match="size must be greater than 0"):
+            local_cpu_backend.allocate(torch.Size([0]), torch.bfloat16)
+
+        assert len(local_cpu_backend.hot_cache) == 3
+
+        # Release the backend's reference and the one held by this test.
+        for key, memory_obj in zip(keys, memory_objs, strict=True):
+            local_cpu_backend.remove(key)
+            memory_obj.ref_count_down()
+
+        local_cpu_backend.memory_allocator.close()
+
     def test_allocate_with_layerwise_config(self, memory_allocator):
         """Test allocate() with layerwise configuration."""
         config = create_test_config(use_layerwise=True, enable_blending=True)
