@@ -2027,6 +2027,8 @@ def test_retrieve_cleanup_ref_count_and_unpin(async_loading: bool) -> None:
     engine.remove_after_retrieve = False
     engine._is_passive.return_value = False
     engine.save_only_first_rank = False
+    # Set in __init__, so not part of the spec: the default (non-sharded) path.
+    engine._pcp_shard = False
     engine._get_req_id.return_value = "req_123"
 
     # We want retrieve to process chunks
@@ -2088,6 +2090,8 @@ def test_store_skips_degenerate_token_ranges() -> None:
     engine.is_frozen.return_value = False
     engine._is_passive.return_value = False
     engine._get_req_id.return_value = "req_1"
+    # A bare MagicMock attribute is truthy: take the default (non-sharded) path.
+    engine._pcp_shard = False
     engine.kv_events_enabled = False
     engine.store_location = "LocalCPUBackend"
     engine.config.get_extra_config_value.return_value = False
