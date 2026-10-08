@@ -10,12 +10,14 @@ while using the device-independent native module for shared enums.
 # Standard
 from types import ModuleType
 from typing import Any
+from unittest.mock import MagicMock
 import importlib
 import inspect
 import sys
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache import device_ops, torch_dev, torch_device_type
@@ -62,6 +64,15 @@ def isolated_registry() -> Any:
 
 
 # -- Contract --------------------------------------------------------------
+
+
+def test_synchronize_follows_tensor_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CPU skips synchronization; CUDA uses the tensor's device index."""
+    synchronize = MagicMock()
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
+    for device in ("cpu", "cuda:1", "cpu"):
+        platform_pkg.synchronize_device(torch.device(device))
+    synchronize.assert_called_once_with(torch.device("cuda:1"))
 
 
 def test_base_class_declares_every_op_as_instance_method() -> None:
