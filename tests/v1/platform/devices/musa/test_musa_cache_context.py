@@ -60,10 +60,6 @@ def test_close_deregisters_gds_staging_buffer(monkeypatch: Any) -> None:
         def close(self) -> None:
             calls.append("wrapper.close")
 
-    class _FakeGDSContext:
-        def deregister_gpu_buffer(self, buffer: Any) -> None:
-            calls.append(f"deregister:{buffer}")
-
     class _TestContext(MUSACacheContext):
         def __init__(self) -> None:
             self.stream_ = _Stream()  # type: ignore[assignment]
@@ -71,7 +67,11 @@ def test_close_deregisters_gds_staging_buffer(monkeypatch: Any) -> None:
             self._gds_buffer_registered = True
             self._temp_buffer = cast(Any, SimpleNamespace(buffer="STAGING"))
 
-    monkeypatch.setattr(musa_ctx_mod, "get_gds_context", lambda: _FakeGDSContext())
+    monkeypatch.setattr(
+        musa_ctx_mod,
+        "deregister_gds_gpu_buffer",
+        lambda buffer: calls.append(f"deregister:{buffer}"),
+    )
     # torch_dev.stream must be usable as a context manager for the
     # deregistration block.
     # Standard
@@ -105,11 +105,6 @@ def test_close_releases_ipc_wrappers_when_gds_deregister_fails(
         def close(self) -> None:
             calls.append("wrapper.close")
 
-    class _FakeGDSContext:
-        def deregister_gpu_buffer(self, buffer: Any) -> None:
-            calls.append(f"deregister:{buffer}")
-            raise RuntimeError("deregister failed")
-
     class _TestContext(MUSACacheContext):
         def __init__(self) -> None:
             self.stream_ = _Stream()  # type: ignore[assignment]
@@ -117,7 +112,11 @@ def test_close_releases_ipc_wrappers_when_gds_deregister_fails(
             self._gds_buffer_registered = True
             self._temp_buffer = cast(Any, SimpleNamespace(buffer="STAGING"))
 
-    monkeypatch.setattr(musa_ctx_mod, "get_gds_context", lambda: _FakeGDSContext())
+    def fail_deregister(buffer: Any) -> None:
+        calls.append(f"deregister:{buffer}")
+        raise RuntimeError("deregister failed")
+
+    monkeypatch.setattr(musa_ctx_mod, "deregister_gds_gpu_buffer", fail_deregister)
     monkeypatch.setattr(
         musa_ctx_mod.torch_dev, "stream", lambda s: contextlib.nullcontext()
     )

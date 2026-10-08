@@ -16,7 +16,10 @@ from lmcache import torch_dev
 from lmcache.lmcache_native import EngineKVFormat
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.gds_context import get_gds_context
+from lmcache.v1.gpu_connector.gds_context import (
+    deregister_gds_gpu_buffer,
+    register_gds_gpu_buffer,
+)
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
@@ -367,10 +370,10 @@ class MUSACacheContext(BaseCacheContext):
         self.stream_ = torch_dev.Stream(device=self.device_)
         self.host_callback_stream_ = _MUSAHostCallbackStream(self.stream_)
 
-        # Register the staging buffer with the GDS muFile context on the
+        # Register the staging buffer with all active GDS L1 contexts on the
         # context's MUSA stream (mirrors the CUDA cache context).
         with torch_dev.stream(self.stream_):
-            get_gds_context().register_gpu_buffer(self._temp_buffer.buffer)
+            register_gds_gpu_buffer(self._temp_buffer.buffer)
         self._gds_buffer_registered = True
 
         logger.debug(
@@ -411,7 +414,7 @@ class MUSACacheContext(BaseCacheContext):
                 and stream is not None
             ):
                 with torch_dev.stream(stream):
-                    get_gds_context().deregister_gpu_buffer(temp_buffer.buffer)
+                    deregister_gds_gpu_buffer(temp_buffer.buffer)
                 self._gds_buffer_registered = False
 
             kv_tensors = getattr(self, "kv_caches_", None)
