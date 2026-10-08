@@ -265,6 +265,16 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       ``mp_host`` and ``mp_port`` identify the standalone LMCache request
       server. A bare host uses the default ZMQ transport.
 
+      Engine-driven transfer can be selected under ``extra_config`` with the
+      same name as the vLLM connector:
+
+      .. code-block:: yaml
+
+         mp_host: 127.0.0.1
+         mp_port: 5555
+         extra_config:
+           lmcache.mp.mp_transfer_mode: engine_driven
+
       **Start the LMCache server**
 
       .. code-block:: bash
@@ -273,7 +283,12 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          # prompts below. Use the default (256) for production workloads.
          lmcache server \
            --host 127.0.0.1 --port 5555 \
-           --l1-size-gb 10 --eviction-policy LRU --chunk-size 16
+           --l1-size-gb 10 --eviction-policy LRU --chunk-size 16 \
+           --supported-transfer-mode auto
+
+      The server command above enables both transfer protocols. The client and
+      server transfer modes must be compatible; a server dedicated to one mode
+      can instead use ``lmcache_driven`` or ``engine_driven``.
 
       To use gRPC instead of ZMQ, include the ``grpc://`` scheme in the
       connector configuration:
