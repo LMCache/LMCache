@@ -11,17 +11,39 @@ fallback.
 from __future__ import annotations
 
 # Standard
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.devices.xpu.tensor_from_ptr import (
+    construct_xpu_tensor_from_data_pointer,
+)
+
+if TYPE_CHECKING:
+    # Third Party
+    import torch
 
 logger = init_logger(__name__)
 
 
 class XpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "xpu"
+
+    def tensor_from_ptr(
+        self,
+        ptr: int,
+        shape: tuple[int, ...],
+        dtype: "torch.dtype",
+        device: "torch.device",
+    ) -> "torch.Tensor":
+        """Create a non-owning XPU tensor from a process-local pointer.
+
+        The LMCache-driven transfer path passes device buffers as raw
+        pointers, so the torch fallback for the block-transfer kernels can
+        only run on XPU once those pointers can be turned back into tensors.
+        """
+        return construct_xpu_tensor_from_data_pointer(ptr, shape, dtype, device)
 
     def ensure_native(self) -> None:
         if self._native_bound:
