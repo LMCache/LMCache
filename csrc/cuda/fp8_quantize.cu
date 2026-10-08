@@ -36,8 +36,19 @@
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
+
+#ifndef CHECK_CUDA_CALL
+  #define CHECK_CUDA_CALL(call)                                       \
+    do {                                                              \
+      cudaError_t err = call;                                         \
+      if (err != cudaSuccess) {                                       \
+        fprintf(stderr, "CUDA error in file '%s' in line %i : %s.\n", \
+                __FILE__, __LINE__, cudaGetErrorString(err));         \
+        exit(1);                                                      \
+      }                                                               \
+    } while (0)
+#endif
 
 #ifdef USE_ROCM
   #include <hip/hip_fp8.h>
@@ -196,18 +207,18 @@ std::tuple<at::Tensor, at::Tensor> fp8QuantizeScaled(
   const float* xf = x.data_ptr<float>();
   auto* fp8p = reinterpret_cast<__nv_fp8_storage_t*>(fp8_out.data_ptr());
   float* scp = scales.data_ptr<float>();
-  C10_CUDA_CHECK(cudaGetLastError());
+  CHECK_CUDA_CALL(cudaGetLastError());
 
   if (scale_mode == 0) {
     auto amax = at::empty({1}, x.options().dtype(at::kFloat));
     fp8AmaxGlobalKernel<<<1, 256, 0, stream>>>(xf, n, amax.data_ptr<float>());
-    C10_CUDA_CHECK(cudaGetLastError());
+    CHECK_CUDA_CALL(cudaGetLastError());
     // One scalar readback costs a stream sync; amortised over the whole
     // tensor. Rowwise and blockwise avoid it entirely.
     float am = 0.0f;
-    C10_CUDA_CHECK(cudaMemcpyAsync(&am, amax.data_ptr<float>(), sizeof(float),
-                                   cudaMemcpyDeviceToHost, stream));
-    C10_CUDA_CHECK(cudaStreamSynchronize(stream));
+    CHECK_CUDA_CALL(cudaMemcpyAsync(&am, amax.data_ptr<float>(), sizeof(float),
+                                    cudaMemcpyDeviceToHost, stream));
+    CHECK_CUDA_CALL(cudaStreamSynchronize(stream));
     if (amax_ceiling > 0.0f) am = fmaxf(am, ceil_f);
     const float inv = (am > kFp8MinNormal) ? (kFp8Max / am) : 1.0f;
     scp[0] = (inv > 0.0f) ? (1.0f / inv) : 1.0f;
@@ -215,7 +226,7 @@ std::tuple<at::Tensor, at::Tensor> fp8QuantizeScaled(
     const int64_t threads = 256;
     const int64_t blocks = (n + threads - 1) / threads;
     fp8CastScaledKernel<<<blocks, threads, 0, stream>>>(xf, fp8p, n, inv);
-    C10_CUDA_CHECK(cudaGetLastError());
+    CHECK_CUDA_CALL(cudaGetLastError());
   } else if (scale_mode == 1) {
     TORCH_CHECK(x.dim() >= 1, "rowwise needs dim >= 1");
     const int64_t cols = x.size(-1);
@@ -224,7 +235,7 @@ std::tuple<at::Tensor, at::Tensor> fp8QuantizeScaled(
     TORCH_CHECK(scales.numel() >= rows, "scales too small for rowwise");
     fp8QuantRowwiseKernel<<<rows, 256, 0, stream>>>(
         xf, fp8p, scp, static_cast<int>(cols), ceil_f);
-    C10_CUDA_CHECK(cudaGetLastError());
+    CHECK_CUDA_CALL(cudaGetLastError());
   } else {
     TORCH_CHECK(block_size > 0 && block_size % 32 == 0,
                 "block_size must be a positive multiple of 32");
@@ -236,7 +247,7 @@ std::tuple<at::Tensor, at::Tensor> fp8QuantizeScaled(
     fp8QuantBlockwiseKernel<<<blocks, threads, 0, stream>>>(
         xf, fp8p, scp, static_cast<int>(n_groups), static_cast<int>(block_size),
         ceil_f);
-    C10_CUDA_CHECK(cudaGetLastError());
+    CHECK_CUDA_CALL(cudaGetLastError());
   }
   return std::make_tuple(fp8_out, scales);
 }
