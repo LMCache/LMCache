@@ -290,10 +290,6 @@ class ClientPollingLoop:
         self._process_ops()
 
 
-CONNECT_TIMEOUT_MS = 5000
-RECONNECT_IVL_MAX_MS = 1000
-
-
 # Main classes
 class MessageQueueClient:
     @dataclass
@@ -307,8 +303,6 @@ class MessageQueueClient:
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.DEALER)
-        self.socket.setsockopt(zmq.CONNECT_TIMEOUT, CONNECT_TIMEOUT_MS)
-        self.socket.setsockopt(zmq.RECONNECT_IVL_MAX, RECONNECT_IVL_MAX_MS)
         self.socket.connect(server_url)
 
         # Input queue
