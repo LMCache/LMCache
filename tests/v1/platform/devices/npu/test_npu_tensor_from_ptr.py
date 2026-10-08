@@ -13,6 +13,11 @@ from lmcache.v1.platform.devices.npu import device_ops
 
 pytestmark = pytest.mark.no_shared_allocator
 
+# ``npu`` only parses once torch_npu registers the device type, so these
+# CPU-runnable tests forward a stand-in device: ``tensor_from_ptr`` treats
+# the argument as opaque pass-through data.
+STANDIN_DEVICE = torch.device("meta:0")
+
 
 def _fake_cpu_storage_constructor(
     monkeypatch: pytest.MonkeyPatch,
@@ -44,13 +49,13 @@ def test_constructs_aliasing_view_from_data_pointer(
         original.data_ptr(),
         (4, 6),
         torch.float32,
-        torch.device("npu:0"),
+        STANDIN_DEVICE,
     )
 
     assert view.shape == (4, 6)
     assert view.stride() == (6, 1)
     assert view.dtype == torch.float32
-    assert calls == [(original.data_ptr(), torch.device("npu:0"), 96)]
+    assert calls == [(original.data_ptr(), STANDIN_DEVICE, 96)]
 
     # A copy fallback would break the paged-buffer ownership contract:
     # writes through the view must reach the caller's buffer.
@@ -70,5 +75,5 @@ def test_constructor_failure_raises_runtime_error(
 
     with pytest.raises(RuntimeError, match="non-owning tensor"):
         device_ops.NpuDeviceOps().tensor_from_ptr(
-            0x1000, (2, 3), torch.float16, torch.device("npu:0")
+            0x1000, (2, 3), torch.float16, STANDIN_DEVICE
         )
