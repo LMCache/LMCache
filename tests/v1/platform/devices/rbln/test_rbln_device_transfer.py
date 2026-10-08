@@ -35,9 +35,12 @@ BLOCKS_PER_CHUNK = 2
 CHUNK_TOKENS = BLOCKS_PER_CHUNK * BLOCK_SIZE
 DTYPE = torch.bfloat16
 
-pytestmark = pytest.mark.skipif(
-    not RblnDeviceSpec().is_available(), reason="RBLN NPU is required"
-)
+pytestmark = [
+    pytest.mark.rbln,
+    pytest.mark.skipif(
+        not RblnDeviceSpec().is_available(), reason="RBLN NPU is required"
+    ),
+]
 
 
 def _shape_desc(kv_size: int, num_heads: int, head_size: int) -> PageBufferShapeDesc:
