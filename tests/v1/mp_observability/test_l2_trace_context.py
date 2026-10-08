@@ -130,8 +130,9 @@ class ObservedL2(MockL2Adapter):
 
 @linux_controller
 @pytest.mark.parametrize("sampled", [True, False])
+@pytest.mark.parametrize("fail_first_lookup", [False, True])
 def test_prefetch_queue_keeps_each_parent(
-    monkeypatch: pytest.MonkeyPatch, sampled: bool
+    monkeypatch: pytest.MonkeyPatch, sampled: bool, fail_first_lookup: bool
 ) -> None:
     monkeypatch.setenv("LMCACHE_MP_TRACE_CONTEXT", "1")
     config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10)
@@ -141,6 +142,17 @@ def test_prefetch_queue_keeps_each_parent(
     assert wait_fd(adapter.get_store_event_fd())
     assert warm in adapter.pop_completed_store_tasks()
     adapter.seen.clear()
+    submit_lookup = adapter.submit_lookup_and_lock_task
+
+    def lookup_with_failure(
+        lookup_keys: list[ObjectKey], layout_descs: dict[int, MemoryLayoutDesc]
+    ) -> int:
+        if fail_first_lookup and lookup_keys == [keys[0]]:
+            adapter.observe("lookup")
+            raise ValueError("test lookup submission failure")
+        return submit_lookup(lookup_keys, layout_descs)
+
+    monkeypatch.setattr(adapter, "submit_lookup_and_lock_task", lookup_with_failure)
     # Exercise controller queues with CPU buffers; no accelerator allocation.
     l1 = create_autospec(L1Manager, instance=True)
     l1.reserve_read.side_effect = lambda keys, read_locks=1: {
@@ -154,12 +166,15 @@ def test_prefetch_queue_keeps_each_parent(
             size_in_bytes=4096, use_lazy=True, init_size_in_bytes=4096
         )
     )
+    l1.config = l1config
+    l1.l1_manager_id = 0
     controller = PrefetchController(
         [l1],
         [L1ManagerDescriptor(0, l1config)],
         [adapter],
         [L2AdapterDescriptor(0, config)],
         DefaultPrefetchPolicy(),
+        max_in_flight=1,
     )
     controller.start()
     try:
@@ -174,17 +189,21 @@ def test_prefetch_queue_keeps_each_parent(
                         PrefetchTaskSpec(key_groups=[group])
                     )
                 )
-        for request in requests:
+        for index, request in enumerate(requests):
             assert controller.wait_prefetch_result(request, timeout=5)
-            assert controller.query_prefetch_result(request) is not None
-        assert sorted(adapter.seen) == sorted(
-            [
-                ("lookup", 10, sampled),
-                ("load", 10, sampled),
-                ("lookup", 11, sampled),
-                ("load", 11, sampled),
-            ]
-        )
+            result = controller.query_prefetch_result(request)
+            assert result is not None
+            failed = fail_first_lookup and index == 0
+            assert result.hit_cells[0].popcount() == (0 if failed else 1)
+            assert result.l1_owners == ({} if failed else {keys[index]: 0})
+        expected = [
+            ("lookup", 10, sampled),
+            ("lookup", 11, sampled),
+            ("load", 11, sampled),
+        ]
+        if not fail_first_lookup:
+            expected.append(("load", 10, sampled))
+        assert sorted(adapter.seen) == sorted(expected)
     finally:
         controller.stop()
         adapter.close()

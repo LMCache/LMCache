@@ -117,6 +117,10 @@ class _StorageManagerStub:
         self._capacity_publish_lock = threading.Lock()
         self._event_bus = _RecordingBus()
 
+    @property
+    def _l1_managers_by_id(self) -> dict[int, _FakeL1Manager]:
+        return {0: self._l1_manager}
+
     def _require_single_l1(self) -> None:
         """This capacity-only stub always represents one L1 manager."""
 
