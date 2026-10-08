@@ -196,9 +196,9 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
             _request_id: External request identifier (used for logging).
             key: LMCache key object for the store range.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to store, indexed by LMCache KV group id.
+            block_ids: Engine block IDs to store, indexed by LMCache KV group id.
             _event: Synchronization event; ``wait()`` is called in background.
-            blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+            blocks_in_chunk: Number of engine blocks per LMCache chunk.
 
         Returns:
             An unresolved :class:`MessagingFuture` that resolves to ``True``
