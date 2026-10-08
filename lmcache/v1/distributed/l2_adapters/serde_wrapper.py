@@ -40,8 +40,11 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.internal_api import (
+    L1ManagerInterface,
+    L2AdapterListener,
+    L2StoreResult,
+)
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
     L2AdapterInterface,
@@ -110,7 +113,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         self,
         inner: L2AdapterInterface,
         serde: SerdeProcessor,
-        l1_manager: L1Manager,
+        l1_manager: L1ManagerInterface,
     ) -> None:
         super().__init__()
         self._inner = inner
@@ -631,7 +634,13 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         if len(successful_temp_keys) != len(temp_keys):
             self._release_write_temps(successful_temp_keys)
             return temp_keys, None
-        temp_objs = [results[tk][1] for tk in temp_keys]
+        temp_objs: list[MemoryObj] = []
+        for temp_key in temp_keys:
+            temp_obj = results[temp_key][1]
+            # Every key succeeded above, and a successful reservation carries
+            # its object.
+            assert temp_obj is not None
+            temp_objs.append(temp_obj)
         return temp_keys, temp_objs
 
     def _release_write_temps(self, temp_keys: list[ObjectKey]) -> None:
