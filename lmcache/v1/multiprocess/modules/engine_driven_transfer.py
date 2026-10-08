@@ -328,6 +328,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         )
         strategy: TransferStrategy = create_transfer_strategy(
             self._ctx.storage_manager,
+            read_owner_resolver=self._ctx.get_read_owners,
             shm_name=shm_name,
             pool_size=pool_size,
             pending_writes=self._pending_shm_writes,

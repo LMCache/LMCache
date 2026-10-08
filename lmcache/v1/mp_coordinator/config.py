@@ -27,9 +27,10 @@ class KafkaCacheEventSourceConfig:
         bootstrap_servers: Comma-separated Kafka bootstrap servers.
         topic: Topic to consume; must match the MP servers'
             ``--coordinator-kafka-topic``.
-        group_id: Consumer group whose committed offsets a restarted
-            coordinator resumes from; a new group reads the whole retained
-            stream.
+        group_id: Consumer group the coordinator joins. Where a restart
+            resumes is the checkpoint's business, not the group's (see
+            :class:`~.ingest.stream_position.StreamPosition`); the group
+            only decides how partitions are shared between members.
     """
 
     bootstrap_servers: str = ""
