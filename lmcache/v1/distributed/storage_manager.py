@@ -32,8 +32,13 @@ from lmcache.v1.distributed.config import (
     unwrap_l2_adapter_config,
 )
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError, strerror
-from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
-from lmcache.v1.distributed.l1_manager import L1Manager, L1OperationResult
+from lmcache.v1.distributed.internal_api import (
+    L1ManagerInterface,
+    L1MemoryDesc,
+    L1OperationResult,
+    L2AdapterListener,
+)
+from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -98,7 +103,7 @@ class StorageManager:
         self,
         config: StorageManagerConfig,
         *,
-        _l1_managers: tuple[L1Manager, ...] | None = None,
+        _l1_managers: tuple[L1ManagerInterface, ...] | None = None,
         _write_policy: OrderedWritePolicy | None = None,
     ) -> None:
         """Create configured peer L1s and their affinity-bound L2 controllers.
@@ -125,14 +130,14 @@ class StorageManager:
                     config, l1_manager_configs=[m.config for m in managers]
                 )
             else:
-                created: list[L1Manager] = []
+                created: list[L1ManagerInterface] = []
                 for manager_config in config.l1_manager_configs:
                     path = manager_config.memory_config.devdax_path
                     if path and any(m.owns_device(path) for m in created):
                         raise ValueError(
                             f"Device-DAX path already owned by an L1: {path}"
                         )
-                    manager = L1Manager(manager_config)
+                    manager: L1ManagerInterface = L1Manager(manager_config)
                     cleanup.callback(manager.close)
                     created.append(manager)
                 managers = tuple(created)
@@ -750,8 +755,15 @@ class StorageManager:
 
     @property
     def l1_memory_desc(self) -> L1MemoryDesc:
-        """Descriptor of the L1 memory buffer backing this storage manager."""
+        """Descriptor of the L1 memory buffer backing this storage manager.
+
+        Raises:
+            ValueError: More than one L1 is configured, or the L1 has no
+                registerable buffer (GDS).
+        """
         self._require_single_l1()
+        if self._l1_memory_desc is None:
+            raise ValueError("The L1 exposes no registerable memory buffer")
         return self._l1_memory_desc
 
     def get_l2_usages(
