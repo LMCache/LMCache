@@ -69,9 +69,9 @@ def test_fingerprint_queue_drains_in_order():
     worker.start()
     try:
         jobs = [
-            ([1, 2, 3], [b"h1"], 0, 0, "req-a"),
-            ([4, 5, 6], [b"h2"], 1, 3, "req-b"),
-            ([7, 8, 9], [b"h3"], 0, 6, "req-c"),
+            ([1, 2, 3], [b"h1"], 0, 0, "req-a", None),
+            ([4, 5, 6], [b"h2"], 1, 3, "req-b", b"h1"),
+            ([7, 8, 9], [b"h3"], 0, 6, "req-c", b"h2"),
         ]
         for j in jobs:
             eng._fingerprint_queue.put(j)
@@ -94,8 +94,12 @@ def test_fingerprint_queue_drains_in_order():
     assert calls[0].args[0] == [1, 2, 3]
     assert calls[1].args[0] == [4, 5, 6]
     assert calls[2].args[0] == [7, 8, 9]
-    # kwargs are preserved (start_chunk_idx, position_offset).
-    assert calls[1].kwargs == {"start_chunk_idx": 1, "position_offset": 3}
+    # kwargs are preserved (start_chunk_idx, position_offset, predecessor).
+    assert calls[1].kwargs == {
+        "start_chunk_idx": 1,
+        "position_offset": 3,
+        "predecessor_hash": b"h1",
+    }
 
 
 def test_fingerprint_worker_survives_kernel_exception():
@@ -114,8 +118,8 @@ def test_fingerprint_worker_survives_kernel_exception():
     worker = threading.Thread(target=eng._drain_fingerprint_queue, daemon=True)
     worker.start()
     try:
-        eng._fingerprint_queue.put(([1], [b"h1"], 0, 0, "req-a"))
-        eng._fingerprint_queue.put(([2], [b"h2"], 0, 1, "req-b"))
+        eng._fingerprint_queue.put(([1], [b"h1"], 0, 0, "req-a", None))
+        eng._fingerprint_queue.put(([2], [b"h2"], 0, 1, "req-b", None))
         deadline = time.monotonic() + 2.0
         while (
             eng._token_range_matcher.on_new_token_hashes.call_count < 2
@@ -647,3 +651,79 @@ def test_store_registers_nothing_when_no_chunk_committed():
     assert result == (b"evt", True)
     assert eng._fingerprint_queue.empty()
     assert eng._pending_fp_hashes == set()
+
+
+def _queued_jobs(eng) -> list:
+    jobs = []
+    while not eng._fingerprint_queue.empty():
+        jobs.append(eng._fingerprint_queue.get_nowait())
+    return jobs
+
+
+def test_store_job_carries_the_chunk_stored_before_each_run():
+    """Each registration job names the chunk stored right before its first
+    chunk: nothing at sequence start, else the preceding chunk of the stored
+    sequence -- even one the transfer skipped, since the run's KV was still
+    computed after it."""
+    # First Party
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
+    eng = _store_hook_engine([True, True, False, True])
+
+    eng.store(
+        _store_hook_key(4), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    jobs = _queued_jobs(eng)
+    assert [j[5] for j in jobs] == [None, TokenHasher.hash_to_bytes(102)]
+
+
+@pytest.mark.parametrize("predecessor", [None, b"\x01" * 16])
+def test_store_job_round_trips_the_dispatcher_codec(predecessor):
+    """With a GPU context, store jobs reach the drainer through the device
+    host-func dispatcher's msgpack codec, decoded as ``FpJob``. A job it
+    cannot decode is dropped and only logged, so the predecessor slot must
+    survive it."""
+    # Third Party
+    import msgspec
+
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend.store import FpJob
+
+    job = ([1, 2, 3, 4], [b"h0"], 0, 4, "req-codec", predecessor)
+
+    decoded = msgspec.msgpack.Decoder(type=FpJob).decode(msgspec.msgpack.encode(job))
+
+    assert decoded == job
+
+
+def test_store_job_of_a_later_range_carries_the_chunk_before_the_range():
+    """A store that starts mid-sequence (a later prefill chunk) records the
+    last chunk before its range as the first run's predecessor."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
+    eng = _store_hook_engine([True, True])
+    session = eng._ctx.session_manager.get_or_create.return_value
+    # Chunk i hashes to 100 + i, whatever range is asked for.
+    session.get_hashes.side_effect = lambda st, ed: list(
+        range(100 + st // 4, 100 + ed // 4)
+    )
+    key = IPCCacheServerKey(
+        model_name="m",
+        world_size=1,
+        num_kv_readers=1,
+        worker_id=0,
+        token_ids=tuple(range(1000, 1016)),
+        start=8,
+        end=16,
+        request_id="req-store-later-range",
+    )
+
+    eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
+
+    jobs = _queued_jobs(eng)
+    assert [(j[2], j[3], j[5]) for j in jobs] == [
+        (0, 8, TokenHasher.hash_to_bytes(101))
+    ]

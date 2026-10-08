@@ -230,6 +230,15 @@ class CBMatchResult:
         cur_st: Start position in the query sequence where the match was found.
         cur_ed: End position in the query sequence where the match was found.
         hash: Token hash bytes (from registration) used as the storage key.
+        predecessor_hash: Token hash of the chunk stored immediately before
+            this one in its stored sequence, or ``None`` when the server did
+            not record it (fleet-coordinator and segmented-prefix matches,
+            and servers that predate this field). Token hashes are prefix
+            hashes, so ``b.predecessor_hash == a.hash`` with
+            ``b.cur_st == a.cur_ed`` means ``b``'s cached KV was computed
+            right after ``a``'s: ``b`` continues ``a``'s stored context.
+            Defaulted and last, so payloads with and without it decode on
+            either side of a version skew.
     """
 
     old_st: int
@@ -237,6 +246,7 @@ class CBMatchResult:
     cur_st: int
     cur_ed: int
     hash: bytes
+    predecessor_hash: bytes | None = None
 
 
 @dataclass

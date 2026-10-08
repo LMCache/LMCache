@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import dataclass
 from multiprocessing import Queue
 from typing import Any
 import multiprocessing as mp
@@ -13,6 +14,7 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
+    CBMatchResult,
     IPCCacheServerKey,
     get_customized_decoder,
     get_customized_encoder,
@@ -419,3 +421,44 @@ def test_block_allocation_record_list_serialization():
     assert decoded[1].req_id == "req-2"
     assert decoded[1].new_block_ids == []
     assert decoded[1].new_token_ids == [40, 50]
+
+
+@dataclass
+class _CBMatchResultWithoutPredecessor:
+    """``CBMatchResult`` as peers that predate ``predecessor_hash`` define it."""
+
+    old_st: int
+    old_ed: int
+    cur_st: int
+    cur_ed: int
+    hash: bytes
+
+
+def test_cb_match_result_round_trips_predecessor_hash():
+    matches = [
+        CBMatchResult(0, 256, 512, 768, b"a", predecessor_hash=b"p"),
+        CBMatchResult(256, 512, 768, 1024, b"b"),
+    ]
+
+    encoded = get_customized_encoder(list[CBMatchResult]).encode(matches)
+    decoded = get_customized_decoder(list[CBMatchResult]).decode(encoded)
+
+    assert decoded == matches
+    assert [m.predecessor_hash for m in decoded] == [b"p", None]
+
+
+def test_cb_match_result_decodes_across_a_version_skew():
+    """Peers with and without ``predecessor_hash`` read each other's matches:
+    a missing field decodes as ``None``, an unknown one is ignored."""
+    old = _CBMatchResultWithoutPredecessor(0, 256, 512, 768, b"a")
+    new = CBMatchResult(0, 256, 512, 768, b"a", predecessor_hash=b"p")
+
+    from_old = get_customized_decoder(list[CBMatchResult]).decode(
+        get_customized_encoder(list[_CBMatchResultWithoutPredecessor]).encode([old])
+    )
+    from_new = get_customized_decoder(list[_CBMatchResultWithoutPredecessor]).decode(
+        get_customized_encoder(list[CBMatchResult]).encode([new])
+    )
+
+    assert from_old == [CBMatchResult(0, 256, 512, 768, b"a")]
+    assert from_new == [old]

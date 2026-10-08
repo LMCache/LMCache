@@ -14,6 +14,8 @@ message CbMatchResult {
   int64 cur_st = 3;
   int64 cur_ed = 4;
   bytes hash = 5;
+  // Token hash of the chunk stored right before this one; unset = unknown.
+  optional bytes predecessor_hash = 6;
 }
 
 message CbProtocolHandshakeRequest {

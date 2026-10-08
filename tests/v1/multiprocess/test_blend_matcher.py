@@ -950,6 +950,105 @@ def test_repeated_registration_of_same_hash_is_idempotent():
     assert matches[0].old_st == 0
 
 
+# -- Stored predecessor -------------------------------------------------------
+
+
+def _h(seed: int) -> bytes:
+    return ObjectKey.IntHash2Bytes(seed)
+
+
+def _by_cur_st(matches: list[CBMatchResult]) -> dict[int, CBMatchResult]:
+    return {m.cur_st: m for m in matches}
+
+
+def test_match_reports_the_chunk_stored_before_it():
+    """Each match names the chunk stored right before it: the previous chunk
+    of its registration, or the caller's ``predecessor_hash`` for chunk 0."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    # Chunk 0 is the prefix leg's (start_chunk_idx=1), as in a store.
+    matcher.on_new_token_hashes(
+        _content_chunk(1) + _content_chunk(2) + _content_chunk(3),
+        [_h(101), _h(102), _h(103)],
+        start_chunk_idx=1,
+    )
+    # A later range of another sequence, stored after the chunk hashed 900.
+    matcher.on_new_token_hashes(
+        _content_chunk(4),
+        [_h(104)],
+        position_offset=CHUNK_SIZE,
+        predecessor_hash=_h(900),
+    )
+
+    matches = _by_cur_st(
+        matcher.match_sub_sequence(
+            _content_chunk(2) + _content_chunk(3) + _content_chunk(4)
+        )
+    )
+    assert matches[0].predecessor_hash == _h(101)
+    assert matches[CHUNK_SIZE].predecessor_hash == _h(102)
+    assert matches[2 * CHUNK_SIZE].predecessor_hash == _h(900)
+
+
+def test_predecessor_separates_equal_offset_neighbours_from_other_sequences():
+    """Stored ``[S, Z, A]`` and ``[S, Y1, Y2, B]``; query ``[S', X, A, B]``.
+    A and B match at offset 0 and B starts where A ends, so positions alone
+    say B continues A -- but B's KV followed Y2. Only ``[S, Z, A, B]`` makes
+    B's predecessor A's hash."""
+    s, z, a = _content_chunk(1), _content_chunk(2), _content_chunk(3)
+    y1, y2, b = _content_chunk(4), _content_chunk(5), _content_chunk(6)
+    query = _content_chunk(7) + _content_chunk(8) + a + b
+
+    split = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    split.on_new_token_hashes(s + z + a, [_h(1), _h(2), _h(3)], start_chunk_idx=1)
+    split.on_new_token_hashes(
+        s + y1 + y2 + b, [_h(1), _h(14), _h(15), _h(16)], start_chunk_idx=1
+    )
+    m = _by_cur_st(split.match_sub_sequence(query))
+    m_a, m_b = m[2 * CHUNK_SIZE], m[3 * CHUNK_SIZE]
+    assert (m_a.cur_st - m_a.old_st, m_b.cur_st - m_b.old_st) == (0, 0)
+    assert m_b.cur_st == m_a.cur_ed
+    assert m_b.predecessor_hash == _h(15) != m_a.hash
+
+    joined = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    joined.on_new_token_hashes(
+        s + z + a + b, [_h(1), _h(2), _h(3), _h(26)], start_chunk_idx=1
+    )
+    m = _by_cur_st(joined.match_sub_sequence(query))
+    assert m[3 * CHUNK_SIZE].predecessor_hash == m[2 * CHUNK_SIZE].hash
+
+
+def test_content_dedup_reports_the_predecessor_of_the_served_entry():
+    """Under ``dedup_content`` the first registration of a text is served,
+    so its match carries that registration's predecessor; a chunk stored
+    after the skipped duplicate keeps the duplicate's hash as predecessor
+    and so does not chain to the served entry."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE, dedup_content=True)
+    a, b = _content_chunk(3), _content_chunk(4)
+    matcher.on_new_token_hashes(
+        _content_chunk(1) + a, [_h(1), _h(31)], start_chunk_idx=1
+    )
+    # Same text A behind another prefix: skipped; B is stored after it.
+    matcher.on_new_token_hashes(
+        _content_chunk(2) + a + b, [_h(2), _h(32), _h(42)], start_chunk_idx=1
+    )
+
+    m = _by_cur_st(matcher.match_sub_sequence(a + b))
+    assert (m[0].hash, m[0].predecessor_hash) == (_h(31), _h(1))
+    assert m[CHUNK_SIZE].predecessor_hash == _h(32) != m[0].hash
+
+
+def test_reregistered_chunk_reports_its_new_predecessor():
+    """Eviction drops the recorded predecessor with the entry; a later
+    registration of the same text records its own."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE, dedup_content=True)
+    matcher.on_new_token_hashes(_content_chunk(1), [_h(101)], predecessor_hash=_h(7))
+    matcher.remove_chunks([_h(101)])
+    matcher.on_new_token_hashes(_content_chunk(1), [_h(202)], predecessor_hash=_h(8))
+
+    matches = matcher.match_sub_sequence(_content_chunk(1))
+    assert [(m.hash, m.predecessor_hash) for m in matches] == [(_h(202), _h(8))]
+
+
 # -- Config -------------------------------------------------------------------
 
 
