@@ -24,6 +24,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -52,6 +53,10 @@ class StoreMixin:
         _pending_fp_hashes: set[bytes]
         _pending_fp_lock: "threading.Lock"
 
+    @request_handler(
+        HandlerType.BLOCKING,
+        requires_client_affinity=True,
+    )
     def store(
         self,
         key: IPCCacheServerKey,
@@ -70,9 +75,10 @@ class StoreMixin:
             The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
-        result = self._transfer_module.store(
+        handle, store_ok, stored_mask = self._transfer_module.store_with_chunk_mask(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
+        result = (handle, store_ok)
 
         # The matcher is engine-shared; only worker 0 registers.
         if key.worker_id not in (0, None):
@@ -98,23 +104,49 @@ class StoreMixin:
             tokens_in_range = list(key.token_ids)[key.start : key.end]
             # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.
             start_chunk_idx = 0 if key.start != 0 else 1
-            job: FpJob = (
-                tokens_in_range,
-                chunk_hashes,
-                start_chunk_idx,
-                key.start,
-                key.request_id,
-            )
+
+            # Register only committed chunks: a fingerprint for a skipped
+            # chunk would advertise content that was never persisted.
+            def _stored(i: int) -> bool:
+                return stored_mask[i] if i < len(stored_mask) else False
+
+            jobs: list[FpJob] = []
+            chunk_size = self._ctx.chunk_size
+            run_start: int | None = None
+            for i in range(len(chunk_hashes) + 1):
+                if i < len(chunk_hashes) and _stored(i):
+                    if run_start is None:
+                        run_start = i
+                    continue
+                if run_start is None:
+                    continue
+                run_sci = max(start_chunk_idx - run_start, 0)
+                if run_sci < i - run_start:
+                    jobs.append(
+                        (
+                            tokens_in_range[run_start * chunk_size : i * chunk_size],
+                            chunk_hashes[run_start:i],
+                            run_sci,
+                            key.start + run_start * chunk_size,
+                            key.request_id,
+                        )
+                    )
+                run_start = None
+            if not jobs:
+                return result
+
             with self._pending_fp_lock:
-                self._pending_fp_hashes.update(chunk_hashes[start_chunk_idx:])
+                for _, hashes, sci, _, _ in jobs:
+                    self._pending_fp_hashes.update(hashes[sci:])
             entry = self._transfer_module.get_and_touch_context_entry(instance_id)
             gpu_ctx = entry.cache_context if entry is not None else None
-            if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
-                submit_callback_to_stream(
-                    gpu_ctx.cupy_stream, CB_FINGERPRINTS_KIND, job
-                )
-            else:
-                self._fingerprint_queue.put_nowait(job)
+            for job in jobs:
+                if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
+                    submit_callback_to_stream(
+                        gpu_ctx.cupy_stream, CB_FINGERPRINTS_KIND, job
+                    )
+                else:
+                    self._fingerprint_queue.put_nowait(job)
         except Exception:
             logger.exception(
                 "CB fingerprint enqueue failed for request %s "

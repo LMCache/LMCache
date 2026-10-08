@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// ObservabilityService wire contract for LMCache mp-mode gRPC.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+message BlockAllocationRecord {
+  string req_id = 1;
+  repeated int64 new_block_ids = 2;
+  repeated int64 new_token_ids = 3;
+}
+
+message ReportBlockAllocationRequest {
+  int64 instance_id = 1;
+  string model_name = 2;
+  repeated BlockAllocationRecord records = 3;
+}
+
+message ReportBlockAllocationResponse {}
+
+service ObservabilityService {
+  rpc ReportBlockAllocation(ReportBlockAllocationRequest)
+      returns (ReportBlockAllocationResponse);
+}

@@ -10,12 +10,14 @@ while using the device-independent native module for shared enums.
 # Standard
 from types import ModuleType
 from typing import Any
+from unittest.mock import MagicMock
 import importlib
 import inspect
 import sys
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache import device_ops, torch_dev, torch_device_type
@@ -23,8 +25,8 @@ from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
-from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
-from lmcache.v1.platform.cuda.device_ops import CudaDeviceOps
+from lmcache.v1.platform.devices.cpu.device_ops import CpuDeviceOps
+from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
 from lmcache.v1.platform.ops_types import (
     BatchStep,
     KernelGroupSpec,
@@ -62,6 +64,15 @@ def isolated_registry() -> Any:
 
 
 # -- Contract --------------------------------------------------------------
+
+
+def test_synchronize_follows_tensor_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CPU skips synchronization; CUDA uses the tensor's device index."""
+    synchronize = MagicMock()
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
+    for device in ("cpu", "cuda:1", "cpu"):
+        platform_pkg.synchronize_device(torch.device(device))
+    synchronize.assert_called_once_with(torch.device("cuda:1"))
 
 
 def test_base_class_declares_every_op_as_instance_method() -> None:
@@ -118,7 +129,7 @@ def test_cpu_inherits_baseline_verbatim() -> None:
 def test_musa_overrides_transfer_and_stream_ordering_ops() -> None:
     """MusaDeviceOps owns transfer and stream-ordering adaptation."""
     musa_mod = pytest.importorskip(
-        "lmcache.v1.platform.musa.device_ops",
+        "lmcache.v1.platform.devices.musa.device_ops",
         reason="musa platform package unavailable",
     )
     overridden = [
@@ -144,11 +155,11 @@ def test_musa_override_dispatches_native_first(
     import torch
 
     musa_mod = pytest.importorskip(
-        "lmcache.v1.platform.musa.device_ops",
+        "lmcache.v1.platform.devices.musa.device_ops",
         reason="musa platform package unavailable",
     )
     native_mod = pytest.importorskip(
-        "lmcache.v1.platform.musa.native_kv_transfer",
+        "lmcache.v1.platform.devices.musa.native_kv_transfer",
         reason="musa native_kv_transfer unavailable",
     )
 

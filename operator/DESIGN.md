@@ -178,7 +178,18 @@ spec:
   priorityClassName: string
 
   # -- Security --
-  hostIPC: bool               # default: false; run the pod in the host IPC
+  isolatedIPC: bool           # unset = auto: true for gpuVendor nvidia, false
+                              # for amd. Runs the server with --isolated-ipc:
+                              # KV caches and completion events travel over
+                              # driver-level CUDA IPC, needing neither hostIPC
+                              # nor any /dev/shm sharing. Overrides hostIPC
+                              # when it resolves to true. Set to false for
+                              # LMCache images without --isolated-ipc or for
+                              # CUDA-VMM-backed allocators (vLLM sleep mode /
+                              # expandable segments), which driver-level CUDA
+                              # IPC cannot share.
+  hostIPC: bool               # default: false; only applies when isolatedIPC
+                              # resolves to false: run the pod in the host IPC
                               # namespace instead of mounting the host's
                               # /dev/shm via hostPath. Needed only where the
                               # hostPath mount is unavailable or for AMD (HIP
@@ -199,15 +210,15 @@ spec:
 
 The operator always injects these into the pod spec:
 
-- **Host `/dev/shm` mount (hostPath, volume `lmcache-dev-shm`)** — **required for CUDA IPC between LMCache and vLLM.** The CUDA IPC handles that carry KV tensors across pods are opened via files the driver and PyTorch create in `/dev/shm`, so both pods must see the same `/dev/shm` tmpfs; without it, `cudaIpcOpenMemHandle` fails with `cudaErrorMapBufferObjectFailed`. A shared IPC namespace is **not** required — only the shared `/dev/shm` tmpfs is. The injection webhook mirrors the mount onto opted-in vLLM pods. `spec.hostIPC: true` restores the legacy host-IPC-namespace mode — for clusters that block hostPath volumes, or for `gpuVendor: amd` (unverified without it). A user-supplied `/dev/shm` mount suppresses the injection.
+- **IPC wiring (mode-dependent)** — under the default **isolated IPC** (`spec.isolatedIPC`, auto-on for nvidia) the server runs with `--isolated-ipc`, KV caches and completion events travel over driver-level CUDA IPC that rendezvouses in the kernel driver, and the engine pod gets **no** IPC wiring at all: no `hostIPC`, no `/dev/shm` volume (the injection webhook gives opted-in vLLM pods a pod-private memory-backed `/dev/shm` for their own workers). With `spec.isolatedIPC: false`, the legacy wiring applies: a **host `/dev/shm` mount (hostPath, volume `lmcache-dev-shm`)** — required for torch-storage CUDA IPC between LMCache and vLLM. Those CUDA IPC handles are opened via files the driver and PyTorch create in `/dev/shm`, so both pods must see the same `/dev/shm` tmpfs; without it, `cudaIpcOpenMemHandle` fails with `cudaErrorMapBufferObjectFailed`. A shared IPC namespace is **not** required — only the shared `/dev/shm` tmpfs is. The injection webhook mirrors the mount onto opted-in vLLM pods. `spec.hostIPC: true` restores the host-IPC-namespace mode — for clusters that block hostPath volumes, or for `gpuVendor: amd` (unverified without it). A user-supplied `/dev/shm` mount suppresses the injection in every mode.
 - **`runtimeClassName: nvidia`** — uses the NVIDIA container runtime, which injects the host's NVIDIA driver libraries and device files into the container. This is required for CUDA to function inside the pod.
 - **`NVIDIA_VISIBLE_DEVICES=all`** — gives the engine access to all GPUs on the node for CUDA IPC and custom data transfer kernels without claiming any via `nvidia.com/gpu` resource requests (which would make those GPUs unavailable to the serving engine). The combination of `runtimeClassName: nvidia` + `NVIDIA_VISIBLE_DEVICES=all` lets the container see all GPUs without consuming device-plugin resources, so the serving engine (e.g., vLLM) can still request all GPUs on the node. On most clusters this is sufficient; on some, the engine cannot see the GPUs unless the pod is also privileged — set `spec.privileged: true` to run the engine container privileged (default `false`).
 - **`NVIDIA_VISIBLE_DEVICES=all`** and **`NVIDIA_DRIVER_CAPABILITIES=all`** — env vars that instruct the NVIDIA container runtime to expose all GPUs and all driver capabilities to the container.
 - **`--host 0.0.0.0`** — always passed as a container arg. The server defaults to `--host localhost` which only binds to loopback; the server must bind to all interfaces so the node-local Service can route traffic to it.
 - **No `hostNetwork`** — the operator does **not** use `hostNetwork`. Instead, it creates a ClusterIP Service with `internalTrafficPolicy=Local`. kube-proxy ensures that traffic to the service is routed only to the LMCache pod on the same node. This avoids occupying host ports and reduces the privileged surface area.
-- **No `/dev/shm` emptyDir mount** — the operator intentionally never mounts an emptyDir at `/dev/shm`. It would shadow the host's `/dev/shm` with a private tmpfs, breaking CUDA IPC (`cudaIpcOpenMemHandle` fails because IPC handles written by one pod are invisible to others).
+- **No `/dev/shm` emptyDir mount on the engine** — in legacy mode (`isolatedIPC: false`) the operator intentionally never mounts an emptyDir at `/dev/shm`: it would shadow the host's `/dev/shm` with a private tmpfs, breaking CUDA IPC (`cudaIpcOpenMemHandle` fails because IPC handles written by one pod are invisible to others). Under isolated IPC the engine pod simply has no `/dev/shm` volume; only webhook-injected vLLM pods get a private emptyDir there (their own workers need it).
 
-> **Security implications:** The LMCache pods mount the host's `/dev/shm` (hostPath), which exposes the host's shared-memory tmpfs — a narrower grant than the whole host IPC namespace, but still host-level access. With `spec.hostIPC: true` they instead join the host IPC namespace, and with `spec.privileged: true` they additionally run privileged, granting full device access. Only deploy in trusted environments. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace — hostPath volumes, `hostIPC`, and `privileged` are all rejected by the `baseline` and `restricted` profiles.
+> **Security implications:** Under the default isolated IPC the pods carry no host-level IPC grants at all — no hostPath `/dev/shm`, no `hostIPC` — so `baseline` Pod Security Standards can admit them (barring other spec fields). With `spec.isolatedIPC: false` the LMCache pods mount the host's `/dev/shm` (hostPath), which exposes the host's shared-memory tmpfs — a narrower grant than the whole host IPC namespace, but still host-level access. With `spec.hostIPC: true` they instead join the host IPC namespace, and with `spec.privileged: true` they additionally run privileged, granting full device access. Only deploy those modes in trusted environments; clusters using Pod Security Standards must then allow the `privileged` profile for the LMCache namespace — hostPath volumes, `hostIPC`, and `privileged` are all rejected by the `baseline` and `restricted` profiles.
 
 ---
 

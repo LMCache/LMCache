@@ -34,19 +34,39 @@ storage layer ──► EventBus ──► CacheEventSubscriber ──► CacheE
   raise `CacheEventPublishError`. Retrying is safe; the current subscriber
   drops a failed drained list, consumes its sequence numbers, and leaves a
   gap that marks the coordinator view stale.
-- A future **Kafka sink** produces to a topic with the message key set
-  to `instance_id`, so one partition carries one instance's stream —
-  partition FIFO is exactly the per-instance FIFO the directory needs.
-  The coordinator side gains a consumer that feeds
-  the coordinator's `EventGate`; the subscriber and producers are
-  untouched.
+- **`TraceCacheEventSink`** appends each batch, in wire form, to an
+  `events`-level trace file (`lmcache server --trace-level events`); it
+  needs no coordinator. **`MultiCacheEventSink`** fans one flush out to
+  several sinks and raises only after every sink was tried. See
+  `docs/design/v1/mp_observability/trace.md` §12.
+- **`KafkaCacheEventSink`** produces one JSON record per batch with the
+  message key set to `instance_id`, so Kafka assigns one instance's
+  records to one partition. The producer enables idempotence and
+  requires `acks=all`. The JSON value uses the existing
+  `CacheEventsRequest` envelope with exactly one batch, keeping the HTTP
+  and Kafka wire vocabulary identical.
+
+  `publish` does not wait for the broker. It hands records to the
+  producer's buffer and serves earlier delivery reports. The producer
+  retries in order for up to the delivery timeout (5 minutes by
+  default), so a broker restart delays events instead of losing them.
+  The buffer is capped at 64 MB. A record that does not fit, or that the
+  producer gives up on, is dropped and counted. Its `seq` is already
+  spent, so the coordinator sees a gap. `close` waits up to 10 seconds
+  for what is still queued.
+
+A coordinator started with `--event-transport kafka` consumes the topic
+through `KafkaCacheEventSource` (see [ingest.md](ingest.md)) instead of
+serving `POST /events`; direct HTTP remains the default end-to-end
+transport.
 
 On the coordinator side, transport adapters converge at
-`EventGate.ingest_batches`. The current
-`HttpCacheEventSource` is explicitly non-durable and advertises no replay
-capability. Gate cursors (`instance_id` / `incarnation` / `seq`) remain
-separate from a future durable transport's seek position (for example
-Kafka partition offsets).
+`EventGate.ingest_batches`. `HttpCacheEventSource` is non-durable and
+advertises no replay capability; `KafkaCacheEventSource` (selected by
+`--event-transport kafka` in place of the HTTP source, see
+[ingest.md](ingest.md)) polls the topic and advertises `seekable`. Gate cursors (`instance_id` / `incarnation` /
+`seq`) remain separate from Kafka's partition offsets, which the consumer
+group commits.
 
 ## Batching and sequencing (inside the subscriber)
 
@@ -186,12 +206,25 @@ and `--coordinator-event-reporting` (or
 `--coordinator-event-flush-interval` paces the subscriber's
 event-driven flushes (default 1s).
 
+`--coordinator-event-transport kafka` selects Kafka instead of HTTP and
+requires `--coordinator-kafka-bootstrap-servers`. The topic defaults to
+`lmcache-cache-events`. `--coordinator-kafka-delivery-timeout` (default
+300 s) is how long the producer retries a record before dropping it.
+These flags have no
+environment-variable fallback. `confluent-kafka` ships as the optional
+`lmcache[kafka]` extra and is imported only when the Kafka sink is built,
+so HTTP-only deployments never load it.
+
 ## Known limitations (follow-ups)
 
 - **Bus overflow drops events before sequencing** (bounded queue,
   rate-limited warning), so the gate cannot detect the loss. A durable
   transport also cannot replay an event that never reached its producer;
-  producer retry/backpressure or a local spool is separate future work.
+  a local spool is separate future work.
+- **A Kafka declaration dropped after it was queued is not re-sent.** The
+  subscriber restores a capacity declaration only when `publish` raises.
+  When the producer drops it later, the coordinator lacks that
+  instance's capacity until the next declaration.
 - **The flush pump is coupled to the eviction loop's tick** — decouple
   it (e.g. a bus-owned periodic hook) so tail freshness does not depend
   on that loop's cadence.

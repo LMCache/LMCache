@@ -442,7 +442,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> PagedCpuGpuMemoryAllocator:
         if self.corrected_device != "cpu":
-            logger.info(f"Setting cuda device to {self.corrected_device} ")
+            logger.info("Setting cuda device to %s ", self.corrected_device)
             torch_dev.set_device(self.corrected_device)
 
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
@@ -470,10 +470,14 @@ class PDBackendAsync(AllocatorBackendInterface):
 
         if aligned_buffer_size != origin_buffer_size:
             logger.info(
-                f"Auto align pd_buffer_size, origin: {origin_buffer_size}, "
-                f"aligned: {aligned_buffer_size}, chunk size: {chunk_size_bytes}. "
-                f"The remaining {origin_buffer_size - aligned_buffer_size} bytes "
-                f"will not be allocated."
+                "Auto align pd_buffer_size, origin: %s, "
+                "aligned: %s, chunk size: %s. "
+                "The remaining %s bytes "
+                "will not be allocated.",
+                origin_buffer_size,
+                aligned_buffer_size,
+                chunk_size_bytes,
+                origin_buffer_size - aligned_buffer_size,
             )
 
         self._chunk_size_bytes = chunk_size_bytes
@@ -1184,7 +1188,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         socket = async_ctx.socket(zmq.ROUTER)
         alloc_port = self.pd_config.peer_alloc_port
         socket.bind(f"tcp://*:{alloc_port}")
-        logger.info(f"Async mem alloc server listening on port {alloc_port}")
+        logger.info("Async mem alloc server listening on port %s", alloc_port)
         try:
             while self.running:
                 try:
