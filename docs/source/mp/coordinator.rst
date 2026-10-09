@@ -255,9 +255,9 @@ created:
 Set ``--otlp-endpoint http://collector:4317`` to push metrics to an
 OpenTelemetry Collector instead. In OTLP push mode, and when
 ``--disable-metrics`` is set, ``GET /metrics`` returns 404. The Coordinator
-exports Key Directory placement-count and reported-logical-byte gauges for the
-``l1`` and ``l2`` tiers. See :doc:`observability/metrics` for their exact names
-and semantics.
+exports Key Directory placement and reported-logical-byte gauges for the
+``l1`` and ``l2`` tiers, under the ``lmcache_coordinator.`` prefix. See
+:doc:`observability/metrics` for their exact names and semantics.
 
 Connecting MP servers
 ---------------------
