@@ -207,7 +207,7 @@ def test_http_event_source_marks_real_sequence_gap() -> None:
         finally:
             sink.close()
 
-        stream = app.state.ctx.event_gate.stats()["event-source-node"]
+        stream = app.state.ctx.event_gate.stats().streams["event-source-node"]
         assert stream.last_seq == 3
         assert stream.gap_detected is True
         response = requests.post(

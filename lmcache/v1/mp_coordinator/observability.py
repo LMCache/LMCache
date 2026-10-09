@@ -118,8 +118,8 @@ def register_event_gate_metrics(
 ) -> None:
     """Register the gate's loss metrics: fleet counters and per-server gauges.
 
-    The counters read :meth:`EventGate.totals` and cover this process's
-    lifetime. The gauges read :meth:`EventGate.stats`: one series per
+    Both read :meth:`EventGate.stats`. The counters cover this process's
+    lifetime. The gauges give one series per
     emitter the gate tracks, gone when its cursor goes (departure or
     timeout), which is why per-server values are gauges rather than
     counters. Each covers the emitter's current incarnation.
@@ -133,11 +133,11 @@ def register_event_gate_metrics(
         meter = metrics.get_meter(_METER_NAME)
 
     def read_batches_received() -> list[tuple[float, dict[str, str]]]:
-        totals = event_gate.totals()
+        stats = event_gate.stats()
         return [
-            (totals.batches_applied, {"result": "applied"}),
-            (totals.batches_duplicate, {"result": "duplicate"}),
-            (totals.batches_stale, {"result": "stale"}),
+            (stats.batches_applied, {"result": "applied"}),
+            (stats.batches_duplicate, {"result": "duplicate"}),
+            (stats.batches_stale, {"result": "stale"}),
         ]
 
     meter.create_observable_counter(
@@ -150,7 +150,7 @@ def register_event_gate_metrics(
         "lmcache_coordinator.ingest.event_batches_missing",
         callbacks=[
             _make_observation_callback(
-                lambda: [(event_gate.totals().batches_missing, {})]
+                lambda: [(event_gate.stats().batches_missing, {})]
             )
         ],
         description="Cache-event batches that never arrived: skipped seq "
@@ -160,7 +160,7 @@ def register_event_gate_metrics(
         "lmcache_coordinator.ingest.events_dropped_by_servers",
         callbacks=[
             _make_observation_callback(
-                lambda: [(event_gate.totals().events_dropped, {})]
+                lambda: [(event_gate.stats().events_dropped, {})]
             )
         ],
         description="Cache events the mp servers reported dropping before "
@@ -320,7 +320,7 @@ def _make_server_gauge_callback(
     def _observe_servers(_options: "CallbackOptions") -> list["Observation"]:
         return [
             metrics.Observation(read_value(stream), {"instance_id": instance_id})
-            for instance_id, stream in event_gate.stats().items()
+            for instance_id, stream in event_gate.stats().streams.items()
         ]
 
     return _observe_servers

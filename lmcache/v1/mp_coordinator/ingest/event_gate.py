@@ -14,7 +14,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import cast
 import threading
@@ -54,31 +54,6 @@ class CacheEventIngestSummary:
 
 
 @dataclass(frozen=True)
-class IngestTotals:
-    """What the gate has seen from every emitter since this process started.
-
-    Unlike :class:`InstanceStreamStats`, these never reset when an emitter
-    restarts or leaves, and are not checkpointed: they are this process's
-    running totals, for metrics.
-
-    Attributes:
-        batches_applied: Batches admitted and broadcast to the consumers.
-        batches_duplicate: Batches dropped because their ``seq`` was seen.
-        batches_stale: Batches dropped because their incarnation was older.
-        batches_missing: Batches that never arrived (skipped ``seq``
-            values in streams the gate was already tracking).
-        events_dropped: Events the emitters reported dropping before they
-            reached the coordinator.
-    """
-
-    batches_applied: int = 0
-    batches_duplicate: int = 0
-    batches_stale: int = 0
-    batches_missing: int = 0
-    events_dropped: int = 0
-
-
-@dataclass(frozen=True)
 class InstanceStreamStats:
     """The gate's cursor for one emitter stream.
 
@@ -104,6 +79,33 @@ class InstanceStreamStats:
     gap_detected: bool
     missing_batches: int = 0
     events_dropped: int = 0
+
+
+@dataclass
+class EventGateStats:
+    """What the gate has seen from the emitters.
+
+    The totals cover every emitter since this process started: unlike the
+    per-stream counts they never reset when an emitter restarts or leaves,
+    and they are not checkpointed.
+
+    Attributes:
+        batches_applied: Batches admitted and broadcast to the consumers.
+        batches_duplicate: Batches dropped because their ``seq`` was seen.
+        batches_stale: Batches dropped because their incarnation was older.
+        batches_missing: Batches that never arrived (skipped ``seq``
+            values in streams the gate was already tracking).
+        events_dropped: Events the emitters reported dropping before they
+            reached the coordinator.
+        streams: Each tracked emitter's cursor, keyed by ``instance_id``.
+    """
+
+    batches_applied: int = 0
+    batches_duplicate: int = 0
+    batches_stale: int = 0
+    batches_missing: int = 0
+    events_dropped: int = 0
+    streams: dict[str, InstanceStreamStats] = field(default_factory=dict)
 
 
 @dataclass
@@ -144,12 +146,9 @@ class EventGate:
         # Acquired outside self._lock on every mutating path, so a capture
         # and an ingest take the two locks in the same order.
         self._quiesce = quiesce
-        # Process-lifetime totals behind totals(); guarded by self._lock.
-        self._batches_applied = 0
-        self._batches_duplicate = 0
-        self._batches_stale = 0
-        self._batches_missing = 0
-        self._events_dropped = 0
+        # The totals; ``streams`` stays empty here and is filled from the
+        # cursors when stats() takes a snapshot.
+        self._stats = EventGateStats()
 
     def ingest(self, batch: CacheEventBatch) -> IngestResult:
         """Offer one batch to the consumers, applying incarnation
@@ -165,11 +164,11 @@ class EventGate:
         with self._quiesce.applying(), self._lock:
             result = self._admit(batch)
             if result == IngestResult.ADMITTED:
-                self._batches_applied += 1
+                self._stats.batches_applied += 1
             elif result == IngestResult.DUPLICATE:
-                self._batches_duplicate += 1
+                self._stats.batches_duplicate += 1
             else:
-                self._batches_stale += 1
+                self._stats.batches_stale += 1
         return result
 
     def ingest_batches(self, batches: list[CacheEventBatch]) -> CacheEventIngestSummary:
@@ -288,30 +287,21 @@ class EventGate:
                     dropped_baseline=fields[3] if len(fields) > 3 else None,
                 )
 
-    def stats(self) -> dict[str, InstanceStreamStats]:
-        """Return a cursor snapshot keyed by ``instance_id``."""
+    def stats(self) -> EventGateStats:
+        """Return a snapshot of the totals and every emitter's cursor."""
         with self._lock:
-            return {
-                instance_id: InstanceStreamStats(
-                    incarnation=cursor.incarnation,
-                    last_seq=cursor.last_seq,
-                    gap_detected=cursor.gap_detected,
-                    missing_batches=cursor.missing_batches,
-                    events_dropped=cursor.events_dropped,
-                )
-                for instance_id, cursor in self._cursors.items()
-            }
-
-    def totals(self) -> IngestTotals:
-        """Return what the gate has seen from every emitter since this
-        process started; see :class:`IngestTotals`."""
-        with self._lock:
-            return IngestTotals(
-                batches_applied=self._batches_applied,
-                batches_duplicate=self._batches_duplicate,
-                batches_stale=self._batches_stale,
-                batches_missing=self._batches_missing,
-                events_dropped=self._events_dropped,
+            return replace(
+                self._stats,
+                streams={
+                    instance_id: InstanceStreamStats(
+                        incarnation=cursor.incarnation,
+                        last_seq=cursor.last_seq,
+                        gap_detected=cursor.gap_detected,
+                        missing_batches=cursor.missing_batches,
+                        events_dropped=cursor.events_dropped,
+                    )
+                    for instance_id, cursor in self._cursors.items()
+                },
             )
 
     # -- Internals ------------------------------------------------------------
@@ -352,7 +342,7 @@ class EventGate:
             )
             if tracked:
                 cursor.missing_batches += skipped
-                self._batches_missing += skipped
+                self._stats.batches_missing += skipped
         if cursor.dropped_baseline is not None:
             dropped = batch.dropped_events - cursor.dropped_baseline
             if dropped > 0:
@@ -360,7 +350,7 @@ class EventGate:
                     cursor, batch, f"emitter reported {dropped} dropped events"
                 )
                 cursor.events_dropped += dropped
-                self._events_dropped += dropped
+                self._stats.events_dropped += dropped
         cursor.dropped_baseline = batch.dropped_events
         cursor.last_seq = batch.seq
         self._broadcaster.broadcast(batch)

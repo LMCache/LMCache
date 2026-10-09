@@ -124,7 +124,7 @@ class TestRoundTrip:
         load_checkpoint(store, restarted.components)
         restarted.gate.ingest(replace(_store(seq=2, keys=[_key(2)]), dropped_events=9))
 
-        assert restarted.gate.stats()["node-a"].events_dropped == 3
+        assert restarted.gate.stats().streams["node-a"].events_dropped == 3
 
     def test_restored_cursors_fence_a_restarted_emitter(self, tmp_path: Path):
         """Placements are only fenceable if the cursor dating them comes
