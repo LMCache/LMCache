@@ -116,11 +116,14 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         config.get_extra_config_value = lambda _key, default: default
         request_client = Mock()
         request_client.get_chunk_size.return_value.result.return_value = 8
+        adapter_module_name = "lmcache.integration.sglang.unified_kv_adapter"
+        adapter_module = ModuleType(adapter_module_name)
+        vars(adapter_module)["SGLangUnifiedKVAdapter"] = Mock(return_value=adapter)
 
         with (
-            patch(
-                "lmcache.integration.sglang.unified_kv_adapter.SGLangUnifiedKVAdapter",
-                return_value=adapter,
+            patch.dict(
+                "sys.modules",
+                {adapter_module_name: adapter_module},
             ),
             patch(
                 "lmcache.v1.config.load_engine_config_with_overrides",
