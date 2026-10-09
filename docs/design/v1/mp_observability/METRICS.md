@@ -18,10 +18,13 @@ The MP Coordinator reuses the same `init_otel_metrics()` pipeline without
 starting a standalone Prometheus HTTP server. In pull mode its FastAPI app
 serves `GET /metrics` on the coordinator port (default `9300`). In OTLP push
 mode, or when coordinator metrics are disabled, that route returns 404. The
-coordinator provider carries `service.name=lmcache-mp-coordinator`; concrete
-coordinator instruments are registered separately from this transport setup.
+coordinator provider carries `service.name=lmcache-mp-coordinator` and
+`service.instance.id` (the host name); concrete coordinator instruments are
+registered separately from this transport setup and use the
+`lmcache_coordinator.` prefix (see
+[`../mp_coordinator/observability.md`](../mp_coordinator/observability.md)).
 
-All metrics use the `lmcache_mp.` prefix (mp = multiprocess), distinct from the main
+All MP server metrics use the `lmcache_mp.` prefix (mp = multiprocess), distinct from the main
 engine's `lmcache.` namespace. On Prometheus, `.` is converted to `_` and counters get
 a `_total` suffix (e.g., `lmcache_mp.l1_read` with `unit="chunks"` is exposed as
 `lmcache_mp_l1_read_chunks_total`).
