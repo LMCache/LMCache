@@ -6,6 +6,9 @@ steps:
     key: "test"
     timeout_in_minutes: 60
     commands:
+      - |
+        source .buildkite/k3_tests/common_scripts/ci-mode.sh
+        if should_skip_ci_mode inprocess; then exit 0; fi
       - chmod +x .buildkite/scripts/vllm-integration-tests.sh
       - |
         # Ensure artifact is created even if test crashes

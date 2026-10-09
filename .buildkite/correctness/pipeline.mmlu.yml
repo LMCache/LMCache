@@ -5,6 +5,8 @@ steps:
   - label: "Run MMLU KV Transfer Test"
     command: |
       set -euo pipefail
+      source .buildkite/k3_tests/common_scripts/ci-mode.sh
+      if should_skip_ci_mode inprocess; then exit 0; fi
       echo "Starting MMLU test"
       echo "Running setup.sh"
       bash setup.sh
