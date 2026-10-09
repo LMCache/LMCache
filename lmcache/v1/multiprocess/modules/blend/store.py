@@ -52,6 +52,7 @@ class StoreMixin:
         _fingerprint_stop: "threading.Event"
         _pending_fp_hashes: set[bytes]
         _pending_fp_lock: "threading.Lock"
+        _prompt_store: Any
 
     @request_handler(
         HandlerType.BLOCKING,
@@ -101,6 +102,8 @@ class StoreMixin:
             ]
             if not chunk_hashes:
                 return result
+            if getattr(self, "_prompt_store", None) is not None and store_ok:
+                self._record_prompt(key, session)
             tokens_in_range = list(key.token_ids)[key.start : key.end]
             # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.
             start_chunk_idx = 0 if key.start != 0 else 1
@@ -155,6 +158,23 @@ class StoreMixin:
             )
 
         return result
+
+    def _record_prompt(self, key: IPCCacheServerKey, session: Any) -> None:
+        """Remember a stored prompt for the reorder planner. The chain starts
+        at chunk 0 because a request's first store starts at its prefix hit.
+        Never raises: reorder planning is best-effort."""
+        try:
+            chain = [
+                TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0, key.end)
+            ]
+            self._prompt_store.record(
+                (key.model_name, key.world_size, key.cache_salt),
+                key.request_id,
+                key.token_ids,
+                chain,
+            )
+        except Exception:
+            logger.exception("CB reorder: recording %s failed", key.request_id)
 
     def _drain_fingerprints_sync(self) -> None:
         """Sync-drain pending fingerprint registrations (the async drainer

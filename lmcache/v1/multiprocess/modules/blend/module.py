@@ -6,6 +6,7 @@ from collections import OrderedDict
 from queue import Queue
 from typing import TYPE_CHECKING, Any
 import threading
+import time
 import weakref
 
 if TYPE_CHECKING:
@@ -14,8 +15,10 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.modules import blend_reorder
 from lmcache.v1.multiprocess.modules.blend.lookup import (
     LookupMixin,
     _CBUnifiedJob,
@@ -35,7 +38,7 @@ from lmcache.v1.multiprocess.modules.blend.store import (
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.session import Session
 
 logger = init_logger(__name__)
@@ -73,6 +76,7 @@ class BlendModule(
         coordinator: "BlendCoordinatorClient | None" = None,
         enable_segmented_prefix: bool = False,
         enable_dedup_content: bool = False,
+        enable_reorder: bool = False,
     ):
         self._ctx = ctx
         self._transfer_module = lmcache_driven_transfer
@@ -85,6 +89,16 @@ class BlendModule(
         self._token_range_matcher = BlendTokenRangeMatcher(
             ctx.chunk_size, dedup_content=enable_dedup_content
         )
+        # Reorder planner (copy one cached prompt). Off with a coordinator: a
+        # plan sees only this server's prompts.
+        reorder = enable_reorder and coordinator is None
+        if enable_reorder and not reorder:
+            logger.warning("--enable-blend-reorder is ignored with a coordinator")
+        self._prompt_store = blend_reorder.PromptStore() if reorder else None
+        if reorder:  # compile the probe's numba kernels now, not in a plan
+            self._token_range_matcher.match_sub_sequence(
+                [0] * ctx.chunk_size, log=False
+            )
         self._event_bus = ctx.event_bus
         self._cb_rope_state: dict[int, _CBRopeState] = {}
 
@@ -171,6 +185,80 @@ class BlendModule(
             "cb_rope_meta": {str(iid): _meta(iid) for iid in self._cb_rope_state},
             "active_cb_lookups": len(self._cb_jobs),
         }
+
+    @request_handler(HandlerType.BLOCKING)
+    def cb_reorder_plan(
+        self,
+        key: IPCCacheServerKey,
+        keep_prefix: int,
+        budget_ms: int,
+    ) -> list[int]:
+        """Reorder ``key.token_ids`` so the prompt starts with an exact copy
+        of a cached prompt (:meth:`plan_reorder`); the namespace is the key's.
+
+        Returns:
+            The reordered token ids, or an empty list to keep the prompt.
+        """
+        out = self.plan_reorder(
+            list(key.token_ids),
+            key.model_name,
+            key.world_size,
+            key.cache_salt,
+            keep_prefix=keep_prefix,
+            deadline=time.monotonic() + budget_ms / 1e3,
+        )
+        return out["token_ids"] if out["reordered"] else []
+
+    def plan_reorder(
+        self,
+        token_ids: list[int],
+        model_name: str = "",
+        world_size: int = 0,
+        cache_salt: str = "",
+        top_k: int = 4,
+        keep_prefix: int = 0,
+        deadline: float | None = None,
+    ) -> dict:
+        """Order ``token_ids`` so the prompt starts with an exact copy of the
+        cached prompt it can rebuild furthest (``blend_reorder.plan``).
+
+        Always returns the prompt to send: ``token_ids`` is the reordered
+        prompt (a permutation of the input) when ``reordered`` is true, else
+        the input unchanged, with ``reason`` saying why.
+        """
+        P = list(token_ids)
+        out: dict[str, Any] = {"token_ids": P, "reordered": False, "reason": ""}
+        t0 = time.monotonic()
+        deadline = t0 + 0.2 if deadline is None else deadline
+        if self._prompt_store is None:
+            return dict(out, reason="disabled")
+        if len(P) > blend_reorder.MAX_PLAN_TOKENS:
+            return dict(out, reason="too_long")
+        if t0 >= deadline:
+            return dict(out, reason="expired")
+        ns = self._prompt_store.resolve(model_name, world_size, cache_salt)
+        if ns is None:  # the salt must match; empty name / zero size = any
+            return dict(out, reason="no_namespace")
+        hits = self._token_range_matcher.match_sub_sequence(P, log=False)
+        cands, base = self._prompt_store.candidates(
+            ns,
+            [h.hash for h in hits],
+            self._ctx.token_hasher.compute_chunk_hashes(P),
+            top_k,
+        )
+        perm, info = blend_reorder.plan(
+            P,
+            cands,
+            self._ctx.chunk_size,
+            base,
+            budget_s=deadline - time.monotonic(),
+            keep_prefix=keep_prefix,
+        )
+        out["reason"] = info.pop("reason")
+        if perm != list(range(len(P))):
+            out.update(token_ids=[P[i] for i in perm], reordered=True)
+        out.update(info, plan_ms=round(1e3 * (time.monotonic() - t0), 2))
+        return out
 
     def _release_unretrieved_locks(self, session: Session) -> None:
         """Release read locks the request's retrieve never consumed.

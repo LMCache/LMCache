@@ -203,6 +203,14 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[CBUnifiedLookupResult | None]: ...
 
     @rpc_method
+    def cb_reorder_plan(
+        self,
+        key: IPCCacheServerKey,
+        keep_prefix: int,
+        budget_ms: int,
+    ) -> MessagingFuture[list[int]]: ...
+
+    @rpc_method
     def cb_protocol_handshake(
         self, client_version: int
     ) -> MessagingFuture[tuple[int, bool]]: ...
