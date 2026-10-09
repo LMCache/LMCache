@@ -56,6 +56,28 @@ _KEY_SEP = "@"
 _PATH_SLASH_REPLACEMENT = "-SEP-"
 _FILE_EXT = ".data"
 
+# Maximum number of value-sized I/Os a single load batch may have in flight.
+#
+# Bounded rather than unbounded because a batch is caller-sized: one request can
+# carry hundreds of keys (a 126,900-token context is ~496 chunks), and fanning
+# every one out at once would put an unbounded number of large transfers in the
+# executor at the same time.
+#
+# 16 is chosen from a sweep on XFS over 4-drive NVMe RAID-0 with 24 MiB values (a
+# KV chunk for a 30B model at chunk_size 256), loading a 32-key batch:
+#
+#     io_concurrency:   1      4      8     16     32
+#     duration (ms): 67.3   37.0   32.2   31.7   32.0
+#
+# The curve plateaus from ~8 onward with no measured penalty at 32, so 16 sits on
+# the plateau with headroom rather than at its edge. Smaller values benefit from
+# more concurrency (256 KiB values were still improving at 32-way), so raise
+# `io_concurrency` when the value size is known to be small.
+#
+# Deliberately lower than _DELETE_CONCURRENCY (64), which bounds unlink() calls
+# rather than data transfers.
+_DEFAULT_IO_CONCURRENCY = 16
+
 
 def _readinto_full(
     f,  # typing: IO[bytes]
@@ -180,6 +202,7 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         relative_tmp_dir: Optional[str] = None,
         read_ahead_size: Optional[int] = None,
         use_odirect: bool = False,
+        io_concurrency: int = _DEFAULT_IO_CONCURRENCY,
     ):
         """Initialize FSL2AdapterConfig.
 
@@ -190,6 +213,8 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
             read_ahead_size: If set, trigger filesystem
                 readahead by issuing a small initial read
                 of this many bytes before reading the rest.
+            io_concurrency: Maximum value-sized I/Os in flight within a single
+                load batch. See _DEFAULT_IO_CONCURRENCY for why this is bounded.
             use_odirect: If True, bypass the OS page cache
                 using O_DIRECT for both reads and writes.
                 Requires buffer sizes aligned to the
@@ -199,6 +224,7 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         self.relative_tmp_dir = relative_tmp_dir
         self.read_ahead_size = read_ahead_size
         self.use_odirect = use_odirect
+        self.io_concurrency = io_concurrency
 
     @classmethod
     def from_dict(cls, d: dict) -> "FSL2AdapterConfig":
@@ -216,11 +242,15 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         use_odirect = d.get("use_odirect", False)
         if not isinstance(use_odirect, bool):
             raise ValueError("use_odirect must be a boolean")
+        io_concurrency = d.get("io_concurrency", _DEFAULT_IO_CONCURRENCY)
+        if not isinstance(io_concurrency, int) or io_concurrency < 1:
+            raise ValueError("io_concurrency must be a positive integer")
         return cls(
             base_path=base_path,
             relative_tmp_dir=relative_tmp_dir,
             read_ahead_size=read_ahead_size,
             use_odirect=use_odirect,
+            io_concurrency=io_concurrency,
         )
 
     @classmethod
@@ -235,6 +265,9 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
             "- read_ahead_size (int): trigger fs "
             "readahead by reading this many bytes first "
             "(optional)\n"
+            "- io_concurrency (int): max concurrent I/Os "
+            "within one load batch (default "
+            f"{_DEFAULT_IO_CONCURRENCY}).\n"
             "- use_odirect (bool): bypass page cache "
             "via O_DIRECT (optional, default false)"
         )
@@ -279,6 +312,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         # I/O tuning options aligned with FSConnector
         self._read_ahead_size = config.read_ahead_size
+        self._io_concurrency = config.io_concurrency
         self._use_odirect = config.use_odirect
         self._os_disk_bs = 0
         if self._use_odirect:
@@ -304,11 +338,12 @@ class FSL2Adapter(L2AdapterInterface):
         logger.info(
             "Initialized FSL2Adapter with base_path=%s, "
             "relative_tmp_dir=%s, "
-            "read_ahead_size=%s, use_odirect=%s",
+            "read_ahead_size=%s, use_odirect=%s, io_concurrency=%d",
             self._base_path,
             self._relative_tmp_dir,
             self._read_ahead_size,
             self._use_odirect,
+            self._io_concurrency,
         )
 
     # ------------------------------------------------------------------
@@ -701,79 +736,89 @@ class FSL2Adapter(L2AdapterInterface):
         task_id: L2TaskId,
     ) -> None:
         bitmap = Bitmap(len(keys))
-        for i, key in enumerate(keys):
-            file_path = self._key_to_path(key)
-            try:
-                dst_buf = objects[i].byte_array
-                expected = len(dst_buf)
-                num_read: Optional[int] = None
+        # Load the batch concurrently rather than one key at a time; awaiting
+        # each key in turn made a 32-key batch of 24 MiB values 2.1x slower than
+        # the same work split across eight batches.  Bounded by io_concurrency
+        # because the batch size is chosen by the caller, not by us.  Same
+        # semaphore + gather shape as _execute_delete below.
+        sem = asyncio.Semaphore(self._io_concurrency)
 
-                # O_DIRECT path (sync, via executor)
-                if self._use_odirect:
-                    num_read = await self._loop.run_in_executor(
-                        None,
-                        self._read_with_odirect,
-                        file_path,
-                        dst_buf,
-                    )
-                    if num_read != expected:
-                        logger.warning(
-                            "Incomplete O_DIRECT read for %s: expected %d, got %d",
-                            file_path.name,
-                            expected,
-                            num_read or 0,
+        async def _load_one(i: int, key: ObjectKey) -> None:
+            file_path = self._key_to_path(key)
+            async with sem:
+                try:
+                    dst_buf = objects[i].byte_array
+                    expected = len(dst_buf)
+                    num_read: Optional[int] = None
+
+                    # O_DIRECT path (sync, via executor)
+                    if self._use_odirect:
+                        num_read = await self._loop.run_in_executor(
+                            None,
+                            self._read_with_odirect,
+                            file_path,
+                            dst_buf,
                         )
-                    else:
+                        if num_read != expected:
+                            logger.warning(
+                                "Incomplete O_DIRECT read for %s: expected %d, got %d",
+                                file_path.name,
+                                expected,
+                                num_read or 0,
+                            )
+                        else:
+                            bitmap.set(i)
+                            logger.debug(
+                                "FSL2Adapter loaded key %s (%d bytes, O_DIRECT)",
+                                file_path.name,
+                                num_read,
+                            )
+                        return
+
+                    # Standard async path with optional
+                    # read-ahead
+                    expected = len(dst_buf)
+                    async with aiofiles.open(file_path, "rb") as f:
+                        if self._read_ahead_size is None:
+                            num_read = await _async_readinto_full(f, dst_buf)
+                        else:
+                            if not isinstance(dst_buf, memoryview):
+                                dst_buf = memoryview(dst_buf)
+                            # Trigger readahead with a
+                            # small initial read
+                            ra = self._read_ahead_size
+                            n_head = await _async_readinto_full(f, dst_buf[:ra])
+                            if n_head == ra:
+                                n_tail = await _async_readinto_full(f, dst_buf[ra:])
+                                num_read = n_head + n_tail
+                            else:
+                                num_read = n_head
+
+                        if num_read != expected:
+                            logger.warning(
+                                "Incomplete read for %s: expected %d, got %d",
+                                file_path.name,
+                                expected,
+                                num_read,
+                            )
+                            return
+
                         bitmap.set(i)
                         logger.debug(
-                            "FSL2Adapter loaded key %s (%d bytes, O_DIRECT)",
+                            "FSL2Adapter loaded key %s (%d bytes)",
                             file_path.name,
                             num_read,
                         )
-                    continue
-
-                # Standard async path with optional
-                # read-ahead
-                expected = len(dst_buf)
-                async with aiofiles.open(file_path, "rb") as f:
-                    if self._read_ahead_size is None:
-                        num_read = await _async_readinto_full(f, dst_buf)
-                    else:
-                        if not isinstance(dst_buf, memoryview):
-                            dst_buf = memoryview(dst_buf)
-                        # Trigger readahead with a
-                        # small initial read
-                        ra = self._read_ahead_size
-                        n_head = await _async_readinto_full(f, dst_buf[:ra])
-                        if n_head == ra:
-                            n_tail = await _async_readinto_full(f, dst_buf[ra:])
-                            num_read = n_head + n_tail
-                        else:
-                            num_read = n_head
-
-                    if num_read != expected:
-                        logger.warning(
-                            "Incomplete read for %s: expected %d, got %d",
-                            file_path.name,
-                            expected,
-                            num_read,
-                        )
-                        continue
-
-                    bitmap.set(i)
-                    logger.debug(
-                        "FSL2Adapter loaded key %s (%d bytes)",
-                        file_path.name,
-                        num_read,
+                except FileNotFoundError:
+                    return
+                except Exception:
+                    logger.exception(
+                        "FSL2Adapter failed to load %s",
+                        file_path,
                     )
-            except FileNotFoundError:
-                continue
-            except Exception:
-                logger.exception(
-                    "FSL2Adapter failed to load %s",
-                    file_path,
-                )
-                continue
+                    return
+
+        await asyncio.gather(*(_load_one(i, k) for i, k in enumerate(keys)))
 
         loaded_keys = [keys[i] for i in bitmap.get_indices_list()]
         if loaded_keys:
