@@ -119,8 +119,6 @@ ignore = [
 # why mixed directories are listed file by file, and "<dir>/**" is used only
 # where every file below the directory still violates the rule.
 # Tracking issue: https://github.com/LMCache/LMCache/issues/5118
-"benchmarks/multi_round_qa/multi-round-qa.py" = ["G004"]
-"benchmarks/multi_round_qa/utils.py" = ["G004"]
 "examples/token_dropping/rkv_token_dropping.ipynb" = ["G004"]
 "examples/token_dropping/snapkv_token_dropping.ipynb" = ["G004"]
 "lmcache/integration/vllm/utils.py" = ["G004"]
