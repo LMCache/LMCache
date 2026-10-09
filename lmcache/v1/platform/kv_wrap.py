@@ -12,6 +12,7 @@ them without importing the vLLM integration package.
 from __future__ import annotations
 
 # Standard
+from logging import DEBUG
 from typing import Any
 
 # Third Party
@@ -19,6 +20,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector.utils import get_device
 from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.platform import resolve_kv_wrapper_factory
 
@@ -32,9 +34,6 @@ def wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
     so this call site stays free of if/elif chains and external accelerators
     can provide their wrapper from an installed device-plugin wheel.
     """
-    # First Party
-    from lmcache.v1.gpu_connector.utils import get_device
-
     return resolve_kv_wrapper_factory(get_device(tensor).type)(tensor)
 
 
@@ -57,17 +56,18 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     # Emit a per-layer (name, shape, dtype) summary so the operator can
     # verify the exact layer set & tensor geometry being shipped to the
     # LMCache server, then the low-noise count of handles being wrapped.
-    kept_summary = [
-        (name, *_layer_shape_and_dtype(value)) for name, value in kv_caches.items()
-    ]
-    logger.debug(
-        "KV cache transfer keeping %d layer(s) (name, shape, dtype):\n%s",
-        len(kept_summary),
-        "\n".join(
-            f"  [{i}] {name}  shape={shape}  dtype={dtype}"
-            for i, (name, shape, dtype) in enumerate(kept_summary)
-        ),
-    )
+    if logger.isEnabledFor(DEBUG):
+        kept_summary = [
+            (name, *_layer_shape_and_dtype(value)) for name, value in kv_caches.items()
+        ]
+        logger.debug(
+            "KV cache transfer keeping %d layer(s) (name, shape, dtype):\n%s",
+            len(kept_summary),
+            "\n".join(
+                f"  [{i}] {name}  shape={shape}  dtype={dtype}"
+                for i, (name, shape, dtype) in enumerate(kept_summary)
+            ),
+        )
     logger.info("Wrapping %d KV cache tensors for IPC", len(kv_caches))
     # Per-iteration resource management: if wrapping the N-th value
     # raises, ``shm_unlink`` whatever earlier iterations already
