@@ -8,11 +8,11 @@ from collections.abc import Callable
 import pytest
 
 # First Party
-import lmcache.lmcache_native as lmcache_native
 from lmcache.v1.platform.devices.musa.format_capabilities import (
     is_supported_musa_mp_block_transfer_format,
     is_supported_musa_native_block_transfer_format,
 )
+import lmcache.lmcache_native as lmcache_native
 
 F = lmcache_native.EngineKVFormat
 

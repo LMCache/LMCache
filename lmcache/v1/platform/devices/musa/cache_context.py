@@ -220,8 +220,10 @@ class _TempMUSABuffer:
             self._kv_groups_manager.get_slots_per_chunk_in_sw(kernel_group_idx)
             * num_chunks
         )
+        engine_kv_format = group.engine_kv_format
+        assert engine_kv_format is not None
         return torch.Size(
-            get_spec_class(group.engine_kv_format).staging_shape(
+            get_spec_class(engine_kv_format).staging_shape(
                 group.num_layers,
                 num_slots,
                 group.hidden_dim_size,
