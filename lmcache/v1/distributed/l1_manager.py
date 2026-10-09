@@ -1083,10 +1083,11 @@ class L1Manager:
 
         Returns:
             For Device-DAX, the optional DRAM region plus all mapped arenas,
-            including draining arenas. For other memory managers, 1.
+            including draining arenas. For a segmented (GTT) DRAM L1, the
+            published segments. For other memory managers, 1.
         """
         manager = self._memory_manager
-        if isinstance(manager, DevDaxL1MemoryManager):
+        if isinstance(manager, L1MemoryManager):
             return manager.memory_region_count()
         return 1
 

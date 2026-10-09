@@ -26,8 +26,10 @@ from lmcache.v1.distributed.api import (
     Tier,
 )
 from lmcache.v1.distributed.config import (
+    GTT_L1_UNSUPPORTED_MODES_HINT,
     EvictionConfig,
     StorageManagerConfig,
+    gtt_incompatible_l2_adapter,
     requires_single_l1_memory_region,
     unwrap_l2_adapter_config,
 )
@@ -1129,8 +1131,9 @@ class StorageManager:
         Raises:
             ValueError: If the adapter registers a single L1 memory region
                 while L1 spans more than one (hybrid DRAM + Device-DAX, or
-                more than one Device-DAX arena), or a DAX device is already
-                mapped by L1 or another L2 adapter.
+                more than one Device-DAX arena), registers L1 memory or does
+                direct I/O on it while L1 uses the gtt backend, or a DAX
+                device is already mapped by L1 or another L2 adapter.
         """
         with self._lifecycle_lock:
             # Mirror of the check in add_l1_devdax_device: a single-region
@@ -1140,6 +1143,14 @@ class StorageManager:
                 raise ValueError(f"Unknown L1 affinity_tag: {config.affinity_tag}")
             if self._l1_by_tag[config.affinity_tag].config.gds_l1_config is not None:
                 raise ValueError("L2 affinity requires a host-backed DRAM or DEVDAX L1")
+            l1_memory_config = self._l1_by_tag[config.affinity_tag].config.memory_config
+            if l1_memory_config.host_memory_backend == "gtt" and (
+                reason := gtt_incompatible_l2_adapter(config)
+            ):
+                raise ValueError(
+                    "L2 adapter cannot be used with the gtt L1 backend: "
+                    f"{reason}. {GTT_L1_UNSUPPORTED_MODES_HINT}"
+                )
             region_count = self._l1_by_tag[config.affinity_tag].memory_region_count()
             if adapter_name is not None and region_count > 1:
                 raise ValueError(
