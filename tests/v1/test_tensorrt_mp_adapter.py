@@ -66,25 +66,75 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
     worker._metadata = module.LMCacheMPConnectorMetadata(
         loads={7: module._BlockSpec(tokens=[1, 2], block_ids=[3])}
     )
-    worker._mq_client = MagicMock(name="mq_client")
+    worker._req_client = MagicMock(name="req_client")
     worker._mq_timeout = 5.0
     worker._instance_id = 42
+    worker._device = "cpu"
     worker._create_key = MagicMock(return_value=SimpleNamespace())
 
     event = MagicMock(name="event")
     event.ipc_handle.return_value = b"producer-event"
-    monkeypatch.setattr(module, "check_interprocess_event_support", MagicMock())
-    monkeypatch.setattr(module.torch_dev, "Event", MagicMock(return_value=event))
+    event_backend = MagicMock(name="event_backend")
+    event_backend.create_event.return_value = event
+    event_backend.export_event.side_effect = (
+        lambda exported_event, device: exported_event.ipc_handle()
+    )
+    worker._event_backend = event_backend
 
     device_future = MagicMock(name="device_future")
     device_future.result.return_value = False
     raw_future = MagicMock(name="raw_future")
     raw_future.to_device_future.return_value = device_future
-    send_request = MagicMock(return_value=raw_future)
-    monkeypatch.setattr(module, "_send_request", send_request)
+    worker._req_client.retrieve.return_value = raw_future
 
     with pytest.raises(RuntimeError, match="refusing to use unloaded KV blocks"):
         worker.start_load_kv(MagicMock(name="stream"))
 
-    raw_future.to_device_future.assert_called_once_with()
+    raw_future.to_device_future.assert_called_once_with(
+        device="cpu",
+        event_backend=event_backend,
+    )
+    raw_future.retain_reference.assert_called_once_with(event)
+    device_future.result.assert_called_once_with(timeout=5.0)
+
+
+def test_store_wait_retains_event_on_raw_future(
+    trt_mp_module,
+) -> None:
+    """A timed store keeps its exported event alive on the raw future."""
+    module = trt_mp_module
+    worker = module.LMCacheMPKvConnectorWorker.__new__(
+        module.LMCacheMPKvConnectorWorker
+    )
+    worker._metadata = module.LMCacheMPConnectorMetadata(
+        saves={7: module._BlockSpec(tokens=[1, 2], block_ids=[3])}
+    )
+    worker._req_client = MagicMock(name="req_client")
+    worker._mq_timeout = 5.0
+    worker._instance_id = 42
+    worker._device = "cpu"
+    worker._create_key = MagicMock(return_value=SimpleNamespace())
+
+    event = MagicMock(name="event")
+    event.ipc_handle.return_value = b"producer-event"
+    event_backend = MagicMock(name="event_backend")
+    event_backend.create_event.return_value = event
+    event_backend.export_event.side_effect = (
+        lambda exported_event, device: exported_event.ipc_handle()
+    )
+    worker._event_backend = event_backend
+
+    device_future = MagicMock(name="device_future")
+    device_future.result.return_value = True
+    raw_future = MagicMock(name="raw_future")
+    raw_future.to_device_future.return_value = device_future
+    worker._req_client.store.return_value = raw_future
+
+    worker.wait_for_save(MagicMock(name="stream"))
+
+    raw_future.to_device_future.assert_called_once_with(
+        device="cpu",
+        event_backend=event_backend,
+    )
+    raw_future.retain_reference.assert_called_once_with(event)
     device_future.result.assert_called_once_with(timeout=5.0)

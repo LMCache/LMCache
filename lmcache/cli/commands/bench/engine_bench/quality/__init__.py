@@ -3,6 +3,8 @@
 
 * ``dataset`` — loading multi-passage QA datasets into :class:`Sample` objects.
 * ``scoring`` — extracting the model's answer and scoring it against gold.
+* ``alignment`` — padding prompt blocks to whole cache chunks.
+* ``prompts`` — the shared multi-passage QA prompt.
 """
 
 # First Party

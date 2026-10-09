@@ -26,17 +26,24 @@ import lmcache.lmcache_native as lmcache_native
 def resolve_vllm_kv_layout(
     layout_hints: LayoutHints, cpu_attention_backend: bool
 ) -> str:
-    """Validate the ``kv_layout`` hint and apply the CPU-backend override."""
-    kv_layout = layout_hints.get("kv_layout", "NHD")
+    """Validate an explicit ``kv_layout`` hint or choose a legacy default."""
+    kv_layout = layout_hints.get("kv_layout")
+    if kv_layout is None:
+        # Registrations predating layout hints relied on the CPU backend's HND
+        # allocation and the NHD default everywhere else.
+        return "HND" if cpu_attention_backend else "NHD"
     if kv_layout not in KV_LAYOUT_NAMES:
         raise ValueError(
             f"kv_layout hint {kv_layout!r} is not a layout LMCache supports; "
             f"expected one of {', '.join(KV_LAYOUT_NAMES)}."
         )
-    # The CPU attention backend allocates HND but hints NHD.
-    if cpu_attention_backend and kv_layout in ("NHD", "HND"):
-        return "HND"
     return kv_layout
+
+
+def _is_blocked_indexer_plane(t: torch.Tensor) -> bool:
+    """Whether a per-layer plane is the fp8 DSA indexer cache."""
+    # Row: 128 fp8 values + one fp32 scale.
+    return t.dtype == torch.uint8 and int(t.shape[-1]) == 132
 
 
 class VLLM_Detector(EngineDetector):
@@ -66,6 +73,18 @@ class VLLM_Detector(EngineDetector):
             and isinstance(kv_caches[0], torch.Tensor)
             and kv_caches[0].dim() == 4
         ):
+            # vLLM >= 0.29 allocates the DSA indexer cache through the MLA
+            # spec, so its plane carries a singleton head axis. Squeeze it so
+            # the blocked page layout is addressed by its own format rather
+            # than as fused K/V rows.
+            head_axis = 1 if is_hnd else 2
+            if int(kv_caches[0].shape[head_axis]) == 1 and _is_blocked_indexer_plane(
+                kv_caches[0]
+            ):
+                return (
+                    lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
+                    [t.squeeze(head_axis) for t in kv_caches],
+                )
             if is_hnd:
                 return lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS, kv_caches
             return lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS, kv_caches
@@ -95,9 +114,21 @@ class VLLM_Detector(EngineDetector):
                     return lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS, kv_caches
                 return lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS, kv_caches
         if list_depth == 1 and tensor_ndim == 3:  # MLA (or DSA indexer cache)
-            if first_tensor.dtype == torch.uint8 and int(first_tensor.shape[-1]) == 132:
+            if _is_blocked_indexer_plane(first_tensor):
                 return lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS, kv_caches
             return lmcache_native.EngineKVFormat.NL_X_NB_BS_HS, kv_caches
-        if list_depth == 2 and tensor_ndim == 4 and len(kv_caches[0]) == 2:
-            return lmcache_native.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS, kv_caches
+        if list_depth == 2 and tensor_ndim == 4:
+            layer0_planes = kv_caches[0]
+            single_head = all(int(t.shape[2]) == 1 for t in layer0_planes)
+            widths = {int(t.shape[-1]) for t in layer0_planes}
+            if single_head and (len(layer0_planes) in (1, 3) or len(widths) > 1):
+                return (
+                    lmcache_native.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,
+                    kv_caches,
+                )
+            if len(layer0_planes) == 2:
+                return (
+                    lmcache_native.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS,
+                    kv_caches,
+                )
         return None, kv_caches

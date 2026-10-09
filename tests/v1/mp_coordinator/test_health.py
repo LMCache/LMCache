@@ -11,7 +11,10 @@ from fastapi.testclient import TestClient
 # First Party
 from lmcache.v1.mp_coordinator.app import create_app, evict_stale
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
+from lmcache.v1.mp_coordinator.views.instance_registry import (
+    InstanceRegistry,
+    MPInstance,
+)
 
 
 def _instance(instance_id: str, heartbeat: float) -> MPInstance:

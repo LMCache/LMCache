@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     import httpx
 
     # First Party
-    from lmcache.v1.mp_coordinator.registry import MPInstance
+    from lmcache.v1.mp_coordinator.views.instance_registry import MPInstance
 
 logger = init_logger(__name__)
 

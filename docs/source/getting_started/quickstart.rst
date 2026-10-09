@@ -34,9 +34,10 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          .. tab-item:: MP mode (recommended)
             :sync: mp
 
-            Start the LMCache server. ``--host`` / ``--port`` set the ZMQ
-            address vLLM connects to; they are spelled out here so the two
-            commands line up (these are also the defaults):
+            Start the LMCache server. ``--host`` / ``--port`` set the request
+            address vLLM connects to; ``--transport`` selects ZMQ (the default)
+            or gRPC. The defaults are spelled out here so the two commands
+            line up:
 
             .. code-block:: bash
 
@@ -47,7 +48,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                    --host localhost --port 5555 \
                    --l1-size-gb 20 --eviction-policy LRU --chunk-size 16
 
-            The ZMQ port (``--port``, default **5555**) accepts connections
+            The request port (``--port``, default **5555**) accepts connections
             from vLLM; the HTTP frontend (default **8080**) serves the
             management and metrics endpoints. See :doc:`../mp/configuration`
             for the full list of ``lmcache server`` and connector options.
@@ -55,9 +56,11 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             Start vLLM with the MP connector in a separate terminal. Point the
             connector at the server above via ``lmcache.mp.host`` /
             ``lmcache.mp.port`` in ``kv_connector_extra_config``. The host may
-            include a ZMQ transport prefix (e.g. ``tcp://``); a bare
-            ``host``/``host:port`` is also accepted and is normalized to
-            ``tcp://`` automatically:
+            include a transport prefix: ``tcp://`` for ZMQ or ``grpc://`` for
+            gRPC. A bare ``host``/``host:port`` is also accepted and is
+            normalized to ``tcp://`` automatically. See
+            :doc:`/mp/request_transport` for supported endpoint schemes and
+            transport-selection behavior:
 
             .. code-block:: bash
 
@@ -230,11 +233,13 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
    .. tab-item:: SGLang
 
-      .. note::
-         The SGLang integration now defaults to MP (multi-process) mode.
-         Please refer to `examples/sgl_integration/README.md`_ for the current setup instructions.
-
-      .. _examples/sgl_integration/README.md: https://github.com/LMCache/LMCache/blob/dev/examples/sgl_integration/README.md
+      .. important::
+         The SGLang integration currently supports only MP (multi-process)
+         mode. LMCache must run as a standalone server; in-process mode is not
+         supported. Use an SGLang version that contains `SGLang PR #38652
+         <https://github.com/sgl-project/sglang/pull/38652>`_ and an LMCache
+         version that contains `LMCache PR #4828
+         <https://github.com/LMCache/LMCache/pull/4828>`_.
 
       **Install SGLang**
 
@@ -244,30 +249,71 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          source .venv/bin/activate
          uv pip install --prerelease=allow lmcache "sglang"
 
-      **Start SGLang with LMCache**
+      **Configure the LMCache connection**
 
       .. code-block:: bash
 
-         cat > lmc_config.yaml <<'EOF'
-         chunk_size: 8  # demo only; use 256 for production
-         local_cpu: true
-         use_layerwise: true
-         max_local_cpu_size: 10  # GB
+         cat > lmcache_config.yaml <<'EOF'
+         mp_host: 127.0.0.1
+         mp_port: 5555
          EOF
 
-         export LMCACHE_CONFIG_FILE=$PWD/lmc_config.yaml
+      ``mp_host`` and ``mp_port`` identify the standalone LMCache request
+      server. A bare host uses the default ZMQ transport.
+
+      **Start the LMCache server**
+
+      .. code-block:: bash
+
+         # A small chunk size makes cache reuse visible with the short demo
+         # prompts below. Use the default (256) for production workloads.
+         lmcache server \
+           --host 127.0.0.1 --port 5555 \
+           --l1-size-gb 10 --eviction-policy LRU --chunk-size 16
+
+      To use gRPC instead of ZMQ, include the ``grpc://`` scheme in the
+      connector configuration:
+
+      .. code-block:: bash
+
+         cat > lmcache_config.yaml <<'EOF'
+         mp_host: grpc://127.0.0.1
+         mp_port: 5555
+         EOF
+
+      Then start the LMCache server with the matching transport:
+
+      .. code-block:: bash
+
+         lmcache server \
+           --host 127.0.0.1 --port 5555 --transport grpc \
+           --l1-size-gb 10 --eviction-policy LRU --chunk-size 16
+
+      .. warning::
+         When serving a hybrid model, add ``--separate-object-groups`` to the
+         LMCache server command. This option is required so full-attention,
+         sliding-window, and recurrent-state cache groups retain their distinct
+         storage semantics. Omitting it can restore incompatible KV or state
+         data and cause accuracy problems.
+
+      **Start SGLang in a separate terminal**
+
+      .. code-block:: bash
 
          python -m sglang.launch_server \
            --model-path Qwen/Qwen3-8B \
            --host 0.0.0.0 \
            --port 30000 \
-           --enable-lmcache
+           --enable-lmcache \
+           --lmcache-config-file "$PWD/lmcache_config.yaml"
 
-      .. note::
-         Configure LMCache via the config file. See :doc:`../api_reference/configurations` for the full list.
+      The SGLang process owns the GPU-resident radix cache and connects to the
+      LMCache server for external lookup, retrieve, and store operations. The
+      server independently manages its CPU and remote cache tiers.
 
       **Test** -- open a new terminal and send two requests whose prompts
-      share a prefix:
+      share a prefix. Clear SGLang's local radix cache between them so the
+      second request must retrieve the shared prefix from LMCache.
 
       **First request**
 
@@ -282,6 +328,13 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
              "temperature": 0.7
            }'
 
+      **Clear the local SGLang radix cache**
+
+      .. code-block:: bash
+
+         sleep 2  # allow the asynchronous LMCache store to finish
+         curl -X POST "http://localhost:30000/flush_cache?timeout=60"
+
       **Second request**
 
       .. code-block:: bash
@@ -295,32 +348,15 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
              "temperature": 0.7
            }'
 
-      **You should see LMCache logs like this:**
+      The first request populates LMCache. After the local radix cache is
+      cleared, the second request retrieves its shared, chunk-aligned prefix
+      from the standalone LMCache server. You can confirm the retrieve through
+      the server metrics endpoint:
 
-      **First request** -- prompt plus generated tokens are stored:
+      .. code-block:: bash
 
-      .. code-block:: text
-
-         Prefill batch, #new-seq: 1, #new-token: 35, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 74, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1.63, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 114, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.95, #queue-req: 0,
-         LMCache INFO: Stored 128 out of total 135 tokens. size: 0.0195 GB, cost 12.8890 ms, throughput: 1.5153 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
-
-      **Second request** -- Radix Cache and LMCache share the prefix; only the new portion is stored:
-
-      .. code-block:: text
-
-         Prefill batch, #new-seq: 1, #new-token: 10, #cached-token: 30, token usage: 0.00, #running-req: 0, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 64, token usage: 0.00, cuda graph: True, gen throughput (token/s): 8.29, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 104, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.95, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 144, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.89, #queue-req: 0,
-         LMCache INFO: Stored 112 out of total 140 tokens. size: 0.0171 GB, cost 11.1986 ms, throughput: 1.5261 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
-
-      - **Total tokens 140**: SGLang stores KV cache for both prefill and decode tokens together, so total = 40 prompt + 100 generated = 140 tokens.
-      - **Cached tokens: 30**: SGLang's Radix Attention Cache reused 30 tokens from the first request.
-      - **LMCache hit tokens: 24**: LMCache detected 24 tokens (3 full 8-token chunks) stored from the first request. Since Radix Cache already provides 30 tokens in GPU memory, these 24 tokens don't need to be loaded from LMCache or stored again.
-      - **New tokens: 10**: Only 10 prompt tokens need prefill computation (40 prompt - 30 cached = 10).
-      - **Stored 112 out of 140**: 24 tokens (3 full chunks) are already in LMCache and skipped. Of the remaining 116 tokens, 112 (14 full 8-token chunks) are stored.
+         curl -s http://localhost:8080/metrics \
+           | grep lmcache_mp_l1_read_chunks_total
 
    .. tab-item:: TensorRT-LLM
 
@@ -453,15 +489,18 @@ More MP server options
 The vLLM MP example above runs ``lmcache server`` locally on the default
 ports. Common variations:
 
-**Custom port or remote host** -- by default the connector talks to
-``localhost:5555``. To use a different port, or a server on another host,
-pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
-``kv_connector_extra_config``:
+**Custom port, remote host, or gRPC** -- by default the connector talks to
+``localhost:5555`` over ZMQ. To use a different port, a server on another
+host, or gRPC, pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
+``kv_connector_extra_config`` and select the matching server transport:
 
 .. code-block:: bash
 
    vllm serve Qwen/Qwen3-8B --kv-transfer-config \
      '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://10.0.0.1", "lmcache.mp.port": 6555}}'
+
+For gRPC, start the server with ``--transport grpc`` and use a
+``grpc://10.0.0.1`` connector host.
 
 **CPU-only (no GPU)** -- the server runs with a ``StubCPUDevice`` and shares
 KV tensors with vLLM over POSIX shared memory. Start ``lmcache server``

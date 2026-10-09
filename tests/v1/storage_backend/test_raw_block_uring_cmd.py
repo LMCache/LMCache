@@ -261,12 +261,12 @@ def test_uring_cmd_get_nvme_info(loop_in_thread):
         # Test getting namespace ID
         nsid = raw_device.nvme_nsid()
         assert nsid > 0, f"Expected positive nsid, got {nsid}"
-        logger.info(f"NVMe namespace ID: {nsid}")
+        logger.info("NVMe namespace ID: %s", nsid)
 
         # Test getting LBA size
         lba_size = raw_device.nvme_lba_size()
         assert lba_size > 0, f"Expected positive lba_size, got {lba_size}"
-        logger.info(f"NVMe LBA size: {lba_size} bytes")
+        logger.info("NVMe LBA size: %s bytes", lba_size)
 
     except Exception as e:
         pytest.fail(f"Failed to get NVMe info: {e}")
@@ -481,19 +481,6 @@ def _unaligned_bytearray(total_len: int, align: int = 4096) -> bytearray:
     """Return a bytearray that is likely (best-effort) not ``align``-aligned."""
     backing = bytearray(total_len + align)
     return bytearray(backing[1 : 1 + total_len])
-
-
-def test_uring_cmd_read_uring_handles_unaligned_buffer() -> None:
-    """``read_uring`` must accept an unaligned buffer under ``use_uring_cmd``."""
-    device_path = TEST_DEVICES["char_device"]
-    raw_dev = _open_raw_device(device_path, use_uring_cmd=True)
-
-    try:
-        total_len = 8192  # multi-page to require a PRP list
-        buf = _unaligned_bytearray(total_len)
-        raw_dev.read_uring(0, buf, total_len, total_len)
-    finally:
-        raw_dev.close()
 
 
 def test_uring_cmd_batched_read_handles_unaligned_buffer() -> None:

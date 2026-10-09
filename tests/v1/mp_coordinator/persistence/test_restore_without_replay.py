@@ -19,6 +19,7 @@ from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from tests.v1.mp_coordinator.persistence.conftest import capture_consistently
@@ -30,7 +31,9 @@ class _Coordinator:
     def __init__(self) -> None:
         self.directory = KeyDirectory()
         self.usage = CacheUsageManager()
-        self.controller = FleetEvictionController(usage_manager=self.usage)
+        self.controller = FleetEvictionController(
+            usage_manager=self.usage, registry=InstanceRegistry()
+        )
         self.broadcaster = CacheEventBroadcaster()
         self.broadcaster.register_consumer(self.directory)
         self.broadcaster.register_consumer(self.usage)

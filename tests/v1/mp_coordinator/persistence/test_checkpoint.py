@@ -33,6 +33,7 @@ from lmcache.v1.mp_coordinator.persistence.durable_component import (
 )
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 from lmcache.v1.mp_coordinator.persistence.store import LocalArtifactStore
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 
@@ -43,7 +44,9 @@ class _Coordinator:
     def __init__(self) -> None:
         self.directory = KeyDirectory()
         self.usage = CacheUsageManager()
-        self.controller = FleetEvictionController(usage_manager=self.usage)
+        self.controller = FleetEvictionController(
+            usage_manager=self.usage, registry=InstanceRegistry()
+        )
         broadcaster = CacheEventBroadcaster()
         broadcaster.register_consumer(self.directory)
         broadcaster.register_consumer(self.usage)

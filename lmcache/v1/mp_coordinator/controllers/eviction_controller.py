@@ -8,10 +8,12 @@ See ``docs/design/v1/mp_coordinator/usage_and_eviction.md``.
 from __future__ import annotations
 
 # Standard
-from collections.abc import Mapping
-from dataclasses import asdict
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, cast
 import asyncio
+import contextlib
 
 # Third Party
 import httpx
@@ -25,25 +27,47 @@ from lmcache.v1.distributed.eviction_policy.isolated_lru import (
 )
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.api import CacheEventBatch, CacheEventType
-from lmcache.v1.mp_coordinator.controllers.base import Controller
+from lmcache.v1.mp_coordinator.controllers.base import (
+    Controller,
+    ControllerRuntime,
+)
+from lmcache.v1.mp_coordinator.controllers.eviction_http_api import build_routers
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
 )
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from lmcache.v1.multiprocess.cache_control.object_service import (
     MAX_DELETE_BATCH,
 )
 
 if TYPE_CHECKING:
+    # Third Party
+    from fastapi import APIRouter
+
     # First Party
     from lmcache.v1.distributed.api import ObjectKey
     from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
     from lmcache.v1.mp_coordinator.discovery import Registry
-    from lmcache.v1.mp_coordinator.registry import InstanceRegistry
     from lmcache.v1.mp_coordinator.views.base import View
+    from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class PinnedKey:
+    """One L2-pinned key and how many pins hold it.
+
+    Attributes:
+        key: The pinned key.
+        pin_count: Active pins on the key. ``unpin`` lowers it by one per
+            call; ``drop_pins`` removes the key outright.
+    """
+
+    key: ObjectKey
+    pin_count: int
 
 
 class FleetEvictionController(Controller):
@@ -51,28 +75,35 @@ class FleetEvictionController(Controller):
 
     Owns the quota registry it enforces (exposed for the ``/quota``
     endpoints) and reads the fleet usage view on the ``l2`` tier.
-    :meth:`run` is the loop, :meth:`execute_evictions` one pass of it.
+    :meth:`run` drives the loop, :meth:`execute_evictions` one pass of it.
 
     Args:
         usage_manager: The fleet usage view. A consumer in its own
             right, registered on the broadcaster **before** this
             controller so it has accounted a batch by the time
             :meth:`consume` reads sizes from it.
+        registry: The fleet membership view; supplies the address a
+            victim's DELETE is sent to.
         eviction_ratio: Fraction of tracked keys to evict per cycle.
         trigger_watermark: Eviction fires when usage reaches this
             fraction of the quota.
+        check_interval: Seconds between sweeps. Zero runs no loop.
     """
 
     def __init__(
         self,
         usage_manager: CacheUsageManager,
+        registry: InstanceRegistry,
         eviction_ratio: float = 0.5,
         trigger_watermark: float = 1.0,
+        check_interval: float = 0.0,
     ) -> None:
         self._quota_manager = QuotaManager()
         self._usage_manager = usage_manager
+        self._registry = registry
         self._eviction_ratio = max(0.0, min(1.0, eviction_ratio))
         self._trigger_watermark = trigger_watermark
+        self._check_interval = check_interval
         self._policy = IsolatedLRUEvictionPolicy()
         self._in_flight_dispatches: set[asyncio.Task] = set()
         self._pin_counts: dict[ObjectKey, int] = {}
@@ -139,25 +170,30 @@ class FleetEvictionController(Controller):
         self._policy.on_keys_removed([key])
 
     def pin(self, keys: list[ObjectKey]) -> None:
-        """Increment each key's pin count, excluding it from eviction."""
+        """Increment each key's pin count, excluding it from eviction.
+
+        A pin covers the key's chunk in every object group (see
+        :func:`_pinned_chunk_key`).
+        """
         for key in keys:
-            self._pin_counts[key] = self._pin_counts.get(key, 0) + 1
+            chunk_key = _pinned_chunk_key(key)
+            self._pin_counts[chunk_key] = self._pin_counts.get(chunk_key, 0) + 1
 
     def unpin(self, keys: list[ObjectKey]) -> None:
         """Decrement each key's pin count, floored at 0."""
         for key in keys:
-            count = self._pin_counts.get(key, 0)
+            chunk_key = _pinned_chunk_key(key)
+            count = self._pin_counts.get(chunk_key, 0)
             if count <= 1:
-                self._pin_counts.pop(key, None)
+                self._pin_counts.pop(chunk_key, None)
             else:
-                self._pin_counts[key] = count - 1
+                self._pin_counts[chunk_key] = count - 1
 
     @classmethod
     def from_config(
         cls,
         config: "MPCoordinatorConfig",
         views: "Registry[View]",
-        controllers: "Registry[Controller]",
     ) -> "FleetEvictionController":
         """Build the controller from configuration and the fleet's views.
 
@@ -168,13 +204,25 @@ class FleetEvictionController(Controller):
         Args:
             config: The coordinator configuration.
             views: The fleet's read models.
-            controllers: Unused; this controller depends on no peer.
         """
         return cls(
             usage_manager=views.get(CacheUsageManager),
+            registry=views.get(InstanceRegistry),
             eviction_ratio=config.eviction_ratio,
             trigger_watermark=config.trigger_watermark,
+            check_interval=config.eviction_check_interval,
         )
+
+    def get_routers(self) -> tuple[APIRouter, ...]:
+        """Return the ``/quota`` and ``/cache/pins`` endpoints, bound to this
+        controller.
+
+        They act on state only this controller holds, so they are built around
+        it rather than resolving it per request -- and go away with it when an
+        operator leaves it unbuilt, rather than lingering as paths that cannot
+        answer.
+        """
+        return build_routers(self)
 
     def get_durable_components(self) -> tuple[DurableComponent, ...]:
         """Return the state this controller owns that must outlive the process.
@@ -223,20 +271,49 @@ class FleetEvictionController(Controller):
                 counts are dropped.
         """
         entries = cast("list[Mapping[str, object]]", state["entries"])
-        restored = (_decode_pin(entry) for entry in entries)
-        self._pin_counts = {key: count for key, count in restored if count > 0}
+        pin_counts: dict[ObjectKey, int] = {}
+        for key, count in (_decode_pin(entry) for entry in entries):
+            if count > 0:
+                chunk_key = _pinned_chunk_key(key)
+                pin_counts[chunk_key] = pin_counts.get(chunk_key, 0) + count
+        self._pin_counts = pin_counts
 
     def filter_unpinned(self, keys: list[ObjectKey]) -> list[ObjectKey]:
         """Return the subset of ``keys`` with no active L2 pin, in input order.
 
         Used by non-force delete to skip L2-pinned keys.
         """
-        return [key for key in keys if key not in self._pin_counts]
+        return [key for key in keys if _pinned_chunk_key(key) not in self._pin_counts]
 
     def drop_pins(self, keys: list[ObjectKey]) -> None:
         """Remove each key from the L2 pin set (used by force delete; idempotent)."""
         for key in keys:
-            self._pin_counts.pop(key, None)
+            self._pin_counts.pop(_pinned_chunk_key(key), None)
+
+    def list_pins(
+        self, cache_salt: str, model_name: str, offset: int, limit: int
+    ) -> tuple[int, list[PinnedKey]]:
+        """Page through the L2 pin table.
+
+        Keys come back in the order they were first pinned. Pins taken
+        between two page reads can shift later pages by one.
+
+        Args:
+            cache_salt: Keep keys with this salt. Empty keeps every salt.
+            model_name: Keep keys for this model. Empty keeps every model.
+            offset: Matching keys to skip.
+            limit: Maximum keys to return.
+
+        Returns:
+            The number of keys matching the filters, and the requested page.
+        """
+        matching = [
+            PinnedKey(key=key, pin_count=count)
+            for key, count in self._pin_counts.items()
+            if (not cache_salt or key.cache_salt == cache_salt)
+            and (not model_name or key.model_name == model_name)
+        ]
+        return len(matching), matching[offset : offset + limit]
 
     def compute_eviction_plan(self) -> dict[str, list[ObjectKey]]:
         """Select eviction candidates per ``cache_salt``.
@@ -267,7 +344,9 @@ class FleetEvictionController(Controller):
             actions = self._policy.get_eviction_actions(
                 effective_ratio,
                 cache_salt=cache_salt,
-                key_eligible_filter=lambda key: key not in self._pin_counts,
+                key_eligible_filter=lambda key: (
+                    _pinned_chunk_key(key) not in self._pin_counts
+                ),
             )
             keys_to_evict: list[ObjectKey] = []
             for action in actions:
@@ -293,31 +372,32 @@ class FleetEvictionController(Controller):
 
         return eviction_plan
 
-    async def run(
-        self,
-        registry: InstanceRegistry,
-        http_client: httpx.AsyncClient,
-        check_interval: float,
-    ) -> None:
-        """Run the control loop until cancelled, sleeping first.
+    @asynccontextmanager
+    async def run(self, runtime: ControllerRuntime) -> AsyncIterator[None]:
+        """Sweep on a cadence while the app serves, then drain.
+
+        A dispatch is fire-and-forget, so one the last sweep launched
+        would otherwise die with the process; the exit half waits for it.
 
         Args:
-            registry: Fleet membership; supplies the dispatch target.
-            http_client: Client for the outbound DELETE requests.
-            check_interval: Seconds between passes; must be positive.
-
-        Raises:
-            ValueError: If ``check_interval`` is not positive.
+            runtime: Supplies the client for the outbound DELETEs.
         """
-        if check_interval <= 0:
-            raise ValueError(f"check_interval must be > 0 (got {check_interval})")
-        while True:
-            await asyncio.sleep(check_interval)
-            await self.execute_evictions(registry, http_client)
+        task: asyncio.Task | None = None
+        if self._check_interval > 0:
+            task = asyncio.create_task(self._sweep_forever(runtime.http_client))
+        else:
+            logger.debug("Eviction loop disabled (check_interval=0)")
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            await self.wait_for_in_flight_dispatches()
 
     async def execute_evictions(
         self,
-        registry: InstanceRegistry,
         http_client: httpx.AsyncClient,
     ) -> dict[str, list[ObjectKey]]:
         """Compute the plan and fire-and-forget ``DELETE /cache/objects``
@@ -328,12 +408,19 @@ class FleetEvictionController(Controller):
         the dispatch tasks are spawned; the LRU clears only when the
         matching ``delete`` event comes back on the cache-event stream.
         At-least-once, safe because the delete is idempotent.
+
+        Args:
+            http_client: Client for the outbound DELETE requests.
+
+        Returns:
+            The plan dispatched, keyed by ``cache_salt``; empty when
+            there was nothing to evict or no server to send it to.
         """
         plan = self.compute_eviction_plan()
         if not plan:
             return plan
 
-        target = registry.random_instance()
+        target = self._registry.random_instance()
         if target is None:
             logger.warning(
                 "Eviction plan computed (%d salts) but no MP servers are "
@@ -366,11 +453,17 @@ class FleetEvictionController(Controller):
         """Await every outstanding fire-and-forget dispatch."""
         await asyncio.gather(*self._in_flight_dispatches, return_exceptions=True)
 
+    async def _sweep_forever(self, http_client: httpx.AsyncClient) -> None:
+        """Evict on a cadence until cancelled, sleeping first."""
+        while True:
+            await asyncio.sleep(self._check_interval)
+            await self.execute_evictions(http_client)
+
     @staticmethod
     async def _dispatch_eviction(
         http_client: httpx.AsyncClient,
         url: str,
-        body: dict,
+        body: Mapping[str, object],
         instance_id: str,
         key_count: int,
         salt_count: int,
@@ -415,3 +508,12 @@ def _decode_pin(entry: Mapping[str, object]) -> tuple[ObjectKey, int]:
         cache_salt=str(fields["cache_salt"]),
     )
     return encoded.to_object_key(), cast(int, entry["count"])
+
+
+def _pinned_chunk_key(key: ObjectKey) -> ObjectKey:
+    """Return ``key`` without its object group, as the pin table stores it.
+
+    A pin is on a chunk, which ``--separate-object-groups`` stores once per
+    object group; dropping the group makes one pin cover them all.
+    """
+    return replace(key, object_group_id=0) if key.object_group_id else key

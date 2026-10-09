@@ -51,7 +51,8 @@ def wait_for_keys_in_cache(
             return True
         time.sleep(poll_interval)
     logger.warning(
-        f"Timeout waiting for keys: {[key.to_string() for key in missing_keys]}"
+        "Timeout waiting for keys: %s",
+        [key.to_string() for key in missing_keys],
     )
     return False
 
@@ -147,7 +148,7 @@ def run_mock_controller(
         socket.bind(controller_url)
         socket.setsockopt(zmq.RCVTIMEO, 1000)
 
-        logger.info(f"Mock controller started at {controller_url}")
+        logger.info("Mock controller started at %s", controller_url)
         ready_event.set()  # Signal that the controller is ready
 
         while not stop_event.is_set():

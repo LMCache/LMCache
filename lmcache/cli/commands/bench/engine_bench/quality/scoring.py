@@ -15,9 +15,9 @@ _ARTICLES = re.compile(r"\b(a|an|the)\b")
 _PUNCTUATION = str.maketrans("", "", string.punctuation)
 
 # Lazy match, last region wins: reasoning models may echo an example answer
-# before their own.
+# before their own. Include an unfinished last region to avoid scoring the example.
 _FINAL_ANSWER = re.compile(
-    r"<final_answer>\s*(.*?)\s*</final_answer>",
+    r"<final_answer>\s*(.*?)\s*(</final_answer>|$)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -32,12 +32,13 @@ def extract_final_answer(output: str) -> str:
         output: The model's full response text.
 
     Returns:
-        The extracted answer, or ``""`` when no complete region is present.
+        The extracted answer, or ``""`` when the last region is absent or incomplete.
     """
     matches = _FINAL_ANSWER.findall(output)
     if not matches:
         return ""
-    return matches[-1].strip()
+    answer, closing_tag = matches[-1]
+    return answer.strip() if closing_tag else ""
 
 
 def normalize_answer(text: str) -> str:

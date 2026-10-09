@@ -13,7 +13,6 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Any
 import time
 
 # Third Party
@@ -22,6 +21,22 @@ from opentelemetry import metrics
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+
+_LIFECYCLE_BUCKETS_S: tuple[float, ...] = (
+    1.0,
+    5.0,
+    15.0,
+    30.0,
+    60.0,
+    120.0,
+    300.0,
+    600.0,
+    900.0,
+    1800.0,
+    3600.0,
+    7200.0,
+    14400.0,
+)
 
 
 @dataclass
@@ -45,7 +60,10 @@ class L1LifecycleSubscriber(EventSubscriber):
     Parameters:
         sample_rate: Fraction of chunks to track (0, 1.0].  Default 0.01 (1%).
         max_evict_reuse_wait: Maximum seconds to track an evicted chunk
-            waiting for reuse.  Default 300 s (5 min).
+            waiting for reuse.  Must be positive.  Default 300 s (5 min).
+
+    Raises:
+        ValueError: If ``max_evict_reuse_wait`` is not positive.
     """
 
     def __init__(
@@ -56,6 +74,10 @@ class L1LifecycleSubscriber(EventSubscriber):
         assert 0 < sample_rate <= 1.0, (
             f"sample_rate must be in (0, 1.0], got {sample_rate}"
         )
+        if max_evict_reuse_wait <= 0:
+            raise ValueError(
+                f"max_evict_reuse_wait must be positive, got {max_evict_reuse_wait}"
+            )
         self._sample_rate = sample_rate
         self._max_evict_reuse_wait = max_evict_reuse_wait
         # Deterministic sampling via hash: hash(key) % _SAMPLE_PRIME < threshold.
@@ -69,11 +91,13 @@ class L1LifecycleSubscriber(EventSubscriber):
                 "Histogram of L1 chunk lifetime from allocation to eviction (seconds)."
             ),
             unit="s",
+            explicit_bucket_boundaries_advisory=_LIFECYCLE_BUCKETS_S,
         )
         self._idle_hist = meter.create_histogram(
             "lmcache_mp.l1_chunk_idle_before_evict",
             description=("Histogram of idle time before L1 chunk eviction (seconds)."),
             unit="s",
+            explicit_bucket_boundaries_advisory=_LIFECYCLE_BUCKETS_S,
         )
         self._reuse_gap_hist = meter.create_histogram(
             "lmcache_mp.l1_chunk_reuse_gap",
@@ -82,7 +106,13 @@ class L1LifecycleSubscriber(EventSubscriber):
                 "touches (write or read) of the same L1 chunk (seconds)."
             ),
             unit="s",
+            explicit_bucket_boundaries_advisory=_LIFECYCLE_BUCKETS_S,
         )
+        # The cap must be a boundary: otherwise capped samples land in a wider
+        # bucket and histogram_quantile interpolates values above the cap.
+        evict_reuse_buckets = [
+            b for b in _LIFECYCLE_BUCKETS_S if b < max_evict_reuse_wait
+        ] + [max_evict_reuse_wait]
         self._evict_reuse_gap_hist = meter.create_histogram(
             "lmcache_mp.l1_chunk_evict_reuse_gap",
             description=(
@@ -90,12 +120,13 @@ class L1LifecycleSubscriber(EventSubscriber):
                 "next reuse.  Capped at max_evict_reuse_wait."
             ),
             unit="s",
+            explicit_bucket_boundaries_advisory=evict_reuse_buckets,
         )
 
-        # Shadow map: key -> chunk lifecycle state (live chunks).
-        self._shadow: dict[Any, _L1ChunkState] = {}
-        # Evicted map: key -> eviction timestamp (waiting for reuse).
-        self._evicted_at: dict[Any, float] = {}
+        # A key can have independent copies in several L1 managers.
+        self._shadow: dict[tuple[str | None, object], _L1ChunkState] = {}
+        # (L1 tag, key) -> eviction timestamp (waiting for reuse).
+        self._evicted_at: dict[tuple[str | None, object], float] = {}
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {
@@ -107,26 +138,36 @@ class L1LifecycleSubscriber(EventSubscriber):
 
     def _on_read_finished(self, event: Event) -> None:
         now = event.timestamp or time.time()
+        tag = event.metadata.get("l1_tag")
+        attrs = {"l1_tag": tag} if tag is not None else None
         for key in event.metadata["keys"]:
-            state = self._shadow.get(key)
+            identity = (tag, key)
+            state = self._shadow.get(identity)
             if state is not None:
-                self._reuse_gap_hist.record(now - state.last_access_time)
+                self._reuse_gap_hist.record(
+                    now - state.last_access_time, attributes=attrs
+                )
                 state.last_access_time = now
 
     def _on_write_finished(self, event: Event) -> None:
         now = event.timestamp or time.time()
+        tag = event.metadata.get("l1_tag")
+        attrs = {"l1_tag": tag} if tag is not None else None
         for key in event.metadata["keys"]:
+            identity = (tag, key)
             # Check if this is a reuse of an evicted chunk.
-            evict_time = self._evicted_at.pop(key, None)
+            evict_time = self._evicted_at.pop(identity, None)
             if evict_time is not None:
                 gap = min(now - evict_time, self._max_evict_reuse_wait)
-                self._evict_reuse_gap_hist.record(gap)
+                self._evict_reuse_gap_hist.record(gap, attributes=attrs)
 
-            state = self._shadow.get(key)
+            state = self._shadow.get(identity)
             if state is not None:
                 # Re-write of existing chunk counts as a touch.
-                self._reuse_gap_hist.record(now - state.last_access_time)
-                self._shadow[key] = _L1ChunkState(
+                self._reuse_gap_hist.record(
+                    now - state.last_access_time, attributes=attrs
+                )
+                self._shadow[identity] = _L1ChunkState(
                     alloc_time=now,
                     last_access_time=now,
                 )
@@ -134,7 +175,7 @@ class L1LifecycleSubscriber(EventSubscriber):
                 # First time seeing this key — deterministic sample check.
                 if not self._should_sample(key):
                     continue
-                self._shadow[key] = _L1ChunkState(
+                self._shadow[identity] = _L1ChunkState(
                     alloc_time=now,
                     last_access_time=now,
                 )
@@ -142,13 +183,16 @@ class L1LifecycleSubscriber(EventSubscriber):
 
     def _on_evicted(self, event: Event) -> None:
         now = event.timestamp or time.time()
+        tag = event.metadata.get("l1_tag")
+        attrs = {"l1_tag": tag} if tag is not None else None
         for key in event.metadata["keys"]:
-            state = self._shadow.pop(key, None)
+            identity = (tag, key)
+            state = self._shadow.pop(identity, None)
             if state is not None:
-                self._lifetime_hist.record(now - state.alloc_time)
-                self._idle_hist.record(now - state.last_access_time)
+                self._lifetime_hist.record(now - state.alloc_time, attributes=attrs)
+                self._idle_hist.record(now - state.last_access_time, attributes=attrs)
                 # Start tracking eviction-to-reuse gap (only for sampled).
-                self._evicted_at[key] = now
+                self._evicted_at[identity] = now
         self._sweep_stale_evictions(now)
 
     def _should_sample(self, key: object) -> bool:
@@ -161,6 +205,10 @@ class L1LifecycleSubscriber(EventSubscriber):
             for key, evict_time in self._evicted_at.items()
             if now - evict_time >= self._max_evict_reuse_wait
         ]
-        for key in stale:
-            self._evicted_at.pop(key, None)
-            self._evict_reuse_gap_hist.record(self._max_evict_reuse_wait)
+        for identity in stale:
+            self._evicted_at.pop(identity, None)
+            tag = identity[0]
+            self._evict_reuse_gap_hist.record(
+                self._max_evict_reuse_wait,
+                attributes={"l1_tag": tag} if tag is not None else None,
+            )

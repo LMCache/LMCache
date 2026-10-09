@@ -25,7 +25,7 @@
 // which is monotonic (steady_clock == CLOCK_MONOTONIC on Linux) while
 // remaining expressed in Unix-epoch seconds so downstream consumers don't
 // notice any change.
-static double wall_clock_time() {
+double lmcache_wall_clock_time() {
   static const auto epoch_sys = std::chrono::system_clock::now();
   static const auto epoch_steady = std::chrono::steady_clock::now();
   auto now_steady = std::chrono::steady_clock::now();
@@ -67,7 +67,7 @@ static void
 #endif
     event_host_callback(void* data) {
   auto* event = static_cast<PendingEvent*>(data);
-  event->timestamp = wall_clock_time();
+  event->timestamp = lmcache_wall_clock_time();
   EventRecorder::instance().push(event);
 }
 

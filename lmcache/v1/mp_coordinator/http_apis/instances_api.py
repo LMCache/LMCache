@@ -19,11 +19,14 @@ from fastapi.responses import JSONResponse
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
-from lmcache.v1.mp_coordinator.registry import MPInstance
 from lmcache.v1.mp_coordinator.schemas import (
     HeartbeatResponse,
     RegisterRequest,
     RegisterResponse,
+)
+from lmcache.v1.mp_coordinator.views.instance_registry import (
+    InstanceRegistry,
+    MPInstance,
 )
 from lmcache.v1.mp_coordinator.views.server_config import (
     ServerConfigRegistry,
@@ -55,7 +58,7 @@ async def register_instance(
     # NTP-safe stale detection (see registry.stale). register() does the
     # exists-check and write under one lock, so the re_registered flag is correct
     # even under concurrent registrations of the same id.
-    re_registered = ctx.registry.register(
+    re_registered = ctx.views.get(InstanceRegistry).register(
         MPInstance(
             instance_id=instance_id,
             ip=body.ip,
@@ -80,7 +83,11 @@ async def heartbeat(instance_id: str, request: Request) -> Any:
         instance is unknown (the caller should re-register via ``POST
         /instances``).
     """
-    if get_context(request).registry.update_heartbeat(instance_id, time.monotonic()):
+    if (
+        get_context(request)
+        .views.get(InstanceRegistry)
+        .update_heartbeat(instance_id, time.monotonic())
+    ):
         return HeartbeatResponse(instance_id=instance_id)
     return JSONResponse(
         status_code=404,
@@ -98,7 +105,7 @@ async def deregister_instance(instance_id: str, request: Request) -> Response:
         An empty 204 response.
     """
     ctx = get_context(request)
-    if ctx.registry.deregister(instance_id) is not None:
+    if ctx.views.get(InstanceRegistry).deregister(instance_id) is not None:
         logger.info("Deregistered instance %s", instance_id)
     else:
         logger.info("Instance %s not registered, skipping deregistration", instance_id)
@@ -130,6 +137,6 @@ async def list_instances(request: Request) -> Any:
             "p2p_advertised_url": instance.p2p_advertised_url,
             "mq_port": instance.mq_port,
         }
-        for instance in get_context(request).registry.all_instances()
+        for instance in get_context(request).views.get(InstanceRegistry).all_instances()
     ]
     return {"instances": instances}
