@@ -110,6 +110,26 @@ it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
 instances assembled by ``ModuleCreator`` (in ``module_creator.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
+**``module_creator.py``** -- Assembles the engine modules. Each module is
+declared once as a slot carrying an ``order`` rank; slots are appended as
+they are built and sorted by rank at the end, so the close order lives in
+one table instead of a hand-maintained list. Sorting (rather than list
+position) is what lets ``ManagementModule`` be *built* last — it consumes
+the plugin modules' liveness targets — while still *closing* early:
+
+.. code-block:: text
+
+    order  10  LookupModule
+    order  20  P2PController
+    order  30  ManagementModule      <- built last, closes first
+    order  40  LMCacheDrivenTransferModule / EngineDrivenTransferModule
+    order  50  experimental modules (--enable)
+    order  60  BlendModule           (--engine-type blend)
+    order  70  out-of-tree plugin modules (--server-module)
+    order  80  server-module router
+
+Adding a built-in module means adding one slot, not editing two lists.
+
 **``server.py``** -- The transport-neutral server compositor. Creates an
 ``MPCacheServer``, assembles the engine modules
 (``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``

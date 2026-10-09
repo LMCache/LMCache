@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 # Standard
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TypeGuard
 
@@ -49,6 +50,22 @@ def _is_liveness_target(module: EngineModule) -> TypeGuard[InstanceLivenessTarge
     )
 
 
+def _compose(slots: Iterable[_ModuleSlot]) -> list[EngineModule]:
+    """Return slot modules sorted into composition (close) order.
+
+    ``sorted`` is stable, so slots sharing an ``order`` keep their insertion
+    order -- that is how the two transfer modules in ``auto`` mode stay in
+    LMCache-driven-then-engine-driven sequence.
+
+    Args:
+        slots: Slots to order.
+
+    Returns:
+        The modules in close order.
+    """
+    return [slot.module for slot in sorted(slots, key=lambda slot: slot.order)]
+
+
 @dataclass(frozen=True)
 class ServerBuildComponents:
     """Modules and transport services composed for one MP server instance."""
@@ -56,6 +73,38 @@ class ServerBuildComponents:
     modules: list[EngineModule]
     grpc_service_registrars: tuple[TransportServiceRegistrar, ...] = ()
     zmq_service_registrars: tuple[TransportServiceRegistrar, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ModuleSlot:
+    """One assembled module and its rank in the composition.
+
+    Each module is declared once as a slot instead of being repeated in a
+    hand-maintained list, so the close order is stated in one place. Slots
+    are appended as they are built and sorted by ``order`` at the end, which
+    lets a module be constructed late (because it depends on earlier ones)
+    while still closing early.
+
+    Attributes:
+        module: The instantiated module.
+        order: Sort key for the composition. Lower closes earlier.
+    """
+
+    module: EngineModule
+    order: int
+
+
+# Composition order. ManagementModule deliberately sits below the transfer and
+# blend modules so close() stops and joins the reaper before those modules clear
+# their state and before storage_manager.close() runs.
+_ORDER_LOOKUP = 10
+_ORDER_P2P = 20
+_ORDER_MANAGEMENT = 30
+_ORDER_TRANSFER = 40
+_ORDER_EXPERIMENTAL = 50
+_ORDER_BLEND = 60
+_ORDER_PLUGIN = 70
+_ORDER_PLUGIN_ROUTER = 80
 
 
 class ModuleCreator:
@@ -114,60 +163,68 @@ class ModuleCreator:
             if isinstance(m, (LMCacheDrivenTransferModule, EngineDrivenTransferModule))
         ]
 
+        slots: list[_ModuleSlot] = [
+            _ModuleSlot(lookup_module, _ORDER_LOOKUP),
+            _ModuleSlot(p2p_controller, _ORDER_P2P),
+        ]
+        slots.extend(
+            _ModuleSlot(module, _ORDER_TRANSFER) for module in transfer_modules
+        )
+
         blend_module = self._create_blend_module(transfer_modules)
         if blend_module is not None:
             # The blend module mirrors per-instance CB rope state, so the reaper
             # must notify it via drop_instance_state when an instance is reaped.
             liveness_targets.append(blend_module)
+            slots.append(_ModuleSlot(blend_module, _ORDER_BLEND))
 
         experimental_modules, experimental_transfer = self._create_experimental_modules(
             transfer_modules
         )
         liveness_targets.extend(experimental_modules)
+        slots.extend(
+            _ModuleSlot(module, _ORDER_EXPERIMENTAL) for module in experimental_modules
+        )
 
+        # Plugin factories see the built-ins assembled so far. ManagementModule
+        # is deliberately not among them: it is built after this call because it
+        # consumes the plugin modules' liveness targets.
         plugin_components = load_server_module_components(
             self._mp_config.server_modules,
             server_context=self._ctx,
             mp_config=self._mp_config,
             coordinator_config=self._coordinator_config,
-            built_modules=[
-                lookup_module,
-                p2p_controller,
-                *transfer_modules,
-                *experimental_modules,
-                *([blend_module] if blend_module is not None else []),
-            ],
+            built_modules=_compose(slots),
         )
         plugin_modules = list(plugin_components.modules)
         for module in plugin_modules:
             if _is_liveness_target(module):
                 liveness_targets.append(module)
-        plugin_router = build_server_module_router(self._ctx, plugin_modules)
+        slots.extend(_ModuleSlot(module, _ORDER_PLUGIN) for module in plugin_modules)
 
-        management = ManagementModule(
-            self._ctx,
-            liveness_targets=liveness_targets,
-            worker_reap_timeout_seconds=self._mp_config.worker_reap_timeout_seconds,
-            worker_registration_grace_seconds=(
-                self._mp_config.worker_registration_grace_seconds
-            ),
-            experimental_transfer=experimental_transfer,
+        slots.append(
+            _ModuleSlot(
+                ManagementModule(
+                    self._ctx,
+                    liveness_targets=liveness_targets,
+                    worker_reap_timeout_seconds=(
+                        self._mp_config.worker_reap_timeout_seconds
+                    ),
+                    worker_registration_grace_seconds=(
+                        self._mp_config.worker_registration_grace_seconds
+                    ),
+                    experimental_transfer=experimental_transfer,
+                ),
+                _ORDER_MANAGEMENT,
+            )
         )
 
-        # ManagementModule precedes the transfer/blend modules so close() stops
-        # and joins the reaper before those modules clear their state and before
-        # storage_manager.close() runs.
+        plugin_router = build_server_module_router(self._ctx, plugin_modules)
+        if plugin_router is not None:
+            slots.append(_ModuleSlot(plugin_router, _ORDER_PLUGIN_ROUTER))
+
         return ServerBuildComponents(
-            modules=[
-                lookup_module,
-                p2p_controller,
-                management,
-                *transfer_modules,
-                *experimental_modules,
-                *([blend_module] if blend_module is not None else []),
-                *plugin_modules,
-                *([plugin_router] if plugin_router is not None else []),
-            ],
+            modules=_compose(slots),
             grpc_service_registrars=tuple(plugin_components.grpc_service_registrars),
             zmq_service_registrars=tuple(plugin_components.zmq_service_registrars),
         )
