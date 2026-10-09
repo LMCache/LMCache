@@ -15,7 +15,7 @@ import os
 from lmcache.cli.commands.bench.engine_bench.config import (
     EngineBenchConfig,
     resolve_l1_capacity_gb,
-    server_is_blend,
+    server_runs_blend_module,
 )
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
 from lmcache.cli.commands.bench.engine_bench.request_sender import (
@@ -176,31 +176,30 @@ def create_workload(
                 l1_capacity_gb = resolve_l1_capacity_gb(lmcache_url)
             except RuntimeError as exc:
                 logger.warning("Could not read L1 capacity: %s", exc)
-        # Without blending, cache keys are prefix-chained, so a document is
-        # reused only when everything before it in the prompt also matches.
-        # These prompts concatenate a random subset in random order, so that
-        # almost never holds: the run writes a great deal to the storage tier
-        # and reads almost none of it back, while the storage read share still
-        # looks healthy. Refuse rather than produce a number that looks fine
-        # and means nothing.
+        # A cheap early signal only. The server reporting the blend module
+        # does not mean vLLM is driving it through CBKVConnector, and the
+        # fields that look authoritative are not: engine_type is the server
+        # class name (MPCacheServer for both engines) and nothing writes
+        # cb_gpu_context_meta. The real check is which lookup counter family
+        # moves during warm-up, which the workload does itself once traffic
+        # has run -- so warn here, do not refuse.
         if lmcache_url and args.ktp_docs_per_request > 1:
             try:
-                blend = server_is_blend(lmcache_url)
+                runs_blend = server_runs_blend_module(lmcache_url)
             except RuntimeError as exc:
-                logger.warning("Could not determine the server engine: %s", exc)
+                logger.warning("Could not read the server status: %s", exc)
             else:
-                if not blend:
-                    raise ValueError(
-                        f"kv-tier-pressure needs CacheBlend when "
-                        f"--ktp-docs-per-request is above 1, but the LMCache "
-                        f"server at {lmcache_url} is not running the blend "
-                        f"engine. Each request concatenates a random subset of "
-                        f"the pool in random order, which a prefix-chained "
-                        f"cache cannot reuse -- expect roughly 4% of each "
-                        f"prompt served from cache. Either start the server "
-                        f"with the blend engine, or pass "
-                        f"--ktp-docs-per-request 1, which keeps every prompt "
-                        f"prefix-stable and reuses normally."
+                if not runs_blend:
+                    logger.warning(
+                        "The LMCache server at %s does not report the blend "
+                        "module, and --ktp-docs-per-request is %d. Each "
+                        "request concatenates a random subset of the pool in "
+                        "random order, which a prefix-chained cache cannot "
+                        "reuse. The run will stop after warm-up if blended "
+                        "reuse is not confirmed; pass "
+                        "--ktp-docs-per-request 1 for the non-blend path.",
+                        lmcache_url,
+                        args.ktp_docs_per_request,
                     )
         ktp_workload_config = KVTierPressureConfig.resolve(
             pool_size=args.ktp_pool_size or 0,

@@ -177,26 +177,30 @@ def _find_model_meta(
     )
 
 
-def server_is_blend(lmcache_url: str) -> bool:
-    """Report whether the LMCache server is running the blend engine.
+def server_runs_blend_module(lmcache_url: str) -> bool:
+    """Report whether the LMCache server loaded the blend module.
 
-    A CacheBlend deployment populates ``cb_gpu_context_meta`` in ``/status``
-    where the default engine populates ``cache_context_meta``; the
-    ``engine_type`` field also names it. Either signal is sufficient.
+    Detected by the presence of ``active_cb_lookups`` in ``/status``, which
+    only :mod:`lmcache.v1.multiprocess.modules.blend` emits.  Two fields that
+    look like they would answer this do not: ``engine_type`` is
+    ``self.__class__.__name__`` and reads ``MPCacheServer`` for both engines,
+    and nothing in the codebase writes ``cb_gpu_context_meta``.
+
+    This is a necessary but not sufficient condition for blended reuse -- it
+    says the server can blend, not that vLLM is driving it through
+    ``CBKVConnector``.  Confirm the end-to-end path by checking which lookup
+    counter family moves once traffic has run.
 
     Args:
         lmcache_url: URL of the LMCache HTTP server.
 
     Returns:
-        True when the server reports the blend engine.
+        True when the server reports the blend module.
 
     Raises:
         RuntimeError: If the server is unreachable.
     """
-    data = _fetch_lmcache_status(lmcache_url)
-    if data.get("cb_gpu_context_meta"):
-        return True
-    return "blend" in str(data.get("engine_type", "")).lower()
+    return "active_cb_lookups" in _fetch_lmcache_status(lmcache_url)
 
 
 def resolve_l1_capacity_gb(lmcache_url: str) -> float:

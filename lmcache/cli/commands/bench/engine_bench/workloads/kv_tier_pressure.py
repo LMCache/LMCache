@@ -61,9 +61,13 @@ workload reports whenever ``--lmcache-url`` is given.
 
 Without blending, use ``docs_per_request=1``.  Each prompt is then
 ``[system prompt][document]``, which is prefix-stable, so repeat draws of the
-same document hit cache normally.  When an LMCache URL is supplied the
-workload checks the server's engine and refuses a multi-document run against
-a non-blend server.
+same document hit cache normally.
+
+When an LMCache URL is supplied the workload verifies blending itself, after
+the warm-up sweep, by checking which lookup counter family moved.  That is
+the only reliable signal: ``engine_type`` in ``/status`` is the server class
+name and reads the same for both engines, and a blend server behind the plain
+``LMCacheMPConnector`` is configured correctly yet still blends nothing.
 
 The hit-token counters come from whichever family the engine populates: the
 default engine updates ``lmcache_mp_lookup_*``, the blend engine
@@ -428,15 +432,20 @@ def sample_requests(
 # instead. Read both and use whichever moved -- reading only one makes the
 # metric vanish in exactly the mode this workload is documented to require.
 _COUNTER_FAMILIES = (
-    ("lmcache_mp_lookup_hit_tokens_total", "lmcache_mp_lookup_requested_tokens_total"),
     (
+        "mp",
+        "lmcache_mp_lookup_hit_tokens_total",
+        "lmcache_mp_lookup_requested_tokens_total",
+    ),
+    (
+        "blend",
         "lmcache_blend_lookup_hit_tokens_total",
         "lmcache_blend_lookup_requested_tokens_total",
     ),
 )
 
 
-def scrape_lookup_tokens(metrics_url: str) -> dict[str, float]:
+def scrape_lookup_tokens(metrics_url: str) -> dict[str, float | str]:
     """Read the lookup hit/requested token counters from an LMCache server.
 
     Args:
@@ -444,16 +453,21 @@ def scrape_lookup_tokens(metrics_url: str) -> dict[str, float]:
             endpoint directly.
 
     Returns:
-        Mapping with ``hit`` and ``requested`` totals.  Both are 0.0 when the
-        server is unreachable or does not expose the counters, so a missing
-        metrics endpoint degrades the report rather than failing the run.
+        Mapping with ``hit`` and ``requested`` totals, plus ``family`` naming
+        which counter family supplied them (``"mp"``, ``"blend"``, or ``""``
+        when neither moved).  The family is what tells you whether blended
+        reuse actually happened: the blend counters move only when the server
+        runs blend *and* vLLM drives it through ``CBKVConnector``.  Totals are
+        0.0 when the server is unreachable or exposes no counters, so a
+        missing metrics endpoint degrades the report rather than failing the
+        run.
     """
     url = metrics_url.rstrip("/")
     if not url.startswith(("http://", "https://")):
         url = f"http://{url}"
     if not url.endswith("/metrics"):
         url = f"{url}/metrics"
-    totals = {"hit": 0.0, "requested": 0.0}
+    totals: dict[str, float | str] = {"hit": 0.0, "requested": 0.0, "family": ""}
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             body = resp.read().decode()
@@ -461,7 +475,7 @@ def scrape_lookup_tokens(metrics_url: str) -> dict[str, float]:
         logger.debug("Could not scrape %s: %s", url, exc)
         return totals
     wanted: dict[str, tuple[int, str]] = {}
-    for index, (hit_name, requested_name) in enumerate(_COUNTER_FAMILIES):
+    for index, (_name, hit_name, requested_name) in enumerate(_COUNTER_FAMILIES):
         wanted[hit_name] = (index, "hit")
         wanted[requested_name] = (index, "requested")
 
@@ -484,8 +498,10 @@ def scrape_lookup_tokens(metrics_url: str) -> dict[str, float]:
     # Whichever family actually moved is the one this engine populates. If
     # both did, prefer the larger: a stale zeroed family cannot outweigh a
     # live one, and summing them would double-count.
-    live = max(families, key=lambda f: f["requested"])
+    index, live = max(enumerate(families), key=lambda pair: pair[1]["requested"])
     totals.update(live)
+    if live["requested"] > 0:
+        totals["family"] = _COUNTER_FAMILIES[index][0]
     return totals
 
 
@@ -578,7 +594,11 @@ class KVTierPressureWorkload(BaseWorkload):
         self._pending_tasks: set[asyncio.Task] = set()
         self._request_index = 0
         self._lmcache_url = lmcache_url
-        self._lookup_at_boundary: dict[str, float] = {"hit": 0.0, "requested": 0.0}
+        self._lookup_at_boundary: dict[str, float | str] = {
+            "hit": 0.0,
+            "requested": 0.0,
+            "family": "",
+        }
 
         logger.debug(
             "KVTierPressure: pool=%d docs, %d per request, %d sweep + "
@@ -662,6 +682,49 @@ class KVTierPressureWorkload(BaseWorkload):
             )
         ]
 
+    def _verify_blend_path(self) -> None:
+        """Fail if multi-document requests are not actually being blended.
+
+        The warm-up sweep has just run, so the lookup counters now say which
+        path the engine really used.  ``lmcache_blend_lookup_*`` moves only
+        when the server runs the blend module *and* vLLM drives it through
+        ``CBKVConnector``; with the plain connector the ``mp`` family moves
+        instead.  That makes this the authoritative check -- a blend server
+        behind the wrong connector passes any configuration-level test and
+        still produces a run where almost nothing is reused.
+
+        Checked here rather than before the sweep because no counter has
+        moved until traffic has run.  The cost of failing late is the sweep.
+
+        Raises:
+            ValueError: If ``docs_per_request`` is above 1 and the blend
+                counters did not move.
+        """
+        if self._config.docs_per_request <= 1:
+            return
+        family = self._lookup_at_boundary.get("family", "")
+        if family == "blend":
+            return
+        if not family:
+            logger.warning(
+                "No lookup counters moved during warm-up, so blended reuse "
+                "could not be confirmed. If this run reports a low cache-hit "
+                "token rate, check that vLLM is using CBKVConnector."
+            )
+            return
+        raise ValueError(
+            f"kv-tier-pressure needs blended reuse when "
+            f"--ktp-docs-per-request is above 1, but the warm-up sweep moved "
+            f"the {family!r} lookup counters, not the blend ones. The server "
+            f"is not blending this traffic -- either it was not started with "
+            f"the blend engine, or vLLM is using LMCacheMPConnector rather "
+            f"than CBKVConnector. Each request concatenates a random subset "
+            f"of the pool in random order, which a prefix-chained cache "
+            f"cannot reuse: expect roughly 4% of each prompt served from "
+            f"cache. Fix the connector, or pass --ktp-docs-per-request 1, "
+            f"which keeps every prompt prefix-stable and reuses normally."
+        )
+
     def _hit_token_entries(self) -> list[tuple[str, str, str | int | float]]:
         """Cache-hit tokens over the measured phase, as counter deltas.
 
@@ -686,8 +749,10 @@ class KVTierPressureWorkload(BaseWorkload):
             )
             return []
         after = scrape_lookup_tokens(self._lmcache_url)
-        hit = after["hit"] - self._lookup_at_boundary["hit"]
-        requested = after["requested"] - self._lookup_at_boundary["requested"]
+        hit = float(after["hit"]) - float(self._lookup_at_boundary["hit"])
+        requested = float(after["requested"]) - float(
+            self._lookup_at_boundary["requested"]
+        )
         if requested <= 0:
             logger.warning(
                 "LMCache at %s reported no lookup tokens over the measured "
@@ -770,6 +835,7 @@ class KVTierPressureWorkload(BaseWorkload):
         # warm-up, and counting it would inflate the measured hit rate.
         if self._lmcache_url:
             self._lookup_at_boundary = scrape_lookup_tokens(self._lmcache_url)
+            self._verify_blend_path()
 
     # ------------------------------------------------------------------
     # Benchmark dispatch

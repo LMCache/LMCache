@@ -529,7 +529,7 @@ class TestScrapeLookupTokens:
         "lmcache_mp_l1_read_chunks_total 99.0\n"
     )
 
-    def _scrape(self, body: str) -> dict[str, float]:
+    def _scrape(self, body: str) -> dict[str, float | str]:
         payload = MagicMock()
         payload.read.return_value = body.encode()
         payload.__enter__ = lambda self_: payload
@@ -547,7 +547,7 @@ class TestScrapeLookupTokens:
 
     def test_ignores_unrelated_counters(self) -> None:
         totals = self._scrape(self.BODY)
-        assert set(totals) == {"hit", "requested"}
+        assert set(totals) == {"hit", "requested", "family"}
 
     def test_unreachable_server_degrades_quietly(self) -> None:
         """A missing metrics endpoint must not fail the benchmark."""
@@ -557,12 +557,14 @@ class TestScrapeLookupTokens:
             assert scrape_lookup_tokens("http://localhost:9999") == {
                 "hit": 0.0,
                 "requested": 0.0,
+                "family": "",
             }
 
     def test_absent_counters_give_zero(self) -> None:
         assert self._scrape("lmcache_mp_l1_read_chunks_total 7.0\n") == {
             "hit": 0.0,
             "requested": 0.0,
+            "family": "",
         }
 
 
@@ -627,7 +629,7 @@ class TestBlendCounterFamily:
         "lmcache_blend_lookup_requested_tokens_total 7001.0\n"
     )
 
-    def _scrape(self, body: str) -> dict[str, float]:
+    def _scrape(self, body: str) -> dict[str, float | str]:
         payload = MagicMock()
         payload.read.return_value = body.encode()
         payload.__enter__ = lambda self_: payload
@@ -636,11 +638,16 @@ class TestBlendCounterFamily:
             return scrape_lookup_tokens("http://localhost:8080")
 
     def test_default_engine_counters(self) -> None:
-        assert self._scrape(self.MP_ONLY) == {"hit": 800.0, "requested": 2000.0}
+        assert self._scrape(self.MP_ONLY) == {
+            "hit": 800.0,
+            "requested": 2000.0,
+            "family": "mp",
+        }
 
     def test_blend_engine_counters(self) -> None:
         """This is the case that silently reported nothing before."""
-        assert self._scrape(self.BLEND_ONLY) == {"hit": 6908.0, "requested": 7001.0}
+        got = self._scrape(self.BLEND_ONLY)
+        assert got == {"hit": 6908.0, "requested": 7001.0, "family": "blend"}
 
     def test_prefers_the_family_that_moved(self) -> None:
         both = (
@@ -655,65 +662,81 @@ class TestBlendCounterFamily:
         assert self._scrape("lmcache_mp_l1_read_chunks_total 7.0\n") == {
             "hit": 0.0,
             "requested": 0.0,
+            "family": "",
         }
 
 
-class TestBlendModeGuard:
-    """A non-blend server with docs_per_request > 1 must fail fast."""
+class TestBlendPathVerification:
+    """The authoritative check: which counter family moved during warm-up.
 
-    def _args(self, docs: int) -> object:
-        # Standard
-        import argparse
+    Reported as a blocker in review -- the previous configuration-level guard
+    refused every multi-document run, because the two fields it read can
+    never indicate blend: ``engine_type`` is the server class name
+    (``MPCacheServer`` for both engines) and nothing writes
+    ``cb_gpu_context_meta``.
+    """
 
-        return argparse.Namespace(
-            ktp_pool_size=100,
-            ktp_docs_per_request=docs,
-            ktp_context_length=64,
-            ktp_system_prompt_length=16,
-            ktp_num_requests=8,
-            ktp_overflow_factor=2.0,
-            ktp_access_skew=0.0,
-            ktp_num_inflight_requests=4,
-            ktp_max_output_length=1,
-            lmcache_url="http://localhost:8080",
-        )
+    def _workload(self, docs: int) -> KVTierPressureWorkload:
+        cfg = _make_config(pool_size=12, docs_per_request=docs, num_requests=4)
+        with patch.object(
+            ktp, "try_load_tokenizer", return_value=make_fake_tokenizer()
+        ):
+            return KVTierPressureWorkload(
+                cfg,
+                _make_mock_sender(),
+                MagicMock(),
+                MagicMock(),
+                seed=42,
+                model_name="fake-model",
+                lmcache_url="http://localhost:8080",
+            )
 
-    def _config(self) -> MagicMock:
-        config = MagicMock()
-        config.workload = "kv-tier-pressure"
-        config.tokens_per_gb_kvcache = 6000
-        config.seed = 42
-        config.model = "fake-model"
-        return config
+    def _warmup_with(self, docs: int, family: str, requested: float = 2000.0):
+        w = self._workload(docs)
+        snapshot = {"hit": 800.0, "requested": requested, "family": family}
+        with patch.object(ktp, "scrape_lookup_tokens", return_value=snapshot):
+            asyncio.run(w.warmup())
+        return w
 
-    def _create(self, docs: int, blend: bool):
-        # First Party
-        from lmcache.cli.commands.bench.engine_bench import workloads as wl
+    def test_blend_family_is_accepted(self) -> None:
+        assert self._warmup_with(docs=3, family="blend") is not None
 
-        with patch.object(wl, "server_is_blend", return_value=blend):
-            # the factory hardcodes vocab_size=8000
-            with patch.object(
-                ktp, "try_load_tokenizer", return_value=make_fake_tokenizer(8000)
-            ):
-                return wl.create_workload(
-                    self._config(),
-                    self._args(docs),
-                    _make_mock_sender(),
-                    MagicMock(),
-                    MagicMock(),
-                )
+    def test_mp_family_is_rejected_for_multi_doc(self) -> None:
+        """A blend server behind the plain connector moves the mp counters."""
+        with pytest.raises(ValueError, match="not the blend ones"):
+            self._warmup_with(docs=3, family="mp")
 
-    def test_rejects_multi_doc_on_a_non_blend_server(self) -> None:
-        with pytest.raises(ValueError, match="needs CacheBlend"):
-            self._create(docs=8, blend=False)
-
-    def test_error_names_the_workaround(self) -> None:
+    def test_error_names_the_connector_and_the_workaround(self) -> None:
+        with pytest.raises(ValueError, match="CBKVConnector"):
+            self._warmup_with(docs=3, family="mp")
         with pytest.raises(ValueError, match="--ktp-docs-per-request 1"):
-            self._create(docs=8, blend=False)
+            self._warmup_with(docs=3, family="mp")
 
-    def test_allows_single_doc_on_a_non_blend_server(self) -> None:
-        """docs_per_request=1 keeps every prompt prefix-stable."""
-        assert self._create(docs=1, blend=False) is not None
+    def test_single_doc_is_never_rejected(self) -> None:
+        """The non-blend path is legitimate at one document per request."""
+        assert self._warmup_with(docs=1, family="mp") is not None
 
-    def test_allows_multi_doc_on_a_blend_server(self) -> None:
-        assert self._create(docs=8, blend=True) is not None
+    def test_no_counters_warns_rather_than_failing(self) -> None:
+        """A server exposing no counters must not block the run."""
+        assert self._warmup_with(docs=3, family="", requested=0.0) is not None
+
+
+class TestServerRunsBlendModule:
+    """Pre-run detection via the one key that is actually blend-only."""
+
+    def _status(self, payload: dict) -> bool:
+        # First Party
+        from lmcache.cli.commands.bench.engine_bench import config as cfg_mod
+
+        with patch.object(cfg_mod, "_fetch_lmcache_status", return_value=payload):
+            return cfg_mod.server_runs_blend_module("http://localhost:8080")
+
+    def test_detects_blend_by_active_cb_lookups(self) -> None:
+        assert self._status({"engine_type": "MPCacheServer", "active_cb_lookups": 0})
+
+    def test_absent_key_means_default_engine(self) -> None:
+        assert not self._status({"engine_type": "MPCacheServer"})
+
+    def test_engine_type_is_not_used(self) -> None:
+        """It reads MPCacheServer for both engines, so it cannot decide this."""
+        assert not self._status({"engine_type": "blend"})
