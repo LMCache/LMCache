@@ -102,7 +102,8 @@ class StoreMixin:
             ]
             if not chunk_hashes:
                 return result
-            if getattr(self, "_prompt_store", None) is not None and store_ok:
+            # Record prompts whose KV was stored, for the reorder planner.
+            if getattr(self, "_prompt_store", None) is not None and any(stored_mask):
                 self._record_prompt(key, session)
             tokens_in_range = list(key.token_ids)[key.start : key.end]
             # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.

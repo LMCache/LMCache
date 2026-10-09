@@ -191,72 +191,35 @@ class BlendModule(
         keep_prefix: int,
         budget_ms: int,
     ) -> list[int]:
-        """Reorder ``key.token_ids`` so the prompt starts with an exact copy
-        of a cached prompt (:meth:`plan_reorder`); the namespace is the key's.
+        """Order ``key.token_ids`` so the prompt starts with an exact copy of
+        a cached prompt from the key's namespace, keeping the first
+        ``keep_prefix`` tokens in place (``reorder.plan``).
 
         Returns:
             The reordered token ids, or an empty list to keep the prompt.
         """
-        out = self.plan_reorder(
-            list(key.token_ids),
-            key.model_name,
-            key.world_size,
-            key.cache_salt,
-            keep_prefix=keep_prefix,
-            deadline=time.monotonic() + budget_ms / 1e3,
-        )
-        return out["token_ids"] if out["reordered"] else []
-
-    def plan_reorder(
-        self,
-        token_ids: list[int],
-        model_name: str = "",
-        world_size: int = 0,
-        cache_salt: str = "",
-        top_k: int = 4,
-        keep_prefix: int = 0,
-        deadline: float | None = None,
-    ) -> dict:
-        """Order ``token_ids`` so the prompt starts with an exact copy of the
-        cached prompt it can rebuild furthest (``blend_reorder.plan``).
-
-        Always returns the prompt to send: ``token_ids`` is the reordered
-        prompt (a permutation of the input) when ``reordered`` is true, else
-        the input unchanged, with ``reason`` saying why.
-        """
-        P = list(token_ids)
-        out: dict[str, Any] = {"token_ids": P, "reordered": False, "reason": ""}
-        t0 = time.monotonic()
-        deadline = t0 + 0.2 if deadline is None else deadline
-        if self._prompt_store is None:
-            return dict(out, reason="disabled")
-        if len(P) > blend_reorder.MAX_PLAN_TOKENS:
-            return dict(out, reason="too_long")
-        if t0 >= deadline:
-            return dict(out, reason="expired")
-        ns = self._prompt_store.resolve(model_name, world_size, cache_salt)
-        if ns is None:  # the salt must match; empty name / zero size = any
-            return dict(out, reason="no_namespace")
-        hits = self._token_range_matcher.match_sub_sequence(P)
-        cands, base = self._prompt_store.candidates(
-            ns,
-            [h.hash for h in hits],
-            self._ctx.token_hasher.compute_chunk_hashes(P),
-            top_k,
-        )
-        perm, info = blend_reorder.plan(
-            P,
-            cands,
-            self._ctx.chunk_size,
-            base,
-            budget_s=deadline - time.monotonic(),
-            keep_prefix=keep_prefix,
-        )
-        out["reason"] = info.pop("reason")
-        if perm != list(range(len(P))):
-            out.update(token_ids=[P[i] for i in perm], reordered=True)
-        out.update(info, plan_ms=round(1e3 * (time.monotonic() - t0), 2))
-        return out
+        store = self._prompt_store
+        if store is None:
+            return []
+        deadline = time.monotonic() + budget_ms / 1e3
+        P = list(key.token_ids)
+        try:
+            ns = store.resolve(key.model_name, key.world_size, key.cache_salt)
+            if ns is None:  # the salt must match; empty name / zero size = any
+                return []
+            hits = self._token_range_matcher.match_sub_sequence(P)
+            cands, base = store.candidates(
+                ns,
+                [h.hash for h in hits],
+                self._ctx.token_hasher.compute_chunk_hashes(P),
+            )
+            perm = blend_reorder.plan(
+                P, cands, self._ctx.chunk_size, base, deadline, keep_prefix
+            )
+        except Exception:
+            logger.exception("CB reorder: planning %s failed", key.request_id)
+            return []
+        return [P[i] for i in perm] if perm else []
 
     def _release_unretrieved_locks(self, session: Session) -> None:
         """Release read locks the request's retrieve never consumed.
