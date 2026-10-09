@@ -30,6 +30,7 @@ from lmcache.v1.config_base import (
     load_config_with_overrides,
     validate_and_set_config_value,
 )
+from lmcache.v1.pcp_shard import shard_store_enabled
 
 logger = init_logger(__name__)
 
@@ -904,6 +905,10 @@ def _get_extra_config_value(self, key, default_value=None):
 
 
 def _get_lmcache_worker_ids(self, use_mla, world_size):
+    # PCP shard mode: each rank holds different chunks, so by default every rank
+    # reports its chunks to the controller.
+    if not self.lmcache_worker_ids and shard_store_enabled(self, use_mla, world_size):
+        return list(range(world_size))
     if not self.lmcache_worker_ids:
         # if mla is not enabled, return all worker ids, which means start
         # lmcache worker on all ranks as default;
@@ -918,6 +923,10 @@ def _get_lmcache_worker_ids(self, use_mla, world_size):
 
 
 def _get_lookup_server_worker_ids(self, use_mla, world_size):
+    # PCP shard mode: every rank answers for the chunks it owns; a lookup that
+    # skipped a rank would be wrong, so this overrides lookup_server_worker_ids.
+    if shard_store_enabled(self, use_mla, world_size):
+        return list(range(world_size))
     if not self.lookup_server_worker_ids:
         # if mla is not enabled, return all worker ids, which means start
         # lookup server on all worker as default;
