@@ -6,8 +6,10 @@ single-reader ``Consumer`` (``subscribe`` / ``assign`` / ``poll`` /
 ``close``) over one logical partition per topic. Consumer groups,
 retention, and rebalancing are out of scope; the single partition is
 assigned once, synchronously, in :meth:`FakeKafkaConsumer.subscribe`.
-Offset commits are not modelled at all -- the coordinator does not
-commit, because its checkpoint is its cursor. :func:`install_fake_confluent_kafka`
+The coordinator never commits, because its checkpoint is its cursor; a
+consumer can only be seeded with an offset the group committed earlier,
+which an assignment that names no offset resumes from, as a real one
+does. :func:`install_fake_confluent_kafka`
 swaps the stand-ins in for the real module, so tests run without
 ``confluent-kafka`` installed.
 """
@@ -26,6 +28,9 @@ DeliveryCallback = Callable[[object | None, "FakeKafkaMessage"], None]
 ProducerFactory = Callable[[dict[str, str | int | bool]], "FakeKafkaProducer"]
 ConsumerFactory = Callable[[dict[str, str | int | bool]], "FakeKafkaConsumer"]
 AssignCallback = Callable[[object, list["FakeTopicPartition"]], None]
+
+OFFSET_BEGINNING = -2
+"""Stands in for ``confluent_kafka.OFFSET_BEGINNING``."""
 
 OFFSET_INVALID = -1001
 """Stands in for ``confluent_kafka.OFFSET_INVALID``."""
@@ -267,13 +272,19 @@ class FakeKafkaConsumer:
     Args:
         broker: Broker whose records are read.
         config: Consumer configuration, exposed for assertions.
+        committed_offsets: Per-topic offset the consumer group committed
+            before this consumer started; ``None`` for a group with none.
     """
 
     def __init__(
-        self, broker: FakeKafkaBroker, config: dict[str, str | int | bool]
+        self,
+        broker: FakeKafkaBroker,
+        config: dict[str, str | int | bool],
+        committed_offsets: dict[str, int] | None = None,
     ) -> None:
         self._broker = broker
         self._config = dict(config)
+        self._committed_offsets = dict(committed_offsets or {})
         self._topics: list[str] = []
         self._positions: dict[str, int] = {}
         self._errors: list[object] = []
@@ -317,21 +328,27 @@ class FakeKafkaConsumer:
         """
         self._topics = list(topics)
         if on_assign is not None:
-            partitions = [
-                FakeTopicPartition(topic, offset=self._positions.get(topic, 0))
-                for topic in self._topics
-            ]
+            partitions = [FakeTopicPartition(topic) for topic in self._topics]
             on_assign(self, partitions)
 
     def assign(self, partitions: list[FakeTopicPartition]) -> None:
         """Seek each partition to the offset given, as a real consumer's
         ``assign`` does when called from an ``on_assign`` callback.
 
+        ``OFFSET_INVALID`` resumes from the group's committed offset, or
+        the first record when there is none (``auto.offset.reset`` of
+        ``earliest``); ``OFFSET_BEGINNING`` always resumes from the first.
+
         Args:
             partitions: Partitions with the position to resume each from.
         """
         for partition in partitions:
-            self._positions[partition.topic] = partition.offset
+            offset = partition.offset
+            if offset == OFFSET_INVALID:
+                offset = self._committed_offsets.get(partition.topic, 0)
+            elif offset == OFFSET_BEGINNING:
+                offset = 0
+            self._positions[partition.topic] = offset
 
     def poll(self, timeout: float | None = None) -> FakeKafkaMessage | None:
         """Return the next error or unread record, or ``None`` when caught up.
@@ -374,6 +391,7 @@ def install_fake_confluent_kafka(
     """
     module = types.ModuleType("confluent_kafka")
     module.__dict__["KafkaException"] = FakeKafkaException
+    module.__dict__["OFFSET_BEGINNING"] = OFFSET_BEGINNING
     if producer_factory is not None:
         module.__dict__["Producer"] = producer_factory
     if consumer_factory is not None:

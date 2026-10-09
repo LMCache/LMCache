@@ -198,7 +198,7 @@ it. It holds no cache state itself. See [ingest.md](ingest.md).
   partition to. It is the only cursor — the consumer group never commits
   — so the resume point moves only when a checkpoint is written, and the
   offset in a checkpoint always describes the state stored beside it. A
-  partition it has never seen falls back to `auto.offset.reset`.
+  partition it has never seen is read from its beginning.
 - `event_gate.py` — the admission point for every source. Owns the
   per-emitter stream cursor: incarnation fencing (a restart voids the
   emitter's L1 facts), `seq` dedup, and gap detection. Scan sources
