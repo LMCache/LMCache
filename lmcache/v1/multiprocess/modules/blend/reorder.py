@@ -24,10 +24,28 @@ import numpy as np
 # copied, so the end of the prompt (the question, the assistant header) stays
 # last.
 LMIN = 16
+# Longest short run (e.g. a separator) copied between two pieces when H has it
+# there but P has it elsewhere.
+GLUE = 3
 
 
 class PlanBudgetExceeded(Exception):
     pass
+
+
+# Window hash: sum of x[j] * _MUL**(LMIN-1-j), mod 2**64.
+_MUL = 0x9E3779B97F4A7C15
+_POW = np.array([pow(_MUL, LMIN - 1 - j, 1 << 64) for j in range(LMIN)], np.uint64)
+
+
+def _window_hashes(x: np.ndarray) -> np.ndarray:
+    """The hash of every LMIN-token window of ``x``."""
+    m = max(len(x) - LMIN + 1, 0)
+    xu = x.astype(np.uint64)
+    h = np.zeros(m, dtype=np.uint64)
+    for j in range(LMIN):
+        h = h * np.uint64(_MUL) + xu[j : j + m]
+    return h
 
 
 class _Copier:
@@ -36,13 +54,22 @@ class _Copier:
     def __init__(self, P: Sequence[int], deadline: float):
         self.Pn = np.asarray(P, dtype=np.int64)
         self.deadline = deadline
-        # Every LMIN-token window of P, keyed by its bytes: a piece starts at one.
-        self.windows: dict[bytes, list[int]] = {}
-        pb, w = self.Pn.tobytes(), self.Pn.itemsize
-        for i in range(len(self.Pn) - LMIN + 1):
-            if not i % 8192:
-                self._check()
-            self.windows.setdefault(pb[w * i : w * (i + LMIN)], []).append(i)
+        # P's LMIN-token windows sorted by hash; a piece starts at one. A hash
+        # collision is harmless: every run is checked token by token.
+        h = _window_hashes(self.Pn)
+        self._order = np.argsort(h)
+        self._sorted = h[self._order]
+        self._check()
+
+    def _starts(self, Hn: np.ndarray, k: int) -> list[int]:
+        """Ascending positions of P whose LMIN-token window has the hash of
+        H[k : k + LMIN]."""
+        if k + LMIN > len(Hn):
+            return []
+        key = (Hn[k : k + LMIN].astype(np.uint64) * _POW).sum()
+        lo = np.searchsorted(self._sorted, key, "left")
+        hi = np.searchsorted(self._sorted, key, "right")
+        return np.sort(self._order[lo:hi]).tolist()
 
     def _check(self) -> None:
         if time.monotonic() > self.deadline:
@@ -54,7 +81,7 @@ class _Copier:
         """(start, length) of the longest unused run of P equal to H[k:], at
         least LMIN tokens; ties keep the leftmost."""
         best = None
-        for i in self.windows.get(Hn[k : k + LMIN].tobytes(), ()):
+        for i in self._starts(Hn, k):
             if used[i]:
                 continue
             n = min(len(self.Pn) - i, len(Hn) - k)  # never grows with i
@@ -77,12 +104,55 @@ class _Copier:
         used[max(len(self.Pn) - LMIN, 0) :] = True  # the prompt's end stays last
         pieces = [(0, keep_prefix)] if keep_prefix else []
         k = keep_prefix
-        while k < len(Hn) and (piece := self._longest(Hn, k, used)):
+        while k < len(Hn):
+            piece = self._longest(Hn, k, used)
+            if piece is None:
+                glued = self._glue(Hn, k, used, pieces)  # glue + the piece after it
+                if glued is None:
+                    break
+                (i, j), piece = glued
+                pieces.append((i, j))
+                used[i:j] = True
+                k += j - i
             i, m = piece
             pieces.append((i, i + m))
             used[i : i + m] = True
             k += m
         return pieces
+
+    def _glue(
+        self, Hn: np.ndarray, k: int, used: np.ndarray, pieces: list[tuple[int, int]]
+    ) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        """Up to GLUE tokens of P equal to H[k:], then a piece for what follows.
+        Glue next to copied text comes first, then the leftmost; it is never
+        taken from beyond the copy (P's final run, where the question is)."""
+        L = len(self.Pn)
+        for gl in range(1, GLUE + 1):
+            if k + gl >= len(Hn):
+                break
+            if not self._starts(Hn, k + gl):
+                continue  # no piece can follow
+            cands = [
+                int(i)
+                for i in np.flatnonzero((self.Pn == Hn[k]) & ~used)
+                if i + gl <= L
+                and not used[i : i + gl].any()
+                and np.array_equal(self.Pn[i : i + gl], Hn[k : k + gl])
+            ]
+            cands.sort(
+                key=lambda i: (
+                    not ((i > 0 and used[i - 1]) or (i + gl < L and used[i + gl])),
+                    i,
+                )
+            )
+            for i in cands:
+                self._check()
+                used[i : i + gl] = True  # the next piece must not reuse the glue
+                nxt = self._longest(Hn, k + gl, used)
+                used[i : i + gl] = False
+                if nxt and i + gl <= max([j for _, j in pieces] + [nxt[0] + nxt[1]]):
+                    return (i, i + gl), nxt
+        return None
 
 
 def plan(
@@ -111,7 +181,7 @@ def plan(
         copier = _Copier(P, deadline)
         seen: set[bytes] = set()
         for H in candidates:
-            Hn = np.asarray(H, dtype=np.int64)
+            Hn = np.asarray(H)  # the store keeps uint32; numpy compares across types
             key = Hn.tobytes()
             if key in seen or not np.array_equal(
                 Hn[:keep_prefix], copier.Pn[:keep_prefix]
