@@ -22,6 +22,9 @@ if TYPE_CHECKING:
     from opentelemetry.metrics import CallbackOptions, Meter, Observation
 
     # First Party
+    from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
+        CacheEventBroadcaster,
+    )
     from lmcache.v1.mp_coordinator.ingest.event_gate import (
         EventGate,
         InstanceStreamStats,
@@ -32,8 +35,8 @@ if TYPE_CHECKING:
     )
 
 
-# Shared by every coordinator component that creates instruments.
-METER_NAME = "lmcache.mp_coordinator"
+# The meter every coordinator instrument is registered on.
+_METER_NAME = "lmcache.mp_coordinator"
 
 
 def init_coordinator_metrics(config: MPCoordinatorConfig) -> None:
@@ -75,7 +78,7 @@ def register_key_directory_metrics(
             coordinator meter; tests pass one from a private provider.
     """
     if meter is None:
-        meter = metrics.get_meter(METER_NAME)
+        meter = metrics.get_meter(_METER_NAME)
     placements_callback = _make_tier_gauge_callback(
         key_directory, lambda stats: (stats.l1_count, stats.l2_count)
     )
@@ -113,12 +116,13 @@ def register_key_directory_metrics(
 def register_event_gate_metrics(
     event_gate: "EventGate", meter: "Meter | None" = None
 ) -> None:
-    """Register per-server gauges over the gate's stream cursors.
+    """Register the gate's loss metrics: fleet counters and per-server gauges.
 
-    One series per emitter the gate tracks; a series disappears when its
-    emitter's cursor goes (departure or timeout), which is why per-server
-    values are gauges rather than counters. Each covers the emitter's
-    current incarnation.
+    The counters read :meth:`EventGate.totals` and cover this process's
+    lifetime. The gauges read :meth:`EventGate.stats`: one series per
+    emitter the gate tracks, gone when its cursor goes (departure or
+    timeout), which is why per-server values are gauges rather than
+    counters. Each covers the emitter's current incarnation.
 
     Args:
         event_gate: The gate admitting the coordinator's cache events.
@@ -126,7 +130,42 @@ def register_event_gate_metrics(
             coordinator meter; tests pass one from a private provider.
     """
     if meter is None:
-        meter = metrics.get_meter(METER_NAME)
+        meter = metrics.get_meter(_METER_NAME)
+
+    def read_batches_received() -> list[tuple[float, dict[str, str]]]:
+        totals = event_gate.totals()
+        return [
+            (totals.batches_applied, {"result": "applied"}),
+            (totals.batches_duplicate, {"result": "duplicate"}),
+            (totals.batches_stale, {"result": "stale"}),
+        ]
+
+    meter.create_observable_counter(
+        "lmcache_coordinator.ingest.event_batches_received",
+        callbacks=[_make_observation_callback(read_batches_received)],
+        description="Cache-event batches received from mp servers, by what "
+        "the gate did with them.",
+    )
+    meter.create_observable_counter(
+        "lmcache_coordinator.ingest.event_batches_missing",
+        callbacks=[
+            _make_observation_callback(
+                lambda: [(event_gate.totals().batches_missing, {})]
+            )
+        ],
+        description="Cache-event batches that never arrived: skipped seq "
+        "values in a stream the gate was already tracking.",
+    )
+    meter.create_observable_counter(
+        "lmcache_coordinator.ingest.events_dropped_by_servers",
+        callbacks=[
+            _make_observation_callback(
+                lambda: [(event_gate.totals().events_dropped, {})]
+            )
+        ],
+        description="Cache events the mp servers reported dropping before "
+        "they reached the coordinator.",
+    )
     meter.create_observable_gauge(
         "lmcache_coordinator.ingest.server_event_batches_missing",
         callbacks=[
@@ -157,6 +196,85 @@ def register_event_gate_metrics(
         description="1 while the coordinator knows it is missing part of this "
         "server's cache.",
     )
+
+
+def register_broadcaster_metrics(
+    broadcaster: "CacheEventBroadcaster", meter: "Meter | None" = None
+) -> None:
+    """Register per-consumer counters over the broadcaster's tallies.
+
+    Every view and controller that consumes cache events gets the same
+    three series, labelled by its class name: batches delivered, time spent
+    applying them (apply time / batches delivered is the average per
+    batch), and failures. A failure leaves that consumer disagreeing with
+    the others.
+
+    Args:
+        broadcaster: The broadcaster fanning batches out to the consumers.
+        meter: Meter to register on. Defaults to the global provider's
+            coordinator meter; tests pass one from a private provider.
+    """
+    if meter is None:
+        meter = metrics.get_meter(_METER_NAME)
+
+    def read_batches_delivered() -> list[tuple[float, dict[str, str]]]:
+        return [
+            (stats.batches_delivered, {"consumer": consumer})
+            for consumer, stats in broadcaster.stats().items()
+        ]
+
+    def read_apply_seconds() -> list[tuple[float, dict[str, str]]]:
+        return [
+            (stats.apply_seconds, {"consumer": consumer})
+            for consumer, stats in broadcaster.stats().items()
+        ]
+
+    def read_apply_failures() -> list[tuple[float, dict[str, str]]]:
+        points: list[tuple[float, dict[str, str]]] = []
+        for consumer, stats in broadcaster.stats().items():
+            points.append(
+                (stats.consume_failures, {"consumer": consumer, "op": "consume"})
+            )
+            points.append((stats.fence_failures, {"consumer": consumer, "op": "fence"}))
+        return points
+
+    meter.create_observable_counter(
+        "lmcache_coordinator.ingest.batches_delivered",
+        callbacks=[_make_observation_callback(read_batches_delivered)],
+        description="Admitted cache-event batches handed to each consumer.",
+    )
+    meter.create_observable_counter(
+        "lmcache_coordinator.ingest.batch_apply_time_seconds",
+        callbacks=[_make_observation_callback(read_apply_seconds)],
+        description="Time each consumer spent applying admitted batches.",
+    )
+    meter.create_observable_counter(
+        "lmcache_coordinator.ingest.batch_apply_failures",
+        callbacks=[_make_observation_callback(read_apply_failures)],
+        description="Batches (op=consume) or fences (op=fence) a consumer "
+        "failed to apply; that consumer now disagrees with the others.",
+    )
+
+
+def _make_observation_callback(
+    read_points: Callable[[], list[tuple[float, dict[str, str]]]],
+) -> Callable[["CallbackOptions"], list["Observation"]]:
+    """Return an instrument callback reporting ``read_points``'s values.
+
+    Args:
+        read_points: Returns ``(value, attributes)`` pairs, one per series.
+
+    Returns:
+        A callback observing each pair as one series.
+    """
+
+    def _observe(_options: "CallbackOptions") -> list["Observation"]:
+        return [
+            metrics.Observation(value, attributes)
+            for value, attributes in read_points()
+        ]
+
+    return _observe
 
 
 def _make_tier_gauge_callback(

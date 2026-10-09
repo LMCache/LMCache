@@ -207,3 +207,59 @@ def test_event_gate_gauges_drop_a_server_that_leaves() -> None:
     assert values["lmcache_coordinator.ingest.server_view_incomplete"] == {
         labels(instance_id="node-b"): 0
     }
+
+
+def test_event_gate_counters_report_the_fleet_totals() -> None:
+    gate = EventGate(CacheEventBroadcaster(), QuiesceLock())
+    gate.ingest(_stream_batch("node-a", seq=1))
+    gate.ingest(_stream_batch("node-a", seq=4, dropped_events=6))
+    gate.ingest(_stream_batch("node-a", seq=4))  # duplicate
+    meter, reader = private_meter()
+
+    observability.register_event_gate_metrics(gate, meter)
+
+    values = read_values(reader)
+    assert values["lmcache_coordinator.ingest.event_batches_received"] == {
+        labels(result="applied"): 2,
+        labels(result="duplicate"): 1,
+        labels(result="stale"): 0,
+    }
+    assert values["lmcache_coordinator.ingest.event_batches_missing"] == {labels(): 2}
+    assert values["lmcache_coordinator.ingest.events_dropped_by_servers"] == {
+        labels(): 6
+    }
+
+
+class _FailingConsumer:
+    def consume(self, batch: CacheEventBatch) -> None:
+        raise RuntimeError("consume bug")
+
+    def fence_instance(self, instance_id: str) -> None:
+        raise RuntimeError("fence bug")
+
+
+def test_broadcaster_counters_report_each_consumer() -> None:
+    broadcaster = CacheEventBroadcaster()
+    broadcaster.register_consumer(_FailingConsumer())
+    broadcaster.register_consumer(KeyDirectory())
+    broadcaster.broadcast(_stream_batch("node-a", seq=1))
+    broadcaster.fence_instance("node-a")
+    meter, reader = private_meter()
+
+    observability.register_broadcaster_metrics(broadcaster, meter)
+
+    values = read_values(reader)
+    assert values["lmcache_coordinator.ingest.batches_delivered"] == {
+        labels(consumer="_FailingConsumer"): 1,
+        labels(consumer="KeyDirectory"): 1,
+    }
+    assert set(values["lmcache_coordinator.ingest.batch_apply_time_seconds"]) == {
+        labels(consumer="_FailingConsumer"),
+        labels(consumer="KeyDirectory"),
+    }
+    assert values["lmcache_coordinator.ingest.batch_apply_failures"] == {
+        labels(consumer="_FailingConsumer", op="consume"): 1,
+        labels(consumer="_FailingConsumer", op="fence"): 1,
+        labels(consumer="KeyDirectory", op="consume"): 0,
+        labels(consumer="KeyDirectory", op="fence"): 0,
+    }

@@ -9,20 +9,14 @@ See ``docs/design/v1/mp_coordinator/ingest.md``.
 """
 
 # Standard
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
+import threading
 import time
-
-# Third Party
-from opentelemetry import metrics
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
-from lmcache.v1.mp_coordinator.observability import METER_NAME
-
-if TYPE_CHECKING:
-    # Third Party
-    from opentelemetry.metrics import Meter
 
 logger = init_logger(__name__)
 
@@ -56,49 +50,48 @@ class CacheEventConsumer(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class ConsumerStats:
+    """What one consumer has done with the batches handed to it since this
+    process started.
+
+    Attributes:
+        batches_delivered: Batches handed to its ``consume``, failed or not.
+        apply_seconds: Total time spent in those ``consume`` calls.
+        consume_failures: ``consume`` calls that raised; each leaves this
+            consumer disagreeing with the others.
+        fence_failures: ``fence_instance`` calls that raised.
+    """
+
+    batches_delivered: int = 0
+    apply_seconds: float = 0.0
+    consume_failures: int = 0
+    fence_failures: int = 0
+
+
+@dataclass
+class _ConsumerTally:
+    """Mutable form of :class:`ConsumerStats`."""
+
+    batches_delivered: int = 0
+    apply_seconds: float = 0.0
+    consume_failures: int = 0
+    fence_failures: int = 0
+
+
 class CacheEventBroadcaster:
     """Fans one gate-admitted cache-event batch out to every consumer.
 
     A consumer that raises is logged and counted, and the rest still run,
     so only that consumer misses the batch -- which leaves it disagreeing
-    with the others, the failure ``ingest.batch_apply_failures`` exists to
-    page on. Keeps no locks: fan-out is thread-safe as long as each
-    consumer is.
-
-    Args:
-        meter: Meter for the per-consumer instruments. Defaults to the
-            global provider's coordinator meter; tests pass a private one.
+    with the others. Fan-out takes no lock, so it is thread-safe as long as
+    each consumer is; a small lock guards only the per-consumer tallies
+    behind :meth:`stats`.
     """
 
-    def __init__(self, meter: "Meter | None" = None) -> None:
-        # Each consumer with its metric attributes, built once at
-        # registration rather than on every batch.
-        self._consumers: list[tuple[CacheEventConsumer, dict[str, str]]] = []
-        if meter is None:
-            meter = metrics.get_meter(METER_NAME)
-        self._apply_duration = meter.create_histogram(
-            "lmcache_coordinator.ingest.batch_apply_duration_seconds",
-            unit="s",
-            description="Time for one consumer to apply one admitted batch.",
-            # In-memory work: sub-millisecond normally, seconds only when
-            # something is badly wrong (blend hashing a huge batch).
-            explicit_bucket_boundaries_advisory=(
-                0.0005,
-                0.001,
-                0.005,
-                0.01,
-                0.05,
-                0.1,
-                0.5,
-                1,
-                5,
-            ),
-        )
-        self._apply_failures = meter.create_counter(
-            "lmcache_coordinator.ingest.batch_apply_failures",
-            description="Batches or fences a consumer failed to apply; that "
-            "consumer now disagrees with the others.",
-        )
+    def __init__(self) -> None:
+        self._consumers: list[tuple[CacheEventConsumer, _ConsumerTally]] = []
+        self._tally_lock = threading.Lock()
 
     def register_consumer(self, consumer: CacheEventConsumer) -> None:
         """Register a consumer for all subsequently broadcast batches.
@@ -110,7 +103,7 @@ class CacheEventBroadcaster:
         Args:
             consumer: The consumer to fan batches out to.
         """
-        self._consumers.append((consumer, {"consumer": type(consumer).__name__}))
+        self._consumers.append((consumer, _ConsumerTally()))
 
     def broadcast(self, batch: CacheEventBatch) -> None:
         """Deliver one gate-admitted batch to every consumer.
@@ -118,12 +111,13 @@ class CacheEventBroadcaster:
         Args:
             batch: The admitted batch.
         """
-        for consumer, attributes in self._consumers:
+        for consumer, tally in self._consumers:
             started = time.perf_counter()
+            failed = False
             try:
                 consumer.consume(batch)
             except Exception:
-                self._apply_failures.add(1, {**attributes, "op": "consume"})
+                failed = True
                 logger.exception(
                     "Cache-event consumer %s failed on batch %s/%d/%d",
                     type(consumer).__name__,
@@ -131,8 +125,12 @@ class CacheEventBroadcaster:
                     batch.incarnation,
                     batch.seq,
                 )
-            finally:
-                self._apply_duration.record(time.perf_counter() - started, attributes)
+            elapsed = time.perf_counter() - started
+            with self._tally_lock:
+                tally.batches_delivered += 1
+                tally.apply_seconds += elapsed
+                if failed:
+                    tally.consume_failures += 1
 
     def fence_instance(self, instance_id: str) -> None:
         """Tell every consumer that ``instance_id``'s L1 state is void.
@@ -140,13 +138,33 @@ class CacheEventBroadcaster:
         Args:
             instance_id: The restarted or departed instance.
         """
-        for consumer, attributes in self._consumers:
+        for consumer, tally in self._consumers:
             try:
                 consumer.fence_instance(instance_id)
             except Exception:
-                self._apply_failures.add(1, {**attributes, "op": "fence"})
+                with self._tally_lock:
+                    tally.fence_failures += 1
                 logger.exception(
                     "Cache-event consumer %s failed to fence %s",
                     type(consumer).__name__,
                     instance_id,
                 )
+
+    def stats(self) -> dict[str, ConsumerStats]:
+        """Return each consumer's tally since this process started.
+
+        Returns:
+            :class:`ConsumerStats` keyed by the consumer's class name.
+            Discovery builds one instance per class, so the names are
+            unique.
+        """
+        with self._tally_lock:
+            return {
+                type(consumer).__name__: ConsumerStats(
+                    batches_delivered=tally.batches_delivered,
+                    apply_seconds=tally.apply_seconds,
+                    consume_failures=tally.consume_failures,
+                    fence_failures=tally.fence_failures,
+                )
+                for consumer, tally in self._consumers
+            }

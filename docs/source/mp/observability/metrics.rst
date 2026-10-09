@@ -861,14 +861,14 @@ server, and cover that server's current run.
      - Type
      - Description
    * - ``lmcache_coordinator.ingest.event_batches_received``
-     - Counter (attr: ``result``)
+     - ObservableCounter (attr: ``result``)
      - Cache-event batches received from MP servers: ``applied``,
        ``duplicate`` (seq already seen) or ``stale`` (older incarnation).
    * - ``lmcache_coordinator.ingest.event_batches_missing``
-     - Counter
+     - ObservableCounter
      - Batches that never arrived: skipped ``seq`` values.
    * - ``lmcache_coordinator.ingest.events_dropped_by_servers``
-     - Counter
+     - ObservableCounter
      - Cache events the MP servers reported dropping before they reached the
        coordinator.
    * - ``lmcache_coordinator.ingest.server_event_batches_missing``
@@ -882,9 +882,14 @@ server, and cover that server's current run.
      - ``1`` while the coordinator knows it is missing part of this server's
        cache.  Clears when the server restarts or leaves.
    * - ``lmcache_coordinator.ingest.batch_apply_failures``
-     - Counter (attrs: ``consumer``, ``op``)
+     - ObservableCounter (attrs: ``consumer``, ``op``)
      - A view or controller failed to apply a batch (``op="consume"``) or a
        fence (``op="fence"``); it now disagrees with the others.
-   * - ``lmcache_coordinator.ingest.batch_apply_duration_seconds``
-     - Histogram (attr: ``consumer``)
-     - Time for one view or controller to apply one batch.
+   * - ``lmcache_coordinator.ingest.batches_delivered``
+     - ObservableCounter (attr: ``consumer``)
+     - Admitted batches handed to each view or controller.
+   * - ``lmcache_coordinator.ingest.batch_apply_time_seconds``
+     - ObservableCounter (attr: ``consumer``)
+     - Time each view or controller spent applying those batches.  Divide its
+       rate by the rate of ``batches_delivered`` for the average apply time
+       per batch.

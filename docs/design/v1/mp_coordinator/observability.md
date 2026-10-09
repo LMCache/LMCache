@@ -163,7 +163,7 @@ A view added later gets the generic ones for free and adds its own from its
 
 | View | Metric | Type | Labels | Tells you | Phase |
 | --- | --- | --- | --- | --- | --- |
-| Every view | `ingest.batch_apply_duration_seconds` | histogram | `consumer` | Time to apply one batch; finds the slow view (blend hashing) | P0 |
+| Every view | `ingest.batches_delivered`, `ingest.batch_apply_time_seconds` | counter | `consumer` | Batches handed to it and time spent applying them; time ÷ batches is the average apply time, which finds the slow view (blend hashing) | P0 |
 | Every view | `ingest.batch_apply_failures` | counter | `consumer`, `op` | Failed to apply a batch (above) | P0 |
 | Instance registry | `registry.servers_registered` | gauge | | Number of mp servers in the fleet | P1 |
 | Instance registry | `registry.server_seconds_since_heartbeat` | gauge | `instance_id` | Time since each server's last heartbeat | P0 |
@@ -312,7 +312,7 @@ an example Prometheus rules file. Names leave out the prefix, as in section 3.
 | Kafka partitions split | `kafka_partitions_assigned` below the topic's partition count for 5 min | Page | P0 | A second coordinator in the same consumer group |
 | Events being lost | `rate(ingest_event_batches_missing_total[5m]) > 0 or rate(ingest_events_dropped_by_servers_total[5m]) > 0` for 10 min | Ticket | P0 | `ingest_server_event_batches_missing` and `ingest_server_events_dropped` show which server |
 | Server silent | `ingest_server_seconds_since_last_event > 120` while `registry_server_seconds_since_heartbeat < 30` | Ticket | P0 | The server's event flush (it rides the L1 eviction tick) |
-| Kafka falling behind | `kafka_unread_records` rising for 10 min and above 10,000 | Ticket | P0 | `event_loop_blocked_seconds`, `ingest_batch_apply_duration_seconds` |
+| Kafka falling behind | `kafka_unread_records` rising for 10 min and above 10,000 | Ticket | P0 | `event_loop_blocked_seconds`, `ingest_batch_apply_time_seconds_total` ÷ `ingest_batches_delivered_total` |
 | Event loop stalled | p99 of `event_loop_blocked_seconds` above 1 s for 5 min | Ticket | P0 | `checkpoint_file_write_duration_seconds`, `/events` load |
 | Checkpoint stale | `time() - checkpoint_file_last_write_timestamp_seconds > 600` | Ticket | P1 | `/status` checkpoint `last_error`, disk |
 | Pin or quota not saved | `increase(metadata_file_writes_total{result="error"}[1h]) > 0` | Ticket | P1 | Disk at the metadata path (callers already got a 503) |
@@ -361,6 +361,8 @@ Three steps, each one or more small PRs. Tests read public state only:
 | P1 | View and controller metrics (registry, directory, blend, usage, eviction, quota, pins, prefetch); checkpoint metrics; if P0 shows a blocked event loop (p99 of `event_loop.blocked_seconds` above 100 ms), move `POST /events` ingest to a worker thread; metric name constants exported for private controllers, and the private `EvictionController` emitting the same eviction metrics (in coordinator-controllers, released against the same LMCache version); metadata write failures undo the change and return 503 | `persistence/` tests, `test_eviction_controller.py`, `test_quota_api.py`, `test_registry.py` |
 | P2 | HTTP server and outbound metrics; tracing once trace context exists | `test_metrics_api.py`, `test_directory_api.py`, `test_cache_api.py` |
 
-Components take an optional `meter` argument. Production passes nothing and
-gets the global one; tests pass a private meter so readings don't leak between
-tests.
+Components keep plain running totals and `stats()` snapshots and create no
+instruments. Every instrument is registered in `observability.py`, reading
+those snapshots; its `register_*_metrics` functions take an optional `meter`.
+Production passes nothing and gets the global one; tests pass a private meter
+so readings don't leak between tests.

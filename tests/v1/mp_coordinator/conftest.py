@@ -15,5 +15,6 @@ def _isolate_key_directory_metric_registration() -> Iterator[None]:
     with (
         patch("lmcache.v1.mp_coordinator.app.register_key_directory_metrics"),
         patch("lmcache.v1.mp_coordinator.app.register_event_gate_metrics"),
+        patch("lmcache.v1.mp_coordinator.app.register_broadcaster_metrics"),
     ):
         yield

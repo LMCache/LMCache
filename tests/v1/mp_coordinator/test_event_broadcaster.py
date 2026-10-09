@@ -12,14 +12,11 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
-from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
+from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
+    CacheEventBroadcaster,
+    ConsumerStats,
+)
 import lmcache.v1.mp_coordinator.ingest.event_broadcaster as event_broadcaster
-
-# Local
-from .otel_reader import labels, private_meter, read_values
-
-_FAILURES = "lmcache_coordinator.ingest.batch_apply_failures"
-_DURATION = "lmcache_coordinator.ingest.batch_apply_duration_seconds"
 
 
 class _RecordingConsumer:
@@ -141,11 +138,10 @@ def test_a_fence_that_raises_does_not_stop_the_others(
     assert errors == ["Cache-event consumer _RaisingConsumer failed to fence node-a"]
 
 
-def test_failures_are_counted_per_consumer_and_operation(
+def test_stats_tally_each_consumer_s_batches_and_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    meter, reader = private_meter()
-    broadcaster = CacheEventBroadcaster(meter)
+    broadcaster = CacheEventBroadcaster()
     broadcaster.register_consumer(_RaisingConsumer())
     broadcaster.register_consumer(_RecordingConsumer("ok", []))
     _capture_exceptions(monkeypatch)
@@ -154,25 +150,23 @@ def test_failures_are_counted_per_consumer_and_operation(
     broadcaster.broadcast(_batch(seq=2))
     broadcaster.fence_instance("node-a")
 
-    assert read_values(reader)[_FAILURES] == {
-        labels(consumer="_RaisingConsumer", op="consume"): 2,
-        labels(consumer="_RaisingConsumer", op="fence"): 1,
-    }
+    stats = broadcaster.stats()
+    raising, recording = stats["_RaisingConsumer"], stats["_RecordingConsumer"]
+    assert (
+        raising.batches_delivered,
+        raising.consume_failures,
+        raising.fence_failures,
+    ) == (2, 2, 1)
+    assert (
+        recording.batches_delivered,
+        recording.consume_failures,
+        recording.fence_failures,
+    ) == (2, 0, 0)
+    assert raising.apply_seconds >= 0 and recording.apply_seconds >= 0
 
 
-def test_apply_time_is_recorded_per_consumer_including_failures(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    meter, reader = private_meter()
-    broadcaster = CacheEventBroadcaster(meter)
-    broadcaster.register_consumer(_RaisingConsumer())
+def test_stats_list_every_consumer_before_any_batch() -> None:
+    broadcaster = CacheEventBroadcaster()
     broadcaster.register_consumer(_RecordingConsumer("ok", []))
-    _capture_exceptions(monkeypatch)
 
-    broadcaster.broadcast(_batch(seq=1))
-    broadcaster.broadcast(_batch(seq=2))
-
-    assert read_values(reader)[_DURATION] == {
-        labels(consumer="_RaisingConsumer"): 2,
-        labels(consumer="_RecordingConsumer"): 2,
-    }
+    assert broadcaster.stats() == {"_RecordingConsumer": ConsumerStats()}

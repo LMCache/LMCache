@@ -11,12 +11,13 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
-from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate, IngestResult
+from lmcache.v1.mp_coordinator.ingest.event_gate import (
+    EventGate,
+    IngestResult,
+    IngestTotals,
+)
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
-
-# Local
-from .otel_reader import labels, private_meter, read_values
 
 
 class _RecordingConsumer:
@@ -372,26 +373,23 @@ def test_loss_counts_start_over_when_the_emitter_leaves():
     assert _loss(gate) == (0, 0, True)
 
 
-def test_gate_counters_cover_the_whole_fleet():
-    meter, reader = private_meter()
-    gate = EventGate(CacheEventBroadcaster(), QuiesceLock(), meter)
+def test_totals_cover_the_whole_fleet_and_outlive_departures():
+    gate = _gate()
     gate.ingest(_batch(instance_id="node-a", seq=1))
     gate.ingest(_batch(instance_id="node-a", seq=3, dropped_events=4))
     gate.ingest(_batch(instance_id="node-a", seq=3))  # duplicate
     gate.ingest(_batch(instance_id="node-b", incarnation=2, seq=1))
     gate.ingest(_batch(instance_id="node-b", incarnation=1, seq=2))  # stale
     gate.ingest(_batch(instance_id="node-b", incarnation=2, seq=4))
+    gate.drop_instance("node-a")
 
-    values = read_values(reader)
-    assert values["lmcache_coordinator.ingest.event_batches_received"] == {
-        labels(result="applied"): 4,
-        labels(result="duplicate"): 1,
-        labels(result="stale"): 1,
-    }
-    assert values["lmcache_coordinator.ingest.event_batches_missing"] == {labels(): 3}
-    assert values["lmcache_coordinator.ingest.events_dropped_by_servers"] == {
-        labels(): 4
-    }
+    assert gate.totals() == IngestTotals(
+        batches_applied=4,
+        batches_duplicate=1,
+        batches_stale=1,
+        batches_missing=3,
+        events_dropped=4,
+    )
 
 
 def test_restored_gate_measures_drops_against_the_checkpointed_baseline():

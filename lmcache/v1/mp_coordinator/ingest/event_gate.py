@@ -16,23 +16,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, cast
+from typing import cast
 import threading
-
-# Third Party
-from opentelemetry import metrics
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
-from lmcache.v1.mp_coordinator.observability import METER_NAME
 from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
-
-if TYPE_CHECKING:
-    # Third Party
-    from opentelemetry.metrics import Meter
 
 logger = init_logger(__name__)
 
@@ -44,14 +36,6 @@ class IngestResult(str, Enum):
     ADMITTED = "admitted"
     DUPLICATE = "duplicate"
     STALE_INCARNATION = "stale_incarnation"
-
-
-# ``result`` label of the received-batches counter, per outcome.
-_RESULT_LABELS = {
-    IngestResult.ADMITTED: {"result": "applied"},
-    IngestResult.DUPLICATE: {"result": "duplicate"},
-    IngestResult.STALE_INCARNATION: {"result": "stale"},
-}
 
 
 @dataclass(frozen=True)
@@ -67,6 +51,31 @@ class CacheEventIngestSummary:
     applied: int = 0
     duplicates: int = 0
     stale: int = 0
+
+
+@dataclass(frozen=True)
+class IngestTotals:
+    """What the gate has seen from every emitter since this process started.
+
+    Unlike :class:`InstanceStreamStats`, these never reset when an emitter
+    restarts or leaves, and are not checkpointed: they are this process's
+    running totals, for metrics.
+
+    Attributes:
+        batches_applied: Batches admitted and broadcast to the consumers.
+        batches_duplicate: Batches dropped because their ``seq`` was seen.
+        batches_stale: Batches dropped because their incarnation was older.
+        batches_missing: Batches that never arrived (skipped ``seq``
+            values in streams the gate was already tracking).
+        events_dropped: Events the emitters reported dropping before they
+            reached the coordinator.
+    """
+
+    batches_applied: int = 0
+    batches_duplicate: int = 0
+    batches_stale: int = 0
+    batches_missing: int = 0
+    events_dropped: int = 0
 
 
 @dataclass(frozen=True)
@@ -124,15 +133,10 @@ class EventGate:
         broadcaster: Fan-out for admitted batches.
         quiesce: Held across every mutating call, so whoever captures
             durable state never sees a half-applied batch.
-        meter: Meter for the gate's counters. Defaults to the global
-            provider's coordinator meter; tests pass a private one.
     """
 
     def __init__(
-        self,
-        broadcaster: CacheEventBroadcaster,
-        quiesce: QuiesceLock,
-        meter: "Meter | None" = None,
+        self, broadcaster: CacheEventBroadcaster, quiesce: QuiesceLock
     ) -> None:
         self._lock = threading.Lock()
         self._broadcaster = broadcaster
@@ -140,23 +144,12 @@ class EventGate:
         # Acquired outside self._lock on every mutating path, so a capture
         # and an ingest take the two locks in the same order.
         self._quiesce = quiesce
-        if meter is None:
-            meter = metrics.get_meter(METER_NAME)
-        self._batches_received = meter.create_counter(
-            "lmcache_coordinator.ingest.event_batches_received",
-            description="Cache-event batches received from mp servers, by what "
-            "the gate did with them.",
-        )
-        self._batches_missing = meter.create_counter(
-            "lmcache_coordinator.ingest.event_batches_missing",
-            description="Cache-event batches that never arrived: skipped seq "
-            "values in a stream the gate was already tracking.",
-        )
-        self._events_dropped = meter.create_counter(
-            "lmcache_coordinator.ingest.events_dropped_by_servers",
-            description="Cache events the mp servers reported dropping before "
-            "they reached the coordinator.",
-        )
+        # Process-lifetime totals behind totals(); guarded by self._lock.
+        self._batches_applied = 0
+        self._batches_duplicate = 0
+        self._batches_stale = 0
+        self._batches_missing = 0
+        self._events_dropped = 0
 
     def ingest(self, batch: CacheEventBatch) -> IngestResult:
         """Offer one batch to the consumers, applying incarnation
@@ -171,7 +164,12 @@ class EventGate:
         """
         with self._quiesce.applying(), self._lock:
             result = self._admit(batch)
-        self._batches_received.add(1, _RESULT_LABELS[result])
+            if result == IngestResult.ADMITTED:
+                self._batches_applied += 1
+            elif result == IngestResult.DUPLICATE:
+                self._batches_duplicate += 1
+            else:
+                self._batches_stale += 1
         return result
 
     def ingest_batches(self, batches: list[CacheEventBatch]) -> CacheEventIngestSummary:
@@ -304,6 +302,18 @@ class EventGate:
                 for instance_id, cursor in self._cursors.items()
             }
 
+    def totals(self) -> IngestTotals:
+        """Return what the gate has seen from every emitter since this
+        process started; see :class:`IngestTotals`."""
+        with self._lock:
+            return IngestTotals(
+                batches_applied=self._batches_applied,
+                batches_duplicate=self._batches_duplicate,
+                batches_stale=self._batches_stale,
+                batches_missing=self._batches_missing,
+                events_dropped=self._events_dropped,
+            )
+
     # -- Internals ------------------------------------------------------------
 
     def _admit(self, batch: CacheEventBatch) -> IngestResult:
@@ -342,7 +352,7 @@ class EventGate:
             )
             if tracked:
                 cursor.missing_batches += skipped
-                self._batches_missing.add(skipped)
+                self._batches_missing += skipped
         if cursor.dropped_baseline is not None:
             dropped = batch.dropped_events - cursor.dropped_baseline
             if dropped > 0:
@@ -350,7 +360,7 @@ class EventGate:
                     cursor, batch, f"emitter reported {dropped} dropped events"
                 )
                 cursor.events_dropped += dropped
-                self._events_dropped.add(dropped)
+                self._events_dropped += dropped
         cursor.dropped_baseline = batch.dropped_events
         cursor.last_seq = batch.seq
         self._broadcaster.broadcast(batch)
