@@ -742,6 +742,35 @@ def test_raw_block_core_io_uring_put_many_round_trip(tmp_path: Path) -> None:
         core.close()
 
 
+def test_raw_block_core_load_many_rejects_undersized_destination(
+    tmp_path: Path,
+) -> None:
+    path = make_raw_block_file(tmp_path)
+    fake = _RecordingRawDevice(size=128 * 1024 * 1024)
+    core = _make_core_with_fake(path, fake, io_engine="io_uring")
+
+    try:
+        specs = [encode_object_key(make_object_key(i)) for i in range(2)]
+        payloads = [b"a" * 1024, b"b" * 1024]
+        assert core.put_many(
+            specs, [make_memory_obj(payload) for payload in payloads]
+        ).results == [True, True]
+
+        valid = make_empty_memory_obj(len(payloads[0]))
+        sentinel = b"\xa5" * (len(payloads[1]) - 1)
+        undersized = make_memory_obj(sentinel)
+
+        result = core.load_many_into(
+            [spec.encoded for spec in specs], [valid, undersized]
+        )
+
+        assert result == [True, False]
+        assert memory_obj_bytes(valid) == payloads[0]
+        assert memory_obj_bytes(undersized) == sentinel
+    finally:
+        core.close()
+
+
 def test_raw_block_core_io_uring_padded_odirect_uses_batched_write(
     tmp_path: Path,
 ) -> None:
