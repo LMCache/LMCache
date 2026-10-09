@@ -494,7 +494,8 @@ and are grouped by concern: ``metrics/`` (OTel counters and lifecycle
 histograms), ``logging/`` (Python logging handlers, lookup-hash JSONL),
 and ``tracing/`` (OTel spans built from START/END event pairs).
 ``init_observability()`` registers the set selected by CLI flags
-(``--disable-metrics``, ``--disable-logging``, ``--enable-tracing``).
+(``--disable-metrics``, ``--disable-grpc-metrics``,
+``--disable-logging``, ``--enable-tracing``).
 
 **OTel providers** are set up via ``otel_init.py`` before subscribers
 are constructed, so module-level ``get_meter()`` / ``get_tracer()``
