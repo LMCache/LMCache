@@ -8,11 +8,13 @@ block transfer kernel (via a GPU staging copy) and through the direct path, and
 the results are compared bit for bit. The plan exercises several chunks, a
 skipped block prefix, a two-kernel-group object (non-zero byte offset in the
 object), a padded MLA block stride, and a small pin-chunk alignment so entries
-are split at the allocator's virtual boundaries.
+are split at the allocator's virtual boundaries. Layers packed side by side in
+every block (vLLM's block-outermost layouts) take the 2-D copy path; those
+tests also check how many copies were issued.
 """
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import random
 
 # Third Party
@@ -212,7 +214,9 @@ def _direct(
     block_ids: list[list[int]],
     direction: "lmcache_native.TransferDirection",
     device: torch.device,
-) -> None:
+    alignment: int = _PIN_ALIGNMENT,
+) -> int:
+    """Run the direct path; returns the number of copies it submitted."""
     offset = 0
     specs = []
     for gi, g in enumerate(groups):
@@ -241,10 +245,11 @@ def _direct(
                 [skip] * len(groups),
             )
         )
-    cuda_ops.execute_direct_copy_transfer(
-        direction, device, _PIN_ALIGNMENT, specs, objects
+    num_copies = cuda_ops.execute_direct_copy_transfer(
+        direction, device, alignment, specs, objects
     )
     torch.cuda.synchronize(device)
+    return num_copies
 
 
 def _pinned_objects(groups: list[_Geometry], fill: bool) -> list[torch.Tensor]:
@@ -356,6 +361,90 @@ def test_direct_matches_kernel_two_groups_in_one_object(direction) -> None:
     else:
         for a, b in zip(host_kernel, host_direct, strict=True):
             assert _bitwise_equal(a, b)
+
+
+def _block_outer_paged(
+    groups: list[_Geometry], pads: list[int], device: torch.device
+) -> tuple[torch.Tensor, list[list[torch.Tensor]]]:
+    """Random buffer whose every block packs all layers of all groups side by
+    side, each page padded to ``pads[g]`` elements (vLLM's block-outermost
+    layouts, e.g. DeepSeek-V4). Returns the buffer and per-layer views."""
+    base = torch.rand([_NB, groups[0].block_stride_elems], dtype=_DTYPE, device=device)
+    return base, _block_outer_views(base, groups, pads)
+
+
+def _block_outer_views(
+    base: torch.Tensor, groups: list[_Geometry], pads: list[int]
+) -> list[list[torch.Tensor]]:
+    views, off = [], 0
+    for g, pad in zip(groups, pads, strict=True):
+        tight = g.tight_block_elems
+        views.append(
+            [
+                base[:, off + i * pad : off + i * pad + tight].view(
+                    _NB, g.bs, g.nh, g.hs
+                )
+                for i in range(g.nl)
+            ]
+        )
+        off += g.nl * pad
+    return views
+
+
+def _block_outer_groups() -> tuple[list[_Geometry], list[int]]:
+    """Two kernel groups sharing every block, like DeepSeek-V4's indexer and
+    latent groups: pages padded, a few spare elements at the block end."""
+    groups = [
+        _Geometry(Fmt.NL_X_NB_BS_NH_CS, nl=5, kv_size=1, nh=1, hs=72, bs=8),
+        _Geometry(Fmt.NL_X_NB_BS_NH_CS, nl=4, kv_size=1, nh=1, hs=40, bs=8),
+    ]
+    pads = [
+        g.tight_block_elems + extra for g, extra in zip(groups, (16, 8), strict=True)
+    ]
+    block_elems = sum(g.nl * p for g, p in zip(groups, pads, strict=True)) + 24
+    return [replace(g, block_stride_elems=block_elems) for g in groups], pads
+
+
+@pytest.mark.parametrize("direction", [H2D, D2H], ids=["retrieve", "store"])
+def test_direct_block_outer_layout_matches_kernel(direction) -> None:
+    """Layers packed side by side in each block move as split 2-D copies."""
+    device = torch.device("cuda:0")
+    groups, pads = _block_outer_groups()
+    base_kernel, paged_kernel = _block_outer_paged(groups, pads, device)
+    base_direct = base_kernel.clone()
+    paged_direct = _block_outer_views(base_direct, groups, pads)
+    ids = _block_ids(groups[:1])[0]
+    block_ids = [ids, ids]  # one engine group: both kernel groups share blocks
+
+    if direction == H2D:
+        host_kernel = _pinned_objects(groups, fill=True)
+        host_direct = [t.clone().pin_memory() for t in host_kernel]
+    else:
+        host_kernel = _pinned_objects(groups, fill=False)
+        host_direct = _pinned_objects(groups, fill=False)
+
+    _kernel_reference(groups, paged_kernel, host_kernel, block_ids, direction, device)
+    _direct(groups, paged_direct, host_direct, block_ids, direction, device)
+
+    if direction == H2D:
+        assert _bitwise_equal(base_kernel, base_direct)  # padding untouched too
+    else:
+        for a, b in zip(host_kernel, host_direct, strict=True):
+            assert _bitwise_equal(a, b)
+
+
+@pytest.mark.skipif(torch.version.hip is not None, reason="2-D copies are CUDA-only")
+def test_direct_block_outer_layout_issues_one_copy_per_block() -> None:
+    """Without pin-boundary splits, each (kernel group, block) is one copy."""
+    device = torch.device("cuda:0")
+    groups, pads = _block_outer_groups()
+    _, paged = _block_outer_paged(groups, pads, device)
+    ids = _block_ids(groups[:1])[0]
+    host = _pinned_objects(groups, fill=True)
+    blocks_per_chunk = _CHUNK_TOKENS // groups[0].bs
+    expected = len(groups) * (_NUM_CHUNKS * blocks_per_chunk - _SKIP_BLOCKS_FIRST_CHUNK)
+    num_copies = _direct(groups, paged, host, [ids, ids], H2D, device, 1 << 30)
+    assert num_copies == expected
 
 
 def test_direct_rejects_hnd_layout() -> None:

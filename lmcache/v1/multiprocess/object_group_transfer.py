@@ -18,6 +18,7 @@ through a GPU temp buffer and scatters it with the block transfer kernel. See
 # Standard
 from itertools import islice
 from typing import Any, Generator, Sequence
+import time
 
 # Third Party
 import torch
@@ -61,6 +62,17 @@ _HAS_BATCH_MEMCPY_ASYNC: bool = (
 # Layouts already reported as ineligible, so a model whose format never
 # qualifies logs once instead of once per request.
 _direct_copy_rejected_formats: set[str] = set()
+# (device, object group, direction) triples already reported as taking the
+# direct path.
+_direct_copy_announced: set[tuple[str, int, str]] = set()
+logger.info(
+    "Direct copy path (cudaMemcpyBatchAsync) is %s",
+    "available"
+    if _HAS_BATCH_MEMCPY_ASYNC
+    else "unavailable (needs a CUDA >= 12.8 build, runtime and driver, or "
+    "HIP >= 7.15 with LMCACHE_ROCM_ENABLE_BATCH_MEMCPY); every transfer uses the "
+    "block transfer kernel",
+)
 
 
 def direct_transfer_supported(
@@ -467,10 +479,11 @@ def run_direct_transfer(
     Direct-copy counterpart of :func:`_run_object_group_transfer_plan`: the
     same window skip / ``skip_first_n_tokens`` logic, but instead of staging
     each chunk through the GPU temp buffer and launching the block transfer
-    kernel, every (kv plane, layer, block) of a chunk becomes one entry of a
-    ``cudaMemcpyBatchAsync`` call between the pinned host object and the paged
-    buffer (``execute_direct_copy_transfer``, one call per chunk, single GIL
-    release for the whole group).
+    kernel, each (kv plane, block) of a chunk is copied straight between the
+    pinned host object and the paged buffer (``execute_direct_copy_transfer``,
+    single GIL release for the whole group): one 2-D copy over all layers when
+    the kernel group's layers sit at a constant pitch (vLLM's block-outermost
+    layouts), else one ``cudaMemcpyBatchAsync`` entry per layer.
 
     The caller must have checked :data:`_HAS_BATCH_MEMCPY_ASYNC` and
     :func:`direct_transfer_supported`.
@@ -494,10 +507,16 @@ def run_direct_transfer(
     object_group = kv_groups_manager.object_groups[object_group_id]
     kernel_group_ids = object_group.kernel_group_indices
     is_h2d = direction == lmcache_native.TransferDirection.H2D
+    direction_name = "H2D" if is_h2d else "D2H"
+    announce_key = (str(cache_context.device), object_group_id, direction_name)
+    announce = announce_key not in _direct_copy_announced
 
     group_specs: list[Any] = []
     blocks_per_chunk_by_kg: list[int] = []
     blocks_per_window_by_kg: list[int] = []
+    # Batch entries per unskipped block (kv planes x layers), per kernel
+    # group; only used for logging.
+    entries_per_block_by_kg: list[int] = []
     for kernel_group_id in kernel_group_ids:
         blocks_per_chunk = cache_context.calculate_num_blocks(
             lmcache_chunk_size, kernel_group_id
@@ -511,12 +530,37 @@ def run_direct_transfer(
         )
         blocks_per_chunk_by_kg.append(blocks_per_chunk)
         blocks_per_window_by_kg.append(blocks_per_window)
+        shape_desc = cache_context.get_shape_desc(kernel_group_id)
+        slots_per_chunk = cache_context.get_slots_per_chunk_in_sw(kernel_group_id)
+        entries_per_block_by_kg.append(shape_desc.kv_size * shape_desc.nl)
+        if announce:
+            sd = shape_desc
+            blocks = slots_per_chunk // sd.bs
+            logger.info(
+                "Direct copy path (cudaMemcpyBatchAsync) %s on %s: object group "
+                "%d, kernel group %d, %s, %d entries/chunk of %d B (kv=%d x "
+                "nl=%d x %d blocks; bs=%d nh=%d hs=%d elem=%d)",
+                direction_name,
+                cache_context.device,
+                object_group_id,
+                kernel_group_id,
+                cache_context.get_engine_kv_format(kernel_group_id),
+                sd.kv_size * sd.nl * blocks,
+                sd.bs * sd.nh * sd.hs * sd.element_size,
+                sd.kv_size,
+                sd.nl,
+                blocks,
+                sd.bs,
+                sd.nh,
+                sd.hs,
+                sd.element_size,
+            )
         group_specs.append(
             device_ops.DirectCopyGroupSpec(
                 cache_context.get_kernel_group_kv_pointer_list(kernel_group_id),
-                cache_context.get_shape_desc(kernel_group_id),
+                shape_desc,
                 cache_context.get_engine_kv_format(kernel_group_id),
-                cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
+                slots_per_chunk,
                 cache_context.get_kernel_group_offset_in_object(
                     object_group_id, kernel_group_id
                 ),
@@ -530,7 +574,10 @@ def run_direct_transfer(
         sw_size_chunks = attn_desc.num_chunks_in_sw[object_group_id]
         num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
 
+    _direct_copy_announced.add(announce_key)
+
     objects: list[Any] = []
+    num_entries = 0
     for chunk_idx in range(num_objects_to_skip, len(memory_objs)):
         memory_obj = memory_objs[chunk_idx]
         if memory_obj is None:
@@ -563,6 +610,9 @@ def run_direct_transfer(
                     orig_skip_blocks,
                 )
             )
+            num_entries += entries_per_block_by_kg[position] * (
+                blocks_per_window_by_kg[position] - skip_blocks[-1]
+            )
         objects.append(
             device_ops.DirectCopyObject(
                 memory_obj.data_ptr,
@@ -574,14 +624,35 @@ def run_direct_transfer(
         )
 
     if not objects:
+        logger.debug(
+            "Direct copy %s: object group %d has nothing to copy",
+            direction_name,
+            object_group_id,
+        )
         return
 
-    device_ops.execute_direct_copy_transfer(
+    issue_start = time.perf_counter()
+    num_copies = device_ops.execute_direct_copy_transfer(
         direction,
         cache_context.device,
         LazyMemoryAllocator.PIN_CHUNK_SIZE,
         group_specs,
         objects,
+    )
+    # Host-side issue time only: the copies complete asynchronously on the
+    # stream, so this is the CPU cost of building and submitting the batches.
+    logger.info(
+        "Direct copy %s on %s: object group %d, %d chunks (%d dropped by "
+        "sliding window), %d layer-block pieces in %d copies, issued in "
+        "%.3f ms",
+        direction_name,
+        cache_context.device,
+        object_group_id,
+        len(objects),
+        num_objects_to_skip,
+        num_entries,
+        num_copies,
+        (time.perf_counter() - issue_start) * 1000,
     )
 
 
