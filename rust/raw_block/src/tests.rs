@@ -2,10 +2,11 @@
 
 use super::{
     check_nvme_ioctl_result, fail_submissions, placement_id_to_u16, prepare_iouring_write_buffer,
-    record_submission_result, RawBlockDevice, SubmissionRetry, UringNotify,
+    record_submission_result, RawBlockDevice, RawBlockIoStats, SubmissionRetry, UringNotify,
     SUBMISSION_RETRY_INITIAL_DELAY, SUBMISSION_RETRY_MAX_DELAY, SUBMISSION_STALL_TIMEOUT,
 };
 use pyo3::prelude::*;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -149,11 +150,17 @@ fn drop_releases_gil_while_joining_worker() {
 #[test]
 fn recoverable_submission_errors_preserve_pending_until_retry_succeeds() {
     for error_code in [libc::EAGAIN, libc::EINTR, libc::EBUSY] {
+        let stats = RawBlockIoStats::default();
+        let in_flight = HashMap::new();
         let mut pending = VecDeque::from([10, 11, 12]);
         let mut retry = SubmissionRetry::default();
         let now = Instant::now();
-        let result =
-            record_submission_result(&mut pending, Err(io::Error::from_raw_os_error(error_code)));
+        let result = record_submission_result(
+            &mut pending,
+            &in_flight,
+            &stats.recorder(),
+            Err(io::Error::from_raw_os_error(error_code)),
+        );
         retry.record_result(result, now).unwrap();
         assert_eq!(pending, VecDeque::from([10, 11, 12]));
         assert_eq!(
@@ -161,14 +168,14 @@ fn recoverable_submission_errors_preserve_pending_until_retry_succeeds() {
             Some(SUBMISSION_RETRY_INITIAL_DELAY)
         );
 
-        let result = record_submission_result(&mut pending, Ok(1));
+        let result = record_submission_result(&mut pending, &in_flight, &stats.recorder(), Ok(1));
         retry
             .record_result(result, now + SUBMISSION_RETRY_INITIAL_DELAY)
             .unwrap();
         assert_eq!(pending, VecDeque::from([11, 12]));
         assert!(retry.remaining_delay(now).is_none());
 
-        let result = record_submission_result(&mut pending, Ok(2));
+        let result = record_submission_result(&mut pending, &in_flight, &stats.recorder(), Ok(2));
         retry
             .record_result(result, now + SUBMISSION_RETRY_INITIAL_DELAY)
             .unwrap();
