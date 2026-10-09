@@ -11,7 +11,6 @@ See ``docs/design/v1/mp_coordinator/ingest.md``.
 # Standard
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
-import threading
 import time
 
 # First Party
@@ -84,14 +83,12 @@ class CacheEventBroadcaster:
 
     A consumer that raises is logged and counted, and the rest still run,
     so only that consumer misses the batch -- which leaves it disagreeing
-    with the others. Fan-out takes no lock, so it is thread-safe as long as
-    each consumer is; a small lock guards only the per-consumer tallies
-    behind :meth:`stats`.
+    with the others. Keeps no locks: fan-out is thread-safe as long as each
+    consumer is.
     """
 
     def __init__(self) -> None:
         self._consumers: list[tuple[CacheEventConsumer, _ConsumerTally]] = []
-        self._tally_lock = threading.Lock()
 
     def register_consumer(self, consumer: CacheEventConsumer) -> None:
         """Register a consumer for all subsequently broadcast batches.
@@ -125,12 +122,10 @@ class CacheEventBroadcaster:
                     batch.incarnation,
                     batch.seq,
                 )
-            elapsed = time.perf_counter() - started
-            with self._tally_lock:
-                tally.batches_delivered += 1
-                tally.apply_seconds += elapsed
-                if failed:
-                    tally.consume_failures += 1
+            tally.batches_delivered += 1
+            tally.apply_seconds += time.perf_counter() - started
+            if failed:
+                tally.consume_failures += 1
 
     def fence_instance(self, instance_id: str) -> None:
         """Tell every consumer that ``instance_id``'s L1 state is void.
@@ -142,8 +137,7 @@ class CacheEventBroadcaster:
             try:
                 consumer.fence_instance(instance_id)
             except Exception:
-                with self._tally_lock:
-                    tally.fence_failures += 1
+                tally.fence_failures += 1
                 logger.exception(
                     "Cache-event consumer %s failed to fence %s",
                     type(consumer).__name__,
@@ -158,13 +152,12 @@ class CacheEventBroadcaster:
             Discovery builds one instance per class, so the names are
             unique.
         """
-        with self._tally_lock:
-            return {
-                type(consumer).__name__: ConsumerStats(
-                    batches_delivered=tally.batches_delivered,
-                    apply_seconds=tally.apply_seconds,
-                    consume_failures=tally.consume_failures,
-                    fence_failures=tally.fence_failures,
-                )
-                for consumer, tally in self._consumers
-            }
+        return {
+            type(consumer).__name__: ConsumerStats(
+                batches_delivered=tally.batches_delivered,
+                apply_seconds=tally.apply_seconds,
+                consume_failures=tally.consume_failures,
+                fence_failures=tally.fence_failures,
+            )
+            for consumer, tally in self._consumers
+        }
