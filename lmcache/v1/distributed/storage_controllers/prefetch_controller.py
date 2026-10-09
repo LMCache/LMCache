@@ -410,7 +410,8 @@ class PrefetchController(StorageControllerInterface):
        An L1-only request (``skip_l2`` or no L2 adapter) is served on the
        calling thread and is complete when the call returns.
     2. Read-locks the keys resident in L1 and submits lookup-and-lock tasks
-       to every live L2 adapter.
+       to every live L2 adapter, unless ``PrefetchPolicy.needs_l2_lookup``
+       reports that L1 alone serves the request; that request finishes here.
     3. Plans which cells to serve from L1 and which to load from L2, and
        releases every lock outside the plan.
     4. Reserves L1 staging buffers for the L2 plan; on reservation failures
@@ -1039,6 +1040,20 @@ class PrefetchController(StorageControllerInterface):
             if adapter_idx not in self._draining
         }
 
+        # No live L2 adapter, or no L2 result could change the plan: serve
+        # from L1 alone, on this thread. The request was registered before
+        # locking so a failed start can be aborted; retire it here like
+        # _advance_request does.
+        if not active_adapters or not self._policy.needs_l2_lookup(
+            request.key_groups,
+            request.key_states.l1_locked_keys,
+            request.fetching_policy,
+        ):
+            self._plan_load(request, {})
+            self._finish_request(request)
+            self._retire_request(request)
+            return
+
         # TODO(ApostaC): Here, we submit the full keys to L2 adapters.
         # In the future, we can do `All keys - L1 hit keys` to reduce the
         # L2 lookup overhead.
@@ -1050,15 +1065,6 @@ class PrefetchController(StorageControllerInterface):
                 flattened_keys, spec.group_layout_descs
             )
             request.inflight_lookup_tasks[adapter_idx] = task_id
-
-        # No live L2 adapter: serve from L1 alone, on this thread. The
-        # request was registered before locking so a failed start can be
-        # aborted; retire it here like _advance_request does.
-        if not active_adapters:
-            self._plan_load(request, {})
-            self._finish_request(request)
-            self._retire_request(request)
-            return
 
         self._event_bus.publish(
             Event(
