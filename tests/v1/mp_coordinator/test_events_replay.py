@@ -10,6 +10,7 @@ in-process ASGI transport. Everything runs on CPU.
 from __future__ import annotations
 
 # Standard
+from pathlib import Path
 from typing import Any
 import asyncio
 import time
@@ -43,6 +44,14 @@ from lmcache.v1.mp_coordinator.events_replay import (
 from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_observability.trace.decorator import set_tracing_enabled
+from lmcache.v1.mp_observability.trace.format import (
+    FORMAT_VERSION,
+    MAGIC,
+    Header,
+    Record,
+    encode_header,
+    encode_record,
+)
 from lmcache.v1.mp_observability.trace.recorder import (
     EventsTraceRecorder,
     StorageTraceRecorder,
@@ -129,6 +138,51 @@ class _RecordingTarget(CoordinatorTarget):
 
 
 # -- Loading -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("trace_schema", [1, 2])
+@pytest.mark.parametrize(
+    "level_meta",
+    [
+        {},
+        {"cache_event_schema_version": None},
+        {"cache_event_schema_version": CACHE_EVENT_SCHEMA_VERSION},
+        {"cache_event_schema_version": 99},
+    ],
+)
+def test_load_checks_trace_and_cache_event_schemas_separately(
+    tmp_path: Path, trace_schema: int, level_meta: dict[str, int | None]
+) -> None:
+    """Accept both trace schemas unless the cache-event schema is incompatible."""
+    header = Header(
+        magic=MAGIC,
+        format_version=FORMAT_VERSION,
+        level="events",
+        trace_schema_version=trace_schema,
+        t_mono_start=0.0,
+        t_wall_start=0.0,
+        sm_config_json="",
+        sm_config_digest="",
+        level_meta=level_meta,
+    )
+    record = Record(
+        t_mono=1.0,
+        t_wall=1.0,
+        qualname=EVENTS_TRACE_BATCH,
+        args=_batch("node-a", 1, 1),
+    )
+    path = tmp_path / "events.lct"
+    with path.open("wb") as fh:
+        for frame in (encode_header(header), encode_record(record)):
+            fh.write(len(frame).to_bytes(4, "big") + frame)
+
+    if level_meta.get("cache_event_schema_version") == 99:
+        with pytest.raises(ValueError, match="cache_event_schema_version 99"):
+            EventsTrace.load([str(path)])
+    else:
+        trace = EventsTrace.load([str(path)])
+        assert trace.records == [record]
+        assert trace.meta == level_meta
 
 
 def test_load_merges_files_by_wall_clock(tmp_path):
