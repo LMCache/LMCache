@@ -809,12 +809,17 @@ async def test_the_loop_evicts_on_each_tick_until_stopped():
     k = _make_key("alice", h="aa")
     _store(ctrl, kd, k, 100)
     qs.set_quota("alice", 0)  # ratio=1.0 → full eviction
-    dispatched, handler = _recorder()
+    dispatched: list[str] = []
+    arrived = asyncio.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        dispatched.append(str(request.url))
+        arrived.set()
+        return httpx.Response(200, json={"requested": 1, "adapter": "s3", "ok": True})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         async with ctrl.run(ControllerRuntime(http_client=client)):
-            # Long enough for several ticks, short enough to keep the test fast.
-            await asyncio.sleep(0.1)
+            await asyncio.wait_for(arrived.wait(), timeout=5.0)
 
     assert dispatched, "the loop never dispatched an eviction"
     assert dispatched[0] == "http://10.0.0.1:8000/cache/objects"
