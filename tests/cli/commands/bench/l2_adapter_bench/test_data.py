@@ -42,6 +42,8 @@ def test_make_memory_objects_uses_shared_l1_range() -> None:
     assert len(objects) == 2
     assert objects[0].raw_data.data_ptr() == buffer.data_ptr() + 1024
     assert objects[1].raw_data.data_ptr() == buffer.data_ptr() + 2048
+    assert objects[0].meta.address == 1024
+    assert objects[1].meta.address == 2048
     assert torch.all(objects[0].raw_data == 0)
     assert torch.all(objects[1].raw_data == 1)
 
@@ -59,3 +61,5 @@ def test_make_memory_objects_can_use_different_fill_pattern() -> None:
 
     assert torch.all(objects[0].raw_data == 1)
     assert torch.all(objects[1].raw_data == 2)
+    assert objects[0].meta.address == 0
+    assert objects[1].meta.address == 1024
