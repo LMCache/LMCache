@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Public-API unit tests for LMCache MP vLLM adapters. The MQ boundary is
 stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
-recovery: ``.buildkite/k3_tests/multiprocess/scripts/run-restart-recovery.sh``."""
+recovery: multiprocess ``workloads/common/restart-recovery.sh``."""
 
 # Standard
 from typing import Callable, ClassVar, cast
@@ -373,6 +373,61 @@ def test_scheduler_adapter_does_not_autostart(monkeypatch) -> None:
 
     maybe_start.assert_not_called()
     wait_for_server.assert_not_called()
+
+
+def test_scheduler_starts_one_heartbeat_per_server_on_first_lookup(monkeypatch) -> None:
+    """The first lookup starts and retains every server heartbeat exactly once."""
+    servers = ["tcp://server-a:5555", "tcp://server-b:5555"]
+    clients: dict[str, MagicMock] = {
+        server: MagicMock(name=f"req_client[{server}]", spec=RequestClient)
+        for server in servers
+    }
+    for client in clients.values():
+        client.lookup.return_value = MagicMock(name="lookup_future")
+
+    monkeypatch.setattr(
+        adapter_mod.RequestClientFactory,
+        "create",
+        lambda server_url, **_kwargs: clients[server_url],
+    )
+    monkeypatch.setattr(
+        adapter_mod, "get_lmcache_chunk_size", lambda *_args, **_kwargs: 256
+    )
+    FakeHeartbeatThread.instances.clear()
+    FakeHeartbeatThread.start_hook = None
+    monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
+
+    adapter = LMCacheMPSchedulerAdapter(
+        server_urls=servers,
+        context=MagicMock(name="zmq_context"),
+        model_name="test-model",
+        vllm_block_size=16,
+        parallel_strategy=ParallelStrategy(
+            mla_only=False,
+            vllm_world_size=2,
+            vllm_worker_id=0,
+            tp_size=2,
+            pp_size=1,
+            n_servers=2,
+        ),
+    )
+
+    assert FakeHeartbeatThread.instances == []
+    adapter.maybe_submit_lookup_request("request-1", list(range(256)))
+
+    assert len(FakeHeartbeatThread.instances) == len(servers)
+    for heartbeat in FakeHeartbeatThread.instances:
+        assert heartbeat.req_client in clients.values()
+        assert heartbeat.calls == ["start"]
+
+    adapter.maybe_submit_lookup_request("request-1", list(range(256)))
+    assert len(FakeHeartbeatThread.instances) == len(servers)
+
+    adapter.shutdown()
+    for client in clients.values():
+        client.close.assert_called_once()
+    for heartbeat in FakeHeartbeatThread.instances:
+        assert heartbeat.calls == ["start", "stop"]
 
 
 def test_worker_zero_autostarts_before_mq_client(monkeypatch) -> None:
@@ -1168,6 +1223,35 @@ def test_failed_retrieve_marks_blocks_for_recompute(
     assert "req-1" not in adapter.retrieve_futures
 
 
+@pytest.mark.parametrize("lazy_offload", [False, True])
+@pytest.mark.parametrize("failure", ["failed", "pending_when_unhealthy", "dropped"])
+def test_failed_receive_request_ids(
+    fake_adapter, lazy_offload: bool, failure: str
+) -> None:
+    """Every failed receive is reported once with its completion, then drained."""
+    adapter, _, _ = fake_adapter
+    adapter.lazy_offload = lazy_offload
+    adapter.transfer_ctx = MagicMock()
+    future = adapter.transfer_ctx.submit_retrieve.return_value
+    future.query.return_value = failure == "failed"
+    future.result.return_value = False
+    if failure == "dropped":
+        FakeHeartbeatThread.start_hook = lambda hb: hb.health_event.clear()
+    adapter.submit_retrieve_request("req-1", _op([[7, 8]]), None)
+    if failure == "pending_when_unhealthy":
+        FakeHeartbeatThread.instances[0].health_event.clear()
+    poll = (
+        adapter.get_finished_with_lazy_offload
+        if lazy_offload
+        else lambda: adapter.get_finished(set())
+    )
+    assert poll()[1] == {"req-1"}
+    assert adapter.get_failed_request_ids() == {"req-1"}
+    assert adapter.get_block_ids_with_load_errors() == set()
+    assert not poll()[1]
+    assert adapter.get_failed_request_ids() == set()
+
+
 def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> None:
     """A failed full async load must not re-enter remote wait forever."""
     pytest.importorskip("vllm")
@@ -1190,6 +1274,7 @@ def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> Non
             self.num_preemptions = 0
             self.cache_salt = ""
             self.prompt_token_ids = [1, 2, 3, 4]
+            self.num_prompt_tokens = 4
             self.all_token_ids = [1, 2, 3, 4]
             self.mm_features: list[object] = []
 

@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import MagicMock
 import importlib
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
 from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
@@ -39,9 +41,12 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
-from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.protocols.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
+)
 from lmcache.v1.multiprocess.request_handler import (
+    HandlerType,
     iter_request_handlers,
     request_handler,
 )
@@ -94,12 +99,11 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
     calls = _Calls()
 
     class FakeModules:
-        @request_handler(RequestType.LOOKUP, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def lookup(self, key: IPCCacheServerKey, tp_size: int) -> None:
             calls.lookup = (key, tp_size)
 
         @request_handler(
-            RequestType.STORE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
@@ -116,7 +120,6 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             return b"output-event", key.model_name == "model"
 
         @request_handler(
-            RequestType.PREPARE_STORE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
@@ -130,7 +133,6 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             )
 
         @request_handler(
-            RequestType.PREPARE_RETRIEVE,
             HandlerType.BLOCKING,
             requires_client_affinity=True,
         )
@@ -145,26 +147,29 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
                 context={"slot": 3},
             )
 
-        @request_handler(RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT)
+        @request_handler()
         def register_kv_cache_engine_driven_context(
             self, payload: RegisterEngineDrivenContextPayload
         ) -> RegisterEngineDrivenContextResponse:
             assert payload.num_physical_slots == 32
             return RegisterEngineDrivenContextResponse("shared-memory", 4096)
 
-        @request_handler(RequestType.PING, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def ping(self, instance_id: int | None) -> bool:
             return instance_id == 7
 
-        @request_handler(RequestType.CLEAR, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def clear(self, force: bool = False) -> None:
             calls.clear_force = force
 
-        @request_handler(RequestType.NOOP)
+        @request_handler(operation="noop")
         def debug(self) -> str:
             return "ok"
 
-        @request_handler(RequestType.REPORT_BLOCK_ALLOCATION, HandlerType.BLOCKING)
+        @request_handler(
+            HandlerType.BLOCKING,
+            operation="report_block_allocation",
+        )
         def report_block_allocations(
             self,
             instance_id: int,
@@ -173,7 +178,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
         ) -> None:
             calls.allocation = (instance_id, model_name, records)
 
-        @request_handler(RequestType.CB_UNIFIED_LOOKUP, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def cb_unified_lookup(
             self, key: IPCCacheServerKey, tp_size: int
         ) -> CBUnifiedLookupResult | None:
@@ -184,7 +189,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
                 non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash")],
             )
 
-        @request_handler(RequestType.P2P_LOOKUP_AND_LOCK, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def p2p_lookup_and_lock(
             self,
             keys: list[ObjectKey],
@@ -195,12 +200,22 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             assert group_layout_descs[0].dtypes == [torch.float16]
             return 41
 
-        @request_handler(RequestType.P2P_QUERY_LOOKUP_RESULTS, HandlerType.BLOCKING)
+        @request_handler(HandlerType.BLOCKING)
         def p2p_query_lookup_results(
             self, task_id: int
         ) -> list[TransferChannelAddress] | None:
             assert task_id == 41
             return [TransferChannelAddress(offset=8, size=16)]
+
+        @request_handler(HandlerType.BLOCKING)
+        def server_module_call(
+            self, request: ServerModuleCallRequest
+        ) -> ServerModuleCallResponse:
+            return ServerModuleCallResponse(
+                success=request.method == "fake.echo",
+                payload=b"grpc:" + request.payload,
+                error="" if request.method == "fake.echo" else "missing",
+            )
 
     modules: Any = FakeModules()
     server = GrpcMultiprocessServer(
@@ -242,7 +257,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     assert set(registry.by_full_name) == generated_methods
 
     lookup_codec = registry.by_full_name["lmcache.mp.LookupService.Lookup"]
-    assert lookup_codec.request_type is RequestType.LOOKUP
+    assert lookup_codec.operation == "lookup"
     assert lookup_codec.payload_types == (IPCCacheServerKey, int)
     assert lookup_codec.response_type is type(None)
 
@@ -256,7 +271,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     assert store_codec.response_type == tuple[bytes, bool]
 
     clear_codec = registry.by_full_name["lmcache.mp.ControllerService.Clear"]
-    assert clear_codec.request_type is RequestType.CLEAR
+    assert clear_codec.operation == "clear"
     assert clear_codec.payload_types == (bool,)
     assert clear_codec.request_decoder(clear_codec.request_encoder((), {})) == (False,)
     assert clear_codec.request_decoder(
@@ -293,6 +308,12 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
             num_physical_slots=32,
         ),
     )
+    server_module_codec = registry.by_full_name[
+        "lmcache.mp.ControllerService.ServerModuleCall"
+    ]
+    assert server_module_codec.operation == "server_module_call"
+    assert server_module_codec.payload_types == (ServerModuleCallRequest,)
+    assert server_module_codec.response_type is ServerModuleCallResponse
 
 
 def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
@@ -305,18 +326,19 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
         EngineDrivenTransferModule,
         QStoreModule,
         BlendModule,
+        ExtServerModuleRouter,
     )
     handlers = {
-        registered.options.request_type: registered.handler
+        registered.operation: registered.handler
         for module_type in module_types
         for registered in iter_request_handlers(module_type)
     }
     registry = get_method_codec_registry()
     codecs = tuple(registry.by_full_name.values())
 
-    assert set(handlers) == {codec.request_type for codec in codecs}
+    assert set(handlers) == {codec.operation for codec in codecs}
     for codec in codecs:
-        codec.validate_handler(handlers[codec.request_type])
+        codec.validate_handler(handlers[codec.operation])
 
 
 def test_grpc_imports_do_not_load_zmq_runtime() -> None:
@@ -409,9 +431,11 @@ def test_build_grpc_request_server_uses_configured_server_workers(
                 grpc_server_workers,
             )
             self.modules: Any = None
+            self.service_registrars: Any = None
 
-        def add_modules(self, modules: Any) -> None:
+        def add_modules(self, modules: Any, *, service_registrars: Any = ()) -> None:
             self.modules = modules
+            self.service_registrars = service_registrars
 
     monkeypatch.setattr(
         grpc_server_module,
@@ -427,10 +451,47 @@ def test_build_grpc_request_server_uses_configured_server_workers(
         grpc_server_workers=7,
     )
 
-    server = cast(Any, build_grpc_request_server(modules, config))
+    service_registrars = (MagicMock(name="grpc_service_registrar"),)
+
+    server = cast(
+        Any,
+        build_grpc_request_server(
+            modules,
+            config,
+            service_registrars=service_registrars,
+        ),
+    )
 
     assert server.args == ("grpc://127.0.0.1:6000", 2, 3, 7)
     assert server.modules is modules
+    assert server.service_registrars is service_registrars
+
+
+def test_grpc_server_registers_out_of_tree_services() -> None:
+    """Server modules may attach package-owned gRPC services before start."""
+    registered_servers: list[Any] = []
+    explicit_registrar = MagicMock(name="explicit_registrar")
+
+    class ServiceModule:
+        def register_grpc_services(self, server: Any) -> None:
+            registered_servers.append(server)
+
+    server = GrpcMultiprocessServer(
+        "grpc://127.0.0.1:0",
+        max_cpu_workers=1,
+        max_gpu_workers=1,
+        grpc_server_workers=1,
+    )
+    try:
+        server.add_modules(
+            [cast(Any, ServiceModule())],
+            service_registrars=[explicit_registrar],
+        )
+    finally:
+        server.close()
+
+    assert len(registered_servers) == 1
+    explicit_registrar.assert_called_once()
 
 
 def test_service_message_codec_registry_round_trips_custom_types() -> None:
@@ -530,3 +591,19 @@ def test_generated_grpc_services_communicate_end_to_end(
     assert client.p2p_query_lookup_results(task_id).result(5) == [
         TransferChannelAddress(offset=8, size=16)
     ]
+
+
+def test_generated_grpc_server_module_call_round_trips(
+    grpc_client: tuple[GrpcMultiprocessClient, _Calls],
+) -> None:
+    client, _calls = grpc_client
+
+    response = client.server_module_call(
+        ServerModuleCallRequest(method="fake.echo", payload=b"hello")
+    ).result(timeout=1)
+
+    assert response == ServerModuleCallResponse(
+        success=True,
+        payload=b"grpc:hello",
+        error="",
+    )

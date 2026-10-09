@@ -82,11 +82,11 @@ _path_filter_should_skip_for_pipeline() {
                     ;;
                 lmcache/v1/platform/*)
                     # For CUDA unit, platform implementation changes under
-                    # lmcache/v1/platform/{base,cuda,devices}/ are relevant and
+                    # lmcache/v1/platform/{base,devices}/ are relevant and
                     # should trigger the pipeline; keep explicitly special-cased
                     # device directories above as non-targets.
                     case "$changed_file" in
-                        lmcache/v1/platform/base/*|lmcache/v1/platform/cuda/*|lmcache/v1/platform/devices/*)
+                        lmcache/v1/platform/base/*|lmcache/v1/platform/devices/*)
                             return 1
                             ;;
                     esac
@@ -184,7 +184,10 @@ _path_filter_should_skip_for_pipeline() {
             ;;
         sglang)
             case "$changed_file" in
-                .buildkite/k3_harness/setup-sglang-env.sh|lmcache/integration/sglang/*|.buildkite/k3_tests/sglang/*)
+                .buildkite/k3_harness/resolve-pinned-sglang.sh|\
+                .buildkite/k3_harness/setup-sglang-env.sh|\
+                lmcache/integration/sglang/*|\
+                .buildkite/k3_tests/sglang/*)
                     return 1
                     ;;
                 examples/*)
@@ -216,8 +219,10 @@ _path_filter_should_skip_for_pipeline() {
             return 1
             ;;
         rbln)
-            # Placeholder only: no dedicated RBLN pipeline dir is introduced here.
-            # Keep the platform kind explicit for future CI extension.
+            if declare -F "_path_filter_rbln_should_skip" >/dev/null 2>&1; then
+                _path_filter_rbln_should_skip "$changed_file"
+                return $?
+            fi
             return 1
             ;;
         neuron)
@@ -245,6 +250,7 @@ _path_filter_pipeline_kind() {
         *k3_tests/sglang/pipeline.yml) echo sglang ;;
         *k3_tests/xpu/*/pipeline.yml) echo xpu ;;
         *k3_tests/musa/pipeline.yml) echo musa ;;
+        *k3_tests/rbln/pipeline.yml) echo rbln ;;
         *k3_tests/amd/pipeline.yml) echo amd ;;
         *k3_tests/comprehensive/pipeline.yml) echo comprehensive ;;
         *) echo generic ;;
@@ -256,7 +262,7 @@ _path_filter_load_device_filter() {
     local script_dir repo_root filter_script
 
     case "$pipeline_kind" in
-        xpu|amd) ;;
+        xpu|amd|rbln) ;;
         *) return 0 ;;
     esac
 

@@ -337,7 +337,7 @@ lmcache/cli/
 ├── main.py              # main() entry point
 ├── metrics/             # Metrics system (see framework-and-metrics.md)
 ├── commands/
-│   ├── __init__.py      # Auto-discovers ALL_COMMANDS (no manual edits)
+│   ├── __init__.py      # Directed registration; ALL_COMMANDS is a lazy shim
 │   ├── base.py          # BaseCommand ABC + CompositeCommand
 │   ├── mock.py          # lmcache mock  (example/test command)
 │   ├── server.py        # lmcache server

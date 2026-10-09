@@ -17,10 +17,12 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
-from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
+from lmcache.v1.multiprocess.custom_types import (
+    RegisterEngineDrivenContextPayload,
+    RegisterEngineDrivenContextResponse,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
@@ -30,7 +32,11 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     scatter_cpu_to_paged_kv,
 )
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.platform import get_device_spec, resolve_kv_wrapper_factory
+from lmcache.v1.platform import (
+    get_device_spec,
+    resolve_kv_wrapper_factory,
+    synchronize_device,
+)
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
@@ -200,7 +206,7 @@ def _get_kv_device(kv_caches: dict[str, torch.Tensor]) -> torch.device:
         ValueError: If ``kv_caches`` is empty.
     """
     if not kv_caches:
-        raise ValueError("LMCache-driven transfer requires at least one KV cache")
+        raise ValueError("Transfer requires at least one KV cache")
     return get_device(next(iter(kv_caches.values())))
 
 
@@ -482,6 +488,29 @@ class LMCacheDrivenTransferContext(TransferContext):
         super().__init__(instance_id, req_client)
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
+        self._mq_timeout: float = 0.0
+        self._inflight_stores: list[MessagingFuture] = []
+        self._inflight_lock = threading.Lock()
+
+    @staticmethod
+    def _store_settled(future: MessagingFuture) -> bool:
+        """Whether the server is done with this store's engine KV blocks.
+
+        ``query()`` raises when the store's RPC failed, so a failed store is
+        reported as settled: it is no longer reading the blocks, and its error
+        is surfaced by the request path that owns it rather than here.
+
+        Args:
+            future: A store future returned by ``submit_store``.
+
+        Returns:
+            True if the store completed or failed, False if still in flight.
+        """
+        try:
+            return future.query()
+        except Exception:
+            logger.debug("Treating a failed store as settled", exc_info=True)
+            return True
 
     def register(
         self,
@@ -521,7 +550,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 model_name,
                 world_size,
                 engine_type,
-                layout_hints,
+                layout_hints or {},
                 list(engine_group_infos),
             )
         )
@@ -530,6 +559,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             return
         self._device = device
         self._event_backend = event_backend
+        self._mq_timeout = mq_timeout
 
     def create_recorded_event(self) -> IPCEvent:
         """Create and record an exportable event for handle-based transfer.
@@ -576,7 +606,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             model_name,
             world_size,
             EngineType.VLLM,
-            layout_hints,
+            layout_hints or {},
             list(engine_group_infos),
         )
         future.result(timeout=mq_timeout)
@@ -616,12 +646,18 @@ class LMCacheDrivenTransferContext(TransferContext):
         if event is None:
             raise RuntimeError("LMCache-driven transfer requires an IPC event.")
         event_ipc_handle = self._event_backend.export_event(event, self._device)
-        return self._req_client.store(
+        future = self._req_client.store(
             key, self._instance_id, block_ids, event_ipc_handle
         ).to_device_future(
             device=self._device,
             event_backend=self._event_backend,
         )
+        with self._inflight_lock:
+            self._inflight_stores = [
+                f for f in self._inflight_stores if not self._store_settled(f)
+            ]
+            self._inflight_stores.append(future)
+        return future
 
     def submit_q_store(
         self,
@@ -700,7 +736,31 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._event_backend = None
 
     def flush_inflight_stores(self) -> None:
-        pass
+        """Block until the server has finished reading the engine KV blocks.
+
+        In this mode the server copies the blocks on its own stream after the
+        forward pass that produced them, and the engine never waits for that
+        copy.  When the scheduler preempts a request it frees those blocks
+        immediately and may hand them to another request in the same step,
+        whose forward pass would overwrite blocks the server is still reading
+        and commit the wrong KV under the preempted request's keys.
+
+        A timeout is logged rather than raised, so a slow server degrades to a
+        possibly stale store instead of a crashed engine.
+        """
+        with self._inflight_lock:
+            pending = [f for f in self._inflight_stores if not self._store_settled(f)]
+            self._inflight_stores = []
+        for future in pending:
+            try:
+                if not future.wait(timeout=self._mq_timeout):
+                    logger.warning(
+                        "A store did not finish within %.1fs; its KV blocks may "
+                        "be overwritten while the server is still reading them",
+                        self._mq_timeout,
+                    )
+            except Exception:
+                logger.exception("Failed waiting for an in-flight store")
 
 
 class EngineDrivenTransferContext(TransferContext):
@@ -843,7 +903,7 @@ class EngineDrivenTransferContext(TransferContext):
         """Return no event for the synchronous engine-driven transfer path.
 
         Returns:
-            ``None`` because store and retrieve synchronize the active device
+            ``None`` because store and retrieve synchronize the KV tensor device
             before accessing or releasing KV-cache buffers.
 
         Raises:
@@ -871,7 +931,8 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_store()."
             )
 
-        torch_dev.synchronize()
+        device = _get_kv_device(kv_caches)
+        synchronize_device(device)
         result = self._engine_driven_context.prepare_store(key, self._instance_id)
         out_buffers, chunk_indices = result if result is not None else (None, None)
         # All chunks already in cache — nothing to gather or commit.
@@ -893,7 +954,7 @@ class EngineDrivenTransferContext(TransferContext):
         # commit_store serializes immediately. Either way the copies must be
         # complete first, so this is unconditional -- guarding it on out_buffers
         # left the pickle path serializing a buffer still being written.
-        torch_dev.synchronize()
+        synchronize_device(device)
         ok = self._engine_driven_context.commit_store(
             key, self._instance_id, cpu_chunks
         )
@@ -918,6 +979,7 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
 
+        device = _get_kv_device(kv_caches)
         src_buffers = self._engine_driven_context.prepare_retrieve(
             key, self._instance_id
         )
@@ -938,7 +1000,7 @@ class EngineDrivenTransferContext(TransferContext):
                 ok = False
             # SHM path: ensure all device writes are complete before releasing
             # the SHM slot (server may immediately reuse it after commit_retrieve).
-            torch_dev.synchronize()
+            synchronize_device(device)
         self._engine_driven_context.commit_retrieve(key, self._instance_id)
 
         future: MessagingFuture[bool] = MessagingFuture()

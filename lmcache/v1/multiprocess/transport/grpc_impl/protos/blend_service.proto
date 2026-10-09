@@ -69,6 +69,9 @@ message CbRegisterRopeRequest {
   bool is_neox_style = 4;
   repeated int64 group_to_cache = 5;
   repeated RopeWindow group_rot = 6;
+  repeated int64 group_head_size = 7;
+  // fp8 flavor of the paged KV ("fp8_e4m3"/"fp8_e5m2"); "" = unquantized.
+  string kv_quant = 8;
 }
 
 message CbRegisterRopeResponse {}

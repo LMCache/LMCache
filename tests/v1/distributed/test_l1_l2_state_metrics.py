@@ -16,9 +16,10 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import (
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
+    PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -36,8 +37,11 @@ from lmcache.v1.distributed.storage_controllers.store_controller import (
     StoreController,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     DefaultStorePolicy,
+)
+from lmcache.v1.distributed.storage_controllers.utils import (
+    L1ManagerDescriptor,
+    L2AdapterDescriptor,
 )
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 
@@ -76,9 +80,24 @@ def make_adapter(bandwidth_gb: float = 10.0) -> MockL2Adapter:
     return MockL2Adapter(config)
 
 
-def make_descriptor(index: int) -> AdapterDescriptor:
+def make_l1_descriptor() -> L1ManagerDescriptor:
+    """Create an L1ManagerDescriptor for the single test L1 manager."""
+    config = L1ManagerConfig(
+        memory_config=L1MemoryManagerConfig(size_in_bytes=1 << 20, use_lazy=False)
+    )
+    return L1ManagerDescriptor(index=0, config=config)
+
+
+def single_row_spec(keys, layout) -> PrefetchTaskSpec:
+    """A prefetch spec with one full-attention row over ``keys``."""
+    return PrefetchTaskSpec(
+        key_groups=[GroupedObjectKeys(keys=keys, object_group_id=0, layout_desc=layout)]
+    )
+
+
+def make_descriptor(index: int) -> L2AdapterDescriptor:
     config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
-    return AdapterDescriptor(index=index, config=config)
+    return L2AdapterDescriptor(index=index, config=config)
 
 
 def wait_for_condition(predicate, timeout: float = 5.0) -> bool:
@@ -99,7 +118,6 @@ def write_keys_to_l1(
         keys=keys,
         is_temporary=[False] * len(keys),
         layout_desc=layout,
-        mode="new",
     )
     written = [k for k, (e, m) in results.items() if m is not None]
     if written:
@@ -189,17 +207,26 @@ class TestL1MemoryUsageGauge:
 
     def test_gauge_reports_zero_initially(self, l1_manager):
         # A fresh L1 with no writes should report 0 used bytes.
-        before = _value_for("lmcache_mp.l1_memory_usage_bytes")
+        before = _value_for(
+            "lmcache_mp.l1_memory_usage_bytes",
+            {"l1_tag": "_default", "backend": "dram"},
+        )
         assert before == 0
 
     def test_gauge_grows_after_writes(self, l1_manager):
-        before = _value_for("lmcache_mp.l1_memory_usage_bytes")
+        before = _value_for(
+            "lmcache_mp.l1_memory_usage_bytes",
+            {"l1_tag": "_default", "backend": "dram"},
+        )
 
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         write_keys_to_l1(l1_manager, keys, layout)
 
-        after = _value_for("lmcache_mp.l1_memory_usage_bytes")
+        after = _value_for(
+            "lmcache_mp.l1_memory_usage_bytes",
+            {"l1_tag": "_default", "backend": "dram"},
+        )
         assert after > before, "Gauge should reflect bytes written to L1"
 
 
@@ -301,7 +328,8 @@ class TestNumInflightL2Loads:
         store_keys_in_l2(adapter, keys, layout)
 
         ctrl = PrefetchController(
-            l1_manager=l1_manager,
+            l1_managers=[l1_manager],
+            l1_manager_descriptors=[make_l1_descriptor()],
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(adapter_index)],
             policy=DefaultPrefetchPolicy(),
@@ -311,7 +339,7 @@ class TestNumInflightL2Loads:
         before_loads = _value_for("lmcache_mp.num_inflight_l2_loads", attrs)
         before_bytes = _value_for("lmcache_mp.inflight_load_memory_usage_bytes", attrs)
 
-        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys, layout))
 
         # Wait for the request to fully resolve, then the counters should
         # come back to where they started.
@@ -348,7 +376,8 @@ class TestNumInflightL2Loads:
         store_keys_in_l2(adapter, keys, layout)
 
         ctrl = PrefetchController(
-            l1_manager=l1_manager,
+            l1_managers=[l1_manager],
+            l1_manager_descriptors=[make_l1_descriptor()],
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(adapter_index)],
             policy=DefaultPrefetchPolicy(),
@@ -358,7 +387,7 @@ class TestNumInflightL2Loads:
         before_loads = _value_for("lmcache_mp.num_inflight_l2_loads", attrs)
         before_bytes = _value_for("lmcache_mp.inflight_load_memory_usage_bytes", attrs)
 
-        ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, {0: layout}))
+        ctrl.submit_prefetch_request(single_row_spec(keys, layout))
 
         # Wait until the load is actually in flight on this adapter; only
         # then is ``_cleanup_in_flight_requests`` the path that brings the
@@ -385,3 +414,69 @@ class TestNumInflightL2Loads:
         )
 
         adapter.close()
+
+
+@pytest.mark.no_shared_allocator
+def test_peer_l1_gauges_are_separate_and_removed_on_close() -> None:
+    managers = [
+        L1Manager(
+            L1ManagerConfig(L1MemoryManagerConfig(8192, False, shm_name=""), tag=tag)
+        )
+        for tag in ("metric-a", "metric-b")
+    ]
+    try:
+        layout = MemoryLayoutDesc([torch.Size([4096])], [torch.uint8])
+        for count, manager in enumerate(managers, 1):
+            keys = [make_object_key(i) for i in range(count)]
+            manager.reserve_write(keys, [False] * count, layout)
+            manager.finish_write(keys)
+        for count, manager in enumerate(managers, 1):
+            assert (
+                _value_for(
+                    "lmcache_mp.l1_memory_usage_bytes",
+                    {"l1_tag": manager.config.tag, "backend": "dram"},
+                )
+                == count * 4096
+            )
+    finally:
+        for manager in managers:
+            manager.close()
+    for tag in ("metric-a", "metric-b"):
+        assert (
+            _value_for(
+                "lmcache_mp.l1_memory_usage_bytes", {"l1_tag": tag, "backend": "dram"}
+            )
+            == 0
+        )
+
+
+@pytest.mark.no_shared_allocator
+def test_legacy_hybrid_usage_is_labeled_as_both_media(tmp_path) -> None:
+    path = tmp_path / "dax"
+    path.write_bytes(b"\0" * 8192)
+    manager = L1Manager(
+        L1ManagerConfig(
+            L1MemoryManagerConfig(
+                8192,
+                False,
+                shm_name="",
+                devdax_path=str(path),
+                devdax_size_in_bytes=8192,
+            ),
+            tag="metric-mixed",
+        )
+    )
+    try:
+        keys = [make_object_key(0)]
+        layout = MemoryLayoutDesc([torch.Size([4096])], [torch.uint8])
+        manager.reserve_write(keys, [False], layout)
+        manager.finish_write(keys)
+        assert (
+            _value_for(
+                "lmcache_mp.l1_memory_usage_bytes",
+                {"l1_tag": "metric-mixed", "backend": "dram+devdax"},
+            )
+            == 4096
+        )
+    finally:
+        manager.close()

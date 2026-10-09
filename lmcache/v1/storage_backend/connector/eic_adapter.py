@@ -23,7 +23,7 @@ class EICConnectorAdapter(ConnectorAdapter):
         # Local
         from .eic_connector import EICConnector
 
-        logger.info(f"Creating EIC connector for URL: {context.url}")
+        logger.info("Creating EIC connector for URL: %s", context.url)
         return EICConnector(
             endpoint=context.url,
             loop=context.loop,

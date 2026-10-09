@@ -69,6 +69,8 @@ lmcache/v1/mp_coordinator/
     event_broadcaster.py  # fans admitted events to the registered consumers
     event_source.py     # source lifecycle/status contract
     http_event_source.py  # non-durable POST /events push source
+    kafka_event_source.py  # durable Kafka pull source (poll thread -> gate)
+    stream_position.py  # StreamPosition: the checkpoint's own read cursor
   discovery.py          # Registry + package scan, shared by views and controllers
   views/                # read models of the fleet: what is cached, and how much
     __init__.py         # build_views: scans this package
@@ -184,10 +186,19 @@ through this layer, which decides **what** is admitted and **who** sees
 it. It holds no cache state itself. See [ingest.md](ingest.md).
 
 - `event_source.py` — common source lifecycle/status contract.
-- `http_event_source.py` — `HttpCacheEventSource`, today's non-durable
-  `POST /events` push adapter. Future durable sources use the same
-  `EventGate.ingest_batches` method but own their transport lifecycle
-  separately.
+- `http_event_source.py` — `HttpCacheEventSource`, the non-durable
+  `POST /events` push adapter.
+- `kafka_event_source.py` — `KafkaCacheEventSource`, the durable pull
+  adapter: a poll thread reads the fleet's Kafka topic and offers each
+  record to the same `EventGate.ingest_batches`. Selected by
+  `--event-transport kafka` in place of the HTTP source; a coordinator
+  runs exactly one.
+- `stream_position.py` — `StreamPosition`, checkpointed beside the state
+  it describes: the cursor a restarted `KafkaCacheEventSource` seeks each
+  partition to. It is the only cursor — the consumer group never commits
+  — so the resume point moves only when a checkpoint is written, and the
+  offset in a checkpoint always describes the state stored beside it. A
+  partition it has never seen falls back to `auto.offset.reset`.
 - `event_gate.py` — the admission point for every source. Owns the
   per-emitter stream cursor: incarnation fencing (a restart voids the
   emitter's L1 facts), `seq` dedup, and gap detection. Scan sources
@@ -301,6 +312,14 @@ The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
   directory, usage view, and LRU are rebuilt only from the cache-event
   stream, so after a coordinator restart they start empty and refill as
   events arrive — quotas under-report until they do.
+
+## Observability
+
+Every answer the coordinator gives is derived from the cache-event stream,
+so its observability is organized around ingest fidelity, freshness, and
+control-loop liveness rather than request rates. Metrics catalog,
+`/status`, cardinality rules, and phasing: see
+[observability.md](observability.md).
 
 ## Running
 
