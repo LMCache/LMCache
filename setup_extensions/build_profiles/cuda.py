@@ -155,7 +155,7 @@ class CudaProfile(BuildProfile):
                 sources=cuda_sources,
                 include_dirs=[CSRC_DIR],
                 extra_compile_args={
-                    "cxx": [flag_cxx_abi, "-std=c++17"],
+                    "cxx": [flag_cxx_abi, "-std=c++20"],
                     "nvcc": nvcc_flags,
                 },
             ),
