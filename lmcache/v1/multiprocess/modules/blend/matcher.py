@@ -143,7 +143,6 @@ class BlendTokenRangeMatcher:
     def match_sub_sequence(
         self,
         token_ids: list[int],
-        log: bool = True,
     ) -> list[CBMatchResult]:
         """Find every registered chunk reused anywhere in a query sequence.
 
@@ -196,13 +195,12 @@ class BlendTokenRangeMatcher:
                         hash=th,
                     )
                 )
-            if log:  # the reorder planner probes too; keep its calls quiet
-                logger.info(
-                    "[match_probe] n_tok=%d table_hits=%d matches=%d",
-                    len(token_ids),
-                    len(hit_positions),
-                    len(results),
-                )
+            logger.info(
+                "[match_probe] n_tok=%d table_hits=%d matches=%d",
+                len(token_ids),
+                len(hit_positions),
+                len(results),
+            )
             return results
 
     def remove_chunks(self, token_hashes: list[bytes]) -> None:

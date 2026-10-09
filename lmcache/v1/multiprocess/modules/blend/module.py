@@ -96,9 +96,7 @@ class BlendModule(
             logger.warning("--enable-blend-reorder is ignored with a coordinator")
         self._prompt_store = blend_reorder.PromptStore() if reorder else None
         if reorder:  # compile the probe's numba kernels now, not in a plan
-            self._token_range_matcher.match_sub_sequence(
-                [0] * ctx.chunk_size, log=False
-            )
+            self._token_range_matcher.match_sub_sequence([0] * ctx.chunk_size)
         self._event_bus = ctx.event_bus
         self._cb_rope_state: dict[int, _CBRopeState] = {}
 
@@ -239,7 +237,7 @@ class BlendModule(
         ns = self._prompt_store.resolve(model_name, world_size, cache_salt)
         if ns is None:  # the salt must match; empty name / zero size = any
             return dict(out, reason="no_namespace")
-        hits = self._token_range_matcher.match_sub_sequence(P, log=False)
+        hits = self._token_range_matcher.match_sub_sequence(P)
         cands, base = self._prompt_store.candidates(
             ns,
             [h.hash for h in hits],
