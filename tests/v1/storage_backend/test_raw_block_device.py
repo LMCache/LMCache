@@ -5,15 +5,18 @@ from __future__ import annotations
 
 # Standard
 from pathlib import Path
+import mmap
 import os
 import platform
 import subprocess
 import sys
+import weakref
 
 # Third Party
 import pytest
 
 # First Party
+from lmcache.v1.storage_backend.raw_block import round_up
 from tests.v1.storage_backend.raw_block_test_utils import (
     RAW_BLOCK_CI_BLOCK_ALIGN,
     RAW_BLOCK_CI_CAPACITY_BYTES,
@@ -23,6 +26,171 @@ from tests.v1.storage_backend.raw_block_test_utils import (
 
 lmcache_rust_raw_block_io = pytest.importorskip("lmcache_rust_raw_block_io")
 RawBlockDevice = lmcache_rust_raw_block_io.RawBlockDevice
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize(
+    "size",
+    [
+        17,
+        RAW_BLOCK_CI_BLOCK_ALIGN,
+        RAW_BLOCK_CI_BLOCK_ALIGN + 1,
+        2 * RAW_BLOCK_CI_BLOCK_ALIGN + 1808,
+    ],
+)
+def test_iouring_tail_roundtrip_preserves_source_and_guards(
+    tmp_path: Path, batched: bool, size: int
+) -> None:
+    """Exercise padded scalar and vectored I/O through the native public API."""
+    path = make_raw_block_file(tmp_path)
+    try:
+        dev = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=True,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+    except Exception as exc:
+        if is_skip_safe_io_error(exc):
+            pytest.skip(f"io_uring unavailable: {exc}")
+        raise
+    total = round_up(size, RAW_BLOCK_CI_BLOCK_ALIGN)
+    source = mmap.mmap(-1, total + RAW_BLOCK_CI_BLOCK_ALIGN)
+    target = mmap.mmap(-1, total + RAW_BLOCK_CI_BLOCK_ALIGN)
+    source[:] = bytes([0xA5]) * len(source)
+    target[:] = bytes([0xCC]) * len(target)
+    src = memoryview(source)[:size]
+    dst = memoryview(target)[:size]
+    try:
+        if batched:
+            batch = dev.batched_write([0], [src], [total], None, [size])
+            assert dev.wait_iouring(batch) == ([True], [])
+            batch = dev.batched_read([0], [dst], [total])
+            assert dev.wait_iouring(batch) == ([True], [])
+        else:
+            dev.write_uring(0, src, size, total)
+            dev.read_uring(0, dst, size, total)
+        assert source[:] == bytes([0xA5]) * len(source)
+        assert target[:size] == bytes([0xA5]) * size
+        assert target[size:] == bytes([0xCC]) * (len(target) - size)
+        with path.open("rb") as stored:
+            assert stored.read(total) == bytes(src) + bytes(total - size)
+    finally:
+        dev.close()
+        src.release()
+        dst.release()
+        source.close()
+        target.close()
+
+
+@pytest.mark.parametrize(
+    "available", [0, RAW_BLOCK_CI_BLOCK_ALIGN, 2 * RAW_BLOCK_CI_BLOCK_ALIGN]
+)
+def test_iouring_short_vectored_read_does_not_copy_tail(
+    tmp_path: Path, available: int
+) -> None:
+    """A short prefix read followed by EOF fails without copying the tail."""
+    payload_len = 2 * RAW_BLOCK_CI_BLOCK_ALIGN + 1808
+    total = round_up(payload_len, RAW_BLOCK_CI_BLOCK_ALIGN)
+    path = make_raw_block_file(tmp_path)
+    with path.open("r+b") as stored:
+        stored.truncate(total)
+        stored.write(bytes([0x31]) * total)
+    try:
+        dev = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=True,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+    except Exception as exc:
+        if is_skip_safe_io_error(exc):
+            pytest.skip(f"io_uring unavailable: {exc}")
+        raise
+    dev.close()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import mmap
+import sys
+from lmcache_rust_raw_block_io import RawBlockDevice
+
+available, block, payload_len, total = map(int, sys.argv[2:])
+prefix = payload_len // block * block
+device = RawBlockDevice(
+    sys.argv[1], writable=False, use_odirect=True, alignment=block,
+    io_engine="io_uring", iouring_queue_depth=8,
+)
+target = mmap.mmap(-1, total)
+target[:] = bytes([0xCC]) * len(target)
+dst = memoryview(target)[:payload_len]
+try:
+    batch = device.batched_read([total - available], [dst], [total])
+    results, errors = device.wait_iouring(batch)
+    assert results == [False], results
+    assert len(errors) == 1, errors
+    assert target[:available] == bytes([0x31]) * available
+    # A failed direct read may modify the prefix, including bytes past EOF.
+    assert target[prefix:] == bytes([0xCC]) * (total - prefix)
+finally:
+    device.close()
+    dst.release()
+    target.close()
+""",
+            str(path),
+            str(available),
+            str(RAW_BLOCK_CI_BLOCK_ALIGN),
+            str(payload_len),
+            str(total),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_iouring_batch_retains_payload_view_until_wait(tmp_path: Path) -> None:
+    """The batch must own the direct prefix exporter, not only its pointer."""
+    path = make_raw_block_file(tmp_path)
+    try:
+        dev = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=True,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+    except Exception as exc:
+        if is_skip_safe_io_error(exc):
+            pytest.skip(f"io_uring unavailable: {exc}")
+        raise
+    payload_len = RAW_BLOCK_CI_BLOCK_ALIGN + 904
+    total = round_up(payload_len, RAW_BLOCK_CI_BLOCK_ALIGN)
+    source = mmap.mmap(-1, total)
+    source[:] = bytes([9]) * total
+    view = memoryview(source)[:payload_len]
+    reference = weakref.ref(view)
+    try:
+        batch = dev.batched_write([0], [view], [total], None, [payload_len])
+        del view
+        assert reference() is not None
+        assert dev.wait_iouring(batch) == ([True], [])
+        assert reference() is None
+        with path.open("rb") as stored:
+            assert stored.read(total) == bytes([9]) * payload_len + bytes(
+                total - payload_len
+            )
+    finally:
+        dev.close()
+        source.close()
 
 
 def test_raw_block_device_posix_roundtrip_on_tmp_file(tmp_path):

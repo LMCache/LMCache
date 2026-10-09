@@ -736,16 +736,47 @@ impl Drop for AlignedBuf {
     }
 }
 
+/// ABI-compatible iovec kept in owned storage while the kernel uses it.
+/// `libc::iovec` holds a raw pointer and is not `Send`, so the address is a
+/// `usize` like `IoSubmission::ptr_addr`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IoVecDescriptor {
+    base_addr: usize,
+    len: usize,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<IoVecDescriptor>() == std::mem::size_of::<libc::iovec>());
+    assert!(std::mem::align_of::<IoVecDescriptor>() == std::mem::align_of::<libc::iovec>());
+};
+
+fn tail_iovecs(ptr: usize, prefix: usize, tail: &AlignedBuf) -> Arc<Vec<IoVecDescriptor>> {
+    Arc::new(vec![
+        IoVecDescriptor {
+            base_addr: ptr,
+            len: prefix,
+        },
+        IoVecDescriptor {
+            base_addr: tail.as_ptr() as usize,
+            len: tail.len,
+        },
+    ])
+}
+
 /// Source description for one prepared io_uring write.
 ///
 /// Fields:
 /// - `ptr_addr`: Address to submit, either the caller buffer or the bounce
 /// - `bounce`: Bounce buffer that must stay alive until the write completes
 /// - `fixed_buffer_idx`: Registered fixed-buffer index, cleared when bouncing
+/// - `iovecs`: Direct prefix and owned tail descriptors, submitted instead of
+///   `ptr_addr` when set
 struct PreparedWriteBuffer {
     ptr_addr: usize,
     bounce: Option<Arc<AlignedBuf>>,
     fixed_buffer_idx: Option<u16>,
+    iovecs: Option<Arc<Vec<IoVecDescriptor>>>,
 }
 
 // Report whether `len` bytes starting at `ptr_addr + offset` are all zero.
@@ -771,6 +802,11 @@ fn buffer_range_is_zero(ptr_addr: usize, offset: usize, len: usize) -> bool {
 // keeps the fixed-buffer zero-copy path. A bounce buffer is used when the
 // source is shorter than `total_len`, its padding tail is not already zero, or
 // O_DIRECT requires an aligned address. The source buffer is never modified.
+//
+// An aligned O_DIRECT source with less than one block of padding bounces only
+// its final block and submits the source prefix alongside it as an iovec.
+// `use_uring_cmd` disables this split because an NVMe command takes one buffer.
+#[allow(clippy::too_many_arguments)]
 fn prepare_iouring_write_buffer(
     ptr_addr: usize,
     cap: usize,
@@ -779,6 +815,7 @@ fn prepare_iouring_write_buffer(
     use_odirect: bool,
     alignment: usize,
     fixed_buffer_idx: Option<u16>,
+    use_uring_cmd: bool,
 ) -> PyResult<PreparedWriteBuffer> {
     if cap < payload_len {
         return Err(PyValueError::new_err(format!(
@@ -803,6 +840,43 @@ fn prepare_iouring_write_buffer(
             ptr_addr,
             bounce: None,
             fixed_buffer_idx,
+            iovecs: None,
+        });
+    }
+
+    if use_odirect
+        && !use_uring_cmd
+        && !needs_alignment_bounce
+        && has_padding
+        && total_len - payload_len < alignment
+        && total_len.is_multiple_of(alignment)
+    {
+        let prefix = payload_len / alignment * alignment;
+        let tail_payload = payload_len - prefix;
+        let bounce = Arc::new(AlignedBuf::new(alignment, alignment)?);
+        // SAFETY: the source covers payload_len and the tail covers alignment.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (ptr_addr as *const u8).add(prefix),
+                bounce.as_mut_ptr(),
+                tail_payload,
+            );
+            std::ptr::write_bytes(
+                bounce.as_mut_ptr().add(tail_payload),
+                0,
+                alignment - tail_payload,
+            );
+        }
+        let iovecs = (prefix > 0).then(|| tail_iovecs(ptr_addr, prefix, &bounce));
+        return Ok(PreparedWriteBuffer {
+            ptr_addr: if prefix > 0 {
+                ptr_addr
+            } else {
+                bounce.as_ptr() as usize
+            },
+            bounce: Some(bounce),
+            fixed_buffer_idx: None,
+            iovecs,
         });
     }
 
@@ -823,7 +897,196 @@ fn prepare_iouring_write_buffer(
         ptr_addr: bounce_arc.as_ptr() as usize,
         bounce: Some(bounce_arc),
         fixed_buffer_idx: None,
+        iovecs: None,
     })
+}
+
+/// Destination description for one prepared io_uring read.
+///
+/// Fields match the `IoSubmission` fields of the same names.
+struct PreparedReadBuffer {
+    ptr_addr: usize,
+    fixed_buffer_idx: Option<u16>,
+    iovecs: Option<Arc<Vec<IoVecDescriptor>>>,
+    bounce: Option<Arc<AlignedBuf>>,
+    original_ptr: Option<usize>,
+    payload_len: Option<usize>,
+}
+
+// Prepare one batched io_uring read into a caller buffer of `cap` bytes.
+//
+// `payload_len` is the number of bytes the caller accepts and must not exceed
+// `cap`; bounce copy-back writes only that range. An aligned buffer covering
+// `total_len` is read directly. An aligned O_DIRECT buffer with less than one
+// block of padding reads its prefix directly and bounces only the final block;
+// `use_uring_cmd` disables this split because an NVMe command takes one buffer.
+// Otherwise the whole transfer is bounced. The caller keeps the buffer alive.
+#[allow(clippy::too_many_arguments)]
+fn prepare_iouring_read_buffer(
+    ptr: usize,
+    cap: usize,
+    payload_len: usize,
+    total_len: usize,
+    use_odirect: bool,
+    use_uring_cmd: bool,
+    alignment: usize,
+    fixed_idx: Option<u16>,
+) -> PyResult<PreparedReadBuffer> {
+    let aligned = !(use_odirect || use_uring_cmd) || ptr.is_multiple_of(alignment);
+    if aligned && cap >= total_len {
+        return Ok(PreparedReadBuffer {
+            ptr_addr: ptr,
+            fixed_buffer_idx: fixed_idx,
+            iovecs: None,
+            bounce: None,
+            original_ptr: None,
+            payload_len: None,
+        });
+    }
+    let prefix = if use_odirect
+        && !use_uring_cmd
+        && aligned
+        && payload_len < total_len
+        && total_len - payload_len < alignment
+        && total_len.is_multiple_of(alignment)
+    {
+        payload_len / alignment * alignment
+    } else {
+        0
+    };
+    let bounce = Arc::new(AlignedBuf::new(total_len - prefix, alignment)?);
+    let iovecs = (prefix > 0).then(|| tail_iovecs(ptr, prefix, &bounce));
+    Ok(PreparedReadBuffer {
+        ptr_addr: if prefix > 0 {
+            ptr
+        } else {
+            bounce.as_ptr() as usize
+        },
+        fixed_buffer_idx: None,
+        iovecs,
+        bounce: Some(bounce),
+        original_ptr: Some(ptr + prefix),
+        payload_len: Some(payload_len - prefix),
+    })
+}
+
+fn copy_from_bounce_buffer(bounce: &AlignedBuf, orig_ptr: usize, payload_len: usize) {
+    // SAFETY: the submission retains the destination and a bounce covering
+    // payload_len until its terminal completion.
+    unsafe {
+        libc::memcpy(
+            orig_ptr as *mut libc::c_void,
+            bounce.as_ptr() as *const libc::c_void,
+            payload_len,
+        );
+    }
+}
+
+/// Advance a positive short regular-I/O completion for resubmission.
+/// Returns false for terminal completions and NVMe command status results.
+fn prepare_short_iouring_retry(sub: &mut IoSubmission, result: i32) -> bool {
+    if result <= 0 || result as usize >= sub.len || sub.nvme_cmd_data.is_some() {
+        return false;
+    }
+    let transferred = result as usize;
+    sub.offset += transferred as u64;
+    sub.len -= transferred;
+    if let Some(vectors) = sub.iovecs.as_mut() {
+        // The kernel no longer reads these descriptors after the CQE.
+        // `make_mut` copies them if another clone still shares them. Tail
+        // copy-back waits for the final completion.
+        let vectors = Arc::make_mut(vectors);
+        let mut remaining = transferred;
+        let mut consumed = 0;
+        for vector in vectors.iter_mut() {
+            if remaining < vector.len {
+                vector.base_addr += remaining;
+                vector.len -= remaining;
+                break;
+            }
+            remaining -= vector.len;
+            consumed += 1;
+        }
+        vectors.drain(..consumed);
+        return true;
+    }
+    if sub.is_write || sub.bounce.is_none() {
+        sub.ptr_addr += transferred;
+    }
+    if !sub.is_write {
+        if let (Some(bounce), Some(original), Some(payload)) =
+            (sub.bounce.as_ref(), sub.original_ptr, sub.payload_len)
+        {
+            copy_from_bounce_buffer(bounce, original, transferred.min(payload));
+            sub.original_ptr = Some(original + transferred);
+            sub.payload_len = Some(payload.saturating_sub(transferred));
+        }
+    }
+    true
+}
+
+// Finish an operation after retries have been handled by the worker.
+fn handle_completion_result(
+    sub: &mut IoSubmission,
+    cqe_result: i32,
+    is_shutdown: bool,
+) -> PyResult<()> {
+    let is_uring_cmd = sub.nvme_cmd_data.is_some();
+
+    if cqe_result < 0 {
+        let code = -cqe_result;
+        let _ = sub.bounce.take();
+        Err(PyOSError::new_err((code, "io_uring I/O error")))
+    } else if is_uring_cmd {
+        // Non-zero result indicates NVMe command error
+        if cqe_result != 0 {
+            let code = cqe_result;
+            let _ = sub.bounce.take();
+            Err(PyOSError::new_err((code, "io_uring_cmd NVMe error")))
+        } else {
+            // io_uring_cmd successful completion (result == 0)
+            // For reads with bounce buffer, copy data back to original buffer
+            if !sub.is_write {
+                if let (Some(bounce), Some(orig_ptr), Some(payload_len)) =
+                    (sub.bounce.take(), sub.original_ptr, sub.payload_len)
+                {
+                    copy_from_bounce_buffer(&bounce, orig_ptr, payload_len);
+                }
+            } else {
+                let _ = sub.bounce.take();
+            }
+            Ok(())
+        }
+    } else {
+        // Regular io_uring read/write
+        let bytes_transferred = cqe_result as usize;
+        if bytes_transferred < sub.len {
+            if is_shutdown {
+                // Short read/write during shutdown: fail the request
+                let _ = sub.bounce.take();
+                Err(PyRuntimeError::new_err(
+                    "io_uring worker shutting down: short I/O during shutdown",
+                ))
+            } else {
+                // A zero-byte completion cannot make progress.
+                let _ = sub.bounce.take();
+                Err(PyRuntimeError::new_err("short io_uring transfer"))
+            }
+        } else {
+            // Full completion
+            // For reads with bounce buffer, copy data back to original buffer
+            if !sub.is_write {
+                if let (Some(bounce), Some(orig_ptr), Some(payload_len)) =
+                    (sub.bounce.take(), sub.original_ptr, sub.payload_len)
+                {
+                    copy_from_bounce_buffer(&bounce, orig_ptr, payload_len);
+                }
+            } else {
+                let _ = sub.bounce.take();
+            }
+            Ok(())
+        }
+    }
 }
 
 // Acquire a Python buffer view with the requested mutability.
@@ -1103,9 +1366,10 @@ impl Drop for UringNotify {
 /// - `is_write`: true for write, false for read
 /// - `completion`: Shared completion primitive for signaling result
 /// - `fixed_buffer_idx`: Index into registered fixed buffers (if using zero-copy)
+/// - `iovecs`: Owned prefix/tail descriptors, never combined with a fixed index
 /// - `bounce`: optional bounce buffer when O_DIRECT requires alignment.
-/// - `original_ptr`: For reads with bounce buffer, the original destination pointer.
-/// - `payload_len`: For reads with bounce buffer, the actual payload length to copy back.
+/// - `original_ptr`: For reads with bounce buffer, the destination address for copy-back.
+/// - `payload_len`: For reads with bounce buffer, the number of bytes to copy back.
 /// - `batch_id`: The batch ID this submission belongs to (for per-batch tracking)
 /// - `nvme_cmd_data`: Optional NVMe command for io_uring_cmd submission
 #[derive(Clone)]
@@ -1117,6 +1381,7 @@ struct IoSubmission {
     is_write: bool,
     completion: Arc<IoCompletion>,
     fixed_buffer_idx: Option<u16>,
+    iovecs: Option<Arc<Vec<IoVecDescriptor>>>,
     bounce: Option<std::sync::Arc<AlignedBuf>>,
     original_ptr: Option<usize>,        // For bounce buffer reads
     payload_len: Option<usize>,         // For bounce buffer reads
@@ -1324,6 +1589,7 @@ impl Default for IoSubmission {
             is_write: false,
             completion: Arc::new(IoCompletion::new()),
             fixed_buffer_idx: None,
+            iovecs: None,
             bounce: None,
             original_ptr: None,
             payload_len: None,
@@ -1598,89 +1864,6 @@ impl RawBlockDevice {
             let batch_in_flight_clone = Arc::clone(&batch_in_flight);
             let ring_size = iouring_queue_depth;
 
-            // Helper function to copy data from bounce buffer to original buffer
-            fn copy_from_bounce_buffer(bounce: &AlignedBuf, orig_ptr: usize, payload_len: usize) {
-                unsafe {
-                    libc::memcpy(
-                        orig_ptr as *mut libc::c_void,
-                        bounce.as_ptr() as *const libc::c_void,
-                        payload_len,
-                    );
-                }
-            }
-
-            // Helper function to handle completion result and set IoCompletion
-            // Returns Ok(()) for successful completion, Err for errors
-            // Note: Short I/O resubmission for regular I/O is handled BEFORE calling this function
-            // in the main completion loop. This function only handles:
-            // - Full completions
-            // - Errors (negative results)
-            // - Short I/O during shutdown (cannot resubmit)
-            fn handle_completion_result(
-                sub: &mut IoSubmission,
-                cqe_result: i32,
-                is_shutdown: bool,
-            ) -> PyResult<()> {
-                let is_uring_cmd = sub.nvme_cmd_data.is_some();
-
-                if cqe_result < 0 {
-                    let code = -cqe_result;
-                    let _ = sub.bounce.take();
-                    Err(PyOSError::new_err((code, "io_uring I/O error")))
-                } else if is_uring_cmd {
-                    // Non-zero result indicates NVMe command error
-                    if cqe_result != 0 {
-                        let code = cqe_result;
-                        let _ = sub.bounce.take();
-                        Err(PyOSError::new_err((code, "io_uring_cmd NVMe error")))
-                    } else {
-                        // io_uring_cmd successful completion (result == 0)
-                        // For reads with bounce buffer, copy data back to original buffer
-                        if !sub.is_write {
-                            if let (Some(bounce), Some(orig_ptr), Some(payload_len)) =
-                                (sub.bounce.take(), sub.original_ptr, sub.payload_len)
-                            {
-                                copy_from_bounce_buffer(&bounce, orig_ptr, payload_len);
-                            }
-                        } else {
-                            let _ = sub.bounce.take();
-                        }
-                        Ok(())
-                    }
-                } else {
-                    // Regular io_uring read/write
-                    let bytes_transferred = cqe_result as usize;
-                    if bytes_transferred < sub.len {
-                        if is_shutdown {
-                            // Short read/write during shutdown: fail the request
-                            let _ = sub.bounce.take();
-                            Err(PyRuntimeError::new_err(
-                                "io_uring worker shutting down: short I/O during shutdown",
-                            ))
-                        } else {
-                            // This should never happen
-                            let _ = sub.bounce.take();
-                            Err(PyRuntimeError::new_err(
-                                "Unexpected short I/O: internal error",
-                            ))
-                        }
-                    } else {
-                        // Full completion
-                        // For reads with bounce buffer, copy data back to original buffer
-                        if !sub.is_write {
-                            if let (Some(bounce), Some(orig_ptr), Some(payload_len)) =
-                                (sub.bounce.take(), sub.original_ptr, sub.payload_len)
-                            {
-                                copy_from_bounce_buffer(&bounce, orig_ptr, payload_len);
-                            }
-                        } else {
-                            let _ = sub.bounce.take();
-                        }
-                        Ok(())
-                    }
-                }
-            }
-
             // Helper function to decrement in-flight counts and notify condition variables
             fn decrement_in_flight(
                 in_flight_count: &Arc<AtomicU64>,
@@ -1760,7 +1943,18 @@ impl RawBlockDevice {
                     }
                 } else {
                     // Regular read/write operations
-                    let sqe = if sub.is_write {
+                    let sqe = if let Some(iovecs) = &sub.iovecs {
+                        let vectors = iovecs.as_ptr().cast::<libc::iovec>();
+                        if sub.is_write {
+                            opcode::Writev::new(Fd(sub.fd), vectors, iovecs.len() as u32)
+                                .offset(sub.offset)
+                                .build()
+                        } else {
+                            opcode::Readv::new(Fd(sub.fd), vectors, iovecs.len() as u32)
+                                .offset(sub.offset)
+                                .build()
+                        }
+                    } else if sub.is_write {
                         if let Some(idx) = sub.fixed_buffer_idx {
                             opcode::WriteFixed::new(
                                 Fd(sub.fd),
@@ -1851,44 +2045,7 @@ impl RawBlockDevice {
                                         let batch_id = sub.batch_id;
                                         let cqe_result = cqe.result();
 
-                                        // Handle short I/O with resubmission (only for regular I/O, not io_uring_cmd)
-                                        if cqe_result > 0
-                                            && (cqe_result as usize) < sub.len
-                                            && sub.nvme_cmd_data.is_none()
-                                        {
-                                            let bytes_transferred = cqe_result as usize;
-                                            // Update offset and length for resubmission
-                                            sub.offset += bytes_transferred as u64;
-                                            sub.len -= bytes_transferred;
-                                            // Update buffer pointer for writes and direct reads
-                                            if sub.is_write || sub.bounce.is_none() {
-                                                sub.ptr_addr += bytes_transferred;
-                                            }
-                                            // For read with bounce buffer, copy partial data back
-                                            if !sub.is_write {
-                                                if let (
-                                                    Some(bounce),
-                                                    Some(orig_ptr),
-                                                    Some(payload_len),
-                                                ) = (
-                                                    sub.bounce.as_ref(),
-                                                    sub.original_ptr,
-                                                    sub.payload_len,
-                                                ) {
-                                                    copy_from_bounce_buffer(
-                                                        bounce,
-                                                        orig_ptr,
-                                                        bytes_transferred.min(payload_len),
-                                                    );
-                                                    sub.original_ptr =
-                                                        Some(orig_ptr + bytes_transferred);
-                                                    sub.payload_len = Some(
-                                                        payload_len
-                                                            .saturating_sub(bytes_transferred),
-                                                    );
-                                                }
-                                            }
-                                            // Re-insert into in_flight with updated values
+                                        if prepare_short_iouring_retry(&mut sub, cqe_result) {
                                             // Don't decrement in_flight_count since we're resubmitting
                                             in_flight.insert(user_data, sub.clone());
                                             // Push a new SQE for the remaining data
@@ -1944,44 +2101,7 @@ impl RawBlockDevice {
                                         let batch_id = sub.batch_id;
                                         let cqe_result = cqe.result();
 
-                                        // Handle short I/O with resubmission (only for regular I/O, not io_uring_cmd)
-                                        if cqe_result > 0
-                                            && (cqe_result as usize) < sub.len
-                                            && sub.nvme_cmd_data.is_none()
-                                        {
-                                            let bytes_transferred = cqe_result as usize;
-                                            // Update offset and length for resubmission
-                                            sub.offset += bytes_transferred as u64;
-                                            sub.len -= bytes_transferred;
-                                            // Update buffer pointer for writes and direct reads
-                                            if sub.is_write || sub.bounce.is_none() {
-                                                sub.ptr_addr += bytes_transferred;
-                                            }
-                                            // For read with bounce buffer, copy partial data back
-                                            if !sub.is_write {
-                                                if let (
-                                                    Some(bounce),
-                                                    Some(orig_ptr),
-                                                    Some(payload_len),
-                                                ) = (
-                                                    sub.bounce.as_ref(),
-                                                    sub.original_ptr,
-                                                    sub.payload_len,
-                                                ) {
-                                                    copy_from_bounce_buffer(
-                                                        bounce,
-                                                        orig_ptr,
-                                                        bytes_transferred.min(payload_len),
-                                                    );
-                                                    sub.original_ptr =
-                                                        Some(orig_ptr + bytes_transferred);
-                                                    sub.payload_len = Some(
-                                                        payload_len
-                                                            .saturating_sub(bytes_transferred),
-                                                    );
-                                                }
-                                            }
-                                            // Re-insert into in_flight with updated values
+                                        if prepare_short_iouring_retry(&mut sub, cqe_result) {
                                             // Don't decrement in_flight_count since we're resubmitting
                                             in_flight.insert(user_data, sub.clone());
                                             // Push a new SQE for the remaining data
@@ -2669,6 +2789,7 @@ impl RawBlockDevice {
                     use_odirect,
                     alignment,
                     fixed_idx,
+                    use_uring_cmd,
                 )?;
 
                 // Build NVMe command data
@@ -2696,6 +2817,7 @@ impl RawBlockDevice {
                     is_write: true,
                     completion: comp.clone(),
                     fixed_buffer_idx: prepared.fixed_buffer_idx,
+                    iovecs: prepared.iovecs,
                     bounce: prepared.bounce,
                     original_ptr: None,
                     payload_len: None,
@@ -2937,6 +3059,7 @@ impl RawBlockDevice {
                 is_write: false,
                 completion: comp.clone(),
                 fixed_buffer_idx: fixed_idx,
+                iovecs: None,
                 bounce: None,
                 original_ptr: None,
                 payload_len: None,
@@ -2969,6 +3092,7 @@ impl RawBlockDevice {
                 is_write: false,
                 completion: comp.clone(),
                 fixed_buffer_idx: None,
+                iovecs: None,
                 bounce: Some(bounce_arc),
                 original_ptr: Some(ptr as usize),
                 payload_len: Some(payload_len),
@@ -3075,83 +3199,60 @@ impl RawBlockDevice {
             None
         };
 
-        let placement_id_u16 = placement_id.map(placement_id_to_u16).transpose()?;
-        let prepared = prepare_iouring_write_buffer(
-            ptr as usize,
-            cap,
-            payload_len,
-            total_len,
-            self.use_odirect,
-            align,
-            fixed_idx,
-        )?;
-
-        let res = if prepared.bounce.is_none() {
-            let comp = Arc::new(IoCompletion::new());
-            let sub = IoSubmission {
-                fd: self.fd,
-                offset,
-                len: total_len,
-                ptr_addr: prepared.ptr_addr,
-                is_write: true,
-                completion: comp.clone(),
-                fixed_buffer_idx: prepared.fixed_buffer_idx,
-                bounce: None,
-                original_ptr: None,
-                payload_len: None,
-                batch_id: 0,
-                nvme_cmd_data: self._build_nvme_cmd_data(
-                    if placement_id_u16.is_some() { 0x2 } else { 0x0 },
-                    placement_id_u16.unwrap_or(0),
-                )?,
-            };
-            if let Err(error) = enqueue_if_running(
-                self.queue.as_ref().expect("queue must exist"),
-                self.shutdown.as_ref().expect("shutdown must exist"),
-                &self.in_flight_count,
-                sub,
-            ) {
+        let preparation = (|| {
+            let placement_id_u16 = placement_id.map(placement_id_to_u16).transpose()?;
+            let prepared = prepare_iouring_write_buffer(
+                ptr as usize,
+                cap,
+                payload_len,
+                total_len,
+                self.use_odirect,
+                align,
+                fixed_idx,
+                self.use_uring_cmd,
+            )?;
+            let command = self._build_nvme_cmd_data(
+                if placement_id_u16.is_some() { 0x2 } else { 0x0 },
+                placement_id_u16.unwrap_or(0),
+            )?;
+            Ok::<_, PyErr>((prepared, command))
+        })();
+        let (prepared, nvme_cmd_data) = match preparation {
+            Ok(prepared) => prepared,
+            Err(error) => {
                 release_pybuffer(view);
                 return Err(error);
             }
-            if let Some(batch_ready) = &self.batch_ready {
-                batch_ready.signal_producer();
-            }
-            py.allow_threads(move || comp.wait())
-        } else {
-            let bounce = prepared.bounce;
-            let comp = Arc::new(IoCompletion::new());
-            let sub = IoSubmission {
-                fd: self.fd,
-                offset,
-                len: total_len,
-                ptr_addr: prepared.ptr_addr,
-                is_write: true,
-                completion: comp.clone(),
-                fixed_buffer_idx: None,
-                bounce,
-                original_ptr: None,
-                payload_len: Some(payload_len),
-                batch_id: 0,
-                nvme_cmd_data: self._build_nvme_cmd_data(
-                    if placement_id_u16.is_some() { 0x2 } else { 0x0 },
-                    placement_id_u16.unwrap_or(0),
-                )?,
-            };
-            if let Err(error) = enqueue_if_running(
-                self.queue.as_ref().expect("queue must exist"),
-                self.shutdown.as_ref().expect("shutdown must exist"),
-                &self.in_flight_count,
-                sub,
-            ) {
-                release_pybuffer(view);
-                return Err(error);
-            }
-            if let Some(batch_ready) = &self.batch_ready {
-                batch_ready.signal_producer();
-            }
-            py.allow_threads(move || comp.wait())
         };
+        let comp = Arc::new(IoCompletion::new());
+        let sub = IoSubmission {
+            fd: self.fd,
+            offset,
+            len: total_len,
+            ptr_addr: prepared.ptr_addr,
+            is_write: true,
+            completion: comp.clone(),
+            fixed_buffer_idx: prepared.fixed_buffer_idx,
+            iovecs: prepared.iovecs,
+            bounce: prepared.bounce,
+            original_ptr: None,
+            payload_len: None,
+            batch_id: 0,
+            nvme_cmd_data,
+        };
+        if let Err(error) = enqueue_if_running(
+            self.queue.as_ref().expect("queue must exist"),
+            self.shutdown.as_ref().expect("shutdown must exist"),
+            &self.in_flight_count,
+            sub,
+        ) {
+            release_pybuffer(view);
+            return Err(error);
+        }
+        if let Some(batch_ready) = &self.batch_ready {
+            batch_ready.signal_producer();
+        }
+        let res = py.allow_threads(move || comp.wait());
 
         release_pybuffer(view);
         res?;
@@ -3281,7 +3382,6 @@ impl RawBlockDevice {
             let mut submissions: Vec<(IoSubmission, Arc<IoCompletion>)> = Vec::with_capacity(n);
 
             // Per-item bounce decision mirrors `read_uring`.
-            let needs_align = use_odirect || use_uring_cmd;
             for i in 0..n {
                 let total_len = total_lens[i];
                 let offset = offsets[i];
@@ -3306,47 +3406,30 @@ impl RawBlockDevice {
                     )));
                 }
 
-                let ptr_aligned = if needs_align {
-                    ptrs[i].is_multiple_of(alignment)
-                } else {
-                    true
-                };
-                let use_bounce = !ptr_aligned || cap < total_len;
-
+                let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                let prepared = prepare_iouring_read_buffer(
+                    ptrs[i],
+                    cap,
+                    cap.min(total_len),
+                    total_len,
+                    use_odirect,
+                    use_uring_cmd,
+                    alignment,
+                    fixed_idx,
+                )?;
                 let comp = Arc::new(IoCompletion::new());
-
-                let (ptr_addr, fixed_idx, bounce_opt, original_ptr_opt, payload_len_opt) =
-                    if use_bounce {
-                        let bounce = AlignedBuf::new(total_len, alignment)?;
-                        let bounce_arc = Arc::new(bounce);
-                        let bounce_ptr = bounce_arc.as_mut_ptr() as usize;
-                        // Copy-back bounded by caller capacity.
-                        let payload_len = std::cmp::min(cap, total_len);
-                        (
-                            bounce_ptr,
-                            None,
-                            Some(bounce_arc),
-                            Some(ptrs[i]),
-                            Some(payload_len),
-                        )
-                    } else {
-                        // Fixed buffers are pre-registered with io_uring,
-                        // enabling true zero-copy I/O.
-                        let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
-                        (ptrs[i], fixed_idx, None, None, None)
-                    };
-
                 let sub = IoSubmission {
                     fd,
                     offset,
                     len: total_len,
-                    ptr_addr,
-                    is_write: false, // read operation
+                    ptr_addr: prepared.ptr_addr,
+                    is_write: false,
                     completion: comp.clone(),
-                    fixed_buffer_idx: fixed_idx,
-                    bounce: bounce_opt,
-                    original_ptr: original_ptr_opt,
-                    payload_len: payload_len_opt,
+                    fixed_buffer_idx: prepared.fixed_buffer_idx,
+                    iovecs: prepared.iovecs,
+                    bounce: prepared.bounce,
+                    original_ptr: prepared.original_ptr,
+                    payload_len: prepared.payload_len,
                     batch_id,
                     nvme_cmd_data: nvme_cmd_data.clone(),
                 };

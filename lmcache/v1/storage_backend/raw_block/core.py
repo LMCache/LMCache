@@ -869,6 +869,11 @@ class RawBlockCore:
     ) -> list[bool]:
         """Load raw-block payloads into caller-provided memory objects.
 
+        A load may write destination bytes past the stored payload, up to the
+        padded transfer length, but never past the destination buffer. A failed
+        load may leave the destination partially written, so callers must use
+        only objects whose result is ``True``.
+
         Args:
             encoded_keys: Ordered encoded raw-block keys to load.
             objs: Destination memory objects. Buffers must remain valid until
@@ -925,7 +930,6 @@ class RawBlockCore:
                         payload_len=payload_len,
                         total_len=total_len,
                         buffer_len=len(buf),
-                        zero_tail=False,
                     )
                     if direct_view is not None:
                         read_buffer = direct_view
@@ -1225,8 +1229,6 @@ class RawBlockCore:
         payload_len: int,
         total_len: int,
         buffer_len: int,
-        *,
-        zero_tail: bool,
     ) -> Optional[memoryview]:
         """Build an aligned memoryview for direct O_DIRECT I/O when possible.
 
@@ -1235,7 +1237,6 @@ class RawBlockCore:
             payload_len: Logical payload length in bytes.
             total_len: I/O length after any O_DIRECT padding.
             buffer_len: Available buffer length in bytes.
-            zero_tail: Whether to zero any padded tail bytes before writing.
 
         Returns:
             A direct memoryview over the allocation, or None when the memory
@@ -1268,8 +1269,6 @@ class RawBlockCore:
         try:
             raw = (ctypes.c_ubyte * view_len).from_address(ptr)
             view = memoryview(raw)
-            if zero_tail and total_len > payload_len and view_len >= total_len:
-                ctypes.memset(ptr + payload_len, 0, total_len - payload_len)
             return view
         except Exception:
             return None
@@ -1322,7 +1321,6 @@ class RawBlockCore:
                 payload_len=payload_len,
                 total_len=total_len,
                 buffer_len=len(buf),
-                zero_tail=True,
             )
             if direct_view is not None:
                 buf = direct_view
@@ -1343,6 +1341,29 @@ class RawBlockCore:
         if total_len % self.block_align != 0:
             raise ValueError("io_uring_cmd requires aligned transfer lengths")
 
+    def _uring_cmd_tail_prefix(
+        self, view: memoryview, payload_len: int, total_len: int
+    ) -> int | None:
+        """Return the aligned prefix length to transfer directly from ``view``.
+
+        Returns ``None`` when the view is read-only or non-contiguous (ctypes
+        reads the address only from a writable contiguous buffer), is not
+        aligned to ``block_align``, or when ``total_len`` is not
+        ``payload_len`` rounded up to the next block. Callers then stage the
+        whole transfer.
+        """
+        if (
+            view.readonly
+            or not view.c_contiguous
+            or not 0 < payload_len < total_len
+            or total_len != round_up(payload_len, self.block_align)
+        ):
+            return None
+        ptr = ctypes.addressof(ctypes.c_ubyte.from_buffer(view))
+        if ptr % self.block_align:
+            return None
+        return payload_len // self.block_align * self.block_align
+
     def _write_uring_cmd_buffers(
         self,
         offsets: Sequence[int],
@@ -1352,6 +1373,10 @@ class RawBlockCore:
         placement_ids: Sequence[PlacementId] | None = None,
     ) -> None:
         """Write buffers as bounded NVMe raw-command chunks.
+
+        Aligned inputs with less than one block of padding use direct prefix
+        chunks and an owned zero-padded tail. Sources are never modified and are
+        kept alive until the batch completes.
 
         Args:
             offsets: Device offsets for each logical write.
@@ -1392,25 +1417,37 @@ class RawBlockCore:
             self._validate_uring_cmd_chunk(offset, total_len)
 
             view = self._byte_view(buf)
-            if len(view) < total_len:
-                if len(view) < payload_len:
-                    raise ValueError("input buffer shorter than payload_len")
+            if len(view) < payload_len or total_len < payload_len:
+                raise ValueError("input buffer or transfer shorter than payload_len")
+            # Sub-block payloads have no direct prefix to inspect or split.
+            prefix = (
+                self._uring_cmd_tail_prefix(view, payload_len, total_len)
+                if payload_len > self.block_align
+                else None
+            )
+            segments: list[tuple[int, memoryview]]
+            if prefix is not None:
+                tail = self._allocate_aligned_buffer(total_len - prefix)
+                tail[: payload_len - prefix] = view[prefix:payload_len]
+                segments = [(0, view[:prefix]), (prefix, tail)]
+            elif len(view) < total_len:
                 padded = self._allocate_aligned_buffer(total_len)
                 padded[:payload_len] = view[:payload_len]
-                view = padded
+                segments = [(0, padded)]
             else:
-                view = view[:total_len]
-            keepalive.append(view)
-
-            cursor = 0
-            while cursor < total_len:
-                chunk_len = min(self.max_data_transfer_size, total_len - cursor)
-                self._validate_uring_cmd_chunk(offset + cursor, chunk_len)
-                chunk_offsets.append(offset + cursor)
-                chunk_buffers.append(view[cursor : cursor + chunk_len])
-                chunk_lens.append(chunk_len)
-                chunk_placement_ids.append(placement_id)
-                cursor += chunk_len
+                segments = [(0, view[:total_len])]
+            for segment_offset, segment in segments:
+                keepalive.append(segment)
+                cursor = 0
+                while cursor < len(segment):
+                    chunk_len = min(self.max_data_transfer_size, len(segment) - cursor)
+                    chunk_offset = offset + segment_offset + cursor
+                    self._validate_uring_cmd_chunk(chunk_offset, chunk_len)
+                    chunk_offsets.append(chunk_offset)
+                    chunk_buffers.append(segment[cursor : cursor + chunk_len])
+                    chunk_lens.append(chunk_len)
+                    chunk_placement_ids.append(placement_id)
+                    cursor += chunk_len
 
         if not chunk_offsets:
             return
@@ -1440,6 +1477,10 @@ class RawBlockCore:
     ) -> list[bool]:
         """Read buffers as bounded NVMe raw-command chunks.
 
+        For aligned destinations shorter than the padded transfer, only the
+        final block is staged. It is copied back only after every chunk of that
+        logical read succeeds; a failed read may still modify the direct prefix.
+
         Args:
             offsets: Device offsets for each logical read.
             buffers: Destination buffers.
@@ -1464,6 +1505,7 @@ class RawBlockCore:
         for logical_idx, (offset, buf, payload_len, total_len) in enumerate(
             zip(offsets, buffers, payload_lens, total_lens, strict=True)
         ):
+            chunk_start = len(chunk_offsets)
             try:
                 offset = int(offset)
                 payload_len = int(payload_len)
@@ -1471,34 +1513,83 @@ class RawBlockCore:
                 self._validate_uring_cmd_chunk(offset, total_len)
 
                 dst = self._byte_view(buf)
-                if len(dst) < total_len:
-                    if len(dst) < payload_len:
-                        raise ValueError("output buffer shorter than payload_len")
-                    target = self._allocate_aligned_buffer(total_len)
-                    copy_back = True
-                else:
-                    target = dst[:total_len]
-                    copy_back = False
-                keepalive.append(target)
+                if len(dst) < payload_len or total_len < payload_len:
+                    raise ValueError(
+                        "output buffer or transfer shorter than payload_len"
+                    )
+                needs_staging = len(dst) < total_len
+                prefix = (
+                    self._uring_cmd_tail_prefix(dst, payload_len, total_len)
+                    if needs_staging and self.block_align < payload_len
+                    else None
+                )
+                if prefix is None:
+                    if needs_staging:
+                        target = self._allocate_aligned_buffer(total_len)
+                    else:
+                        target = dst
+                    cursor = 0
+                    max_chunk_len = (
+                        self.max_data_transfer_size
+                        if self.max_data_transfer_size > 0
+                        else total_len
+                    )
+                    while cursor < total_len:
+                        chunk_len = min(max_chunk_len, total_len - cursor)
+                        chunk_offset = offset + cursor
+                        self._validate_uring_cmd_chunk(chunk_offset, chunk_len)
+                        chunk_offsets.append(chunk_offset)
+                        chunk_buffers.append(target[cursor : cursor + chunk_len])
+                        chunk_lens.append(chunk_len)
+                        chunk_logical_indices.append(logical_idx)
+                        cursor += chunk_len
+                    # chunk_buffers owns the views through submission and wait.
+                    if needs_staging:
+                        copy_back_targets[logical_idx] = (dst, target, payload_len)
+                    continue
+                target = self._allocate_aligned_buffer(total_len - prefix)
+                segments = [(0, dst[:prefix]), (prefix, target)]
+                copy_target = (
+                    dst[prefix:payload_len],
+                    target,
+                    payload_len - prefix,
+                )
 
-                cursor = 0
                 max_chunk_len = (
                     self.max_data_transfer_size
                     if self.max_data_transfer_size > 0
                     else total_len
                 )
-                while cursor < total_len:
-                    chunk_len = min(max_chunk_len, total_len - cursor)
-                    self._validate_uring_cmd_chunk(offset + cursor, chunk_len)
-                    chunk_offsets.append(offset + cursor)
-                    chunk_buffers.append(target[cursor : cursor + chunk_len])
+                planned: list[tuple[int, memoryview, int]] = []
+                for segment_offset, segment in segments:
+                    cursor = 0
+                    while cursor < len(segment):
+                        chunk_len = min(max_chunk_len, len(segment) - cursor)
+                        chunk_offset = offset + segment_offset + cursor
+                        self._validate_uring_cmd_chunk(chunk_offset, chunk_len)
+                        planned.append(
+                            (
+                                chunk_offset,
+                                segment[cursor : cursor + chunk_len],
+                                chunk_len,
+                            )
+                        )
+                        cursor += chunk_len
+
+                # Append chunks only after the whole logical read is planned.
+                for chunk_offset, chunk, chunk_len in planned:
+                    chunk_offsets.append(chunk_offset)
+                    chunk_buffers.append(chunk)
                     chunk_lens.append(chunk_len)
                     chunk_logical_indices.append(logical_idx)
-                    cursor += chunk_len
-
-                if copy_back:
-                    copy_back_targets[logical_idx] = (dst, target, payload_len)
+                    keepalive.append(chunk)
+                copy_back_targets[logical_idx] = copy_target
             except Exception:
+                # No submission occurs until all logical requests are prepared.
+                del chunk_offsets[chunk_start:]
+                del chunk_buffers[chunk_start:]
+                del chunk_lens[chunk_start:]
+                del chunk_logical_indices[chunk_start:]
                 continue
 
         if not chunk_offsets:
