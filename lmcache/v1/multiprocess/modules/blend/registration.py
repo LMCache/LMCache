@@ -85,7 +85,7 @@ class RegistrationMixin:
                 offset 0). MLA models must declare this: a single-plane MLA
                 row is indistinguishable from a key-only cache to the legacy
                 inference and would get its content dims rotated.
-            group_head_size: Per-engine-group scatter head size. Empty means
+            group_head_size: Per-engine-group logical head size. Empty means
                 ``head_size`` covers every group.
             kv_quant: fp8 flavor of the paged KV (``"fp8_e4m3"`` /
                 ``"fp8_e5m2"``); empty for unquantized KV.

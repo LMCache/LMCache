@@ -86,7 +86,7 @@ def _build_plan_engine_and_context(
             slots_per_block=4,
             engine_group_idx=0,
             engine_kv_format=lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-            shape_desc=SimpleNamespace(nb=100),
+            shape_desc=SimpleNamespace(nb=100, hs=head_size),
         )
         for _ in range(num_groups)
     ]
