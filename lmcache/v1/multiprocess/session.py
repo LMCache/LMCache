@@ -27,13 +27,6 @@ from lmcache.v1.periodic_thread import (
 logger = init_logger(__name__)
 
 
-def _same_tokens_until(key: IPCCacheServerKey, lookup_key: IPCCacheServerKey) -> bool:
-    """Whether ``key`` and ``lookup_key`` agree on the tokens up to
-    ``key.end``. Only the retrieved range must match the lookup: the
-    caller may rewrite the request tail after it (blend reorder)."""
-    return key.token_ids[: key.end] == lookup_key.token_ids[: key.end]
-
-
 @dataclass
 class Session:
     """Tracks accumulated token IDs and computed chunk hashes for a request.
@@ -222,7 +215,8 @@ class Session:
             same_lookup = (
                 key.model_name == lookup_key.model_name
                 and key.world_size == lookup_key.world_size
-                and _same_tokens_until(key, lookup_key)
+                # Only the retrieved range must match; the tail may be rewritten.
+                and key.token_ids[: key.end] == lookup_key.token_ids[: key.end]
                 and key.cache_salt == lookup_key.cache_salt
                 and key.start >= lookup_key.start
                 and key.end <= lookup_key.end
@@ -267,7 +261,8 @@ class Session:
             same_lookup = (
                 key.model_name == lookup_key.model_name
                 and key.world_size == lookup_key.world_size
-                and _same_tokens_until(key, lookup_key)
+                # Only the retrieved range must match; the tail may be rewritten.
+                and key.token_ids[: key.end] == lookup_key.token_ids[: key.end]
                 and key.cache_salt == lookup_key.cache_salt
                 and key.start >= lookup_key.start
                 and key.end <= lookup_key.end
