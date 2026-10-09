@@ -130,6 +130,7 @@ def test_store_owner_callback_round_trip(
     cache_context.kv_layer_groups_manager = SimpleNamespace(
         num_object_groups=2,
         num_kernel_groups=2,
+        kernel_groups=[SimpleNamespace(recurrent_state=False) for _ in range(2)],
         object_groups=[ObjectGroupInfo(kernel_group_indices=[i]) for i in range(2)],
     )
     entry = SimpleNamespace(

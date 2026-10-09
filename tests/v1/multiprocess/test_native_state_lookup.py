@@ -110,7 +110,7 @@ class _PresenceStorage:
             self.locked[key] -= read_locks
 
 
-def _groups() -> KVLayerGroupsManager:
+def _groups(separate: bool = True) -> KVLayerGroupsManager:
     # State aliases truncate each checkpoint to its payload; the row stride
     # still includes neighboring bytes in the checkpoint allocation.
     page = torch.empty(32, 1, 64, dtype=torch.uint8)
@@ -146,10 +146,14 @@ def _groups() -> KVLayerGroupsManager:
             ),
         ],
         lmcache_tokens_per_chunk=CHUNK,
-        separate_object_groups=True,
+        separate_object_groups=separate,
     )
-    assert manager.get_attn_desc().num_chunks_in_sw == [-1, 1]
-    assert manager.get_attn_desc().group_kinds == ("attention", "recurrent")
+    if separate:
+        assert manager.get_attn_desc().num_chunks_in_sw == [-1, 1]
+        assert manager.get_attn_desc().group_kinds == ("attention", "recurrent")
+    else:
+        # One shared full-attention object holds PAGE and STATE.
+        assert manager.get_attn_desc().num_chunks_in_sw == [-1]
     assert [g.shape_desc.block_stride_elems for g in manager.kernel_groups] == [
         64,
         128,
@@ -214,6 +218,17 @@ def _lookup(
         if missing_page_chunk is not None:
             present.discard(per_group[0][missing_page_chunk])
 
+    return _run_lookup(manager, present, key, world_size)
+
+
+def _run_lookup(
+    manager: KVLayerGroupsManager,
+    present: set[ObjectKey],
+    key: IPCCacheServerKey,
+    world_size: int,
+) -> tuple[int, _PresenceStorage, LookupModule, IPCCacheServerKey]:
+    """Look ``key`` up against storage holding exactly ``present``."""
+    hasher = TokenHasher(CHUNK)
     registry = LayoutDescRegistry()
     layouts = {
         gid: MemoryLayoutDesc(
@@ -278,6 +293,52 @@ def test_sparse_state_selects_latest_joint_endpoint(
         ]
         assert {k.chunk_hash for k in state_keys} == {expected_hash}
     module.free_lookup_locks(key, tp_size=len(endpoints))
+    assert not +storage.locked
+
+
+@pytest.mark.parametrize("separate", [True, False])
+def test_prefix_hit_never_ends_on_a_chunk_without_a_state_page(
+    separate: bool,
+) -> None:
+    """One store of chunks [0, 6): one-block steps snapshot a state at chunks
+    0-2, then a three-block step snapshots one only at chunk 5. A query sharing
+    five chunks must stop after chunk 2, the last state it can restore, whether
+    PAGE and STATE are separate objects or share one."""
+    manager = _groups(separate)
+    hashes = TokenHasher(CHUNK).compute_chunk_hashes(list(TOKENS))
+    stored = 6
+    state_ids = [1, 2, 3, -1, -1, 4]
+    masks = all_null_chunk_masks(
+        [list(range(stored * 4)), state_ids, state_ids],
+        manager.object_groups,
+        [4, 1, 1],
+        stored,
+        -1,
+        recurrent_kernel_groups={
+            kg
+            for kg, group in enumerate(manager.kernel_groups)
+            if group.recurrent_state
+        },
+    )
+    per_group = ipc_key_to_object_keys(
+        replace(_key(), worker_id=0),
+        hashes[:stored],
+        list(range(len(manager.object_groups))),
+    )
+    present = {
+        obj_key
+        for group_id, mask in enumerate(masks)
+        for obj_key, skipped in zip(per_group[group_id], mask, strict=True)
+        if not skipped
+    }
+
+    hit, storage, module, key = _run_lookup(
+        manager, present, replace(_key(), end=5 * CHUNK), world_size=1
+    )
+
+    assert hit == 3
+    assert state_ids[hit - 1] != -1
+    module.free_lookup_locks(key, tp_size=1)
     assert not +storage.locked
 
 

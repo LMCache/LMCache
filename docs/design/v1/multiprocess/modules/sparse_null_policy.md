@@ -43,9 +43,23 @@ uses `--separate-object-groups` explicitly.
 ## Store and retrieve behavior
 
 `all_null_chunk_masks` compares every block ID against the configured global
-sentinel. A chunk is skipped for an object group only when all block IDs in all
-of that object's kernel groups equal the sentinel. Skipped objects are neither
-reserved nor committed.
+sentinel. A chunk is skipped for an object group when all block IDs in all of
+that object's kernel groups equal the sentinel, or when any of its
+recurrent-state kernel groups (`KernelGroupInfo.recurrent_state`) has only
+sentinel block IDs in that chunk. Skipped objects are neither reserved nor
+committed.
+
+The second rule matters when PAGE and STATE share an object (no
+`--separate-object-groups`). vLLM's `--mamba-cache-mode align` writes a state
+only at the end of a scheduler step, so a step longer than one block leaves
+the null block in the state slot of every earlier chunk while their attention
+blocks are real. Without the rule those chunks were committed with the null
+block as their state, and a prefix hit ending on one restored it: the engine
+continued from a state it never computed. With the rule they are skipped, so a
+shared object's prefix lookup stops before the first chunk without a state.
+That is correct but keeps less than separated groups, whose lookup can skip
+over stateless chunks to the next state; hybrid recurrent models should still
+run with `--separate-object-groups`.
 
 LMCache already skips these copies in the transfer layer. On store, skipped
 objects become `None` entries and the D2H loop does not launch a kernel for
@@ -68,6 +82,7 @@ contract or per-kernel transfer masks and are outside this integration.
 - `tests/v1/multiprocess/test_lmcache_driven_transfer_skip.py` covers global
   null masks and reuse of the existing sparse-copy skip path.
 - `tests/v1/multiprocess/test_native_state_lookup.py` covers sparse PAGE/STATE
-  lookup with explicit object-group separation.
+  lookup with explicit object-group separation, and checks that a prefix hit
+  never ends on a chunk without a state, with or without separation.
 - `tests/v1/multiprocess/test_native_state_alias_gpu.py` covers a real
   two-process device transfer and is skipped when no GPU is available.

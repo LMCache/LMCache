@@ -3,7 +3,8 @@
 ``lmcache_driven_transfer``.
 
 - ``all_null_chunk_masks`` (store side): mark chunks whose block ids are all the
-  null block so ``store`` never commits them.
+  null block, or whose recurrent-state pages are, so ``store`` never commits
+  them.
 - ``retrieve`` (read side): read/transfer only each object group's in-window
   suffix, None-padding the skipped prefix so the transfer path is unchanged.
 """
@@ -96,6 +97,47 @@ def test_object_group_null_only_when_all_its_kernel_groups_null():
     assert masks == [[True, False]]
 
 
+def test_shared_object_skips_chunks_without_a_state_page():
+    # Attention (kernel group 0) and recurrent state (kernel group 1) share one
+    # object, as without --separate-object-groups. Align-mode Mamba snapshots a
+    # state only at a step's last block (chunk 3 here); chunks 0-2 must not be
+    # committed, or their objects would carry the null block as the state.
+    masks = all_null_chunk_masks(
+        block_ids=[[1, 2, 3, 4], [0, 0, 0, 9]],
+        object_groups=[_og([0, 1])],
+        blocks_per_chunk=[1, 1],
+        num_chunks=4,
+        recurrent_kernel_groups={1},
+    )
+    assert masks == [[True, True, True, False]]
+
+
+def test_any_recurrent_kernel_group_without_a_state_skips_the_chunk():
+    # Two recurrent kernel groups in one object: the object needs both pages,
+    # so one null page is enough to skip the chunk.
+    masks = all_null_chunk_masks(
+        block_ids=[[0, 5], [6, 7]],
+        object_groups=[_og([0, 1])],
+        blocks_per_chunk=[1, 1],
+        num_chunks=2,
+        recurrent_kernel_groups={0, 1},
+    )
+    assert masks == [[True, False]]
+
+
+def test_recurrent_kernel_groups_leave_separated_groups_unchanged():
+    # With separated object groups the attention object stays dense and the
+    # state object keeps its endpoint-only presence, exactly as before.
+    masks = all_null_chunk_masks(
+        block_ids=[[1, 2, 3], [0, 0, 5]],
+        object_groups=[_og([0]), _og([1])],
+        blocks_per_chunk=[1, 1],
+        num_chunks=3,
+        recurrent_kernel_groups={1},
+    )
+    assert masks == [[False, False, False], [True, True, False]]
+
+
 def test_zero_is_real_with_negative_null_block() -> None:
     masks = all_null_chunk_masks([[0, 0]], [_og([0])], [1], 2, -1)
     assert masks == [[False, False]]
@@ -111,6 +153,7 @@ def _staging_context(
     object_groups: list[ObjectGroupInfo],
     *,
     window_tokens: int = 2,
+    recurrent_kernel_groups: frozenset[int] = frozenset(),
 ) -> MagicMock:
     """Build a CPU-only context that captures staged block IDs."""
     context = MagicMock()
@@ -118,6 +161,10 @@ def _staging_context(
     context.calculate_num_blocks.side_effect = lambda tokens, group: tokens
     context.kv_layer_groups_manager = SimpleNamespace(
         num_kernel_groups=num_kernel_groups,
+        kernel_groups=[
+            SimpleNamespace(recurrent_state=kg in recurrent_kernel_groups)
+            for kg in range(num_kernel_groups)
+        ],
         object_groups=object_groups,
         get_subchunk_sw_size_tokens=lambda group: window_tokens,
     )
@@ -206,7 +253,9 @@ def _make_checkpoint_module(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[LMCacheDrivenTransferModule, MagicMock, list, list]:
     module, reads, transfers = _make_module(monkeypatch, 2, [-1, 1])
-    context = _staging_context(3, [_og([0]), _og([1, 2])])
+    context = _staging_context(
+        3, [_og([0]), _og([1, 2])], recurrent_kernel_groups=frozenset({1, 2})
+    )
     context.kv_layer_groups_manager.num_object_groups = 2
     context.kv_layer_groups_manager.get_attn_desc = lambda: SimpleNamespace(
         num_chunks_in_sw=[-1, 1], group_kinds=("attention", "recurrent")
@@ -248,6 +297,39 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
         [-1, -1, 0, 1],
         [-1, -1, 2, 3],
     ]
+
+
+def test_store_skips_shared_objects_without_a_state_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One object holds the attention page (kernel group 0) and the recurrent
+    # state (kernel group 1). Only chunk 1 has a state snapshot, so only its
+    # object is reserved; the null block is never stored as chunk 0's state.
+    module, _reads, transfers = _make_module(monkeypatch, 2, [-1])
+    context = _staging_context(2, [_og([0, 1])], recurrent_kernel_groups=frozenset({1}))
+    context.kv_layer_groups_manager.num_object_groups = 1
+    module.get_and_touch_context_entry(1).cache_context = context
+    module.context.chunk_size = 2
+    module.context.storage_manager.reserve_write.side_effect = lambda keys, layout: {
+        key: MagicMock(get_size=MagicMock(return_value=10)) for key in keys
+    }
+    monkeypatch.setattr(
+        mod, "downsample_and_stage_block_ids", downsample_and_stage_block_ids
+    )
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a, **kw: object())
+
+    _handle, ok, stored = module.store_with_chunk_mask(
+        SimpleNamespace(request_id="req", worker_id=1),
+        1,
+        [[4, 5, 6, 7], [0, 0, 0, 3]],
+        b"producer",
+    )
+
+    assert ok
+    reserve = cast(MagicMock, module.context.storage_manager.reserve_write)
+    assert [c.args[0] for c in reserve.call_args_list] == [["g0c1"]]
+    assert [obj is None for obj in transfers[0][1]] == [True, False]
+    assert stored == [False, True]
 
 
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
