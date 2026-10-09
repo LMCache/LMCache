@@ -3,7 +3,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Collection, Sequence
 import threading
 import time
 
@@ -87,8 +87,9 @@ def all_null_chunk_masks(
     blocks_per_chunk: Sequence[int],
     num_chunks: int,
     null_block_id: int = 0,
+    recurrent_kernel_groups: Collection[int] = (),
 ) -> list[list[bool]]:
-    """Mark, per object group, the chunks whose engine block ids are all null.
+    """Mark, per object group, the chunks that hold no valid object to store.
 
     A chunk is null for an object group when every block ID of every kernel
     group equals the server's null marker. Align-mode Mamba/linear
@@ -96,6 +97,16 @@ def all_null_chunk_masks(
     is real, so every earlier chunk is null. These chunks must not be stored --
     the null block carries no valid KV, and object keys are content hashes, so
     committing them would serve garbage to a later prefix hit.
+
+    A chunk is also null for an object group when one of its recurrent-state
+    kernel groups (``recurrent_kernel_groups``) has only null block IDs in the
+    chunk, even if its other kernel groups are real. This happens when one
+    object holds both attention KV and recurrent state (object groups not
+    separated): the attention pages are real at every chunk, but the state
+    page is real only where the engine took a state snapshot. Storing
+    the chunk would commit the null block as that chunk's state, and a later
+    prefix hit ending there would restore it. Skipping it makes the prefix
+    lookup stop before the first chunk without a state page.
 
     Args:
         block_ids: Raw per-kernel-group engine block ids (before any downsample),
@@ -106,23 +117,30 @@ def all_null_chunk_masks(
         num_chunks: Number of chunks in the request.
         null_block_id: Server-wide block ID denoting absent data. Defaults to
             the historical vLLM null block zero.
+        recurrent_kernel_groups: Kernel-group indices whose pages hold
+            recurrent state snapshots. Empty for models without such groups.
 
     Returns:
-        ``mask[g][i]`` is True iff chunk ``i`` is all-null for object group ``g``.
+        ``mask[g][i]`` is True iff chunk ``i`` must not be stored for object
+        group ``g``.
     """
+
+    def _chunk_is_null(kg: int, i: int) -> bool:
+        bpc = blocks_per_chunk[kg]
+        return all(
+            block == null_block_id for block in block_ids[kg][i * bpc : (i + 1) * bpc]
+        )
+
     masks: list[list[bool]] = []
     for group in object_groups:
+        recurrent_in_group = [
+            kg for kg in group.kernel_group_indices if kg in recurrent_kernel_groups
+        ]
         chunk_null: list[bool] = []
         for i in range(num_chunks):
-            is_null = True
-            for kg in group.kernel_group_indices:
-                bpc = blocks_per_chunk[kg]
-                if any(
-                    block != null_block_id
-                    for block in block_ids[kg][i * bpc : (i + 1) * bpc]
-                ):
-                    is_null = False
-                    break
+            is_null = all(_chunk_is_null(kg, i) for kg in group.kernel_group_indices)
+            if not is_null:
+                is_null = any(_chunk_is_null(kg, i) for kg in recurrent_in_group)
             chunk_null.append(is_null)
         masks.append(chunk_null)
     return masks
@@ -682,16 +700,22 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 )
 
             # Chunks whose block ids are all the null block (e.g. align-mode
-            # Mamba chunks holding no real state) carry no valid KV and must not
-            # be committed. Computed on the raw block ids before downsampling
-            # mutates them.
+            # Mamba chunks holding no real state), or whose recurrent-state
+            # pages are, carry no valid object and must not be committed.
+            # Computed on the raw block ids before downsampling mutates them.
             null_block_id = self._ctx.null_block_id
+            groups_manager = cache_context.kv_layer_groups_manager
             skipped_chunks = all_null_chunk_masks(
                 gpu_block_ids,
-                cache_context.kv_layer_groups_manager.object_groups,
+                groups_manager.object_groups,
                 blocks_per_chunk,
                 num_chunks,
                 null_block_id,
+                recurrent_kernel_groups={
+                    kg
+                    for kg, group in enumerate(groups_manager.kernel_groups)
+                    if group.recurrent_state
+                },
             )
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
