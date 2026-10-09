@@ -61,7 +61,14 @@ workload reports whenever ``--lmcache-url`` is given.
 
 Without blending, use ``docs_per_request=1``.  Each prompt is then
 ``[system prompt][document]``, which is prefix-stable, so repeat draws of the
-same document hit cache normally.
+same document hit cache normally.  When an LMCache URL is supplied the
+workload checks the server's engine and refuses a multi-document run against
+a non-blend server.
+
+The hit-token counters come from whichever family the engine populates: the
+default engine updates ``lmcache_mp_lookup_*``, the blend engine
+``lmcache_blend_lookup_*``.  Both are read, and the workload warns rather
+than silently omitting the figure when neither moved.
 
 Warm-up
 -------
@@ -416,8 +423,17 @@ def sample_requests(
 # so it reads the same whether the cache is serving most of each prompt or
 # almost none of it.  Hit tokens per request is the figure that separates
 # those two cases.
-_HIT_TOKENS = "lmcache_mp_lookup_hit_tokens_total"
-_REQUESTED_TOKENS = "lmcache_mp_lookup_requested_tokens_total"
+# Two engines, two counter families. The default engine updates the ``mp``
+# pair; the blend engine leaves those at zero and updates the ``blend`` pair
+# instead. Read both and use whichever moved -- reading only one makes the
+# metric vanish in exactly the mode this workload is documented to require.
+_COUNTER_FAMILIES = (
+    ("lmcache_mp_lookup_hit_tokens_total", "lmcache_mp_lookup_requested_tokens_total"),
+    (
+        "lmcache_blend_lookup_hit_tokens_total",
+        "lmcache_blend_lookup_requested_tokens_total",
+    ),
+)
 
 
 def scrape_lookup_tokens(metrics_url: str) -> dict[str, float]:
@@ -444,22 +460,32 @@ def scrape_lookup_tokens(metrics_url: str) -> dict[str, float]:
     except (urllib.error.URLError, OSError, ValueError) as exc:
         logger.debug("Could not scrape %s: %s", url, exc)
         return totals
+    wanted: dict[str, tuple[int, str]] = {}
+    for index, (hit_name, requested_name) in enumerate(_COUNTER_FAMILIES):
+        wanted[hit_name] = (index, "hit")
+        wanted[requested_name] = (index, "requested")
+
+    families: list[dict[str, float]] = [
+        {"hit": 0.0, "requested": 0.0} for _ in _COUNTER_FAMILIES
+    ]
     for line in body.splitlines():
         if line.startswith("#"):
             continue
         name, _, value = line.partition(" ")
-        base = name.split("{", 1)[0]
-        key = (
-            "hit"
-            if base == _HIT_TOKENS
-            else ("requested" if base == _REQUESTED_TOKENS else "")
-        )
-        if not key:
+        target = wanted.get(name.split("{", 1)[0])
+        if target is None:
             continue
+        index, key = target
         try:
-            totals[key] += float(value)
+            families[index][key] += float(value)
         except ValueError:
             continue
+
+    # Whichever family actually moved is the one this engine populates. If
+    # both did, prefer the larger: a stale zeroed family cannot outweigh a
+    # live one, and summing them would double-count.
+    live = max(families, key=lambda f: f["requested"])
+    totals.update(live)
     return totals
 
 
@@ -647,14 +673,30 @@ class KVTierPressureWorkload(BaseWorkload):
 
         Returns:
             Entries to append to the metric section.  Empty when no LMCache
-            URL was supplied or the counters were unavailable.
+            URL was supplied or the counters never moved; both cases warn,
+            because a silently missing figure is worse than an absent one --
+            this is the number that reveals a run which cached nothing.
         """
         if not self._lmcache_url:
+            logger.warning(
+                "No --lmcache-url: cache-hit tokens will not be reported. "
+                "That is the figure which distinguishes a run reusing most "
+                "of each prompt from one reusing almost none, so the storage "
+                "read share alone cannot tell you whether this run worked."
+            )
             return []
         after = scrape_lookup_tokens(self._lmcache_url)
         hit = after["hit"] - self._lookup_at_boundary["hit"]
         requested = after["requested"] - self._lookup_at_boundary["requested"]
         if requested <= 0:
+            logger.warning(
+                "LMCache at %s reported no lookup tokens over the measured "
+                "phase, so cache-hit tokens cannot be reported. Neither the "
+                "mp nor the blend counter family moved; the server may not "
+                "expose them. Do not read the storage read share as evidence "
+                "that the cache was reused.",
+                self._lmcache_url,
+            )
             return []
         per_request = hit / max(len(self._measured_groups), 1)
         return [

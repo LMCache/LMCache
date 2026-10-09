@@ -604,3 +604,116 @@ class TestHitTokenReporting:
         assert entries["requested_tokens_total"] == 2000
         assert entries["hit_tokens_per_request"] == pytest.approx(80.0)
         assert entries["hit_token_rate_pct"] == pytest.approx(40.0)
+
+
+class TestBlendCounterFamily:
+    """The blend engine populates a different counter family.
+
+    Reported by review: with CacheBlend on, the ``mp`` counters stay at zero
+    and ``blend`` ones move instead, so reading only ``mp`` made the metric
+    vanish in exactly the mode the docs require.
+    """
+
+    MP_ONLY = (
+        "lmcache_mp_lookup_hit_tokens_total 800.0\n"
+        "lmcache_mp_lookup_requested_tokens_total 2000.0\n"
+        "lmcache_blend_lookup_hit_tokens_total 0.0\n"
+        "lmcache_blend_lookup_requested_tokens_total 0.0\n"
+    )
+    BLEND_ONLY = (
+        "lmcache_mp_lookup_hit_tokens_total 0.0\n"
+        "lmcache_mp_lookup_requested_tokens_total 0.0\n"
+        "lmcache_blend_lookup_hit_tokens_total 6908.0\n"
+        "lmcache_blend_lookup_requested_tokens_total 7001.0\n"
+    )
+
+    def _scrape(self, body: str) -> dict[str, float]:
+        payload = MagicMock()
+        payload.read.return_value = body.encode()
+        payload.__enter__ = lambda self_: payload
+        payload.__exit__ = lambda self_, *a: False
+        with patch.object(ktp.urllib.request, "urlopen", return_value=payload):
+            return scrape_lookup_tokens("http://localhost:8080")
+
+    def test_default_engine_counters(self) -> None:
+        assert self._scrape(self.MP_ONLY) == {"hit": 800.0, "requested": 2000.0}
+
+    def test_blend_engine_counters(self) -> None:
+        """This is the case that silently reported nothing before."""
+        assert self._scrape(self.BLEND_ONLY) == {"hit": 6908.0, "requested": 7001.0}
+
+    def test_prefers_the_family_that_moved(self) -> None:
+        both = (
+            "lmcache_mp_lookup_hit_tokens_total 1.0\n"
+            "lmcache_mp_lookup_requested_tokens_total 2.0\n"
+            "lmcache_blend_lookup_hit_tokens_total 6908.0\n"
+            "lmcache_blend_lookup_requested_tokens_total 7001.0\n"
+        )
+        assert self._scrape(both)["requested"] == 7001.0
+
+    def test_neither_family_present(self) -> None:
+        assert self._scrape("lmcache_mp_l1_read_chunks_total 7.0\n") == {
+            "hit": 0.0,
+            "requested": 0.0,
+        }
+
+
+class TestBlendModeGuard:
+    """A non-blend server with docs_per_request > 1 must fail fast."""
+
+    def _args(self, docs: int) -> object:
+        # Standard
+        import argparse
+
+        return argparse.Namespace(
+            ktp_pool_size=100,
+            ktp_docs_per_request=docs,
+            ktp_context_length=64,
+            ktp_system_prompt_length=16,
+            ktp_num_requests=8,
+            ktp_overflow_factor=2.0,
+            ktp_access_skew=0.0,
+            ktp_num_inflight_requests=4,
+            ktp_max_output_length=1,
+            lmcache_url="http://localhost:8080",
+        )
+
+    def _config(self) -> MagicMock:
+        config = MagicMock()
+        config.workload = "kv-tier-pressure"
+        config.tokens_per_gb_kvcache = 6000
+        config.seed = 42
+        config.model = "fake-model"
+        return config
+
+    def _create(self, docs: int, blend: bool):
+        # First Party
+        from lmcache.cli.commands.bench.engine_bench import workloads as wl
+
+        with patch.object(wl, "server_is_blend", return_value=blend):
+            # the factory hardcodes vocab_size=8000
+            with patch.object(
+                ktp, "try_load_tokenizer", return_value=make_fake_tokenizer(8000)
+            ):
+                return wl.create_workload(
+                    self._config(),
+                    self._args(docs),
+                    _make_mock_sender(),
+                    MagicMock(),
+                    MagicMock(),
+                )
+
+    def test_rejects_multi_doc_on_a_non_blend_server(self) -> None:
+        with pytest.raises(ValueError, match="needs CacheBlend"):
+            self._create(docs=8, blend=False)
+
+    def test_error_names_the_workaround(self) -> None:
+        with pytest.raises(ValueError, match="--ktp-docs-per-request 1"):
+            self._create(docs=8, blend=False)
+
+    def test_allows_single_doc_on_a_non_blend_server(self) -> None:
+        """docs_per_request=1 keeps every prompt prefix-stable."""
+        assert self._create(docs=1, blend=False) is not None
+
+    def test_allows_multi_doc_on_a_blend_server(self) -> None:
+        assert self._create(docs=8, blend=True) is not None

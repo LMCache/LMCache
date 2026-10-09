@@ -15,6 +15,7 @@ import os
 from lmcache.cli.commands.bench.engine_bench.config import (
     EngineBenchConfig,
     resolve_l1_capacity_gb,
+    server_is_blend,
 )
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
 from lmcache.cli.commands.bench.engine_bench.request_sender import (
@@ -175,6 +176,32 @@ def create_workload(
                 l1_capacity_gb = resolve_l1_capacity_gb(lmcache_url)
             except RuntimeError as exc:
                 logger.warning("Could not read L1 capacity: %s", exc)
+        # Without blending, cache keys are prefix-chained, so a document is
+        # reused only when everything before it in the prompt also matches.
+        # These prompts concatenate a random subset in random order, so that
+        # almost never holds: the run writes a great deal to the storage tier
+        # and reads almost none of it back, while the storage read share still
+        # looks healthy. Refuse rather than produce a number that looks fine
+        # and means nothing.
+        if lmcache_url and args.ktp_docs_per_request > 1:
+            try:
+                blend = server_is_blend(lmcache_url)
+            except RuntimeError as exc:
+                logger.warning("Could not determine the server engine: %s", exc)
+            else:
+                if not blend:
+                    raise ValueError(
+                        f"kv-tier-pressure needs CacheBlend when "
+                        f"--ktp-docs-per-request is above 1, but the LMCache "
+                        f"server at {lmcache_url} is not running the blend "
+                        f"engine. Each request concatenates a random subset of "
+                        f"the pool in random order, which a prefix-chained "
+                        f"cache cannot reuse -- expect roughly 4% of each "
+                        f"prompt served from cache. Either start the server "
+                        f"with the blend engine, or pass "
+                        f"--ktp-docs-per-request 1, which keeps every prompt "
+                        f"prefix-stable and reuses normally."
+                    )
         ktp_workload_config = KVTierPressureConfig.resolve(
             pool_size=args.ktp_pool_size or 0,
             l1_capacity_gb=l1_capacity_gb,

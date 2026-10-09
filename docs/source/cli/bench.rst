@@ -425,6 +425,9 @@ cache and samples a subset into each request:
 
    Without blending, use ``--ktp-docs-per-request 1``. Each prompt is then
    ``[system prompt][document]``, which is prefix-stable and reuses normally.
+   When ``--lmcache-url`` is given the workload checks the server's engine and
+   refuses to start a multi-document run against a non-blend server, rather
+   than producing a result that looks reasonable and means nothing.
 
 ``--ktp-pool-size`` is what decides whether the storage tier is reached: the
 working set is ``pool_size x --ktp-context-length`` tokens, and only what

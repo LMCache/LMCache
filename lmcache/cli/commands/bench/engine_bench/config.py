@@ -177,6 +177,28 @@ def _find_model_meta(
     )
 
 
+def server_is_blend(lmcache_url: str) -> bool:
+    """Report whether the LMCache server is running the blend engine.
+
+    A CacheBlend deployment populates ``cb_gpu_context_meta`` in ``/status``
+    where the default engine populates ``cache_context_meta``; the
+    ``engine_type`` field also names it. Either signal is sufficient.
+
+    Args:
+        lmcache_url: URL of the LMCache HTTP server.
+
+    Returns:
+        True when the server reports the blend engine.
+
+    Raises:
+        RuntimeError: If the server is unreachable.
+    """
+    data = _fetch_lmcache_status(lmcache_url)
+    if data.get("cb_gpu_context_meta"):
+        return True
+    return "blend" in str(data.get("engine_type", "")).lower()
+
+
 def resolve_l1_capacity_gb(lmcache_url: str) -> float:
     """Query the LMCache server for the configured host-memory capacity.
 
