@@ -920,6 +920,24 @@ jobs:
                   "lmcache/standalone:${LATEST_TAG}-cu129-arm64"
                 docker buildx imagetools inspect "lmcache/standalone:${LATEST_TAG}-cu129"
 
+    # Build lmcache/sglang (SGLang release image + the LMCache wheel) for every
+    # published release, stable or RC. Separate from publish-image so an SGLang
+    # build failure never blocks the vLLM and standalone images.
+    publish-image-sglang:
+        name: Build SGLang image
+        if: |
+            needs.publish-pypi.result == 'success' &&
+            !cancelled() &&
+            github.repository_owner == 'LMCache' && github.event.action == 'published'
+        needs: [publish-pypi]
+        uses: ./.github/workflows/build_sglang_image.yml
+        with:
+            lmcache_version: ${{ github.ref_name }}
+            push: true
+        # Reusable workflows do not auto-inherit secrets.
+        secrets:
+          dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+
     # Build RC container image and push to DockerHub when:
     # - a new RC GitHub release is created (e.g. v0.4.8rc1)
     # Only pushes lmcache/vllm-openai:<tag> — does not touch latest or other image variants.
