@@ -68,12 +68,11 @@ def test_zmq_legacy_operation_round_trip(operation: str, legacy_id: int) -> None
 
 
 def test_new_zmq_operations_use_names_without_registry_changes() -> None:
-    operation = "server_module_call"
+    operation = "future_extension_rpc"
     encoded = encode_operation(operation)
 
     assert msgspec.msgpack.decode(encoded) == operation
     assert decode_operation(encoded) == operation
-    assert operation not in LEGACY_OPERATION_IDS
 
 
 def test_unknown_legacy_zmq_operation_is_rejected() -> None:

@@ -278,42 +278,6 @@ def parse_server_module_specs(raw_specs: Sequence[str]) -> list[ExtServerModuleS
     return specs
 
 
-def load_server_modules(
-    specs: Sequence[ExtServerModuleSpec],
-    *,
-    server_context: MPCacheServerContext,
-    mp_config: MPServerConfig,
-    coordinator_config: CoordinatorConfig,
-    built_modules: Sequence[EngineModule],
-) -> list[EngineModule]:
-    """Load out-of-tree server modules from configured factories.
-
-    Args:
-        specs: Dynamic module factories to load.
-        server_context: Shared server context passed to factories.
-        mp_config: Parsed multiprocess server configuration.
-        coordinator_config: Parsed coordinator configuration.
-        built_modules: Built-in modules assembled before plugin loading.
-
-    Returns:
-        Dynamically loaded modules, ordered by ``specs``.
-
-    Raises:
-        ImportError: If a plugin module cannot be imported.
-        AttributeError: If the configured factory is missing.
-        TypeError: If a factory is not callable or returns a non-module value.
-    """
-    return list(
-        load_server_module_components(
-            specs,
-            server_context=server_context,
-            mp_config=mp_config,
-            coordinator_config=coordinator_config,
-            built_modules=built_modules,
-        ).modules
-    )
-
-
 def load_server_module_components(
     specs: Sequence[ExtServerModuleSpec],
     *,
@@ -406,6 +370,8 @@ def register_grpc_services(
 ) -> None:
     """Register out-of-tree gRPC services exposed by server modules.
 
+    Module methods already listed in ``service_registrars`` are called once.
+
     Args:
         modules: Ordered server modules to inspect for a
             ``register_grpc_services(server)`` method.
@@ -417,7 +383,9 @@ def register_grpc_services(
         TypeError: If a module exposes a non-callable registrar attribute.
     """
     _call_transport_service_registrars(service_registrars, server)
-    _register_transport_services(modules, server, _GRPC_SERVICE_REGISTRAR)
+    _register_transport_services(
+        modules, server, _GRPC_SERVICE_REGISTRAR, service_registrars
+    )
 
 
 def register_zmq_services(
@@ -426,6 +394,8 @@ def register_zmq_services(
     service_registrars: Sequence[TransportServiceRegistrar] = (),
 ) -> None:
     """Register out-of-tree ZMQ services exposed by server modules.
+
+    Module methods already listed in ``service_registrars`` are called once.
 
     Args:
         modules: Ordered server modules to inspect for a
@@ -438,7 +408,9 @@ def register_zmq_services(
         TypeError: If a module exposes a non-callable registrar attribute.
     """
     _call_transport_service_registrars(service_registrars, server)
-    _register_transport_services(modules, server, _ZMQ_SERVICE_REGISTRAR)
+    _register_transport_services(
+        modules, server, _ZMQ_SERVICE_REGISTRAR, service_registrars
+    )
 
 
 def iter_server_module_handlers(
@@ -477,6 +449,7 @@ def _register_transport_services(
     modules: Sequence[object],
     server: Any,
     registrar_name: str,
+    explicit_registrars: Sequence[TransportServiceRegistrar],
 ) -> None:
     """Call optional transport service registrars exposed by modules."""
     for module in modules:
@@ -487,6 +460,8 @@ def _register_transport_services(
             raise TypeError(
                 f"{type(module).__name__}.{registrar_name} must be callable"
             )
+        if registrar in explicit_registrars:
+            continue
         cast(TransportServiceRegistrar, registrar)(server)
 
 

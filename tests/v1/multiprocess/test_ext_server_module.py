@@ -19,7 +19,6 @@ from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleSpec,
     build_server_module_router,
     load_server_module_components,
-    load_server_modules,
     parse_server_module_specs,
     register_grpc_services,
     register_zmq_services,
@@ -125,58 +124,6 @@ def test_parse_server_module_specs_accepts_object_and_list() -> None:
     assert specs[0].config == {"a": 1}
     assert specs[1].factory_name == "build_two"
     assert specs[2].factory_name == "build_server_modules"
-
-
-def test_load_server_modules_passes_context_and_accumulates_modules(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ctx = MagicMock(name="ctx")
-    built_module = MagicMock(name="built_module")
-    first_plugin = _FakePluginModule(ctx)
-    second_plugin = _FakePluginModule(ctx)
-    seen_contexts: list[ExtServerModuleBuildContext] = []
-
-    def factory(build_context: ExtServerModuleBuildContext):
-        seen_contexts.append(build_context)
-        if len(seen_contexts) == 1:
-            return first_plugin
-        return [second_plugin]
-
-    module_name = _install_fake_factory(monkeypatch, factory)
-    specs = [
-        ExtServerModuleSpec(module_name, config={"name": "first"}),
-        ExtServerModuleSpec(module_name, config={"name": "second"}),
-    ]
-
-    modules = load_server_modules(
-        specs,
-        server_context=ctx,
-        mp_config=MPServerConfig(),
-        coordinator_config=MagicMock(url=""),
-        built_modules=[built_module],
-    )
-
-    assert modules == [first_plugin, second_plugin]
-    assert seen_contexts[0].server_context is ctx
-    assert seen_contexts[0].config == {"name": "first"}
-    assert seen_contexts[0].modules == (built_module,)
-    assert seen_contexts[1].config == {"name": "second"}
-    assert seen_contexts[1].modules == (built_module, first_plugin)
-
-
-def test_load_server_modules_rejects_non_module_return(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module_name = _install_fake_factory(monkeypatch, lambda _: object())
-
-    with pytest.raises(TypeError, match="must return an EngineModule"):
-        load_server_modules(
-            [ExtServerModuleSpec(module_name)],
-            server_context=MagicMock(name="ctx"),
-            mp_config=MPServerConfig(),
-            coordinator_config=MagicMock(url=""),
-            built_modules=[],
-        )
 
 
 def test_load_server_module_components_accepts_service_only_return(
@@ -288,6 +235,28 @@ def test_transport_service_registrars_are_called() -> None:
 
     assert module.grpc_server is grpc_server
     assert module.zmq_server is zmq_server
+
+
+@pytest.mark.parametrize("transport", ["grpc", "zmq"])
+def test_explicit_module_service_registrar_is_called_once(transport: str) -> None:
+    calls: list[tuple[object, object]] = []
+
+    class ServiceModule:
+        def register_grpc_services(self, server: object) -> None:
+            calls.append((self, server))
+
+        def register_zmq_services(self, server: object) -> None:
+            calls.append((self, server))
+
+    explicit_module = ServiceModule()
+    implicit_module = ServiceModule()
+    server = object()
+    register = register_grpc_services if transport == "grpc" else register_zmq_services
+    registrar = getattr(explicit_module, f"register_{transport}_services")
+
+    register([explicit_module, implicit_module], server, [registrar])
+
+    assert calls == [(explicit_module, server), (implicit_module, server)]
 
 
 def test_transport_service_registrars_must_be_callable() -> None:
