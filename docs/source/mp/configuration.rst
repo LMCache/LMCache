@@ -147,6 +147,17 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - JSON string of extra key-value config forwarded to runtime
        plugins via ``LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG``. Example:
        ``'{"plugin.frontend.heartbeat_url": "http://localhost:5000/heartbeat"}'``.
+   * - ``--server-module``
+     - ``[]``
+     - JSON object describing an out-of-tree server-module factory to
+       load after the built-in modules. Repeatable; a single flag may
+       also carry a JSON list of specs. Each spec has ``module_path``
+       (required dotted import path), ``factory_name`` (optional,
+       defaults to ``build_server_modules``) and ``config`` (optional
+       plugin-specific object). Example:
+       ``'{"module_path":"my_pkg.server_module","factory_name":"build_server_modules","config":{"name":"demo"}}'``.
+       See :doc:`/developer_guide/extending_lmcache/server_modules` for
+       the factory contract and the ``SERVER_MODULE_CALL`` envelope.
    * - ``--script-allowed-imports``
      - ``[]``
      - Space-separated list of Python module names that scripts posted
