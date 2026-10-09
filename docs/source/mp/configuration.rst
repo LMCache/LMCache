@@ -354,6 +354,47 @@ single-L1 interface.
        DAX L2 adapter with the same ``device_path`` is registered, that
        adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
        size.
+   * - ``--l1-host-memory-backend``
+     - ``registered``
+     - ``registered`` pins anonymous memory with ``cudaHostRegister`` /
+       ``hipHostRegister``. ``gtt`` (ROCm only, lazy L1 only) allocates L1 as
+       non-migratable GTT memory; see *ROCm GTT L1* below.
+
+ROCm GTT L1
+~~~~~~~~~~~
+
+On ROCm, registered host memory stays movable: memory compaction or NUMA
+migration can move its pages at any time, and every migration evicts the
+LMCache server's GPU queues on all GPUs, stalling transfers for seconds.
+``--l1-host-memory-backend gtt`` allocates L1 with ``hipHostMalloc`` as
+driver-owned GTT memory, which the kernel cannot migrate.
+
+- Start the server with ``HSA_USERPTR_FOR_PAGED_MEM=0`` in its environment
+  (ROCm reads it once at startup). Without it the server refuses to start; it
+  never falls back to movable memory.
+- Set the same variable for vLLM: otherwise compaction moves vLLM's own
+  pinned buffers instead and stalls its workers. They then become GTT memory
+  too and use the same GTT capacity.
+- GTT memory is not charged to the container memory limit and does not show
+  in ``VmRSS``. Size L1 against host memory and the node's GTT capacity
+  (``/sys/class/drm/card*/device/mem_info_gtt_total``), shared by all
+  processes.
+- One GTT allocation must stay below 512 GiB, so L1 is built from several
+  segments; ``--l1-init-size-gb`` is allocated at startup and the rest in the
+  background.
+- Rejected at startup: P2P; L2 adapters that register L1 (``nixl_store``,
+  ``nixl_store_dynamic``, ``nixl_native``, ``mooncake_store`` with RDMA); and
+  direct I/O on L1, which fails with ``EFAULT`` on GTT pages (``fs`` /
+  ``fs_native`` with ``"use_odirect": true``, ``raw_block`` with
+  ``use_odirect`` or ``use_uring_cmd``). Buffered ``fs`` / ``fs_native`` work.
+
+.. code-block:: yaml
+
+   # Kubernetes: LMCache server and vLLM containers
+   env:
+     - name: HSA_USERPTR_FOR_PAGED_MEM
+       value: "0"
+   # server args: --l1-size-gb 1000 --l1-init-size-gb 1 --l1-host-memory-backend gtt
 
 GDS L1 Tier
 -----------

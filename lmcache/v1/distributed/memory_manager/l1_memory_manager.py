@@ -12,9 +12,17 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.segmented_memory_allocator import (
+    SegmentedMemoryAllocator,
+)
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryObj,
+)
+from lmcache.v1.platform.devices.rocm.gtt_host_memory import (
+    GTT_MAX_ALLOCATION_BYTES,
+    alloc_gtt_segment,
+    free_gtt_segment,
 )
 
 logger = init_logger(__name__)
@@ -51,6 +59,16 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
     Returns:
         MemoryAllocatorInterface: An instance of a memory allocator.
     """
+    if config.host_memory_backend == "gtt":
+        logger.info("L1 host memory backend: gtt")
+        return SegmentedMemoryAllocator(
+            config.init_size_in_bytes,
+            config.size_in_bytes,
+            GTT_MAX_ALLOCATION_BYTES - 1,
+            alloc_gtt_segment,
+            free_gtt_segment,
+            align_bytes=config.align_bytes,
+        )
     if config.use_lazy:
         logger.debug(
             "use lazy memory allocator, init size is %d bytes, "
@@ -192,17 +210,20 @@ class L1MemoryManager:
         used_size = total_size - free_size
         return used_size, total_size
 
-    def get_l1_memory_desc(self) -> L1MemoryDesc:
+    def get_l1_memory_desc(self) -> L1MemoryDesc | None:
         """
         Return an L1MemoryDesc describing the underlying memory buffer.
 
         Returns:
             Descriptor containing the final L1 arena and its stable-size
-            snapshot.
+            snapshot, or ``None`` for a segmented (GTT) L1, which has no
+            single region.
 
         Raises:
             NotImplementedError: If the allocator type does not support this operation.
         """
+        if isinstance(self._allocator, SegmentedMemoryAllocator):
+            return None
         if isinstance(self._allocator, MixedMemoryAllocator):
             buffer = self._allocator.buffer
             # POSIX SHM is file-backed and is not eligible for io_uring
@@ -233,6 +254,16 @@ class L1MemoryManager:
             align_bytes=self._align_bytes,
             stable_registration_size=stable_registration_size,
         )
+
+    def memory_region_count(self) -> int:
+        """Return the number of memory regions backing L1.
+
+        Returns:
+            The published segments of a segmented (GTT) L1, else 1.
+        """
+        if isinstance(self._allocator, SegmentedMemoryAllocator):
+            return self._allocator.memory_region_count()
+        return 1
 
     def close(self) -> None:
         """

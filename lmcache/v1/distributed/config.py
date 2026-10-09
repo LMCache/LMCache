@@ -23,8 +23,11 @@ from lmcache.v1.distributed.l2_adapters.config import (
     parse_args_to_l2_adapters_config,
 )
 from lmcache.v1.platform import current_device_spec
+from lmcache.v1.platform.devices.rocm.gtt_host_memory import check_gtt_environment
 
 logger = init_logger(__name__)
+
+L1HostMemoryBackend = Literal["registered", "gtt"]
 
 _L1ConfigT = TypeVar("_L1ConfigT", bound="L1ManagerConfig")
 
@@ -182,6 +185,30 @@ def requires_single_l1_memory_region(
     return None
 
 
+def check_gtt_l2_adapter(adapter_config: L2AdapterConfigBase) -> None:
+    """Reject an L2 adapter that cannot run on a gtt L1.
+
+    Args:
+        adapter_config: The adapter configuration, possibly wrapped.
+
+    Raises:
+        ValueError: If the adapter registers the L1 buffer, or does O_DIRECT /
+            NVMe passthrough I/O on it (``get_user_pages`` fails on GTT pages).
+    """
+    inner = unwrap_l2_adapter_config(adapter_config)
+    type_name = get_type_name_for_config(inner)
+    if (
+        requires_single_l1_memory_region(adapter_config) is not None
+        or type_name == "nixl_native"
+        or getattr(inner, "use_odirect", False)
+        or getattr(inner, "use_uring_cmd", False)
+    ):
+        raise ValueError(
+            f"L2 adapter {type_name} registers L1 memory or does direct I/O on "
+            "it, which --l1-host-memory-backend gtt does not support."
+        )
+
+
 def _check_hugepage_availability(size_in_bytes: int) -> None:
     """Config-time check that the 2 MiB hugepage pool has enough *free* pages
     to back an L1 buffer of ``size_in_bytes``.
@@ -311,8 +338,20 @@ class L1MemoryManagerConfig:
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
 
+    host_memory_backend: L1HostMemoryBackend = "registered"
+    """ ``registered`` pins anonymous memory; ``gtt`` (ROCm, lazy L1 only)
+    uses non-migratable GTT segments and needs HSA_USERPTR_FOR_PAGED_MEM=0. """
+
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
+
+        if self.host_memory_backend not in ("registered", "gtt"):
+            raise ValueError(
+                "host_memory_backend must be 'registered' or 'gtt', got "
+                f"{self.host_memory_backend!r}"
+            )
+        if self.host_memory_backend == "gtt":
+            self._validate_gtt()
 
         if self.devdax_path is not None:
             self.devdax_path = self.devdax_path.strip()
@@ -351,6 +390,14 @@ class L1MemoryManagerConfig:
                 "supported on the current backend. Disabling l1-use-lazy."
             )
             self.use_lazy = False
+
+    def _validate_gtt(self) -> None:
+        """Reject a gtt L1 that cannot work, before any memory is allocated."""
+        if current_device_spec.backend_name != "rocm":
+            raise ValueError("l1 host memory backend 'gtt' is only supported on ROCm")
+        if not self.use_lazy:
+            raise ValueError("l1 host memory backend 'gtt' requires --l1-use-lazy")
+        check_gtt_environment()
 
 
 @dataclass
@@ -517,7 +564,13 @@ class DRAML1ManagerConfig(L1ManagerConfig):
             defaults,
             read_ttl,
             write_ttl,
-            {"use_lazy", "init_size_gb", "shm_name", "use_hugepages"},
+            {
+                "use_lazy",
+                "init_size_gb",
+                "shm_name",
+                "use_hugepages",
+                "host_memory_backend",
+            },
         )
         use_lazy = _l1_bool(values, "use_lazy", True)
         hugepages = _l1_bool(values, "use_hugepages", False)
@@ -532,6 +585,9 @@ class DRAML1ManagerConfig(L1ManagerConfig):
             init_size_in_bytes=int(_l1_number(values, "init_size_gb", 20) * (1 << 30)),
             shm_name=shm_name,
             use_hugepages=hugepages,
+            host_memory_backend=cast(
+                L1HostMemoryBackend, values.get("host_memory_backend", "registered")
+            ),
         )
         if hugepages:
             _check_hugepage_availability(config.memory_config.size_in_bytes)
@@ -722,6 +778,11 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     for l1 in by_tag.values():
         if l1.gds_l1_config is not None and l1.memory_config.devdax_path:
             raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
+        if (
+            l1.gds_l1_config is not None
+            and l1.memory_config.host_memory_backend == "gtt"
+        ):
+            raise ValueError("gds-l1-path cannot be used with the gtt L1 backend")
     for adapter_config in config.l2_adapter_config.adapters:
         if adapter_config.affinity_tag not in by_tag:
             raise ValueError(
@@ -737,6 +798,8 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
                 "Hybrid DRAM + Device-DAX L1 cannot be used with L2 adapters "
                 f"that register a single L1 memory region: {adapter_name}"
             )
+        if memory.host_memory_backend == "gtt":
+            check_gtt_l2_adapter(adapter_config)
 
 
 def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
@@ -747,7 +810,7 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
 
     Returns:
         ``True`` if L1 is a single registerable memory region, ``False`` for
-        GDS L1 or Device-DAX L1.
+        GDS L1, Device-DAX L1 or GTT L1.
     """
     if len(config.l1_manager_configs) != 1:
         return False
@@ -755,6 +818,8 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
     if l1_config.gds_l1_config is not None:
         return False
     if l1_config.memory_config.devdax_path:
+        return False
+    if l1_config.memory_config.host_memory_backend == "gtt":
         return False
     return True
 
@@ -848,6 +913,15 @@ def add_storage_manager_args(
             'map. Set --no-l1-use-lazy and --shm-name "". '
             "If a DAX L2 adapter with the same device_path is registered, "
             "that adapter's max_dax_size_gb is used as L1 overflow size."
+        ),
+    )
+    memory_group.add_argument(
+        "--l1-host-memory-backend",
+        default="registered",
+        help=(
+            "'registered' (default) or 'gtt': ROCm only, lazy L1 backed by "
+            "non-migratable GTT memory; requires HSA_USERPTR_FOR_PAGED_MEM=0 "
+            "in the server environment."
         ),
     )
 
@@ -1026,6 +1100,7 @@ def parse_args_to_config(
             args.l1_size_gb is not None
             or args.gds_l1_path is not None
             or args.l1_devdax_path is not None
+            or getattr(args, "l1_host_memory_backend", "registered") != "registered"
         ):
             raise ValueError("Use either --l1-manager or legacy L1 flags")
         classes: dict[
@@ -1098,6 +1173,7 @@ def parse_args_to_config(
             align_bytes=args.l1_align_bytes,
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
+            host_memory_backend=getattr(args, "l1_host_memory_backend", "registered"),
         )
     else:
         memory_config = L1MemoryManagerConfig(
@@ -1108,6 +1184,7 @@ def parse_args_to_config(
             shm_name=shm_name,
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
+            host_memory_backend=getattr(args, "l1_host_memory_backend", "registered"),
         )
 
     gds_l1_config: GdsL1Config | None = None
