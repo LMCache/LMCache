@@ -112,14 +112,14 @@ class EventGateStats:
 class _StreamCursor:
     """Mutable form of :class:`InstanceStreamStats`.
 
-    ``dropped_baseline`` is the ``dropped_events`` of the last admitted
+    ``last_dropped_events`` is the ``dropped_events`` of the last admitted
     batch, or ``None`` until the gate knows it (a stream joined midway).
     """
 
     incarnation: int
     last_seq: int = 0
     gap_detected: bool = False
-    dropped_baseline: int | None = None
+    last_dropped_events: int | None = None
     missing_batches: int = 0
     events_dropped: int = 0
 
@@ -234,13 +234,13 @@ class EventGate:
         has nothing to compare, so a restarted server's stale L1 slice
         would be advertised forever.
 
-        The dropped-events baseline rides along, so a restarted
-        coordinator measures the next report against the last one instead
-        of losing a whole report to re-learning the baseline.
+        ``last_dropped_events`` rides along, so a restarted coordinator
+        measures the next report against the last one instead of losing a
+        whole report to re-learning it.
 
         Returns:
             ``{"cursors": {instance_id: (incarnation, last_seq,
-            gap_detected, dropped_baseline)}}``; ``dropped_baseline`` is
+            gap_detected, last_dropped_events)}}``; ``last_dropped_events`` is
             ``None`` when not yet known.
         """
         with self._lock:
@@ -250,7 +250,7 @@ class EventGate:
                         cursor.incarnation,
                         cursor.last_seq,
                         cursor.gap_detected,
-                        cursor.dropped_baseline,
+                        cursor.last_dropped_events,
                     )
                     for instance_id, cursor in self._cursors.items()
                 }
@@ -261,8 +261,8 @@ class EventGate:
 
         Args:
             state: A :meth:`capture` value. Cursors captured before the
-                dropped-events baseline existed hold three fields; they
-                restore with the baseline unknown.
+                ``last_dropped_events`` existed hold three fields; they
+                restore with it unknown.
 
         Raises:
             ValueError: If the gate already holds cursors -- a batch was
@@ -284,7 +284,7 @@ class EventGate:
                     incarnation=incarnation,
                     last_seq=last_seq,
                     gap_detected=gap_detected,
-                    dropped_baseline=fields[3] if len(fields) > 3 else None,
+                    last_dropped_events=fields[3] if len(fields) > 3 else None,
                 )
 
     def stats(self) -> EventGateStats:
@@ -328,8 +328,8 @@ class EventGate:
                 incarnation=batch.incarnation,
                 # A new incarnation, or a stream seen from its first batch,
                 # has dropped nothing yet; one joined midway has an unknown
-                # history, so its first report only sets the baseline.
-                dropped_baseline=0 if tracked or batch.seq == 1 else None,
+                # history, so its first report is only remembered.
+                last_dropped_events=0 if tracked or batch.seq == 1 else None,
             )
             self._cursors[batch.instance_id] = cursor
 
@@ -343,15 +343,15 @@ class EventGate:
             if tracked:
                 cursor.missing_batches += skipped
                 self._stats.batches_missing += skipped
-        if cursor.dropped_baseline is not None:
-            dropped = batch.dropped_events - cursor.dropped_baseline
+        if cursor.last_dropped_events is not None:
+            dropped = batch.dropped_events - cursor.last_dropped_events
             if dropped > 0:
                 self._mark_gap(
                     cursor, batch, f"emitter reported {dropped} dropped events"
                 )
                 cursor.events_dropped += dropped
                 self._stats.events_dropped += dropped
-        cursor.dropped_baseline = batch.dropped_events
+        cursor.last_dropped_events = batch.dropped_events
         cursor.last_seq = batch.seq
         self._broadcaster.broadcast(batch)
         return IngestResult.ADMITTED

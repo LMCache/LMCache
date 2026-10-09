@@ -329,7 +329,7 @@ def test_dropped_events_count_the_increases_of_the_reported_total():
     assert _loss(gate) == (0, 10, True)
 
 
-def test_a_stream_joined_midway_only_learns_the_dropped_baseline():
+def test_a_stream_joined_midway_only_remembers_its_first_drop_count():
     gate = _gate()
     gate.ingest(_batch(seq=7, dropped_events=40))
     gate.ingest(_batch(seq=8, dropped_events=45))
@@ -352,7 +352,7 @@ def test_a_restart_counts_the_new_run_s_drops_from_zero():
     assert gate.stats().streams["node-a"].events_dropped == 2
 
 
-def test_rejected_batches_do_not_move_the_dropped_baseline():
+def test_rejected_batches_do_not_change_the_last_drop_count():
     gate = _gate()
     gate.ingest(_batch(incarnation=2, seq=1))
     gate.ingest(_batch(incarnation=2, seq=1, dropped_events=50))  # duplicate
@@ -392,7 +392,7 @@ def test_totals_cover_the_whole_fleet_and_outlive_departures():
     ) == (4, 1, 1, 3, 4)
 
 
-def test_restored_gate_measures_drops_against_the_checkpointed_baseline():
+def test_restored_gate_measures_drops_against_the_checkpointed_last_count():
     live = _gate()
     live.ingest(_batch(seq=1, dropped_events=6))
     restored = _gate()
@@ -403,7 +403,7 @@ def test_restored_gate_measures_drops_against_the_checkpointed_baseline():
     assert _loss(restored) == (0, 2, True)
 
 
-def test_a_cursor_checkpointed_without_a_baseline_restores_with_none_known():
+def test_a_cursor_checkpointed_without_a_last_drop_count_restores_unknown():
     restored = _gate()
     restored.restore({"cursors": {"node-a": (1, 4, False)}})
 

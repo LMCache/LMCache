@@ -113,7 +113,7 @@ class TestRoundTrip:
         assert _capture(restarted) == _capture(live)
 
     def test_a_restart_keeps_measuring_dropped_events(self, tmp_path: Path):
-        """The dropped-events baseline survives the msgpack round trip, so
+        """The last dropped_events count survives the msgpack round trip, so
         the first report after a restart counts only what is new."""
         store = LocalArtifactStore(tmp_path / "checkpoint")
         live = _Coordinator()

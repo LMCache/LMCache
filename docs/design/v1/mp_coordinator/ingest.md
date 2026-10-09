@@ -180,7 +180,7 @@ as metrics instead: fleet counters
 `...server_event_batches_missing`, `...server_events_dropped` and
 `...server_view_incomplete` (the `gap_detected` flag). The per-instance
 counts cover the emitter's current incarnation and are not
-checkpointed; the `dropped_events` baseline is, so a restarted
+checkpointed; the last `dropped_events` seen is, so a restarted
 coordinator keeps measuring against the last report. See
 [observability.md](observability.md).
 
