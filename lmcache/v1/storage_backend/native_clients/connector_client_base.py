@@ -58,6 +58,9 @@ class ConnectorClientBase(Generic[NativeClientT]):
                                 fut.set_result(list(result_bools))
                             else:
                                 fut.set_result([])
+                        elif op in ("batch_get", "get") and result_bools is not None:
+                            # per-key GET results (False: key not found)
+                            fut.set_result(list(result_bools))
                         else:
                             fut.set_result(None)
                     else:
@@ -94,7 +97,7 @@ class ConnectorClientBase(Generic[NativeClientT]):
         self._pending[int(future_id)] = (fut, op, keepalive)
         return fut
 
-    async def get(self, key: str, buf: memoryview) -> None:
+    async def get(self, key: str, buf: memoryview) -> Optional[list[bool]]:
         return await self.batch_get([key], [buf])
 
     async def set(self, key: str, buf: memoryview) -> None:
@@ -104,7 +107,9 @@ class ConnectorClientBase(Generic[NativeClientT]):
         results = await self.batch_exists([key])
         return results[0]
 
-    async def batch_get(self, keys: list[str], bufs: list[memoryview]) -> None:
+    async def batch_get(
+        self, keys: list[str], bufs: list[memoryview]
+    ) -> Optional[list[bool]]:
         if len(keys) != len(bufs):
             raise ValueError("keys and bufs length mismatch")
         future_id = int(self._client.submit_batch_get(keys, bufs))  # type: ignore[attr-defined]
@@ -126,7 +131,7 @@ class ConnectorClientBase(Generic[NativeClientT]):
     async def batched_exists(self, keys: list[str]) -> list[bool]:
         return await self.batch_exists(keys)
 
-    def get_sync(self, key: str, buf: memoryview) -> None:
+    def get_sync(self, key: str, buf: memoryview) -> Optional[list[bool]]:
         return self.batch_get_sync([key], [buf])
 
     def set_sync(self, key: str, buf: memoryview) -> None:
@@ -136,7 +141,9 @@ class ConnectorClientBase(Generic[NativeClientT]):
         results = self.batch_exists_sync([key])
         return results[0]
 
-    def batch_get_sync(self, keys: list[str], bufs: list[memoryview]) -> None:
+    def batch_get_sync(
+        self, keys: list[str], bufs: list[memoryview]
+    ) -> Optional[list[bool]]:
         if len(keys) != len(bufs):
             raise ValueError("keys and bufs length mismatch")
         future_id = int(self._client.submit_batch_get(keys, bufs))  # type: ignore[attr-defined]
