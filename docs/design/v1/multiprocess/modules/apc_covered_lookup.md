@@ -1,105 +1,86 @@
-# APC-covered lookup skip (non-pin / re-lookup method)
+# APC-covered lookup skip (non-pin method)
 
-When the serving engine's prefix cache (vLLM APC) already covers the first `N`
-tokens of a request, the MP-server lookup no longer read-locks or L2-prefetches
-the LMCache objects for that covered prefix — it only LRU-touches them (so they
-stay warm) and prefetches just the uncovered tail `[N, end)`. Gated by
-`lmcache.mp.skip_covered_lookup` (default off ⇒ identical to today).
+vLLM's prefix cache (APC) often already holds the first `N` tokens of a
+request. LMCache looked them up anyway — read-locking them and pulling them
+from L2 into L1 — even though vLLM will never read them.
 
-The APC hit can shrink while the async lookup is in flight (a WAITING request's
-matched blocks are unprotected until `allocate_slots`). **This branch handles that
-race without pinning**: leave the covered GPU blocks unpinned and, if the APC hit
-shrinks below the covered boundary `c0`, fall back to a full lookup from token 0 so
-LMCache owns the whole prefix `[0, ret)` — no covered skip for the rest of that
-request. An alternative *pin* method is implemented in `core/skip-apc-pin`; the two
-are weighed in the standalone comparison doc (`apc_covered_lookup_comparison.md`).
+```
+[========= APC already has this =========][==== LMCache loads ====]
+0                                         c0                     end
+ \__ locked + prefetched for nothing __/
+```
 
-## Design
+`lmcache.mp.skip_covered_lookup` (default off ⇒ identical to today) stops
+that. At concurrency 16 / 32k tokens / 75% covered: **126 → 36 keys looked up
+per request, 7,872 → 1,824 L1 keys held, same hit rate.**
 
-Shared covered-skip mechanics:
+## What changes
 
-- The server (`LookupModule.lookup`) reads `covered_chunks` from the key's
-  `request_configs`, **touches** the covered prefix `[0, c0)` but does **not**
-  read-lock or L2-prefetch it, and submits a prefetch for only the uncovered
-  sub-range `chunk_hashes[c0:]`; hit counts are offset back to absolute at status
-  time.
-- The touch spans **both tiers** (`StorageManager.touch_cached_keys` → `L1Manager`
-  **and** every L2 adapter). This matters: a lookup that really loads a key
-  refreshes recency in L1 *and* L2, so if the skip only refreshed L1 the covered
-  keys would look cold to L2 and be evicted — losing data a non-skipping lookup
-  would have kept, and lowering later hit rates. The touch moves no bytes and
-  promotes nothing into L1; each tier ignores keys it does not hold.
-- Consequence by design: the covered prefix is no longer *promoted* into L1 on
-  every lookup (that promotion was the redundant read being removed). It stays
-  wherever it already lives, which frees L1 for data that is actually retrieved.
-  Cache **contents** are unchanged versus the feature being off; only the tier
-  placement of the covered prefix differs.
-- Every lock-release resolves through `resolve_prefetched_obj_keys`, whose
-  per-group range start is clamped to `c0`, so a release never drops a lock the
-  lookup did not take (which would corrupt a concurrent prefix-sharing request).
+`LookupModule.lookup` reads `covered_chunks` from the key's `request_configs`
+(carried there to avoid a proto change). For the covered prefix `[0, c0)` it:
 
-Non-pin-specific handling (this branch):
+- **touches** it in **L1 and L2** — no bytes move, nothing is promoted. Both
+  tiers matter: a real load refreshes recency in both, so touching only L1
+  would leave the keys cold to L2 and get them evicted.
+- **does not** lock or prefetch it. The prefetch covers `chunk_hashes[c0:]`
+  only; hit counts shift back to absolute at status time.
 
-- No GPU-block pinning at all, so there is no block-pool pressure (the pin method
-  in `core/skip-apc-pin` adds the acquire/release-pin machinery this branch omits).
-- **Full re-lookup on shrink** (`_handle_covered_shrink`): when the current aligned
-  APC hit drops below the frozen `c0`, the completed lookup skipped a now-uncovered
-  gap. Rather than chase the moving boundary, fall back to a full lookup from token
-  0: free the stale `[c0, ret)` locks (the fresh full lookup would otherwise re-lock
-  that overlap and leak one read-lock refcount — corrupting prefix-sharing
-  requests), set the sticky `covered_skip_disabled` flag, and reset the per-lookup
-  tracker fields. The next scheduler poll re-submits with `covered_chunks = 0`, so
-  LMCache loads full coverage `[0, ret')` from the beginning (the covered prefix is
-  kept retrievable by the covered-range touch). Because `lookup_covered_tokens` is
-  now 0, the covered-skip release elision no longer applies, so the fresh lookup's
-  read locks release through the normal `update_state_after_alloc` path. Returns
-  `(None, True)` so the scheduler re-polls.
-- **Blocking stale-lock release**: the stale-lock free uses
-  `free_lookup_locks_blocking` (waits for every server to ack) rather than the
-  fire-and-forget `free_lookup_locks`. The server's release reads live session
-  state (`prefetch_hit_chunks` / `prefetch_covered_chunks`), which the fresh
-  lookup's `begin_lookup` resets. Since `LOOKUP` and `FREE_LOOKUP_LOCKS` share the
-  normal thread pool, a fire-and-forget release could be reordered after the next
-  poll's `begin_lookup` when `max_cpu_workers > 1` — reading the reset state,
-  over-releasing the covered prefix and leaking the stale locks. Blocking until the
-  release is acked serializes the two, making the recovery correct for any worker
-  count (not just the default `max_cpu_workers = 1`).
-- Sticky by design: once a request has shrunk it stays on full lookups, so a second
-  shrink cannot recur (no re-lookup churn) even across preemption/resume.
-- Trade-off: soft guarantee — a prefix chunk evicted before the re-fetch just
-  shortens the hit (partial local recompute) rather than corrupting; no
-  availability risk from held blocks.
+So the prefix is no longer *promoted* into L1 on every lookup — that
+promotion was the waste. Cache contents are unchanged; only placement is.
 
-## Workflow — module interactions
+## The shrink race
 
-Participants: **Scheduler** (vLLM), **Connector** (`LMCacheMPConnector`),
-**Adapter** (`LMCacheMPSchedulerAdapter`), **LookupModule** (server),
-**Storage** (`StorageManager`/`L1Manager`).
+A WAITING request's APC blocks are unprotected until `allocate_slots`, so the
+APC hit can shrink while the lookup is in flight, leaving the frozen `c0`
+covering a gap nobody owns.
+
+**This branch does not pin** — it restarts instead: free the stale
+`[c0, ret)` locks, set the sticky `covered_skip_disabled` (so the request
+never skips again — one shrink each, no churn, survives preemption), reset
+per-lookup state, and return `(None, True)`. The scheduler re-polls and
+re-submits with `covered_chunks = 0`, loading the prefix from token 0.
+
+That free **blocks** until every server acks. `LOOKUP` and
+`FREE_LOOKUP_LOCKS` share the normal thread pool, so with
+`max_cpu_workers > 1` a fire-and-forget release could land *after* the
+replacement lookup's `begin_lookup` reset the session — over-releasing the
+prefix and leaking the stale locks.
+
+Pinning the covered blocks instead is implemented in `core/skip-apc-pin` and
+weighed in `apc_covered_lookup_comparison.md`. Non-pin won: no block-pool
+pressure, no coupling to vLLM's `BlockPool`, and a shrink costs one wasted
+lookup rather than held GPU blocks.
+
+## The invariant
+
+Read locks are anonymous refcounts **shared across prefix-sharing requests**,
+so releasing one you never took corrupts another request. Every release goes
+through `resolve_prefetched_obj_keys`, whose per-group range start is clamped
+to `c0` — it cannot reach into the skipped prefix.
+
+## Flow
 
 ```mermaid
 sequenceDiagram
     participant S as Scheduler
     participant C as Connector
-    participant A as Adapter
     participant L as LookupModule
     participant SM as Storage
 
-    S->>C: get_num_new_matched_tokens(num_computed = APC hit)
-    Note over C: c0 = align(num_computed) then covered_chunks (no pin)
-    C->>A: maybe_submit_lookup_request(covered_chunks)
-    A->>L: LOOKUP(key, covered_chunks)
-    L->>SM: touch covered [0,c0) in L1+L2 - no lock / no prefetch
-    L->>SM: reserve_read + prefetch uncovered [c0,end)
-    C->>A: check_lookup_result
-    A-->>C: LookupOutcome(hit, stored)
+    S->>C: get_num_new_matched_tokens(APC hit)
+    Note over C: freeze c0
+    C->>L: LOOKUP(key, covered_chunks)
+    L->>SM: touch [0,c0) in L1+L2 - no lock, no prefetch
+    L->>SM: reserve_read + prefetch [c0,end)
+    L-->>C: hit
 
     alt APC hit shrank below c0
-        C->>A: free stale [c0,ret) locks (BLOCKING ack) + cleanup
-        Note over C: set covered_skip_disabled, reset per-lookup state
-        C-->>S: (None, True) re-poll, full lookup covered_chunks=0
+        C->>L: free stale [c0,ret) locks (blocking)
+        Note over C: covered_skip_disabled = true
+        C-->>S: (None, True) re-poll, covered_chunks=0
     else normal
-        C-->>S: need_to_load = hit - num_computed
+        C-->>S: need_to_load = hit - APC hit
         S->>C: update_state_after_alloc
-        C->>A: free_lookup_locks([0, vllm_hit)) [clamp c0, 0 after shrink]
+        C->>L: free_lookup_locks([0, hit)) - clamped to c0
     end
 ```
