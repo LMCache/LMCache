@@ -196,8 +196,9 @@ class TestParseMixedSlotMapping:
 
     def test_empty_string(self):
         slots, err = parse_mixed_slot_mapping("")
-        assert err is None
-        assert slots == []
+        assert slots is None
+        assert err is not None
+        assert "error" in err
 
 
 # ============================================================
