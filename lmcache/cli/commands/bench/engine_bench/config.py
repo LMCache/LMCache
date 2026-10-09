@@ -184,7 +184,8 @@ def server_runs_blend_module(lmcache_url: str) -> bool:
     only :mod:`lmcache.v1.multiprocess.modules.blend` emits.  Two fields that
     look like they would answer this do not: ``engine_type`` is
     ``self.__class__.__name__`` and reads ``MPCacheServer`` for both engines,
-    and nothing in the codebase writes ``cb_gpu_context_meta``.
+    and nothing in the codebase writes ``cb_gpu_context_meta``.  Tracked
+    upstream in #5589; switch to the reported engine once that lands.
 
     This is a necessary but not sufficient condition for blended reuse -- it
     says the server can blend, not that vLLM is driving it through
