@@ -22,6 +22,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from collections.abc import Callable
 from functools import cache
 from typing import Any
 import ctypes
@@ -160,6 +161,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         type_name: str = "",
         extra_status: dict[str, Any] | None = None,
         pad_buffers_to_alignment: bool = False,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         """Initialize the adapter over a native connector client.
 
@@ -179,6 +181,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 native connectors whose I/O path requires aligned buffer
                 lengths (e.g. O_DIRECT file storage). See
                 ``_obj_to_memoryview``.
+            on_close: Called by :meth:`close` after the native client is
+                closed, e.g. to delete non-persistent data files.
         """
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
         self._client = native_client
@@ -186,6 +190,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._type_name: str = type_name or type(native_client).__name__
         self._extra_status: dict[str, Any] = dict(extra_status or {})
         self._pad_buffers_to_alignment = pad_buffers_to_alignment
+        self._on_close = on_close
 
         # 3 distinct cross-platform notifiers for the L2 adapter
         # interface
@@ -452,6 +457,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._demux_thread.join(timeout=5)
 
         self._client.close()
+        if self._on_close is not None:
+            self._on_close()
 
         self._store_efd.close()
         self._lookup_efd.close()

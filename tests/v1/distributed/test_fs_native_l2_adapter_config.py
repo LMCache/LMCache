@@ -10,8 +10,12 @@ longer be silently ignored.
 # Standard
 from unittest.mock import patch
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.distributed.l2_adapters import fs_native_l2_adapter
+from lmcache.v1.distributed.l2_adapters.config import PersistConfig
 from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
     FSNativeL2AdapterConfig,
 )
@@ -63,3 +67,47 @@ class TestFSNativeCapacityHelpText:
         # read as an enforced cap; it must name the eviction requirement.
         assert "eviction" in help_text
         assert "max L2 capacity" not in help_text
+
+
+class TestFSNativePersistEnabled:
+    def test_delete_cache_files_removes_only_cache_files(self, tmp_path):
+        (tmp_path / "a.data").write_bytes(b"x")
+        (tmp_path / "b.tmp").write_bytes(b"x")
+        (tmp_path / "notes.txt").write_bytes(b"x")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "c.data").write_bytes(b"x")
+        tmp_dir = tmp_path / "staging"
+        tmp_dir.mkdir()
+        (tmp_dir / "d.tmp").write_bytes(b"x")
+        (tmp_dir / "e.data").write_bytes(b"x")
+
+        removed = fs_native_l2_adapter.delete_cache_files(str(tmp_path), str(tmp_dir))
+
+        # In-flight writes in the tmp dir keep the .data name, so both
+        # suffixes go in both directories.
+        assert removed == 4
+        assert sorted(p.name for p in tmp_path.iterdir()) == [
+            "notes.txt",
+            "staging",
+            "sub",
+        ]
+        assert (tmp_path / "sub" / "c.data").exists()
+        assert list(tmp_dir.iterdir()) == []
+
+    def test_delete_cache_files_tolerates_missing_directory(self, tmp_path):
+        assert fs_native_l2_adapter.delete_cache_files(str(tmp_path / "missing")) == 0
+
+    def test_persist_disabled_on_shared_adapter_is_rejected(self):
+        cfg, _ = _from_dict()
+        cfg.shared = True
+        cfg.persist_config = PersistConfig(persist_enabled=False)
+        with pytest.raises(ValueError, match="shared"):
+            fs_native_l2_adapter.validate_persist_config(cfg)
+
+    def test_persist_disabled_on_private_adapter_is_allowed(self):
+        cfg, _ = _from_dict()
+        cfg.persist_config = PersistConfig(persist_enabled=False)
+        fs_native_l2_adapter.validate_persist_config(cfg)
+
+    def test_help_mentions_persist_enabled(self):
+        assert "persist_enabled" in FSNativeL2AdapterConfig.help()
