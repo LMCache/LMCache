@@ -66,6 +66,8 @@ TTLs must be positive integers. Unknown fields are rejected.
      - ``use_lazy`` (true), ``init_size_gb`` (20, capped at capacity),
        ``shm_name`` (empty), ``use_hugepages`` (false). Shared memory and
        hugepages require eager allocation. Shared-memory names must be unique.
+       ``host_memory_backend`` (``registered``) and ``gtt_segment_size_gb``
+       select the ROCm GTT L1 (see :doc:`configuration`, *ROCm GTT L1*).
    * - ``DEVDAX``
      - Required ``path``; the allocator checks mapping size and device alignment.
    * - ``GDS``

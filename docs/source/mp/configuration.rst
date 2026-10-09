@@ -345,6 +345,77 @@ single-L1 interface.
        DAX L2 adapter with the same ``device_path`` is registered, that
        adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
        size.
+   * - ``--l1-host-memory-backend``
+     - ``registered``
+     - Host memory backing of the lazy L1. ``registered`` pins anonymous
+       memory with ``cudaHostRegister`` / ``hipHostRegister``. ``gtt``
+       (ROCm only) builds L1 from driver-owned GTT segments; see
+       *ROCm GTT L1* below.
+   * - ``--l1-gtt-segment-size-gb``
+     - largest valid size
+     - Size of one GTT segment for ``--l1-host-memory-backend gtt``. Must be
+       below 512 GB and a multiple of ``max(--l1-align-bytes, page size)``.
+       The default is ``512 GiB`` minus that granule.
+
+ROCm GTT L1
+~~~~~~~~~~~
+
+On ROCm, ``hipHostRegister`` memory (and default ``hipHostMalloc`` memory)
+is a KFD userptr allocation whose pages stay movable. Memory compaction,
+khugepaged, NUMA migration or ``move_pages`` can migrate them at any time, and
+every migration makes the kernel evict the LMCache server's GPU queues on all
+GPUs, stalling transfers and the server for seconds. With
+``--l1-host-memory-backend gtt`` the L1 is instead allocated with
+``hipHostMalloc`` as driver-owned GTT memory, which the kernel cannot migrate.
+
+- The server process must start with ``HSA_USERPTR_FOR_PAGED_MEM=0`` in its
+  environment; ROCm reads it once at initialization. The server refuses to
+  start without it and verifies that every segment is a GTT mapping; it never
+  falls back to movable memory. ``HSA_SVM_FOR_PAGED_MEM`` is not needed.
+- Set ``HSA_USERPTR_FOR_PAGED_MEM=0`` in the vLLM container as well. vLLM's
+  own pinned host buffers are otherwise movable too; once the LMCache L1 can
+  no longer be migrated, memory compaction moves those buffers instead and
+  stalls the vLLM workers. With the variable set they become GTT memory too
+  (tens of GB for a TP8 model), which counts against the same GTT capacity.
+- One GTT allocation must stay below 512 GiB, so the L1 is built from several
+  segments (for example ``--l1-size-gb 1000`` uses two or three). The initial
+  ``--l1-init-size-gb`` is allocated at startup and the rest in the
+  background, one segment at a time. A single L1 object must fit in one
+  segment.
+- GTT memory is host DRAM owned by the GPU driver. It may not be charged to
+  the container memory limit or show up in the process ``VmRSS``. Size L1
+  against the host memory and the per-node GTT capacity
+  (``/sys/class/drm/card*/device/mem_info_gtt_total``), which all processes
+  on the node share.
+- The GTT L1 is not one contiguous region, so P2P and L2 adapters that register
+  the L1 buffer with a transfer engine (``nixl_store``,
+  ``nixl_store_dynamic``, ``nixl_native``, ``mooncake_store`` with RDMA) are
+  rejected at startup. The LMCache-driven transfer path
+  (``LMCacheMPConnector``) and L2 adapters that copy through L1 objects
+  with buffered I/O (for example ``fs`` and ``fs_native``) are supported.
+- The kernel cannot pin GTT pages for direct I/O (``O_DIRECT`` fails with
+  ``EFAULT``), so ``fs`` / ``fs_native`` with ``"use_odirect": true`` and
+  ``raw_block`` with ``use_odirect`` or ``use_uring_cmd`` are rejected at
+  startup; use ``"use_odirect": false``.
+
+Kubernetes container specs (LMCache server and vLLM):
+
+.. code-block:: yaml
+
+   - name: lmcache-server
+     env:
+       - name: HSA_USERPTR_FOR_PAGED_MEM
+         value: "0"
+     args:
+       - lmcache server --l1-size-gb 1000 --l1-init-size-gb 1
+         --l1-host-memory-backend gtt ...
+   - name: vllm
+     env:
+       - name: HSA_USERPTR_FOR_PAGED_MEM
+         value: "0"
+
+With Docker: ``docker run -e HSA_USERPTR_FOR_PAGED_MEM=0 ... lmcache server
+--l1-host-memory-backend gtt ...``.
 
 GDS L1 Tier
 -----------

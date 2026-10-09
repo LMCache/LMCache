@@ -15,6 +15,7 @@ import uvicorn
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import (
+    GTT_L1_UNSUPPORTED_MODES_HINT,
     StorageManagerConfig,
     add_storage_manager_args,
     l1_exposes_single_memory_region,
@@ -219,6 +220,14 @@ def run_http_server(
                 "P2P requires a coordinator for peer discovery: set "
                 "--coordinator-url (or LMCACHE_COORDINATOR_URL) when "
                 "--p2p-advertise-url is set."
+            )
+        if any(
+            c.memory_config.host_memory_backend == "gtt"
+            for c in storage_manager_config.l1_manager_configs
+        ):
+            raise ValueError(
+                "P2P requires a single L1 memory region the transfer channel "
+                f"can register. {GTT_L1_UNSUPPORTED_MODES_HINT}"
             )
         if not l1_exposes_single_memory_region(storage_manager_config):
             raise ValueError(
