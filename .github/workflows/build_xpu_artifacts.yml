@@ -104,6 +104,27 @@ jobs:
                     set -euxo pipefail
                     WHEEL=$(ls /work/LMCache/dist/*.whl | head -n 1)
                     python3 -m pip install --no-deps "$WHEEL"
+                    python3 /work/LMCache/.github/scripts/assert_native_ops.py lmcache.xpu_ops
+                    python3 /work/LMCache/.github/scripts/assert_native_ops.py lmcache.lmcache_native
+                    python3 /work/LMCache/.github/scripts/assert_native_ops.py lmcache.lmcache_fs
+                    python3 /work/LMCache/.github/scripts/assert_native_ops.py lmcache.lmcache_redis
+                    python3 - <<"PY"
+                import lmcache.lmcache_fs as fs
+                import lmcache.lmcache_native as native
+                import lmcache.lmcache_redis as redis
+                import lmcache.xpu_ops as ops
+
+                for module, required in (
+                    (native, ("TransferDirection", "EngineKVFormat")),
+                    (ops, ("multi_layer_kv_transfer",)),
+                    (fs, ("LMCacheFSClient",)),
+                    (redis, ("LMCacheRedisClient",)),
+                ):
+                    missing = [name for name in required if not hasattr(module, name)]
+                    if missing:
+                        raise RuntimeError(module.__name__ + " is missing: " + ", ".join(missing))
+                print("LMCache XPU extension API surface OK")
+                PY
                     python3 -c "import lmcache; print(\"LMCache import OK\")"
                   '
 
