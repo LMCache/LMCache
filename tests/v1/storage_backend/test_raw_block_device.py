@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 # Standard
-import errno
+from pathlib import Path
 import os
 import platform
+import subprocess
+import sys
 
 # Third Party
 import pytest
@@ -15,28 +17,12 @@ import pytest
 from tests.v1.storage_backend.raw_block_test_utils import (
     RAW_BLOCK_CI_BLOCK_ALIGN,
     RAW_BLOCK_CI_CAPACITY_BYTES,
+    is_skip_safe_io_error,
     make_raw_block_file,
 )
 
 lmcache_rust_raw_block_io = pytest.importorskip("lmcache_rust_raw_block_io")
 RawBlockDevice = lmcache_rust_raw_block_io.RawBlockDevice
-
-
-def _is_skip_safe_io_error(exc: BaseException) -> bool:
-    if getattr(exc, "errno", None) in {errno.EINVAL, errno.ENOSYS, errno.EPERM}:
-        return True
-    msg = str(exc).lower()
-    return any(
-        text in msg
-        for text in (
-            "function not implemented",
-            "invalid argument",
-            "io_uring init failed",
-            "not supported",
-            "operation not permitted",
-            "unsupported",
-        )
-    )
 
 
 def test_raw_block_device_posix_roundtrip_on_tmp_file(tmp_path):
@@ -107,18 +93,414 @@ def test_raw_block_device_iouring_best_effort_roundtrip(tmp_path):
         out = bytearray(len(payload))
 
         batch_id = dev.batched_write([4096], [payload], [len(payload)])
-        dev.wait_iouring(batch_id)
+        assert dev.wait_iouring(batch_id) == ([True], [])
         batch_id = dev.batched_read([4096], [out], [len(out)])
-        dev.wait_iouring(batch_id)
+        assert dev.wait_iouring(batch_id) == ([True], [])
 
         assert out == payload
     except Exception as e:
-        if _is_skip_safe_io_error(e):
+        if is_skip_safe_io_error(e):
             pytest.skip(f"io_uring is unavailable on this runner: {e}")
         raise
     finally:
         if dev is not None:
             dev.close()
+
+
+def test_raw_block_device_iouring_batched_write_padded_roundtrip(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    dev = None
+    try:
+        dev = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=False,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+
+        payload = bytearray(b"padded-payload")
+        total = RAW_BLOCK_CI_BLOCK_ALIGN
+        out = bytearray(total)
+
+        # payload_len < total_len: the source holds only len(payload) bytes but
+        # the transfer is padded up to total. batched_write must copy only the
+        # payload and zero-fill the tail.
+        batch_id = dev.batched_write(
+            [4096], [payload], [total], payload_lens=[len(payload)]
+        )
+        dev.wait_iouring(batch_id)
+        batch_id = dev.batched_read([4096], [out], [total])
+        dev.wait_iouring(batch_id)
+
+        assert out[: len(payload)] == payload
+        assert out[len(payload) :] == bytearray(total - len(payload))
+    except Exception as e:
+        if is_skip_safe_io_error(e):
+            pytest.skip(f"io_uring is unavailable on this runner: {e}")
+        raise
+    finally:
+        if dev is not None:
+            dev.close()
+
+
+def test_raw_block_device_iouring_batched_write_zeroes_existing_tail(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    dev = None
+    try:
+        dev = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=False,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+
+        payload = b"padded-payload"
+        total = RAW_BLOCK_CI_BLOCK_ALIGN
+        buf = bytearray([0xAB]) * total
+        buf[: len(payload)] = payload
+        out = bytearray(total)
+
+        batch_id = dev.batched_write(
+            [4096], [buf], [total], payload_lens=[len(payload)]
+        )
+        dev.wait_iouring(batch_id)
+        batch_id = dev.batched_read([4096], [out], [total])
+        dev.wait_iouring(batch_id)
+
+        assert out[: len(payload)] == payload
+        assert out[len(payload) :] == bytearray(total - len(payload))
+    except Exception as e:
+        if is_skip_safe_io_error(e):
+            pytest.skip(f"io_uring is unavailable on this runner: {e}")
+        raise
+    finally:
+        if dev is not None:
+            dev.close()
+
+
+def test_raw_block_device_iouring_batched_write_mixed_padding_batch(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    dev = None
+    try:
+        dev = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=False,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+
+        total = RAW_BLOCK_CI_BLOCK_ALIGN
+        non_padded = bytearray(b"non-padded")
+        zero_tail_payload = b"zero-tail-payload"
+        zero_tail = bytearray(total)
+        zero_tail[: len(zero_tail_payload)] = zero_tail_payload
+        stale_tail_payload = b"stale-tail-payload"
+        stale_tail = bytearray([0xEF]) * total
+        stale_tail[: len(stale_tail_payload)] = stale_tail_payload
+        short_payload = bytearray(b"short-source-payload")
+
+        offsets = [4096, 8192, 12288, 16384]
+        buffers = [non_padded, zero_tail, stale_tail, short_payload]
+        total_lens = [len(non_padded), total, total, total]
+        payload_lens = [
+            len(non_padded),
+            len(zero_tail_payload),
+            len(stale_tail_payload),
+            len(short_payload),
+        ]
+
+        batch_id = dev.batched_write(
+            offsets, buffers, total_lens, payload_lens=payload_lens
+        )
+        dev.wait_iouring(batch_id)
+
+        outs = [
+            bytearray(len(non_padded)),
+            bytearray(total),
+            bytearray(total),
+            bytearray(total),
+        ]
+        batch_id = dev.batched_read(offsets, outs, total_lens)
+        dev.wait_iouring(batch_id)
+
+        assert outs[0] == non_padded
+        assert outs[1][: len(zero_tail_payload)] == zero_tail_payload
+        assert outs[1][len(zero_tail_payload) :] == bytearray(
+            total - len(zero_tail_payload)
+        )
+        assert outs[2][: len(stale_tail_payload)] == stale_tail_payload
+        assert outs[2][len(stale_tail_payload) :] == bytearray(
+            total - len(stale_tail_payload)
+        )
+        assert outs[3][: len(short_payload)] == short_payload
+        assert outs[3][len(short_payload) :] == bytearray(total - len(short_payload))
+    except Exception as e:
+        if is_skip_safe_io_error(e):
+            pytest.skip(f"io_uring is unavailable on this runner: {e}")
+        raise
+    finally:
+        if dev is not None:
+            dev.close()
+
+
+def test_raw_block_device_iouring_write_uring_zeroes_existing_tail(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    dev = None
+    try:
+        dev = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=False,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+
+        payload = b"serial-padded-payload"
+        total = RAW_BLOCK_CI_BLOCK_ALIGN
+        buf = bytearray([0xCD]) * total
+        buf[: len(payload)] = payload
+        out = bytearray(total)
+
+        dev.write_uring(4096, buf, len(payload), total)
+        batch_id = dev.batched_read([4096], [out], [total])
+        dev.wait_iouring(batch_id)
+
+        assert out[: len(payload)] == payload
+        assert out[len(payload) :] == bytearray(total - len(payload))
+    except Exception as e:
+        if is_skip_safe_io_error(e):
+            pytest.skip(f"io_uring is unavailable on this runner: {e}")
+        raise
+    finally:
+        if dev is not None:
+            dev.close()
+
+
+def test_raw_block_device_iouring_batched_write_validates_payload_lengths(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    dev = None
+    try:
+        dev = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=False,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+
+        with pytest.raises(
+            ValueError, match="payload_lens must have same length as offsets"
+        ):
+            dev.batched_write([4096], [bytearray(b"payload")], [4096], payload_lens=[])
+
+        with pytest.raises(ValueError, match="total_len must be >= payload_len"):
+            dev.batched_write([4096], [bytearray(b"payload")], [4], payload_lens=[5])
+
+        with pytest.raises(ValueError, match="input buffer too small"):
+            dev.batched_write([4096], [bytearray(b"x")], [4096], payload_lens=[2])
+    except Exception as e:
+        if is_skip_safe_io_error(e):
+            pytest.skip(f"io_uring is unavailable on this runner: {e}")
+        raise
+    finally:
+        if dev is not None:
+            dev.close()
+
+
+@pytest.mark.skipif(
+    os.getenv("LMCACHE_RUN_ODIRECT_SMOKE") != "1",
+    reason="O_DIRECT smoke is opt-in and not part of default PR CI",
+)
+def test_raw_block_device_odirect_batched_write_padded_roundtrip(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    dev = None
+    try:
+        dev = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=True,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+
+        payload = bytearray(b"padded-odirect-payload")
+        total = RAW_BLOCK_CI_BLOCK_ALIGN
+
+        batch_id = dev.batched_write(
+            [4096], [payload], [total], payload_lens=[len(payload)]
+        )
+        dev.wait_iouring(batch_id)
+        dev.close()
+        dev = None
+
+        # Read the bytes physically written with a non-O_DIRECT device so the
+        # padding region can be inspected without aligned-buffer requirements.
+        verify = RawBlockDevice(
+            str(path),
+            writable=False,
+            use_odirect=False,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="posix",
+            iouring_queue_depth=8,
+        )
+        try:
+            out = bytearray(total)
+            verify.pread_into(4096, out, total, total)
+            assert out[: len(payload)] == payload
+            assert out[len(payload) :] == bytearray(total - len(payload))
+        finally:
+            verify.close()
+    except Exception as e:
+        if is_skip_safe_io_error(e):
+            pytest.skip(f"O_DIRECT is unavailable on this runner: {e}")
+        raise
+    finally:
+        if dev is not None:
+            dev.close()
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="io_uring is Linux only")
+@pytest.mark.parametrize("queue_depth", [1, 2])
+def test_raw_block_device_iouring_batch_exceeds_queue_depth(
+    tmp_path: Path, queue_depth: int
+) -> None:
+    path = make_raw_block_file(tmp_path)
+    try:
+        device = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=False,
+            io_engine="io_uring",
+            iouring_queue_depth=queue_depth,
+        )
+    except Exception as error:
+        if is_skip_safe_io_error(error):
+            pytest.skip(f"io_uring unavailable: {error}")
+        raise
+
+    try:
+        payloads = [bytearray([index]) * 4096 for index in range(32)]
+        buffers = [bytearray(4096) for _ in payloads]
+        offsets = [4096 * index for index in range(len(payloads))]
+        lengths = [4096] * len(payloads)
+        batch = device.batched_write(offsets, payloads, lengths)
+        assert device.wait_iouring(batch) == ([True] * len(payloads), [])
+        batch = device.batched_read(offsets, buffers, lengths)
+        assert device.wait_iouring(batch) == ([True] * len(payloads), [])
+        assert buffers == payloads
+    finally:
+        device.close()
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="io_uring is Linux only")
+@pytest.mark.parametrize("remaining_bytes", [0, 4])
+def test_raw_block_device_iouring_eof_terminates(
+    tmp_path: Path, remaining_bytes: int
+) -> None:
+    path = make_raw_block_file(tmp_path)
+    try:
+        device = RawBlockDevice(
+            str(path), writable=False, io_engine="io_uring", use_odirect=False
+        )
+    except Exception as error:
+        if is_skip_safe_io_error(error):
+            pytest.skip(f"io_uring unavailable: {error}")
+        raise
+    device.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+from lmcache_rust_raw_block_io import RawBlockDevice
+
+device = RawBlockDevice(
+    sys.argv[1], writable=False, io_engine="io_uring", use_odirect=False
+)
+try:
+    batch = device.batched_read([int(sys.argv[2])], [bytearray(8)], [8])
+    success, errors = device.wait_iouring(batch)
+    assert success == [False], success
+    assert len(errors) == 1, errors
+finally:
+    device.close()
+""",
+            str(path),
+            str(RAW_BLOCK_CI_CAPACITY_BYTES - remaining_bytes),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="io_uring is Linux only")
+@pytest.mark.parametrize("cleanup", ["close", "drop", "exit"])
+@pytest.mark.no_shared_allocator
+def test_raw_block_device_iouring_cleanup_without_wait(
+    tmp_path: Path, cleanup: str
+) -> None:
+    """Clean up outstanding batches on close, deallocation, and interpreter exit."""
+    path = make_raw_block_file(tmp_path)
+    try:
+        device = RawBlockDevice(
+            str(path),
+            writable=True,
+            io_engine="io_uring",
+            use_odirect=False,
+            iouring_queue_depth=2,
+        )
+    except Exception as error:
+        if is_skip_safe_io_error(error):
+            pytest.skip(f"io_uring unavailable: {error}")
+        raise
+    device.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import gc
+import sys
+from lmcache_rust_raw_block_io import RawBlockDevice
+
+device = RawBlockDevice(
+    sys.argv[1], writable=True, io_engine="io_uring", use_odirect=False,
+    iouring_queue_depth=2,
+)
+buffers = [bytearray([index]) * 4096 for index in range(32)]
+device.batched_write(
+    [4096 * index for index in range(len(buffers))], buffers, [4096] * len(buffers)
+)
+del buffers
+if sys.argv[2] == "close":
+    device.close()
+    device.close()
+elif sys.argv[2] == "drop":
+    del device
+    gc.collect()
+""",
+            str(path),
+            cleanup,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.skipif(
@@ -144,7 +526,7 @@ def test_raw_block_device_odirect_optional_smoke(tmp_path):
         dev.pread_into(4096, out, len(out), len(out))
         assert out == payload
     except Exception as e:
-        if _is_skip_safe_io_error(e):
+        if is_skip_safe_io_error(e):
             pytest.skip(f"O_DIRECT is unavailable on this runner: {e}")
         raise
     finally:

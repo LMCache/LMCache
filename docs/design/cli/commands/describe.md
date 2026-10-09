@@ -326,13 +326,13 @@ endpoint is only known in `run_http_server()`. Since `run_http_server()` calls
 "http_endpoint": getattr(self, "http_endpoint", None),
 ```
 
-### 3. Same changes for `BlendCacheEngine`
+### 3. Blend server
 
-**File:** `lmcache/v1/multiprocess/blend_server.py` (and `blend_server_v2.py`)
-
-Mirror the same `start_time`, `zmq_endpoint`, and `http_endpoint` additions if
-`BlendCacheEngine` has its own `report_status()`. If it delegates to
-`MPCacheServer`, no separate change is needed.
+The blend server is not a separate server: `--engine-type blend` composes
+`BlendModule` (`lmcache/v1/multiprocess/modules/blend.py`) into the same
+`MPCacheServer`, so the `start_time`, `zmq_endpoint`, and `http_endpoint`
+additions above cover it. `BlendModule.report_status()` only contributes the
+module's own fields.
 
 ### Summary of server-side changes
 
@@ -344,7 +344,7 @@ Mirror the same `start_time`, `zmq_endpoint`, and `http_endpoint` additions if
 
 ### 4. Expose engine KV format, shape, and attention backend in `kv_cache_layout`
 
-**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/platform/cuda/cache_context.py`, `lmcache/v1/multiprocess/server.py`
+**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/platform/devices/cuda/cache_context.py`, `lmcache/v1/multiprocess/server.py`
 
 Helper functions in `utils.py` (derived from `legible_print_engine_kv_format()`):
 - `get_engine_kv_shape_description(engine_kv_format)` — symbolic shape (e.g., `NL x [2, NB, BS, NH, HS]`)

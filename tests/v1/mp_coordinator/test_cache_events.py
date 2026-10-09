@@ -6,6 +6,7 @@ app."""
 
 # Standard
 from dataclasses import asdict
+from unittest.mock import MagicMock
 import asyncio
 import threading
 
@@ -15,29 +16,51 @@ import numpy as np
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import L1BackendType, ObjectKey, Tier
+from lmcache.v1.distributed.api import (
+    CapacitySnapshot,
+    L1BackendType,
+    ModuleMemoryCapacity,
+    ObjectKey,
+    Tier,
+)
 from lmcache.v1.distributed.internal_api import L1ObjectMeta
 from lmcache.v1.mp_coordinator.api import (
     UNKNOWN_TOKEN_OFFSET,
+    BlendNamespace,
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.cache_events import (
+    EVENTS_TRACE_LIFECYCLE,
     CacheEventPublishError,
     CacheEventSink,
     CacheEventSubscriber,
     HttpCacheEventSink,
+    MultiCacheEventSink,
+    TraceCacheEventSink,
 )
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
+from lmcache.v1.mp_observability.trace.reader import TraceReader
+from lmcache.v1.mp_observability.trace.recorder import EventsTraceRecorder
+from lmcache.v1.multiprocess.config import (
+    CoordinatorConfig,
+    HTTPFrontendConfig,
+    MPServerConfig,
+)
 import lmcache.v1.mp_coordinator.cache_events as cache_events
 
 
 def _key(hash_byte: int) -> ObjectKey:
     return ObjectKey(chunk_hash=bytes([hash_byte]) * 4, model_name="m", kv_rank=0)
+
+
+# The namespace ``_key`` stores in; fragment queries must ask from it.
+NS = BlendNamespace.from_object_key(_key(0))
 
 
 def _entry(hash_byte: int, size_bytes: int = 0) -> CacheEventEntry:
@@ -783,15 +806,15 @@ def test_token_bindings_feed_the_key_directory_end_to_end():
     )
     subscriber.flush()
 
-    key_directory = app.state.ctx.key_directory
+    key_directory = app.state.ctx.views.get(KeyDirectory)
     assert key_directory.get_token_ids([_key(1).chunk_hash, _key(2).chunk_hash]) == [
         (1, 2),
         (3, 4),
     ]
     # The offsets survive the emitter -> HTTP -> directory round trip, and
     # reach a match as the re-RoPE source position.
-    (first,) = key_directory.blend_match(np.asarray([1, 2], dtype=np.uint64))
-    (second,) = key_directory.blend_match(np.asarray([3, 4], dtype=np.uint64))
+    (first,) = key_directory.blend_match(np.asarray([1, 2], dtype=np.uint64), NS)
+    (second,) = key_directory.blend_match(np.asarray([3, 4], dtype=np.uint64), NS)
     assert (first.old_st, second.old_st) == (0, 256)
 
 
@@ -809,3 +832,220 @@ def test_http_sink_raises_publish_error_on_http_failure():
     with pytest.raises(CacheEventPublishError):
         sink.publish([batch])
     sink.close()
+
+
+# -- Capacity declarations ----------------------------------------------------
+
+
+def _snapshot(*modules: ModuleMemoryCapacity) -> CapacitySnapshot:
+    """A capacity snapshot as StorageManager publishes it."""
+    return CapacitySnapshot(modules=tuple(modules))
+
+
+def _capacity_event(snapshot: CapacitySnapshot) -> Event:
+    """The bus event StorageManager emits on a topology change."""
+    return Event(
+        event_type=EventType.SM_CAPACITY_CHANGED,
+        metadata={"snapshot": snapshot},
+    )
+
+
+def test_a_declaration_becomes_one_config_batch_per_compartment():
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        _capacity_event(
+            _snapshot(
+                ModuleMemoryCapacity(Tier.L1, "dram", 40 * (1 << 30), False),
+                ModuleMemoryCapacity(Tier.L2, "s3", 0, True),
+            )
+        ),
+    )
+    subscriber.flush()
+
+    batches = sink.published[0]
+    assert [b.event_type for b in batches] == [CacheEventType.CONFIG] * 2
+    assert [(b.tier, b.backend, b.capacity_bytes, b.shared) for b in batches] == [
+        (Tier.L1, "dram", 40 * (1 << 30), False),
+        (Tier.L2, "s3", 0, True),
+    ]
+    # One declaration, so one revision -- that is what lets the coordinator
+    # tell a fresh declaration from a continuation.
+    assert {b.capacity_revision for b in batches} == {1}
+    # A declaration carries no placements.
+    assert all(b.entries == [] for b in batches)
+
+
+def test_config_batches_share_the_seq_space_with_placements():
+    # They ride the same stream, so a reused seq would be dropped as a
+    # duplicate by the gate.
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        _capacity_event(
+            _snapshot(ModuleMemoryCapacity(Tier.L1, "dram", 8 * (1 << 30), False))
+        ),
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={"keys": [_key(1)], "meta": [_meta(100)]},
+        ),
+    )
+    subscriber.flush()
+
+    batches = sink.published[0]
+    assert [b.seq for b in batches] == [1, 2]
+    # Declaration first, so the denominator lands before the bytes.
+    assert batches[0].event_type == CacheEventType.CONFIG
+    assert batches[1].event_type == CacheEventType.STORE
+
+
+def test_a_newer_declaration_supersedes_an_unflushed_one():
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        _capacity_event(
+            _snapshot(ModuleMemoryCapacity(Tier.L1, "dram", 8 * (1 << 30), False))
+        ),
+        _capacity_event(
+            _snapshot(ModuleMemoryCapacity(Tier.L1, "dram", 16 * (1 << 30), False))
+        ),
+    )
+    subscriber.flush()
+
+    batches = sink.published[0]
+    assert [b.capacity_bytes for b in batches] == [16 * (1 << 30)]
+    # Coalesced into one declaration, so one revision -- not two burnt.
+    assert batches[0].capacity_revision == 1
+
+
+def test_a_declaration_survives_a_publish_failure():
+    # The whole topology, so resending repairs it; a byte delta could not.
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        _capacity_event(
+            _snapshot(ModuleMemoryCapacity(Tier.L1, "dram", 8 * (1 << 30), False))
+        ),
+    )
+    sink.fail_next = True
+    subscriber.flush()
+    assert sink.published == []
+
+    # Re-emitted at a fresh revision; the coordinator takes the newer one.
+    subscriber.flush()
+    assert [b.capacity_revision for b in sink.published[0]] == [2]
+
+
+# -- maybe_create_cache_event_subscriber ---------------------------------------------
+
+
+def _capture_subscriber(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Replace the subscriber class so the test can read what it was built with."""
+    factory = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(cache_events, "CacheEventSubscriber", factory)
+    return factory
+
+
+def test_no_destination_builds_no_subscriber(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cache_events, "get_active_trace_recorder", MagicMock(return_value=None)
+    )
+    assert (
+        cache_events.maybe_create_cache_event_subscriber(
+            MPServerConfig(), HTTPFrontendConfig(), CoordinatorConfig()
+        )
+        is None
+    )
+
+
+def test_events_trace_alone_builds_a_subscriber_with_a_trace_sink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """No coordinator URL at all: the trace is the only sink, and the file
+    opens with a start mark carrying the server's identity."""
+    recorder = EventsTraceRecorder(str(tmp_path / "e.lct"), level_meta={})
+    monkeypatch.setattr(
+        cache_events,
+        "get_active_trace_recorder",
+        MagicMock(return_value=recorder),
+    )
+    factory = _capture_subscriber(monkeypatch)
+    mp_config = MPServerConfig(instance_id="node-a")
+
+    subscriber = cache_events.maybe_create_cache_event_subscriber(
+        mp_config, HTTPFrontendConfig(http_port=8123), CoordinatorConfig()
+    )
+    recorder.close()
+
+    assert subscriber is factory.return_value
+    kwargs = factory.call_args.kwargs
+    assert isinstance(kwargs["sink"], TraceCacheEventSink)
+    assert kwargs["instance_id"] == "node-a"
+    with TraceReader(str(tmp_path / "e.lct")) as reader:
+        records = list(reader.records())
+    assert [r.qualname for r in records] == [EVENTS_TRACE_LIFECYCLE]
+    assert records[0].args["phase"] == "start"
+    assert records[0].args["instance_id"] == "node-a"
+    assert records[0].args["http_port"] == 8123
+    assert records[0].args["incarnation"] == kwargs["incarnation"]
+
+
+def test_coordinator_and_trace_together_fan_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    recorder = EventsTraceRecorder(str(tmp_path / "e.lct"), level_meta={})
+    monkeypatch.setattr(
+        cache_events,
+        "get_active_trace_recorder",
+        MagicMock(return_value=recorder),
+    )
+    coordinator_sink = MagicMock(spec=CacheEventSink)
+    monkeypatch.setattr(
+        cache_events,
+        "create_cache_event_sink",
+        MagicMock(return_value=coordinator_sink),
+    )
+    factory = _capture_subscriber(monkeypatch)
+
+    cache_events.maybe_create_cache_event_subscriber(
+        MPServerConfig(),
+        HTTPFrontendConfig(),
+        CoordinatorConfig(url="http://coordinator:9300", event_reporting=True),
+    )
+    recorder.close()
+
+    assert isinstance(factory.call_args.kwargs["sink"], MultiCacheEventSink)
+
+
+def test_reporting_without_http_frontend_records_only_the_trace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Without the HTTP frontend there is nothing to register with the
+    coordinator, so its sink is not built even when reporting is on."""
+    recorder = EventsTraceRecorder(str(tmp_path / "e.lct"), level_meta={})
+    monkeypatch.setattr(
+        cache_events,
+        "get_active_trace_recorder",
+        MagicMock(return_value=recorder),
+    )
+    create_sink = MagicMock()
+    monkeypatch.setattr(cache_events, "create_cache_event_sink", create_sink)
+    factory = _capture_subscriber(monkeypatch)
+
+    cache_events.maybe_create_cache_event_subscriber(
+        MPServerConfig(),
+        None,
+        CoordinatorConfig(url="http://coordinator:9300", event_reporting=True),
+    )
+    recorder.close()
+
+    create_sink.assert_not_called()
+    assert isinstance(factory.call_args.kwargs["sink"], TraceCacheEventSink)

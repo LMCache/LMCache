@@ -3,3 +3,6 @@
 # The cu12 analogue lives in cuda12_core.txt.
 
 cupy-cuda13x
+# cuda.bindings, used by the timeline-semaphore event IPC backend
+# (selected under isolated IPC) and the raw CUDA IPC wrapper.
+cuda-python>=13,<14

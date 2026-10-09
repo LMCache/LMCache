@@ -17,7 +17,8 @@ VLLM_LOG="${VLLM_LOG_FILE:-/tmp/build_${BUILD_ID}_vllm_cpu_validation.log}"
 LMCACHE_PID=""
 VLLM_PID=""
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
-LMCACHE_ZMQ_PORT="${LMCACHE_ZMQ_PORT:-5555}"
+LMCACHE_REQUEST_PORT="${LMCACHE_REQUEST_PORT:-${LMCACHE_ZMQ_PORT:-5555}}"
+LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 LMCACHE_L1_SIZE_GB="${LMCACHE_L1_SIZE_GB:-1}"
 LMCACHE_EVICTION_POLICY="${LMCACHE_EVICTION_POLICY:-LRU}"
@@ -78,9 +79,51 @@ VLLM_HF_OFFLINE="${VLLM_HF_OFFLINE:-1}"
 #   LMCACHE_MP_TRANSFER_MODE=lmcache_driven -> lmcache-driven IPC handle path
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
 LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-engine_driven}"
+
+case "${LMCACHE_REQUEST_TRANSPORT}" in
+  zmq) LMCACHE_REQUEST_SCHEME="tcp" ;;
+  grpc) LMCACHE_REQUEST_SCHEME="grpc" ;;
+  *)
+    echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'" >&2
+    echo "Valid values: zmq, grpc" >&2
+    exit 1
+    ;;
+esac
 # Set SKIP_INSTALL=1 to skip Phase 1 (install) — useful when the caller
 # has already installed everything (e.g. macOS CI workflow steps).
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
+
+resolve_vllm_cpu_nightly_spec() {
+  if [ -n "${VLLM_CPU_NIGHTLY_SPEC:-}" ]; then
+    echo "Using caller-provided VLLM_CPU_NIGHTLY_SPEC=${VLLM_CPU_NIGHTLY_SPEC}"
+    return
+  fi
+
+  local platform_label=""
+  case "$(uname -s)" in
+    Darwin) platform_label="macos-latest" ;;
+    Linux) platform_label="ubuntu-22.04" ;;
+  esac
+
+  if [ -n "${platform_label}" ] && [ -z "${LMCACHE_VLLM_PIN_URL:-}" ]; then
+    export LMCACHE_VLLM_PIN_URL="https://raw.githubusercontent.com/LMCache/LMCache/github_nightly_tested_vllm/latest_tested_vllm_${platform_label}.txt"
+  fi
+
+  local resolver="${SHARED_SCRIPTS_DIR}/../../.buildkite/k3_harness/resolve-pinned-vllm.sh"
+  if [ -f "${resolver}" ]; then
+    # shellcheck disable=SC1090
+    source "${resolver}"
+  else
+    echo "Pinned vLLM resolver not found at ${resolver}; using latest CPU nightly"
+  fi
+
+  if [ -n "${PINNED_VLLM_VERSION:-}" ]; then
+    export VLLM_CPU_NIGHTLY_SPEC="vllm-cpu-nightly==${PINNED_VLLM_VERSION}"
+  else
+    export VLLM_CPU_NIGHTLY_SPEC="vllm-cpu-nightly"
+  fi
+  echo "Resolved VLLM_CPU_NIGHTLY_SPEC=${VLLM_CPU_NIGHTLY_SPEC}"
+}
 
 # Directory to collect artifacts before workspace is deleted
 ARTIFACT_DIR="/tmp/build_${BUILD_ID}_artifacts"
@@ -290,12 +333,16 @@ start_vllm() {
   # kept for backwards-compatibility with older vLLM CPU wheels.
   export VLLM_DEVICE=cpu
   export VLLM_TARGET_DEVICE=cpu
+  # reset_prefix_cache is a vLLM development endpoint. This E2E uses it to
+  # exercise connector-managed cache reset through the vLLM HTTP server.
+  export VLLM_SERVER_DEV_MODE=1
   export VLLM_CPU_KVCACHE_SPACE="${VLLM_CPU_KVCACHE_SPACE}"
   export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE}"
   # Force non-MLA attention backend when the matrix profile asks for it.
-  # vLLM's CPU backend still raises NotImplementedError for MLA today,
-  # so DeepSeek-V2-family models (which normally route through MLA) must
-  # set this on CPU to fall back to standard MHA.
+  # vLLM's CPU backend now supports MLA (vllm-project/vllm#49453), so
+  # DeepSeek-V2-family models route through the CPU MLA backend by
+  # default. This knob only remains to opt *out* of MLA when a profile
+  # still wants the standard MHA fallback.
   #
   # vLLM parses this env as `bool(int(os.getenv("VLLM_MLA_DISABLE","0")))`,
   # so any non-integer value (including the empty string GitHub Actions
@@ -322,8 +369,8 @@ start_vllm() {
   kv_cache_bytes="$(python3 -c "print(int(${VLLM_CPU_KVCACHE_SPACE} * 1024 * 1024 * 1024))")"
   # Tell LMCacheMPConnector where the lmcache server actually listens.
   # Without this it falls back to tcp://localhost:5555 and dies with
-  # "Cannot reach the LMCache MP server" whenever we run multiple e2e
-  # steps in parallel/sequence on different ZMQ ports.
+  # "Cannot reach the LMCache MP server" whenever the selected request
+  # transport or port differs from that legacy default.
   local kv_transfer_config
   kv_transfer_config="$(python3 -c "
 import json
@@ -332,8 +379,8 @@ print(json.dumps({
     'kv_role': 'kv_both',
     'kv_connector_module_path': 'lmcache.integration.vllm.lmcache_mp_connector',
     'kv_connector_extra_config': {
-        'lmcache.mp.host': 'tcp://localhost',
-        'lmcache.mp.port': int('${LMCACHE_ZMQ_PORT}'),
+        'lmcache.mp.host': '${LMCACHE_REQUEST_SCHEME}://localhost',
+        'lmcache.mp.port': int('${LMCACHE_REQUEST_PORT}'),
     },
 }))")"
   # Optional flags — appended only when set, so unrelated callers stay
@@ -420,6 +467,7 @@ else
   # of `setuptools` that would block the version vllm-cpu-nightly
   # pins.
   uv pip uninstall -y vllm vllm-cpu-nightly 2>/dev/null || true
+  resolve_vllm_cpu_nightly_spec
   PIP_BIN="uv pip" \
   PIP_INSTALL_EXTRA_ARGS="--index-strategy unsafe-best-match" \
     bash "${SHARED_SCRIPTS_DIR}/install_vllm_cpu.sh"
@@ -484,7 +532,8 @@ echo "[Phase 2 / Step 3] Starting LMCache server"
 echo "LMCache log: ${LMCACHE_LOG}"
 # Build lmcache server args
 LMCACHE_ARGS=(
-  --port "${LMCACHE_ZMQ_PORT}"
+  --transport "${LMCACHE_REQUEST_TRANSPORT}"
+  --port "${LMCACHE_REQUEST_PORT}"
   --http-port "${LMCACHE_HTTP_PORT}"
   --l1-size-gb "${LMCACHE_L1_SIZE_GB}"
   --eviction-policy "${LMCACHE_EVICTION_POLICY}"
@@ -556,8 +605,10 @@ if [ "$(uname -s)" = "Linux" ]; then
   #               unconditionally, so `vllm serve` aborts with
   #               "libavutil.so.NN: cannot open shared object file"
   #               without FFmpeg — even for text-only models.
-  # Prefer sudo if present (GitHub ubuntu runners need it). Install only
-  # what's missing and never let an apt hiccup fail the step.
+  # Prefer sudo if present (GitHub ubuntu runners need it). These packages
+  # are runtime prerequisites for the vLLM CPU server, so an installation
+  # failure must fail the validation instead of surfacing later as a missing
+  # torch operator.
   MISSING_PKGS=()
   if [ ! -e /usr/lib/x86_64-linux-gnu/libnuma.so.1 ] \
      && [ ! -e /lib/x86_64-linux-gnu/libnuma.so.1 ]; then
@@ -572,16 +623,25 @@ if [ "$(uname -s)" = "Linux" ]; then
   if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
     echo "Installing missing system packages: ${MISSING_PKGS[*]}"
     if command -v sudo >/dev/null 2>&1; then
-      sudo apt-get update \
-        && sudo apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}" \
-        || echo "⚠️  apt-get install (${MISSING_PKGS[*]}) via sudo failed; continuing"
+      sudo apt-get update -o Acquire::Retries=3
+      sudo apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}"
     else
-      apt-get update \
-        && apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}" \
-        || echo "⚠️  apt-get install (${MISSING_PKGS[*]}) failed; continuing"
+      apt-get update -o Acquire::Retries=3
+      apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}"
     fi
   else
     echo "libnuma1 and FFmpeg runtime libs already present, skipping apt install"
+  fi
+
+  # Do not let a missing runtime library turn into a misleading native
+  # operator error from vLLM during worker initialization.
+  if ! ldconfig -p 2>/dev/null | grep -q 'libnuma\.so\.1'; then
+    echo "❌ Required runtime library libnuma.so.1 is unavailable"
+    false
+  fi
+  if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+    echo "❌ Required FFmpeg runtime library libavutil.so is unavailable"
+    false
   fi
 fi
 # VLLM_DEVICE is the modern env var (vLLM 0.8+)
@@ -656,8 +716,10 @@ echo "✅ CPU E2E validation passed"
 # Scenario:
 #   - LMCache server stays running the entire time
 #   - vLLM instance 1: request A → LMCache store; request A again → LMCache hit
+#   - Reset the external prefix cache through vLLM
+#   - request A → LMCache miss/store; request A again → LMCache hit
 #   - vLLM restart (instance 2): request A → LMCache hit (cross-instance)
-#   - All three outputs must be identical (bit-exact with temperature=0)
+#   - All outputs must be identical (bit-exact with temperature=0)
 # ═══════════════════════════════════════════════════════════════════
 
 echo "=== Cache Hit Validation (Phase 3) ==="
@@ -712,17 +774,70 @@ if [ "${READ_DELTA}" -lt 1 ]; then
 fi
 echo "✅ LMCache hit verified on same instance (${READ_DELTA} chunks read)"
 
+# Reset through vLLM so this exercises LMCacheMPConnector.reset_cache(), not the
+# LMCache HTTP management endpoint directly.
+echo "[Phase 3 / Step 5] Resetting the external prefix cache through vLLM"
+RESET_RESPONSE=$(curl -fsS -X POST \
+  "http://localhost:${VLLM_PORT}/reset_prefix_cache?reset_external=true")
+echo "Reset response: ${RESET_RESPONSE}"
+if ! echo "${RESET_RESPONSE}" | python3 -c \
+  "import json, sys; assert json.load(sys.stdin).get('success') is True"; then
+  echo "❌ vLLM did not report a successful external prefix-cache reset"
+  false
+fi
+echo "✅ vLLM external prefix-cache reset succeeded"
+
+# The first request after reset must miss the cleared LMCache data and store it
+# again. A read here would mean stale cache entries survived the reset.
+echo "[Phase 3 / Step 6] Request A after reset — expecting LMCache miss/store"
+L1_READ_BEFORE=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
+L1_WRITE_BEFORE=$(scrape_metric "lmcache_mp_l1_write_chunks_total")
+OUTPUT_3=$(send_completion "${PROMPT_FILE}" 50)
+echo "Output 3: ${OUTPUT_3}"
+wait_for_metric_change \
+  "lmcache_mp_l1_write_chunks_total" "${L1_WRITE_BEFORE}" 10 || true
+L1_READ_AFTER=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
+L1_WRITE_AFTER=$(scrape_metric "lmcache_mp_l1_write_chunks_total")
+READ_DELTA=$((L1_READ_AFTER - L1_READ_BEFORE))
+STORE_DELTA=$((L1_WRITE_AFTER - L1_WRITE_BEFORE))
+echo "L1 read chunks delta after reset: ${READ_DELTA}"
+echo "L1 write chunks delta after reset: ${STORE_DELTA}"
+if [ "${READ_DELTA}" -gt 0 ]; then
+  echo "❌ LMCache read stale data after the external prefix-cache reset"
+  false
+fi
+if [ "${STORE_DELTA}" -lt 1 ]; then
+  echo "❌ LMCache did not repopulate after the external prefix-cache reset"
+  false
+fi
+echo "✅ Reset verified: old data missed and ${STORE_DELTA} chunks were rewritten"
+
+# The repopulated entry must be usable on the next request.
+echo "[Phase 3 / Step 7] Request A again — expecting LMCache hit after repopulation"
+L1_READ_BEFORE=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
+OUTPUT_4=$(send_completion "${PROMPT_FILE}" 50)
+echo "Output 4: ${OUTPUT_4}"
+sleep 2
+L1_READ_AFTER=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
+READ_DELTA=$((L1_READ_AFTER - L1_READ_BEFORE))
+echo "L1 read chunks delta after repopulation: ${READ_DELTA}"
+if [ "${READ_DELTA}" -lt 1 ]; then
+  echo "❌ No LMCache hit after repopulating the cleared cache"
+  false
+fi
+echo "✅ LMCache hit verified after repopulation (${READ_DELTA} chunks read)"
+
 # Restart vLLM
-echo "[Phase 3 / Step 5] Restarting vLLM (instance 2)"
+echo "[Phase 3 / Step 8] Restarting vLLM (instance 2)"
 stop_vllm
 sleep 2
 start_vllm
 
-# Request A (third time, new vLLM instance) → should trigger read/hit from LMCache
-echo "[Phase 3 / Step 6] Request A (third) — expecting LMCache hit after vLLM restart"
+# Request A on a new vLLM instance should trigger read/hit from LMCache.
+echo "[Phase 3 / Step 9] Request A — expecting LMCache hit after vLLM restart"
 L1_READ_BEFORE=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
-OUTPUT_3=$(send_completion "${PROMPT_FILE}" 50)
-echo "Output 3: ${OUTPUT_3}"
+OUTPUT_5=$(send_completion "${PROMPT_FILE}" 50)
+echo "Output 5: ${OUTPUT_5}"
 sleep 2
 L1_READ_AFTER=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
 READ_DELTA=$((L1_READ_AFTER - L1_READ_BEFORE))
@@ -733,24 +848,22 @@ if [ "${READ_DELTA}" -lt 1 ]; then
 fi
 echo "✅ LMCache cross-instance hit verified (${READ_DELTA} chunks read)"
 
-# Verify all three outputs are identical
-echo "[Phase 3 / Step 7] Verifying output consistency"
-if [ "${OUTPUT_1}" != "${OUTPUT_2}" ]; then
-  echo "❌ Output mismatch between request 1 and request 2"
-  echo "  Output 1: ${OUTPUT_1}"
-  echo "  Output 2: ${OUTPUT_2}"
-  false
-fi
-if [ "${OUTPUT_1}" != "${OUTPUT_3}" ]; then
-  echo "❌ Output mismatch between request 1 and request 3 (after vLLM restart)"
-  echo "  Output 1: ${OUTPUT_1}"
-  echo "  Output 3: ${OUTPUT_3}"
-  false
-fi
-echo "✅ All three outputs are identical — cache does not alter inference results"
+# Verify every output is identical.
+echo "[Phase 3 / Step 10] Verifying output consistency"
+for output_number in 2 3 4 5; do
+  output_var="OUTPUT_${output_number}"
+  output_value="${!output_var}"
+  if [ "${OUTPUT_1}" != "${output_value}" ]; then
+    echo "❌ Output mismatch between request 1 and request ${output_number}"
+    echo "  Output 1: ${OUTPUT_1}"
+    echo "  Output ${output_number}: ${output_value}"
+    false
+  fi
+done
+echo "✅ All five outputs are identical — reset does not alter inference results"
 
 # Negative test: a completely different prompt should NOT hit the cache
-echo "[Phase 3 / Step 8] Request B (different prompt) — expecting cache MISS"
+echo "[Phase 3 / Step 11] Request B (different prompt) — expecting cache MISS"
 PROMPT_FILE_B="/tmp/build_${BUILD_ID}_phase3_prompt_b.txt"
 python3 -c "
 # A completely different prompt that shares no prefix with prompt A
@@ -770,7 +883,7 @@ if [ "${READ_DELTA}" -gt 0 ]; then
 fi
 echo "✅ Cache miss confirmed for different prompt — metrics are trustworthy"
 
-echo "[Phase 3 / Step 9] Cleaning up"
+echo "[Phase 3 / Step 12] Cleaning up"
 stop_vllm
 cleanup_processes
 echo "✅ Phase 3 cleanup completed"

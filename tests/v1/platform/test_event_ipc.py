@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import gc
 import inspect
+import weakref
 
 # Third Party
 import pytest
@@ -9,12 +11,17 @@ import pytest
 from lmcache import torch_device_type
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.event_ipc import (
+    _EXPORTED_EVENT_RING_SIZE,
     DefaultEventIPCBackend,
     EventIPCBackend,
     get_event_ipc_backend,
 )
-from lmcache.v1.platform.cpu import CpuDeviceSpec
-from lmcache.v1.platform.cuda import CudaDeviceSpec
+from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
+from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
+from lmcache.v1.platform.devices.cuda.timeline_semaphore_event_ipc import (
+    TimelineSemaphoreEventIPCBackend,
+)
+from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
 import lmcache.v1.platform as platform
 
 pytestmark = pytest.mark.skipif(
@@ -90,6 +97,36 @@ def test_default_backend_create_export_import_delegate():
         _is_device := imported.calls[0][1],
         b"h",
     ) == imported.calls[0]
+
+
+def test_export_event_retains_event_while_handle_is_usable():
+    """An IPC handle dangles if its event dies, so export must retain it.
+
+    The exporter previously dropped its only reference on return, so whether a
+    peer could still import the handle depended on refcount/GC timing.
+    """
+    backend = DefaultEventIPCBackend(
+        event_module=_FakeEventModule(), device_type="fake"
+    )
+    event = backend.create_event(_Device("fake"))
+    alive = weakref.ref(event)
+
+    backend.export_event(event, _Device("fake"))
+    del event
+    gc.collect()
+
+    assert alive() is not None
+
+
+def test_exported_event_retention_is_bounded():
+    """Retention must not grow without limit on a long-lived backend."""
+    backend = DefaultEventIPCBackend(
+        event_module=_FakeEventModule(), device_type="fake"
+    )
+    for _ in range(_EXPORTED_EVENT_RING_SIZE + 64):
+        backend.export_event(backend.create_event(_Device("fake")), _Device("fake"))
+
+    assert len(backend._exported_events) == _EXPORTED_EVENT_RING_SIZE
 
 
 def test_default_backend_record_wait_query_synchronize_delegate():
@@ -220,12 +257,44 @@ def test_cpu_device_spec_exposes_cached_default_event_backend() -> None:
     assert spec.event_ipc_backend is spec.event_ipc_backend
 
 
-@pytest.mark.cuda
-def test_cuda_device_spec_exposes_cached_default_event_backend() -> None:
+@pytest.fixture
+def restore_isolated_ipc():
+    """Restore the process-global isolated-IPC switch after the test."""
+    previous = is_isolated_ipc()
+    yield
+    set_isolated_ipc(previous)
+
+
+def test_cuda_device_spec_exposes_timeline_backend_when_isolated(
+    restore_isolated_ipc,
+) -> None:
+    set_isolated_ipc(True)
+    spec = CudaDeviceSpec()
+    assert isinstance(spec.event_ipc_backend, TimelineSemaphoreEventIPCBackend)
+    assert spec.event_ipc_backend.device_type == "cuda"
+    assert spec.event_ipc_backend is spec.event_ipc_backend
+
+
+def test_cuda_device_spec_exposes_default_backend_by_default(
+    restore_isolated_ipc,
+) -> None:
+    """Isolated IPC defaults to off, keeping CUDA interprocess event handles."""
+    set_isolated_ipc(False)
     spec = CudaDeviceSpec()
     assert isinstance(spec.event_ipc_backend, DefaultEventIPCBackend)
-    assert spec.event_ipc_backend.device_type == torch_device_type
+    assert spec.event_ipc_backend.device_type == "cuda"
     assert spec.event_ipc_backend is spec.event_ipc_backend
+
+
+def test_cuda_device_spec_backend_cache_ignores_later_switch_changes(
+    restore_isolated_ipc,
+) -> None:
+    """The backend is cached on first read; later switch flips are ignored."""
+    set_isolated_ipc(True)
+    spec = CudaDeviceSpec()
+    backend = spec.event_ipc_backend
+    set_isolated_ipc(False)
+    assert spec.event_ipc_backend is backend
 
 
 def test_default_backend_stub_end_to_end():

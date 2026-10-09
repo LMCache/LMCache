@@ -42,7 +42,9 @@ class EngineDetector(ABC):
 
     @abstractmethod
     def discover(
-        self, kv_caches: DiscoverableKVCache, layout_hints: LayoutHints
+        self,
+        kv_caches: DiscoverableKVCache,
+        layout_hints: LayoutHints,
     ) -> "tuple[Optional[lmcache_native.EngineKVFormat], DiscoverableKVCache]":
         """Return ``(format, canonical_kv_caches)``, or ``(None, kv_caches)``.
 

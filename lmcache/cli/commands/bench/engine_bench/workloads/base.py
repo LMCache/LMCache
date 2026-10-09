@@ -9,6 +9,7 @@ import queue
 import time
 
 # First Party
+from lmcache.cli.commands.bench.engine_bench.config import WarmupPolicy
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
 from lmcache.cli.commands.bench.engine_bench.request_sender import RequestSender
 from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
@@ -100,31 +101,44 @@ class BaseWorkload(ABC):
         """
         return []
 
-    def run(self) -> None:
+    def run(self, warmup_policy: WarmupPolicy = WarmupPolicy.RUN) -> None:
         """Run warmup + benchmark, closing the HTTP client in the same loop.
 
         Blocks until the workload is complete. The ``RequestSender``'s
         httpx transports are bound to this loop, so they must be closed
         before ``asyncio.run`` destroys it — otherwise a later close
         from a fresh loop raises ``RuntimeError: Event loop is closed``.
+
+        Args:
+            warmup_policy: ``WarmupPolicy.SKIP`` starts the measured run
+                immediately, without calling :meth:`warmup`.
         """
 
         async def _run_and_close() -> None:
             try:
-                await self._run_async()
+                await self._run_async(warmup_policy)
             finally:
                 await self._request_sender.close()
 
         asyncio.run(_run_and_close())
 
-    async def _run_async(self) -> None:
-        """Internal async implementation of the run loop."""
-        self._progress_monitor.log_message("Starting warmup phase")
-        await self.warmup()
+    async def _run_async(self, warmup_policy: WarmupPolicy) -> None:
+        """Internal async implementation of the run loop.
 
-        self._progress_monitor.log_message(
-            "Warmup complete, starting benchmark",
-        )
+        Args:
+            warmup_policy: Whether to run :meth:`warmup` before measuring.
+        """
+        if warmup_policy is WarmupPolicy.SKIP:
+            self._progress_monitor.log_message(
+                "Skipping warmup phase, starting benchmark",
+            )
+        else:
+            self._progress_monitor.log_message("Starting warmup phase")
+            await self.warmup()
+            self._progress_monitor.log_message(
+                "Warmup complete, starting benchmark",
+            )
+
         self._stats_collector.reset()
         self._drain_finished_queue()  # discard warmup completions
 

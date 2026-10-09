@@ -17,7 +17,7 @@ multiprocess (MP) mode.
 │                           │                                     │
 │                     torch_dev (unified entry)                   │
 │              torch_device_type (e.g. "cuda"/"musa"/"xpu"/       │
-│                                 "hpu"/"cpu"; auto-discoverable) │
+│                          "hpu"/"neuron"/"cpu"; auto-discoverable)│
 │                                                                 │
 │  [Registry Discovery Point]                                     │
 │  Built-in DeviceSpecs are discovered under lmcache.v1.platform; │
@@ -189,10 +189,10 @@ default raises `NotImplementedError`.
 ## CPU-Only Stub Fallback
 
 `_detect_device()` also accepts a CPU-only environment where none of the
-supported accelerators (CUDA, MUSA, XPU, HPU) is available. In that case
+supported accelerators (CUDA, MUSA, XPU, HPU, Neuron) is available. In that case
 `torch_device_type` is `"cpu"` and `torch_dev` is either:
 
-- `lmcache.v1.platform.cpu.stub_cpu_device.StubCPUDevice` — when `torch`
+- `lmcache.v1.platform.devices.cpu.stub_cpu_device.StubCPUDevice` — when `torch`
   is importable but no GPU is detected. The stub implements the subset of
   the `torch.cuda` / `torch.xpu` / `torch.hpu` surface used by the middle
   layer (`Event`, `Stream`, `device`, `synchronize`, `set_device`,
@@ -220,7 +220,7 @@ which is wrong for that backend's actual KV cache layout.
 Device vendors choose one of two ownership models:
 
 - **In-tree:** contribute the `DeviceSpec`, `DeviceOps`, tests, and optional
-  IPC capabilities under `lmcache/v1/platform/<device>/`. Subclass discovery
+  IPC capabilities under `lmcache/v1/platform/devices/<backend>/`. Subclass discovery
   finds the backend without a registration list. This model ships and tests
   the device on the LMCache release cadence.
 - **External wheel:** maintain the same interfaces in a vendor repository and

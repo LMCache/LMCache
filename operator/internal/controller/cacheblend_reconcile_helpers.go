@@ -66,7 +66,7 @@ func (r *CacheBlendEngineReconciler) validateAndSetCondition(ctx context.Context
 	return nil
 }
 
-// reconcileDaemonSet creates or updates the blend_v3 engine DaemonSet.
+// reconcileDaemonSet creates or updates the blend engine DaemonSet.
 func (r *CacheBlendEngineReconciler) reconcileDaemonSet(ctx context.Context, engine *lmcachev1alpha1.CacheBlendEngine) error {
 	// Resolve the coordinator connection (ref -> Service URL) so the DaemonSet
 	// builder emits --coordinator-url for server registration.

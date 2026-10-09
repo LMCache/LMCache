@@ -16,11 +16,12 @@ from lmcache.v1.mp_coordinator.api import (
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
-from lmcache.v1.mp_coordinator.controllers.usage_manager import CacheUsageManager
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
-from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
+from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from tests.v1.mp_coordinator.persistence.conftest import capture_consistently
 
 
@@ -30,7 +31,9 @@ class _Coordinator:
     def __init__(self) -> None:
         self.directory = KeyDirectory()
         self.usage = CacheUsageManager()
-        self.controller = FleetEvictionController(usage_manager=self.usage)
+        self.controller = FleetEvictionController(
+            usage_manager=self.usage, registry=InstanceRegistry()
+        )
         self.broadcaster = CacheEventBroadcaster()
         self.broadcaster.register_consumer(self.directory)
         self.broadcaster.register_consumer(self.usage)
@@ -64,10 +67,15 @@ def _key(chunk_id: int, cache_salt: str = "") -> ObjectKey:
     )
 
 
-def _store(seq: int, keys: list[ObjectKey], tier: Tier = Tier.L2) -> CacheEventBatch:
+def _store(
+    seq: int,
+    keys: list[ObjectKey],
+    tier: Tier = Tier.L2,
+    incarnation: int = 7,
+) -> CacheEventBatch:
     return CacheEventBatch(
         instance_id="node-a",
-        incarnation=7,
+        incarnation=incarnation,
         seq=seq,
         event_type=CacheEventType.STORE,
         tier=tier,
@@ -125,9 +133,9 @@ class TestRestoreWithoutReplay:
         assert restarted.directory.lookup([_key(1)])[0], "restored L1 placement"
 
         # The emitter comes back with a higher incarnation.
-        batch = _store(seq=1, keys=[_key(9)], tier=Tier.L1)
-        object.__setattr__(batch, "incarnation", 8)
-        restarted.gate.ingest(batch)
+        restarted.gate.ingest(
+            _store(seq=1, keys=[_key(9)], tier=Tier.L1, incarnation=8)
+        )
 
         assert restarted.directory.lookup([_key(1)]) == [[]], (
             "incarnation 8 should have fenced incarnation 7's L1 slice"

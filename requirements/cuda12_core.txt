@@ -2,3 +2,6 @@
 # LMCACHE_CUDA_MAJOR=12. The cu13 default lives in cuda13_core.txt.
 
 cupy-cuda12x
+# cuda.bindings, used by the timeline-semaphore event IPC backend
+# (selected under isolated IPC) and the raw CUDA IPC wrapper.
+cuda-python>=12,<13

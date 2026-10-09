@@ -2,19 +2,19 @@
 """Tests for platform event IPC use in the LMCache-driven handle path."""
 
 # Standard
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any, Iterator, cast
+from typing import Any, cast
 from unittest.mock import MagicMock
 import inspect
 
 # Third Party
+import msgspec
 import pytest
 import torch
 
 # First Party
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
-from lmcache.v1.multiprocess.protocol import RequestType
 
 
 class _FakeEventBackend:
@@ -58,18 +58,13 @@ class _FakeEventBackend:
         self.calls.append(("synchronize", event, device))
 
 
-class _WorkerEvent:
-    """Worker event without a direct ``ipc_handle`` method."""
-
-    def wait(self, stream: object | None = None) -> None:
-        return None
-
-
 class _NoopDispatcher:
-    """Avoid starting native callback threads in the server unit test."""
+    """Record registrations instead of starting native callback threads."""
+
+    payload_types: dict[str, object] = {}
 
     def register(self, kind: str, handler: object, payload_type: object) -> None:
-        return None
+        _NoopDispatcher.payload_types[kind] = payload_type
 
     def start(self) -> None:
         return None
@@ -81,6 +76,13 @@ class _FakeStorageManager:
     def finish_write(self, keys: list[object]) -> None:
         return None
 
+    def finish_write_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
+        """Accept the owner-tagged callback registered by the transfer module."""
+        return None
+
+    def finish_read_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
+        return None
+
     def finish_read_prefetched(self, keys: list[object]) -> None:
         return None
 
@@ -88,13 +90,14 @@ class _FakeStorageManager:
         self,
         keys: list[object],
         layout: object,
-        mode: str,
     ) -> dict[object, object]:
         return {}
 
-    @contextmanager
-    def read_prefetched_results(self, keys: list[object]) -> Iterator[list[object]]:
-        yield []
+    def prepare_read_completion(self, keys, l1_owners=None):
+        return []
+
+    def unsafe_read(self, keys, l1_owners=None):
+        return [], []
 
 
 def _resolved_future(result: object) -> MessagingFuture[object]:
@@ -123,67 +126,61 @@ def test_worker_exports_events_through_platform_backend(
         lambda kv_caches: list(kv_caches.values()),
     )
 
-    sent: list[tuple[RequestType, list[object]]] = []
+    client = MagicMock()
+    client.register_kv_cache.return_value = _resolved_future(True)
+    client.store.return_value = MessagingFuture()
+    client.retrieve.return_value = MessagingFuture()
 
-    def send_request(
-        _client: object,
-        request_type: RequestType,
-        payload: list[object],
-    ) -> MessagingFuture:
-        sent.append((request_type, payload))
-        if request_type == RequestType.REGISTER_KV_CACHE:
-            return _resolved_future(True)
-        return MessagingFuture()
-
-    context = worker_transfer.LMCacheDrivenTransferContext()
+    context = worker_transfer.LMCacheDrivenTransferContext(1, client)
     kv_caches = {"layer_0": torch.empty(1)}
     context.register(
-        1,
         kv_caches,
         "model",
         1,
         1,
-        MagicMock(),
         1.0,
-        send_request,
     )
+    unregister_future = context.unregister()
+    stream = MagicMock(name="current_stream")
+    monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: stream)
+    event = context.create_recorded_event()
 
     store_future = context.submit_store(
         "request",
         "key",
-        1,
         kv_caches,
         [[0]],
-        _WorkerEvent(),
+        event,
         1,
     )
     retrieve_future = context.submit_retrieve(
         "request",
         "key",
-        1,
         kv_caches,
         [[0]],
-        _WorkerEvent(),
+        event,
         1,
         skip_first_n_tokens=2,
     )
 
     assert isinstance(store_future, DeviceMessagingFuture)
     assert isinstance(retrieve_future, DeviceMessagingFuture)
-    assert sent[1] == (
-        RequestType.STORE,
-        ["key", 1, [[0]], b"completion-handle"],
-    )
-    assert sent[2] == (
-        RequestType.RETRIEVE,
-        ["key", 1, [[0]], b"completion-handle", 2],
-    )
+    assert unregister_future is client.unregister_kv_cache.return_value
+    client.unregister_kv_cache.assert_called_once_with(1)
+    client.store.assert_called_once_with("key", 1, [[0]], b"completion-handle")
+    client.retrieve.assert_called_once_with("key", 1, [[0]], b"completion-handle", 2)
     assert [call[0] for call in backend.calls] == [
         "check",
+        "create",
+        "record",
         "export",
         "export",
     ]
-    assert all(call[-1] == torch.device("cpu") for call in backend.calls)
+    assert backend.calls[2][2] is stream
+    device = torch.device("cpu")
+    assert backend.calls[0][1] == device
+    assert backend.calls[1][1] == device
+    assert all(call[-1] == device for call in backend.calls[3:])
 
 
 def test_server_store_and_retrieve_delegate_event_ordering(
@@ -235,9 +232,24 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     )
 
     storage_manager = _FakeStorageManager()
+    callbacks: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        lmcache_driven_transfer,
+        "submit_callback_to_stream",
+        lambda stream, kind, payload: callbacks.append((kind, payload)),
+    )
+    held: list[tuple[str, bytes]] = []
+    released: list[int] = []
+
+    def hold_imported_event(event: tuple[str, bytes]) -> int:
+        held.append(event)
+        return len(held) - 1
+
     server_context = SimpleNamespace(
         chunk_size=1,
+        null_block_id=0,
         storage_manager=storage_manager,
+        get_read_owners=lambda request_id: None,
         event_bus=SimpleNamespace(
             publish=lambda event: None,
             publish_on_stream=lambda stream, event: None,
@@ -252,12 +264,16 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         device=torch.device("cpu"),
         stream="transfer-stream",
         cupy_stream="cupy-stream",
+        hold_imported_event=hold_imported_event,
+        release_imported_event=released.append,
         max_batch_size=1,
         kv_layer_groups_manager=SimpleNamespace(
             num_object_groups=1,
             num_kernel_groups=1,
             object_groups=[SimpleNamespace(kernel_group_indices=[0])],
-            get_attn_desc=lambda: SimpleNamespace(num_chunks_in_sw=[-1]),
+            get_attn_desc=lambda: SimpleNamespace(
+                num_chunks_in_sw=[-1], group_kinds=()
+            ),
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
     )
@@ -287,6 +303,18 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     waited_handles = [call[1][1] for call in backend.calls if call[0] == "wait"]
     assert imported_handles == [b"store-producer", b"retrieve-producer"]
     assert waited_handles == [b"store-producer", b"retrieve-producer"]
+
+    # Each import is held and its release is queued on the transfer stream
+    # right behind the wait; the callback payload decodes as registered.
+    assert held == [("remote", handle) for handle in imported_handles]
+    assert callbacks == [
+        ("release_imported_event", (1, 0)),
+        ("release_imported_event", (1, 1)),
+    ]
+    for kind, payload in callbacks:
+        decoder = msgspec.msgpack.Decoder(type=_NoopDispatcher.payload_types[kind])
+        module._release_imported_event(decoder.decode(msgspec.msgpack.encode(payload)))
+    assert released == [0, 1]
     assert sum(call[0] == "record" for call in backend.calls) == 2
     assert sum(call[0] == "export" for call in backend.calls) == 2
     for index, call in enumerate(backend.calls):
@@ -303,5 +331,5 @@ def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
 
     for module in (futures, lmcache_driven_transfer, worker_transfer):
         source = inspect.getsource(module)
-        assert "lmcache.v1.platform.musa" not in source
+        assert "lmcache.v1.platform.devices.musa" not in source
         assert 'device.type == "musa"' not in source

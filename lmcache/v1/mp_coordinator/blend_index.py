@@ -5,9 +5,12 @@ Answers the blend-style fragment lookup: which cached chunks does a
 request's tokens contain, and where? A strided rolling-hash probe
 discovers candidates; each is then verified token-exact.
 
+One content can be held by several chunk hashes (the same text stored
+after different prefixes), each claimed by the namespaces that stored it;
+a match names one the requester's own namespace claims.
+
 Owns its lock and never calls back into the directory, so the only lock
-order is directory → index. Matches name a ``chunk_hash`` only, with no
-model or salt awareness.
+order is directory → index.
 
 See ``docs/design/v1/mp_coordinator/blend_index.md``.
 """
@@ -24,7 +27,7 @@ import numpy as np
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.api import BlendMatch
+from lmcache.v1.mp_coordinator.api import BlendMatch, BlendNamespace
 from lmcache.v1.multiprocess.token_hasher import (
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,
@@ -52,12 +55,31 @@ class BlendIndexStats:
     Attributes:
         num_contents: Distinct chunk contents indexed.
         num_chunks: Chunks indexed across those contents.
+        num_claims: ``(chunk, namespace)`` pairs across those chunks.
+        num_namespaces: Distinct namespaces holding indexed content.
         table_size: Slots in the occupancy filter.
     """
 
     num_contents: int
     num_chunks: int
+    num_claims: int
+    num_namespaces: int
     table_size: int
+
+
+@dataclass
+class _Occupant:
+    """One chunk hash holding an entry's content.
+
+    Attributes:
+        token_offset: The chunk's position in its stored sequence; per
+            chunk, since identical content can sit at different offsets.
+        namespaces: Every namespace that stored this chunk. The occupant
+            is dropped when the last one goes.
+    """
+
+    token_offset: int
+    namespaces: set[BlendNamespace] = field(default_factory=set)
 
 
 @dataclass
@@ -68,16 +90,16 @@ class _FingerprintEntry:
     undiscoverable rather than being wrongly matched."""
 
     token_ids: np.ndarray
-    # (chunk_hash, token_offset); the offset is per chunk, since identical
-    # content can be stored at different positions.
-    occupants: list[tuple[bytes, int]] = field(default_factory=list)
+    # chunk_hash -> occupant, in first-indexed order.
+    occupants: dict[bytes, _Occupant] = field(default_factory=dict)
 
 
 class BlendIndex:
     """Thread-safe content fingerprint index for fragment lookups.
 
-    Mutations arrive through :meth:`add` and :meth:`remove` (driven by
-    binding lifecycle); reads through :meth:`match` and :meth:`stats`.
+    Mutations arrive through :meth:`add`, :meth:`remove_claim`, and
+    :meth:`remove_chunk` (driven by binding lifecycle); reads through
+    :meth:`match` and :meth:`stats`.
     """
 
     def __init__(self, chunk_size: int = 256, probe_stride: int = 1) -> None:
@@ -109,17 +131,31 @@ class BlendIndex:
         # Bits currently set; a removal leaves its bit behind (a stale bit
         # only costs a dict miss), so rebuild once they outgrow the entries.
         self._bits_set = 0
+        # Running totals behind stats(), kept in step with every mutation:
+        # a metrics scrape reads them, and walking the table under the lock
+        # would stall ingest and lookups for time growing with the index.
+        self._num_chunks = 0
+        self._claims_by_namespace: dict[BlendNamespace, int] = {}
 
-    def add(self, token_ids: np.ndarray, chunk_hash: bytes, token_offset: int) -> None:
-        """Index ``chunk_hash``'s content, or attach it to an existing entry.
+    def add(
+        self,
+        token_ids: np.ndarray,
+        chunk_hash: bytes,
+        token_offset: int,
+        namespace: BlendNamespace,
+    ) -> None:
+        """Record that ``namespace`` stores ``chunk_hash`` with this content.
 
-        Idempotent. Content whose length is not ``chunk_size`` is ignored.
+        Idempotent, and additive in the namespace: a second namespace
+        joins the existing occupant rather than replacing its claim.
+        Content whose length is not ``chunk_size`` is ignored.
 
         Args:
             token_ids: The chunk's tokens. Held by reference, so the
                 caller must not mutate it afterwards.
             chunk_hash: The chunk's ``ObjectKey.chunk_hash``.
             token_offset: The chunk's position in its stored sequence.
+            namespace: The namespace the chunk was stored in.
         """
         if token_ids.shape[0] != self._chunk_size:
             logger.warning(
@@ -134,27 +170,70 @@ class BlendIndex:
         with self._lock:
             entry = self._fingerprint_table.get(poly)
             if entry is None:
-                self._fingerprint_table[poly] = _FingerprintEntry(
-                    token_ids=token_ids, occupants=[(chunk_hash, token_offset)]
-                )
+                entry = _FingerprintEntry(token_ids=token_ids)
+                self._fingerprint_table[poly] = entry
                 slot = poly & int(self._mask)
                 if not self._slots[slot]:
                     self._slots[slot] = 1
                     self._bits_set += 1
                 if _TABLE_GROWTH * len(self._fingerprint_table) > self._slots.shape[0]:
                     self._rebuild_table()
+            occupant = entry.occupants.get(chunk_hash)
+            if occupant is None:
+                entry.occupants[chunk_hash] = _Occupant(
+                    token_offset=token_offset, namespaces={namespace}
+                )
+                self._num_chunks += 1
+                self._count_claim(namespace, 1)
                 return
-            for index, (held_hash, _) in enumerate(entry.occupants):
-                if held_hash == chunk_hash:
-                    entry.occupants[index] = (chunk_hash, token_offset)
-                    return
-            entry.occupants.append((chunk_hash, token_offset))
+            occupant.token_offset = token_offset
+            if namespace not in occupant.namespaces:
+                occupant.namespaces.add(namespace)
+                self._count_claim(namespace, 1)
 
-    def remove(self, token_ids: np.ndarray, chunk_hash: bytes) -> None:
-        """Drop ``chunk_hash`` from the entry for ``token_ids``.
+    def remove_claim(
+        self, token_ids: np.ndarray, chunk_hash: bytes, namespace: BlendNamespace
+    ) -> None:
+        """Drop ``namespace``'s claim on ``chunk_hash``.
 
-        The content is dropped with its last chunk; removing an unknown
-        chunk or content is a no-op.
+        The chunk survives while another namespace still stores it, and
+        the content is dropped with its last chunk. Removing an unknown
+        claim, chunk, or content is a no-op.
+
+        Args:
+            token_ids: The content the chunk was indexed under.
+            chunk_hash: The chunk to release.
+            namespace: The namespace releasing it.
+        """
+        if token_ids.shape[0] != self._chunk_size:
+            return
+        poly = self._fingerprint(token_ids)
+        with self._lock:
+            entry = self._fingerprint_table.get(poly)
+            if entry is None:
+                return
+            occupant = entry.occupants.get(chunk_hash)
+            if occupant is None or namespace not in occupant.namespaces:
+                return
+            occupant.namespaces.discard(namespace)
+            self._count_claim(namespace, -1)
+            if occupant.namespaces:
+                return
+            del entry.occupants[chunk_hash]
+            self._num_chunks -= 1
+            if entry.occupants:
+                return
+            del self._fingerprint_table[poly]
+            # The bit stays until a rebuild: clearing it here could hide a
+            # different fingerprint sharing the bucket.
+            if self._bits_set > 2 * len(self._fingerprint_table):
+                self._rebuild_table()
+
+    def remove_chunk(self, token_ids: np.ndarray, chunk_hash: bytes) -> None:
+        """Drop ``chunk_hash`` and every namespace's claim on it.
+
+        For a re-store under the same hash with different tokens, which
+        invalidates every claim at once.
 
         Args:
             token_ids: The content the chunk was indexed under.
@@ -167,9 +246,12 @@ class BlendIndex:
             entry = self._fingerprint_table.get(poly)
             if entry is None:
                 return
-            entry.occupants = [
-                occupant for occupant in entry.occupants if occupant[0] != chunk_hash
-            ]
+            occupant = entry.occupants.pop(chunk_hash, None)
+            if occupant is None:
+                return
+            self._num_chunks -= 1
+            for namespace in occupant.namespaces:
+                self._count_claim(namespace, -1)
             if entry.occupants:
                 return
             del self._fingerprint_table[poly]
@@ -178,14 +260,17 @@ class BlendIndex:
             if self._bits_set > 2 * len(self._fingerprint_table):
                 self._rebuild_table()
 
-    def match(self, tokens: np.ndarray) -> list[BlendMatch]:
-        """Find indexed chunks contained in ``tokens``.
+    def match(self, tokens: np.ndarray, namespace: BlendNamespace) -> list[BlendMatch]:
+        """Find chunks ``namespace`` can retrieve, contained in ``tokens``.
 
-        Every candidate is verified token-exact before acceptance.
+        Candidates are narrowed to the occupants ``namespace`` stores,
+        then verified token-exact. Content held only by other namespaces
+        yields nothing, and is rejected before the comparison.
 
         Args:
             tokens: The query token ids (any dtype castable to
                 ``uint64``).
+            namespace: The requester's retrieval namespace.
 
         Returns:
             Matches in ascending ``cur_st`` order, at most one per chunk.
@@ -207,17 +292,20 @@ class BlendIndex:
                 entry = self._fingerprint_table.get(int(probe[position]))
                 if entry is None:
                     continue  # bucket shared with another fingerprint
-                cur_st = position * self._probe_stride
-                if not np.array_equal(query[cur_st : cur_st + window], entry.token_ids):
-                    continue  # fingerprint collision: content differs
-                for chunk_hash, token_offset in entry.occupants:
-                    if chunk_hash in seen:
+                for chunk_hash, occupant in entry.occupants.items():
+                    if chunk_hash in seen or namespace not in occupant.namespaces:
                         continue
+                    # Verifying only here spares foreign content the comparison.
+                    cur_st = position * self._probe_stride
+                    if not np.array_equal(
+                        query[cur_st : cur_st + window], entry.token_ids
+                    ):
+                        break  # fingerprint collision: content differs
                     seen.add(chunk_hash)
                     matches.append(
                         BlendMatch(
                             chunk_hash=chunk_hash,
-                            old_st=token_offset,
+                            old_st=occupant.token_offset,
                             cur_st=cur_st,
                         )
                     )
@@ -227,15 +315,20 @@ class BlendIndex:
     def stats(self) -> BlendIndexStats:
         """Return a point-in-time summary of index contents.
 
+        Reads running totals, so its cost does not grow with the index:
+        a metrics scrape calls it while ingest and lookups wait on the
+        same lock.
+
         Returns:
-            Distinct contents, total chunks, and the table size.
+            Distinct contents, chunks, namespace claims, distinct
+            namespaces, and the table size.
         """
         with self._lock:
             return BlendIndexStats(
                 num_contents=len(self._fingerprint_table),
-                num_chunks=sum(
-                    len(entry.occupants) for entry in self._fingerprint_table.values()
-                ),
+                num_chunks=self._num_chunks,
+                num_claims=sum(self._claims_by_namespace.values()),
+                num_namespaces=len(self._claims_by_namespace),
                 table_size=int(self._slots.shape[0]),
             )
 
@@ -245,6 +338,16 @@ class BlendIndex:
         """Return the 64-bit polynomial fingerprint of one chunk's content."""
         window = np.asarray(token_ids, dtype=np.uint64)
         return int(chunk_hash_windows_numba(window, self._chunk_size, POLY_BASE)[0])
+
+    def _count_claim(self, namespace: BlendNamespace, delta: int) -> None:
+        """Adjust ``namespace``'s claim count, forgetting it at zero so
+        ``num_namespaces`` counts only namespaces still holding content.
+        Call with the lock held."""
+        count = self._claims_by_namespace.get(namespace, 0) + delta
+        if count:
+            self._claims_by_namespace[namespace] = count
+        else:
+            del self._claims_by_namespace[namespace]
 
     def _rebuild_table(self) -> None:
         """Resize the occupancy filter and rebuild it from live contents,

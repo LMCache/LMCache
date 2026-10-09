@@ -4,7 +4,10 @@ Tests for the DAX MP L2 adapter.
 """
 
 # Standard
-from typing import cast
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Callable, cast
+import os
 import select
 import threading
 import time
@@ -18,7 +21,6 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
-    PrefetchRequestSpec,
 )
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -28,7 +30,8 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L2AdapterListener
-from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_registered_l2_adapter_types,
@@ -42,13 +45,18 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
     L2ReconfigureError,
 )
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.mp_observability.event_bus import EventBus
 from lmcache.v1.platform import consume_fd
+
+# Test helpers
+from tests.v1.distributed.utils import single_row_spec
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -232,6 +240,7 @@ def test_dax_hotplug_remove_migrate_preserves_loadability(tmp_path):
                 "device_path": source_path,
                 "mode": "migrate",
             },
+            device_owners=lambda _path: [],
         )
 
         assert result["state"] == "removed"
@@ -254,7 +263,7 @@ def test_dax_adapter_implements_generic_reconfigure_status(tmp_path):
     adapter = make_hotplug_adapter(tmp_path)
     try:
         assert isinstance(adapter, L2ReconfigurableAdapter)
-        status = adapter.reconfigure("status", {})
+        status = adapter.reconfigure("status", {}, device_owners=lambda _path: [])
         assert status == {
             "backend": "dax",
             "supported_operations": ["status", "add", "remove", "resize"],
@@ -357,7 +366,53 @@ def test_dax_hotplug_remove_evict_notifies_logical_delete(tmp_path):
         adapter.close()
 
 
-def test_dax_hotplug_add_sanitizes_mapping_errors(tmp_path):
+def test_dax_hotplug_add_duplicate_device(tmp_path: Path) -> None:
+    adapter = make_hotplug_adapter(tmp_path)
+    device = tmp_path / "extra.bin"
+    device.write_bytes(bytes(4096))
+    alias = tmp_path / "extra-alias.bin"
+    os.link(device, alias)
+    registered = str(device)
+    requested = str(alias)
+    try:
+        added = adapter.hotplug_add_device(registered, 4096)
+        repeated = adapter.hotplug_add_device(requested, 4096)
+        assert repeated["device"]["device_id"] == added["device"]["device_id"]
+        assert repeated["device"]["device_path"] == registered
+        assert len(adapter.hotplug_status()["devices"]) == 3
+
+        with pytest.raises(L2ReconfigureError) as exc_info:
+            adapter.hotplug_add_device(requested, 2048)
+        assert exc_info.value.status_code == 409
+        assert len(adapter.hotplug_status()["devices"]) == 3
+    finally:
+        adapter.close()
+
+
+def test_dax_duplicate_config_rejected(tmp_path: Path) -> None:
+    device = tmp_path / "device.bin"
+    device.write_bytes(bytes(4096))
+    alias = tmp_path / "alias.bin"
+    os.link(device, alias)
+    with pytest.raises(ValueError, match="already mapped"):
+        DaxL2Adapter(
+            DaxL2AdapterConfig(
+                devices=[
+                    DaxDeviceConfig(str(p), 4096 / (1024**3)) for p in (device, alias)
+                ],
+                slot_bytes=4096,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "path_type, expected_error",
+    [
+        ("missing", "failed to identify DAX device"),
+        ("too_small", "failed to map DAX device"),
+    ],
+)
+def test_dax_hotplug_add_sanitizes_mapping_errors(tmp_path, path_type, expected_error):
     adapter = DaxL2Adapter(
         DaxL2AdapterConfig(
             devices=[],
@@ -368,14 +423,18 @@ def test_dax_hotplug_add_sanitizes_mapping_errors(tmp_path):
             num_load_workers=1,
         )
     )
-    missing_path = str(tmp_path / "missing_dax.bin")
+    candidate = tmp_path / "invalid_dax"
+    if path_type == "too_small":
+        candidate.write_bytes(bytes(1024))
+    device_path = str(candidate)
     try:
+        assert not adapter.owns_device(device_path)
         with pytest.raises(L2ReconfigureError) as exc_info:
-            adapter.hotplug_add_device(missing_path, 2048)
+            adapter.hotplug_add_device(device_path, 2048)
 
         assert exc_info.value.status_code == 400
-        assert exc_info.value.payload == {"error": "failed to map DAX device"}
-        assert missing_path not in str(exc_info.value.payload)
+        assert exc_info.value.payload == {"error": expected_error}
+        assert device_path not in str(exc_info.value.payload)
     finally:
         adapter.close()
 
@@ -429,9 +488,19 @@ class _FakeReconfigurableAdapter:
             "status": {"ready": True},
         }
 
-    def reconfigure(self, operation: str, payload: dict[str, object]) -> dict:
+    def reconfigure(
+        self,
+        operation: str,
+        payload: dict[str, object],
+        *,
+        device_owners: Callable[[str], list[str]],
+    ) -> dict:
         self.calls.append((operation, payload))
         return {"status": "ok", "operation": operation, "payload": payload}
+
+    def get_usage(self) -> AdapterUsage:
+        """Declare no capacity; reconfiguring still reports the compartment."""
+        return AdapterUsage(total_bytes_used=0, total_capacity_bytes=0)
 
 
 class _SerdeLikeWrapper:
@@ -440,8 +509,46 @@ class _SerdeLikeWrapper:
 
 
 class _FakeAdapterDescriptor:
-    def __init__(self, type_name: str) -> None:
+    def __init__(self, type_name: str, shared: bool = False) -> None:
         self.type_name = type_name
+        # The real L2AdapterDescriptor always carries its config; capacity
+        # reporting reads ``shared`` off it.
+        self.config = SimpleNamespace(shared=shared)
+
+
+class _RecordingBus:
+    """Captures capacity-change events instead of publishing them."""
+
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    def publish(self, event: object) -> None:
+        self.events.append(event)
+
+
+def _wire_capacity_publishing(sm: StorageManager) -> None:
+    """Give a bare StorageManager the state its capacity publish needs.
+
+    Reconfiguring an adapter also announces the new topology, which reads
+    the L1 manager, the adapter descriptors, and the event bus.
+
+    Args:
+        sm: The partially-constructed storage manager to wire up.
+    """
+    sm._lifecycle_lock = threading.Lock()
+    sm._capacity_publish_lock = threading.Lock()
+    sm._event_bus = cast(EventBus, _RecordingBus())
+    # Declares no L1, keeping these tests about the L2 path.
+    sm._l1_manager = cast(
+        L1Manager,
+        SimpleNamespace(get_capacity_bytes_by_backend=lambda: {}),
+    )
+    sm._l1_managers_by_id = {0: sm._l1_manager}
+    if not hasattr(sm, "_adapter_descriptors"):
+        sm._adapter_descriptors = {
+            adapter_id: cast(L2AdapterDescriptor, _FakeAdapterDescriptor("fake"))
+            for adapter_id in sm._l2_adapters
+        }
 
 
 def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
@@ -449,6 +556,9 @@ def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
     adapter = _FakeReconfigurableAdapter()
     sm._adapters_lock = threading.Lock()
     sm._l2_adapters = {0: cast(L2AdapterInterface, adapter)}
+    # Reconfiguring changes capacity, so the call also announces the new
+    # topology; that needs enough state to build a capacity snapshot.
+    _wire_capacity_publishing(sm)
 
     result = sm.reconfigure_l2_adapter(0, "flip", {"enabled": True})
 
@@ -792,7 +902,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
         adapter = sm._l2_adapters[0]
         assert isinstance(adapter, DaxL2Adapter)
 
-        reserved = sm.reserve_write([key], layout, mode="new")
+        reserved = sm.reserve_write([key], layout)
         assert key in reserved
         assert reserved[key].tensor is not None
         reserved[key].tensor.fill_(11)
@@ -806,26 +916,14 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
             timeout=5.0,
         )
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec([key], {0: layout}))
-        assert wait_for_condition(
-            lambda: sm.query_prefetch_lookup_hits(handle) is not None,
-            timeout=5.0,
-        )
-        lookup_hits = sm.query_prefetch_lookup_hits(handle)
-        assert lookup_hits == 1
-
-        final_result: dict[str, int | None] = {"value": None}
-
-        def _capture_prefetch_result() -> bool:
-            result = sm.query_prefetch_status(handle)
-            if result is None:
-                return False
-            final_result["value"] = result.count_leading_ones()
-            return True
-
-        assert wait_for_condition(_capture_prefetch_result, timeout=5.0)
-        final_hits = final_result["value"]
+        handle = sm.submit_prefetch_task(single_row_spec([key], layout))
+        assert sm.wait_prefetch_status(handle, timeout=5.0)
+        result = sm.query_prefetch_status(handle)
+        assert result is not None
+        final_hits = result.hit_cells[0].count_leading_ones()
         assert final_hits == 1
+        # The key came back from the DAX adapter, not from L1.
+        assert result.l2_hit_cells[0].count_leading_ones() == 1
 
         with sm.read_prefetched_results([key]) as results:
             assert results is not None
@@ -897,7 +995,7 @@ def test_storage_manager_dax_adapter_uses_global_l2_eviction(tmp_path):
         key2 = create_object_key(72)
 
         def _write_key(key: ObjectKey, fill_value: int, usage_fraction: float) -> None:
-            reserved = sm.reserve_write([key], layout, mode="new")
+            reserved = sm.reserve_write([key], layout)
             assert key in reserved
             assert reserved[key].tensor is not None
             reserved[key].tensor.fill_(fill_value)

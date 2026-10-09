@@ -2,7 +2,7 @@
 
 Module: `lmcache/v1/mp_coordinator/cache_events.py`
 Contract vocabulary: `lmcache/v1/mp_coordinator/api.py`
-Consumer: `lmcache/v1/mp_coordinator/key_directory.py` (see
+Consumer: `lmcache/v1/mp_coordinator/views/key_directory.py` (see
 [key_directory.md](key_directory.md))
 
 This is the emission half of the key directory (M1 of the control-plane
@@ -22,23 +22,51 @@ storage layer ──► EventBus ──► CacheEventSubscriber ──► CacheE
                   thread)      seq, batching)
 ```
 
-- **`CacheEventSink`** — `publish(batches)` with **at-least-once**
-  delivery, preserving list order within and across calls. That is the
-  entire transport contract, and it is deliberately weak: the directory
-  already absorbs everything a real transport does wrong. Redelivery is
-  deduplicated by the per-instance `seq` cursor, loss surfaces as a
-  `seq` gap that marks the instance's slice stale until the stream is
-  replayed, and restarts are fenced by `incarnation`. A sink never needs exactly-once or global ordering.
+- **`CacheEventSink`** — `publish(batches)`, preserving list order within
+  and across successful calls. Redelivery is safe: the per-instance `seq`
+  cursor deduplicates it, and restarts are fenced by `incarnation`.
+  Delivery loss surfaces as a `seq` gap. A durable source can replay
+  retained events; HTTP cannot repair an event dropped before the
+  coordinator accepted it. A sink never needs exactly-once or global
+  ordering.
 - **`HttpCacheEventSink`** — the first sink: one
   `POST /events` per flush, batches in list order. Failures
-  raise `CacheEventPublishError`; the caller decides retry vs drop
-  (both are safe, see above).
-- A future **Kafka sink** produces to a topic with the message key set
-  to `instance_id`, so one partition carries one instance's stream —
-  partition FIFO is exactly the per-instance FIFO the directory needs.
-  The coordinator side gains a consumer that feeds
-  the coordinator's `EventGate`; the subscriber and producers are
-  untouched.
+  raise `CacheEventPublishError`. Retrying is safe; the current subscriber
+  drops a failed drained list, consumes its sequence numbers, and leaves a
+  gap that marks the coordinator view stale.
+- **`TraceCacheEventSink`** appends each batch, in wire form, to an
+  `events`-level trace file (`lmcache server --trace-level events`); it
+  needs no coordinator. **`MultiCacheEventSink`** fans one flush out to
+  several sinks and raises only after every sink was tried. See
+  `docs/design/v1/mp_observability/trace.md` §12.
+- **`KafkaCacheEventSink`** produces one JSON record per batch with the
+  message key set to `instance_id`, so Kafka assigns one instance's
+  records to one partition. The producer enables idempotence and
+  requires `acks=all`. The JSON value uses the existing
+  `CacheEventsRequest` envelope with exactly one batch, keeping the HTTP
+  and Kafka wire vocabulary identical.
+
+  `publish` does not wait for the broker. It hands records to the
+  producer's buffer and serves earlier delivery reports. The producer
+  retries in order for up to the delivery timeout (5 minutes by
+  default), so a broker restart delays events instead of losing them.
+  The buffer is capped at 64 MB. A record that does not fit, or that the
+  producer gives up on, is dropped and counted. Its `seq` is already
+  spent, so the coordinator sees a gap. `close` waits up to 10 seconds
+  for what is still queued.
+
+A coordinator started with `--event-transport kafka` consumes the topic
+through `KafkaCacheEventSource` (see [ingest.md](ingest.md)) instead of
+serving `POST /events`; direct HTTP remains the default end-to-end
+transport.
+
+On the coordinator side, transport adapters converge at
+`EventGate.ingest_batches`. `HttpCacheEventSource` is non-durable and
+advertises no replay capability; `KafkaCacheEventSource` (selected by
+`--event-transport kafka` in place of the HTTP source, see
+[ingest.md](ingest.md)) polls the topic and advertises `seekable`. Gate cursors (`instance_id` / `incarnation` /
+`seq`) remain separate from Kafka's partition offsets, which the consumer
+group commits.
 
 ## Batching and sequencing (inside the subscriber)
 
@@ -58,8 +86,9 @@ One `CacheEventSubscriber` per MP-server process owns the buffer, the
 - **`seq` is consumed even when publish fails.** A failed flush drops
   the drained list (bounding memory while the coordinator is down) but
   keeps the `seq` numbers it assigned. The directory sees a gap and
-  sets `gap_detected` for the instance — the honest signal that events
-  were lost and the slice needs an event-stream replay to reconcile.
+  sets `gap_detected` for the instance when a later batch arrives — the
+  honest signal that events were lost. Replay can reconcile the gap only
+  if a durable transport retained the failed batch; HTTP did not.
   Reusing the seqs instead would hide partial-delivery ambiguity (an
   HTTP timeout after the coordinator applied the batch).
 - **`incarnation` = server start time** (`int(time.time())` at
@@ -126,10 +155,11 @@ listener plumbing or a dedicated flush task:
   trade for a self-contained protocol (see
   [key_directory.md](key_directory.md) — Token index).
   `ACCESS` batches carry an **empty backend**: the directory only
-  refreshes key-level recency on access, so there is no placement
-  identity to name — the vocabulary requires a non-empty backend for
-  `store`/`delete` only. The subscriber is single-threaded by design —
-  everything runs on the bus's drain thread, so it needs no locking.
+  refreshes key-level recency and access count on access, so there is
+  no placement identity to name. The vocabulary requires a non-empty
+  backend for `store`/`delete` only. The subscriber is single-threaded
+  by design - everything runs on the bus's drain thread, so it needs no
+  locking.
 - **Threading.** The bus dispatches on one drain thread, which is
   exactly the per-instance FIFO the directory needs. The subscriber
   self-paces delivery: recording flushes when `flush_interval` has
@@ -140,13 +170,14 @@ listener plumbing or a dedicated flush task:
   store completions) is delivered within one tick of the interval
   elapsing instead of waiting for the next request. The sink posts
   synchronously with a short timeout (a slow coordinator briefly
-  stalls the drain, bounded by the timeout; overflow beyond the bus's
-  bounded queue is dropped and surfaces as a `seq` gap → replay).
+  stalls the drain, bounded by the timeout). Overflow beyond the bus's
+  bounded queue happens before the subscriber assigns `seq`, so it is
+  logged by the bus but is not detectable as a gate sequence gap.
 - **Coupling.** The stream requires the bus: enabling
   `--coordinator-event-reporting` together with
-  `--disable-observability` is rejected at startup. Bus-level drops
-  under overload are acceptable by the same argument as transport loss —
-  the directory is eventually consistent soft state.
+  `--disable-observability` is rejected at startup. Bus-level drops under
+  overload remain possible; the directory is eventually consistent soft
+  state, but the loss is not currently self-healing.
 
 ## L1 media
 
@@ -175,12 +206,25 @@ and `--coordinator-event-reporting` (or
 `--coordinator-event-flush-interval` paces the subscriber's
 event-driven flushes (default 1s).
 
+`--coordinator-event-transport kafka` selects Kafka instead of HTTP and
+requires `--coordinator-kafka-bootstrap-servers`. The topic defaults to
+`lmcache-cache-events`. `--coordinator-kafka-delivery-timeout` (default
+300 s) is how long the producer retries a record before dropping it.
+These flags have no
+environment-variable fallback. `confluent-kafka` ships as the optional
+`lmcache[kafka]` extra and is imported only when the Kafka sink is built,
+so HTTP-only deployments never load it.
+
 ## Known limitations (follow-ups)
 
-- **Bus overflow drops events silently** (bounded queue, rate-limited
-  warning); the resulting `seq` gap marks the instance's slice stale.
-  Reconstruction is by replaying the event stream (durable-transport
-  retention) — wiring that replay up is future work.
+- **Bus overflow drops events before sequencing** (bounded queue,
+  rate-limited warning), so the gate cannot detect the loss. A durable
+  transport also cannot replay an event that never reached its producer;
+  a local spool is separate future work.
+- **A Kafka declaration dropped after it was queued is not re-sent.** The
+  subscriber restores a capacity declaration only when `publish` raises.
+  When the producer drops it later, the coordinator lacks that
+  instance's capacity until the next declaration.
 - **The flush pump is coupled to the eviction loop's tick** — decouple
   it (e.g. a bus-owned periodic hook) so tail freshness does not depend
   on that loop's cadence.
