@@ -247,13 +247,34 @@ class GDSContext:
         buf = buffer.view(torch.uint8)
         nbytes = buf.numel()
         with self._registry_lock:
-            if raw_stream not in self._registered_streams:
-                self.backend.register_stream(raw_stream)
-                self._registered_streams.add(raw_stream)
-            for start in range(0, nbytes, _MAX_GDS_REGION):
-                self._register_region_locked(
-                    buf[start : min(start + _MAX_GDS_REGION, nbytes)]
-                )
+            stream_registered = False
+            registered_regions: list[torch.Tensor] = []
+            try:
+                if raw_stream not in self._registered_streams:
+                    self.backend.register_stream(raw_stream)
+                    self._registered_streams.add(raw_stream)
+                    stream_registered = True
+                for start in range(0, nbytes, _MAX_GDS_REGION):
+                    region = buf[start : min(start + _MAX_GDS_REGION, nbytes)]
+                    self._register_region_locked(region)
+                    registered_regions.append(region)
+            except BaseException:
+                for region in reversed(registered_regions):
+                    try:
+                        self._deregister_region_locked(region)
+                    except Exception:
+                        logger.exception(
+                            "GDSContext: failed to roll back buffer registration"
+                        )
+                if stream_registered:
+                    try:
+                        self.backend.deregister_stream(raw_stream)
+                    except Exception:
+                        logger.exception(
+                            "GDSContext: failed to roll back stream registration"
+                        )
+                    self._registered_streams.discard(raw_stream)
+                raise
 
     def deregister_gpu_buffer(self, buffer: torch.Tensor) -> None:
         """Reverse of :meth:`register_gpu_buffer`: deregister its regions + stream.
@@ -395,6 +416,10 @@ class GDSContext:
         """
         base = buffer.data_ptr()
         idx = bisect.bisect_left(self._base_ptrs, base)
+        if idx >= len(self._base_ptrs) or self._base_ptrs[idx] != base:
+            raise ValueError(
+                f"GDS buffer at 0x{base:x} is not registered by this context"
+            )
         try:
             self.backend.deregister_buffer(self._buffers[idx])
         except Exception as e:
@@ -416,9 +441,13 @@ class GDSContext:
         # lists mid-lookup.
         with self._registry_lock:
             idx = bisect.bisect_right(self._base_ptrs, ptr) - 1
+            if idx < 0:
+                raise ValueError(f"GDS buffer at 0x{ptr:x} is not registered")
             base = self._base_ptrs[idx]
             nbytes = self._nbytes[idx]
         offset = ptr - base
+        if offset >= nbytes:
+            raise ValueError(f"GDS buffer at 0x{ptr:x} is not registered")
         return base, offset, nbytes
 
     def _slab_read(

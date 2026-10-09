@@ -90,8 +90,7 @@ def build_common_cpp(
             include_dirs=[str(ROOT_DIR / d) for d in spec.include_dirs],
             extra_compile_args={
                 "cxx": (
-                    (profile.extra_cxx_flags_for(spec) if profile else [])
-                    + ["-O3", "-std=c++17"]
+                    (profile.extra_cxx_flags_for(spec) if profile else []) + ["-O3"]
                 ),
             },
         )
