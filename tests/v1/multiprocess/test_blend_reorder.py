@@ -5,7 +5,7 @@
 import random
 
 # First Party
-from lmcache.v1.multiprocess.modules import blend_reorder as br
+from lmcache.v1.multiprocess.modules.blend import reorder as br
 
 C = 32  # chunk size for these tests
 SYS = list(range(1, C + 1))  # a one-chunk "system prompt"

@@ -18,7 +18,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
-from lmcache.v1.multiprocess.modules import blend_reorder
+from lmcache.v1.multiprocess.modules.blend import reorder as blend_reorder
 from lmcache.v1.multiprocess.modules.blend.lookup import (
     LookupMixin,
     _CBUnifiedJob,

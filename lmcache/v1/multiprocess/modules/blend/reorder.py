@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CacheBlend reorder planner: copy one cached prompt ("steps 1+3").
+"""CacheBlend reorder planner.
 
 Step 1 rebuilds the longest possible beginning of one cached prompt ``H`` out
-of the incoming prompt ``P``'s own tokens. Step 3 serves that copy followed by
+of the incoming prompt ``P``'s own tokens.
+Step 2 serves that copy followed by
 the rest of ``P`` in its original order. The copy is an exact-prefix hit for
 the KV cache; the planner needs only token ids (no document boundaries).
 
-Pure Python + numpy, kept outside the ``blend`` package so importing it does
-not pull in the package's device imports.
+Pure Python + numpy.
 """
 
 # Standard
 from collections import Counter, OrderedDict
 from functools import cached_property
-from typing import Hashable, Sequence
+from typing import Sequence
 import threading
 import time
 
@@ -83,7 +83,8 @@ class _Copier:
         P, L = self.P, len(self.P)
         H = Hn.tolist()
         used = np.zeros(L, dtype=bool)
-        k, pieces = 0, []
+        k = 0
+        pieces: list[tuple[int, int, int]] = []
 
         def add_long(i, m, h):
             if seam_rule and pieces:
@@ -242,6 +243,9 @@ def plan(
     return perm, info
 
 
+NS = tuple[str, int, str]  # namespace: (model_name, world_size, cache_salt)
+
+
 class PromptStore:
     """Token ids of stored prompts, per namespace, LRU-bounded by entries and
     by total tokens, with an owner map from each chunk's chain hash to the
@@ -254,11 +258,11 @@ class PromptStore:
         # (ns, request_id) -> [seq, token ids, chain hashes]
         self._entries: "OrderedDict[tuple, list]" = OrderedDict()
         self._owner: dict[tuple, tuple] = {}  # (ns, chain hash) -> (ns, request_id)
-        self._newest: dict[Hashable, tuple] = {}  # ns -> newest (ns, request_id)
+        self._newest: dict[NS, tuple] = {}  # ns -> newest (ns, request_id)
 
     def record(
         self,
-        ns: Hashable,
+        ns: NS,
         request_id: str,
         token_ids: Sequence[int],
         chain_hashes: Sequence[bytes],
@@ -290,7 +294,7 @@ class PromptStore:
                 if self._newest.get(old[0]) == old:
                     del self._newest[old[0]]
 
-    def resolve(self, model_name: str, world_size: int, cache_salt: str):
+    def resolve(self, model_name: str, world_size: int, cache_salt: str) -> NS | None:
         """The one recorded namespace (model_name, world_size, cache_salt) that
         matches the caller: the salt must be equal; an empty model_name or a
         zero world_size match any. None if zero or several match."""
@@ -306,7 +310,7 @@ class PromptStore:
 
     def candidates(
         self,
-        ns: Hashable,
+        ns: NS,
         hit_hashes: Sequence[bytes],
         prompt_chain: Sequence[bytes],
         top_k: int,
