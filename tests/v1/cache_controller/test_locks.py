@@ -21,6 +21,20 @@ from lmcache.v1.cache_controller.locks import (
 )
 
 
+def _wait_for_waiting_writer(lock: RWLockWithTimeout, timeout: float = 1.0) -> None:
+    """Block until a writer is queued on ``lock``.
+
+    A zero-timeout read acquire succeeds while the lock is read-held and no
+    writer is waiting, and fails as soon as one is. Polling it avoids relying
+    on sleeps to order the test threads.
+    """
+    deadline = time.monotonic() + timeout
+    while lock.acquire_read(timeout=0):
+        lock.release_read()
+        if time.monotonic() >= deadline:
+            raise AssertionError("writer never started waiting")
+
+
 class TestRWLockWithTimeout:
     """Test cases for RWLockWithTimeout."""
 
@@ -255,6 +269,88 @@ class TestRWLockWithTimeout:
         writer_idx = events.index("writer_acquired")
         reader2_idx = events.index("reader2_acquired")
         assert writer_idx < reader2_idx
+
+    def test_writer_timeout_wakes_waiting_readers(self):
+        """Test that readers blocked by a waiting writer resume once it times out."""
+        lock = RWLockWithTimeout()
+        writer_result = []
+        reader2_result = []
+
+        def writer():
+            # Blocked by the first reader until the timeout expires.
+            writer_result.append(lock.acquire_write(timeout=0.1))
+
+        def second_reader():
+            start = time.monotonic()
+            acquired = lock.acquire_read(timeout=2.0)
+            reader2_result.append((acquired, time.monotonic() - start))
+            if acquired:
+                lock.release_read()
+
+        # The first reader holds the lock for the whole test, so the only
+        # event that can unblock the second reader is the writer giving up.
+        assert lock.acquire_read(timeout=1.0)
+        try:
+            t_writer = threading.Thread(target=writer)
+            t_writer.start()
+            _wait_for_waiting_writer(lock)
+
+            t_reader = threading.Thread(target=second_reader)
+            t_reader.start()
+            t_writer.join(timeout=3.0)
+            t_reader.join(timeout=3.0)
+        finally:
+            lock.release_read()
+
+        assert writer_result == [False]
+        assert reader2_result, "second reader did not finish"
+        acquired, elapsed = reader2_result[0]
+        assert acquired is True
+        # Must resume shortly after the writer's 0.1s timeout, not after the
+        # reader's own 2.0s timeout.
+        assert elapsed < 1.0
+
+    def test_writer_timeout_keeps_other_writer_priority(self):
+        """Test that a timed-out writer does not let readers bypass a waiting one."""
+        lock = RWLockWithTimeout()
+        events = []
+
+        def short_writer():
+            events.append(("short_writer", lock.acquire_write(timeout=0.1)))
+
+        def long_writer():
+            if lock.acquire_write(timeout=2.0):
+                events.append(("long_writer_acquired", True))
+                lock.release_write()
+
+        def second_reader():
+            if lock.acquire_read(timeout=2.0):
+                events.append(("reader2_acquired", True))
+                lock.release_read()
+
+        assert lock.acquire_read(timeout=1.0)
+        t_short = threading.Thread(target=short_writer)
+        t_long = threading.Thread(target=long_writer)
+        t_reader = threading.Thread(target=second_reader)
+        try:
+            t_long.start()
+            _wait_for_waiting_writer(lock)
+            t_short.start()
+            t_reader.start()
+            t_short.join(timeout=3.0)
+            # The short writer has given up; the long writer must still hold
+            # the second reader back until the first reader releases.
+            t_reader.join(timeout=0.3)
+            assert ("reader2_acquired", True) not in events
+        finally:
+            lock.release_read()
+        t_long.join(timeout=3.0)
+        t_reader.join(timeout=3.0)
+
+        assert ("short_writer", False) in events
+        assert events.index(("long_writer_acquired", True)) < events.index(
+            ("reader2_acquired", True)
+        )
 
 
 class TestFastLockWithTimeout:
