@@ -109,7 +109,7 @@ jobs:
                 docker buildx build \
                   --platform linux/${{ matrix.arch }} \
                   --build-arg LMCACHE_VERSION=${{ inputs.lmcache_version }} \
-                  --build-arg EXPECTED_TORCH=${EXPECTED_TORCH} \
+                  --build-arg "EXPECTED_TORCH=${EXPECTED_TORCH}" \
                   --tag "${IMAGE}" \
                   ${{ inputs.push && '--push' || '' }} \
                   --file docker/Dockerfile.sglang .
