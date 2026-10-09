@@ -27,8 +27,8 @@ a cross-process event, which cannot be expressed without an event type.
 and leaves `ipc_wrapper_cls` / `event_ipc_backend` at their `None` defaults, so
 `mp_transfer_mode=lmcache_driven` fails at its documented validation point
 instead of crashing later on an attribute lookup. `mp_transfer_mode=auto`
-already routes every non-CUDA device to the engine-driven context, so the
-default needs no special casing.
+resolves to the device spec's declared default, which `RblnDeviceSpec`
+inherits as engine-driven, so the default needs no special casing.
 
 ## The 6-D KV cache
 

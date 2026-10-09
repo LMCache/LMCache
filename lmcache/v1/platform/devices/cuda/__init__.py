@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 # First Party
+from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 from lmcache.v1.platform.devices.cuda.pin_memory import CudaPinMemoryBackend
@@ -157,6 +158,10 @@ class CudaDeviceSpec(DeviceSpec):
             )
         except Exception:
             return False
+
+    def default_mp_transfer_mode(self) -> MPTransferMode:
+        """CUDA defaults to the lmcache-driven (CUDA IPC) transfer path."""
+        return MPTransferMode.LMCACHE_DRIVEN
 
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         # First Party

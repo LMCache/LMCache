@@ -33,6 +33,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 # First Party
+from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 
 if TYPE_CHECKING:
@@ -145,6 +146,21 @@ class DeviceSpec:
         """Return ``True`` when the device is usable for handle transfer."""
         # TODO(chunxiaozheng): implement on subclasses
         return True
+
+    def default_mp_transfer_mode(self) -> MPTransferMode:
+        """Default MP transfer mode when neither the caller nor
+        ``LMCACHE_MP_TRANSFER_MODE`` specifies one.
+
+        Worker-side ``auto`` resolves to this value. Implementations must
+        return a concrete mode: returning ``AUTO`` would silently route to
+        the engine-driven path.
+
+        Returns:
+            ``ENGINE_DRIVEN`` for the CPU fallback and devices without a
+            handle-transfer stack; overridden to ``LMCACHE_DRIVEN`` by
+            devices that have one (CUDA, NPU).
+        """
+        return MPTransferMode.ENGINE_DRIVEN
 
     def current_stream(self, device: object) -> object:
         """Return the current stream for ``device`` on the active platform."""

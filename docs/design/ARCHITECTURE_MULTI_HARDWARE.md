@@ -156,8 +156,8 @@ multiprocess (MP) mode.
 
 ```
 MPTransferMode.AUTO (default):
-  device_type == "cuda"  -->  LMCacheDrivenTransferContext  (IPC zero-copy)
-  device_type != "cuda"  -->  EngineDrivenTransferContext    (gather/scatter copy)
+  DeviceSpec.default_mp_transfer_mode()  -->  LMCacheDrivenTransferContext (cuda, npu)
+                                          -->  EngineDrivenTransferContext   (all others)
 
 MPTransferMode.ENGINE_DRIVEN:
   any device             -->  EngineDrivenTransferContext
