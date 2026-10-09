@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the mamba store-skip / retrieve-window logic in
+"""Tests for the store-skip / retrieve-window logic in
 ``lmcache_driven_transfer``.
 
-- ``all_null_chunk_masks`` (store side): mark chunks whose block ids are all the
-  null block so ``store`` never commits them.
+- ``incomplete_chunk_masks`` (store side): reject objects missing retained blocks.
 - ``retrieve`` (read side): read/transfer only each object group's in-window
   suffix, None-padding the skipped prefix so the transfer path is unchanged.
 """
@@ -15,20 +14,23 @@ from unittest.mock import MagicMock, call
 
 # Third Party
 import pytest
+import torch
 
 # First Party
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager, ObjectGroupInfo
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
-    all_null_chunk_masks,
+    incomplete_chunk_masks,
 )
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
 )
+import lmcache.lmcache_native as lmcache_native
 
 # ------------------------------------------------------------------ #
-#  all_null_chunk_masks (store-side skip)                              #
+#  incomplete_chunk_masks (store-side skip)                           #
 # ------------------------------------------------------------------ #
 
 
@@ -38,7 +40,7 @@ def _og(kernel_group_indices):
 
 def test_full_attention_group_never_null():
     # One real block per chunk -> nothing skipped.
-    masks = all_null_chunk_masks(
+    masks = incomplete_chunk_masks(
         block_ids=[[1, 2, 3]],
         object_groups=[_og([0])],
         blocks_per_chunk=[1],
@@ -50,7 +52,7 @@ def test_full_attention_group_never_null():
 def test_mamba_group_one_block_per_chunk_marks_null_prefix():
     # Align-mamba: only the last block is real; earlier chunks are the null
     # block (id 0) and must be marked skippable.
-    masks = all_null_chunk_masks(
+    masks = incomplete_chunk_masks(
         block_ids=[[0, 0, 0, 7]],
         object_groups=[_og([0])],
         blocks_per_chunk=[1],
@@ -59,22 +61,20 @@ def test_mamba_group_one_block_per_chunk_marks_null_prefix():
     assert masks == [[True, True, True, False]]
 
 
-def test_multi_block_per_chunk_null_only_when_all_blocks_zero():
-    # chunk size = 2 blocks. Chunk 0 = [0, 0] (null), chunk 1 = [0, 9] (has a
-    # real block in its second slot) -> not null.
-    masks = all_null_chunk_masks(
+def test_multi_block_per_chunk_requires_every_retained_block():
+    masks = incomplete_chunk_masks(
         block_ids=[[0, 0, 0, 9]],
         object_groups=[_og([0])],
         blocks_per_chunk=[2],
         num_chunks=2,
     )
-    assert masks == [[True, False]]
+    assert masks == [[True, True]]
 
 
 def test_two_object_groups_independent():
     # Group 0 = full attention (kernel group 0, all real); group 1 = mamba
     # (kernel group 1, null prefix). Masks are per object group.
-    masks = all_null_chunk_masks(
+    masks = incomplete_chunk_masks(
         block_ids=[[1, 2, 3], [0, 0, 5]],
         object_groups=[_og([0]), _og([1])],
         blocks_per_chunk=[1, 1],
@@ -83,26 +83,23 @@ def test_two_object_groups_independent():
     assert masks == [[False, False, False], [True, True, False]]
 
 
-def test_object_group_null_only_when_all_its_kernel_groups_null():
-    # An object group spanning two kernel groups: a chunk is null only if every
-    # kernel group's blocks for that chunk are null.
-    masks = all_null_chunk_masks(
+def test_object_group_requires_every_kernel_group():
+    masks = incomplete_chunk_masks(
         block_ids=[[0, 0], [0, 4]],
         object_groups=[_og([0, 1])],
         blocks_per_chunk=[1, 1],
         num_chunks=2,
     )
-    # chunk 0: kg0=0 and kg1=0 -> null; chunk 1: kg0=0 but kg1=4 -> not null.
-    assert masks == [[True, False]]
+    assert masks == [[True, True]]
 
 
 def test_zero_is_real_with_negative_null_block() -> None:
-    masks = all_null_chunk_masks([[0, 0]], [_og([0])], [1], 2, -1)
+    masks = incomplete_chunk_masks([[0, 0]], [_og([0])], [1], 2, -1)
     assert masks == [[False, False]]
 
 
 def test_negative_null_marker_preserves_checkpoint_zero() -> None:
-    masks = all_null_chunk_masks([[-1, 0, -1, 1]], [_og([0])], [1], 4, -1)
+    masks = incomplete_chunk_masks([[-1, 0, -1, 1]], [_og([0])], [1], 4, -1)
     assert masks == [[True, False, True, False]]
 
 
@@ -248,6 +245,102 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
         [-1, -1, 0, 1],
         [-1, -1, 2, 3],
     ]
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.parametrize(
+    "separate_object_groups,full_sw_kv,null_block_id",
+    [
+        pytest.param(False, False, 0, id="merged"),
+        pytest.param(True, False, 0, id="separate"),
+        pytest.param(False, True, 0, id="full-window"),
+        pytest.param(True, False, -1, id="negative-null-marker"),
+    ],
+)
+def test_store_requires_every_retained_block_in_hybrid_object(
+    monkeypatch: pytest.MonkeyPatch,
+    separate_object_groups: bool,
+    full_sw_kv: bool,
+    null_block_id: int,
+) -> None:
+    """A warm prefix can retain full-attention pages after SW pages are gone."""
+    # Logical block sizes differ from physical slots in the compressed group.
+    tokens_per_block = [64, 64, 256, 256, 256, 4, 8]
+    slots_per_block = [64, 64, 64, 64, 2, 4, 8]
+    windows = [128, 128, -1, -1, -1, 8, 128]
+    engine_groups = [0, 1, 2, 2, 2, 3, 4]
+    tensors = [
+        torch.empty(
+            8, slots, index + 1, dtype=torch.uint8 if index < 5 else torch.float32
+        )
+        for index, slots in enumerate(slots_per_block)
+    ]
+    manager = KVLayerGroupsManager(
+        tensors,
+        [lmcache_native.EngineKVFormat.NL_X_NB_BS_HS] * len(tensors),
+        engine_group_infos=[
+            EngineGroupInfo(
+                engine_group_id=engine_groups[index],
+                layer_indices=(index,),
+                tokens_per_block=tpb,
+                sw_size_tokens=windows[index],
+            )
+            for index, tpb in enumerate(tokens_per_block)
+        ],
+        lmcache_tokens_per_chunk=256,
+        separate_object_groups=separate_object_groups,
+    )
+    if full_sw_kv:
+        manager.enable_full_sw_kv()
+    module, _, transfers = _make_module(
+        monkeypatch, 4, manager.get_attn_desc().num_chunks_in_sw
+    )
+    context = module.get_and_touch_context_entry(1).cache_context
+    context.kv_layer_groups_manager = manager
+    context.lmcache_tokens_per_chunk = 256
+    context.calculate_num_blocks.side_effect = lambda tokens, group: (
+        manager.calculate_num_blocks(group, tokens)
+    )
+    context.stage_block_ids.side_effect = lambda ids: ids
+    module.context.null_block_id = null_block_id
+    module.context.storage_manager.reserve_write.side_effect = lambda keys, layout: {
+        key: MagicMock(get_size=MagicMock(return_value=10)) for key in keys
+    }
+    monkeypatch.setattr(
+        mod, "downsample_and_stage_block_ids", downsample_and_stage_block_ids
+    )
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *args, **kwargs: object())
+
+    real_block = 1 if null_block_id == 0 else 0
+    block_ids: list[list[int]] = []
+    for tpb, window in zip(tokens_per_block, windows, strict=True):
+        bpc = 256 // tpb
+        if window == -1:
+            block_ids.append([real_block] * (4 * bpc))
+            continue
+        keep = window // tpb
+        # Chunk 0: every SW group absent. Chunk 1: only the narrow SW absent.
+        # Chunk 2: one retained narrow-SW block absent. Chunk 3: only the
+        # discarded prefix is absent, so its retained window is valid.
+        chunks = [[null_block_id] * bpc, [real_block] * bpc, [real_block] * bpc]
+        if window == 8:
+            chunks[1] = [null_block_id] * bpc
+            chunks[2][-keep] = null_block_id
+        chunks.append([null_block_id] * (bpc - keep) + [real_block] * keep)
+        block_ids.append([block for chunk in chunks for block in chunk])
+
+    _, ok, stored = module.store_with_chunk_mask(
+        SimpleNamespace(request_id="req", worker_id=1), 1, block_ids, b"producer"
+    )
+
+    assert ok
+    assert stored == [False, False, False, not full_sw_kv]
+    for group_id, group in enumerate(manager.object_groups):
+        has_sw = any(windows[index] != -1 for index in group.kernel_group_indices)
+        expected = ([] if full_sw_kv else [3]) if has_sw else list(range(4))
+        assert [
+            i for i, obj in enumerate(transfers[group_id][1]) if obj is not None
+        ] == expected
 
 
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):

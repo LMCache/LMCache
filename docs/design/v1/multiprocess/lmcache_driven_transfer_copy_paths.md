@@ -87,6 +87,15 @@ the same rules as the staged planner, evaluated per chunk (the direct path
 has no batch of 4; the skip is `recalculate_blocks_to_skip` of the chunk's
 own skipped tokens).
 
+Before STORE reserves an object, every retained block ID in all its kernel
+groups must differ from `null_block_id`. This check runs after sub-chunk
+downsampling: discarded sliding-window blocks may be null, but a missing
+retained slice invalidates the whole object. Full-attention groups remain
+independently storable when object groups are separated. This prevents a
+GPU-cached prefix with missing sliding-window history from being stored under
+valid token hashes; it does not protect non-null blocks from reuse during an
+in-flight copy.
+
 ## Selection
 
 There is no configuration knob: the direct path is taken whenever it can be.
