@@ -41,12 +41,12 @@ esac
 
 if [[ -n "${good_first_issue_pipeline}" ]] && \
     should_skip_k3_pipeline_for_good_first_issue "${good_first_issue_pipeline}"; then
-    echo "+++ :fast_forward: Skipping ${good_first_issue_pipeline} CI for good first issue PR"
+    echo "+++ :fast_forward: Skipping ${good_first_issue_pipeline} CI for labeled PR"
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent annotate \
             --style success \
             --context "good-first-issue-skip" \
-            "Skipped: PR has the \`good first issue\` label. Add a \`force-ci\` label to run the full ${good_first_issue_pipeline} suite." \
+            "Skipped: PR has the \`good first issue\` or \`adapter only\` label. Add a \`force-ci\` label to run the full ${good_first_issue_pipeline} suite." \
             || true
     fi
     exit 0

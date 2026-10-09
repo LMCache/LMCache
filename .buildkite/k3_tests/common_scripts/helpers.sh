@@ -50,6 +50,39 @@ pr_has_label() {
     [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",${wanted_label},"* ]]
 }
 
+# An "adapter only" PR may skip K3 only if every change is an individual
+# *_l2_adapter.py file (plus its tests and docs) other than the adapters K3
+# exercises: P2P, NIXL, and the mock adapter the MP tests use. Any other file
+# in l2_adapters/ may be shared MP-server code (e.g. serde_wrapper.py is
+# imported by storage_manager.py), so it blocks the skip by default.
+# Uses path-filter.sh helpers, so callers must source path-filter.sh.
+pr_is_k3_untested_adapter_change() {
+    local changed_files f
+    changed_files="$(_path_filter_get_changed_files)" || return 1
+    [[ -n "${changed_files}" ]] || return 1
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        case "$f" in
+            *p2p*|*nixl*|\
+            lmcache/v1/distributed/l2_adapters/mock_l2_adapter.py)
+                echo "--- :label: '${f}' is exercised by K3 tests; not skipping"
+                return 1
+                ;;
+            lmcache/v1/distributed/l2_adapters/*_l2_adapter.py|\
+            tests/v1/distributed/l2_adapters/*|\
+            tests/v1/distributed/test_*l2_adapter*)
+                ;;
+            *)
+                if ! _path_filter_is_trivial "$f"; then
+                    echo "--- :label: '${f}' is not an individual L2 adapter; not skipping"
+                    return 1
+                fi
+                ;;
+        esac
+    done <<< "${changed_files}"
+    return 0
+}
+
 should_skip_k3_pipeline_for_good_first_issue() {
     local pipeline_name="${1:?pipeline name is required}"
 
@@ -64,6 +97,11 @@ should_skip_k3_pipeline_for_good_first_issue() {
 
     if pr_has_label "good first issue"; then
         echo "--- :label: PR has 'good first issue'; skipping ${pipeline_name} tests"
+        return 0
+    fi
+
+    if pr_has_label "adapter only" && pr_is_k3_untested_adapter_change; then
+        echo "--- :label: PR has 'adapter only'; skipping ${pipeline_name} tests"
         return 0
     fi
 
