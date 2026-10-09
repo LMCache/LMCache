@@ -19,7 +19,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 # First Party
-from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 from lmcache.v1.platform.devices.npu.pin_memory import NpuPinMemoryBackend
@@ -80,9 +79,9 @@ class NpuDeviceSpec(DeviceSpec):
             self._event_backend_cache = backend
         return backend
 
-    def default_mp_transfer_mode(self) -> MPTransferMode:
-        """Ascend NPU defaults to the lmcache-driven (IPC) transfer path."""
-        return MPTransferMode.LMCACHE_DRIVEN
+    def is_lmcache_driven_available(self) -> bool:
+        """Ascend NPU has the full IPC stack for LMCache-driven transfer."""
+        return True
 
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         """Create the NPU cache context for LMCache-driven transfer."""

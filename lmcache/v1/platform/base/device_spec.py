@@ -142,24 +142,37 @@ class DeviceSpec:
         """
         return False
 
-    def is_handle_transfer_available(self) -> bool:
-        """Return ``True`` when the device is usable for handle transfer."""
-        # TODO(chunxiaozheng): implement on subclasses
-        return True
+    def is_lmcache_driven_available(self) -> bool:
+        """Return ``True`` when the device can serve the lmcache-driven path.
+
+        The base default is ``False``: the fallback spec and devices
+        without a handle-transfer stack (KV wrapper factory, event IPC)
+        stay on the engine-driven data path. Devices with a complete
+        stack override this to ``True`` (CUDA, NPU) or with a runtime
+        probe (MUSA).
+        """
+        return False
 
     def default_mp_transfer_mode(self) -> MPTransferMode:
         """Default MP transfer mode when neither the caller nor
         ``LMCACHE_MP_TRANSFER_MODE`` specifies one.
 
-        Worker-side ``auto`` resolves to this value. Implementations must
-        return a concrete mode: returning ``AUTO`` would silently route to
-        the engine-driven path.
+        Worker-side ``auto`` resolves to this value. The base
+        implementation derives it from :meth:`is_lmcache_driven_available`:
+        devices with a lmcache-driven stack default to ``LMCACHE_DRIVEN``,
+        everything else falls back to ``ENGINE_DRIVEN``. Devices whose
+        lmcache-driven stack is available but opt-in only (CPU SHM, MUSA
+        handles) override this to ``ENGINE_DRIVEN``.
+
+        Implementations must return a concrete mode: returning ``AUTO``
+        would silently route to the engine-driven path.
 
         Returns:
-            ``ENGINE_DRIVEN`` for the CPU fallback and devices without a
-            handle-transfer stack; overridden to ``LMCACHE_DRIVEN`` by
-            devices that have one (CUDA, NPU).
+            The derived (or overridden) concrete
+            :class:`MPTransferMode` member.
         """
+        if self.is_lmcache_driven_available():
+            return MPTransferMode.LMCACHE_DRIVEN
         return MPTransferMode.ENGINE_DRIVEN
 
     def current_stream(self, device: object) -> object:

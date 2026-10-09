@@ -151,7 +151,7 @@ def _build_lmcache_driven_context(
             "Use mode 'engine_driven' instead." % device_type
         ) from exc
     device_spec = get_device_spec(device_type)
-    if device_spec and not device_spec.is_handle_transfer_available():
+    if device_spec and not device_spec.is_lmcache_driven_available():
         raise ValueError(
             "MP transfer mode 'lmcache_driven' is not available for device type "
             "%r: required platform capability checks failed. "

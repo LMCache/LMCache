@@ -486,20 +486,29 @@ def test_auto_npu_context_routes_to_lmcache_driven(
 
 
 def test_default_mp_transfer_mode_declarations() -> None:
-    """Device specs must declare the AUTO routing default explicitly.
+    """AUTO routing defaults must stay pinned per device spec.
 
-    Base (CPU fallback and unoverridden devices) stays engine-driven;
-    cuda and npu declare lmcache-driven.
+    The base default derives from ``is_lmcache_driven_available``:
+    cuda and npu (capability ``True``) default to lmcache-driven; the
+    fallback spec and opt-in-only stacks (cpu SHM, musa handles) stay
+    engine-driven.
     """
     # First Party
     from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
     from lmcache.v1.platform.base.device_spec import DeviceSpec
+    from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
     from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
+    from lmcache.v1.platform.devices.musa import MusaDeviceSpec
     from lmcache.v1.platform.devices.npu import NpuDeviceSpec
 
     assert DeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
+    assert CudaDeviceSpec().is_lmcache_driven_available() is True
     assert CudaDeviceSpec().default_mp_transfer_mode() is MPTransferMode.LMCACHE_DRIVEN
+    assert NpuDeviceSpec().is_lmcache_driven_available() is True
     assert NpuDeviceSpec().default_mp_transfer_mode() is MPTransferMode.LMCACHE_DRIVEN
+    # Available but opt-in-only stacks keep the portable data path as AUTO.
+    assert CpuDeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
+    assert MusaDeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
 
 
 def test_create_transfer_context_invalid_mode_raises() -> None:

@@ -106,8 +106,9 @@ class ExtraConfigDefault(enum.Enum):
     # Poll status replies without blocking the scheduler by default.
     nonblocking_lookup_status = True
     # Routing mode for ``create_transfer_context``: ``auto`` resolves to
-    # the device spec's declared default (CUDA and NPU -> lmcache_driven,
-    # others -> engine_driven);
+    # the device spec's declared default (derived from
+    # ``is_lmcache_driven_available()``: CUDA and NPU -> lmcache_driven;
+    # opt-in-only stacks and others -> engine_driven);
     # ``lmcache_driven`` forces the IPC / SHM zero-copy path where the
     # LMCache server pulls data via device handles;
     # ``engine_driven`` forces the worker-side gather/scatter copy path.

@@ -15,7 +15,8 @@ class MPTransferMode(str, Enum):
     """Routing mode used by :func:`create_transfer_context`.
 
     * ``AUTO``: defer to the device spec's declared default
-      (:meth:`DeviceSpec.default_mp_transfer_mode`); CUDA and NPU declare
+      (:meth:`DeviceSpec.default_mp_transfer_mode`, derived from
+      :meth:`DeviceSpec.is_lmcache_driven_available`); CUDA and NPU get
       lmcache-driven, every other device engine-driven.
     * ``ENGINE_DRIVEN``: force :class:`EngineDrivenTransferContext`
       (worker-side gather / scatter copy path).
