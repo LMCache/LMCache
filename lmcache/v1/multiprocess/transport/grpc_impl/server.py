@@ -15,11 +15,13 @@ import grpc
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.engine_module import EngineModule
+from lmcache.v1.multiprocess.engine_module import EngineModule, InstanceLivenessTarget
 from lmcache.v1.multiprocess.request_handler import (
     BoundRequestHandler,
     HandlerType,
+    get_affinity_key_index,
     iter_request_handlers,
+    wrap_affinity_release,
 )
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
@@ -41,7 +43,6 @@ _GRPC_OPTIONS = (
     ("grpc.max_send_message_length", -1),
     ("grpc.max_receive_message_length", -1),
 )
-_CLIENT_ID_METADATA_KEY = "lmcache-client-id-bin"
 
 
 @dataclass
@@ -49,7 +50,7 @@ class _GrpcRequestHandler:
     operation: str
     handler: Callable[..., Any] | None
     handler_type: HandlerType
-    requires_client_affinity: bool
+    affinity_key_index: int | None
     request_decoder: RequestDecoder
     response_encoder: ResponseEncoder
 
@@ -61,14 +62,12 @@ class _GeneratedServicer:
         handlers: dict[str, _GrpcRequestHandler],
         normal_pool: ThreadPoolExecutor,
         affinity_pool: AffinityThreadPool,
-        affinity_submit_lock: threading.Lock,
         sync_handler_lock: threading.Lock,
     ) -> None:
         self._binding = binding
         self._handlers = handlers
         self._normal_pool = normal_pool
         self._affinity_pool = affinity_pool
-        self._affinity_submit_lock = affinity_submit_lock
         self._sync_handler_lock = sync_handler_lock
 
     def __getattr__(self, method_name: str) -> Callable[[Any, Any], Any]:
@@ -100,15 +99,13 @@ class _GeneratedServicer:
                 with self._sync_handler_lock:
                     result = registered.handler(*payloads)
             elif registered.handler_type is HandlerType.BLOCKING and (
-                registered.requires_client_affinity
+                registered.affinity_key_index is not None
             ):
-                affinity_key = self._affinity_key(context)
-                with self._affinity_submit_lock:
-                    future = self._affinity_pool.submit(
-                        registered.handler,
-                        *payloads,
-                        affinity_key=affinity_key,
-                    )
+                future = self._affinity_pool.submit(
+                    registered.handler,
+                    *payloads,
+                    affinity_key=payloads[registered.affinity_key_index],
+                )
                 result = future.result()
             elif registered.handler_type is HandlerType.BLOCKING:
                 result = self._normal_pool.submit(
@@ -123,15 +120,8 @@ class _GeneratedServicer:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
             raise RuntimeError("gRPC context abort unexpectedly returned") from exc
 
-    @staticmethod
-    def _affinity_key(context: grpc.ServicerContext) -> int:
-        for key, value in context.invocation_metadata():
-            if key == _CLIENT_ID_METADATA_KEY:
-                return hash(value)
-        return hash(context.peer())
 
-
-class GrpcMultiprocessServer(RequestServer):
+class GrpcMultiprocessServer(RequestServer, InstanceLivenessTarget):
     """Register transport-neutral modules against generated gRPC services."""
 
     def __init__(
@@ -151,7 +141,6 @@ class GrpcMultiprocessServer(RequestServer):
             max_workers=max_gpu_workers,
             thread_name_prefix="grpc-affinity",
         )
-        self._affinity_submit_lock = threading.Lock()
         # HandlerType.SYNC is a transport-neutral single-main-loop contract.
         self._sync_handler_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(
@@ -205,16 +194,25 @@ class GrpcMultiprocessServer(RequestServer):
             full_name = method.full_name
             registered = _GrpcRequestHandler(
                 operation=method_codec.operation,
-                handler=(bound_handler.handler if bound_handler is not None else None),
+                handler=(
+                    wrap_affinity_release(
+                        bound_handler.operation,
+                        bound_handler.handler,
+                        self.drop_instance_state,
+                    )
+                    if bound_handler is not None
+                    else None
+                ),
                 handler_type=(
                     bound_handler.options.handler_type
                     if bound_handler is not None
                     else HandlerType.SYNC
                 ),
-                requires_client_affinity=(
-                    bound_handler.options.requires_client_affinity
+                affinity_key_index=(
+                    get_affinity_key_index(bound_handler.operation)
                     if bound_handler is not None
-                    else False
+                    and bound_handler.options.requires_client_affinity
+                    else None
                 ),
                 request_decoder=method_codec.request_decoder,
                 response_encoder=method_codec.response_encoder,
@@ -227,7 +225,6 @@ class GrpcMultiprocessServer(RequestServer):
             service_handlers,
             self._normal_pool,
             self._affinity_pool,
-            self._affinity_submit_lock,
             self._sync_handler_lock,
         )
         add_servicer = getattr(
@@ -240,6 +237,10 @@ class GrpcMultiprocessServer(RequestServer):
         """Start accepting gRPC requests."""
         self._server.start()
         logger.info("LMCache gRPC cache server is running on %s", self._bind_url)
+
+    def drop_instance_state(self, instance_id: int) -> None:
+        """Retire a worker's affinity binding; safe from the reaper thread."""
+        self._affinity_pool.release_key(instance_id)
 
     def close(self) -> None:
         """Stop the gRPC server and its request executors."""

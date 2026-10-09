@@ -2,10 +2,14 @@
 """Transport-neutral request server behavior tests."""
 
 # Standard
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import cast
+from unittest.mock import MagicMock, patch
 import socket
+import subprocess
+import sys
 import threading
 import time
 
@@ -13,9 +17,18 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess import affinity_pool as affinity_pool_mod
+from lmcache.v1.multiprocess.custom_types import CBMatchResult, IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import EngineModule
-from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.engine_module import EngineModule, InstanceLivenessTarget
+from lmcache.v1.multiprocess.modules import management as management_mod
+from lmcache.v1.multiprocess.modules.management import ManagementModule
+from lmcache.v1.multiprocess.request_handler import (
+    HandlerType,
+    get_affinity_key_index,
+    request_handler,
+    wrap_affinity_release,
+)
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
@@ -100,3 +113,203 @@ def test_sync_handlers_are_serialized(request_transport: RequestTransport) -> No
 
     assert state.calls == worker_count
     assert state.max_active == 1
+
+
+class _AffinityModule(EngineModule):
+    @property
+    def context(self) -> MPCacheServerContext:
+        """The dispatch-only test does not use an engine context."""
+        raise NotImplementedError
+
+    def report_status(self) -> dict:
+        return {}
+
+    def close(self) -> None:
+        pass
+
+    @request_handler(HandlerType.BLOCKING, requires_client_affinity=True)
+    def store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool]:
+        return threading.current_thread().name.encode(), True
+
+    @request_handler(HandlerType.BLOCKING, requires_client_affinity=True)
+    def cb_retrieve_pre_computed(
+        self,
+        key: IPCCacheServerKey,
+        cb_match_result: list[CBMatchResult],
+        gpu_block_ids: list[list[int]],
+        instance_id: int,
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool]:
+        return threading.current_thread().name.encode(), True
+
+    @request_handler()
+    def unregister_kv_cache(self, instance_id: int) -> None:
+        if instance_id < 0:
+            raise ValueError("unregister failed")
+
+    @request_handler()
+    def unregister_kv_cache_engine_driven_context(self, instance_id: int) -> None:
+        pass
+
+    @request_handler()
+    def unregister_q_cache(self, instance_id: int) -> None:
+        pass
+
+
+@pytest.fixture(params=REQUEST_TRANSPORTS)
+def affinity_server(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[tuple[str, Callable[[int], None]]]:
+    """Run real transports/pools with a manually ticked reaper and no GPU state."""
+    transport = cast(RequestTransport, request.param)
+    server_url = request_server_url(transport, _unused_tcp_port())
+    config = request_server_config(transport, server_url, max_gpu_workers=2)
+    timer_factory = MagicMock()
+    monkeypatch.setattr(management_mod, "create_periodic_thread", timer_factory)
+    target = MagicMock(spec=InstanceLivenessTarget)
+    target.reap_stale_instances.return_value = []
+    target.tracked_instance_count.return_value = 0
+    management = ManagementModule(
+        MagicMock(spec=MPCacheServerContext),
+        liveness_targets=[target],
+        worker_reap_timeout_seconds=120,
+        worker_registration_grace_seconds=3600,
+    )
+    server = create_request_server([management, _AffinityModule()], config)
+    server.start()
+
+    def reap(instance_id: int) -> None:
+        target.reap_stale_instances.return_value = [instance_id]
+        timer_factory.call_args.kwargs["execute_fn"]()
+
+    try:
+        yield server_url, reap
+    finally:
+        management.close()
+        server.close()
+
+
+def _store_thread(client: RequestClient, instance_id: int) -> bytes:
+    key = IPCCacheServerKey("model", 1, 0, (1,), 0, 1, "affinity-test")
+    name, success = client.store(key, instance_id, [[0]], b"").result(timeout=5)
+    assert success
+    return name
+
+
+@pytest.mark.parametrize("cleanup", ["reap", "kv", "engine", "q"])
+def test_affinity_cleanup_after_repeated_restarts(
+    affinity_server: tuple[str, Callable[[int], None]], cleanup: str
+) -> None:
+    """Both transports retire stale bindings through reaping and unregister RPCs."""
+    server_url, reap = affinity_server
+    clients = [RequestClientFactory.create(server_url) for _ in range(2)]
+    try:
+        old, survivor = clients
+        retired_key = 1001
+        retired_thread = _store_thread(old, retired_key)
+        survivor_thread = _store_thread(survivor, 1002)
+        assert retired_thread != survivor_thread
+        with patch.object(affinity_pool_mod.logger, "warning") as warning:
+            for replacement in range(1003, 1008):
+                if cleanup != "reap":
+                    unregister = {
+                        "kv": old.unregister_kv_cache,
+                        "engine": old.unregister_kv_cache_engine_driven_context,
+                        "q": old.unregister_q_cache,
+                    }[cleanup]
+                    unregister(retired_key).result(timeout=5)
+                old.close()
+                clients.remove(old)
+                if cleanup == "reap":
+                    reap(retired_key)
+                old = RequestClientFactory.create(server_url)
+                clients.append(old)
+                assert _store_thread(old, replacement) == retired_thread
+                assert _store_thread(survivor, 1002) == survivor_thread
+                retired_key = replacement
+            warning.assert_not_called()
+    finally:
+        for client in clients:
+            client.close()
+
+
+def test_affinity_uses_instance_id_across_connections_and_operations(
+    affinity_server: tuple[str, Callable[[int], None]],
+) -> None:
+    """One instance keeps its thread across connections and payload positions."""
+    server_url, _ = affinity_server
+    clients = [RequestClientFactory.create(server_url) for _ in range(2)]
+    try:
+        first, second = clients
+        thread = _store_thread(first, 1)
+        assert _store_thread(second, 1) == thread
+        assert _store_thread(first, 2) != thread
+        key = IPCCacheServerKey("model", 1, 0, (1,), 0, 1, "affinity-test")
+        assert second.cb_retrieve_pre_computed(key, [], [[0]], 1, b"").result(
+            timeout=5
+        ) == (thread, True)
+    finally:
+        for client in clients:
+            client.close()
+
+
+def test_failed_unregister_does_not_release_affinity() -> None:
+    release = MagicMock()
+    handler = wrap_affinity_release(
+        "unregister_kv_cache", _AffinityModule().unregister_kv_cache, release
+    )
+    with pytest.raises(ValueError, match="unregister failed"):
+        handler(-1)
+    release.assert_not_called()
+
+
+def test_affinity_recovers_when_restarts_precede_reaping(
+    affinity_server: tuple[str, Callable[[int], None]],
+) -> None:
+    server_url, reap = affinity_server
+    client = RequestClientFactory.create(server_url)
+    try:
+        threads = {key: _store_thread(client, key) for key in (1001, 1002, 1003, 1004)}
+        assert threads[1002] == threads[1004]
+        reap(1001)
+        reap(1003)
+        assert _store_thread(client, 1002) != _store_thread(client, 1004)
+    finally:
+        client.close()
+
+
+def test_server_factory_import_is_lightweight() -> None:
+    """Importing the factory must not import a backend or engine state."""
+    script = """
+import importlib.abc
+import sys
+
+blocked = (
+    "lmcache.v1.multiprocess.engine_context",
+    "lmcache.v1.multiprocess.modules.management",
+    "lmcache.v1.multiprocess.transport.grpc_impl",
+    "lmcache.v1.multiprocess.transport.zmq_impl",
+)
+
+class ImportBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if any(fullname == name or fullname.startswith(name + ".") for name in blocked):
+            raise ImportError(f"Factory eagerly imported {fullname}")
+        return None
+
+sys.meta_path.insert(0, ImportBlocker())
+import lmcache.v1.multiprocess.transport.server_factory
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
+@pytest.mark.parametrize("operation", ["noop", "ping"])
+def test_affinity_requires_an_integer_instance_id(operation: str) -> None:
+    with pytest.raises(ValueError, match="requires an integer instance_id"):
+        get_affinity_key_index(operation)

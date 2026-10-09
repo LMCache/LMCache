@@ -110,6 +110,13 @@ GPU entry now frees the context directly.) Collect+pop shares the module lock wi
 register's refresh, serializing every register-vs-reap race; on close, the reaper
 is stopped and joined before any module clears state.
 
+The request transport also receives `drop_instance_state` and retires the
+instance's thread-affinity binding. Queued/running tasks keep their original
+worker until they drain; new clients and idle clients sharing a worker can reuse
+the released slot.
+Explicit KV/Q unregister RPCs perform the same affinity retirement. See
+[Worker affinity lifecycle](transport/request_transport.md#worker-affinity-lifecycle).
+
 ### 5.4 Public protocol and config
 
 ```python
@@ -126,7 +133,9 @@ class InstanceLivenessTarget(Protocol):
 One protocol covers both reaper-driven roles. The transfer modules override the
 liveness methods (`touch`/`reap`/`count`); `BlendModule` overrides only
 `drop_instance_state` to drop its mirrored CB state. `ManagementModule` receives
-all targets in a single injected list. (Earlier a separate one-method
+the business targets in a single injected list; server construction attaches
+the request transport as an additional state mirror before accepting traffic.
+(Earlier a separate one-method
 `InstanceReapListener` held `drop_instance_state`; it was folded in since only
 `BlendModule` ever implemented it.)
 
