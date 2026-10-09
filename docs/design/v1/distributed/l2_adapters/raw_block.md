@@ -222,9 +222,30 @@ Important validation rules:
   that are not aligned to `block_align`; misaligned write buffers use an
   aligned bounce buffer
 
+## I/O Engines: posix, io_uring, and spdk
+
+`io_engine` selects the low-level read/write path. `posix` and `io_uring` are
+documented in the configuration section above. The `spdk` engine routes all I/O
+through the SPDK/DPDK-based `SpdkIoEngineCore` (see
+`csrc/storage_backends/raw_block/README.md` for the C++ implementation). It is
+the only engine that supports zero-copy PCIe DMA: the L1 buffer is registered
+with SPDK so payloads are read/written directly into device-mapped memory
+instead of a DMA bounce buffer.
+
+SPDK is configured with the `spdk_transport_type`, `spdk_target_ip`,
+`spdk_target_port`, `spdk_target_nqn`, and `spdk_core_mask` fields. For NVMe-oF
+targets `device_path` is optional (SPDK connects using the transport/target
+fields); for local PCIe devices `spdk_target_ip` is the PCIe address.
+
+SPDK reserves a fixed block of memory (4096 MiB by default) from the OS 2 MiB
+hugepage pool at `spdk_env_init` time — the same pool that backs the L1 buffer.
+The storage manager therefore forces `use_hugepages=True` for the L1 buffer and
+validates the combined L1 payload + SPDK reservation against the free hugepage
+pool at startup, failing fast with a clear error if the pool is short.
+
 ## Relationship to Non-MP Mode
 
-The legacy `RustRawBlockBackend` now acts as a thin facade over `RawBlockCore`.
+ The legacy `RustRawBlockBackend` now acts as a thin facade over `RawBlockCore`.
 It preserves non-MP behavior such as prefix-oriented contains/get semantics,
 while the MP adapter uses the core's full-bitmap lookup/load API.
 
