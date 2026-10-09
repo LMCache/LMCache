@@ -753,16 +753,21 @@ class LMCacheConnectorV1Impl:
         self._manager.post_init()
 
     @_lmcache_nvtx_annotate
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+    def start_load_kv(
+        self, forward_context: "ForwardContext", **kwargs: object
+    ) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
 
+        The scheduler's connector metadata selects the requests to load,
+        including before full CUDA graph replay outside an attention context.
         Non-layerwise synchronous loads release each request's lookup pins
         before loading the next request, allowing CPU cache space to be reused.
 
         Args:
-            forward_context (ForwardContext): the forward context.
-            **kwargs: additional arguments for the load operation
+            forward_context (ForwardContext): Used to initialize KV caches for
+                legacy connectors.
+            **kwargs: Additional connector arguments; unused.
         """
         self.current_layer = 0
 
@@ -778,11 +783,6 @@ class LMCacheConnectorV1Impl:
 
         assert len(self.kv_caches) > 0
         kvcaches = list(self.kv_caches.values())
-
-        attn_metadata = forward_context.attn_metadata
-        if attn_metadata is None:
-            logger.debug("In connector.start_load_kv, but the attn_metadata is None")
-            return
 
         # LMCache failed to initialize and is running in degraded mode; skip the
         # KV load so vLLM falls back to recompute instead of crashing EngineCore.

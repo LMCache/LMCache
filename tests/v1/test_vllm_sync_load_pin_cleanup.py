@@ -60,8 +60,10 @@ class _CPUConnector(LMCacheConnectorV1Impl):
 
 
 @pytest.mark.parametrize("loading", ["sync", "async", "layerwise"])
+@pytest.mark.parametrize("attn_metadata", [object(), None])
 def test_start_load_releases_sync_lookup_before_next_request(
     loading: Literal["sync", "async", "layerwise"],
+    attn_metadata: object | None,
 ) -> None:
     """A's sync pins must be released before B can need CPU staging allocation.
 
@@ -71,6 +73,7 @@ def test_start_load_releases_sync_lookup_before_next_request(
 
     Args:
         loading: Loading mode selecting the existing adapter dispatch branch.
+        attn_metadata: Attention metadata during a forward, or None outside it.
     """
     requests = [
         ReqMeta(
@@ -87,7 +90,7 @@ def test_start_load_releases_sync_lookup_before_next_request(
     engine.retrieve.return_value = torch.ones(4, dtype=torch.bool)
     engine.retrieve_layer.side_effect = [iter([None, None]), iter([None, None])]
     connector = _CPUConnector(requests, engine, loading)
-    context = MagicMock(attn_metadata=object())
+    context = MagicMock(attn_metadata=attn_metadata)
 
     connector.start_load_kv(context)
 
@@ -115,10 +118,12 @@ def test_start_load_releases_sync_lookup_before_next_request(
 
 
 @pytest.mark.parametrize("other_lookup_pins", [0, 1])
+@pytest.mark.parametrize("attn_metadata", [object(), None])
 def test_next_load_observes_real_cache_eviction_eligibility(
     cache_case: _CacheCase,  # noqa: F811 -- pytest injects the imported fixture
     monkeypatch: pytest.MonkeyPatch,
     other_lookup_pins: int,
+    attn_metadata: object | None,
 ) -> None:
     """Before B loads, A is evictable unless another request still owns its pin.
 
@@ -130,6 +135,7 @@ def test_next_load_observes_real_cache_eviction_eligibility(
         cache_case: Real engine, backend, token database and tiny CPU objects.
         monkeypatch: Observes B's entry before delegating to real engine retrieval.
         other_lookup_pins: Whether another in-flight request C shares A's chunk.
+        attn_metadata: Attention metadata during a forward, or None outside it.
     """
     engine = cache_case.engine
     tokens = cache_case.tokens[:4]
@@ -180,7 +186,7 @@ def test_next_load_observes_real_cache_eviction_eligibility(
     retrieve_spy = MagicMock(side_effect=retrieve_with_eviction_check)
     monkeypatch.setattr(engine, "retrieve", retrieve_spy)
 
-    connector.start_load_kv(MagicMock(attn_metadata=object()))
+    connector.start_load_kv(MagicMock(attn_metadata=attn_metadata))
 
     assert retrieve_spy.call_count == 2
     assert first_obj.metadata.pin_count == other_lookup_pins
