@@ -3,6 +3,7 @@
 from typing import Any, Dict, Generic, Optional, Tuple, TypeVar, Union
 import asyncio
 import concurrent.futures
+import threading
 
 NativeClientT = TypeVar("NativeClientT")
 
@@ -17,6 +18,10 @@ class ConnectorClientBase(Generic[NativeClientT]):
         self._client: NativeClientT = native_client
         self._fd = int(self._client.event_fd())  # type: ignore[attr-defined]
         self._closed = False
+        # Held across (submit, register) in the *_sync methods and while
+        # draining completions, so a completion is never drained before its
+        # future is registered.
+        self._submit_lock = threading.RLock()
         # Keepalive refs prevent buffers passed to native code from being
         # garbage-collected while C++ worker threads still hold raw pointers.
         self._pending: Dict[
@@ -28,6 +33,10 @@ class ConnectorClientBase(Generic[NativeClientT]):
         self.loop.add_reader(self._fd, self._on_ready)
 
     def _on_ready(self) -> None:
+        with self._submit_lock:
+            self._on_ready_locked()
+
+    def _on_ready_locked(self) -> None:
         if self._closed:
             return
 
@@ -139,20 +148,27 @@ class ConnectorClientBase(Generic[NativeClientT]):
     def batch_get_sync(self, keys: list[str], bufs: list[memoryview]) -> None:
         if len(keys) != len(bufs):
             raise ValueError("keys and bufs length mismatch")
-        future_id = int(self._client.submit_batch_get(keys, bufs))  # type: ignore[attr-defined]
-        fut = self._register_future_sync("batch_get", future_id, (keys, tuple(bufs)))
+        with self._submit_lock:
+            future_id = int(self._client.submit_batch_get(keys, bufs))  # type: ignore[attr-defined]
+            fut = self._register_future_sync(
+                "batch_get", future_id, (keys, tuple(bufs))
+            )
         return fut.result()
 
     def batch_set_sync(self, keys: list[str], bufs: list[memoryview]) -> None:
         if len(keys) != len(bufs):
             raise ValueError("keys and bufs length mismatch")
-        future_id = int(self._client.submit_batch_set(keys, bufs))  # type: ignore[attr-defined]
-        fut = self._register_future_sync("batch_set", future_id, (keys, tuple(bufs)))
+        with self._submit_lock:
+            future_id = int(self._client.submit_batch_set(keys, bufs))  # type: ignore[attr-defined]
+            fut = self._register_future_sync(
+                "batch_set", future_id, (keys, tuple(bufs))
+            )
         return fut.result()
 
     def batch_exists_sync(self, keys: list[str]) -> list[bool]:
-        future_id = int(self._client.submit_batch_exists(keys))  # type: ignore[attr-defined]
-        fut = self._register_future_sync("batch_exists", future_id)
+        with self._submit_lock:
+            future_id = int(self._client.submit_batch_exists(keys))  # type: ignore[attr-defined]
+            fut = self._register_future_sync("batch_exists", future_id)
         return fut.result()
 
     def batched_exists_sync(self, keys: list[str]) -> list[bool]:
