@@ -11,7 +11,7 @@ import sys
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess import server as server_mod
+from lmcache.v1.multiprocess import module_creator
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleBuildContext,
@@ -278,14 +278,16 @@ def test_build_modules_loads_plugin_and_registers_liveness_target(
         return plugin_module
 
     module_name = _install_fake_factory(monkeypatch, factory)
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
-    monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
-    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
+    monkeypatch.setattr(module_creator, "LookupModule", lambda ctx: MagicMock())
+    monkeypatch.setattr(module_creator, "P2PController", lambda *a, **kw: MagicMock())
+    monkeypatch.setattr(
+        module_creator, "LMCacheDrivenTransferModule", _FakeLMCacheDriven
+    )
+    monkeypatch.setattr(module_creator, "EngineDrivenTransferModule", _FakeEngineDriven)
     management = MagicMock(name="ManagementModule")
-    monkeypatch.setattr(server_mod, "ManagementModule", management)
+    monkeypatch.setattr(module_creator, "ManagementModule", management)
 
-    modules = server_mod._build_modules(
+    modules = module_creator.build_modules(
         ctx,
         MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
         MagicMock(url=""),
@@ -306,13 +308,15 @@ def test_build_modules_adds_server_module_router(
         return plugin_module
 
     module_name = _install_fake_factory(monkeypatch, factory)
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
-    monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
-    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
-    monkeypatch.setattr(server_mod, "ManagementModule", MagicMock())
+    monkeypatch.setattr(module_creator, "LookupModule", lambda ctx: MagicMock())
+    monkeypatch.setattr(module_creator, "P2PController", lambda *a, **kw: MagicMock())
+    monkeypatch.setattr(
+        module_creator, "LMCacheDrivenTransferModule", _FakeLMCacheDriven
+    )
+    monkeypatch.setattr(module_creator, "EngineDrivenTransferModule", _FakeEngineDriven)
+    monkeypatch.setattr(module_creator, "ManagementModule", MagicMock())
 
-    modules = server_mod._build_modules(
+    modules = module_creator.build_modules(
         ctx,
         MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
         MagicMock(url=""),
@@ -337,13 +341,15 @@ def test_build_server_components_collects_transport_service_registrars(
         )
 
     module_name = _install_fake_factory(monkeypatch, factory)
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
-    monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
-    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
-    monkeypatch.setattr(server_mod, "ManagementModule", MagicMock())
+    monkeypatch.setattr(module_creator, "LookupModule", lambda ctx: MagicMock())
+    monkeypatch.setattr(module_creator, "P2PController", lambda *a, **kw: MagicMock())
+    monkeypatch.setattr(
+        module_creator, "LMCacheDrivenTransferModule", _FakeLMCacheDriven
+    )
+    monkeypatch.setattr(module_creator, "EngineDrivenTransferModule", _FakeEngineDriven)
+    monkeypatch.setattr(module_creator, "ManagementModule", MagicMock())
 
-    components = server_mod._build_server_components(
+    components = module_creator.build_server_components(
         ctx,
         MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
         MagicMock(url=""),

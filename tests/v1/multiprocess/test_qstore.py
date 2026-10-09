@@ -15,7 +15,7 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess import server as server_mod
+from lmcache.v1.multiprocess import module_creator
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
@@ -270,21 +270,23 @@ class _FakeQStore:
 
 @pytest.fixture
 def stub_server_modules(monkeypatch):
-    """Stub the server's module constructors. Returns the ManagementModule mock.
-    The transfer modules stay real classes: _build_modules isinstance-checks
+    """Stub the module constructors. Returns the ManagementModule mock.
+    The transfer modules stay real classes: ModuleCreator isinstance-checks
     them to pick liveness targets and the lmcache-driven module."""
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
-    monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
-    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
-    monkeypatch.setattr(server_mod, "QStoreModule", _FakeQStore)
+    monkeypatch.setattr(module_creator, "LookupModule", lambda ctx: MagicMock())
+    monkeypatch.setattr(module_creator, "P2PController", lambda *a, **kw: MagicMock())
+    monkeypatch.setattr(
+        module_creator, "LMCacheDrivenTransferModule", _FakeLMCacheDriven
+    )
+    monkeypatch.setattr(module_creator, "EngineDrivenTransferModule", _FakeEngineDriven)
+    monkeypatch.setattr(module_creator, "QStoreModule", _FakeQStore)
     management = MagicMock(name="ManagementModule")
-    monkeypatch.setattr(server_mod, "ManagementModule", management)
+    monkeypatch.setattr(module_creator, "ManagementModule", management)
     return management
 
 
 def _build(stub_server_modules, **config) -> list:
-    return server_mod._build_modules(
+    return module_creator.build_modules(
         MagicMock(name="ctx"), MPServerConfig(**config), MagicMock(url="")
     )
 

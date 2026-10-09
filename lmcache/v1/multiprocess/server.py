@@ -5,8 +5,6 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
-from typing import TypeGuard
 import argparse
 import shutil
 import signal
@@ -48,52 +46,18 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_mp_server_config,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import EngineModule, InstanceLivenessTarget
-from lmcache.v1.multiprocess.ext_server_module import (
-    TransportServiceRegistrar,
-    build_server_module_router,
-    load_server_module_components,
-)
-from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
-    EngineDrivenTransferModule,
-)
-from lmcache.v1.multiprocess.modules.experimental import EXPERIMENTAL_TRANSFER
-from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
+from lmcache.v1.multiprocess.engine_module import EngineModule
+from lmcache.v1.multiprocess.module_creator import ModuleCreator
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.ipc_policy import set_isolated_ipc
 
 logger = init_logger(__name__)
-
-_LIVENESS_TARGET_METHODS = (
-    "touch_instance",
-    "reap_stale_instances",
-    "tracked_instance_count",
-    "drop_instance_state",
-)
-
-
-def _is_liveness_target(module: EngineModule) -> TypeGuard[InstanceLivenessTarget]:
-    """Return whether a module exposes the instance-liveness target contract."""
-    return all(
-        callable(getattr(module, name, None)) for name in _LIVENESS_TARGET_METHODS
-    )
-
-
-@dataclass(frozen=True)
-class ServerBuildComponents:
-    """Modules and transport services composed for one MP server instance."""
-
-    modules: list[EngineModule]
-    grpc_service_registrars: tuple[TransportServiceRegistrar, ...] = ()
-    zmq_service_registrars: tuple[TransportServiceRegistrar, ...] = ()
 
 
 class MPCacheServer:
@@ -173,202 +137,6 @@ class MPCacheServer:
                 module.clear(force=force)
                 return
         raise RuntimeError("MPCacheServer.clear: no ManagementModule registered")
-
-
-def _build_modules(
-    ctx: MPCacheServerContext,
-    mp_config: MPServerConfig,
-    coordinator_config: CoordinatorConfig,
-) -> list[EngineModule]:
-    """Assemble only engine modules based on configuration.
-
-    Args:
-        ctx: The shared engine context.
-        mp_config: Server configuration determining which modules to load.
-        coordinator_config: Coordinator connection used by the P2P controller
-            for peer discovery.
-
-    Returns:
-        List of initialized engine modules.
-    """
-    return _build_server_components(ctx, mp_config, coordinator_config).modules
-
-
-def _build_server_components(
-    ctx: MPCacheServerContext,
-    mp_config: MPServerConfig,
-    coordinator_config: CoordinatorConfig,
-) -> ServerBuildComponents:
-    """Assemble the list of engine modules based on configuration.
-
-    Args:
-        ctx: The shared engine context.
-        mp_config: Server configuration determining which modules to load.
-        coordinator_config: Coordinator connection used by the P2P controller
-            for peer discovery.
-
-    Returns:
-        Initialized modules and transport-specific service registrars.
-
-    Raises:
-        ValueError: If blend engine is requested with
-        supported_transfer_mode="engine_driven".
-    """
-    lookup_module = LookupModule(ctx)
-    p2p_controller = P2PController(
-        ctx,
-        mp_config.p2p_config,
-        coordinator_config,
-        mp_config.instance_id,
-        mp_config.transport,
-    )
-
-    # Build the transfer and blend modules first so the ManagementModule can
-    # be constructed with them as liveness targets / reap listeners. They are
-    # the InstanceLivenessTargets the reaper scans.
-    transfer_modules: list[EngineModule] = []
-    if mp_config.supported_transfer_mode == "lmcache_driven":
-        transfer_modules.append(LMCacheDrivenTransferModule(ctx))
-    elif mp_config.supported_transfer_mode == "engine_driven":
-        transfer_modules.append(EngineDrivenTransferModule(ctx))
-    elif mp_config.supported_transfer_mode == "auto":
-        transfer_modules.append(LMCacheDrivenTransferModule(ctx))
-        transfer_modules.append(EngineDrivenTransferModule(ctx))
-    else:
-        raise ValueError(
-            f"Unsupported supported_transfer_mode '{mp_config.supported_transfer_mode}'"
-        )
-
-    logger.info("Supported transfer mode: %s", mp_config.supported_transfer_mode)
-
-    # Targets the reaper scans (and reap-notifies). The transfer modules own
-    # per-instance liveness; BlendModule is appended below as a state mirror.
-    liveness_targets: list[InstanceLivenessTarget] = [
-        m
-        for m in transfer_modules
-        if isinstance(m, (LMCacheDrivenTransferModule, EngineDrivenTransferModule))
-    ]
-
-    blend_module: EngineModule | None = None
-    if mp_config.engine_type == "blend":
-        if mp_config.supported_transfer_mode == "engine_driven":
-            raise ValueError(
-                "blend engine requires supported_transfer_mode "
-                f"'lmcache_driven' or 'auto', got "
-                f"'{mp_config.supported_transfer_mode}'"
-            )
-        # First Party
-        from lmcache.v1.mp_coordinator.blend_client import (
-            BlendCoordinatorClient,
-        )
-        from lmcache.v1.multiprocess.modules.blend import BlendModule
-
-        transfer_module = next(
-            m for m in transfer_modules if isinstance(m, LMCacheDrivenTransferModule)
-        )
-        # Opt-in: enabled when a coordinator URL is configured (flag or
-        # LMCACHE_COORDINATOR_URL, resolved at config parsing); otherwise
-        # None and the blend module matches purely locally.
-        #
-        # Fleet matching also needs cache-event reporting on: the blend
-        # index it queries is built from that stream.
-        if coordinator_config.url and not coordinator_config.event_reporting:
-            logger.warning(
-                "Coordinator URL is set but cache-event reporting is off, so "
-                "the coordinator has no cache state to match against: fleet "
-                "CacheBlend matching is disabled and blend will match "
-                "locally only. Pass --coordinator-event-reporting (or set "
-                "LMCACHE_COORDINATOR_EVENT_REPORTING=true) to enable it."
-            )
-        coordinator = BlendCoordinatorClient.maybe_create(
-            coordinator_config.url if coordinator_config.event_reporting else "",
-            timeout=coordinator_config.blend_timeout,
-            match_concurrency=coordinator_config.blend_match_concurrency,
-        )
-        blend = BlendModule(
-            ctx,
-            transfer_module,
-            coordinator=coordinator,
-            enable_segmented_prefix=mp_config.enable_segmented_prefix,
-            enable_dedup_content=mp_config.enable_dedup_content,
-        )
-        blend_module = blend
-        # The blend module mirrors per-instance CB rope state, so the reaper
-        # must notify it via drop_instance_state when an instance is reaped.
-        liveness_targets.append(blend)
-
-    # Experimental intermediate tensor transfer modules
-    lmcache_driven_module = next(
-        (m for m in transfer_modules if isinstance(m, LMCacheDrivenTransferModule)),
-        None,
-    )
-    enabled_modules = set(mp_config.enable)
-    experimental_transfer: list[str] = []
-    experimental_modules: list[EngineModule] = []
-    for enabled_module in enabled_modules:
-        if enabled_module not in EXPERIMENTAL_TRANSFER:
-            raise ValueError(
-                f"Unknown --enable experimental module '{enabled_module}'."
-            )
-        if lmcache_driven_module is None:
-            raise ValueError(
-                f"Experimental module '{enabled_module}' requires "
-                "supported_transfer_mode='lmcache_driven' or 'auto'."
-            )
-        experimental_module = QStoreModule(ctx)
-        experimental_modules.append(experimental_module)
-        liveness_targets.append(experimental_module)
-        experimental_transfer.append(enabled_module)
-
-    blend_modules: list[EngineModule] = []
-    if blend_module is not None:
-        blend_modules.append(blend_module)
-    built_modules: list[EngineModule] = [
-        lookup_module,
-        p2p_controller,
-        *transfer_modules,
-        *experimental_modules,
-        *blend_modules,
-    ]
-    plugin_components = load_server_module_components(
-        mp_config.server_modules,
-        server_context=ctx,
-        mp_config=mp_config,
-        coordinator_config=coordinator_config,
-        built_modules=built_modules,
-    )
-    plugin_modules = list(plugin_components.modules)
-    for module in plugin_modules:
-        if _is_liveness_target(module):
-            liveness_targets.append(module)
-    plugin_router = build_server_module_router(ctx, plugin_modules)
-
-    management = ManagementModule(
-        ctx,
-        liveness_targets=liveness_targets,
-        worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
-        worker_registration_grace_seconds=mp_config.worker_registration_grace_seconds,
-        experimental_transfer=experimental_transfer,
-    )
-
-    # ManagementModule precedes the transfer/blend modules so close() stops
-    # and joins the reaper before those modules clear their state and before
-    # storage_manager.close() runs.
-    modules: list[EngineModule] = [
-        lookup_module,
-        p2p_controller,
-        management,
-        *transfer_modules,
-        *experimental_modules,
-        *blend_modules,
-        *plugin_modules,
-        *([plugin_router] if plugin_router is not None else []),
-    ]
-    return ServerBuildComponents(
-        modules=modules,
-        grpc_service_registrars=tuple(plugin_components.grpc_service_registrars),
-        zmq_service_registrars=tuple(plugin_components.zmq_service_registrars),
-    )
 
 
 def run_cache_server(
@@ -468,7 +236,7 @@ def run_cache_server(
         session_ttl_seconds=mp_config.session_ttl_seconds,
     )
 
-    components = _build_server_components(ctx, mp_config, coordinator_config)
+    components = ModuleCreator(ctx, mp_config, coordinator_config).create()
     engine = MPCacheServer(ctx, components.modules)
 
     InitializeMPUsageContext(mp_config, storage_manager_config)

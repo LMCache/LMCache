@@ -107,7 +107,7 @@ Engine and Modules
 All server entry points share the same ``MPCacheServer`` and
 ``StorageManager`` core. ``MPCacheServer`` is now a thin compositor:
 it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
-instances assembled by ``_build_modules()`` (in ``server.py``)
+instances assembled by ``ModuleCreator`` (in ``module_creator.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
 **``server.py``** -- The transport-neutral server compositor. Creates an
@@ -271,7 +271,7 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
        prefix. Returns a task id which the caller passes to
        ``P2P_QUERY_LOOKUP_RESULTS`` to poll for the transfer addresses.
        Served by ``P2PController`` (loaded unconditionally by
-       ``_build_modules()``); whether this server also acts as a P2P
+       ``ModuleCreator``); whether this server also acts as a P2P
        client is controlled by ``--p2p-advertise-url`` -- see
        :doc:`p2p`.
    * - ``P2P_QUERY_LOOKUP_RESULTS``
