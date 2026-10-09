@@ -9,7 +9,7 @@ See ``docs/design/v1/mp_coordinator/ingest.md``.
 """
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
 import time
 
@@ -49,7 +49,7 @@ class CacheEventConsumer(Protocol):
         ...
 
 
-@dataclass(frozen=True)
+@dataclass
 class ConsumerStats:
     """What one consumer has done with the batches handed to it since this
     process started.
@@ -68,16 +68,6 @@ class ConsumerStats:
     fence_failures: int = 0
 
 
-@dataclass
-class _ConsumerTally:
-    """Mutable form of :class:`ConsumerStats`."""
-
-    batches_delivered: int = 0
-    apply_seconds: float = 0.0
-    consume_failures: int = 0
-    fence_failures: int = 0
-
-
 class CacheEventBroadcaster:
     """Fans one gate-admitted cache-event batch out to every consumer.
 
@@ -88,7 +78,7 @@ class CacheEventBroadcaster:
     """
 
     def __init__(self) -> None:
-        self._consumers: list[tuple[CacheEventConsumer, _ConsumerTally]] = []
+        self._consumers: list[tuple[CacheEventConsumer, ConsumerStats]] = []
 
     def register_consumer(self, consumer: CacheEventConsumer) -> None:
         """Register a consumer for all subsequently broadcast batches.
@@ -100,7 +90,7 @@ class CacheEventBroadcaster:
         Args:
             consumer: The consumer to fan batches out to.
         """
-        self._consumers.append((consumer, _ConsumerTally()))
+        self._consumers.append((consumer, ConsumerStats()))
 
     def broadcast(self, batch: CacheEventBatch) -> None:
         """Deliver one gate-admitted batch to every consumer.
@@ -108,7 +98,7 @@ class CacheEventBroadcaster:
         Args:
             batch: The admitted batch.
         """
-        for consumer, tally in self._consumers:
+        for consumer, stats in self._consumers:
             started = time.perf_counter()
             failed = False
             try:
@@ -122,10 +112,10 @@ class CacheEventBroadcaster:
                     batch.incarnation,
                     batch.seq,
                 )
-            tally.batches_delivered += 1
-            tally.apply_seconds += time.perf_counter() - started
+            stats.batches_delivered += 1
+            stats.apply_seconds += time.perf_counter() - started
             if failed:
-                tally.consume_failures += 1
+                stats.consume_failures += 1
 
     def fence_instance(self, instance_id: str) -> None:
         """Tell every consumer that ``instance_id``'s L1 state is void.
@@ -133,11 +123,11 @@ class CacheEventBroadcaster:
         Args:
             instance_id: The restarted or departed instance.
         """
-        for consumer, tally in self._consumers:
+        for consumer, stats in self._consumers:
             try:
                 consumer.fence_instance(instance_id)
             except Exception:
-                tally.fence_failures += 1
+                stats.fence_failures += 1
                 logger.exception(
                     "Cache-event consumer %s failed to fence %s",
                     type(consumer).__name__,
@@ -145,7 +135,7 @@ class CacheEventBroadcaster:
                 )
 
     def stats(self) -> dict[str, ConsumerStats]:
-        """Return each consumer's tally since this process started.
+        """Return a copy of each consumer's stats since this process started.
 
         Returns:
             :class:`ConsumerStats` keyed by the consumer's class name.
@@ -153,11 +143,6 @@ class CacheEventBroadcaster:
             unique.
         """
         return {
-            type(consumer).__name__: ConsumerStats(
-                batches_delivered=tally.batches_delivered,
-                apply_seconds=tally.apply_seconds,
-                consume_failures=tally.consume_failures,
-                fence_failures=tally.fence_failures,
-            )
-            for consumer, tally in self._consumers
+            type(consumer).__name__: replace(stats)
+            for consumer, stats in self._consumers
         }
