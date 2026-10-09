@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-request token-dropping configuration and algorithm discovery."""
 
+# Future
 from __future__ import annotations
 
+# Standard
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Any
 
+# First Party
 from lmcache.integration.vllm.utils import extract_request_configs_from_request
 
 if TYPE_CHECKING:
+    # Third Party
     from vllm.v1.request import Request
 
 
