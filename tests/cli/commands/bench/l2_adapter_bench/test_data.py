@@ -46,6 +46,22 @@ def test_make_memory_objects_uses_shared_l1_range() -> None:
     assert torch.all(objects[1].raw_data == 1)
 
 
+def test_make_memory_objects_addresses_are_buffer_relative() -> None:
+    buffer = make_aligned_tensor(4096, align_bytes=1024)
+
+    objects = make_memory_objects(
+        buffer,
+        num_keys=2,
+        data_size=1024,
+        base_offset=2048,
+    )
+
+    assert [obj.meta.address for obj in objects] == [2048, 3072]
+    assert all(obj.meta.address != obj.raw_data.data_ptr() for obj in objects)
+    assert objects[0].raw_data.data_ptr() == buffer.data_ptr() + 2048
+    assert objects[1].raw_data.data_ptr() == buffer.data_ptr() + 3072
+
+
 def test_make_memory_objects_can_use_different_fill_pattern() -> None:
     buffer = make_aligned_tensor(2048, align_bytes=1024)
 
