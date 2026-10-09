@@ -686,9 +686,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 cache_context, gpu_block_ids
             )
 
-            # Check only the blocks that will be copied. Out-of-window null
-            # blocks are harmless, but any missing retained slice invalidates
-            # the whole object, even when another kernel group is present.
+            # Downsampling mutates gpu_block_ids in place. Check those retained
+            # slices: discarded null blocks are harmless, but any missing
+            # retained block invalidates the whole object.
             retained_blocks_per_chunk = [
                 cache_context.calculate_num_blocks(
                     cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(

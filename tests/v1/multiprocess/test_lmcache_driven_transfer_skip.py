@@ -201,12 +201,16 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
 
 def _make_checkpoint_module(
     monkeypatch: pytest.MonkeyPatch,
+    merged: bool,
 ) -> tuple[LMCacheDrivenTransferModule, MagicMock, list, list]:
-    module, reads, transfers = _make_module(monkeypatch, 2, [-1, 1])
-    context = _staging_context(3, [_og([0]), _og([1, 2])])
-    context.kv_layer_groups_manager.num_object_groups = 2
+    windows = [-1] if merged else [-1, 1]
+    groups = [_og([0, 1, 2])] if merged else [_og([0]), _og([1, 2])]
+    module, reads, transfers = _make_module(monkeypatch, 2, windows)
+    context = _staging_context(3, groups)
+    context.kv_layer_groups_manager.num_object_groups = len(groups)
     context.kv_layer_groups_manager.get_attn_desc = lambda: SimpleNamespace(
-        num_chunks_in_sw=[-1, 1], group_kinds=("attention", "recurrent")
+        num_chunks_in_sw=windows,
+        group_kinds=("attention",) if merged else ("attention", "recurrent"),
     )
     module.get_and_touch_context_entry(1).cache_context = context
     module.context.chunk_size = 2
@@ -222,10 +226,14 @@ def _make_checkpoint_module(
     return module, context, reads, transfers
 
 
+@pytest.mark.parametrize("merged", [False, True])
 def test_store_reserves_real_page_zero_and_only_present_state_objects(
     monkeypatch: pytest.MonkeyPatch,
+    merged: bool,
 ) -> None:
-    module, context, _reads, transfers = _make_checkpoint_module(monkeypatch)
+    # Align-mode recurrent state exists only in the final chunk. In merged
+    # mode, that also prevents storing its attention-only prefix.
+    module, context, _reads, transfers = _make_checkpoint_module(monkeypatch, merged)
     _handle, ok = module.store(
         SimpleNamespace(request_id="req", worker_id=1),
         1,
@@ -238,8 +246,9 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
         for call in cast(
             MagicMock, module.context.storage_manager.reserve_write
         ).call_args_list
-    ] == [["g0c0", "g0c1"], ["g1c1"]]
-    assert [obj is None for obj in transfers[1][1]] == [True, False]
+    ] == ([["g0c1"]] if merged else [["g0c0", "g0c1"], ["g1c1"]])
+    state_group = 0 if merged else 1
+    assert [obj is None for obj in transfers[state_group][1]] == [True, False]
     assert context.stage_block_ids.call_args.args[0] == [
         [0, 1, 2, 3],
         [-1, -1, 0, 1],
