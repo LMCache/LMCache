@@ -189,6 +189,21 @@ def test_identical_content_under_two_prefixes_survives_one_eviction():
     ]
 
 
+def test_identical_content_takes_the_occupant_stored_nearest_the_query():
+    """Re-RoPE quality falls with the shift, so among content-identical
+    occupants the one stored nearest cur_st wins, regardless of order."""
+    index = _index()
+    content = _content(1, 2, 3, 4)
+    index.add(content, b"far", token_offset=0, namespace=NS)
+    index.add(content, b"near", token_offset=12, namespace=NS)
+    index.add(content, b"other-ns", token_offset=8, namespace=OTHER_NS)
+
+    query = np.asarray([9] * 8 + [1, 2, 3, 4], dtype=np.uint64)
+    assert _tuples(index.match(query, NS)) == [(b"near", 12, 8)]
+    query = np.asarray([1, 2, 3, 4], dtype=np.uint64)
+    assert _tuples(index.match(query, NS)) == [(b"far", 0, 0)]
+
+
 def test_stats_count_contents_chunks_claims_and_namespaces():
     index = _index()
     shared = _content(1, 2, 3, 4)
