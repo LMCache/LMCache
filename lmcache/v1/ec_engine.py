@@ -183,8 +183,7 @@ class ECCacheEngine:
         """
         key = self._make_cache_key(mm_hash)
 
-        mem_objs = self._storage_manager.batched_get([key])
-        mem_obj = mem_objs[0]
+        mem_obj = self._storage_manager.get(key)
         if mem_obj is None:
             return None
         if mem_obj.tensor is None:
