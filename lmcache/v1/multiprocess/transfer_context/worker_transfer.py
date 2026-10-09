@@ -1027,6 +1027,7 @@ def create_transfer_context(
 ) -> TransferContext:
     """Create a transfer context from KV cache device type.
 
+    Mixed CPU MLA/CUDA groups use bounded GPU staging and the handle protocol.
     The device check is intentionally centralized here. Routing can be
     overridden via the ``mode`` argument or the ``LMCACHE_MP_TRANSFER_MODE``
     environment variable; see :class:`MPTransferMode` for accepted values.
@@ -1045,19 +1046,27 @@ def create_transfer_context(
         A concrete :class:`TransferContext` implementation.
 
     Raises:
-        ValueError: If ``kv_caches`` is empty, has mixed device types, the
+        ValueError: If ``kv_caches`` is empty, mixes unsupported device types, the
             requested mode string is unknown, or the requested mode is not
             supported for the worker device.
     """
     if not kv_caches:
         raise ValueError("kv_caches is empty")
     device_types = {get_device(v).type for v in kv_caches.values()}
+    resolved_mode = _resolve_mode(mode)
+    if device_types == {"cpu", "cuda"}:
+        if resolved_mode is MPTransferMode.ENGINE_DRIVEN:
+            raise ValueError("Mixed CPU/CUDA KV requires auto or lmcache_driven mode")
+        # Local
+        from .mixed import MixedTransferContext
+
+        return MixedTransferContext(instance_id, req_client)
+
     if len(device_types) != 1:
         raise ValueError(
             f"All KV cache tensors must share one device type, got {device_types}"
         )
     device_type = next(iter(device_types))
-    resolved_mode = _resolve_mode(mode)
     logger.info(
         "Creating transfer context (device_type=%s, mode=%s)",
         device_type,

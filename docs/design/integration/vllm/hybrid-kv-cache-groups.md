@@ -135,6 +135,12 @@ skips them — they never form their own info. (Placing them in a group would
 duplicate work and, when their block size differs from the group they default
 into, corrupt the per-group block-id counts.)
 
+### HiSparse offloading
+
+HiSparse registers CPU MLA source and GPU indexer groups, excluding private
+resident/hot pools. See [HiSparse with LMCache](hisparse.md) for the bounded
+staging transport, stream ordering, and end-to-end verification.
+
 ### Scratch groups
 
 A scratch group is an engine group whose spec vLLM marks

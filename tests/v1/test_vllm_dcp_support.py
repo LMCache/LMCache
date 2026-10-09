@@ -700,3 +700,18 @@ def test_scratch_group_spans_zero_and_skips_alignment():
 
     assert get_group_tokens_per_block(config, kv_config) == [1600, 1600, 0]
     assert get_vllm_scheduler_block_size(config, kv_config) == 1600
+
+
+@requires_vllm
+def test_transfer_disabled_group_spans_zero_and_preserves_group_ids() -> None:
+    """Private pools cannot constrain chunk alignment or shift source group IDs."""
+    get_spans, _, get_scheduler_span, _ = _import_connector_geometry_helpers()
+    config = _geometry_config(dcp_size=1)
+    kv_config = _hybrid_kv_cache_config(64, 64)
+    kv_config.kv_cache_groups.insert(
+        1,
+        SimpleNamespace(kv_cache_spec=_attention_spec(7), enable_kv_transfer=False),
+    )
+
+    assert get_spans(config, kv_config) == [64, 0, 64]
+    assert get_scheduler_span(config, kv_config) == 64
