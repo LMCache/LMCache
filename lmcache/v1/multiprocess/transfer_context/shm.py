@@ -212,11 +212,11 @@ class EngineDrivenContextShm(EngineDrivenContext):
         if self._shm is None:
             return
         self._unpin_shm_buffer()
-        try:
-            self._shm.close()
-        finally:
-            self._shm = None
-            self._shm_buffer = None
+        # BufferError may mean an exported view is still alive. Retain the
+        # mapping so the lifecycle owner can retry after that view is released.
+        self._shm.close()
+        self._shm = None
+        self._shm_buffer = None
 
     def _pin_shm_buffer(self) -> None:
         """Pin the SHM buffer as page-locked host memory via cudaHostRegister.

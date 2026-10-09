@@ -31,6 +31,11 @@ def noop_handler() -> str:
     return "NOOP_OK"
 
 
+def ping_registered_handler(instance_id: int, registration_type: str) -> bool:
+    """Check a registration-aware PING over the ZMQ transport."""
+    return instance_id == 7 and registration_type == "register_kv_cache"
+
+
 # ==============================================================================
 # REGISTER_KV_CACHE Request Handlers
 # ==============================================================================
