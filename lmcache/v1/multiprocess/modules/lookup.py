@@ -46,11 +46,8 @@ def resolve_prefetched_obj_keys(
     A worker-specific key resolves only that worker's shard (or one MLA reader
     share), which is required for per-instance RETRIEVE failure cleanup.
 
-    ``covered_chunks`` is the APC-covered prefix the lookup skipped (neither
-    read-locked nor L2-prefetched). Every per-group range start is clamped to
-    it so no release ever touches a chunk the lookup did not lock -- releasing
-    an unlocked chunk would drop a concurrent prefix-sharing request's read
-    lock on the same shared object.
+    Every per-group range start is clamped to ``covered_chunks`` (the prefix
+    the lookup skipped), so a release never drops a lock it never took.
     """
     chunk_hashes = ctx.token_hasher.compute_chunk_hashes(
         list(key.token_ids), start=key.start, end=key.end
@@ -168,12 +165,13 @@ class LookupModule:
     ) -> None:
         """Submit a prefix lookup.
 
-        The covered chunk count is read from ``request_configs`` under
-        ``COVERED_CHUNKS_CONFIG_KEY``: that leading prefix is touched (kept warm)
-        but neither read-locked nor L2-prefetched. Hashes the key, submits a
-        prefetch over the uncovered sub-range ``chunk_hashes[covered_chunks:]``,
-        and registers the job under ``key.request_id`` for later polling via
-        query_prefetch_status.
+        Hashes the key, submits a prefetch task to the storage manager,
+        and registers the job under ``key.request_id`` for later polling
+        via query_prefetch_status.
+
+        ``request_configs[COVERED_CHUNKS_CONFIG_KEY]`` marks a leading prefix
+        the serving engine already has: it is touched but not locked or
+        prefetched, and the prefetch covers only the chunks after it.
 
         Args:
             key: Cache key with request_id embedded.
@@ -277,15 +275,25 @@ class LookupModule:
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.set_tokens(list(key.token_ids))
 
-        # APC-covered prefix: touch it (keep warm), don't lock/prefetch.
-        requested_covered = int(
-            (key.request_configs or {}).get(COVERED_CHUNKS_CONFIG_KEY, 0)
+        # APC-covered prefix: touch it in L1+L2 so it keeps the recency a real
+        # load would have given it, but neither read-lock nor prefetch it.
+        # Absent keys are ignored by the eviction policies, so no probe first.
+        covered_chunks = min(
+            max(0, int((key.request_configs or {}).get(COVERED_CHUNKS_CONFIG_KEY, 0))),
+            len(chunk_hashes),
         )
-        covered_chunks = min(max(0, requested_covered), len(chunk_hashes))
-        # Touch the covered prefix to keep it warm; no lock/prefetch.
-        self._touch_covered_prefix(
-            key, chunk_hashes, covered_chunks, attn_desc.num_object_groups
-        )
+        if covered_chunks:
+            self._ctx.storage_manager.touch_cached_keys(
+                [
+                    obj_key
+                    for group_keys in ipc_key_to_object_keys(
+                        key,
+                        chunk_hashes[:covered_chunks],
+                        list(range(attn_desc.num_object_groups)),
+                    )
+                    for obj_key in group_keys
+                ]
+            )
         session.begin_lookup(
             key,
             tuple(attn_desc.num_chunks_in_sw),
@@ -372,37 +380,6 @@ class LookupModule:
                 cache_salt=key.cache_salt,
             )
         )
-
-    def _touch_covered_prefix(
-        self,
-        key: IPCCacheServerKey,
-        chunk_hashes: list[bytes],
-        covered_chunks: int,
-        num_object_groups: int,
-    ) -> None:
-        """Touch the APC-covered prefix so a busy prefix is not evicted.
-
-        Marks every covered key as recently used in both L1 and L2 without
-        read-locking or fetching, matching the recency a non-skipping lookup
-        would have given them -- otherwise L2 sees the skipped keys as cold and
-        evicts data that would otherwise have been kept. Absent keys are ignored
-        by the eviction policies, so no presence probe is needed.
-
-        Args:
-            key: The lookup IPC key (``worker_id=None`` fans out to all ranks).
-            chunk_hashes: Full-range chunk hashes in token order.
-            covered_chunks: Number of leading chunks the serving engine covers.
-            num_object_groups: Object-group count for this model/world size.
-        """
-        if covered_chunks <= 0:
-            return
-        covered_hashes = chunk_hashes[:covered_chunks]
-        per_group = ipc_key_to_object_keys(
-            key, covered_hashes, list(range(num_object_groups))
-        )
-        all_keys = [obj_key for group_keys in per_group for obj_key in group_keys]
-        if all_keys:
-            self._ctx.storage_manager.touch_cached_keys(all_keys)
 
     @request_handler(HandlerType.BLOCKING)
     def query_prefetch_status(
@@ -531,7 +508,9 @@ class LookupModule:
             )
             return
 
-        # Release only the locked groups; the covered clamp stays above the APC prefix.
+        # Release exactly the groups the prefetch locked (std lookup: all;
+        # CB prefix leg: its prefix set) -- releasing an unlocked group
+        # would drop another request's lock on the shared object key.
         obj_keys = resolve_prefetched_obj_keys(
             self._ctx,
             key,
@@ -636,18 +615,20 @@ class LookupModule:
         if result is None:
             return None
         if job.row_windows:
-            sub_found, _retain = fold_unfold_grouped(result.hit_cells, job.row_windows)
-            sub_l1_found, _l1_retain = fold_unfold_grouped(
+            found_count, _retain = fold_unfold_grouped(
+                result.hit_cells, job.row_windows
+            )
+            l1_found_count, _l1_retain = fold_unfold_grouped(
                 result.l1_hit_cells, job.row_windows
             )
         else:
-            # Nothing was submitted (early exit / fully covered), so the only
-            # hit is the covered prefix itself (added by the offset below).
-            sub_found = 0
-            sub_l1_found = 0
+            # Nothing was submitted (early exit), so nothing can be hit.
+            found_count = 0
+            l1_found_count = 0
 
-        # Offset sub-range fold to absolute chunks (covered prefix counts as hit).
-        found_count = job.covered_chunks + sub_found
+        # The fold covers only the uncovered sub-range; shift back to absolute.
+        found_count += job.covered_chunks
+        l1_found_count += job.covered_chunks
 
         # Record the model-wide hit length on the session so a later
         # free_lookup_locks can reconstruct which keys the prefetch
@@ -660,8 +641,9 @@ class LookupModule:
             result.l1_owners,
         )
 
-        # Credit L1 with the prefix its cells serve (offset by covered); L2 the rest.
-        l1_chunks = min(job.covered_chunks + sub_l1_found, found_count)
+        # L1 is credited with the prefix its own cells serve under the same
+        # window rule; L2 with however far it extended that prefix.
+        l1_chunks = min(l1_found_count, found_count)
         l2_chunks = found_count - l1_chunks
         self._ctx.event_bus.publish(
             Event(

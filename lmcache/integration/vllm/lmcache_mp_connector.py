@@ -1217,13 +1217,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         tracker: "LMCacheMPRequestTracker",
     ) -> "tuple[int | None, bool] | None":
         """Fall back to a full lookup from token 0 when the APC hit shrank below
-        the frozen covered boundary (see the design doc for the full rationale).
+        the frozen covered boundary.
 
-        Frees the stale lookup's ``[c0, ret)`` locks (blocking, so the re-lookup
-        cannot race the release), sets the sticky ``covered_skip_disabled`` so the
-        next poll submits ``covered_chunks=0``, and resets the per-lookup state.
-        Returns ``(None, True)`` to make the scheduler re-poll, or ``None`` when
-        no shrink occurred.
+        Frees the stale locks (blocking, so the re-lookup cannot race them) and
+        sets the sticky ``covered_skip_disabled``. Returns ``(None, True)`` to
+        make the scheduler re-poll, or ``None`` when no shrink occurred.
         """
         if not self._skip_covered_lookup or tracker.lookup_covered_tokens <= 0:
             return None

@@ -696,12 +696,9 @@ class StorageManager:
     def touch_cached_keys(self, keys: list[ObjectKey]) -> None:
         """Refresh eviction recency for ``keys`` in every tier, without I/O.
 
-        Unlike :meth:`touch_l1_keys` this also marks the keys accessed in L2.
-        A lookup that actually loads a key refreshes both tiers; the
-        APC-covered lookup path skips the load, so it must refresh both here
-        or L2 would see those keys as cold and evict data that a non-skipping
-        lookup would have kept. No bytes are read and nothing is promoted into
-        L1 -- each tier ignores keys it does not hold.
+        Unlike :meth:`touch_l1_keys` this also marks the keys accessed in L2,
+        matching the recency a real load gives both tiers. Nothing is read or
+        promoted; each tier ignores keys it does not hold.
 
         Args:
             keys (list[ObjectKey]): List of object keys to touch.

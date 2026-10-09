@@ -383,13 +383,9 @@ class L2AdapterInterface(ABC):
     def touch_keys(self, keys: list[ObjectKey]) -> None:
         """Refresh the eviction recency of ``keys`` without reading them.
 
-        Emits the same accessed-notification a load would, so eviction
-        bookkeeping treats the keys as just-used, but moves no bytes. Keys the
-        adapter does not hold are ignored by the eviction policy.
-
-        Used by the APC-covered lookup path: that prefix is skipped instead of
-        being loaded, and without this the keys would look cold to L2 and be
-        evicted -- data a non-skipping lookup would have kept.
+        Emits the same accessed-notification a load would, so eviction treats
+        the keys as just-used while moving no bytes. Keys this adapter does not
+        hold are ignored by the policy.
 
         Args:
             keys: The object keys to mark as accessed.

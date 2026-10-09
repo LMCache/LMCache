@@ -837,10 +837,9 @@ class LMCacheMPSchedulerAdapter:
                 the IPC key.
             reserve_last_token: Whether to exclude the final token before
                 aligning the lookup range.
-            covered_chunks: Leading LMCache chunks the serving engine's prefix
-                cache already covers. The server touches them (keeps them warm)
-                but skips read-locking / L2-prefetching them. 0 disables the
-                optimization for this request.
+            covered_chunks: Leading chunks the serving engine's prefix cache
+                already covers; the server touches but does not lock or
+                prefetch them. 0 disables the optimization for this request.
 
         Returns:
             None
@@ -1183,15 +1182,13 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
     ) -> None:
-        """Release read locks via ``free_lookup_locks`` but block until every
-        server has processed the release.
+        """Like ``free_lookup_locks``, but blocks until every server has acked.
 
-        The covered-lookup shrink path must release the stale lookup's locks
-        before it submits the replacement full lookup for the same request: on a
-        server with ``max_cpu_workers > 1`` a fire-and-forget release could be
-        reordered after the replacement's ``begin_lookup`` (both share the normal
-        thread pool), over-releasing the covered prefix and leaking the stale
-        locks. Args mirror ``free_lookup_locks``.
+        The covered-lookup shrink path must release the stale locks before it
+        submits the replacement lookup for the same request; a fire-and-forget
+        release can be reordered after the replacement's ``begin_lookup`` when
+        ``max_cpu_workers > 1`` (both share the normal thread pool). Args mirror
+        ``free_lookup_locks``.
         """
         futures = self.free_lookup_locks(
             token_ids, start, end, request_id, cache_salt, request_configs
