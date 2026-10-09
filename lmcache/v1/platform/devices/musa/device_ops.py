@@ -19,20 +19,18 @@ import ctypes
 import torch
 
 # First Party
-from lmcache.lmcache_native import EngineKVFormat, TransferDirection, is_kv_list
+from lmcache.lmcache_native import EngineKVFormat, TransferDirection
+from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.devices.musa import native_kv_transfer
+from lmcache.v1.platform.devices.musa.format_capabilities import (
+    is_supported_musa_mp_block_transfer_format,
+)
 from lmcache.v1.platform.devices.musa.tensor_from_ptr import (
     construct_musa_tensor_from_data_pointer,
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
-
-_MUSA_MP_BLOCK_TRANSFER_FORMATS = {
-    int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS),
-    int(EngineKVFormat.NL_X_NB_BS_HS),
-    int(EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS),
-}
 
 _PagedBufferOperand: TypeAlias = (
     torch.Tensor | list[torch.Tensor] | list[list[torch.Tensor]]
@@ -60,11 +58,10 @@ def _validate_musa_mp_block_transfer_format(
     engine_kv_format: EngineKVFormat,
 ) -> None:
     """Reject MUSA handle-transfer layouts outside the validated scope."""
-    if int(engine_kv_format) not in _MUSA_MP_BLOCK_TRANSFER_FORMATS:
+    if not is_supported_musa_mp_block_transfer_format(engine_kv_format):
         raise ValueError(
-            "MUSA MP block transfer supports only "
-            "NL_X_TWO_NB_BS_NH_HS, NL_X_NB_BS_HS, and "
-            "TWO_X_NL_X_NB_BS_NH_HS layouts; "
+            "MUSA MP block transfer supports only current trait-compatible "
+            "layouts; "
             f"got {engine_kv_format!r}"
         )
 
@@ -168,14 +165,12 @@ def _paged_shape_and_stride(
     bs = int(shape_desc.bs)
     nh = int(shape_desc.nh)
     hs = int(shape_desc.hs)
-    if int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_BS_HS):
+    format_spec = get_spec_class(engine_kv_format)
+    shape = format_spec.paged_pointer_shape(nb, bs, nh, hs)
+    if format_spec.is_mla:
         block_stride = int(getattr(shape_desc, "block_stride_elems", 0))
-        return (nb, bs, hs), (block_stride or bs * hs, hs, 1)
-    if int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
-        return (2, nb, bs, nh, hs), None
-    if int(engine_kv_format) == int(EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS):
-        return (nb, bs, nh, hs), None
-    raise ValueError(f"Unsupported MUSA paged layout: {engine_kv_format!r}")
+        return shape, (block_stride or bs * hs, hs, 1)
+    return shape, None
 
 
 def _staging_shape(
@@ -187,9 +182,12 @@ def _staging_shape(
     nl = int(shape_desc.nl)
     nh = int(shape_desc.nh)
     hs = int(shape_desc.hs)
-    if int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_BS_HS):
-        return (nl, lmcache_chunk_size, hs)
-    return (2, nl, lmcache_chunk_size, nh * hs)
+    return get_spec_class(engine_kv_format).staging_shape(
+        nl,
+        lmcache_chunk_size,
+        nh * hs,
+        int(getattr(shape_desc, "kv_size", 0)),
+    )
 
 
 def _validate_pointer_tensor(value: torch.Tensor, expected_layers: int) -> None:
@@ -212,7 +210,7 @@ def _reconstruct_paged_layers(
 ) -> _PagedLayers:
     """Normalize pointer-form paged operands to non-owning MUSA views."""
     expected_layers = int(shape_desc.nl)
-    separate_kv_lists = is_kv_list(engine_kv_format)
+    separate_kv_lists = get_spec_class(engine_kv_format).is_kv_list
     if separate_kv_lists:
         nested_layers = _kv_layer_lists(value)
         if nested_layers is not None:
