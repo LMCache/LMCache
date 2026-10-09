@@ -401,6 +401,24 @@ def test_lookup_retrieve_and_cleanup(
     assert not receiving
 
 
+def test_abort_with_pending_lookup_ends_session_before_cleanup(
+    connectors: tuple[LMCacheMPConnector, LMCacheMPConnector],
+    mock_io: SimpleNamespace,
+) -> None:
+    scheduler, _ = connectors
+    request = _request()
+    mock_io.scheduler.check_lookup_result.return_value = None
+    assert scheduler.get_num_new_matched_tokens(request, 4) == (None, True)
+    mock_io.scheduler.reset_mock()
+    scheduler.request_finished(request, [])
+    calls = [
+        name
+        for name, _, _ in mock_io.scheduler.mock_calls
+        if name in ("end_session", "cleanup_lookup_result")
+    ]
+    assert calls == ["end_session", "cleanup_lookup_result"]
+
+
 @pytest.mark.parametrize("num_groups,legacy_api", [(1, False), (2, False), (2, True)])
 @pytest.mark.parametrize("retrieve_success", [False, True])
 def test_receive_failure_reporting(
