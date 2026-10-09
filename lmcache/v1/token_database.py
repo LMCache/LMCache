@@ -548,7 +548,9 @@ class SegmentTokenDatabase(TokenDatabase):
                 if idx > 0:
                     start_idx += self.sep_len
                     end_idx += self.sep_len
-                if start_idx >= num_falses:
+                # Adjacent separators yield empty segments. store_layer skips
+                # them, so lookup must too, or it misses and stops matching.
+                if token_chunk_len > 0 and start_idx >= num_falses:
                     if make_key:
                         yield (
                             start_idx,
