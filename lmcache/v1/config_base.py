@@ -316,8 +316,8 @@ def create_config_class(
         return instance
 
     def _from_file(cls, file_path: str):
-        """Load configuration from file"""
-        with open(file_path, "r") as fin:
+        """Load configuration from a UTF-8 YAML file."""
+        with open(file_path, "r", encoding="utf-8") as fin:
             file_config = yaml.safe_load(fin) or {}
 
         # Resolve aliases and handle deprecated configurations
