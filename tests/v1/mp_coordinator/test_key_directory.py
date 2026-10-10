@@ -534,6 +534,29 @@ def test_stats_counts_keys_and_placements():
     assert stats.l1_keys_by_instance["node-b"] == 0
 
 
+def test_stats_placement_count_follows_deletes_and_fencing():
+    directory = KeyDirectory()
+    directory.consume(_batch(instance_id="node-a", seq=1, keys=[_key(1), _key(2)]))
+    directory.consume(_batch(instance_id="node-b", seq=1, keys=[_key(1)]))
+    directory.consume(
+        _batch(instance_id="node-b", seq=2, tier=Tier.L2, backend="fs", keys=[_key(2)])
+    )
+    directory.consume(
+        _batch(
+            instance_id="node-b",
+            seq=3,
+            event_type=CacheEventType.DELETE,
+            keys=[_key(1)],
+        )
+    )
+    directory.fence_instance("node-a")
+
+    stats = directory.stats()
+    placements = directory.lookup([_key(1), _key(2)])
+    assert stats.num_placements == sum(len(p) for p in placements) == 1
+    assert stats.num_keys == 1
+
+
 # -- Placement stats ---------------------------------------------------------
 
 

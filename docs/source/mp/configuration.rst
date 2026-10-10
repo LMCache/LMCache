@@ -362,6 +362,11 @@ The DMA path is selected automatically by platform: **cuFile**
 `ROCm/hipFile <https://github.com/ROCm/hipFile>`_) on AMD ROCm. The same
 flags apply to both; no configuration change is needed to switch vendors.
 
+**muFile** (``libmufile.so``) is selected automatically on MUSA, or
+explicitly with ``--gds-l1-backend mufile``. It uses the SmartIO muFile
+stream-ordered API and a filesystem slab, so the SmartIO runtime and its
+MUSA-compatible ``libmufile.so`` must be installed on every worker.
+
 **uGDS** (``libugds.so``) is a third, opt-in backend selected with
 ``--gds-l1-backend ugds``. It is a user-space GPUDirect Storage library that
 builds NVMe commands and rings doorbells from user space, so its IO path issues
@@ -443,8 +448,9 @@ verify the installation.
        at ``<path>/lmcache_gds_slab.bin``.
    * - ``--gds-l1-backend``
      - ``auto``
-     - GDS implementation: ``auto``, ``cufile``, ``hipfile``, ``ugds``, or
-       ``phx``. ``auto`` selects cuFile on CUDA and hipFile on ROCm.
+     - GDS implementation: ``auto``, ``cufile``, ``hipfile``, ``mufile``,
+       ``ugds``, or ``phx``. ``auto`` selects cuFile on CUDA, hipFile on
+       ROCm, and muFile on MUSA.
    * - ``--gds-l1-use-direct-io`` / ``--no-gds-l1-use-direct-io``
      - ``True``
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
@@ -601,6 +607,11 @@ logging, tracing).
    * - ``--disable-metrics``
      - off
      - Skip metrics subscribers (no Prometheus endpoint).
+   * - ``--disable-grpc-metrics``
+     - off
+     - Skip gRPC Python runtime metrics while keeping LMCache metrics enabled.
+       By default, the MP server enables these metrics only for
+       ``--transport grpc``.
    * - ``--disable-logging``
      - off
      - Skip logging subscribers.

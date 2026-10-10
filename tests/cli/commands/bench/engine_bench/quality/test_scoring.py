@@ -8,8 +8,10 @@ import pytest
 from lmcache.cli.commands.bench.engine_bench.quality.scoring import (
     QualityAggregator,
     SampleScore,
+    answer_match,
     best_f1,
     extract_final_answer,
+    is_abstention,
     normalize_answer,
     token_f1,
 )
@@ -163,3 +165,142 @@ class TestQualityAggregator:
         aggregator.record(_score("b", True, 1.0))
         aggregator.record(_score("a", True, 1.0))
         assert [s.sample_id for s in aggregator.scores()] == ["b", "a"]
+
+
+class TestAnswerMatch:
+    def test_exact_answer_matches(self) -> None:
+        assert answer_match("Bassendean", ["Bassendean"])
+
+    def test_gold_phrase_inside_a_longer_answer_matches(self) -> None:
+        assert answer_match("It is based in Bassendean, WA.", ["Bassendean"])
+
+    def test_partial_word_does_not_match(self) -> None:
+        assert not answer_match("Bassendeans", ["Bassendean"])
+
+    def test_alternate_phrasing_matches(self) -> None:
+        assert answer_match("NYC", ["New York City", "NYC"])
+
+    def test_same_figure_in_another_format_matches(self) -> None:
+        """Token F1 scores this 0; the figure is the same."""
+        assert answer_match("$11,588 million", ["$11588.00"])
+
+    def test_same_figure_in_another_unit_matches(self) -> None:
+        assert answer_match("$11.588 billion", ["$11588.00"])
+
+    def test_rounded_figure_matches(self) -> None:
+        assert answer_match("about $8.74 billion", ["$8738.00"])
+
+    def test_neighbouring_figure_does_not_match(self) -> None:
+        """The wrong line of the same table must not pass."""
+        assert not answer_match("$3,033 million", ["$11588.00"])
+        assert not answer_match("$24,873 million", ["$8738.00"])
+
+    def test_every_gold_number_must_appear(self) -> None:
+        assert not answer_match("2018", ["2018: $1577"])
+        assert answer_match("In 2018 it was 1,577", ["2018: $1577"])
+
+    def test_empty_answer_does_not_match(self) -> None:
+        assert not answer_match("", ["Paris"])
+
+    def test_digits_inside_words_are_not_numbers(self) -> None:
+        """A shared digit must not make two different names match."""
+        assert not answer_match("beta2", ["alpha2"])
+        assert not answer_match("Q3 revenue", ["3"])
+
+    def test_figure_with_unit_suffix_still_matches(self) -> None:
+        assert answer_match("$1.5B", ["$1.5"])
+
+    def test_rescale_needs_a_named_scale(self) -> None:
+        """Without a scale word, a count must not match its thousandfold."""
+        assert not answer_match("3,000", ["3"])
+        assert not answer_match("about 5", ["5000"])
+        assert answer_match("3 thousand", ["3000"])
+        assert answer_match("$1.5B", ["$1500"])
+        assert answer_match("1,500", ["$1.5 thousand"])
+
+    def test_typographic_punctuation_is_folded(self) -> None:
+        """Models emit curly apostrophes, non-breaking hyphens and spaces."""
+        assert answer_match(
+            "St Patrick\u2019s College in Dublin", ["St Patrick's College"]
+        )
+        assert answer_match(
+            "at home in Goring\u2011on\u2011Thames", ["Goring-on-Thames"]
+        )
+        assert answer_match("**$1,577\u202fmillion**", ["$1577.00"])
+
+    def test_hyphens_are_word_breaks(self) -> None:
+        """Either side may hyphenate a compound the other spells open."""
+        answer = "a massively\u2011multiplayer online role-playing game"
+        assert answer_match(answer, ["massively multiplayer online role-playing game"])
+        assert answer_match("role playing", ["role-playing"])
+
+    def test_years_are_context_not_figures(self) -> None:
+        """Naming the years in the question is not stating the answer."""
+        assert not answer_match("+1.2% versus FY 2022", ["Flat in FY 2023 vs FY 2022."])
+        assert not answer_match("for fiscal year 2023", ["$2,018mn in FY 2023"])
+        assert answer_match(
+            "Adjusted EBITDA was $2,018 million", ["$2,018mn in FY 2023"]
+        )
+
+    def test_sign_may_be_stated_in_words(self) -> None:
+        assert answer_match("a \u20110.9% organic decline", ["Shrunk by 0.9%."])
+
+    def test_billions_match_a_figure_in_units(self) -> None:
+        assert answer_match("$8.4 billion in total", ["$8,400,000,000"])
+
+    def test_abstention_naming_the_gold_does_not_match(self) -> None:
+        answer = (
+            "The passages give Robbie Gould's birth date but do not include one "
+            "for Chris Gould."
+        )
+        assert not answer_match(answer, ["Chris Gould"])
+
+    def test_abstention_may_match_a_negative_gold(self) -> None:
+        answer = "The passages do not mention any acquisitions; there are none."
+        assert answer_match(answer, ["There are none"])
+
+    def test_abstention_like_title_still_matches(self) -> None:
+        assert answer_match("Unknown Pleasures", ["Unknown Pleasures"])
+
+
+class TestIsAbstention:
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            "The provided passages do not contain a figure for adjusted EBITDA.",
+            "Not provided",
+            "UNKNOWN",
+            "None",
+            "This cannot be determined from the context.",
+            "There is insufficient information.",
+            "Therefore we cannot determine whether the margin improved.",
+            "Without those numbers it is impossible to determine the trend.",
+            "The provided passages do not name any companies Pfizer acquired.",
+            "None of the excerpts state the county seat.",
+            "The information supplied is insufficient to calculate it.",
+            "It can\u2019t be determined from the passages.",
+            "It isn\u2019t possible to tell which is younger.",
+            "The quick ratio cannot be calculated from the passages.",
+        ],
+    )
+    def test_refusals_are_abstentions(self, answer: str) -> None:
+        assert is_abstention(answer)
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            "Paris",
+            "$1,577 million",
+            "none of them",
+            "The gains do not qualify as high-growth performance.",
+            "Its liquid assets do not fully cover current liabilities.",
+            "The company cannot reasonably estimate the loss.",
+            "The income statement does not list a separate line item, so 0.",
+        ],
+    )
+    def test_answers_are_not_abstentions(self, answer: str) -> None:
+        assert not is_abstention(answer)
+
+    def test_empty_answer_is_not_an_abstention(self) -> None:
+        """An empty answer is unparsed, a different failure."""
+        assert not is_abstention("")
