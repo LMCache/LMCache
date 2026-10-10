@@ -112,15 +112,23 @@ class TestExtraStatsLoggingSubscriber:
 
     def test_store_window_logs_tokens_size_and_throughput(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
+        # Anchor the synthetic timestamps to the wall clock: the subscriber
+        # prunes pending starts older than _PENDING_MAX_AGE_SECONDS against
+        # ``time.time()`` (see ``_prune_pending``), so a fabricated absolute
+        # value such as 100.0 is always stale. On a loaded CI runner a flush
+        # can fire between the START and END dispatches (> _INTERVAL apart),
+        # pruning the pending START and degrading the assertion to
+        # ``avg_copy=n/a`` -- the intermittent failure in #4566.
+        now = time.time()
         with _capture_logs() as handler:
             subs[EventType.MP_STORE_START](
-                _start(EventType.MP_STORE_START, "req-1", 100.0)
+                _start(EventType.MP_STORE_START, "req-1", now)
             )
             subs[EventType.MP_STORE_END](
                 _end(
                     EventType.MP_STORE_END,
                     "req-1",
-                    100.5,
+                    now + 0.5,
                     total_bytes=5_000_000_000,
                     num_tokens=24576,
                 )
@@ -138,15 +146,17 @@ class TestExtraStatsLoggingSubscriber:
 
     def test_retrieve_window_logs_tokens_size_and_throughput(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
+        # Wall-clock anchoring, same reason as the store-throughput test.
+        now = time.time()
         with _capture_logs() as handler:
             subs[EventType.MP_RETRIEVE_START](
-                _start(EventType.MP_RETRIEVE_START, "req-1", 200.0)
+                _start(EventType.MP_RETRIEVE_START, "req-1", now)
             )
             subs[EventType.MP_RETRIEVE_END](
                 _end(
                     EventType.MP_RETRIEVE_END,
                     "req-1",
-                    200.25,
+                    now + 0.25,
                     total_bytes=2_000_000_000,
                     num_tokens=4096,
                 )
@@ -344,6 +354,53 @@ class TestExtraStatsLoggingSubscriber:
         window_lines = [m for m in handler.messages() if "last" in m]
         assert len(window_lines) == 1
         assert "store ops=1 tokens=1024 size=1.00GB avg_copy=n/a" in window_lines[0]
+
+    @pytest.mark.parametrize(
+        ("start_event", "end_event", "label"),
+        [
+            (EventType.MP_STORE_START, EventType.MP_STORE_END, "store"),
+            (EventType.MP_RETRIEVE_START, EventType.MP_RETRIEVE_END, "retrieve"),
+        ],
+    )
+    def test_recent_pending_start_survives_flush_before_end(
+        self, start_event, end_event, label
+    ):
+        """A fresh pending START must survive a flush that fires between the
+        START and END dispatches.
+
+        Regression test for #4566: ``_maybe_flush`` runs on every event and
+        prunes pending starts older than ``_PENDING_MAX_AGE_SECONDS``, so a
+        recent (wall-clock anchored) START must still correlate with its END
+        even when the END arrives after one or more flushes. Exercised for
+        both the store and the retrieve pending maps.
+        """
+        subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
+        with _capture_logs() as handler:
+            now = time.time()
+            subs[start_event](_start(start_event, "req-1", now))
+            # Force at least one flush between START and END, as a slow CI
+            # runner does when dispatches are spaced more than _INTERVAL.
+            time.sleep(_WAIT)
+            subs[EventType.L1_EVICTION_LOOP_TICK](_tick())
+
+            subs[end_event](
+                _end(
+                    end_event,
+                    "req-1",
+                    now + 0.5,
+                    total_bytes=1_000_000_000,
+                    num_tokens=1024,
+                )
+            )
+            time.sleep(_WAIT)
+            subs[EventType.L1_EVICTION_LOOP_TICK](_tick())
+
+        window_lines = [m for m in handler.messages() if "last" in m]
+        assert len(window_lines) == 1
+        assert (
+            f"{label} ops=1 tokens=1024 size=1.00GB avg_copy=2.00GB/s"
+            in window_lines[0]
+        )
 
     def test_end_to_end_via_event_bus(self):
         bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
