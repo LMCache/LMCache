@@ -60,7 +60,12 @@ class BaseCachePolicy(Generic[KeyType, MapType], metaclass=abc.ABCMeta):
         key: KeyType,
     ) -> None:
         """
-        Update internal states when a cache is force evicted
+        Update internal states when a cache is removed from cache_dict
+
+        Backends must call this for every removal, whether it is a forced
+        remove from the external or an internal eviction of a key returned
+        by ``get_evict_candidates``. Calling it for a key the policy does
+        not track is a no-op.
 
         Input:
             key: an object of KeyType
@@ -75,13 +80,19 @@ class BaseCachePolicy(Generic[KeyType, MapType], metaclass=abc.ABCMeta):
         num_candidates: int = 1,
     ) -> list[KeyType]:
         """
-        Evict cache when a new cache comes and the storage is full
+        Select the keys to evict when a new cache comes and the storage is
+        full
+
+        This only selects: it does not modify cache_dict or internal states,
+        and the caller may evict fewer keys than returned. The caller must
+        call ``update_on_force_evict`` for each key it actually removes.
 
         Input:
             cache_dict: a dict consists of current cache
-            num_candidates: number of candidates to be evicted
+            num_candidates: maximum number of candidates to return
 
         Return:
-            return a list of keys to be evicted
+            return a list of at most num_candidates evictable keys, in
+            eviction order
         """
         raise NotImplementedError

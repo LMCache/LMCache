@@ -692,3 +692,47 @@ class TestSchedulerRoleRejection:
             assert "LocalCPUBackend" not in backends
         finally:
             loop.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: cache policy stays in sync with key_dict on internal eviction
+# ---------------------------------------------------------------------------
+
+
+class TestInternalEvictionCachePolicyUpdate:
+    def test_lfu_selects_next_candidate_after_internal_eviction(
+        self, monkeypatch
+    ) -> None:
+        """Internal (``force=False``) evictions must drop the key from the
+        policy, including policies with their own bookkeeping (LFU)."""
+        metadata = _make_metadata()
+        config = _nixl_cpu_config(pool_size=2)
+        config.cache_policy = "LFU"
+        local_cpu = _make_local_cpu_paged(monkeypatch, metadata)
+        backend, loop = _build_static(
+            monkeypatch, metadata, config, local_cpu_backend=local_cpu
+        )
+        keys = [_make_key(idx) for idx in range(2)]
+        obj = MagicMock(
+            shape=torch.Size(metadata.kv_shape),
+            dtype=metadata.kv_dtype,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+
+        try:
+            for key in keys:
+                backend.add_key_to_dict(key, obj, backend.pool.pop())
+
+            with backend.key_lock:
+                evict_keys = backend.cache_policy.get_evict_candidates(
+                    backend.key_dict, num_candidates=1
+                )
+                assert evict_keys == [keys[0]]
+                backend.batched_remove(evict_keys, force=False)
+
+                assert backend.cache_policy.get_evict_candidates(
+                    backend.key_dict, num_candidates=1
+                ) == [keys[1]]
+        finally:
+            loop.close()
+            local_cpu.memory_allocator.close()

@@ -83,12 +83,9 @@ class LFUCachePolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         num_candidates: int = 1,
     ) -> list[KeyType]:
         # Selection only: the caller may evict fewer keys than returned (e.g.
-        # a pinned layer in ``batched_allocate`` skips a candidate), so this
-        # must not mutate internal bookkeeping. Keys are dropped from
-        # ``key_to_freq`` / ``freq_to_keys`` only when they are actually
-        # removed, via ``update_on_force_evict``; mutating here left skipped
-        # candidates resident but untracked, which crashed ``update_on_hit``
-        # with a ``KeyError`` on the next access.
+        # ``batched_allocate`` skips a candidate whose layer is pinned), so
+        # keys leave ``key_to_freq`` / ``freq_to_keys`` only in
+        # ``update_on_force_evict``.
         evict_keys: list[KeyType] = []
         # ``freq_to_keys`` is a SortedDict, so iteration is ascending by
         # frequency; within a bucket, dict insertion order gives FIFO.
