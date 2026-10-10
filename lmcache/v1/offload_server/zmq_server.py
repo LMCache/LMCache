@@ -9,6 +9,7 @@ import msgspec
 import zmq
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.offload_server.abstract_server import OffloadServerInterface
 from lmcache.v1.offload_server.message import OffloadMsg, OffloadRetMsg
@@ -18,13 +19,35 @@ from lmcache.v1.rpc_utils import (
     get_zmq_socket,
 )
 
+logger = init_logger(__name__)
+
 
 class ZMQOffloadServer(OffloadServerInterface):
+    """Serve offload requests over a ZMQ REP socket on a background thread.
+
+    Attempt one reply per request: ``success`` is true when the engine call
+    returns normally and false when the request is invalid or the engine
+    raises. A REP socket must reply before receiving another request.
+    Transport errors stop the thread, and ``running`` is cleared on exit.
+    """
+
     def __init__(
         self,
         lmcache_engine: LMCacheEngine,
         tp_rank: int,
-    ):
+    ) -> None:
+        """Bind the offload endpoint and start its request thread.
+
+        Args:
+            lmcache_engine: LMCacheEngine handling offload operations.
+            tp_rank: Integer rank suffix used to construct the IPC endpoint.
+
+        Raises:
+            ValueError: If ``LMCACHE_OFFLOAD_RPC_PORT`` is not an integer, or
+                the base RPC directory cannot fit even a shortened socket name
+                within the IPC path limit.
+            zmq.ZMQError: If the socket cannot be created or bound.
+        """
         metadata = lmcache_engine.metadata
         self.ctx = get_zmq_context(use_asyncio=False)
         offload_rpc_port = int(os.environ.get("LMCACHE_OFFLOAD_RPC_PORT", 100))
@@ -43,35 +66,43 @@ class ZMQOffloadServer(OffloadServerInterface):
         self.lmcache_engine = lmcache_engine
         self.running = True
 
-        def process_request():
-            # First Party
-            from lmcache.logging import init_logger
+        def process_request() -> None:
+            """Complete each REP receive/send cycle, including failed requests."""
+            try:
+                while self.running:
+                    try:
+                        frames = self.socket.recv_multipart(copy=False)
+                        try:
+                            if len(frames) != 1:
+                                raise ValueError(
+                                    "Offload requests must use one frame, "
+                                    f"got {len(frames)}"
+                                )
+                            offload_msg = msgspec.msgpack.decode(
+                                frames[0], type=OffloadMsg
+                            )
+                            result = self.offload(
+                                offload_msg.hashes,
+                                offload_msg.slot_mapping,
+                                offload_msg.offsets,
+                            )
+                        except Exception:
+                            logger.exception("Failed to process offload request")
+                            result = False
 
-            logger = init_logger(__name__)
-
-            while self.running:
-                try:
-                    frame = self.socket.recv(copy=False)
-                    offload_msg = msgspec.msgpack.decode(frame, type=OffloadMsg)
-                    result = self.offload(
-                        offload_msg.hashes,
-                        offload_msg.slot_mapping,
-                        offload_msg.offsets,
-                    )
-                    response = OffloadRetMsg(success=result)
-                    response = msgspec.msgpack.encode(response)
-                    self.socket.send(response)
-                except zmq.ZMQError as e:
-                    # Socket was closed, exit gracefully
-                    if not self.running:
-                        logger.info("ZMQ socket closed, exiting offload server thread")
+                        # REP must reply even when decoding or storing failed.
+                        response = msgspec.msgpack.encode(OffloadRetMsg(success=result))
+                        self.socket.send(response)
+                    except zmq.ZMQError as e:
+                        if not self.running:
+                            logger.info(
+                                "ZMQ socket closed, exiting offload server thread"
+                            )
+                        else:
+                            logger.error("ZMQ error in offload server: %s", e)
                         break
-                    logger.error("ZMQ error in offload server: %s", e)
-                    break
-                except Exception as e:
-                    logger.error("Unexpected error in offload server: %s", e)
-                    if not self.running:
-                        break
+            finally:
+                self.running = False
 
         self.thread = threading.Thread(
             target=process_request, daemon=True, name="offload-server-thread"
@@ -90,11 +121,6 @@ class ZMQOffloadServer(OffloadServerInterface):
         return True
 
     def close(self) -> None:
-        # First Party
-        from lmcache.logging import init_logger
-
-        logger = init_logger(__name__)
-
         logger.info("Closing ZMQOffloadServer...")
         self.running = False
 
