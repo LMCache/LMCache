@@ -70,6 +70,7 @@ async def register_instance(
             mq_port=body.mq_port,
         )
     )
+    ctx.event_gate.readmit_instance(instance_id)
     logger.info("Registered instance %s at %s:%s", instance_id, body.ip, body.http_port)
     return RegisterResponse(instance_id=instance_id, re_registered=re_registered)
 
