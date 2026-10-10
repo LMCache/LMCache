@@ -557,7 +557,118 @@ class TestSerdeBufferBounds:
         )
         self._run_roundtrip(layout)
 
-    # NOTE: Multi-group layouts (multiple shapes/dtypes) are not tested here
-    # because the fp8 serde accesses MemoryObj.tensor which only works for
-    # single-group layouts. Multi-group would require per-group
-    # serialize/deserialize via MemoryObj.get_tensor(index).
+
+def _exact_fp8_pattern(
+    shape: torch.Size,
+    dtype: torch.dtype,
+    rotation: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Values that are exact in both fp8 e4m3 and e5m2, and in bf16/fp16/fp32."""
+    base = torch.tensor(
+        (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0),
+        dtype=torch.float32,
+    )
+    rotated = torch.roll(base, shifts=rotation)
+    flat = rotated.repeat(shape.numel() // rotated.numel() + 1)[: shape.numel()]
+    return flat.to(device=device, dtype=dtype).reshape(shape)
+
+
+class TestSeparateObjectGroups:
+    """fp8 store/prefetch when one MemoryObj holds several KV groups.
+
+    ``MemoryObj.tensor`` still raises for these objects. The store path
+    has to quantize each ``get_tensor`` group. See issue #4972.
+    """
+
+    def test_multi_group_roundtrip(self) -> None:
+        layout = MemoryLayoutDesc(
+            shapes=[
+                torch.Size([1, 2, 4, 8]),
+                torch.Size([4, 4]),
+                torch.Size([8]),
+            ],
+            dtypes=[torch.bfloat16, torch.float16, torch.float32],
+        )
+        cfg = make_storage_manager_config([make_mock_adapter_config(serde_type="fp8")])
+        sm = StorageManager(cfg)
+        try:
+            keys = [make_object_key(i) for i in range(2)]
+            stored_before = get_l2_stored_object_count(sm)
+            reserved = sm.reserve_write(keys, layout)
+            assert len(reserved) == len(keys)
+
+            for key_index, key in enumerate(keys):
+                obj = reserved[key]
+                with pytest.raises(RuntimeError, match="invalid"):
+                    _ = obj.tensor
+                assert obj.get_shapes() == list(layout.shapes)
+                assert obj.get_dtypes() == list(layout.dtypes)
+                for group_index in range(len(layout.shapes)):
+                    group = obj.get_tensor(group_index)
+                    assert group is not None
+                    group.copy_(
+                        _exact_fp8_pattern(
+                            group.shape,
+                            group.dtype,
+                            rotation=key_index + group_index,
+                            device=group.device,
+                        )
+                    )
+
+            sm.finish_write(list(reserved.keys()))
+
+            def flushed_to_l2() -> bool:
+                status = sm.report_status()
+                stored_total = sum(
+                    adapter["stored_object_count"] for adapter in status["l2_adapters"]
+                )
+                store_controller = status["store_controller"]
+                return (
+                    stored_total >= stored_before + len(keys)
+                    and store_controller["in_flight_task_count"] == 0
+                    and store_controller["pending_keys_count"] == 0
+                )
+
+            assert wait_for_condition(flushed_to_l2), "Store to L2 did not complete"
+            clear_and_wait_drained(sm)
+            assert get_l1_object_count(sm) == 0
+
+            handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
+            hits = wait_for_prefetch_status(sm, handle)
+            assert hits == len(keys)
+
+            with sm.read_prefetched_results(keys) as objs:
+                assert objs is not None
+                assert len(objs) == len(keys)
+                for key_index, obj in enumerate(objs):
+                    assert obj.get_shapes() == list(layout.shapes)
+                    assert obj.get_dtypes() == list(layout.dtypes)
+                    for group_index in range(len(layout.shapes)):
+                        recovered = obj.get_tensor(group_index)
+                        assert recovered is not None
+                        expected = _exact_fp8_pattern(
+                            recovered.shape,
+                            recovered.dtype,
+                            rotation=key_index + group_index,
+                            device=recovered.device,
+                        )
+                        assert recovered.shape == layout.shapes[group_index]
+                        assert recovered.dtype == layout.dtypes[group_index]
+                        assert torch.equal(recovered, expected)
+                        corr = torch.corrcoef(
+                            torch.stack(
+                                [
+                                    recovered.float().flatten().cpu(),
+                                    expected.float().flatten().cpu(),
+                                ]
+                            )
+                        )[0, 1].item()
+                        assert corr > 0.99, f"group {group_index} corr {corr:.4f}"
+
+            sm.finish_read_prefetched(keys)
+            assert wait_for_condition(lambda: get_l1_memory_used(sm) == 0), (
+                f"L1 memory leak: {get_l1_memory_used(sm)} bytes after full cycle"
+            )
+        finally:
+            sm.close()
