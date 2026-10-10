@@ -26,6 +26,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
+from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.ipc_policy import (
@@ -579,6 +580,37 @@ def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
 
     assert adapter.kv_caches is new_caches
     req_client.register_kv_cache.assert_called_once()
+
+
+def test_register_kv_caches_sends_kv_worker_id_hint(fake_adapter):
+    """The registration carries the kv worker id; the caller's hints are
+    unchanged."""
+    adapter, req_client, _ = fake_adapter
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    caller_hints: LayoutHints = {"kv_layout": "NHD"}
+
+    adapter.register_kv_caches({"layer.0": fake_tensor}, layout_hints=caller_hints)
+
+    sent_hints = req_client.register_kv_cache.call_args.args[5]
+    assert sent_hints == {"kv_layout": "NHD", "kv_worker_id": 0}
+    assert caller_hints == {"kv_layout": "NHD"}
+
+
+def test_register_kv_caches_engine_driven_sends_kv_worker_id(fake_adapter, monkeypatch):
+    """The engine-driven registration payload carries the kv worker id too."""
+    _, req_client, _ = fake_adapter
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.transfer_context.worker_transfer._supports_async_primitives",
+        lambda: False,
+    )
+    adapter = _make_worker_adapter()
+    req_client.reset_mock()
+
+    adapter.register_kv_caches({"layer.0": torch.randn(2, 8, 4, 2, 8)})
+
+    payload = req_client.register_kv_cache_engine_driven_context.call_args.args[0]
+    assert payload.kv_worker_id == 0
 
 
 def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):

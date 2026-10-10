@@ -229,7 +229,8 @@ The engine-driven path uses five request types:
 1. `REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`  
    Worker registers engine-driven KV layout metadata. Server then:
    - stores `EngineDrivenContextEntry` (metadata + model/world info)
-   - registers `MemoryLayoutDesc` in `LayoutDescRegistry`
+   - registers `MemoryLayoutDesc` in `LayoutDescRegistry`, also under the
+     payload's `kv_worker_id` when set (pipeline stages differ in `num_layers`)
    - creates `TransferStrategy` from engine-level `shm_pool_info`
    - returns `shm_name/pool_size` so worker creates matching `EngineDrivenContext`
 

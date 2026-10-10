@@ -308,6 +308,10 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
             num_physical_slots=32,
         ),
     )
+    # kv_worker_id crosses the wire; the request above, without it, has None.
+    stage_request = registration_codec.request_encoder((), {"kv_worker_id": 1})
+    (stage_payload,) = registration_codec.request_decoder(stage_request)
+    assert stage_payload.kv_worker_id == 1
     server_module_codec = registry.by_full_name[
         "lmcache.mp.ControllerService.ServerModuleCall"
     ]
