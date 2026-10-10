@@ -703,8 +703,6 @@ class TestInternalEvictionCachePolicyUpdate:
     def test_lfu_selects_next_candidate_after_internal_eviction(
         self, monkeypatch
     ) -> None:
-        """Internal (``force=False``) evictions must drop the key from the
-        policy, including policies with their own bookkeeping (LFU)."""
         metadata = _make_metadata()
         config = _nixl_cpu_config(pool_size=2)
         config.cache_policy = "LFU"

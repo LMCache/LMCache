@@ -632,9 +632,7 @@ class TestLocalCPUBackendAllocatorRecovery:
         allocator.close()
 
     def test_lfu_hit_on_candidate_skipped_by_batched_allocate(self):
-        """A key that ``batched_allocate`` considered but left resident
-        (its group has a pinned layer) must still accept hits and be
-        evictable later under LFU."""
+        """Regression test for issue #5444."""
         chunk_bytes = 4096
         batch_size = 2
         shape = torch.Size([1, chunk_bytes])
@@ -670,7 +668,6 @@ class TestLocalCPUBackendAllocatorRecovery:
         )
         assert backend.unpin(layer_keys[0])
 
-        # A lookup hit on the layer that was selected but not evicted.
         assert backend.contains(layer_keys[1], pin=True)
         backend.touch_cache()
         assert backend.unpin(layer_keys[1])
@@ -690,8 +687,6 @@ class TestLocalCPUBackendAllocatorRecovery:
         allocator.close()
 
     def test_lfu_allocate_evicts_repeatedly(self):
-        """Under LFU, ``allocate`` must keep finding candidates after an
-        earlier eviction removed a key from the hot cache."""
         chunk_bytes = 4096
         shape = torch.Size([1, chunk_bytes])
         config = create_test_config()

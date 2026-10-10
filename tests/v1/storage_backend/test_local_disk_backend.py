@@ -657,9 +657,7 @@ class TestSubmitPutTask:
 
 
 class TestInternalEvictionCachePolicyUpdate:
-    """Internal (``force=False``) evictions must keep the cache policy in sync
-    with ``backend.dict``, including policies with their own bookkeeping (LFU).
-    """
+    """Internal evictions must keep the cache policy in sync with the dict."""
 
     def test_lfu_selects_next_candidate_after_internal_eviction(
         self, temp_disk_path, async_loop, local_cpu_backend

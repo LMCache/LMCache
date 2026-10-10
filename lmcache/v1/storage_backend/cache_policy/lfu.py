@@ -82,13 +82,7 @@ class LFUCachePolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         cache_dict: dict[KeyType, Any],
         num_candidates: int = 1,
     ) -> list[KeyType]:
-        # Selection only: the caller may evict fewer keys than returned (e.g.
-        # ``batched_allocate`` skips a candidate whose layer is pinned), so
-        # keys leave ``key_to_freq`` / ``freq_to_keys`` only in
-        # ``update_on_force_evict``.
         evict_keys: list[KeyType] = []
-        # ``freq_to_keys`` is a SortedDict, so iteration is ascending by
-        # frequency; within a bucket, dict insertion order gives FIFO.
         for fifo_keys in self.freq_to_keys.values():
             for key in fifo_keys:
                 if not cache_dict[key].can_evict:

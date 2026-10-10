@@ -299,9 +299,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     memory_obj.unpin()
             memory_obj.ref_count_down()
 
-            # Internal (``force=False``) evictions must reach the policy too:
-            # policies with side bookkeeping (LFU) would otherwise keep
-            # tracking a key that is no longer in ``self.hot_cache``.
+            # LFU needs this on internal (force=False) evictions too.
             self.cache_policy.update_on_force_evict(key)
 
         if self.batched_msg_sender is not None:

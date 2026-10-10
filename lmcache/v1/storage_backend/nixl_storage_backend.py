@@ -1485,9 +1485,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
             metadata = self.key_dict.pop(key, None)
             if metadata is None:
                 return False
-            # Internal (``force=False``) evictions must reach the policy too:
-            # policies with side bookkeeping (LFU) would otherwise keep
-            # tracking a key that is no longer in ``self.key_dict``.
+            # LFU needs this on internal (force=False) evictions too.
             self.cache_policy.update_on_force_evict(key)
 
         self.pool.push(metadata.index)
