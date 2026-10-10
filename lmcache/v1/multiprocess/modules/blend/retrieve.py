@@ -235,7 +235,9 @@ class RetrieveMixin:
                 engine_kv_format=gpu_context.get_engine_kv_format(group_idx),
                 page_buffer_size=group.shape_desc.nb * group_bs,
                 block_size=group_bs,
-                head_size=rope_state.head_size_for_group(group.engine_group_idx),
+                # The group's per-head row width: packed CS for fused K/V, HS
+                # otherwise (the scatter kernel's contract, not the rope's).
+                head_size=group.shape_desc.hs,
                 # Physical per-block stride; padded pools are wider than bs*hs.
                 block_stride_elems=getattr(group.shape_desc, "block_stride_elems", 0)
                 or 0,

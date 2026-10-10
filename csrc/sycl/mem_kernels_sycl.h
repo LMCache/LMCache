@@ -12,7 +12,8 @@ void multi_layer_kv_transfer(
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
     const EngineKVFormat engine_kv_format, const int block_size = 0,
-    const int head_size = 0, const int skip_prefix_n_tokens = 0);
+    const int head_size = 0, const int skip_prefix_n_tokens = 0,
+    const MemObjKVLayout mem_obj_kv_layout = MemObjKVLayout::UNSPECIFIED);
 
 // collapses to multi_layer_kv_transfer for MLA
 void multi_layer_kv_transfer_unilateral(

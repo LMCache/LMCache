@@ -48,7 +48,7 @@ class _CBRopeState:
     kv_quant: str = ""
 
     def head_size_for_group(self, engine_group_idx: int) -> int:
-        """The scatter head size for one engine group.
+        """The logical (rope) head size for one engine group.
 
         Args:
             engine_group_idx: The kernel group's engine group index.
