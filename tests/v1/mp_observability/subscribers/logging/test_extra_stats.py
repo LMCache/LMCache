@@ -112,13 +112,7 @@ class TestExtraStatsLoggingSubscriber:
 
     def test_store_window_logs_tokens_size_and_throughput(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
-        # Anchor the synthetic timestamps to the wall clock: the subscriber
-        # prunes pending starts older than _PENDING_MAX_AGE_SECONDS against
-        # ``time.time()`` (see ``_prune_pending``), so a fabricated absolute
-        # value such as 100.0 is always stale. On a loaded CI runner a flush
-        # can fire between the START and END dispatches (> _INTERVAL apart),
-        # pruning the pending START and degrading the assertion to
-        # ``avg_copy=n/a`` -- the intermittent failure in #4566.
+        # Anchor to the wall clock so a fresh START is never pruned as stale.
         now = time.time()
         with _capture_logs() as handler:
             subs[EventType.MP_STORE_START](
@@ -365,15 +359,6 @@ class TestExtraStatsLoggingSubscriber:
     def test_recent_pending_start_survives_flush_before_end(
         self, start_event, end_event, label
     ):
-        """A fresh pending START must survive a flush that fires between the
-        START and END dispatches.
-
-        Regression test for #4566: ``_maybe_flush`` runs on every event and
-        prunes pending starts older than ``_PENDING_MAX_AGE_SECONDS``, so a
-        recent (wall-clock anchored) START must still correlate with its END
-        even when the END arrives after one or more flushes. Exercised for
-        both the store and the retrieve pending maps.
-        """
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
         with _capture_logs() as handler:
             now = time.time()
