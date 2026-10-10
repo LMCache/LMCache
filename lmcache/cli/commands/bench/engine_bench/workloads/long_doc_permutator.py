@@ -28,7 +28,6 @@ therefore requires a loadable tokenizer.
 
 # Standard
 from dataclasses import dataclass
-import asyncio
 import itertools
 import math
 import random
@@ -42,7 +41,10 @@ from lmcache.cli.commands.bench.engine_bench.tokenizers import (
     build_single_token_pool,
     try_load_tokenizer,
 )
-from lmcache.cli.commands.bench.engine_bench.workloads.base import BaseWorkload
+from lmcache.cli.commands.bench.engine_bench.workloads.base import (
+    BaseWorkload,
+    DispatchTracker,
+)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -276,8 +278,9 @@ class LongDocPermutatorWorkload(BaseWorkload):
             for m in self._request_list[0][0]
         )
 
-        self._semaphore = asyncio.Semaphore(config.num_inflight_requests)
-        self._pending_tasks: set[asyncio.Task] = set()
+        self._dispatch_tracker = DispatchTracker(
+            progress_monitor, config.num_inflight_requests
+        )
 
         logger.debug(
             "LongDocPermutator: %d contexts x %d permutations = %d requests",
@@ -360,7 +363,7 @@ class LongDocPermutatorWorkload(BaseWorkload):
     # ------------------------------------------------------------------
 
     async def step(self, time_offset: float) -> float:
-        """Dispatch the next permutation request if semaphore allows.
+        """Dispatch the next permutation when a concurrency slot is available.
 
         Args:
             time_offset: Seconds since benchmark start (unused).
@@ -369,21 +372,16 @@ class LongDocPermutatorWorkload(BaseWorkload):
             0.0 to request an immediate re-call, or -1.0 when all done.
         """
         if self._request_index < len(self._request_list):
-            await self._semaphore.acquire()
             req_idx = self._request_index
             messages, perm_idx = self._request_list[req_idx]
+            await self._dispatch_tracker.start(
+                lambda: self._dispatch(messages, perm_idx, req_idx)
+            )
             self._request_index += 1
-
-            task = asyncio.create_task(self._dispatch(messages, perm_idx, req_idx))
-            self._pending_tasks.add(task)
-            task.add_done_callback(self._on_task_done)
             return 0.0
 
-        if self._pending_tasks:
-            await asyncio.wait(
-                self._pending_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+        if self._dispatch_tracker.has_pending:
+            await self._dispatch_tracker.wait_one()
             return 0.0
 
         return -1.0
@@ -394,7 +392,7 @@ class LongDocPermutatorWorkload(BaseWorkload):
         perm_idx: int,
         req_idx: int,
     ) -> None:
-        """Send a single benchmark request, then release the semaphore.
+        """Send a single benchmark request.
 
         Args:
             messages: Chat messages for the request.
@@ -404,26 +402,11 @@ class LongDocPermutatorWorkload(BaseWorkload):
         request_id = f"perm{perm_idx}_req{req_idx}"
         self._progress_monitor.on_request_sent(request_id)
         self._progress_monitor.log_message(f"Dispatched permutation {perm_idx}")
-        try:
-            await self._request_sender.send_request(
-                request_id,
-                messages,
-                max_tokens=self._config.max_output_length,
-            )
-        finally:
-            self._semaphore.release()
-
-    def _on_task_done(self, task: asyncio.Task) -> None:
-        """Clean up completed tasks and log unexpected errors.
-
-        Args:
-            task: The completed asyncio Task.
-        """
-        self._pending_tasks.discard(task)
-        if not task.cancelled():
-            exc = task.exception()
-            if exc is not None:
-                self._progress_monitor.log_message(f"Dispatch task failed: {exc}")
+        await self._request_sender.send_request(
+            request_id,
+            messages,
+            max_tokens=self._config.max_output_length,
+        )
 
     def on_request_finished(self, request_id: str, output: str) -> None:
         """No-op — this workload is stateless."""
