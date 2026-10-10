@@ -175,6 +175,30 @@ def test_grpc_server_workers_are_parsed():
     assert _parse_mp(["--grpc-server-workers", "7"]).grpc_server_workers == 7
 
 
+def test_server_module_flags_are_parsed():
+    config = _parse_mp(
+        [
+            "--server-module",
+            (
+                '{"module_path":"my_pkg.server_module",'
+                '"factory_name":"build_extra_modules",'
+                '"config":{"mode":"test"}}'
+            ),
+        ]
+    )
+
+    assert len(config.server_modules) == 1
+    spec = config.server_modules[0]
+    assert spec.module_path == "my_pkg.server_module"
+    assert spec.factory_name == "build_extra_modules"
+    assert spec.config == {"mode": "test"}
+
+
+def test_server_module_flag_rejects_invalid_json():
+    with pytest.raises(ValueError, match="--server-module must be valid JSON"):
+        _parse_mp(["--server-module", "{"])
+
+
 @pytest.mark.parametrize("workers", ["0", "-1"])
 def test_grpc_server_workers_must_be_positive(workers):
     with pytest.raises(ValueError, match="grpc server workers must be >= 1"):
@@ -390,3 +414,9 @@ def test_deprecated_flags_log_warning():
 def test_deprecated_flush_interval_flag_rejects_nonpositive():
     with pytest.raises(ValueError):
         _parse(["--coordinator-l2-event-flush-interval", "0"])
+
+
+def test_session_ttl_seconds_default_and_flag():
+    """Session TTL defaults to 600 s and is settable for deep queueing."""
+    assert _parse_mp([]).session_ttl_seconds == 600.0
+    assert _parse_mp(["--session-ttl-seconds", "7200"]).session_ttl_seconds == 7200.0

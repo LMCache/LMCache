@@ -58,6 +58,17 @@ message CbUnifiedLookupResponse {
   optional CbUnifiedLookupPayload payload = 1;
 }
 
+message CbReorderPlanRequest {
+  IpcCacheServerKey key = 1;
+  int64 keep_prefix = 2;
+  int64 budget_ms = 3;
+}
+
+message CbReorderPlanResponse {
+  // The reordered prompt; empty = keep the prompt as it is.
+  repeated int64 token_ids = 1;
+}
+
 message RopeWindow {
   repeated int64 values = 1;
 }
@@ -70,6 +81,8 @@ message CbRegisterRopeRequest {
   repeated int64 group_to_cache = 5;
   repeated RopeWindow group_rot = 6;
   repeated int64 group_head_size = 7;
+  // fp8 flavor of the paged KV ("fp8_e4m3"/"fp8_e5m2"); "" = unquantized.
+  string kv_quant = 8;
 }
 
 message CbRegisterRopeResponse {}
@@ -83,4 +96,5 @@ service BlendService {
   rpc CbRetrievePreComputed(CbRetrievePreComputedRequest)
       returns (CbRetrievePreComputedResponse);
   rpc CbUnifiedLookup(CbUnifiedLookupRequest) returns (CbUnifiedLookupResponse);
+  rpc CbReorderPlan(CbReorderPlanRequest) returns (CbReorderPlanResponse);
 }

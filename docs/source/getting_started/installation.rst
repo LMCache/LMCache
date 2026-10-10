@@ -450,6 +450,17 @@ runtime, see :doc:`compatibility` before installing.
 
                             docker pull lmcache/vllm-openai:latest-nightly-cu129
 
+            .. tab-item:: SGLang
+
+                .. code-block:: bash
+
+                    docker pull lmcache/sglang
+
+                The official SGLang release image with the matching LMCache
+                wheel installed (CUDA 13.0). SGLang supports only MP mode, so
+                run it with ``--enable-lmcache`` against a separate LMCache
+                server, such as ``lmcache/standalone``.
+
             .. tab-item:: ROCm
 
                 .. code-block:: bash

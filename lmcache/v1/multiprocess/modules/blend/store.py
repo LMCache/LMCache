@@ -52,6 +52,7 @@ class StoreMixin:
         _fingerprint_stop: "threading.Event"
         _pending_fp_hashes: set[bytes]
         _pending_fp_lock: "threading.Lock"
+        _prompt_store: Any
 
     @request_handler(
         HandlerType.BLOCKING,
@@ -75,9 +76,10 @@ class StoreMixin:
             The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
-        result = self._transfer_module.store(
+        handle, store_ok, stored_mask = self._transfer_module.store_with_chunk_mask(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
+        result = (handle, store_ok)
 
         # The matcher is engine-shared; only worker 0 registers.
         if key.worker_id not in (0, None):
@@ -100,26 +102,55 @@ class StoreMixin:
             ]
             if not chunk_hashes:
                 return result
+            # Record prompts whose KV was stored, for the reorder planner.
+            if getattr(self, "_prompt_store", None) is not None and any(stored_mask):
+                self._record_prompt(key, session)
             tokens_in_range = list(key.token_ids)[key.start : key.end]
             # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.
             start_chunk_idx = 0 if key.start != 0 else 1
-            job: FpJob = (
-                tokens_in_range,
-                chunk_hashes,
-                start_chunk_idx,
-                key.start,
-                key.request_id,
-            )
+
+            # Register only committed chunks: a fingerprint for a skipped
+            # chunk would advertise content that was never persisted.
+            def _stored(i: int) -> bool:
+                return stored_mask[i] if i < len(stored_mask) else False
+
+            jobs: list[FpJob] = []
+            chunk_size = self._ctx.chunk_size
+            run_start: int | None = None
+            for i in range(len(chunk_hashes) + 1):
+                if i < len(chunk_hashes) and _stored(i):
+                    if run_start is None:
+                        run_start = i
+                    continue
+                if run_start is None:
+                    continue
+                run_sci = max(start_chunk_idx - run_start, 0)
+                if run_sci < i - run_start:
+                    jobs.append(
+                        (
+                            tokens_in_range[run_start * chunk_size : i * chunk_size],
+                            chunk_hashes[run_start:i],
+                            run_sci,
+                            key.start + run_start * chunk_size,
+                            key.request_id,
+                        )
+                    )
+                run_start = None
+            if not jobs:
+                return result
+
             with self._pending_fp_lock:
-                self._pending_fp_hashes.update(chunk_hashes[start_chunk_idx:])
+                for _, hashes, sci, _, _ in jobs:
+                    self._pending_fp_hashes.update(hashes[sci:])
             entry = self._transfer_module.get_and_touch_context_entry(instance_id)
             gpu_ctx = entry.cache_context if entry is not None else None
-            if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
-                submit_callback_to_stream(
-                    gpu_ctx.cupy_stream, CB_FINGERPRINTS_KIND, job
-                )
-            else:
-                self._fingerprint_queue.put_nowait(job)
+            for job in jobs:
+                if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
+                    submit_callback_to_stream(
+                        gpu_ctx.cupy_stream, CB_FINGERPRINTS_KIND, job
+                    )
+                else:
+                    self._fingerprint_queue.put_nowait(job)
         except Exception:
             logger.exception(
                 "CB fingerprint enqueue failed for request %s "
@@ -128,6 +159,23 @@ class StoreMixin:
             )
 
         return result
+
+    def _record_prompt(self, key: IPCCacheServerKey, session: Any) -> None:
+        """Remember a stored prompt for the reorder planner. The chain starts
+        at chunk 0 because a request's first store starts at its prefix hit.
+        Never raises: reorder planning is best-effort."""
+        try:
+            chain = [
+                TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0, key.end)
+            ]
+            self._prompt_store.record(
+                (key.model_name, key.world_size, key.cache_salt),
+                key.request_id,
+                key.token_ids,
+                chain,
+            )
+        except Exception:
+            logger.exception("CB reorder: recording %s failed", key.request_id)
 
     def _drain_fingerprints_sync(self) -> None:
         """Sync-drain pending fingerprint registrations (the async drainer

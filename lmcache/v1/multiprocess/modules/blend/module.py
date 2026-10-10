@@ -6,6 +6,7 @@ from collections import OrderedDict
 from queue import Queue
 from typing import TYPE_CHECKING, Any
 import threading
+import time
 import weakref
 
 if TYPE_CHECKING:
@@ -14,8 +15,10 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.modules.blend import reorder as blend_reorder
 from lmcache.v1.multiprocess.modules.blend.lookup import (
     LookupMixin,
     _CBUnifiedJob,
@@ -35,7 +38,7 @@ from lmcache.v1.multiprocess.modules.blend.store import (
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.session import Session
 
 logger = init_logger(__name__)
@@ -73,6 +76,7 @@ class BlendModule(
         coordinator: "BlendCoordinatorClient | None" = None,
         enable_segmented_prefix: bool = False,
         enable_dedup_content: bool = False,
+        enable_reorder: bool = False,
     ):
         self._ctx = ctx
         self._transfer_module = lmcache_driven_transfer
@@ -85,6 +89,14 @@ class BlendModule(
         self._token_range_matcher = BlendTokenRangeMatcher(
             ctx.chunk_size, dedup_content=enable_dedup_content
         )
+        # Reorder planner (copy one cached prompt). Off with a coordinator: a
+        # plan sees only this server's prompts.
+        reorder = enable_reorder and coordinator is None
+        if enable_reorder and not reorder:
+            logger.warning("--enable-blend-reorder is ignored with a coordinator")
+        self._prompt_store = blend_reorder.PromptStore() if reorder else None
+        if reorder:  # compile the probe's numba kernels now, not in a plan
+            self._token_range_matcher.match_sub_sequence([0] * ctx.chunk_size)
         self._event_bus = ctx.event_bus
         self._cb_rope_state: dict[int, _CBRopeState] = {}
 
@@ -172,6 +184,43 @@ class BlendModule(
             "active_cb_lookups": len(self._cb_jobs),
         }
 
+    @request_handler(HandlerType.BLOCKING)
+    def cb_reorder_plan(
+        self,
+        key: IPCCacheServerKey,
+        keep_prefix: int,
+        budget_ms: int,
+    ) -> list[int]:
+        """Order ``key.token_ids`` so the prompt starts with an exact copy of
+        a cached prompt from the key's namespace, keeping the first
+        ``keep_prefix`` tokens in place (``reorder.plan``).
+
+        Returns:
+            The reordered token ids, or an empty list to keep the prompt.
+        """
+        store = self._prompt_store
+        if store is None:
+            return []
+        deadline = time.monotonic() + budget_ms / 1e3
+        P = list(key.token_ids)
+        try:
+            ns = store.resolve(key.model_name, key.world_size, key.cache_salt)
+            if ns is None:  # the salt must match; empty name / zero size = any
+                return []
+            hits = self._token_range_matcher.match_sub_sequence(P)
+            cands, base = store.candidates(
+                ns,
+                [h.hash for h in hits],
+                self._ctx.token_hasher.compute_chunk_hashes(P),
+            )
+            perm = blend_reorder.plan(
+                P, cands, self._ctx.chunk_size, base, deadline, keep_prefix
+            )
+        except Exception:
+            logger.exception("CB reorder: planning %s failed", key.request_id)
+            return []
+        return [P[i] for i in perm] if perm else []
+
     def _release_unretrieved_locks(self, session: Session) -> None:
         """Release read locks the request's retrieve never consumed.
 
@@ -185,7 +234,7 @@ class BlendModule(
         keys = [key for hash_keys in stash["per_hash"].values() for key in hash_keys]
         # No retrieve consumed anything, so the full reservation is still held.
         self._ctx.storage_manager.finish_read_prefetched(
-            keys, read_locks=stash["read_locks"]
+            keys, read_locks=stash["read_locks"], l1_owners=stash.get("l1_owners")
         )
         logger.info(
             "Released %d unretrieved read lock(s) for ended request %s",

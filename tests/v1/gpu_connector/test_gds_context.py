@@ -40,8 +40,8 @@ from lmcache.v1.memory_management import GDSMemoryObject
 
 
 def _fake_stream(handle: int):
-    """A stand-in for ``torch_dev.current_stream()`` (no CUDA needed)."""
-    return SimpleNamespace(cuda_stream=handle, synchronize=lambda: None)
+    """A stand-in for a platform stream (no accelerator needed)."""
+    return SimpleNamespace(raw_handle=handle, synchronize=lambda: None)
 
 
 def _use_fake_stream(monkeypatch: pytest.MonkeyPatch, handle: int) -> None:
@@ -54,7 +54,7 @@ def _use_fake_stream(monkeypatch: pytest.MonkeyPatch, handle: int) -> None:
     monkeypatch.setattr(
         gds_context.platform_stream,
         "stream_handle",
-        lambda device, stream: stream.cuda_stream,
+        lambda device, stream: stream.raw_handle,
     )
 
 
@@ -244,6 +244,41 @@ class TestRegisterGpuBuffer:
         ctx.register_gpu_buffer(buf)
 
         assert sizes == [16 << 20, 16 << 20, 8 << 20]
+
+    def test_rolls_back_regions_when_registration_fails(self, monkeypatch):
+        backend = Mock(spec=GDSBackend)
+        ctx = GDSContext(backend)
+        ctx.initialized = True
+        registered_sizes: list[int] = []
+        deregistered_sizes: list[int] = []
+        stream_registrations: list[int] = []
+        stream_deregistrations: list[int] = []
+
+        def register_buffer(region):
+            registered_sizes.append(region.numel() * region.element_size())
+            if len(registered_sizes) == 2:
+                raise RuntimeError("registration failed")
+
+        monkeypatch.setattr(backend, "register_buffer", register_buffer)
+        monkeypatch.setattr(
+            backend,
+            "deregister_buffer",
+            lambda region: deregistered_sizes.append(
+                region.numel() * region.element_size()
+            ),
+        )
+        monkeypatch.setattr(backend, "register_stream", stream_registrations.append)
+        monkeypatch.setattr(backend, "deregister_stream", stream_deregistrations.append)
+        _use_fake_stream(monkeypatch, 7)
+
+        with pytest.raises(RuntimeError, match="registration failed"):
+            ctx.register_gpu_buffer(torch.empty(40 << 20, dtype=torch.uint8))
+
+        assert registered_sizes == [16 << 20, 16 << 20]
+        assert deregistered_sizes == [16 << 20]
+        assert stream_registrations == [7]
+        assert stream_deregistrations == [7]
+        assert ctx._base_ptrs == []
 
 
 class TestResolveBuffer:
@@ -498,3 +533,37 @@ def test_gds_chunk_larger_than_region_roundtrip(gds_slab_dir: Path):
         assert torch.equal(buf.cpu(), pattern)
     finally:
         ctx.close()
+
+
+def test_l1_context_routes_by_owner_and_limits_process_slabs(monkeypatch, backend):
+    """Owner routing must reject a second slab before native registration."""
+    monkeypatch.setattr(gds_context, "create_backend", lambda name: backend)
+    backend.name = "test"
+    backend.open_slab.return_value.path = "/test/slab"
+    config = GdsL1Config("/test", 4096)
+    owner = 9001
+    gds_context.initialize_l1_gds_context(owner, config)
+    try:
+        context = gds_context.get_l1_gds_context(owner)
+        register = Mock()
+        deregister = Mock()
+        monkeypatch.setattr(context, "register_gpu_buffer", register)
+        monkeypatch.setattr(context, "deregister_gpu_buffer", deregister)
+        tensor = torch.empty(4096, dtype=torch.uint8)
+        gds_context.register_gds_gpu_buffer(tensor)
+        gds_context.deregister_gds_gpu_buffer(tensor)
+        register.assert_called_once_with(tensor)
+        deregister.assert_called_once_with(tensor)
+        with pytest.raises(ValueError, match="one GDS"):
+            gds_context.initialize_l1_gds_context(owner + 1, config)
+        with pytest.raises(ValueError, match="one GDS"):
+            initialize_gds_context(config)
+        with pytest.raises(ValueError, match="Unknown GDS L1 owner"):
+            gds_context.get_l1_gds_context(owner + 1)
+    finally:
+        gds_context.close_l1_gds_context(owner)
+    backend.close_driver.assert_called_once()
+    with pytest.raises(ValueError, match="Unknown GDS L1 owner"):
+        gds_context.get_l1_gds_context(owner)
+    gds_context.initialize_l1_gds_context(owner + 1, config)
+    gds_context.close_l1_gds_context(owner + 1)
