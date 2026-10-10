@@ -78,6 +78,7 @@ from lmcache.integration.vllm.mp_server_launcher import (
     is_mp_server_autostart_enabled,
 )
 from lmcache.integration.vllm.utils import (
+    extract_request_configs_from_request,
     mla_only,
     vllm_layout_hints,
 )
@@ -1203,6 +1204,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if self.lazy_offload:
                 self._lazy_offload_manager.bind_block_pool(gpu_block_pool)
 
+    def _commit_token_drop_resident_updates(self, updates: dict[str, int]) -> None:
+        """After the worker output barrier, commit new P and reclaim private blocks."""
+        raise NotImplementedError
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -1815,6 +1820,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     def _get_or_create_request_tracker(
         self, request: "Request"
     ) -> LMCacheMPRequestTracker:
+        # Reject token-drop requests before LMCache lookup or offload starts.
+        if "lmcache.token_drop" in (
+            extract_request_configs_from_request(request) or {}
+        ):
+            raise NotImplementedError("GPU-native token dropping is not enabled yet")
+
         request_id = request.request_id
         # Remove the old trackers that is created before the preemption
         if (
