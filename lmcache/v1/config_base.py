@@ -543,16 +543,18 @@ def create_singleton_config(
 
 
 def load_config_with_overrides(
-    config_class,
+    config_class: type[Any],
     config_file_env_var: str = "LMCACHE_CONFIG_FILE",
     config_file_path: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
-):
+) -> Any:
     """
     Load configuration with support for file, environment variables, and overrides.
 
     This is a generic utility function that can be reused across different
     configuration classes (LMCacheEngineConfig, ControllerConfig, etc.)
+    For classes created by create_config_class, explicit overrides are recorded
+    as user-set values, so remote configuration with override=False preserves them.
 
     Args:
         config_class: The configuration class to instantiate
@@ -593,6 +595,10 @@ def load_config_with_overrides(
                     setattr(config, key, new_value)
                 else:
                     setattr(config, key, value)
+
+                user_set_keys = getattr(config, "_user_set_keys", None)
+                if user_set_keys is not None:
+                    user_set_keys.add(key)
 
                 new_value = getattr(config, key)
                 if old_value != new_value:
