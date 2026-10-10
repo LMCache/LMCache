@@ -360,7 +360,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       .. code-block:: bash
 
          curl -s http://localhost:8080/metrics \
-           | grep lmcache_mp_l1_read_chunks_total
+           | grep lmcache_mp_num_chunks_loaded_total
 
    .. tab-item:: TensorRT-LLM
 
