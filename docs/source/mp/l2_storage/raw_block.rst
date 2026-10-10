@@ -27,7 +27,9 @@ caller-provided load buffers during prefetch.
 - ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
   during startup (default ``true``). Set to ``false`` to start with an empty
   in-memory index instead.
-- ``enable_zero_copy``: Try aligned direct-buffer I/O when possible.
+- ``enable_zero_copy``: Try aligned direct-buffer I/O when possible. With
+  ``io_engine="io_uring"``, also try to register eligible L1 memory as fixed
+  buffers.
 - ``io_engine``: Rust raw-block I/O engine. Valid values are ``"posix"``
   (default synchronous ``pread``/``pwrite`` path), ``"io_uring"`` (direct Rust
   io_uring syscall path).
@@ -74,8 +76,8 @@ caller-provided load buffers during prefetch.
   through ``RawBlockCore``. Slot reclamation is driven by the shared/global
   L2 eviction controller or explicit ``delete()`` calls.
 - POSIX restart recovery validates slot headers with an internal pool of 8
-  reader threads. Regular ``io_uring`` batches header reads up to
-  ``iouring_queue_depth``, while ``io_uring_cmd`` keeps serial validation.
+  reader threads. Both regular ``io_uring`` and ``io_uring_cmd`` batch header
+  reads up to ``iouring_queue_depth``.
 - ``slot_bytes``, ``header_bytes``, and ``meta_total_bytes`` must be multiples
   of ``block_align``.
 - If ``use_odirect`` or ``use_uring_cmd`` is enabled, the server's
@@ -143,6 +145,75 @@ caller-provided load buffers during prefetch.
 - Metadata checkpoint writes use ``meta_checkpoint_placement_id`` when
   configured, otherwise they use default NVMe placement with no directive.
 
+**Fixed-buffer registration and memlock:**
+
+With ``io_engine="io_uring"`` and ``enable_zero_copy=true``, the adapter
+registers the stable L1 memory range during initialization. An anonymous
+``MixedMemoryAllocator`` exposes its full arena; ``LazyMemoryAllocator``
+exposes only the currently pinned prefix. POSIX shared-memory arenas do not
+expose an eligible range. Registration uses regions no larger than 1 GiB and
+does not grow when the lazy allocator expands.
+
+The kernel charges registered buffers against ``RLIMIT_MEMLOCK`` unless the
+process has ``CAP_IPC_LOCK``. The default lazy initial prefix is 20 GiB, so
+allow at least that much locked memory, plus headroom for other registrations
+and locked memory. Splitting the prefix into 1 GiB regions does not reduce
+the total memlock requirement. See the Linux
+`io_uring_register(2) manual <https://man7.org/linux/man-pages/man2/io_uring_register.2.html>`_.
+
+For a Bash-launched server, inspect the soft and hard limits in KiB and set
+the soft limit before starting the server from the same shell:
+
+.. code-block:: bash
+
+    ulimit -Sl
+    ulimit -Hl
+    # 20 GiB in KiB; requires a hard limit of at least this value.
+    ulimit -Sl 20971520
+
+If the hard limit is too low, raise it through the service, container, or
+login configuration. A systemd service can use ``LimitMEMLOCK=infinity``;
+a Docker container can use ``--ulimit memlock=-1:-1``. Apply the setting to
+the process running the LMCache server, then restart it. Registration is
+attempted once during adapter initialization.
+
+If registration fails, the adapter logs a warning and continues with ordinary
+io_uring. The adapter can therefore remain healthy even when fixed buffers
+are inactive. Check ``RawBlockL2Adapter.report_status()["core"]`` for:
+
+- ``fixed_buffers_registered``: ``true`` only after successful kernel
+  registration.
+- ``fixed_buffer_registered_bytes``: Total bytes in the registered regions;
+  ``0`` when no buffers are registered. This is the registered range size,
+  not the final L1 capacity or the number of bytes transferred.
+
+Both fields also appear under each raw-block adapter in
+:doc:`GET /status <../http_api>`:
+
+.. code-block:: bash
+
+    curl -fsS http://localhost:8080/status | jq '
+      .storage_manager.l2_adapters[]
+      | select(.type == "RawBlockL2Adapter")
+      | .core
+      | {fixed_buffers_registered, fixed_buffer_registered_bytes}'
+
+For a successfully registered 20 GiB prefix, the result is:
+
+.. code-block:: json
+
+    {
+      "fixed_buffers_registered": true,
+      "fixed_buffer_registered_bytes": 21474836480
+    }
+
+Failed or skipped registration reports ``false`` and ``0``, as does a closed
+adapter. Successful registration does not mean every request uses fixed I/O:
+requests outside the registered prefix or crossing a region boundary still
+use ordinary io_uring. When comparing performance, verify these fields and
+keep ``enable_zero_copy`` enabled in both cases to isolate registration from
+direct-buffer I/O.
+
 **Configuration examples:**
 
 .. code-block:: bash
@@ -167,6 +238,27 @@ caller-provided load buffers during prefetch.
 
     # With eviction
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
+
+**Failure handling and shutdown:**
+
+Recoverable ``io_uring`` submission errors (``EAGAIN``, ``EINTR``, ``EBUSY``)
+retry after completion progress or 1–100 ms exponential backoff. Permanent
+errors, or 30 seconds without submission or completion progress, mark the
+worker unhealthy and stop new native I/O. The core status exposes the failure
+reason as ``worker_error``.
+
+After a known worker failure, new prefetch tasks report failure through their
+normal task results and new stores are skipped. The adapter still publishes
+completion results and notifications so controllers can release locks and
+buffers; the serving engine can recompute missing data instead of receiving a
+synchronous storage exception. Valid hits from L1 or other L2 adapters remain
+usable. The legacy non-MP raw-block backend also skips new stores after worker
+failure.
+
+Already-accepted I/O retains its buffers until completion or successful
+cancellation. Close and destructor cleanup release the Python GIL while
+waiting, but can still block indefinitely if accepted I/O cannot finish or be
+cancelled. The 30-second submission retry budget is not a shutdown timeout.
 
 **Hardware-gated FDP status validation:**
 

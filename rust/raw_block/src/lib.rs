@@ -20,7 +20,7 @@ use pyo3::exceptions::{
 };
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::io;
 use std::os::unix::io::RawFd;
@@ -28,7 +28,7 @@ use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use io_uring::cqueue::{Entry, Entry32};
 use io_uring::squeue::{Entry as SqueueEntry, Entry128};
@@ -44,6 +44,13 @@ enum IoUringWrapper {
 }
 
 impl IoUringWrapper {
+    fn submit(&self) -> io::Result<usize> {
+        match self {
+            Self::Standard(ring) => ring.lock().unwrap().submitter().submit(),
+            Self::Big(ring) => ring.lock().unwrap().submitter().submit(),
+        }
+    }
+
     // Get the submission queue length
     fn submission_len(&self) -> usize {
         match self {
@@ -71,6 +78,41 @@ impl IoUringWrapper {
                 let mut ring = ring.lock().unwrap();
                 ring.submission().sync();
             }
+        }
+    }
+
+    fn cancel_submitted(&self) -> io::Result<()> {
+        let timeout = Some(io_uring::types::Timespec::new().sec(1));
+        let cancel = io_uring::types::CancelBuilder::any();
+        match self {
+            Self::Standard(ring) => ring
+                .lock()
+                .unwrap()
+                .submitter()
+                .register_sync_cancel(timeout, cancel),
+            Self::Big(ring) => ring
+                .lock()
+                .unwrap()
+                .submitter()
+                .register_sync_cancel(timeout, cancel),
+        }
+    }
+
+    fn reap_without_submitting(&self) -> io::Result<usize> {
+        let flags = io_uring::EnterFlags::GETEVENTS.bits();
+        match self {
+            Self::Standard(ring) => unsafe {
+                ring.lock()
+                    .unwrap()
+                    .submitter()
+                    .enter::<libc::sigset_t>(0, 0, flags, None)
+            },
+            Self::Big(ring) => unsafe {
+                ring.lock()
+                    .unwrap()
+                    .submitter()
+                    .enter::<libc::sigset_t>(0, 0, flags, None)
+            },
         }
     }
 }
@@ -192,6 +234,7 @@ const O_DIRECT: i32 = libc::O_DIRECT;
 #[cfg(not(target_os = "linux"))]
 const O_DIRECT: i32 = 0;
 const RING_SIZE: usize = 256;
+const MAX_FIXED_BUFFER_REGION_SIZE: usize = 1 << 30;
 
 fn parse_use_iouring(io_engine: Option<String>, use_iouring: bool) -> PyResult<bool> {
     match io_engine {
@@ -210,6 +253,102 @@ fn parse_use_iouring(io_engine: Option<String>, use_iouring: bool) -> PyResult<b
 type BatchTracking = (Arc<AtomicU64>, Arc<Condvar>);
 type IoUringCompletionErrors = Vec<(usize, String)>;
 type IoUringBatchResults = (Vec<bool>, IoUringCompletionErrors);
+
+/// One kernel-registered fixed-buffer region.
+///
+/// Regions are stored in ascending `start` order and use half-open address
+/// ranges: `[start, end)`. `index` remains the index assigned by the original
+/// iovec order passed to io_uring, even when the userspace region list is
+/// sorted for lookup.
+#[derive(Clone, Copy, Debug)]
+struct FixedBufferRegion {
+    start: usize,
+    end: usize,
+    index: u16,
+}
+
+/// Resolve a request to one registered fixed-buffer index.
+///
+/// Fixed I/O is safe only when the complete half-open request range fits in a
+/// single region. Requests that are empty, overflow the address space, cross a
+/// region boundary, or are not covered fall back to ordinary io_uring I/O.
+fn resolve_fixed_buffer_idx(regions: &[FixedBufferRegion], ptr: usize, len: usize) -> Option<u16> {
+    if len == 0 {
+        return None;
+    }
+
+    let request_end = ptr.checked_add(len)?;
+    let insertion = regions.partition_point(|region| region.start <= ptr);
+    if insertion == 0 {
+        return None;
+    }
+
+    let region = &regions[insertion - 1];
+    (request_end <= region.end).then_some(region.index)
+}
+
+/// Validate fixed-buffer inputs and return sorted lookup regions.
+fn build_fixed_buffer_regions(
+    buffer_ptrs: &[usize],
+    buffer_sizes: &[usize],
+) -> PyResult<Vec<FixedBufferRegion>> {
+    if buffer_ptrs.len() != buffer_sizes.len() {
+        return Err(PyValueError::new_err(
+            "buffer_ptrs and buffer_sizes must have same length",
+        ));
+    }
+    if buffer_ptrs.is_empty() {
+        return Err(PyValueError::new_err(
+            "at least one buffer must be provided",
+        ));
+    }
+    if buffer_ptrs.len() > usize::from(u16::MAX) + 1 {
+        return Err(PyValueError::new_err(format!(
+            "too many fixed buffers: {} exceeds the u16 index space",
+            buffer_ptrs.len()
+        )));
+    }
+
+    let mut regions = Vec::with_capacity(buffer_ptrs.len());
+    for (idx, (&ptr, &size)) in buffer_ptrs.iter().zip(buffer_sizes).enumerate() {
+        if ptr == 0 {
+            return Err(PyValueError::new_err(format!(
+                "fixed buffer {idx} has a null pointer"
+            )));
+        }
+        if size == 0 {
+            return Err(PyValueError::new_err(format!(
+                "fixed buffer {idx} has zero size"
+            )));
+        }
+        if size > MAX_FIXED_BUFFER_REGION_SIZE {
+            return Err(PyValueError::new_err(format!(
+                "fixed buffer {idx} size {size} exceeds the 1 GiB limit"
+            )));
+        }
+        let end = ptr.checked_add(size).ok_or_else(|| {
+            PyValueError::new_err(format!("fixed buffer {idx} address range overflows"))
+        })?;
+        let index = u16::try_from(idx)
+            .map_err(|_| PyValueError::new_err("fixed buffer index exceeds u16"))?;
+        regions.push(FixedBufferRegion {
+            start: ptr,
+            end,
+            index,
+        });
+    }
+
+    regions.sort_unstable_by_key(|region| region.start);
+    for pair in regions.windows(2) {
+        if pair[0].end > pair[1].start {
+            return Err(PyValueError::new_err(format!(
+                "fixed buffer regions overlap: [{:#x}, {:#x}) and [{:#x}, {:#x})",
+                pair[0].start, pair[0].end, pair[1].start, pair[1].end
+            )));
+        }
+    }
+    Ok(regions)
+}
 
 /// Round up to nearest multiple of alignment (required for O_DIRECT).
 #[allow(clippy::manual_div_ceil)]
@@ -1000,23 +1139,21 @@ impl UringNotify {
         }
     }
 
-    /// Blocks the worker until either eventfd is readable, then drains
+    /// Blocks until an eventfd is readable or the optional timeout expires, then drains
     /// each fired fd. Drain is required because epoll is level-triggered:
     /// without consuming the counter, the next epoll_wait would return
     /// immediately on the same already-handled signal.
-    fn wait(&self) {
+    fn wait(&self, timeout: Option<Duration>) {
         // A capacity of 2 is enough: only two fds are registered with this
         // epoll instance, so at most two events can come back per call.
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; 2];
 
-        // Timeout = -1 means "block indefinitely". Shutdown wakes us by
-        // writing producer_efd from do_close, so we never need a timeout.
-        let n = unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), 2, -1) };
-
-        // n < 0 is usually EINTR (signal interruption); we just return and
-        // the worker's outer loop will call wait() again. n == 0 should
-        // not happen with timeout=-1 but is handled defensively.
-        if n <= 0 {
+        let timeout_ms = timeout.map_or(-1, |delay| {
+            delay.as_millis().max(1).min(i32::MAX as u128) as i32
+        });
+        let event_count =
+            unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), 2, timeout_ms) };
+        if event_count <= 0 {
             return;
         }
 
@@ -1025,7 +1162,7 @@ impl UringNotify {
         // ev.u64 during epoll_ctl registration. We discard the read value
         // (we only care that a signal arrived, not how many).
         let mut buf = [0u8; 8];
-        for ev in &events[..n as usize] {
+        for ev in &events[..event_count as usize] {
             let fd = ev.u64 as RawFd;
             // Discard the result. The wake-up was already delivered by
             // epoll_wait; this read only exists to reset the eventfd
@@ -1084,6 +1221,196 @@ struct IoSubmission {
     nvme_cmd_data: Option<NvmeCmdData>, // NVMe command data for io_uring_cmd
 }
 
+fn enqueue_if_running(
+    queue: &Mutex<Vec<IoSubmission>>,
+    shutdown: &AtomicBool,
+    in_flight: &AtomicU64,
+    submission: IoSubmission,
+) -> PyResult<()> {
+    let mut queue = queue.lock().unwrap();
+    if shutdown.load(Ordering::Relaxed) {
+        return Err(PyRuntimeError::new_err("io_uring worker stopped"));
+    }
+    in_flight.fetch_add(1, Ordering::Relaxed);
+    queue.push(submission);
+    Ok(())
+}
+
+fn stop_submissions(queue: &Mutex<Vec<IoSubmission>>, shutdown: &AtomicBool) {
+    let _queue = queue.lock().unwrap();
+    shutdown.store(true, Ordering::Relaxed);
+}
+
+fn fail_submissions(
+    queue: &Mutex<Vec<IoSubmission>>,
+    shutdown: &AtomicBool,
+    worker_error: &Mutex<Option<String>>,
+    error: io::Error,
+) {
+    let _queue = queue.lock().unwrap();
+    *worker_error.lock().unwrap() = Some(format!("io_uring worker submission failed: {error}"));
+    shutdown.store(true, Ordering::Relaxed);
+}
+
+const SUBMISSION_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(1);
+const SUBMISSION_RETRY_MAX_DELAY: Duration = Duration::from_millis(100);
+const SUBMISSION_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct SubmissionRetry {
+    stalled_since: Option<Instant>,
+    retry_at: Option<Instant>,
+    delay: Duration,
+}
+
+impl SubmissionRetry {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn remaining_delay(&self, now: Instant) -> Option<Duration> {
+        self.retry_at
+            .and_then(|deadline| deadline.checked_duration_since(now))
+            .filter(|delay| !delay.is_zero())
+    }
+
+    fn record_result(&mut self, result: io::Result<usize>, now: Instant) -> io::Result<()> {
+        let error = match result {
+            Ok(submitted) if submitted > 0 => {
+                self.reset();
+                return Ok(());
+            }
+            Ok(_) => io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "io_uring submit accepted no requests",
+            ),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::EAGAIN) | Some(libc::EINTR) | Some(libc::EBUSY)
+                ) =>
+            {
+                error
+            }
+            Err(error) => return Err(error),
+        };
+        let stalled_since = *self.stalled_since.get_or_insert(now);
+        if now.duration_since(stalled_since) >= SUBMISSION_STALL_TIMEOUT {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "io_uring submission made no progress for {}s: {error}",
+                    SUBMISSION_STALL_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        self.delay = if self.delay.is_zero() {
+            SUBMISSION_RETRY_INITIAL_DELAY
+        } else {
+            (self.delay * 2).min(SUBMISSION_RETRY_MAX_DELAY)
+        };
+        self.retry_at = Some(now + self.delay);
+        Ok(())
+    }
+}
+
+fn submit_pending(ring: &IoUringWrapper, pending: &mut VecDeque<u64>) -> io::Result<usize> {
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    record_submission_result(pending, ring.submit())
+}
+
+fn record_submission_result(
+    pending: &mut VecDeque<u64>,
+    result: io::Result<usize>,
+) -> io::Result<usize> {
+    let submitted = result?;
+    pending.drain(..submitted.min(pending.len()));
+    Ok(submitted)
+}
+
+#[cfg(test)]
+mod submission_lifecycle_tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    #[test]
+    fn partial_submission_preserves_the_unaccepted_suffix() {
+        let mut pending = VecDeque::from([10, 11, 12]);
+        record_submission_result(&mut pending, Ok(1)).unwrap();
+        assert_eq!(pending, VecDeque::from([11, 12]));
+        record_submission_result(&mut pending, Ok(0)).unwrap();
+        assert_eq!(pending, VecDeque::from([11, 12]));
+        record_submission_result(&mut pending, Ok(2)).unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn submission_errors_preserve_pending_entries() {
+        for error_code in [libc::EAGAIN, libc::EINTR, libc::EBUSY, libc::EIO] {
+            let mut pending = VecDeque::from([10, 11, 12]);
+            let error = record_submission_result(
+                &mut pending,
+                Err(io::Error::from_raw_os_error(error_code)),
+            )
+            .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(error_code));
+            assert_eq!(pending, VecDeque::from([10, 11, 12]));
+        }
+    }
+
+    #[test]
+    fn fatal_error_after_partial_submission_keeps_only_unaccepted_entries_pending() {
+        let mut pending = VecDeque::from([10, 11, 12]);
+        record_submission_result(&mut pending, Ok(1)).unwrap();
+        assert!(record_submission_result(
+            &mut pending,
+            Err(io::Error::from_raw_os_error(libc::EIO)),
+        )
+        .is_err());
+        assert_eq!(pending, VecDeque::from([11, 12]));
+    }
+
+    #[test]
+    fn stopped_queue_rejects_without_lifecycle_updates() {
+        let queue = Mutex::new(Vec::new());
+        let shutdown = AtomicBool::new(false);
+        let in_flight = AtomicU64::new(0);
+        stop_submissions(&queue, &shutdown);
+        let result = enqueue_if_running(&queue, &shutdown, &in_flight, IoSubmission::default());
+        assert!(result.is_err());
+        assert!(queue.lock().unwrap().is_empty());
+        assert_eq!(in_flight.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn stop_and_enqueue_have_a_single_admission_boundary() {
+        for _ in 0..64 {
+            let queue = Mutex::new(Vec::new());
+            let shutdown = AtomicBool::new(false);
+            let in_flight = AtomicU64::new(0);
+            let barrier = Barrier::new(2);
+            thread::scope(|scope| {
+                let producer = scope.spawn(|| {
+                    barrier.wait();
+                    enqueue_if_running(&queue, &shutdown, &in_flight, IoSubmission::default())
+                        .is_ok()
+                });
+                barrier.wait();
+                stop_submissions(&queue, &shutdown);
+                let accepted = producer.join().unwrap();
+                assert_eq!(queue.lock().unwrap().len(), usize::from(accepted));
+                assert_eq!(in_flight.load(Ordering::Relaxed), u64::from(accepted));
+                assert!(
+                    enqueue_if_running(&queue, &shutdown, &in_flight, IoSubmission::default(),)
+                        .is_err()
+                );
+            });
+        }
+    }
+}
+
 impl Default for IoSubmission {
     fn default() -> Self {
         IoSubmission {
@@ -1130,9 +1457,9 @@ struct RawBlockDevice {
     worker: Option<thread::JoinHandle<()>>,
     // Shutdown signal for worker thread
     shutdown: Option<Arc<AtomicBool>>,
-    // Map from buffer pointer address to registered fixed buffer index
-    // Used for zero-copy I/O with pre-registered buffers
-    fixed_buffer_map: Arc<Mutex<HashMap<usize, (u16, usize)>>>,
+    worker_error: Arc<Mutex<Option<String>>>,
+    // Sorted, non-overlapping fixed-buffer regions used for containment lookup.
+    fixed_buffer_regions: Arc<Mutex<Vec<FixedBufferRegion>>>,
     // Flag indicating if fixed buffers have been registered
     fixed_buffers_registered: Arc<AtomicBool>,
     // Count of currently in-flight I/O operations (global)
@@ -1275,6 +1602,7 @@ impl RawBlockDevice {
             fd_size_bytes(fd)?
         };
 
+        let worker_error = Arc::new(Mutex::new(None));
         let (
             ring_opt,
             queue_opt,
@@ -1359,6 +1687,7 @@ impl RawBlockDevice {
             let ring_clone = ring.clone();
             let queue_clone = Arc::clone(&queue);
             let shutdown_clone = Arc::clone(&shutdown);
+            let worker_error_clone = Arc::clone(&worker_error);
             let batch_ready_clone = Arc::clone(&batch_ready);
             let in_flight_count_clone = Arc::clone(&in_flight_count);
             let in_flight_cvar_clone = Arc::clone(&in_flight_cvar);
@@ -1593,7 +1922,9 @@ impl RawBlockDevice {
                 .name("rust-rawblock-uring".into())
                 .spawn(move || {
                     let mut in_flight: HashMap<u64, IoSubmission> = HashMap::new();
+                    let mut pending = VecDeque::with_capacity(ring_size);
                     let mut next_user_data: u64 = 1;
+                    let mut submission_retry = SubmissionRetry::default();
 
                     while !shutdown_clone.load(Ordering::Relaxed) {
                         // This drains all completed I/O operations from the completion queue (CQ).
@@ -1612,11 +1943,12 @@ impl RawBlockDevice {
                                 for cqe in completions {
                                     let user_data = cqe.user_data();
                                     if let Some(mut sub) = in_flight.remove(&user_data) {
+                                        submission_retry.reset();
                                         let batch_id = sub.batch_id;
                                         let cqe_result = cqe.result();
 
                                         // Handle short I/O with resubmission (only for regular I/O, not io_uring_cmd)
-                                        if cqe_result >= 0
+                                        if cqe_result > 0
                                             && (cqe_result as usize) < sub.len
                                             && sub.nvme_cmd_data.is_none()
                                         {
@@ -1656,18 +1988,29 @@ impl RawBlockDevice {
                                             // Don't decrement in_flight_count since we're resubmitting
                                             in_flight.insert(user_data, sub.clone());
                                             // Push a new SQE for the remaining data
-                                            let _ =
-                                                build_and_submit_sqe(&ring_clone, &sub, user_data);
-                                            let _ = match &ring_clone {
-                                                IoUringWrapper::Standard(ring) => {
-                                                    let ring = ring.lock().unwrap();
-                                                    ring.submitter().submit()
+                                            if ring_clone.submission_len() < ring_size {
+                                                match build_and_submit_sqe(
+                                                    &ring_clone,
+                                                    &sub,
+                                                    user_data,
+                                                ) {
+                                                    Ok(()) => pending.push_back(user_data),
+                                                    Err(error) => {
+                                                        in_flight.remove(&user_data);
+                                                        sub.completion.set(Err(error));
+                                                        decrement_in_flight(
+                                                            &in_flight_count_clone,
+                                                            &in_flight_cvar_clone,
+                                                            &batch_in_flight_clone,
+                                                            batch_id,
+                                                        );
+                                                    }
                                                 }
-                                                IoUringWrapper::Big(ring) => {
-                                                    let ring = ring.lock().unwrap();
-                                                    ring.submitter().submit()
-                                                }
-                                            };
+                                            } else {
+                                                in_flight.remove(&user_data);
+                                                let mut queue = queue_clone.lock().unwrap();
+                                                queue.push(sub);
+                                            }
                                             continue;
                                         }
 
@@ -1693,11 +2036,12 @@ impl RawBlockDevice {
                                 for cqe in completions {
                                     let user_data = cqe.user_data();
                                     if let Some(mut sub) = in_flight.remove(&user_data) {
+                                        submission_retry.reset();
                                         let batch_id = sub.batch_id;
                                         let cqe_result = cqe.result();
 
                                         // Handle short I/O with resubmission (only for regular I/O, not io_uring_cmd)
-                                        if cqe_result >= 0
+                                        if cqe_result > 0
                                             && (cqe_result as usize) < sub.len
                                             && sub.nvme_cmd_data.is_none()
                                         {
@@ -1737,18 +2081,29 @@ impl RawBlockDevice {
                                             // Don't decrement in_flight_count since we're resubmitting
                                             in_flight.insert(user_data, sub.clone());
                                             // Push a new SQE for the remaining data
-                                            let _ =
-                                                build_and_submit_sqe(&ring_clone, &sub, user_data);
-                                            let _ = match &ring_clone {
-                                                IoUringWrapper::Standard(ring) => {
-                                                    let ring = ring.lock().unwrap();
-                                                    ring.submitter().submit()
+                                            if ring_clone.submission_len() < ring_size {
+                                                match build_and_submit_sqe(
+                                                    &ring_clone,
+                                                    &sub,
+                                                    user_data,
+                                                ) {
+                                                    Ok(()) => pending.push_back(user_data),
+                                                    Err(error) => {
+                                                        in_flight.remove(&user_data);
+                                                        sub.completion.set(Err(error));
+                                                        decrement_in_flight(
+                                                            &in_flight_count_clone,
+                                                            &in_flight_cvar_clone,
+                                                            &batch_in_flight_clone,
+                                                            batch_id,
+                                                        );
+                                                    }
                                                 }
-                                                IoUringWrapper::Big(ring) => {
-                                                    let ring = ring.lock().unwrap();
-                                                    ring.submitter().submit()
-                                                }
-                                            };
+                                            } else {
+                                                in_flight.remove(&user_data);
+                                                let mut queue = queue_clone.lock().unwrap();
+                                                queue.push(sub);
+                                            }
                                             continue;
                                         }
 
@@ -1770,15 +2125,25 @@ impl RawBlockDevice {
                             ring_clone.submission_sync();
                         }
 
+                        if let Some(delay) = submission_retry.remaining_delay(Instant::now()) {
+                            let _ = ring_clone.reap_without_submitting();
+                            batch_ready_clone.wait(Some(delay));
+                            continue;
+                        }
+
                         // Block on epoll only if there's truly nothing pending. The empty +
                         // shutdown checks short-circuit so we don't sleep when a producer or
                         // do_close() already left work for us. Race-free against a late
                         // signal_producer(): eventfd is a counter, so a wake-up between the
                         // check and wait() is buffered, not lost.
+                        if pending.is_empty() && !in_flight.is_empty() {
+                            let _ = ring_clone.submit();
+                        }
                         if !shutdown_clone.load(Ordering::Relaxed)
+                            && pending.is_empty()
                             && queue_clone.lock().unwrap().is_empty()
                         {
-                            batch_ready_clone.wait();
+                            batch_ready_clone.wait(None);
                         }
 
                         let mut q = queue_clone.lock().unwrap();
@@ -1812,22 +2177,16 @@ impl RawBlockDevice {
 
                             drop(q);
 
-                            // Track only successfully built submissions so submit results
-                            // remain aligned even when one build fails in the middle.
-                            let mut user_data_list: Vec<u64> = Vec::with_capacity(to_submit_count);
-                            let mut built_submissions: Vec<IoSubmission> =
-                                Vec::with_capacity(to_submit_count);
                             for sub in batch.iter().take(to_submit_count) {
                                 let user_data = next_user_data;
                                 next_user_data = next_user_data.wrapping_add(1);
                                 match build_and_submit_sqe(&ring_clone, sub, user_data) {
                                     Ok(()) => {
-                                        user_data_list.push(user_data);
-                                        built_submissions.push(sub.clone());
+                                        pending.push_back(user_data);
                                         in_flight.insert(user_data, sub.clone());
                                     }
-                                    Err(e) => {
-                                        sub.completion.set(Err(e));
+                                    Err(error) => {
+                                        sub.completion.set(Err(error));
                                         decrement_in_flight(
                                             &in_flight_count_clone,
                                             &in_flight_cvar_clone,
@@ -1837,79 +2196,20 @@ impl RawBlockDevice {
                                     }
                                 }
                             }
-
-                            let built_count = built_submissions.len();
-                            let submit_result = match &ring_clone {
-                                IoUringWrapper::Standard(ring) => {
-                                    let ring = ring.lock().unwrap();
-                                    ring.submitter().submit()
-                                }
-                                IoUringWrapper::Big(ring) => {
-                                    let ring = ring.lock().unwrap();
-                                    ring.submitter().submit()
-                                }
-                            };
-                            // Handle EAGAIN (ring full) and EINTR (interrupted syscall)
-                            match submit_result {
-                                Ok(submitted) => {
-                                    // Any remaining requests in batch that weren't submitted
-                                    // will be retried in the next iteration of the loop
-                                    if submitted < built_count {
-                                        // Remove in_flight entries for unsubmitted requests
-                                        for user_data in user_data_list[submitted..].iter() {
-                                            in_flight.remove(user_data);
-                                        }
-                                        // Put unsubmitted requests back in the queue for retry
-                                        let unsubmitted: Vec<_> =
-                                            built_submissions[submitted..].to_vec();
-                                        if !unsubmitted.is_empty() {
-                                            let mut q = queue_clone.lock().unwrap();
-                                            // Insert unsubmitted requests back at the front preserving order
-                                            q.splice(0..0, unsubmitted);
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    // Handle submission errors
-                                    let error_code = e.raw_os_error();
-                                    match error_code {
-                                        Some(libc::EAGAIN) | Some(libc::EINTR) => {
-                                            // Ring is full, or the operation was interrupted due
-                                            // to signal. We need to wait for completions and then retry
-                                            // Remove in_flight entries for all submissions in this batch
-                                            for user_data in user_data_list.iter() {
-                                                in_flight.remove(user_data);
-                                            }
-                                            // Put unsubmitted requests back in queue for next iteration
-                                            if built_count > 0 {
-                                                let unsubmitted = built_submissions.clone();
-                                                let mut q = queue_clone.lock().unwrap();
-                                                // Insert unsubmitted requests back at the front preserving order
-                                                q.splice(0..0, unsubmitted);
-                                            }
-                                        }
-                                        _ => {
-                                            // Error: fail all pending submissions in this batch.
-                                            // Remove in_flight entries since these won't generate completions
-                                            for user_data in user_data_list.iter() {
-                                                in_flight.remove(user_data);
-                                            }
-                                            for sub in built_submissions.iter_mut() {
-                                                let batch_id = sub.batch_id;
-                                                sub.completion.set(Err(PyRuntimeError::new_err(
-                                                    format!("io_uring submit error: {:?}", e),
-                                                )));
-                                                let _ = sub.bounce.take();
-                                                decrement_in_flight(
-                                                    &in_flight_count_clone,
-                                                    &in_flight_cvar_clone,
-                                                    &batch_in_flight_clone,
-                                                    batch_id,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                        } else {
+                            drop(q);
+                        }
+                        if !pending.is_empty() {
+                            let result = submit_pending(&ring_clone, &mut pending);
+                            if let Err(error) =
+                                submission_retry.record_result(result, Instant::now())
+                            {
+                                fail_submissions(
+                                    &queue_clone,
+                                    &shutdown_clone,
+                                    &worker_error_clone,
+                                    error,
+                                );
                             }
                         }
                     }
@@ -1935,12 +2235,26 @@ impl RawBlockDevice {
                         }
                     }
 
-                    // Process any remaining in-flight requests
-                    // Wait for kernel to complete the requests or force-cancel them
-                    // Note: This 1000 milliseconds is a rough estimate
-                    let graceful_shutdown = Duration::from_millis(1000);
-                    thread::sleep(graceful_shutdown);
-                    {
+                    for user_data in pending.drain(..) {
+                        if let Some(mut sub) = in_flight.remove(&user_data) {
+                            let batch_id = sub.batch_id;
+                            let _ = sub.bounce.take();
+                            sub.completion.set(Err(PyRuntimeError::new_err(
+                                "io_uring worker stopped before submission",
+                            )));
+                            decrement_in_flight(
+                                &in_flight_count_clone,
+                                &in_flight_cvar_clone,
+                                &batch_in_flight_clone,
+                                batch_id,
+                            );
+                        }
+                    }
+                    if !in_flight.is_empty() {
+                        let _ = ring_clone.cancel_submitted();
+                    }
+                    while !in_flight.is_empty() {
+                        let _ = ring_clone.reap_without_submitting();
                         // Process completions for standard ring
                         if let IoUringWrapper::Standard(ring) = &ring_clone {
                             let completions: Vec<_> = {
@@ -1983,23 +2297,9 @@ impl RawBlockDevice {
                                 }
                             }
                         }
-                        ring_clone.submission_sync();
-                    }
-
-                    // Any remaining in_flight requests, force wake with error
-                    // (these were submitted to kernel but won't get completions)
-                    for (_user_data, mut sub) in in_flight.drain() {
-                        let batch_id = sub.batch_id;
-                        let _ = sub.bounce.take();
-                        sub.completion.set(Err(PyRuntimeError::new_err(
-                            "io_uring worker shutting down - request cancelled",
-                        )));
-                        decrement_in_flight(
-                            &in_flight_count_clone,
-                            &in_flight_cvar_clone,
-                            &batch_in_flight_clone,
-                            batch_id,
-                        );
+                        if !in_flight.is_empty() {
+                            thread::sleep(Duration::from_millis(1));
+                        }
                     }
 
                     // Final notification in case any thread is waiting on in_flight_count
@@ -2046,7 +2346,8 @@ impl RawBlockDevice {
             queue: queue_opt,
             worker: worker_opt,
             shutdown: shutdown_opt,
-            fixed_buffer_map: Arc::new(Mutex::new(HashMap::new())),
+            worker_error,
+            fixed_buffer_regions: Arc::new(Mutex::new(Vec::new())),
             fixed_buffers_registered: Arc::new(AtomicBool::new(false)),
             in_flight_count: in_flight_count_opt.unwrap_or_else(|| Arc::new(AtomicU64::new(0))),
             in_flight_cvar: in_flight_cvar_opt.unwrap_or_else(|| Arc::new(Condvar::new())),
@@ -2123,6 +2424,16 @@ impl RawBlockDevice {
         Ok(self.size)
     }
 
+    /// Return the terminal io_uring submission error, or None if none occurred.
+    ///
+    /// Recoverable errors are retried with 1-100 ms backoff, waking on completions.
+    /// After 30 seconds without submission or completion progress, the worker
+    /// stops accepting requests. The error is available before accepted I/O
+    /// finishes draining. Normal shutdown and POSIX mode do not set an error.
+    fn worker_error(&self) -> Option<String> {
+        self.worker_error.lock().unwrap().clone()
+    }
+
     /// Get NVMe namespace ID (only available when use_uring_cmd=true)
     fn nvme_nsid(&self) -> PyResult<u32> {
         self.nvme_nsid.ok_or_else(|| {
@@ -2157,6 +2468,22 @@ impl RawBlockDevice {
         fetch_fdp_status(self.fd, nsid)
     }
 
+    /// Return a consistent snapshot of fixed-buffer registration.
+    ///
+    /// Returns `(registered, registered_bytes)` for buffers accepted by the
+    /// kernel. Before successful registration and after close, this is
+    /// `(false, 0)`. Failed registration attempts do not contribute bytes.
+    fn fixed_buffer_status(&self) -> (bool, usize) {
+        let regions = self.fixed_buffer_regions.lock().unwrap();
+        let registered = self.fixed_buffers_registered.load(Ordering::Acquire);
+        let registered_bytes = if registered {
+            regions.iter().map(|region| region.end - region.start).sum()
+        } else {
+            0
+        };
+        (registered, registered_bytes)
+    }
+
     /// Register fixed buffers for zero-copy io_uring operations.
     ///
     /// - Pre-registering memory buffers with the kernel
@@ -2169,6 +2496,7 @@ impl RawBlockDevice {
     ///
     /// Registration must happen BEFORE any I/O using these buffers.
     /// The buffers must remain valid (not freed) until unregistered.
+    /// Registration is one-shot for the lifetime of the device.
     #[pyo3(signature = (buffer_ptrs, buffer_sizes))]
     fn register_fixed_buffers(
         &self,
@@ -2178,57 +2506,53 @@ impl RawBlockDevice {
         if !self.use_iouring {
             return Err(PyRuntimeError::new_err("io_uring not enabled"));
         }
-        if buffer_ptrs.len() != buffer_sizes.len() {
-            return Err(PyValueError::new_err(
-                "buffer_ptrs and buffer_sizes must have same length",
-            ));
+        let regions = build_fixed_buffer_regions(&buffer_ptrs, &buffer_sizes)?;
+        let iovecs = buffer_ptrs
+            .iter()
+            .zip(&buffer_sizes)
+            .map(|(&ptr, &size)| libc::iovec {
+                iov_base: ptr as *mut libc::c_void,
+                iov_len: size,
+            })
+            .collect::<Vec<_>>();
+
+        // Serialize registration and userspace publication. The region table is
+        // published only after the kernel has accepted the matching iovec table.
+        let mut published_regions = self.fixed_buffer_regions.lock().unwrap();
+        if self.closed.load(Ordering::Acquire) {
+            return Err(PyRuntimeError::new_err("device is closed"));
         }
-        if buffer_ptrs.is_empty() {
-            return Err(PyValueError::new_err(
-                "at least one buffer must be provided",
+        if self.fixed_buffers_registered.load(Ordering::Acquire) {
+            return Err(PyRuntimeError::new_err(
+                "fixed buffers are already registered",
             ));
         }
 
-        {
-            let mut map = self.fixed_buffer_map.lock().unwrap();
-            map.clear();
-            for (idx, (ptr, size)) in buffer_ptrs.iter().zip(buffer_sizes.iter()).enumerate() {
-                map.insert(*ptr, (idx as u16, *size));
-            }
-        }
-
-        if let Some(ring) = &self.ring {
-            let mut iovecs: Vec<libc::iovec> = Vec::new();
-            for (ptr, size) in buffer_ptrs.iter().zip(buffer_sizes.iter()) {
-                iovecs.push(libc::iovec {
-                    iov_base: *ptr as *mut libc::c_void,
-                    iov_len: *size,
-                });
-            }
-            unsafe {
-                let result = match ring {
-                    IoUringWrapper::Standard(ring) => {
-                        let ring = ring.lock().unwrap();
-                        ring.submitter().register_buffers(&iovecs)
-                    }
-                    IoUringWrapper::Big(ring) => {
-                        let ring = ring.lock().unwrap();
-                        ring.submitter().register_buffers(&iovecs)
-                    }
-                };
-                match result {
-                    Ok(_) => {
-                        self.fixed_buffers_registered.store(true, Ordering::Relaxed);
-                    }
-                    Err(e) => {
-                        return Err(PyRuntimeError::new_err(format!(
-                            "register_buffers failed: {}",
-                            e
-                        )))
-                    }
+        let ring = self
+            .ring
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("io_uring ring is unavailable"))?;
+        let result = unsafe {
+            match ring {
+                IoUringWrapper::Standard(ring) => {
+                    let ring = ring.lock().unwrap();
+                    ring.submitter().register_buffers(&iovecs)
+                }
+                IoUringWrapper::Big(ring) => {
+                    let ring = ring.lock().unwrap();
+                    ring.submitter().register_buffers(&iovecs)
                 }
             }
+        };
+        if let Err(e) = result {
+            return Err(PyRuntimeError::new_err(format!(
+                "register_buffers failed: {}",
+                e
+            )));
         }
+
+        *published_regions = regions;
+        self.fixed_buffers_registered.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -2267,6 +2591,13 @@ impl RawBlockDevice {
         }
         if self.closed.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("device is closed"));
+        }
+        if self
+            .shutdown
+            .as_ref()
+            .is_some_and(|shutdown| shutdown.load(Ordering::Relaxed))
+        {
+            return Err(PyRuntimeError::new_err("io_uring worker stopped"));
         }
 
         let n = offsets.len();
@@ -2394,13 +2725,13 @@ impl RawBlockDevice {
         let use_odirect = self.use_odirect;
         let alignment = self.alignment;
         let use_uring_cmd = self.use_uring_cmd;
-        let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Relaxed);
-        // Clone the fixed buffer map before releasing GIL to avoid lock contention
-        let fixed_buffer_map: HashMap<usize, (u16, usize)> = if fixed_buffers_registered {
-            let map = self.fixed_buffer_map.lock().unwrap();
-            map.clone()
+        let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Acquire);
+        // Clone the fixed-buffer regions before releasing the GIL to avoid lock contention.
+        let fixed_buffer_regions = if fixed_buffers_registered {
+            let regions = self.fixed_buffer_regions.lock().unwrap();
+            regions.clone()
         } else {
-            HashMap::new()
+            Vec::new()
         };
 
         let nvme_cmd_data_base = if use_uring_cmd {
@@ -2437,7 +2768,7 @@ impl RawBlockDevice {
                 let comp = Arc::new(IoCompletion::new());
 
                 // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-                let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                let fixed_idx = resolve_fixed_buffer_idx(&fixed_buffer_regions, ptrs[i], total_len);
 
                 let prepared = prepare_iouring_write_buffer(
                     ptrs[i],
@@ -2484,11 +2815,7 @@ impl RawBlockDevice {
                 submissions.push((sub, comp));
             }
 
-            // Queue all submissions atomically. At this point no further errors can
-            // occur during queuing.
             for (sub, comp) in submissions {
-                in_flight_count.fetch_add(1, Ordering::Relaxed);
-
                 // Increment per-batch in-flight count
                 {
                     let batch_map = batch_in_flight.lock().unwrap();
@@ -2497,8 +2824,20 @@ impl RawBlockDevice {
                     }
                 }
                 {
-                    let mut q = queue.lock().unwrap();
-                    q.push(sub);
+                    if let Err(error) = enqueue_if_running(
+                        &queue,
+                        self.shutdown.as_ref().expect("shutdown must exist"),
+                        &in_flight_count,
+                        sub,
+                    ) {
+                        comp.set(Err(error));
+                        let batch_map = batch_in_flight.lock().unwrap();
+                        if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
+                            if batch_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+                                batch_cvar.notify_all();
+                            }
+                        }
+                    }
                 }
                 batch_ready.signal_producer();
 
@@ -2627,6 +2966,13 @@ impl RawBlockDevice {
         if self.closed.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("device is closed"));
         }
+        if self
+            .shutdown
+            .as_ref()
+            .is_some_and(|shutdown| shutdown.load(Ordering::Relaxed))
+        {
+            return Err(PyRuntimeError::new_err("io_uring worker stopped"));
+        }
 
         let view = get_pybuffer(py, data, true)?;
         if view.readonly != 0 {
@@ -2676,11 +3022,11 @@ impl RawBlockDevice {
         };
 
         // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-        let use_fixed = self.fixed_buffers_registered.load(Ordering::Relaxed);
+        let use_fixed = self.fixed_buffers_registered.load(Ordering::Acquire);
         let fixed_idx = if use_fixed && ptr_aligned {
-            let map = self.fixed_buffer_map.lock().unwrap();
+            let regions = self.fixed_buffer_regions.lock().unwrap();
             let ptr_addr = ptr as usize;
-            map.get(&ptr_addr).map(|(idx, _)| *idx)
+            resolve_fixed_buffer_idx(&regions, ptr_addr, total_len)
         } else {
             None
         };
@@ -2691,7 +3037,6 @@ impl RawBlockDevice {
         let use_bounce = !ptr_aligned || cap < total_len;
 
         let res = if !use_bounce {
-            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
             let comp = Arc::new(IoCompletion::new());
             let sub = IoSubmission {
                 fd: self.fd,
@@ -2707,10 +3052,14 @@ impl RawBlockDevice {
                 batch_id: 0,
                 nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
             };
-            {
-                let q = self.queue.as_ref().expect("queue must exist");
-                let mut q = q.lock().unwrap();
-                q.push(sub);
+            if let Err(error) = enqueue_if_running(
+                self.queue.as_ref().expect("queue must exist"),
+                self.shutdown.as_ref().expect("shutdown must exist"),
+                &self.in_flight_count,
+                sub,
+            ) {
+                release_pybuffer(view);
+                return Err(error);
             }
             if let Some(batch_ready) = &self.batch_ready {
                 batch_ready.signal_producer();
@@ -2720,7 +3069,6 @@ impl RawBlockDevice {
             let bounce = AlignedBuf::new(total_len, align)?;
             let bounce_arc = std::sync::Arc::new(bounce);
             let bounce_ptr = bounce_arc.as_mut_ptr();
-            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
             let comp = Arc::new(IoCompletion::new());
             let sub = IoSubmission {
                 fd: self.fd,
@@ -2736,10 +3084,14 @@ impl RawBlockDevice {
                 batch_id: 0,
                 nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
             };
-            {
-                let q = self.queue.as_ref().expect("queue must exist");
-                let mut q = q.lock().unwrap();
-                q.push(sub);
+            if let Err(error) = enqueue_if_running(
+                self.queue.as_ref().expect("queue must exist"),
+                self.shutdown.as_ref().expect("shutdown must exist"),
+                &self.in_flight_count,
+                sub,
+            ) {
+                release_pybuffer(view);
+                return Err(error);
             }
             if let Some(batch_ready) = &self.batch_ready {
                 batch_ready.signal_producer();
@@ -2772,6 +3124,13 @@ impl RawBlockDevice {
         }
         if self.closed.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("device is closed"));
+        }
+        if self
+            .shutdown
+            .as_ref()
+            .is_some_and(|shutdown| shutdown.load(Ordering::Relaxed))
+        {
+            return Err(PyRuntimeError::new_err("io_uring worker stopped"));
         }
 
         let view = get_pybuffer(py, data, false)?;
@@ -2816,11 +3175,11 @@ impl RawBlockDevice {
         };
 
         // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-        let use_fixed = self.fixed_buffers_registered.load(Ordering::Relaxed);
+        let use_fixed = self.fixed_buffers_registered.load(Ordering::Acquire);
         let fixed_idx = if use_fixed && ptr_aligned {
-            let map = self.fixed_buffer_map.lock().unwrap();
+            let regions = self.fixed_buffer_regions.lock().unwrap();
             let ptr_addr = ptr as usize;
-            map.get(&ptr_addr).map(|(idx, _)| *idx)
+            resolve_fixed_buffer_idx(&regions, ptr_addr, total_len)
         } else {
             None
         };
@@ -2837,7 +3196,6 @@ impl RawBlockDevice {
         )?;
 
         let res = if prepared.bounce.is_none() {
-            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
             let comp = Arc::new(IoCompletion::new());
             let sub = IoSubmission {
                 fd: self.fd,
@@ -2856,10 +3214,14 @@ impl RawBlockDevice {
                     placement_id_u16.unwrap_or(0),
                 )?,
             };
-            {
-                let q = self.queue.as_ref().expect("queue must exist");
-                let mut q = q.lock().unwrap();
-                q.push(sub);
+            if let Err(error) = enqueue_if_running(
+                self.queue.as_ref().expect("queue must exist"),
+                self.shutdown.as_ref().expect("shutdown must exist"),
+                &self.in_flight_count,
+                sub,
+            ) {
+                release_pybuffer(view);
+                return Err(error);
             }
             if let Some(batch_ready) = &self.batch_ready {
                 batch_ready.signal_producer();
@@ -2867,7 +3229,6 @@ impl RawBlockDevice {
             py.allow_threads(move || comp.wait())
         } else {
             let bounce = prepared.bounce;
-            self.in_flight_count.fetch_add(1, Ordering::Relaxed);
             let comp = Arc::new(IoCompletion::new());
             let sub = IoSubmission {
                 fd: self.fd,
@@ -2886,10 +3247,14 @@ impl RawBlockDevice {
                     placement_id_u16.unwrap_or(0),
                 )?,
             };
-            {
-                let q = self.queue.as_ref().expect("queue must exist");
-                let mut q = q.lock().unwrap();
-                q.push(sub);
+            if let Err(error) = enqueue_if_running(
+                self.queue.as_ref().expect("queue must exist"),
+                self.shutdown.as_ref().expect("shutdown must exist"),
+                &self.in_flight_count,
+                sub,
+            ) {
+                release_pybuffer(view);
+                return Err(error);
             }
             if let Some(batch_ready) = &self.batch_ready {
                 batch_ready.signal_producer();
@@ -2923,6 +3288,13 @@ impl RawBlockDevice {
         }
         if self.closed.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("device is closed"));
+        }
+        if self
+            .shutdown
+            .as_ref()
+            .is_some_and(|shutdown| shutdown.load(Ordering::Relaxed))
+        {
+            return Err(PyRuntimeError::new_err("io_uring worker stopped"));
         }
 
         let n = offsets.len();
@@ -2992,13 +3364,13 @@ impl RawBlockDevice {
         let use_odirect = self.use_odirect;
         let use_uring_cmd = self.use_uring_cmd;
         let alignment = self.alignment;
-        let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Relaxed);
-        // Clone the fixed buffer map before releasing GIL to avoid lock contention
-        let fixed_buffer_map: HashMap<usize, (u16, usize)> = if fixed_buffers_registered {
-            let map = self.fixed_buffer_map.lock().unwrap();
-            map.clone()
+        let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Acquire);
+        // Clone the fixed-buffer regions before releasing the GIL to avoid lock contention.
+        let fixed_buffer_regions = if fixed_buffers_registered {
+            let regions = self.fixed_buffer_regions.lock().unwrap();
+            regions.clone()
         } else {
-            HashMap::new()
+            Vec::new()
         };
         // Get NVMe data for io_uring_cmd
         let nvme_cmd_data = self._build_nvme_cmd_data(0, 0)?;
@@ -3069,7 +3441,8 @@ impl RawBlockDevice {
                     } else {
                         // Fixed buffers are pre-registered with io_uring,
                         // enabling true zero-copy I/O.
-                        let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                        let fixed_idx =
+                            resolve_fixed_buffer_idx(&fixed_buffer_regions, ptrs[i], total_len);
                         (ptrs[i], fixed_idx, None, None, None)
                     };
 
@@ -3091,11 +3464,7 @@ impl RawBlockDevice {
                 submissions.push((sub, comp));
             }
 
-            // Queue all submissions atomically. At this point no further errors can
-            // occur during queuing.
             for (sub, comp) in submissions {
-                in_flight_count.fetch_add(1, Ordering::Relaxed);
-
                 // Increment per-batch in-flight count
                 {
                     let batch_map = batch_in_flight.lock().unwrap();
@@ -3105,8 +3474,20 @@ impl RawBlockDevice {
                 }
 
                 {
-                    let mut q = queue.lock().unwrap();
-                    q.push(sub);
+                    if let Err(error) = enqueue_if_running(
+                        &queue,
+                        self.shutdown.as_ref().expect("shutdown must exist"),
+                        &in_flight_count,
+                        sub,
+                    ) {
+                        comp.set(Err(error));
+                        let batch_map = batch_in_flight.lock().unwrap();
+                        if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
+                            if batch_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+                                batch_cvar.notify_all();
+                            }
+                        }
+                    }
                 }
                 batch_ready.signal_producer();
 
@@ -3401,11 +3782,34 @@ impl RawBlockDevice {
         Ok(())
     }
 
+    /// Close the device after draining accepted I/O, without holding the GIL.
+    ///
+    /// Repeated calls are harmless. This may wait indefinitely if an accepted
+    /// request cannot complete or be cancelled. Raises `OSError` if closing
+    /// the underlying file descriptor fails.
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
+        if !self.closed.load(Ordering::Relaxed) {
+            py.allow_threads(|| self.do_close())?;
+        }
+        Ok(())
+    }
+}
+
+impl RawBlockDevice {
     /// Internal function to perform the cleanup operation.
+    ///
+    /// Accepted io_uring requests retain their buffers until terminal completion.
+    /// Shutdown may wait indefinitely if they cannot complete or be cancelled.
     fn do_close(&mut self) -> Result<(), PyErr> {
+        // Serialize close with fixed-buffer registration. Holding this guard
+        // until `closed` is published prevents a concurrent registration from
+        // succeeding after the ring has already been torn down.
+        let fixed_regions_state = Arc::clone(&self.fixed_buffer_regions);
+        let mut published_regions = fixed_regions_state.lock().unwrap();
+
         if self.use_iouring {
-            if let Some(shutdown) = &self.shutdown {
-                shutdown.store(true, Ordering::Relaxed);
+            if let (Some(queue), Some(shutdown)) = (&self.queue, &self.shutdown) {
+                stop_submissions(queue, shutdown);
             }
             if let Some(batch_ready) = &self.batch_ready {
                 batch_ready.signal_producer();
@@ -3421,7 +3825,7 @@ impl RawBlockDevice {
                 guard = g;
             }
 
-            if self.fixed_buffers_registered.load(Ordering::Relaxed) {
+            if self.fixed_buffers_registered.load(Ordering::Acquire) {
                 if let Some(ring) = &self.ring {
                     let _ = match ring {
                         IoUringWrapper::Standard(ring) => {
@@ -3435,8 +3839,8 @@ impl RawBlockDevice {
                     };
                 }
                 self.fixed_buffers_registered
-                    .store(false, Ordering::Relaxed);
-                self.fixed_buffer_map.lock().unwrap().clear();
+                    .store(false, Ordering::Release);
+                published_regions.clear();
             }
         }
 
@@ -3451,19 +3855,14 @@ impl RawBlockDevice {
         self.closed.store(true, Ordering::Relaxed);
         Ok(())
     }
-
-    fn close(&mut self) -> PyResult<()> {
-        if !self.closed.load(Ordering::Relaxed) {
-            self.do_close()?;
-        }
-        Ok(())
-    }
 }
 
 impl Drop for RawBlockDevice {
     fn drop(&mut self) {
         if !self.closed.load(Ordering::Relaxed) {
-            let _ = self.do_close();
+            Python::with_gil(|py| {
+                let _ = py.allow_threads(|| self.do_close());
+            });
         }
     }
 }

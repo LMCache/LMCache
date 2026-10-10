@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 # Standard
+from pathlib import Path
+import ctypes
 import os
 import platform
+import subprocess
+import sys
 
 # Third Party
 import pytest
@@ -20,6 +24,16 @@ from tests.v1.storage_backend.raw_block_test_utils import (
 
 lmcache_rust_raw_block_io = pytest.importorskip("lmcache_rust_raw_block_io")
 RawBlockDevice = lmcache_rust_raw_block_io.RawBlockDevice
+
+
+def _buffer_address(buffer: bytearray | memoryview) -> int:
+    return ctypes.addressof(ctypes.c_char.from_buffer(buffer))
+
+
+def _make_aligned_buffer(size: int, alignment: int) -> tuple[bytearray, memoryview]:
+    backing = bytearray(size + alignment - 1)
+    offset = (-_buffer_address(backing)) % alignment
+    return backing, memoryview(backing)[offset : offset + size]
 
 
 def test_raw_block_device_posix_roundtrip_on_tmp_file(tmp_path):
@@ -363,6 +377,241 @@ def test_raw_block_device_odirect_batched_write_padded_roundtrip(tmp_path):
     finally:
         if dev is not None:
             dev.close()
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="io_uring is Linux only")
+def test_raw_block_device_iouring_fixed_buffer_subranges(tmp_path: Path) -> None:
+    path = make_raw_block_file(tmp_path)
+    dev = None
+    try:
+        dev = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=False,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+
+        region_size = 2 * RAW_BLOCK_CI_BLOCK_ALIGN
+        _backing, registered = _make_aligned_buffer(
+            2 * region_size,
+            RAW_BLOCK_CI_BLOCK_ALIGN,
+        )
+        base_ptr = _buffer_address(registered)
+
+        assert dev.fixed_buffer_status() == (False, 0)
+
+        with pytest.raises(ValueError, match="null pointer"):
+            dev.register_fixed_buffers([0], [1])
+        with pytest.raises(ValueError, match="zero size"):
+            dev.register_fixed_buffers([base_ptr], [0])
+        with pytest.raises(ValueError, match="1 GiB"):
+            dev.register_fixed_buffers([base_ptr], [(1 << 30) + 1])
+        with pytest.raises(ValueError, match="overlap"):
+            dev.register_fixed_buffers(
+                [base_ptr, base_ptr + RAW_BLOCK_CI_BLOCK_ALIGN],
+                [region_size, region_size],
+            )
+
+        assert dev.fixed_buffer_status() == (False, 0)
+
+        dev.register_fixed_buffers(
+            [base_ptr, base_ptr + region_size],
+            [region_size, region_size],
+        )
+        assert dev.fixed_buffer_status() == (True, 2 * region_size)
+        with pytest.raises(RuntimeError, match="already registered"):
+            dev.register_fixed_buffers([base_ptr], [region_size])
+        assert dev.fixed_buffer_status() == (True, 2 * region_size)
+
+        scalar_payload = b"fixed-buffer scalar interior subrange"
+        scalar_view = registered[128 : 128 + len(scalar_payload)]
+        scalar_view[:] = scalar_payload
+        dev.write_uring(4096, scalar_view, len(scalar_view), len(scalar_view))
+        scalar_view[:] = bytes(len(scalar_view))
+        dev.read_uring(4096, scalar_view, len(scalar_view), len(scalar_view))
+        assert bytes(scalar_view) == scalar_payload
+
+        interior_payload = b"fixed-buffer batched interior subrange"
+        interior_start = region_size + 128
+        interior_view = registered[
+            interior_start : interior_start + len(interior_payload)
+        ]
+        interior_view[:] = interior_payload
+
+        crossing_payload = bytes(range(64))
+        crossing_start = region_size - len(crossing_payload) // 2
+        crossing_view = registered[
+            crossing_start : crossing_start + len(crossing_payload)
+        ]
+        crossing_view[:] = crossing_payload
+
+        batch_id = dev.batched_write(
+            [8192, 12288],
+            [interior_view, crossing_view],
+            [len(interior_view), len(crossing_view)],
+        )
+        assert dev.wait_iouring(batch_id) == ([True, True], [])
+
+        interior_view[:] = bytes(len(interior_view))
+        crossing_view[:] = bytes(len(crossing_view))
+        batch_id = dev.batched_read(
+            [8192, 12288],
+            [interior_view, crossing_view],
+            [len(interior_view), len(crossing_view)],
+        )
+        assert dev.wait_iouring(batch_id) == ([True, True], [])
+        assert bytes(interior_view) == interior_payload
+        assert bytes(crossing_view) == crossing_payload
+        dev.close()
+        assert dev.fixed_buffer_status() == (False, 0)
+    except Exception as e:
+        message = str(e).lower()
+        memlock_unavailable = (
+            "register_buffers failed" in message and "cannot allocate memory" in message
+        )
+        if is_skip_safe_io_error(e) or memlock_unavailable:
+            pytest.skip(f"io_uring fixed buffers are unavailable on this runner: {e}")
+        raise
+    finally:
+        if dev is not None:
+            dev.close()
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="io_uring is Linux only")
+@pytest.mark.parametrize("queue_depth", [1, 2])
+def test_raw_block_device_iouring_batch_exceeds_queue_depth(
+    tmp_path: Path, queue_depth: int
+) -> None:
+    path = make_raw_block_file(tmp_path)
+    try:
+        device = RawBlockDevice(
+            str(path),
+            writable=True,
+            use_odirect=False,
+            io_engine="io_uring",
+            iouring_queue_depth=queue_depth,
+        )
+    except Exception as error:
+        if is_skip_safe_io_error(error):
+            pytest.skip(f"io_uring unavailable: {error}")
+        raise
+
+    try:
+        payloads = [bytearray([index]) * 4096 for index in range(32)]
+        buffers = [bytearray(4096) for _ in payloads]
+        offsets = [4096 * index for index in range(len(payloads))]
+        lengths = [4096] * len(payloads)
+        batch = device.batched_write(offsets, payloads, lengths)
+        assert device.wait_iouring(batch) == ([True] * len(payloads), [])
+        batch = device.batched_read(offsets, buffers, lengths)
+        assert device.wait_iouring(batch) == ([True] * len(payloads), [])
+        assert buffers == payloads
+    finally:
+        device.close()
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="io_uring is Linux only")
+@pytest.mark.parametrize("remaining_bytes", [0, 4])
+def test_raw_block_device_iouring_eof_terminates(
+    tmp_path: Path, remaining_bytes: int
+) -> None:
+    path = make_raw_block_file(tmp_path)
+    try:
+        device = RawBlockDevice(
+            str(path), writable=False, io_engine="io_uring", use_odirect=False
+        )
+    except Exception as error:
+        if is_skip_safe_io_error(error):
+            pytest.skip(f"io_uring unavailable: {error}")
+        raise
+    device.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+from lmcache_rust_raw_block_io import RawBlockDevice
+
+device = RawBlockDevice(
+    sys.argv[1], writable=False, io_engine="io_uring", use_odirect=False
+)
+try:
+    batch = device.batched_read([int(sys.argv[2])], [bytearray(8)], [8])
+    success, errors = device.wait_iouring(batch)
+    assert success == [False], success
+    assert len(errors) == 1, errors
+finally:
+    device.close()
+""",
+            str(path),
+            str(RAW_BLOCK_CI_CAPACITY_BYTES - remaining_bytes),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="io_uring is Linux only")
+@pytest.mark.parametrize("cleanup", ["close", "drop", "exit"])
+@pytest.mark.no_shared_allocator
+def test_raw_block_device_iouring_cleanup_without_wait(
+    tmp_path: Path, cleanup: str
+) -> None:
+    """Clean up outstanding batches on close, deallocation, and interpreter exit."""
+    path = make_raw_block_file(tmp_path)
+    try:
+        device = RawBlockDevice(
+            str(path),
+            writable=True,
+            io_engine="io_uring",
+            use_odirect=False,
+            iouring_queue_depth=2,
+        )
+    except Exception as error:
+        if is_skip_safe_io_error(error):
+            pytest.skip(f"io_uring unavailable: {error}")
+        raise
+    device.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import gc
+import sys
+from lmcache_rust_raw_block_io import RawBlockDevice
+
+device = RawBlockDevice(
+    sys.argv[1], writable=True, io_engine="io_uring", use_odirect=False,
+    iouring_queue_depth=2,
+)
+buffers = [bytearray([index]) * 4096 for index in range(32)]
+device.batched_write(
+    [4096 * index for index in range(len(buffers))], buffers, [4096] * len(buffers)
+)
+del buffers
+if sys.argv[2] == "close":
+    device.close()
+    device.close()
+elif sys.argv[2] == "drop":
+    del device
+    gc.collect()
+""",
+            str(path),
+            cleanup,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.skipif(

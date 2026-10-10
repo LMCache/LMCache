@@ -4,8 +4,11 @@ Managing objects and memory for L1 cache
 """
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import count
 import threading
+import weakref
 
 # First Party
 from lmcache.lmcache_native import TTLLock
@@ -13,7 +16,11 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
-from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
+from lmcache.v1.distributed.internal_api import (
+    L1ManagerListener,
+    L1ObjectMeta,
+    L1OperationResult,
+)
 from lmcache.v1.distributed.memory_manager import (
     GDSL1MemoryManager,
     L1ManagerProtocol,
@@ -21,6 +28,10 @@ from lmcache.v1.distributed.memory_manager import (
 )
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
+)
+from lmcache.v1.gpu_connector.gds_context import (
+    close_l1_gds_context,
+    initialize_l1_gds_context,
 )
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaState,
@@ -33,6 +44,45 @@ from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
+_l1_manager_ids = count()
+
+# Upper bound for the count parameter in reserve_read / finish_read
+# to prevent a single call from holding the global lock for too long.
+MAX_READ_LOCK_COUNT = 128
+
+
+def next_l1_manager_id() -> int:
+    """Return a fresh process-local L1 identity.
+
+    Every L1 binding draws from this counter, so the identity doubles as
+    the owner tag stamped on memory objects and stays unique across bindings.
+    """
+    return next(_l1_manager_ids)
+
+
+def validate_read_locks(read_locks: int) -> int:
+    """Validate and clamp a per-key read-lock count.
+
+    Args:
+        read_locks: Total read locks to take or release per key.
+
+    Returns:
+        Clamped value in [1, MAX_READ_LOCK_COUNT].
+    """
+    if read_locks < 1:
+        logger.warning(
+            "L1Manager: read_locks=%d is invalid, clamping to 1",
+            read_locks,
+        )
+        return 1
+    if read_locks > MAX_READ_LOCK_COUNT:
+        logger.warning(
+            "L1Manager: read_locks=%d exceeds limit=%d, clamping",
+            read_locks,
+            MAX_READ_LOCK_COUNT,
+        )
+        return MAX_READ_LOCK_COUNT
+    return read_locks
 
 
 # Internal classes and helper functions
@@ -65,38 +115,6 @@ def l1_mgr_synchronized(func):
             return func(self, *args, **kwargs)
 
     return wrapper
-
-
-L1OperationResult = tuple[L1Error, MemoryObj | None]
-
-# Upper bound for the count parameter in reserve_read / finish_read
-# to prevent a single call from holding the global lock for too long.
-MAX_READ_LOCK_COUNT = 128
-
-
-def _validate_read_locks(read_locks: int) -> int:
-    """Validate and clamp a per-key read-lock count.
-
-    Args:
-        read_locks: Total read locks to take or release per key.
-
-    Returns:
-        Clamped value in [1, MAX_READ_LOCK_COUNT].
-    """
-    if read_locks < 1:
-        logger.warning(
-            "L1Manager: read_locks=%d is invalid, clamping to 1",
-            read_locks,
-        )
-        return 1
-    if read_locks > MAX_READ_LOCK_COUNT:
-        logger.warning(
-            "L1Manager: read_locks=%d exceeds limit=%d, clamping",
-            read_locks,
-            MAX_READ_LOCK_COUNT,
-        )
-        return MAX_READ_LOCK_COUNT
-    return read_locks
 
 
 def _l1_usage_ratio_or_zero(target: "L1Manager | None") -> float:
@@ -170,14 +188,16 @@ class L1Manager:
     For every operation on list of keys, the operation is atomic
     """
 
-    # Singleton dispatch for ``lmcache_mp.l1_memory_usage_bytes``: tests may
-    # construct multiple L1Managers but the OTel SDK only honors the first
-    # gauge registration, so the callback reads from the most recently built
-    # instance via ``_gauge_target``.
+    # OTel registers each gauge once; its callback snapshots all live managers.
     _gauge_registered: bool = False
-    _gauge_target: "L1Manager | None" = None
+    _gauge_lock = threading.Lock()
+    _gauge_targets: weakref.WeakValueDictionary[int, "L1Manager"] = (
+        weakref.WeakValueDictionary()
+    )
 
     def __init__(self, config: L1ManagerConfig):
+        self._config = config
+        self._l1_manager_id = next_l1_manager_id()
         self._lock = threading.Lock()
 
         # Resident objects: readable, never write-locked.
@@ -192,7 +212,10 @@ class L1Manager:
         # owns its backing allocator instead of branching inside the CPU path.
         self._memory_manager: L1ManagerProtocol
         if config.gds_l1_config is not None:
+            if config.memory_config.devdax_path:
+                raise ValueError("GDS and Device-DAX require separate L1 managers")
             self._memory_manager = GDSL1MemoryManager(config.gds_l1_config)
+            initialize_l1_gds_context(self._l1_manager_id, config.gds_l1_config)
             logger.info("L1Manager: GDS L1 tier enabled; CPU pinned-DRAM L1 disabled")
         elif config.memory_config.devdax_path:
             self._memory_manager = DevDaxL1MemoryManager(config.memory_config)
@@ -226,31 +249,33 @@ class L1Manager:
 
         self._event_bus = get_event_bus()
 
-        L1Manager._gauge_target = self
-        if not L1Manager._gauge_registered:
-            L1Manager._gauge_registered = True
-            register_gauge(
-                "lmcache.l1_manager",
-                "lmcache_mp.l1_memory_usage_bytes",
-                "Bytes currently held in L1 cache",
-                lambda: (
-                    L1Manager._gauge_target.get_memory_usage()[0]
-                    if L1Manager._gauge_target is not None
-                    else 0
-                ),
-            )
-            register_gauge(
-                "lmcache.l1_manager",
-                "lmcache_mp.l1_usage_ratio",
-                "L1 used/total ratio (0.0–1.0)",
-                lambda: _l1_usage_ratio_or_zero(L1Manager._gauge_target),
-            )
-            register_gauge(
-                "lmcache.l1_manager",
-                "lmcache_mp.l1_staging_bytes",
-                "Bytes held by L1 staging objects (write-reserved, not admitted)",
-                lambda: _l1_staging_bytes_or_zero(L1Manager._gauge_target),
-            )
+        with L1Manager._gauge_lock:
+            L1Manager._gauge_targets[self._l1_manager_id] = self
+            if not L1Manager._gauge_registered:
+                L1Manager._gauge_registered = True
+                register_gauge(
+                    "lmcache.l1_manager",
+                    "lmcache_mp.l1_memory_usage_bytes",
+                    "Bytes currently held in L1 cache",
+                    lambda: L1Manager._observations(lambda m: m.get_memory_usage()[0]),
+                )
+                register_gauge(
+                    "lmcache.l1_manager",
+                    "lmcache_mp.l1_usage_ratio",
+                    "L1 used/total ratio (0.0–1.0)",
+                    lambda: L1Manager._observations(_l1_usage_ratio_or_zero),
+                )
+                register_gauge(
+                    "lmcache.l1_manager",
+                    "lmcache_mp.l1_staging_bytes",
+                    "Bytes held by L1 staging objects (write-reserved, not admitted)",
+                    lambda: L1Manager._observations(_l1_staging_bytes_or_zero),
+                )
+
+    @property
+    def l1_manager_id(self) -> int:
+        """Return this manager's stable process-local memory-object owner tag."""
+        return self._l1_manager_id
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.
@@ -288,7 +313,7 @@ class L1Manager:
             Staging objects are never readable; a key that is only
             being written is reported as ``KEY_NOT_EXIST``.
         """
-        total = _validate_read_locks(read_locks)
+        total = validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         for key in keys:
@@ -375,7 +400,7 @@ class L1Manager:
             KEY_IN_WRONG_STATE: The key is not read-locked, which
                 means the reader may read inconsistent data.
         """
-        total = _validate_read_locks(read_locks)
+        total = validate_read_locks(read_locks)
         need_to_free: list[MemoryObj] = []
         need_to_free_keys: list[ObjectKey] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -423,13 +448,17 @@ class L1Manager:
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_READ_FINISHED,
-                metadata={"keys": successful_keys},
+                metadata={"l1_tag": self._config.tag, "keys": successful_keys},
             )
         )
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": need_to_free_keys, "meta": freed_meta},
+                metadata={
+                    "l1_tag": self._config.tag,
+                    "keys": need_to_free_keys,
+                    "meta": freed_meta,
+                },
             )
         )
 
@@ -526,6 +555,7 @@ class L1Manager:
             for (key, is_temp), mem_obj in zip(
                 need_to_allocate, allocated_objs, strict=True
             ):
+                mem_obj.set_l1_manager(self._l1_manager_id)
                 entry = L1ObjectState(
                     memory_obj=mem_obj,
                     write_lock=TTLLock(self._write_ttl_seconds),
@@ -542,7 +572,11 @@ class L1Manager:
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_WRITE_RESERVED,
-                metadata={"keys": successful_keys, "tag": tag},
+                metadata={
+                    "l1_tag": self._config.tag,
+                    "keys": successful_keys,
+                    "tag": tag,
+                },
             )
         )
         return ret
@@ -613,6 +647,7 @@ class L1Manager:
                 Event(
                     event_type=EventType.L1_WRITE_FINISHED,
                     metadata={
+                        "l1_tag": self._config.tag,
                         "keys": notification_keys,
                         "meta": notification_keys_meta,
                     },
@@ -657,7 +692,7 @@ class L1Manager:
             the read locks are taken on the resident object, so the caller
             always holds the object that readers see.
         """
-        total = _validate_read_locks(read_locks)
+        total = validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         successful_keys_meta: list[L1ObjectMeta] = []
@@ -697,7 +732,11 @@ class L1Manager:
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
-                metadata={"keys": successful_keys, "meta": successful_keys_meta},
+                metadata={
+                    "l1_tag": self._config.tag,
+                    "keys": successful_keys,
+                    "meta": successful_keys_meta,
+                },
             )
         )
         return ret
@@ -824,7 +863,7 @@ class L1Manager:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_KEYS_ACCESSED,
-                    metadata={"keys": keys},
+                    metadata={"l1_tag": self._config.tag, "keys": keys},
                 )
             )
 
@@ -859,7 +898,11 @@ class L1Manager:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_KEYS_EVICTED,
-                    metadata={"keys": all_keys, "meta": all_meta},
+                    metadata={
+                        "l1_tag": self._config.tag,
+                        "keys": all_keys,
+                        "meta": all_meta,
+                    },
                 )
             )
             cleared = set(all_keys)
@@ -1089,8 +1132,14 @@ class L1Manager:
         """
         return self._require_devdax_memory_manager().remove_device(device_path, mode)
 
+    @property
+    def config(self) -> L1ManagerConfig:
+        """Return this manager's backend and lifetime configuration."""
+        return self._config
+
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
+        close_l1_gds_context(self._l1_manager_id)
         with self._lock:
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
             for per_tag in self._staging.values():
@@ -1101,6 +1150,8 @@ class L1Manager:
             self._staging_bytes = 0
 
         self._memory_manager.close()
+        with L1Manager._gauge_lock:
+            L1Manager._gauge_targets.pop(self._l1_manager_id, None)
 
     # Status reporting
     @l1_mgr_synchronized
@@ -1128,6 +1179,7 @@ class L1Manager:
                 if staged.is_temporary:
                     temporary += 1
         used, total = self._memory_manager.get_memory_usage()
+        capacities = self.get_capacity_bytes_by_backend()
         # ``memory_total_bytes`` is what the allocator currently backs (the
         # grown heap on the lazy tier). ``memory_configured_bytes`` is the
         # current declared capacity, summed to fit this dict's flat shape.
@@ -1141,9 +1193,10 @@ class L1Manager:
             "staging_bytes": self._staging_bytes,
             "memory_used_bytes": used,
             "memory_total_bytes": total,
-            "memory_configured_bytes": sum(
-                self.get_capacity_bytes_by_backend().values()
-            ),
+            "memory_configured_bytes": sum(capacities.values()),
+            "capacity_bytes_by_backend": {
+                backend.value: size for backend, size in capacities.items()
+            },
             "memory_usage_ratio": used / total if total > 0 else 0.0,
             "write_ttl_seconds": self._write_ttl_seconds,
             "read_ttl_seconds": self._read_ttl_seconds,
@@ -1288,7 +1341,7 @@ class L1Manager:
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_READ_RESERVED,
-                metadata={"keys": keys},
+                metadata={"l1_tag": self._config.tag, "keys": keys},
             )
         )
 
@@ -1318,7 +1371,7 @@ class L1Manager:
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": keys, "meta": freed_meta},
+                metadata={"l1_tag": self._config.tag, "keys": keys, "meta": freed_meta},
             )
         )
 
@@ -1337,3 +1390,27 @@ class L1Manager:
                 "L1 is not Device-DAX backed (--l1-devdax-path not set)",
             )
         return self._memory_manager
+
+    @classmethod
+    def _observations(
+        cls, value: Callable[["L1Manager"], int | float]
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        with cls._gauge_lock:
+            managers = list(cls._gauge_targets.values())
+        return [
+            (
+                value(m),
+                {
+                    "l1_tag": m.config.tag,
+                    "backend": "gds"
+                    if m.config.gds_l1_config
+                    else "dram+devdax"
+                    if m.config.memory_config.devdax_path
+                    and m.config.memory_config.devdax_size_in_bytes
+                    else "devdax"
+                    if m.config.memory_config.devdax_path
+                    else "dram",
+                },
+            )
+            for m in managers
+        ]

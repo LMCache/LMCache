@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Process-global GPUDirect Storage data path for the GDS L1 tier.
+"""GPUDirect Storage data path owned by the active GDS L1 manager.
 
-The context owns a GDSBackend and calls its object interface. Each backend
-prepares its own slab and shares its native driver session with peer instances.
+The manager opens its slab before GPU cache contexts register staging buffers.
+Transfers resolve the context from the memory object's owner, and manager
+shutdown drains submissions before closing the slab. One slab per process is
+supported because native stream registration is process-wide. Unowned legacy
+objects retain the separately initialized singleton path.
 
-One :class:`GDSContext` per worker process owns the slab, its GDS handle,
-the registered GPU staging buffers, and the stream-ordered GDS submissions.
-Created once at startup by :func:`initialize_gds_context`, reached via
-:func:`get_gds_context`. :meth:`GDSContext.register_gpu_buffer` registers a
-staging buffer; :meth:`GDSContext.transfer_async` moves a chunk between that
-buffer and the slab. No POSIX fallback -- if the GDS library is unavailable,
-construction fails loudly. The slab is cleared on init, so it does not survive
-a restart (GDS L1 is treated like DRAM).
+The backend clears the slab at startup, so GDS L1 does not survive a restart.
+Construction fails if the requested GDS backend is unavailable.
 """
 
 # Standard
@@ -44,6 +41,91 @@ _MAX_GDS_REGION = 16 * 1024 * 1024
 # draining finished ones (keeps the live submission set bounded).
 _SUBMISSION_CHECKPOINT_EVERY = 64
 
+# L1 topology is established before GPU cache contexts register their buffers.
+_owner_contexts: dict[int, "GDSContext"] = {}
+_owner_contexts_lock = threading.Lock()
+
+
+def initialize_l1_gds_context(owner: int, config: GdsL1Config) -> None:
+    """Open the slab owned by an L1 before GPU staging buffers are registered.
+
+    Args:
+        owner: Process-local L1 identity stamped on its memory objects.
+        config: Slab location and backend settings.
+
+    Raises:
+        ValueError: Another GDS slab is already active in this process.
+        RuntimeError: The backend cannot initialize its slab or driver.
+        OSError: The backing storage cannot be opened.
+    """
+    with _owner_contexts_lock:
+        # cuFile stream registration is process-wide, not per slab.
+        if _owner_contexts or get_gds_context().initialized:
+            raise ValueError("Only one GDS L1 slab is supported per process")
+        context = GDSContext()
+        context.initialize(config)
+        _owner_contexts[owner] = context
+
+
+def get_l1_gds_context(owner: int | None) -> "GDSContext":
+    """Resolve an object's slab by owner; unowned legacy objects use the singleton.
+
+    Args:
+        owner: Identity returned by MemoryObj.get_l1_manager().
+
+    Returns:
+        The owning slab context.
+
+    Raises:
+        ValueError: A tagged object has no registered GDS owner.
+    """
+    if owner is None:
+        return get_gds_context()
+    with _owner_contexts_lock:
+        if owner not in _owner_contexts:
+            raise ValueError(f"Unknown GDS L1 owner: {owner}")
+        return _owner_contexts[owner]
+
+
+def close_l1_gds_context(owner: int) -> None:
+    """Drain and close an L1's slab before unregistering its owner.
+
+    Args:
+        owner: Process-local L1 identity. Repeated closes are harmless.
+
+    Raises:
+        RuntimeError: Device synchronization fails; the context remains registered.
+    """
+    with _owner_contexts_lock:
+        entry = _owner_contexts.get(owner)
+        if entry is not None:
+            entry.close()
+            del _owner_contexts[owner]
+
+
+def register_gds_gpu_buffer(buffer: torch.Tensor) -> None:
+    """Register a GPU staging buffer with each live slab on its current stream.
+
+    Args:
+        buffer: Contiguous, aligned staging buffer, after L1 initialization.
+    """
+    with _owner_contexts_lock:
+        contexts = [get_gds_context(), *_owner_contexts.values()]
+    for context in contexts:
+        context.register_gpu_buffer(buffer)
+
+
+def deregister_gds_gpu_buffer(buffer: torch.Tensor) -> None:
+    """Drain and unregister a staging buffer from every slab before freeing it.
+
+    Args:
+        buffer: Buffer previously passed to register_gds_gpu_buffer.
+    """
+    with _owner_contexts_lock:
+        contexts = [get_gds_context(), *_owner_contexts.values()]
+    for context in contexts:
+        context.deregister_gpu_buffer(buffer)
+
 
 class SlabDirection(enum.Enum):
     """Direction of a GDS slab transfer. GPUDirect DMAs run straight between GPU
@@ -73,9 +155,8 @@ class _StreamSubmissions:
 class GDSContext:
     """Per-process GDS context owning the slab file and its DMA path.
 
-    The singleton always exists but is inert until :meth:`initialize` creates
-    the slab and registers the GDS handle (flipping :attr:`initialized`).
-    While off, ``register_gpu_buffer`` is a no-op.
+    A context stays inert until :meth:`initialize` opens the slab and registers
+    its GDS handle. While off, ``register_gpu_buffer`` is a no-op.
     """
 
     #: Whether :meth:`initialize` has completed (GDS L1 is active).
@@ -166,13 +247,34 @@ class GDSContext:
         buf = buffer.view(torch.uint8)
         nbytes = buf.numel()
         with self._registry_lock:
-            if raw_stream not in self._registered_streams:
-                self.backend.register_stream(raw_stream)
-                self._registered_streams.add(raw_stream)
-            for start in range(0, nbytes, _MAX_GDS_REGION):
-                self._register_region_locked(
-                    buf[start : min(start + _MAX_GDS_REGION, nbytes)]
-                )
+            stream_registered = False
+            registered_regions: list[torch.Tensor] = []
+            try:
+                if raw_stream not in self._registered_streams:
+                    self.backend.register_stream(raw_stream)
+                    self._registered_streams.add(raw_stream)
+                    stream_registered = True
+                for start in range(0, nbytes, _MAX_GDS_REGION):
+                    region = buf[start : min(start + _MAX_GDS_REGION, nbytes)]
+                    self._register_region_locked(region)
+                    registered_regions.append(region)
+            except BaseException:
+                for region in reversed(registered_regions):
+                    try:
+                        self._deregister_region_locked(region)
+                    except Exception:
+                        logger.exception(
+                            "GDSContext: failed to roll back buffer registration"
+                        )
+                if stream_registered:
+                    try:
+                        self.backend.deregister_stream(raw_stream)
+                    except Exception:
+                        logger.exception(
+                            "GDSContext: failed to roll back stream registration"
+                        )
+                    self._registered_streams.discard(raw_stream)
+                raise
 
     def deregister_gpu_buffer(self, buffer: torch.Tensor) -> None:
         """Reverse of :meth:`register_gpu_buffer`: deregister its regions + stream.
@@ -314,6 +416,10 @@ class GDSContext:
         """
         base = buffer.data_ptr()
         idx = bisect.bisect_left(self._base_ptrs, base)
+        if idx >= len(self._base_ptrs) or self._base_ptrs[idx] != base:
+            raise ValueError(
+                f"GDS buffer at 0x{base:x} is not registered by this context"
+            )
         try:
             self.backend.deregister_buffer(self._buffers[idx])
         except Exception as e:
@@ -335,9 +441,13 @@ class GDSContext:
         # lists mid-lookup.
         with self._registry_lock:
             idx = bisect.bisect_right(self._base_ptrs, ptr) - 1
+            if idx < 0:
+                raise ValueError(f"GDS buffer at 0x{ptr:x} is not registered")
             base = self._base_ptrs[idx]
             nbytes = self._nbytes[idx]
         offset = ptr - base
+        if offset >= nbytes:
+            raise ValueError(f"GDS buffer at 0x{ptr:x} is not registered")
         return base, offset, nbytes
 
     def _slab_read(
@@ -424,5 +534,8 @@ def initialize_gds_context(config: Optional[GdsL1Config]) -> GDSContext:
     """
     context = get_gds_context()
     if config is not None:
-        context.initialize(config)
+        with _owner_contexts_lock:
+            if _owner_contexts:
+                raise ValueError("Only one GDS L1 slab is supported per process")
+            context.initialize(config)
     return context

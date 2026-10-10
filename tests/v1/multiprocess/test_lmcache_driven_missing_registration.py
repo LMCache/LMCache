@@ -52,7 +52,10 @@ class _CountingStorageManager:
             self.readers[key] += read_locks
 
     def finish_read_prefetched(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        l1_owners: dict[ObjectKey, int] | None = None,
     ) -> None:
         self.finish_calls.append((list(keys), read_locks))
         for key in keys:
@@ -139,6 +142,7 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
         "failed-retrieve cleanup must use the lookup session's layout"
     )
     ctx = SimpleNamespace(
+        get_read_owners=lambda request_id: None,
         chunk_size=hasher.chunk_size,
         token_hasher=hasher,
         session_manager=sessions,

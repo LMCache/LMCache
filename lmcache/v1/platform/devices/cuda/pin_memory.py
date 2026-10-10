@@ -2,8 +2,10 @@
 """CUDA memory pinning: try torch cudart first, then libcudart via ctypes."""
 
 # Standard
+from collections.abc import Callable
 import ctypes
 import ctypes.util
+import functools
 
 # First Party
 from lmcache.logging import init_logger
@@ -117,12 +119,13 @@ class CudaPinMemoryBackend(PinMemoryBackend):
                 into the device address space.
 
         Returns:
-            True if ``cudaHostRegister`` succeeded, False otherwise.
+            True if ``cudaHostRegister`` succeeded, False otherwise. A
+            failure leaves no CUDA error pending in the calling thread.
         """
         try:
             if self._cudart is not None:
                 err = self._cudart.cudaHostRegister(ptr, size, flags)
-                return int(err) == 0
+                return self._succeeded(int(err))
 
             if self._libcudart is not None:
                 err = self._libcudart.cudaHostRegister(
@@ -130,7 +133,7 @@ class CudaPinMemoryBackend(PinMemoryBackend):
                     ctypes.c_size_t(size),
                     ctypes.c_uint(flags),
                 )
-                return err == 0
+                return self._succeeded(err)
         except Exception as exc:
             logger.warning(
                 "cudaHostRegister failed for ptr=%#x size=%d: %s", ptr, size, exc
@@ -150,11 +153,11 @@ class CudaPinMemoryBackend(PinMemoryBackend):
         try:
             if self._cudart is not None:
                 err = self._cudart.cudaHostUnregister(ptr)
-                return int(err) == 0
+                return self._succeeded(int(err))
 
             if self._libcudart is not None:
                 err = self._libcudart.cudaHostUnregister(ctypes.c_void_p(ptr))
-                return err == 0
+                return self._succeeded(err)
         except Exception as exc:
             logger.warning("cudaHostUnregister failed for ptr=%#x: %s", ptr, exc)
 
@@ -169,3 +172,60 @@ class CudaPinMemoryBackend(PinMemoryBackend):
             available, False otherwise.
         """
         return self._cudart is not None or self._libcudart is not None
+
+    def _succeeded(self, err: int) -> bool:
+        """Return whether a runtime call succeeded, consuming its error.
+
+        CUDA-compatible runtimes keep a failed call's error pending in the
+        calling thread until their last-error function reads it. Without
+        consuming it here, torch can report the handled registration failure
+        after the thread's next kernel launch.
+
+        Args:
+            err: The runtime error code returned by the registration call.
+
+        Returns:
+            True when the call succeeded, otherwise False.
+        """
+        if err != 0:
+            get_last_error = self._load_get_last_error()
+            if get_last_error is not None:
+                get_last_error()
+        return err == 0
+
+    @staticmethod
+    @functools.cache
+    def _load_get_last_error() -> Callable[[], int] | None:
+        """Bind ``cudaGetLastError`` from the CUDA runtime torch loaded.
+
+        ``dlopen`` by soname returns a library that is already loaded, so the
+        binding reaches the runtime instance torch checks after kernel
+        launches. The soname matching torch's CUDA version comes first because
+        pip installs usually keep ``libcudart`` out of the linker cache.
+
+        Returns:
+            The bound ``cudaGetLastError`` function, or ``None`` when no CUDA
+            runtime library can be loaded.
+        """
+        names = []
+        try:
+            # Third Party
+            import torch
+
+            if torch.version.cuda:
+                names.append(f"libcudart.so.{torch.version.cuda.split('.')[0]}")
+        except ImportError:
+            pass
+        names.append(ctypes.util.find_library("cudart") or "libcudart.so")
+        for name in names:
+            try:
+                get_last_error = ctypes.CDLL(name).cudaGetLastError
+            except (AttributeError, OSError):
+                continue
+            get_last_error.restype = ctypes.c_int
+            get_last_error.argtypes = []
+            return get_last_error
+        logger.debug(
+            "CudaPinMemoryBackend: cannot bind cudaGetLastError from %s", names
+        )
+        return None

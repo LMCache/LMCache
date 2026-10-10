@@ -22,6 +22,10 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.protocols.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
+)
 from lmcache.v1.multiprocess.rpc import rpc_method
 
 
@@ -177,6 +181,7 @@ class RequestClient(Protocol):
         group_to_cache: list[int],
         group_rot: list[list[int]],
         group_head_size: list[int],
+        kv_quant: str = "",
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -196,6 +201,14 @@ class RequestClient(Protocol):
     def cb_unified_lookup(
         self, key: IPCCacheServerKey, tp_size: int
     ) -> MessagingFuture[CBUnifiedLookupResult | None]: ...
+
+    @rpc_method
+    def cb_reorder_plan(
+        self,
+        key: IPCCacheServerKey,
+        keep_prefix: int,
+        budget_ms: int,
+    ) -> MessagingFuture[list[int]]: ...
 
     @rpc_method
     def cb_protocol_handshake(
@@ -220,6 +233,12 @@ class RequestClient(Protocol):
     @rpc_method
     def get_experimental(self) -> MessagingFuture[list[str]]: ...
 
+    @rpc_method
+    def server_module_call(
+        self, request: ServerModuleCallRequest
+    ) -> MessagingFuture[ServerModuleCallResponse]: ...
+
+    # Deprecated alias (#4878), frozen: new params go on cb_register_rope.
     def cb_register_rope_v3(
         self,
         instance_id: int,
