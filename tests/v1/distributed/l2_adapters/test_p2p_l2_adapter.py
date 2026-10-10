@@ -304,13 +304,54 @@ def test_load_deadline_expired_yields_failure():
     with _adapter(load_timeout_s=0.01) as (adapter, _mq, _tc_ctx, tc_client, _notifier):
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
         tc_client.submit_read.return_value = 1
+        tc_client.query_read_status.return_value = TransferChannelReadResult(
+            finished=False
+        )
         task_id = adapter.submit_load_task(
             keys, [MagicMock(shm_offset=0, shm_byte_length=10)]
         )
         time.sleep(0.02)
         bitmap = adapter.query_load_result(task_id)
+        tc_client.query_read_status.assert_called_once_with(1)
         assert bitmap is not None
         assert bitmap.popcount() == 0
+
+
+def test_load_finished_read_is_reported_when_poll_lands_after_deadline():
+    keys = [_key(0), _key(1)]
+    addresses = [
+        TransferChannelAddress(offset=100, size=10),
+        TransferChannelAddress(offset=200, size=20),
+    ]
+    with _adapter(load_timeout_s=0.01) as (adapter, req_client, _tc_ctx, tc_client, _n):
+        # Learn the remote addresses through the public lookup flow.
+        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=42)
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(value=addresses)
+        lookup_id = adapter.submit_lookup_and_lock_task(keys, {0: _LAYOUT})
+        assert adapter.query_lookup_and_lock_result(lookup_id) is not None
+
+        tc_client.submit_read.return_value = 7
+        tc_client.query_read_status.return_value = TransferChannelReadResult(
+            finished=True, succeeded_mask=[True, False]
+        )
+        task_id = adapter.submit_load_task(
+            keys,
+            [
+                MagicMock(shm_offset=0, shm_byte_length=10),
+                MagicMock(shm_offset=10, shm_byte_length=20),
+            ],
+        )
+        time.sleep(0.02)  # the poll lands after the 0.01 s load deadline
+
+        bitmap = adapter.query_load_result(task_id)
+
+        tc_client.query_read_status.assert_called_once_with(7)
+        assert bitmap is not None
+        assert bitmap.test(0) is True
+        assert bitmap.test(1) is False
+        # The result is delivered once; the task is gone afterwards.
+        assert adapter.query_load_result(task_id) is None
+        tc_client.query_read_status.assert_called_once_with(7)
 
 
 # ---------------------------------------------------------------------------

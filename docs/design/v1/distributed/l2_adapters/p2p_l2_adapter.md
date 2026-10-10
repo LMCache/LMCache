@@ -66,9 +66,14 @@ next pulse), addresses mean ready.
 
 P2P is error-prone, so both queries are bounded by a per-task deadline
 (`lookup_timeout_s` / `load_timeout_s`). A lookup past its deadline returns an
-all-zero `Bitmap` (treated as a miss); a load past its deadline returns an
-all-zero `Bitmap` (treated as a failure). The prefetch controller then trims
-those keys as if the peer never had them.
+all-zero `Bitmap` (treated as a miss); a load whose read is still in flight past
+its deadline returns an all-zero `Bitmap` (treated as a failure). The prefetch
+controller then trims those keys as if the peer never had them.
+
+The load deadline only applies to a read that has not finished. Each load query
+asks the transfer channel first, so a read that already reached a terminal state
+is reported with its actual per-key result even when the poll lands after the
+deadline.
 
 ## No store / no eviction
 
