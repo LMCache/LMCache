@@ -469,6 +469,34 @@ def test_source_storage_failure_releases_peers_before_propagating(
         assert future.result().all()
 
 
+def test_multi_rank_engine_requires_an_agreement_callback() -> None:
+    group = FakeTensorParallelGroup(1)
+    config = LMCacheEngineConfig.from_defaults(
+        chunk_size=CHUNK_TOKENS,
+        retrieve_buffer_size=TWO_CHUNK_BUDGET,
+        py_enable_gc=True,
+    )
+    metadata = LMCacheMetadata(
+        model_name="test",
+        world_size=2,
+        local_world_size=2,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.float32,
+        kv_shape=(2, 1, CHUNK_TOKENS, 1, 3),
+        use_mla=True,
+    )
+    with pytest.raises(ValueError, match="all_ranks_agree_fn"):
+        LMCacheEngine(
+            config,
+            metadata,
+            MagicMock(spec=TokenDatabase),
+            RecordingConnector(),
+            partial(group.broadcast, 0),
+            partial(group.broadcast_object, 0),
+        )
+
+
 def test_budget_smaller_than_one_chunk_is_rejected_at_init() -> None:
     group = FakeTensorParallelGroup(1)
     with pytest.raises(ValueError, match="at least one KV chunk"):

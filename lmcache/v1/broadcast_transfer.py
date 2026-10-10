@@ -129,8 +129,9 @@ def plan_windows(
 ) -> Iterator[Sequence[StagedChunk]]:
     """Split token-ordered chunks into runs whose packed layout fits ``capacity``.
 
-    A chunk larger than ``capacity`` forms a window of its own; the caller must
-    then grow its staging buffer to that window's ``num_bytes``.
+    A chunk larger than ``capacity`` forms a window of its own whose
+    ``num_bytes`` exceeds ``capacity``; the caller rejects such a window, since
+    the staging buffer never grows.
 
     Args:
         chunks: Chunks in token order.

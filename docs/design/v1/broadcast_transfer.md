@@ -170,6 +170,8 @@ adds `retrieve_buffer_size` of resident memory.
 - A connector that writes from several streams should override
   `synchronize_load()` to fence all of them.
 - A new integration needs the two broadcast callbacks and, for more than one
-  rank, `all_ranks_agree_fn`; without the latter the engine gathers votes with
-  one object broadcast per rank. It must call `retrieve` in the same order on
-  every rank of the group, which the collectives require anyway.
+  rank, `all_ranks_agree_fn` (the engine refuses to start without it). The
+  object-broadcast callback cannot stand in: it addresses the integration's
+  group by that group's own rank space, not by `worker_id`. The integration
+  must call `retrieve` in the same order on every rank of the group, which
+  the collectives require anyway.

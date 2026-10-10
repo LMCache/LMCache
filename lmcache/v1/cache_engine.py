@@ -139,6 +139,14 @@ class LMCacheEngine:
                 if hasattr(self.gpu_connector, "load_stream")
                 else torch_dev.Stream()
             )
+            if metadata.world_size > 1 and all_ranks_agree_fn is None:
+                # Votes must travel over the integration's own host group; the
+                # object-broadcast callback addresses that group by its own
+                # rank space, not by worker_id, so it cannot stand in.
+                raise ValueError(
+                    "save_only_first_rank retrieval across ranks requires "
+                    "all_ranks_agree_fn"
+                )
             chunk_bytes = self._chunk_bytes()
             if config.retrieve_buffer_size < chunk_bytes:
                 raise ValueError(
@@ -1656,9 +1664,10 @@ class LMCacheEngine:
         except Exception as e:
             logger.error("Error popping event for request %s: %s", kwargs["req_id"], e)
             return [], 0
-        # This retrieval now owns every prefetched reference and releases the
-        # ones it uses. Drop the event so a later lookup_unpin cannot release
-        # the same objects a second time.
+        # This retrieval now owns every prefetched reference together with
+        # its prefetch pin. Drop the event so a later lookup_unpin cannot
+        # release the same objects a second time; from here on, every object
+        # this method does not hand out must be released here.
         self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
 
         for backend_results in keyed_memory_objs:
@@ -1667,28 +1676,47 @@ class LMCacheEngine:
 
         # TODO(Jiayi): hashing inside `process_tokens` can be skipped.
         used_keys: set[CacheEngineKey] = set()
-        for start, end, key in self.token_database.process_tokens(
-            tokens=tokens,
-            mask=mask,
-            request_configs=request_configs,
-        ):
-            assert isinstance(key, CacheEngineKey)
-            memory_obj = memory_obj_map.get(key)
-            if memory_obj is None:
-                # returned chunks are expected to be contiguous.
-                # break at the first missing chunk.
-                break
-            chunks.append((key, memory_obj, start, end))
-            tot_kv_size += memory_obj.get_size()
-            ret_mask[start:end] = True
-            used_keys.add(key)
+        try:
+            for start, end, key in self.token_database.process_tokens(
+                tokens=tokens,
+                mask=mask,
+                request_configs=request_configs,
+            ):
+                assert isinstance(key, CacheEngineKey)
+                memory_obj = memory_obj_map.get(key)
+                if memory_obj is None:
+                    # returned chunks are expected to be contiguous.
+                    # break at the first missing chunk.
+                    break
+                chunks.append((key, memory_obj, start, end))
+                tot_kv_size += memory_obj.get_size()
+                ret_mask[start:end] = True
+                used_keys.add(key)
+        except BaseException:
+            # The caller never receives these chunks and the event is gone.
+            for memory_obj in memory_obj_map.values():
+                self._release_prefetched(memory_obj)
+            raise
 
-        # NOTE: free the memory objects that are not hit.
-        for key, mem_obj in memory_obj_map.items():
+        # Objects the mask skipped or that follow the first miss stay with
+        # the cache; give back the prefetch pin as well as the reference.
+        for key, memory_obj in memory_obj_map.items():
             if key not in used_keys:
-                mem_obj.ref_count_down()
+                self._release_prefetched(memory_obj)
 
         return chunks, tot_kv_size
+
+    @staticmethod
+    def _release_prefetched(memory_obj: MemoryObj) -> None:
+        """Release an async-prefetched object together with its prefetch pin.
+
+        Args:
+            memory_obj: An object returned by a completed prefetch event that
+                this retrieval will not hand to the GPU connector.
+        """
+        if memory_obj.is_pinned:
+            memory_obj.unpin()
+        memory_obj.ref_count_down()
 
     def _process_tokens_internal(
         self,
@@ -1938,7 +1966,8 @@ class LMCacheEngine:
                 writable = False
                 ret_mask[window.starts[0] :] = False
                 return
-            ret_mask[window.starts[0] : window.ends[-1]] = True
+            for start, end in zip(window.starts, window.ends, strict=True):
+                ret_mask[start:end] = True
 
         try:
             with torch_dev.stream(self.broadcast_stream):
@@ -2016,19 +2045,13 @@ class LMCacheEngine:
         Returns:
             The conjunction of all votes, identical on every rank.
         """
-        if self.all_ranks_agree_fn is not None:
-            return self.all_ranks_agree_fn(ready)
         if self.metadata.world_size == 1:
             return ready
-        # Integrations providing only object broadcasts: every rank publishes
-        # its vote in rank order, so the collective sequence stays identical.
-        votes = [
-            self.broadcast_object_fn(
-                ready if rank == self.metadata.worker_id else None, rank
+        if self.all_ranks_agree_fn is None:
+            raise RuntimeError(
+                "First-rank retrieval across ranks requires all_ranks_agree_fn"
             )
-            for rank in range(self.metadata.world_size)
-        ]
-        return all(vote is True for vote in votes)
+        return self.all_ranks_agree_fn(ready)
 
     def _disable_after_fatal_transfer_failure(self) -> None:
         """Refuse further first-rank retrievals after a device or collective error.
@@ -2273,16 +2296,17 @@ class LMCacheEngineBuilder:
             gpu_connector: Destination KV writer, or None for a scheduler.
             broadcast_fn: Tensor broadcast callback accepting a source rank.
             broadcast_object_fn: Host metadata broadcast returning the source object.
-            all_ranks_agree_fn: Optional host collective returning True only when
-                every retrieval rank voted True. Without it, votes are gathered
-                with object broadcasts over the metadata's world-size rank space.
+            all_ranks_agree_fn: Host collective returning True only when every
+                retrieval rank voted True. Required for first-rank retrieval
+                when the metadata's world size is greater than one.
 
         Returns:
             The existing compatible engine or a newly initialized engine.
 
         Raises:
             ValueError: If an existing engine has a different configuration or
-                metadata, or the retrieval budget cannot hold one KV chunk.
+                metadata, the retrieval budget cannot hold one KV chunk, or a
+                multi-rank first-rank retrieval has no agreement callback.
         """
         logger.info("Creating LMCacheEngine instance %s", instance_id)
         if instance_id not in cls._instances:

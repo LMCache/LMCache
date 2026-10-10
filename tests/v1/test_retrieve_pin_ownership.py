@@ -553,6 +553,45 @@ def test_async_cleanup_releases_one_prefetch_pin(
     assert "is negative" not in caplog.text
 
 
+def test_async_retrieve_releases_pins_of_skipped_prefetched_chunks(
+    cache_case: _CacheCase, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Prefetched chunks the mask skips give back their pin, not only their ref.
+
+    Consuming the LOADING event makes this retrieval the last owner of every
+    prefetched object, so a chunk vLLM already holds must still be unpinned
+    here; lookup_unpin() can no longer reach it.
+
+    Args:
+        cache_case: Three CPU objects returned through a real completed event.
+        caplog: Captures double-unpin and double-free warnings.
+    """
+    engine = cache_case.engine
+    engine.async_loading = True
+    caplog.set_level(logging.WARNING, logger="lmcache")
+    for key in cache_case.keys:
+        assert cache_case.backend.pin(key)
+    prefetched = asyncio.run(
+        cache_case.backend.batched_get_non_blocking("A", cache_case.keys)
+    )
+    _assert_counts(prefetched, [1, 1, 1], refs=2)
+    _complete_prefetch(engine, list(zip(cache_case.keys, prefetched, strict=True)))
+
+    mask = torch.tensor([False] * CHUNK_SIZE + [True] * (2 * CHUNK_SIZE))
+    assert engine.retrieve(cache_case.tokens, mask=mask, req_id="A").tolist() == (
+        [False] * CHUNK_SIZE + [True] * (2 * CHUNK_SIZE)
+    )
+    engine.lookup_unpin("A")
+
+    _assert_counts(cache_case.memory_objs, [0, 0, 0])
+    assert all(obj.can_evict for obj in cache_case.memory_objs)
+    assert engine.event_manager.get_event_status(EventType.LOADING, "A") == (
+        EventStatus.NOT_FOUND
+    )
+    assert "Double unpin" not in caplog.text
+    assert "is negative" not in caplog.text
+
+
 @pytest.mark.parametrize("received_pins", [0, 1])
 def test_passive_retrieve_touches_no_cache_objects(
     cache_case: _CacheCase, received_pins: int

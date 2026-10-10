@@ -93,9 +93,9 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": 64 * 1024 * 1024,
         "env_converter": int,
         "description": (
-            "Device staging budget in bytes for non-layerwise first-rank KV "
-            "retrieval. Reserved at engine initialization and shared by engines "
-            "on the same local device in this process. Must be positive."
+            "Device staging buffer in bytes for non-layerwise first-rank KV "
+            "retrieval. One buffer of this size is reserved per engine at "
+            "initialization and never grows; it must hold at least one KV chunk."
         ),
     },
     "local_cpu": {

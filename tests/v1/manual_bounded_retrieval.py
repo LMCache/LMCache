@@ -294,7 +294,17 @@ def run_case(
         # A failed window is written but not committed, so written >= committed.
         written = max(connector.written_until, committed)
         check_pages(pages, slots, expected, committed, written)
-        assert all(source.get_ref_count() == 0 for source in sources)
+        # Only the first rank hands sources to the engine, and a chunk that
+        # storage reported missing was never handed out at all. Everything the
+        # engine took it released; the rest is still the script's reference.
+        expected_refs = [
+            1 if rank != 0 or (failure == "read" and index == 2) else 0
+            for index in range(len(sources))
+        ]
+        assert [source.get_ref_count() for source in sources] == expected_refs
+        for source in sources:
+            if source.get_ref_count():
+                source.ref_count_down()
         assert extra_peak <= budget, (extra_peak, budget)
 
         if failure != "none":

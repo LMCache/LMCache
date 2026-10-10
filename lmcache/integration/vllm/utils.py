@@ -235,7 +235,7 @@ def lmcache_get_or_create_config(
                         )
     if vllm_config is not None and vllm_config.kv_transfer_config is not None:
         with _config_lock:
-            extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+            extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
             for key, value in extra.items():
                 if key.startswith("lmcache."):
                     config_key = key.removeprefix("lmcache.")
@@ -290,10 +290,15 @@ def validate_retrieval_memory_budget(vllm_config: "VllmConfig") -> None:
         vllm_config.cache_config, "kv_cache_memory_bytes", None
     ):
         return
-    # Third Party
-    from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
-
-    reserve = getattr(KVConnectorFactory, "get_required_device_memory", None)
+    try:
+        # Third Party
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
+        )
+    except ImportError:
+        reserve = None
+    else:
+        reserve = getattr(KVConnectorFactory, "get_required_device_memory", None)
     if reserve is None or reserve(vllm_config) < required:
         logger.warning(
             "retrieve_buffer_size=%d bytes of first-rank retrieval staging are not "
