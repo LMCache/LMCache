@@ -14,6 +14,7 @@ import uuid
 import grpc
 
 # First Party
+from lmcache.v1.mp_observability.propagation import capture_trace_context
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
@@ -142,7 +143,7 @@ class GrpcMultiprocessClient(RequestClient):
         future: MessagingFuture[Any] = MessagingFuture()
         call = rpc.stub_method.future(
             request,
-            metadata=self._metadata,
+            metadata=self._metadata + tuple(capture_trace_context().items()),
             wait_for_ready=True,
         )
 

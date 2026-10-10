@@ -48,7 +48,21 @@ class Event:
     timestamp: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
     session_id: str = ""
+    trace_context: dict[str, str] = field(default_factory=capture_trace_context)
 ```
+
+### Request parent snapshot
+
+`Event.trace_context` stores an optional W3C carrier captured on the publishing
+thread when the event is constructed. It is independent of `metadata`, so
+tracing subscribers can attach the request's parent without exporting headers
+as attributes. Only `traceparent` and `tracestate` are carried. Capture and
+remote extraction require `LMCACHE_MP_TRACE_CONTEXT=1`; the default is off.
+
+The MP request span is created from the first request or CPU submission event.
+This retains the parent even when subsequent GPU callback events have no
+Python context. CacheBlend's request span uses the same snapshot. Existing
+providers and samplers decide which spans are recorded.
 
 ### Timestamp semantics
 

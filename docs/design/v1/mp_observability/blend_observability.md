@@ -166,17 +166,24 @@ pointed at the same OTLP endpoint as the LMCache server. Gate on a single
 
 ## 5. Unification — linking the three processes
 
-The blocker (from the surface map): **the RPC envelope carries no trace-context**
-— `IPCCacheServerKey` and `CBUnifiedLookupResult` have no `traceparent` field. Two
-ways to bridge:
+With `LMCACHE_MP_TRACE_CONTEXT=1` in both processes, the shared MP transports
+carry W3C `traceparent` and `tracestate`: ZMQ uses the optional
+`IPCCacheServerKey.trace_context` field, and gRPC uses per-call metadata. Events
+snapshot the executing handler's context, and the existing `cb.request` root
+uses that snapshot. Cache identity, affinity, and provider sampling are unchanged.
+The submitting plugin must have an active OTel span; this transport feature does
+not configure plugin tracing. L2 background queues remain a separate boundary.
+
+The original design options below explain the choice of a cross-process link.
+The implementation uses Option A with a dictionary carrier and a request root.
 
 **Option A — propagate W3C trace-context through the RPC (recommended).**
-Add an optional `trace_context: str | None` (W3C `traceparent`) to the CB RPC
-payloads (the lookup key + the retrieve args). The scheduler/worker **inject**
-the current span's context; the server **extracts** it and starts `cb.lookup` /
-`cb.retrieve` as remote children of it. Result: a *true* parent→child distributed
-trace across processes. Cost: one optional protocol field (backward-compatible —
-`None` when tracing off), an `inject`/`extract` at the two RPC boundaries.
+Use optional `trace_context: dict[str, str] | None` on keyed ZMQ requests and
+per-call metadata on gRPC requests. The caller **injects** `traceparent` and
+`tracestate`; the server **extracts** them before executing the handler.
+The EventBus creates `cb.request` as the remote child and nests CB operation
+spans beneath it. Old keyed payloads decode with `None`; when the switch is off,
+the existing ambient-context behavior remains unchanged.
 
 **Option B — deterministic trace-id from `request_id` (zero protocol change).**
 Both sides derive a 128-bit trace-id `= hash(request_id)` and tag every span with
@@ -209,8 +216,9 @@ each side; Option A only adds the *cross*-process edge.
    `CB_FINGERPRINTS_REGISTERED`, the real `no_gpu_context` flag, the
    read-failure `CB_RETRIEVE_END`, and `CB_RETRIEVE_NOOP` are now emitted on the
    V3 path.
-3. **Cross-process link** — add the optional `trace_context` RPC field; inject on
-   the plugin side, extract on the server side. (both repos, in lockstep)
+3. **Cross-process link** — **transport support implemented** with the opt-in
+   W3C key/metadata and Event parent snapshot. Plugin tracer setup remains
+   required on the submitting side.
 4. **Dashboards** — one trace view + the `lmcache_blend.*` / plugin latency metrics
    aligned on `request_id`.
 

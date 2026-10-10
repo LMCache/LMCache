@@ -3,7 +3,8 @@
 
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any, Callable, Generic, TypeVar, get_type_hints
 import enum
 import inspect
@@ -18,9 +19,14 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.mp_observability.propagation import (
+    capture_trace_context,
+    run_with_trace_context,
+)
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
     DeviceIPCWrapper,
+    IPCCacheServerKey,
     get_customized_decoder,
     get_customized_encoder,
 )
@@ -64,6 +70,36 @@ def unwrap_request_payloads(
         for payload, cls in zip(b_payloads, payload_clss, strict=False)
     ]
     return decoded_payloads
+
+
+def invoke_request_handler(
+    handler: Callable[..., T], decoded_payloads: list[object]
+) -> T:
+    """Execute a decoded request under its optional key's W3C context.
+
+    When propagation is enabled, requests without a key run under an empty
+    context so pooled threads do not inherit another request. Disabling
+    propagation preserves the handler's existing ambient context.
+
+    Args:
+        handler: Synchronous request handler to execute in the worker.
+        decoded_payloads: Positional request arguments decoded from the wire.
+
+    Returns:
+        The handler's original result.
+
+    Raises:
+        BaseException: Any exception raised by the handler, unchanged.
+    """
+    carrier = next(
+        (
+            payload.trace_context
+            for payload in decoded_payloads
+            if isinstance(payload, IPCCacheServerKey)
+        ),
+        None,
+    )
+    return run_with_trace_context(carrier, handler, *decoded_payloads)
 
 
 _SPECIAL_ENCODER_DECODERS = {
@@ -408,7 +444,12 @@ class MessageQueueClient:
                 request_uid=request_uid,
                 future=future,
                 rpc_spec=rpc_spec,
-                request_payloads=request_payloads,
+                request_payloads=[
+                    replace(payload, trace_context=capture_trace_context() or None)
+                    if isinstance(payload, IPCCacheServerKey)
+                    else payload
+                    for payload in request_payloads
+                ],
             )
         )
         self._polling_loop.notify()
@@ -451,7 +492,9 @@ class SyncRequestHandler(RequestHandlerBase[ResponseType]):
         self.handler = handler
 
     def __call__(self, payloads: list[bytes]) -> ResponseType:
-        return self.handler(*unwrap_request_payloads(payloads, self.payload_clss))
+        return invoke_request_handler(
+            self.handler, unwrap_request_payloads(payloads, self.payload_clss)
+        )
 
     def get_response_class(self) -> ResponseType:
         return self.response_cls
@@ -489,11 +532,10 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
             "Call add_normal_thread_pool or add_affinity_thread_pool first."
         )
         decoded_payloads = unwrap_request_payloads(payloads, self.payload_clss)
+        invoke = partial(invoke_request_handler, self.handler, decoded_payloads)
         if isinstance(self.executor, AffinityThreadPool):
-            return self.executor.submit(
-                self.handler, *decoded_payloads, affinity_key=affinity_key
-            )
-        return self.executor.submit(self.handler, *decoded_payloads)
+            return self.executor.submit(invoke, affinity_key=affinity_key)
+        return self.executor.submit(invoke)
 
     def get_response_class(self) -> ResponseType:
         return self.response_cls

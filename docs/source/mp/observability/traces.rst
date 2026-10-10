@@ -32,6 +32,50 @@ View traces in any OTel-compatible backend such as **Jaeger** or
         --l1-size-gb 100 --eviction-policy LRU \
         --enable-tracing --otlp-endpoint http://localhost:4317
 
+Propagate a caller trace over RPC
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Set ``LMCACHE_MP_TRACE_CONTEXT=1`` in both the caller and MP server processes.
+Keep the server's existing ``--enable-tracing --otlp-endpoint <URL>`` flags.
+The caller needs an active OpenTelemetry span when it submits a request that
+contains an ``IPCCacheServerKey``.
+
+The client copies only W3C ``traceparent`` and ``tracestate`` into the request
+key. The server restores that parent in the executing worker and restores the
+previous context when the handler returns or raises. The request key's cache
+identity and the original caller object remain unchanged. Existing key maps
+without headers still decode; older map decoders ignore the extra field.
+
+Events capture the parent before the EventBus drain thread or an asynchronous
+GPU callback runs. The standard MP subscriber's existing ``request`` span uses this
+snapshot; LMCache does not install another tracer provider or change the
+provider's sampling policy. Invalid headers and values longer than 512
+characters are ignored. Headers are separate from event metadata and are not
+exported as attributes. Prompt content, token values, and baggage are not
+carried by this feature.
+
+gRPC sends the same headers in per-call metadata. This also covers calls
+without a cache key, such as ``end_session``. The server restores context
+inside the synchronous, normal-pool, or affinity-pool handler. It keeps the
+existing affinity identifier and worker scheduling rules. Missing or invalid
+headers use an isolated context when propagation is enabled.
+
+The propagation switch is off by default. This boundary covers keyed ZMQ
+requests, gRPC metadata, and CPU event submission, including CacheBlend request
+root spans. L2 prefetch keeps each caller's context across lookup and load
+scheduling. A shared L2 store batch uses ``mp.l2.store.schedule`` with links to
+its contributing writers; it does not select one writer as the batch parent.
+Native storage backends remain a separate boundary.
+
+The store span measures synchronous scheduling only, not completion of backend
+I/O. Writer snapshots are bounded to 10,000 keys and eight contexts per key.
+Each scheduling span carries at most 128 distinct links. Evicted or truncated
+contexts lose only trace attribution; cache keys and writes are retained.
+An entirely unsampled batch uses an independent, unsampled context rather than
+a new scheduling span. This keeps child spans unsampled with a parent-based
+sampler. Existing L2 subscribers do not create I/O spans from event snapshots;
+this change does not trace asynchronous backend completion.
+
 Per-Request Hit-Rate Attributes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
