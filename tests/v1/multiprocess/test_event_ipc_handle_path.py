@@ -76,6 +76,13 @@ class _FakeStorageManager:
     def finish_write(self, keys: list[object]) -> None:
         return None
 
+    def abort_write(self, keys: list[object]) -> dict[object, object]:
+        return {}
+
+    def abort_write_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
+        """Accept the owner-tagged rollback registered by the transfer module."""
+        return None
+
     def finish_write_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
         """Accept the owner-tagged callback registered by the transfer module."""
         return None
@@ -86,11 +93,11 @@ class _FakeStorageManager:
     def finish_read_prefetched(self, keys: list[object]) -> None:
         return None
 
-    def reserve_write(
+    def reserve_write_with_status(
         self,
         keys: list[object],
         layout: object,
-    ) -> dict[object, object]:
+    ) -> dict[object, tuple[object, object | None]]:
         return {}
 
     def prepare_read_completion(self, keys, l1_owners=None):

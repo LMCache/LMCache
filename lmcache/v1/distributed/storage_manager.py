@@ -310,49 +310,65 @@ class StorageManager:
         Raises:
             Exception: Allocation exceptions propagate; they are not overflow.
         """
-        reserve_result: dict[ObjectKey, L1OperationResult] = {
-            key: (L1Error.OUT_OF_MEMORY, None) for key in keys
-        }
-        pending = keys
-        for manager in self._write_managers:
-            if not pending:
-                break
-            results = manager.reserve_write(
-                keys=pending,
-                is_temporary=[False] * len(pending),
-                layout_desc=layout_desc,
-                tag=_L1_WRITE_TAG,
-            )
-            reserve_result.update(results)
-            # Retry the failed batch subset, never individual allocations or
-            # terminal conflicts. Each candidate is visited at most once.
-            pending = [k for k in pending if results[k][0] == L1Error.OUT_OF_MEMORY]
+        reserve_result = self._reserve_write_with_status(keys, layout_desc)
+        return {k: m for k, (_, m) in reserve_result.items() if m is not None}
 
-        result = {k: m for k, (e, m) in reserve_result.items() if m is not None}
-        successful_keys = list(result.keys())
-        failed_keys = [k for k, (e, m) in reserve_result.items() if m is None]
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.SM_WRITE_RESERVED,
-                metadata={
-                    "succeeded_keys": successful_keys,
-                    "failed_keys": failed_keys,
-                },
-            )
-        )
+    @enable_tracing()
+    def reserve_write_with_status(
+        self,
+        keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
+    ) -> dict[ObjectKey, tuple[L1Error, MemoryObj | None]]:
+        """Reserve objects for writing and preserve each key's status.
 
-        oom_keys = [
-            k for k, (e, _) in reserve_result.items() if e == L1Error.OUT_OF_MEMORY
-        ]
-        if oom_keys:
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.L1_ALLOCATION_FAILED,
-                    metadata={"during": "l1_store", "keys": oom_keys},
-                )
-            )
+        Unlike :meth:`reserve_write`, this method does not discard failed
+        reservation results. Callers that require fail-closed behavior can
+        therefore distinguish an allocation failure from a skipped key.
 
-        return result
+        Args:
+            keys: Object keys to reserve for writing.
+            layout_desc: Memory layout of each requested object.
+
+        Returns:
+            A mapping from every requested key to its L1 error and optional
+            reserved memory object.
+        """
+        return self._reserve_write_with_status(keys, layout_desc)
+
+    @enable_tracing()
+    def abort_write(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
+        """Discard staged writes without publishing them to readers.
+
+        Args:
+            keys: Keys successfully returned by a preceding write reservation.
+
+        Returns:
+            A mapping from every requested key to its L1 completion status.
+
+        Raises:
+            ValueError: Multiple managers require captured owner/key groups via
+                :meth:`prepare_write_completion` and
+                :meth:`abort_write_by_owner` instead.
+        """
+        self._require_single_l1()
+        return self._l1_manager.finish_write_and_delete(keys, tag=_L1_WRITE_TAG)
+
+    def abort_write_by_owner(self, completion: L1WriteCompletion) -> None:
+        """Discard captured reservations without publishing them to readers.
+
+        Args:
+            completion: Owner/key groups captured by
+                :meth:`prepare_write_completion`.
+
+        Raises:
+            ValueError: A captured owner is no longer registered.
+        """
+        if any(owner not in self._l1_managers_by_id for owner, _ in completion):
+            raise ValueError("write completion requires a registered L1 owner")
+        for owner, keys in completion:
+            self._l1_managers_by_id[owner].finish_write_and_delete(
+                keys, tag=_L1_WRITE_TAG
+            )
 
     def finish_write(
         self,
@@ -819,6 +835,65 @@ class StorageManager:
         ever reconfigured. Later changes announce themselves.
         """
         self._publish_capacity_changed()
+
+    def _reserve_write_with_status(
+        self,
+        keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
+    ) -> dict[ObjectKey, tuple[L1Error, MemoryObj | None]]:
+        """Reserve writes and publish reservation outcome events."""
+        reserve_result: dict[ObjectKey, L1OperationResult] = {
+            key: (L1Error.OUT_OF_MEMORY, None) for key in keys
+        }
+        pending = keys
+        for manager in self._write_managers:
+            if not pending:
+                break
+            results = manager.reserve_write(
+                keys=pending,
+                is_temporary=[False] * len(pending),
+                layout_desc=layout_desc,
+                tag=_L1_WRITE_TAG,
+            )
+            reserve_result.update(results)
+            # Retry only allocation failures on the next candidate. Terminal
+            # conflicts stay attributed to the manager that reported them.
+            pending = [
+                key for key in pending if results[key][0] == L1Error.OUT_OF_MEMORY
+            ]
+
+        successful_keys = [
+            key
+            for key, (_, memory_obj) in reserve_result.items()
+            if memory_obj is not None
+        ]
+        failed_keys = [
+            k for k, (_, memory_obj) in reserve_result.items() if memory_obj is None
+        ]
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_WRITE_RESERVED,
+                metadata={
+                    "succeeded_keys": successful_keys,
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
+
+        oom_keys = [
+            key
+            for key, (error, _) in reserve_result.items()
+            if error == L1Error.OUT_OF_MEMORY
+        ]
+        if oom_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_ALLOCATION_FAILED,
+                    metadata={"during": "l1_store", "keys": oom_keys},
+                )
+            )
+
+        return reserve_result
 
     def _build_capacities(self) -> list[ModuleMemoryCapacity]:
         """Assemble one capacity entry per memory compartment.
