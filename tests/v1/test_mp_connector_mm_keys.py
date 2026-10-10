@@ -35,6 +35,9 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRequestTracker,
 )
 from lmcache.integration.vllm.utils import mm_hash_to_token_values  # noqa: E402
+from lmcache.v1.multiprocess.kv_load_policy import (  # noqa: E402
+    ENGINE_COMPUTED_TOKENS_HINT_KEY,
+)
 
 IMAGE_PLACEHOLDER_ID = 99
 pytestmark = pytest.mark.no_shared_allocator
@@ -211,6 +214,62 @@ def test_eager_prefetch_forwards_request_configs():
     assert tracker.lookup_started_at is not None
 
 
+def test_eager_prefetch_drops_client_supplied_hint():
+    """At enqueue time vLLM's prefix-cache hit is unknown, so the lookup
+    carries no engine-computed-tokens hint, not even a client-supplied one."""
+    request = _FakeRequest(
+        [1, 2, 3],
+        sampling_params_extra_args={
+            "kv_transfer_params": {
+                "lmcache.skip_save": True,
+                ENGINE_COMPUTED_TOKENS_HINT_KEY: 999,
+            },
+        },
+    )
+    tracker = LMCacheMPRequestTracker(request)
+    scheduler_adapter = MagicMock()
+    connector = SimpleNamespace(
+        role=KVConnectorRole.SCHEDULER,
+        _eager_prefetch=True,
+        _reserve_last_token_for_lookup=False,
+        scheduler_adapter=scheduler_adapter,
+        _get_or_create_request_tracker=MagicMock(return_value=tracker),
+    )
+
+    LMCacheMPConnector.on_new_request(connector, request)
+
+    assert scheduler_adapter.maybe_submit_lookup_request.call_args.kwargs[
+        "request_configs"
+    ] == {"lmcache.skip_save": True}
+
+
+def test_lookup_hint_carries_vllm_prefix_hit() -> None:
+    """The scheduler-time lookup reports vLLM's prefix-cache hit to the
+    server's load policy, overriding any client-supplied value."""
+    request = _FakeRequest(
+        list(range(128)),
+        sampling_params_extra_args={
+            "kv_transfer_params": {
+                "lmcache.skip_load": True,
+                ENGINE_COMPUTED_TOKENS_HINT_KEY: 999,
+            },
+        },
+    )
+    scheduler_adapter = MagicMock()
+    scheduler_adapter.lmcache_tokens_per_chunk = 64
+    scheduler_adapter.check_lookup_result.return_value = None
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector.request_trackers = {}
+    connector.scheduler_adapter = scheduler_adapter
+    connector._reserve_last_token_for_lookup = False
+    connector.lazy_offload = False
+
+    assert connector.get_num_new_matched_tokens(request, 16) == (None, True)
+    assert scheduler_adapter.maybe_submit_lookup_request.call_args.kwargs[
+        "request_configs"
+    ] == {"lmcache.skip_load": True, ENGINE_COMPUTED_TOKENS_HINT_KEY: 16}
+
+
 def test_recurrent_lookup_reserves_final_prompt_token() -> None:
     """A recurrent full hit stops at the preceding checkpoint boundary."""
     request = _FakeRequest(list(range(128)))
@@ -232,7 +291,7 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
         request.request_id,
         token_ids=list(range(128)),
         cache_salt="",
-        request_configs=None,
+        request_configs={ENGINE_COMPUTED_TOKENS_HINT_KEY: 0},
         reserve_last_token=True,
     )
     tracker = connector.request_trackers[request.request_id]

@@ -273,7 +273,7 @@ def stub_server_modules(monkeypatch):
     """Stub the server's module constructors. Returns the ManagementModule mock.
     The transfer modules stay real classes: _build_modules isinstance-checks
     them to pick liveness targets and the lmcache-driven module."""
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
+    monkeypatch.setattr(server_mod, "LookupModule", lambda *a, **kw: MagicMock())
     monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
     monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
     monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)

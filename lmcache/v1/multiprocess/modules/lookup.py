@@ -23,10 +23,19 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.kv_load_policy import (
+    ENGINE_COMPUTED_TOKENS_HINT_KEY,
+    DefaultKVLoadPolicy,
+    KVLoadContext,
+    KVLoadPolicy,
+)
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
+
+# Stateless, so one instance can serve every LookupModule.
+_DEFAULT_LOAD_POLICY = DefaultKVLoadPolicy({})
 
 
 def resolve_prefetched_obj_keys(
@@ -115,10 +124,17 @@ class LookupModule:
         ctx: Shared engine context providing storage manager, token hasher,
             session manager, event bus, layout descriptor registry, and
             chunk size.
+        load_policy: Decides per lookup whether to serve the request or let
+            the engine recompute it. Defaults to ``DefaultKVLoadPolicy``.
     """
 
-    def __init__(self, ctx: MPCacheServerContext) -> None:
+    def __init__(
+        self,
+        ctx: MPCacheServerContext,
+        load_policy: KVLoadPolicy = _DEFAULT_LOAD_POLICY,
+    ) -> None:
         self._ctx = ctx
+        self._load_policy = load_policy
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
         self._setup_metrics()
@@ -156,7 +172,8 @@ class LookupModule:
 
         Hashes the key, submits a prefetch task to the storage manager,
         and registers the job under ``key.request_id`` for later polling
-        via query_prefetch_status.
+        via query_prefetch_status. When the KV load policy declines the
+        request, no prefetch is submitted and the job reports zero hits.
 
         Args:
             key: Cache key with request_id embedded.
@@ -285,6 +302,43 @@ class LookupModule:
                     model_name=model_name,
                     cache_salt=key.cache_salt,
                     early_exit_reason="no_group_layout_descs",
+                )
+            )
+            return
+
+        request_configs = key.request_configs or {}
+        if not self._load_policy.should_load(
+            KVLoadContext(
+                request_id=key.request_id,
+                model_name=model_name,
+                chunk_size=self._ctx.chunk_size,
+                num_lookup_tokens=requested_tokens,
+                engine_computed_tokens=request_configs.get(
+                    ENGINE_COMPUTED_TOKENS_HINT_KEY
+                ),
+                request_configs=key.request_configs,
+            )
+        ):
+            # Report a miss without prefetching: nothing is fetched from L2
+            # and no read lock is taken, so the engine has nothing to release.
+            # requested_tokens stays non-zero so hit-rate metrics count the
+            # declined tokens as unserved.
+            self._register_prefetch_job(
+                _PrefetchJob(
+                    handle=PrefetchHandle(
+                        prefetch_request_id=-1,
+                        external_request_id=key.request_id,
+                        total_requested_keys=0,
+                        submit_time=time.monotonic(),
+                    ),
+                    row_windows=(),
+                    request_id=key.request_id,
+                    requested_tokens=requested_tokens,
+                    num_object_groups=attn_desc.num_object_groups,
+                    attn_desc=attn_desc,
+                    model_name=model_name,
+                    cache_salt=key.cache_salt,
+                    early_exit_reason="load_policy_recompute",
                 )
             )
             return

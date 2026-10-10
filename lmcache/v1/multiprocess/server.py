@@ -54,6 +54,7 @@ from lmcache.v1.multiprocess.ext_server_module import (
     build_server_module_router,
     load_server_module_components,
 )
+from lmcache.v1.multiprocess.kv_load_policy import create_kv_load_policy
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
@@ -214,7 +215,12 @@ def _build_server_components(
         ValueError: If blend engine is requested with
         supported_transfer_mode="engine_driven".
     """
-    lookup_module = LookupModule(ctx)
+    lookup_module = LookupModule(
+        ctx,
+        create_kv_load_policy(
+            mp_config.kv_load_policy, mp_config.runtime_plugin_config.extra_config
+        ),
+    )
     p2p_controller = P2PController(
         ctx,
         mp_config.p2p_config,
