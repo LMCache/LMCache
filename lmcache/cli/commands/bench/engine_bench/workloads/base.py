@@ -155,6 +155,7 @@ class BaseWorkload(ABC):
                 await asyncio.sleep(sleep_duration)
 
         self._drain_finished_queue()  # final drain
+        self._stats_collector.finish()
         self._progress_monitor.log_message("Benchmark complete")
 
     def request_finished(self, result, response_text: str) -> None:
