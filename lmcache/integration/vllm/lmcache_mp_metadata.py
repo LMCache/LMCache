@@ -407,10 +407,27 @@ class LMCacheMPRequestMetadata:
         return None
 
 
+@dataclass
+class LMCacheMPTokenDropRequestState:
+    """Request state; worker adapter assigns worker_row."""
+
+    request_id: str
+    algorithm: str
+    config: dict[str, Any]
+    resident_kv_tokens: int | None = None
+    has_physical_override: bool = False
+    is_genuine_decode: bool = False
+    num_decoded_tokens: int = 0
+    num_new_tokens: int = 0
+    worker_row: int = -1
+
+
 class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
+        self.token_drop_requests: list[LMCacheMPTokenDropRequestState] = []
+        self.token_drop_reset_ids: set[str] = set()
         self.need_flush_before_forward: bool = False
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
@@ -441,7 +458,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
 
 @dataclass
 class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
-    """Worker -> Scheduler metadata for completed store events.
+    """Worker -> Scheduler metadata for completed store events and KV updates.
 
     Attributes:
         completed_store_requests: Newly completed stores of this worker, as
@@ -456,10 +473,12 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             breaks the request's stored-prefix chain so later chunks are not
             stored unreachable. ``aggregate()`` unions the sets: one rank's
             failure breaks the chain even when the other ranks succeeded.
+        resident_kv_updates: Absolute post-compaction KV lengths reported by the worker.
     """
 
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
+    resident_kv_updates: dict[str, int] = field(default_factory=dict)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -472,14 +491,24 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
         Returns:
             A new metadata whose completion counts are summed per request
             and whose failed-request sets are unioned.
+            Also includes resident KV length updates.
         """
         assert isinstance(other, LMCacheMPWorkerMetadata)
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
+        # Don't silently pick one worker's KV lengths when they differ.
+        if (
+            self.resident_kv_updates
+            and other.resident_kv_updates
+            and self.resident_kv_updates != other.resident_kv_updates
+        ):
+            raise ValueError("Workers reported different resident KV lengths")
+        resident_updates = self.resident_kv_updates or other.resident_kv_updates
         return LMCacheMPWorkerMetadata(
             completed_store_requests=merged,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
             ),
+            resident_kv_updates=dict(resident_updates),
         )
