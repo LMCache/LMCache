@@ -12,7 +12,7 @@ the CUDA host-callback ABI.
 from __future__ import annotations
 
 # Standard
-from typing import ClassVar, TypeAlias, cast
+from typing import TYPE_CHECKING, ClassVar, TypeAlias, cast
 import ctypes
 
 # Third Party
@@ -25,12 +25,16 @@ from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.devices.musa import native_kv_transfer
 from lmcache.v1.platform.devices.musa.format_capabilities import (
-    is_supported_musa_mp_block_transfer_format,
+    is_supported_musa_mp_block_transfer_spec,
 )
 from lmcache.v1.platform.devices.musa.tensor_from_ptr import (
     construct_musa_tensor_from_data_pointer,
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
 
 _PagedBufferOperand: TypeAlias = (
     torch.Tensor | list[torch.Tensor] | list[list[torch.Tensor]]
@@ -55,14 +59,14 @@ def _host_byte_tensor_from_pointer(pointer: int, nbytes: int) -> torch.Tensor:
 
 
 def _validate_musa_mp_block_transfer_format(
-    engine_kv_format: EngineKVFormat,
+    format_spec: "type[KVFormatSpec]",
 ) -> None:
     """Reject MUSA handle-transfer layouts outside the validated scope."""
-    if not is_supported_musa_mp_block_transfer_format(engine_kv_format):
+    if not is_supported_musa_mp_block_transfer_spec(format_spec):
         raise ValueError(
             "MUSA MP block transfer supports only current trait-compatible "
             "layouts; "
-            f"got {engine_kv_format!r}"
+            f"got {format_spec.engine_kv_format!r}"
         )
 
 
@@ -157,7 +161,7 @@ def _infer_dtype(
 
 
 def _paged_shape_and_stride(
-    engine_kv_format: EngineKVFormat,
+    format_spec: "type[KVFormatSpec]",
     shape_desc: PageBufferShapeDesc,
 ) -> tuple[tuple[int, ...], tuple[int, ...] | None]:
     """Return per-layer shape and physical stride for a MUSA layout."""
@@ -165,7 +169,6 @@ def _paged_shape_and_stride(
     bs = int(shape_desc.bs)
     nh = int(shape_desc.nh)
     hs = int(shape_desc.hs)
-    format_spec = get_spec_class(engine_kv_format)
     shape = format_spec.paged_pointer_shape(nb, bs, nh, hs)
     if format_spec.is_mla:
         block_stride = int(getattr(shape_desc, "block_stride_elems", 0))
@@ -174,7 +177,7 @@ def _paged_shape_and_stride(
 
 
 def _staging_shape(
-    engine_kv_format: EngineKVFormat,
+    format_spec: "type[KVFormatSpec]",
     shape_desc: PageBufferShapeDesc,
     lmcache_chunk_size: int,
 ) -> tuple[int, ...]:
@@ -182,7 +185,7 @@ def _staging_shape(
     nl = int(shape_desc.nl)
     nh = int(shape_desc.nh)
     hs = int(shape_desc.hs)
-    return get_spec_class(engine_kv_format).staging_shape(
+    return format_spec.staging_shape(
         nl,
         lmcache_chunk_size,
         nh * hs,
@@ -203,14 +206,14 @@ def _validate_pointer_tensor(value: torch.Tensor, expected_layers: int) -> None:
 def _reconstruct_paged_layers(
     value: _PagedBufferOperand,
     *,
-    engine_kv_format: EngineKVFormat,
+    format_spec: "type[KVFormatSpec]",
     shape_desc: PageBufferShapeDesc,
     dtype: torch.dtype,
     device: torch.device,
 ) -> _PagedLayers:
     """Normalize pointer-form paged operands to non-owning MUSA views."""
     expected_layers = int(shape_desc.nl)
-    separate_kv_lists = get_spec_class(engine_kv_format).is_kv_list
+    separate_kv_lists = format_spec.is_kv_list
     if separate_kv_lists:
         nested_layers = _kv_layer_lists(value)
         if nested_layers is not None:
@@ -245,7 +248,7 @@ def _reconstruct_paged_layers(
         raise ValueError(
             f"MUSA pointer reconstruction requires a MUSA device, got {device}"
         )
-    shape, stride = _paged_shape_and_stride(engine_kv_format, shape_desc)
+    shape, stride = _paged_shape_and_stride(format_spec, shape_desc)
     reconstructed = [
         construct_musa_tensor_from_data_pointer(
             int(pointer.item()),
@@ -267,7 +270,7 @@ def _reconstruct_paged_layers(
 def _reconstruct_staging_tensors(
     value: list[int] | list[torch.Tensor],
     *,
-    engine_kv_format: EngineKVFormat,
+    format_spec: "type[KVFormatSpec]",
     shape_desc: PageBufferShapeDesc,
     lmcache_chunk_size: int,
     dtype: torch.dtype,
@@ -285,7 +288,7 @@ def _reconstruct_staging_tensors(
         raise ValueError(
             f"MUSA pointer reconstruction requires a MUSA device, got {device}"
         )
-    shape = _staging_shape(engine_kv_format, shape_desc, lmcache_chunk_size)
+    shape = _staging_shape(format_spec, shape_desc, lmcache_chunk_size)
     pointers = cast(list[int], value)
     return [
         construct_musa_tensor_from_data_pointer(pointer, shape, dtype, device)
@@ -414,19 +417,20 @@ def _musa_multi_layer_block_kv_transfer(
     skip_prefix_n_blocks: int,
 ) -> None:
     """Reconstruct MUSA operands, then use native or torch transfer."""
-    _validate_musa_mp_block_transfer_format(engine_kv_format)
+    format_spec = get_spec_class(engine_kv_format)
+    _validate_musa_mp_block_transfer_format(format_spec)
     resolved_device = _as_device(device, paged_buffer_ptrs_tensor, lmcache_objects_ptrs)
     dtype = _infer_dtype(paged_buffer_ptrs_tensor, lmcache_objects_ptrs, shape_desc)
     paged_layers = _reconstruct_paged_layers(
         paged_buffer_ptrs_tensor,
-        engine_kv_format=engine_kv_format,
+        format_spec=format_spec,
         shape_desc=shape_desc,
         dtype=dtype,
         device=resolved_device,
     )
     object_tensors = _reconstruct_staging_tensors(
         lmcache_objects_ptrs,
-        engine_kv_format=engine_kv_format,
+        format_spec=format_spec,
         shape_desc=shape_desc,
         lmcache_chunk_size=lmcache_chunk_size,
         dtype=dtype,

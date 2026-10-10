@@ -17,7 +17,7 @@ import torch
 # First Party
 from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.platform.devices.musa.format_capabilities import (
-    is_supported_musa_native_block_transfer_format,
+    is_supported_musa_native_block_transfer_spec,
 )
 
 ENV_MUSA_NATIVE_KV_TRANSFER = "LMCACHE_MUSA_NATIVE_KV_TRANSFER"
@@ -127,7 +127,8 @@ def try_native_multi_layer_block_kv_transfer(
         return False
     if not object_tensors or lmcache_chunk_size <= 0:
         return False
-    if not is_supported_musa_native_block_transfer_format(engine_kv_format):
+    format_spec = get_spec_class(engine_kv_format)
+    if not is_supported_musa_native_block_transfer_spec(format_spec):
         return False
     if not _is_musa_block_transfer_candidate(paged_layers):
         return False
@@ -148,7 +149,7 @@ def try_native_multi_layer_block_kv_transfer(
     layer_tensors = _as_tensor_list(paged_layers)
     if layer_tensors is None:
         return False
-    use_mla = get_spec_class(engine_kv_format).is_mla
+    use_mla = format_spec.is_mla
     native_dims = _native_transfer_dims(layer_tensors, shape_desc, use_mla)
     if native_dims is None:
         return False

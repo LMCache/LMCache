@@ -32,7 +32,22 @@ def is_supported_musa_mp_block_transfer_format(
         current SGLang K/V-list layout. ``False`` for all other physical
         contracts.
     """
-    spec = get_spec_class(engine_kv_format)
+    return is_supported_musa_mp_block_transfer_spec(get_spec_class(engine_kv_format))
+
+
+def is_supported_musa_mp_block_transfer_spec(
+    spec: type[KVFormatSpec],
+) -> bool:
+    """Return whether a resolved spec fits the current MUSA MP block path.
+
+    Args:
+        spec: Resolved KV-format spec class to classify.
+
+    Returns:
+        ``True`` for ordinary MLA, NHD ``TWO_NB`` per-layer layouts, and the
+        current SGLang K/V-list layout. ``False`` for all other physical
+        contracts.
+    """
     if _is_regular_per_layer_layout(spec):
         return spec.is_mla or spec.is_two_major
     return (
@@ -57,5 +72,22 @@ def is_supported_musa_native_block_transfer_format(
         ``False`` for K/V-list, HND, fused, blocked-scale, tuple, and other
         layouts that the current native ABI does not describe.
     """
-    spec = get_spec_class(engine_kv_format)
+    return is_supported_musa_native_block_transfer_spec(
+        get_spec_class(engine_kv_format)
+    )
+
+
+def is_supported_musa_native_block_transfer_spec(
+    spec: type[KVFormatSpec],
+) -> bool:
+    """Return whether a resolved spec fits the current native MUSA ABI.
+
+    Args:
+        spec: Resolved KV-format spec class to classify.
+
+    Returns:
+        ``True`` for ordinary MLA and NHD ``TWO_NB`` per-layer layouts.
+        ``False`` for K/V-list, HND, fused, blocked-scale, tuple, and other
+        layouts that the current native ABI does not describe.
+    """
     return _is_regular_per_layer_layout(spec) and (spec.is_mla or spec.is_two_major)
