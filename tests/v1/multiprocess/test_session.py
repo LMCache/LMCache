@@ -297,6 +297,79 @@ class TestSessionGetHashesOptionalEnd:
         assert converted == hasher_hashes
 
 
+class TestSessionSetTokensInvalidation:
+    """set_tokens drops cached hashes from the first changed chunk on."""
+
+    def test_rewritten_tail_rehashes(
+        self, session: Session, hasher: TokenHasher
+    ) -> None:
+        orig = list(range(12))
+        session.set_tokens(orig)
+        old = list(session.get_hashes(0, 12))
+
+        # Swap chunks 1 and 2 (chunk_size=4); chunk 0 is unchanged.
+        reordered = orig[:4] + orig[8:12] + orig[4:8]
+        session.set_tokens(reordered)
+        new = session.get_hashes(0, 12)
+
+        assert new[0] == old[0]
+        assert new[1:] != old[1:]
+        fresh = Session(request_id="fresh", hasher=hasher)
+        fresh.set_tokens(reordered)
+        assert new == fresh.get_hashes(0, 12)
+
+    def test_unchanged_tokens_keep_cached_hashes(self, session: Session) -> None:
+        session.set_tokens(list(range(8)))
+        session.get_hashes(0, 8)
+        session.set_tokens(list(range(8)) + [100, 101, 102, 103])
+        assert session.num_chunks_processed == 2
+
+    def test_first_chunk_changed_drops_everything(self, session: Session) -> None:
+        session.set_tokens(list(range(8)))
+        session.get_hashes(0, 8)
+        session.set_tokens([99] + list(range(1, 8)))
+        assert session.num_chunks_processed == 0
+        assert session.last_prefix_hash is None
+
+
+class TestSessionFailedRetrieveRelease:
+    """The lookup-identity check compares only the retrieved range."""
+
+    def _key(self, token_ids: list[int], end: int, worker_id: int | None):
+        return IPCCacheServerKey.from_token_ids(
+            model_name="m",
+            world_size=1,
+            worker_id=worker_id,
+            token_ids=token_ids,
+            start=0,
+            end=end,
+            request_id="req-1",
+        )
+
+    def test_rewritten_tail_after_retrieved_range_still_matches(
+        self, session: Session
+    ) -> None:
+        orig = list(range(12))
+        session.begin_lookup(self._key(orig, 12, None), ())
+        session.record_prefetch_result(1, (0,))
+
+        reordered = orig[:4] + orig[8:12] + orig[4:8]
+        assert (
+            session.prepare_failed_retrieve_release(self._key(reordered, 4, 0))
+            is not None
+        )
+
+    def test_change_inside_retrieved_range_does_not_match(
+        self, session: Session
+    ) -> None:
+        orig = list(range(12))
+        session.begin_lookup(self._key(orig, 12, None), ())
+        session.record_prefetch_result(1, (0,))
+
+        changed = [99] + orig[1:]
+        assert session.prepare_failed_retrieve_release(self._key(changed, 4, 0)) is None
+
+
 class TestSessionLookupIpcKey:
     """Tests for Session.lookup_ipc_key field."""
 

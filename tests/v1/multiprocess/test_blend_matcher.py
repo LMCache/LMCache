@@ -855,7 +855,8 @@ def _matched_hashes(matcher: BlendTokenRangeMatcher, query: list[int]) -> set[by
 
 
 def test_duplicate_content_registers_twice_by_default():
-    """Without the flag, the second registration takes over the slot."""
+    """Without the flag, both copies are indexed; the probe takes the one
+    stored nearest the query position."""
     matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
     first, second = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
 
@@ -863,13 +864,71 @@ def test_duplicate_content_registers_twice_by_default():
     _register_content(matcher, _content_chunk(1), [202], position_offset=CHUNK_SIZE)
 
     matches = matcher.match_sub_sequence(_content_chunk(1))
+    assert [m.hash for m in matches] == [first]
+    assert matches[0].old_st == 0
+
+    # Evicting one copy leaves the other matchable.
+    matcher.remove_chunks([first])
+    matches = matcher.match_sub_sequence(_content_chunk(1))
     assert [m.hash for m in matches] == [second]
     assert matches[0].old_st == CHUNK_SIZE
-
-    # The first entry is orphaned: evicting the second loses the text.
     matcher.remove_chunks([second])
     assert matcher.match_sub_sequence(_content_chunk(1)) == []
-    assert first not in _matched_hashes(matcher, _content_chunk(1))
+
+
+# -- Nearest copy ---------------------------------------------------------------
+
+
+def _filler(n: int) -> list[int]:
+    """``n`` tokens disjoint from every ``_content_chunk`` seed."""
+    return [10**9 + i for i in range(n)]
+
+
+def test_nearest_copy_is_picked_by_query_position():
+    """The same content stored at 0 and at 4 chunks: a query placing it at
+    3 chunks takes the copy stored at 4, one at 0 takes the copy at 0."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    near_zero, near_four = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
+    _register_content(matcher, _content_chunk(1), [101])
+    _register_content(matcher, _content_chunk(1), [202], position_offset=4 * CHUNK_SIZE)
+
+    [m] = matcher.match_sub_sequence(_filler(3 * CHUNK_SIZE) + _content_chunk(1))
+    assert (m.hash, m.old_st, m.cur_st) == (near_four, 4 * CHUNK_SIZE, 3 * CHUNK_SIZE)
+
+    [m] = matcher.match_sub_sequence(_content_chunk(1) + _filler(CHUNK_SIZE))
+    assert (m.hash, m.old_st, m.cur_st) == (near_zero, 0, 0)
+
+
+def test_nearest_copy_does_not_depend_on_registration_order():
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    _register_content(matcher, _content_chunk(1), [202], position_offset=4 * CHUNK_SIZE)
+    _register_content(matcher, _content_chunk(1), [101])
+
+    [m] = matcher.match_sub_sequence(_filler(3 * CHUNK_SIZE) + _content_chunk(1))
+    assert m.old_st == 4 * CHUNK_SIZE
+
+
+def test_repeated_content_in_query_takes_one_copy_per_position():
+    """Each occurrence takes the nearest copy not already used."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    _register_content(matcher, _content_chunk(1), [101])
+    _register_content(matcher, _content_chunk(1), [202], position_offset=2 * CHUNK_SIZE)
+
+    query = _content_chunk(1) + _filler(CHUNK_SIZE) + _content_chunk(1)
+    got = sorted((m.cur_st, m.old_st) for m in matcher.match_sub_sequence(query))
+    assert got == [(0, 0), (2 * CHUNK_SIZE, 2 * CHUNK_SIZE)]
+
+
+def test_evicting_an_older_copy_keeps_the_newer_one_matchable():
+    """The probe slot points at the newest copy; evicting an older one must
+    not clear it."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    first, second = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
+    _register_content(matcher, _content_chunk(1), [101])
+    _register_content(matcher, _content_chunk(1), [202], position_offset=CHUNK_SIZE)
+
+    matcher.remove_chunks([first])
+    assert _matched_hashes(matcher, _content_chunk(1)) == {second}
 
 
 # -- Enabled ------------------------------------------------------------------

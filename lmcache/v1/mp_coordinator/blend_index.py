@@ -265,7 +265,9 @@ class BlendIndex:
 
         Candidates are narrowed to the occupants ``namespace`` stores,
         then verified token-exact. Content held only by other namespaces
-        yields nothing, and is rejected before the comparison.
+        yields nothing, and is rejected before the comparison. When the
+        content is stored at several offsets, each query position takes
+        the not-yet-used occupant stored nearest it.
 
         Args:
             tokens: The query token ids (any dtype castable to
@@ -292,24 +294,30 @@ class BlendIndex:
                 entry = self._fingerprint_table.get(int(probe[position]))
                 if entry is None:
                     continue  # bucket shared with another fingerprint
+                cur_st = position * self._probe_stride
+                # Occupants are content-identical; take the one stored
+                # nearest cur_st so the re-RoPE shift is smallest.
+                best: tuple[bytes, _Occupant] | None = None
                 for chunk_hash, occupant in entry.occupants.items():
                     if chunk_hash in seen or namespace not in occupant.namespaces:
                         continue
-                    # Verifying only here spares foreign content the comparison.
-                    cur_st = position * self._probe_stride
-                    if not np.array_equal(
-                        query[cur_st : cur_st + window], entry.token_ids
+                    if best is None or abs(occupant.token_offset - cur_st) < abs(
+                        best[1].token_offset - cur_st
                     ):
-                        break  # fingerprint collision: content differs
-                    seen.add(chunk_hash)
-                    matches.append(
-                        BlendMatch(
-                            chunk_hash=chunk_hash,
-                            old_st=occupant.token_offset,
-                            cur_st=cur_st,
-                        )
+                        best = (chunk_hash, occupant)
+                if best is None:
+                    continue
+                # Verifying only here spares foreign content the comparison.
+                if not np.array_equal(query[cur_st : cur_st + window], entry.token_ids):
+                    continue  # fingerprint collision: content differs
+                seen.add(best[0])
+                matches.append(
+                    BlendMatch(
+                        chunk_hash=best[0],
+                        old_st=best[1].token_offset,
+                        cur_st=cur_st,
                     )
-                    break  # occupants are content-identical; one suffices
+                )
         return matches
 
     def stats(self) -> BlendIndexStats:

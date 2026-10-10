@@ -46,6 +46,11 @@ class BlendTokenRangeMatcher:
         self._lock = threading.Lock()
         # compact_chunk_id -> full poly hash, for collision reject.
         self._chunk_poly_hash: list[int] = []
+        # poly hash -> every live compact_chunk_id holding that content. The
+        # same text stored behind different prefixes is one entry per copy;
+        # the probe picks the copy nearest the query position (smallest
+        # re-RoPE shift).
+        self._poly_to_cids: dict[int, list[int]] = {}
 
     def on_new_token_hashes(
         self,
@@ -127,6 +132,7 @@ class BlendTokenRangeMatcher:
                 )
                 self._compact_id_to_slot[cid] = slot
                 self._token_hash_to_compact_id[th] = cid
+                self._poly_to_cids.setdefault(poly_hash, []).append(cid)
         return n_new
 
     def _poly_hash_registered(self, poly_hash: int) -> bool:
@@ -149,10 +155,14 @@ class BlendTokenRangeMatcher:
         Vectorized direct-address probe over all token positions, then a
         full poly-hash verify that rejects bucket collisions. Thread-safe.
 
+        When the same content is stored at several positions, each query
+        position takes the not-yet-used copy whose stored position is
+        nearest, so the re-RoPE shift is as small as possible.
+
         Returns:
-            One result per unique reused chunk (cur_st = first query
-            position, old_st = stored position); empty if the query is
-            shorter than one chunk or nothing matched.
+            One result per reused stored chunk (cur_st = query position,
+            old_st = stored position); empty if the query is shorter than
+            one chunk or nothing matched.
         """
         if len(token_ids) < self.chunk_size:
             return []
@@ -175,16 +185,13 @@ class BlendTokenRangeMatcher:
             for pos in hit_positions:
                 pos = int(pos)
                 cid = int(cids_at_pos[pos])
-                if cid in seen_cids:
-                    continue
-                if int(rolling[pos]) != self._chunk_poly_hash[cid]:
+                poly_hash = int(rolling[pos])
+                if poly_hash != self._chunk_poly_hash[cid]:
                     continue  # bucket-only collision
-                th = self._chunk_token_hash[cid]
-                if th is None:
-                    continue  # evicted
-                old_st = self._token_hash_to_start.get(th)
-                if old_st is None:
+                picked = self._nearest_copy(poly_hash, pos, seen_cids)
+                if picked is None:
                     continue
+                cid, th, old_st = picked
                 seen_cids.add(cid)
                 results.append(
                     CBMatchResult(
@@ -203,6 +210,25 @@ class BlendTokenRangeMatcher:
             )
             return results
 
+    def _nearest_copy(
+        self, poly_hash: int, pos: int, seen_cids: set[int]
+    ) -> tuple[int, bytes, int] | None:
+        """The unused live copy of ``poly_hash`` stored nearest ``pos``, as
+        ``(cid, token_hash, old_st)``. Caller must hold ``self._lock``."""
+        best: tuple[int, bytes, int] | None = None
+        for cid in self._poly_to_cids.get(poly_hash, ()):
+            if cid in seen_cids:
+                continue
+            th = self._chunk_token_hash[cid]
+            if th is None:
+                continue  # evicted
+            old_st = self._token_hash_to_start.get(th)
+            if old_st is None:
+                continue
+            if best is None or abs(old_st - pos) < abs(best[2] - pos):
+                best = (cid, th, old_st)
+        return best
+
     def remove_chunks(self, token_hashes: list[bytes]) -> None:
         """Evict the given chunks so later probes cannot match them.
         Thread-safe."""
@@ -219,7 +245,16 @@ class BlendTokenRangeMatcher:
                         cid,
                     )
                     continue
-                self._table_id[slot] = -1
+                poly_hash = self._chunk_poly_hash[cid]
+                siblings = self._poly_to_cids.get(poly_hash, [])
+                if cid in siblings:
+                    siblings.remove(cid)
+                if not siblings:
+                    self._poly_to_cids.pop(poly_hash, None)
+                # Only touch the slot while it still points here: it may hold
+                # a newer copy of this content, or a colliding content.
+                if int(self._table_id[slot]) == cid:
+                    self._table_id[slot] = siblings[-1] if siblings else -1
                 self._compact_id_to_slot[cid] = -1
                 self._chunk_token_hash[cid] = None
                 self._chunk_poly_hash[cid] = 0

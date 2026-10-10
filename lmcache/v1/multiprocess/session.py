@@ -57,11 +57,34 @@ class Session:
     def set_tokens(self, full_token_ids: list[int]) -> None:
         """Update the token sequence (idempotent, replaces not extends).
 
+        Cached chunk hashes are kept only up to the first chunk whose tokens
+        changed: a caller may rewrite the tail of a request (e.g. a blend
+        reorder after the prefix), and stale hashes would key its KV under
+        the old content.
+
         Args:
             full_token_ids: Complete token sequence.
         """
         with self._lock:
+            old = self.token_ids
             self.token_ids = full_token_ids
+            done = self.num_chunks_processed
+            if not done:
+                return
+            chunk_size = self.hasher.chunk_size
+            n = done * chunk_size
+            if old[:n] == full_token_ids[:n]:
+                return
+            keep = 0
+            while keep < done:
+                cs = keep * chunk_size
+                ce = cs + chunk_size
+                if old[cs:ce] != full_token_ids[cs:ce]:
+                    break
+                keep += 1
+            del self.chunk_hashes[keep:]
+            self.num_chunks_processed = keep
+            self.last_prefix_hash = self.chunk_hashes[-1] if keep else None
 
     @overload
     def get_hashes(self, start: int, end: int) -> list: ...
@@ -192,7 +215,8 @@ class Session:
             same_lookup = (
                 key.model_name == lookup_key.model_name
                 and key.world_size == lookup_key.world_size
-                and key.token_ids == lookup_key.token_ids
+                # Only the retrieved range must match; the tail may be rewritten.
+                and key.token_ids[: key.end] == lookup_key.token_ids[: key.end]
                 and key.cache_salt == lookup_key.cache_salt
                 and key.start >= lookup_key.start
                 and key.end <= lookup_key.end
@@ -237,7 +261,8 @@ class Session:
             same_lookup = (
                 key.model_name == lookup_key.model_name
                 and key.world_size == lookup_key.world_size
-                and key.token_ids == lookup_key.token_ids
+                # Only the retrieved range must match; the tail may be rewritten.
+                and key.token_ids[: key.end] == lookup_key.token_ids[: key.end]
                 and key.cache_salt == lookup_key.cache_salt
                 and key.start >= lookup_key.start
                 and key.end <= lookup_key.end
