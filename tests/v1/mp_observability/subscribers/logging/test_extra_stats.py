@@ -112,15 +112,22 @@ class TestExtraStatsLoggingSubscriber:
 
     def test_store_window_logs_tokens_size_and_throughput(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
+        # Anchor to the wall clock rather than a fabricated absolute value.
+        # ``_prune_pending`` drops pending starts older than
+        # ``_PENDING_MAX_AGE_SECONDS`` measured against ``time.time()``, so a
+        # constant like 100.0 is always stale and is discarded by the first
+        # flush that fires between the start and the end -- leaving the end
+        # uncorrelated and the throughput reported as ``n/a``.
+        t0 = time.time()
         with _capture_logs() as handler:
             subs[EventType.MP_STORE_START](
-                _start(EventType.MP_STORE_START, "req-1", 100.0)
+                _start(EventType.MP_STORE_START, "req-1", t0)
             )
             subs[EventType.MP_STORE_END](
                 _end(
                     EventType.MP_STORE_END,
                     "req-1",
-                    100.5,
+                    t0 + 0.5,
                     total_bytes=5_000_000_000,
                     num_tokens=24576,
                 )
@@ -138,15 +145,17 @@ class TestExtraStatsLoggingSubscriber:
 
     def test_retrieve_window_logs_tokens_size_and_throughput(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
+        # Same wall-clock requirement as the store case above.
+        t0 = time.time()
         with _capture_logs() as handler:
             subs[EventType.MP_RETRIEVE_START](
-                _start(EventType.MP_RETRIEVE_START, "req-1", 200.0)
+                _start(EventType.MP_RETRIEVE_START, "req-1", t0)
             )
             subs[EventType.MP_RETRIEVE_END](
                 _end(
                     EventType.MP_RETRIEVE_END,
                     "req-1",
-                    200.25,
+                    t0 + 0.25,
                     total_bytes=2_000_000_000,
                     num_tokens=4096,
                 )
