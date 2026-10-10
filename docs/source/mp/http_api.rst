@@ -377,6 +377,7 @@ Prometheus metrics for time-series data — see :doc:`observability/index`).
     {
       "is_healthy": true,
       "engine_type": "MPCacheServer",
+      "configured_engine": "default",
       "chunk_size": 256,
       "hash_algorithm": "builtin-hash",
       "active_sessions": 2,
@@ -415,6 +416,10 @@ Prometheus metrics for time-series data — see :doc:`observability/index`).
         "...": "backend-specific fields"
       }
     }
+
+``engine_type`` identifies the server class for backward compatibility;
+``configured_engine`` reports the selected cache engine backend (for example,
+``default`` or ``blend``).
 
 **Response** (``503 Service Unavailable``) when the engine has not yet
 been initialized:
