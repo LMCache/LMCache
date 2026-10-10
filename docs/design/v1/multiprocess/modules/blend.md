@@ -87,6 +87,13 @@ success)`**
   (`submit_callback_to_stream`, kind `"cb_fingerprints"`) — stream-ordered
   after the L1 commit, so a fingerprint becomes matchable only once its
   chunk is readable. Fingerprint failures are logged, never raised.
+- A chunk is registered when every object group of the blend read set
+  (attention + aux, see the table below) committed it. Recurrent-state
+  groups do not gate registration: the blend leg never reads them, and under
+  vLLM's `--mamba-cache-mode align` they commit only the last chunk of each
+  scheduler step. Requiring them would leave every other chunk unmatchable
+  although its attention and aux objects are stored. A layout with no blend
+  read set registers nothing.
 
 ## Unified lookup (submit-once, poll-on-recall)
 

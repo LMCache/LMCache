@@ -576,7 +576,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
-    ) -> tuple[bytes, bool, list[bool]]:
+    ) -> tuple[bytes, bool, list[list[bool]]]:
         """Store the GPU KV cache blocks to CPU.
 
         Args:
@@ -593,8 +593,13 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             element indicates whether the store operation completed without a
             fatal error (not whether every requested chunk was stored; see
             Notes). The event handle is empty when no device work was submitted.
-            The third element marks per chunk whether every object group
-            committed it.
+            The third element marks, per object group and chunk, whether that
+            group committed the chunk: ``committed[g][i]``. Object groups
+            commit independently (a recurrent-state group commits only the
+            chunks that hold a state snapshot), so callers that read a subset
+            of the groups decide availability over that subset. It is empty
+            when the store is rejected before any copy (unregistered instance
+            or block-ID underflow).
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -836,16 +841,15 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 ed - st,
             )
 
-        # A chunk is stored only when every object group committed its key.
-        stored_mask = [
-            store_succeeded
-            and all(keys[i] in all_dict for keys in obj_keys_per_obj_group)
-            for i in range(num_chunks)
+        # Per object group: committed only when the whole store succeeded.
+        committed = [
+            [store_succeeded and obj_key in all_dict for obj_key in keys]
+            for keys in obj_keys_per_obj_group
         ]
         return (
             event_backend.export_event(event, cache_context.device),
             store_succeeded,
-            stored_mask,
+            committed,
         )
 
     @request_handler(

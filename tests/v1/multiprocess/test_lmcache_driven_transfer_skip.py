@@ -10,7 +10,7 @@
 
 # Standard
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, call
 
 # Third Party
@@ -360,6 +360,42 @@ def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
         call(cache_context.cupy_stream, "finish_read_by_owner", completion),
     ]
     module.context.storage_manager.finish_read_prefetched.assert_not_called()
+
+
+def test_store_reports_commits_per_object_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Separated layout: the attention object commits both chunks, the state
+    # object only chunk 1, where the engine took a snapshot. The groups are
+    # reported apart, so a caller that reads only attention sees both chunks.
+    module, _context, _reads, _transfers = _make_checkpoint_module(monkeypatch)
+    _handle, ok, committed = module.store_with_chunk_mask(
+        cast(Any, SimpleNamespace(request_id="req", worker_id=1)),
+        1,
+        [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
+        b"producer",
+    )
+    assert ok
+    assert committed == [[True, True], [False, True]]
+
+
+def test_store_reports_nothing_committed_when_a_copy_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, _context, _reads, _transfers = _make_checkpoint_module(monkeypatch)
+    monkeypatch.setattr(
+        mod,
+        "transfer_kv_per_object_group",
+        MagicMock(side_effect=RuntimeError("copy failed")),
+    )
+    _handle, ok, committed = module.store_with_chunk_mask(
+        cast(Any, SimpleNamespace(request_id="req", worker_id=1)),
+        1,
+        [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
+        b"producer",
+    )
+    assert not ok
+    assert committed == [[False, False], [False, False]]
 
 
 # ------------------------------------------------------------------ #

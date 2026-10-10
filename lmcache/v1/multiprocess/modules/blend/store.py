@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.modules.blend.read_set import (
+    _cb_blend_readable_chunks,
+    _classify_cb_read_groups,
+)
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -68,14 +72,17 @@ class StoreMixin:
 
         Delegates the KV write to ``LMCacheDrivenTransfer.store``, then
         (worker 0 only) enqueues chunk hashes for async fingerprint
-        registration ordered after the L1 commit. Fingerprint failures are
-        logged, never raised — they do not affect store correctness.
+        registration ordered after the L1 commit. A chunk is registered once
+        every object group the blend leg reads committed it; recurrent-state
+        groups, which the blend leg never reads, do not gate it. Fingerprint
+        failures are logged, never raised — they do not affect store
+        correctness.
 
         Returns:
             The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
-        handle, store_ok, stored_mask = self._transfer_module.store_with_chunk_mask(
+        handle, store_ok, committed = self._transfer_module.store_with_chunk_mask(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
         result = (handle, store_ok)
@@ -105,10 +112,32 @@ class StoreMixin:
             # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.
             start_chunk_idx = 0 if key.start != 0 else 1
 
-            # Register only committed chunks: a fingerprint for a skipped
-            # chunk would advertise content that was never persisted.
+            # Register only chunks the blend leg can read back: a fingerprint
+            # for a chunk missing one of its read groups would advertise
+            # content the sparse lookup never finds. The read set is the one
+            # the lookup resolves for this (model, world size).
+            if not any(any(group) for group in committed):
+                return result
+            attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
+                key.model_name, key.world_size
+            )
+            try:
+                read = _classify_cb_read_groups(
+                    attn_desc.num_object_groups, attn_desc.group_kinds
+                )
+            except RuntimeError:
+                # The blend leg cannot read this layout (the lookup reports
+                # why), so no chunk of it is blendable.
+                logger.debug(
+                    "CB fingerprints skipped for %s: no blend read set",
+                    key.request_id,
+                    exc_info=True,
+                )
+                return result
+            blendable = _cb_blend_readable_chunks(committed, read)
+
             def _stored(i: int) -> bool:
-                return stored_mask[i] if i < len(stored_mask) else False
+                return blendable[i] if i < len(blendable) else False
 
             jobs: list[FpJob] = []
             chunk_size = self._ctx.chunk_size

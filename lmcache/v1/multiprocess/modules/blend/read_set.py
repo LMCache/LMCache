@@ -76,6 +76,33 @@ def _classify_cb_read_groups(
     )
 
 
+def _cb_blend_readable_chunks(
+    committed: list[list[bool]], read: _BlendReadGroups
+) -> list[bool]:
+    """Mark the stored chunks the blend leg can read back.
+
+    The blend leg keys, locks, and reads only ``read.blend_gids``, so a chunk
+    is blendable once every one of those groups committed it. Recurrent-state
+    groups are not consulted: the blend leg never reads them, and they commit
+    only the chunks that hold a state snapshot (in vLLM's align mode, the
+    last chunk of each scheduler step).
+
+    Args:
+        committed: ``committed[g][i]`` from the store, per object group.
+        read: The registration's read sets.
+
+    Returns:
+        Per chunk, whether every blend read group committed it; empty when
+        ``committed`` is.
+    """
+    if not committed:
+        return []
+    return [
+        all(committed[gid][i] for gid in read.blend_gids)
+        for i in range(len(committed[0]))
+    ]
+
+
 def _cb_chunk_major_object_keys(
     key: IPCCacheServerKey, chunk_hashes: list[bytes], gids: tuple[int, ...]
 ) -> list:
