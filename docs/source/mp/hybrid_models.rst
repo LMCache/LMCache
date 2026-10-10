@@ -248,7 +248,8 @@ Step 2 — derive the required flags from ``N``
    ``--separate-object-groups`` additionally allows values **≥ 2·N**, which
    raise prefill throughput with larger steps but snapshot only the last block
    of each step (cached prefixes then align to step boundaries, not every
-   block).
+   block). Without it, chunks whose state was not snapshot are not stored at
+   all, so a cached prefix stops at the first such chunk.
 
 #. **vLLM** ``--mamba-cache-mode align --enable-prefix-caching`` — ``align`` is
    mandatory (GDN backends do not support the ``all`` mode)::
