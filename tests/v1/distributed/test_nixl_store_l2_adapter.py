@@ -13,7 +13,6 @@ import os
 import select
 import shutil
 import tempfile
-import time
 
 # Third Party
 import pytest
@@ -145,6 +144,19 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
             pass
         return True
     return False
+
+
+def _drain_scheduled_unlocks(adpt: NixlStoreL2Adapter, barrier_key: ObjectKey) -> None:
+    """Deterministically wait until previously scheduled unlocks have run.
+
+    Event-loop callbacks run FIFO, so an eventfd-signaled lookup of a
+    never-stored ``barrier_key`` finishes strictly after every unlock.
+    """
+    task_id = adpt.submit_lookup_and_lock_task([barrier_key], {0: _EMPTY_LAYOUT})
+    assert wait_for_event_fd(adpt.get_lookup_and_lock_event_fd(), timeout=5.0)
+    bitmap = adpt.query_lookup_and_lock_result(task_id)
+    assert bitmap is not None
+    assert not bitmap.test(0)
 
 
 # =============================================================================
@@ -1232,9 +1244,10 @@ class TestEvictionInterface:
         adpt.delete([key])
         assert adpt.report_status()["stored_object_count"] == 1
 
-        # Unpin, then delete should succeed
+        # Unpin, then barrier on the event loop so the queued unlock
+        # has applied before the retry.
         adpt.submit_unlock([key])
-        time.sleep(0.1)  # let the unlock execute in the event loop
+        _drain_scheduled_unlocks(adpt, create_object_key(999999))
         adpt.delete([key])
         assert adpt.report_status()["stored_object_count"] == 0
 

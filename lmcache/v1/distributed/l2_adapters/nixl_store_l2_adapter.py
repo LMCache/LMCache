@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 import asyncio
 import os
@@ -46,6 +46,9 @@ class NixlStoreObj:
     """
     The object stored in Nixl L2 cache.
     Can be used for both file and object.
+
+    ``pin_count`` is adapter-shared state: every read and transition
+    holds the owning adapter's ``_lock``.
     """
 
     page_indices: list[int]
@@ -55,23 +58,20 @@ class NixlStoreObj:
     layout: Optional[MemoryLayoutDesc] = None
 
     pin_count: int = 0
-    _lock: threading.Lock = field(
-        default_factory=threading.Lock, repr=False, compare=False
-    )
 
-    def increase_pin_count(self):
-        with self._lock:
-            self.pin_count += 1
+    def increase_pin_count(self) -> None:
+        """Increment the pin count (caller holds the adapter lock)."""
+        self.pin_count += 1
 
-    def decrease_pin_count(self):
-        with self._lock:
-            if self.pin_count > 0:
-                self.pin_count -= 1
-            else:
-                logger.warning(
-                    "Trying to decrease pin count of object at page indices %s below 0",
-                    self.page_indices,
-                )
+    def decrease_pin_count(self) -> None:
+        """Decrement the pin count, floored at zero (caller holds the adapter lock)."""
+        if self.pin_count > 0:
+            self.pin_count -= 1
+        else:
+            logger.warning(
+                "Trying to decrease pin count of object at page indices %s below 0",
+                self.page_indices,
+            )
 
 
 class NixlObjPool:
@@ -561,12 +561,11 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         def _unlock_keys(keys: list[ObjectKey]) -> None:
-            """
-            Unlock keys in the event loop thread.
-            """
-            for key in keys:
-                if (obj := self._memory_objects.get(key)) is not None:
-                    obj.decrease_pin_count()
+            """Unlock keys on the event loop thread under the adapter lock."""
+            with self._lock:
+                for key in keys:
+                    if (obj := self._memory_objects.get(key)) is not None:
+                        obj.decrease_pin_count()
 
         # Schedule the unlock operation in the event loop thread
         self._loop.call_soon_threadsafe(_unlock_keys, keys)
