@@ -124,6 +124,17 @@ class L1ManagerListener(EventListener):
         # for better clarity
         pass
 
+    def on_l1_keys_prefetch_finished(self, keys: list[ObjectKey]) -> None:
+        """Notify that prefetched keys became resident without read locks.
+
+        Args:
+            keys: Newly admitted non-temporary keys.
+
+        The default delegates to the existing prefetch callback so listeners
+        retain their creation handling without triggering ordinary stores.
+        """
+        self.on_l1_keys_finish_write_and_reserve_read(keys)
+
     @abstractmethod
     def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
         """

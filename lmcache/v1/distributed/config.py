@@ -641,6 +641,14 @@ class StorageManagerConfig:
     prefetch_max_in_flight: int = 8
     """ Maximum number of concurrent prefetch requests. """
 
+    prefetch_load_timeout: float | None = None
+    """ Optional monotonic deadline, in seconds, covering a read-locked L2
+    prefetch from the moment it enters the controller (queueing + L2 lookup +
+    load). ``None`` (default) disables it and preserves existing behavior; on
+    expiry the caller receives the subset already usable under its fetching
+    policy and recomputes the rest. ``NO_LOCK`` warm prefetches are unarmed.
+    Distinct from the connector-side ``lmcache.mp.mq_timeout``. """
+
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
 
@@ -709,6 +717,17 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         ValueError: If mutually exclusive L1 tiers are both configured, or
             hybrid L1 is paired with incompatible L2 adapters.
     """
+    if config.prefetch_load_timeout is not None and not (
+        math.isfinite(config.prefetch_load_timeout) and config.prefetch_load_timeout > 0
+    ):
+        # NaN compares false under every ordering and ``inf > 0`` is true, so
+        # the check is written as "must be finite and positive" rather than
+        # "must not be <= 0".
+        raise ValueError(
+            "prefetch_load_timeout must be a finite positive number of seconds "
+            f"or None to disable (got {config.prefetch_load_timeout})"
+        )
+
     by_tag = {c.tag: c for c in config.l1_manager_configs}
     shm_names = [
         c.memory_config.shm_name
@@ -968,6 +987,16 @@ def add_storage_manager_args(
         help="Maximum number of concurrent prefetch requests. Default is 8.",
     )
     policy_group.add_argument(
+        "--l2-prefetch-load-timeout",
+        type=float,
+        default=None,
+        help="Optional monotonic deadline (seconds) covering a read-locked L2 "
+        "prefetch's queueing, lookup, and load. On expiry the caller gets the "
+        "subset already usable under its fetching policy and recomputes the rest. "
+        "NO_LOCK warm prefetches are unarmed. Default is None (disabled). "
+        "Independent of lmcache.mp.mq_timeout.",
+    )
+    policy_group.add_argument(
         "--periodic-notifier-interval-ms",
         type=int,
         default=5,
@@ -1066,6 +1095,7 @@ def parse_args_to_config(
             store_policy=args.l2_store_policy,
             prefetch_policy=args.l2_prefetch_policy,
             prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+            prefetch_load_timeout=args.l2_prefetch_load_timeout,
             periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
         )
     if args.l1_size_gb is None or defaults is None:
@@ -1144,6 +1174,7 @@ def parse_args_to_config(
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+        prefetch_load_timeout=args.l2_prefetch_load_timeout,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
     return config
