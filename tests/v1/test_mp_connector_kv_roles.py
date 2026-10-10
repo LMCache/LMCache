@@ -14,7 +14,7 @@ import torch
 pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 
 # Third Party
-from vllm.config import KVTransferConfig, VllmConfig  # noqa: E402
+from vllm.config import CacheConfig, KVTransferConfig, VllmConfig  # noqa: E402
 from vllm.distributed.kv_transfer.kv_connector.factory import (  # noqa: E402
     KVConnectorFactory,
 )
@@ -52,11 +52,13 @@ def _config(transfer_config: KVTransferConfig) -> VllmConfig:
     return cast(
         VllmConfig,
         SimpleNamespace(
-            model_config=SimpleNamespace(model="test-model", use_mla=False),
+            model_config=SimpleNamespace(
+                model="test-model", use_mla=False, dtype=torch.float16
+            ),
             parallel_config=SimpleNamespace(
                 world_size=1, rank=0, tensor_parallel_size=1, pipeline_parallel_size=1
             ),
-            cache_config=SimpleNamespace(block_size=4, enable_prefix_caching=True),
+            cache_config=CacheConfig(block_size=4, enable_prefix_caching=True),
             scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
             kv_transfer_config=transfer_config,
         ),
@@ -326,7 +328,7 @@ def test_chunked_prefill_stores_and_completion(
     if can_store:
         mock_io.telemetry.on_request_store_finished.assert_called_once_with(
             request_ids_set={"request"},
-            model_name="test-model",
+            model_name=worker.worker_adapter.model_name,
             world_size=1,
             kv_rank=0,
         )
