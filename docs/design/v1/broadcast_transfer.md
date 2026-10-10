@@ -40,7 +40,10 @@ the engine, next to the single-rank retrieval it mirrors.
 - `Window` is plain data and must stay pickle-safe: it crosses ranks through
   the integration's object broadcast.
 - Views never take or release references. The source rank keeps owning its
-  chunks until the engine releases them after the final fence.
+  chunks until the engine releases them after the final fence. That release
+  follows the single-rank rule from #5098: blocking gets drop their reference
+  only, and lookup pins stay with the lookup owner until `lookup_unpin`; async
+  prefetch results own their pins and are released completely.
 - `pack` does not block the host. The caller fences the stream before the
   buffer is reused or the sources are released.
 - Every chunk starts on a `CHUNK_ALIGNMENT` boundary so transfer kernels see the

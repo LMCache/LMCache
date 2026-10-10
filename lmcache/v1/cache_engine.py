@@ -2069,7 +2069,10 @@ class LMCacheEngine:
             if self._is_sync_pd_backend():
                 memory_obj.ref_count_down()
         else:
-            if memory_obj.is_pinned:
+            # Blocking gets acquire references, not ownership of lookup pins;
+            # the lookup owner releases those through lookup_unpin(). Async
+            # prefetch results and passively received chunks own their pins.
+            if (self.async_loading or self._is_passive()) and memory_obj.is_pinned:
                 memory_obj.unpin()
             memory_obj.ref_count_down()
 

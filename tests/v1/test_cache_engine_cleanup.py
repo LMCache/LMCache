@@ -13,6 +13,7 @@ from collections.abc import Generator
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
+import asyncio
 import logging
 
 # Third Party
@@ -23,7 +24,7 @@ import torch
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.event_manager import EventStatus
+from lmcache.v1.event_manager import EventStatus, EventType
 from lmcache.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.pin_monitor import PinMonitor
@@ -83,8 +84,16 @@ def test_cleanup_memory_objs_handles_mixed_pin_state(
 
 
 @pytest.mark.no_shared_allocator
-def test_retrieve_cleanup_ref_count_and_unpin(pin_monitor: Any) -> None:
-    """A real engine releases both pinned and unpinned retrieval references."""
+@pytest.mark.parametrize("async_loading", [False, True])
+def test_retrieve_releases_references_and_only_async_pins(
+    pin_monitor: Any, async_loading: bool
+) -> None:
+    """Retrieval drops its references; only async prefetch also owns the pins.
+
+    Blocking gets acquire references, not lookup pins, so a synchronous
+    retrieval leaves the lookup owner's pin in place for ``lookup_unpin``.
+    Async prefetch results own both and are released completely.
+    """
     objects = [create_test_memory_obj(), create_test_memory_obj()]
     objects[0].pin()
     keys = [CacheEngineKey("test", 1, 0, index, torch.bfloat16) for index in range(2)]
@@ -97,7 +106,9 @@ def test_retrieve_cleanup_ref_count_and_unpin(pin_monitor: Any) -> None:
     storage.batched_get.return_value = objects
     shape = (16, 2, 8, 1, 128)
     engine = LMCacheEngine(
-        LMCacheEngineConfig.from_defaults(chunk_size=8, py_enable_gc=True),
+        LMCacheEngineConfig.from_defaults(
+            chunk_size=8, py_enable_gc=True, enable_async_loading=async_loading
+        ),
         LMCacheMetadata("test", 1, 1, 0, 0, torch.bfloat16, shape),
         database,
         MockGPUConnector(shape),
@@ -105,9 +116,19 @@ def test_retrieve_cleanup_ref_count_and_unpin(pin_monitor: Any) -> None:
         lambda obj, src: obj,
     )
     engine.storage_manager = storage
+    if async_loading:
+        future: asyncio.Future = asyncio.new_event_loop().create_future()
+        future.set_result([list(zip(keys, objects, strict=True))])
+        engine.event_manager.add_event(EventType.LOADING, "req", future)
+        engine.event_manager.update_event_status(
+            EventType.LOADING, "req", EventStatus.DONE
+        )
     try:
-        assert engine.retrieve(list(range(16))).all()
+        assert engine.retrieve(list(range(16)), req_id="req").all()
         assert all(obj.get_ref_count() == 0 for obj in objects)
-        assert all(obj.metadata.pin_count == 0 for obj in objects)
+        assert objects[0].metadata.pin_count == (0 if async_loading else 1)
+        assert objects[1].metadata.pin_count == 0
     finally:
+        if objects[0].is_pinned:
+            objects[0].unpin()
         engine.close()
