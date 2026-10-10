@@ -23,7 +23,9 @@ Key scenarios tested:
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, Iterator, cast
+from unittest.mock import MagicMock
 import asyncio
+import threading
 
 # Third Party
 import pytest
@@ -35,7 +37,10 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventType
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
+from lmcache.v1.storage_backend.abstract_backend import (
+    AllocatorBackendInterface,
+    StorageBackendInterface,
+)
 from lmcache.v1.storage_backend.storage_manager import (
     StorageManager,
     allocate_and_copy_objects,
@@ -428,3 +433,73 @@ class TestStorageManagerPrefetchCallback:
             assert not obj.ref_count_down_called
         for obj in tier0_objs[4:]:
             assert obj.ref_count_down_called
+
+
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        (["NixlStorageBackend"], "NixlStorageBackend"),
+        (["DiskBackend", "NixlStorageBackend"], "NixlStorageBackend"),
+        (["NixlStorageBackend", "LocalCPUBackend"], "LocalCPUBackend"),
+        (["MaruBackend"], "MaruBackend"),
+        (["MaruBackend", "LocalCPUBackend"], "LocalCPUBackend"),
+    ],
+)
+def test_allocator_selection_without_cpu_tier(
+    monkeypatch: pytest.MonkeyPatch,
+    storage_manager_metadata: LMCacheMetadata,
+    names: list[str],
+    expected: str,
+) -> None:
+    """Construction must select an allocating backend and preserve CPU priority."""
+    backends = {
+        name: MagicMock(
+            spec=(
+                StorageBackendInterface
+                if name == "DiskBackend"
+                else AllocatorBackendInterface
+            )
+        )
+        for name in names
+    }
+    config = LMCacheEngineConfig.from_defaults(
+        max_local_cpu_size=0, enable_async_loading=False
+    )
+    storage_manager_metadata.role = "worker"
+    monkeypatch.setattr(
+        "lmcache.v1.storage_backend.storage_manager.CreateStorageBackends",
+        lambda *args, **kwargs: backends,
+    )
+    monkeypatch.setattr(
+        "lmcache.v1.storage_backend.storage_manager.is_cuda_worker", lambda _: False
+    )
+    manager = StorageManager(config, storage_manager_metadata, EventManager())
+    try:
+        assert manager.allocator_backend is backends[expected]
+        shapes = torch.Size([2, 1, 8, 16])
+        manager.allocate(shapes, torch.float16)
+        backends[expected].allocate.assert_called_once()
+        for name, backend in backends.items():
+            if name != expected and isinstance(backend, AllocatorBackendInterface):
+                backend.allocate.assert_not_called()
+    finally:
+        manager.close()
+
+
+def test_allocator_selection_reports_missing_allocator(
+    monkeypatch: pytest.MonkeyPatch,
+    storage_manager_metadata: LMCacheMetadata,
+) -> None:
+    """A storage-only backend must produce an actionable configuration error."""
+    config = LMCacheEngineConfig.from_defaults(max_local_cpu_size=0)
+    storage_manager_metadata.role = "worker"
+    monkeypatch.setattr(
+        "lmcache.v1.storage_backend.storage_manager.CreateStorageBackends",
+        lambda *args, **kwargs: {
+            "DiskBackend": MagicMock(spec=StorageBackendInterface)
+        },
+    )
+    # Construction fails before close() can own the event-loop thread.
+    monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+    with pytest.raises(RuntimeError, match="No backend can allocate"):
+        StorageManager(config, storage_manager_metadata, EventManager())
