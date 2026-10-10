@@ -15,8 +15,13 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess import server as server_mod
+from lmcache.v1.multiprocess import module_creator
 from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.modules import engine_driven_transfer as ed_mod
+from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as ld_mod
+from lmcache.v1.multiprocess.modules import lookup as lookup_mod
+from lmcache.v1.multiprocess.modules import management as management_mod
+from lmcache.v1.multiprocess.modules import p2p_controller as p2p_mod
 from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
@@ -253,38 +258,43 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
     cast(MagicMock, ctx.event_bus.publish).assert_not_called()
 
 
-class _FakeLMCacheDriven:
-    def __init__(self, ctx) -> None:
-        self.ctx = ctx
-
-
-class _FakeEngineDriven:
-    def __init__(self, ctx) -> None:
-        self.ctx = ctx
-
-
-class _FakeQStore:
-    def __init__(self, ctx) -> None:
-        self.ctx = ctx
-
-
 @pytest.fixture
 def stub_server_modules(monkeypatch):
-    """Stub the server's module constructors. Returns the ManagementModule mock.
-    The transfer modules stay real classes: _build_modules isinstance-checks
-    them to pick liveness targets and the lmcache-driven module."""
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
-    monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
-    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
-    monkeypatch.setattr(server_mod, "QStoreModule", _FakeQStore)
-    management = MagicMock(name="ManagementModule")
-    monkeypatch.setattr(server_mod, "ManagementModule", management)
-    return management
+    """Stub each module's constructor; return the captured ManagementModule kwargs.
+
+    Modules are discovered and construct themselves, so the patch target is
+    each module class's own ``__init__`` rather than a name in the creator.
+    The classes themselves stay real so the discovery contract (name, order,
+    liveness) is unchanged; only construction is intercepted.
+    """
+    captured: dict = {}
+
+    def _capture_init(class_name: str):
+        def __init__(self, *args, **kwargs):
+            captured[class_name] = kwargs
+
+        return __init__
+
+    # Patch __init__ on the real classes in place. Replacing the class outright
+    # would drop the inherited create() and make the stand-in abstract, which
+    # discovery correctly skips.
+    targets = [
+        (lookup_mod, "LookupModule"),
+        (p2p_mod, "P2PController"),
+        (ld_mod, "LMCacheDrivenTransferModule"),
+        (ed_mod, "EngineDrivenTransferModule"),
+        (qstore_mod, "QStoreModule"),
+        (management_mod, "ManagementModule"),
+    ]
+    for module, class_name in targets:
+        monkeypatch.setattr(
+            getattr(module, class_name), "__init__", _capture_init(class_name)
+        )
+    return captured
 
 
 def _build(stub_server_modules, **config) -> list:
-    return server_mod._build_modules(
+    return module_creator.build_modules(
         MagicMock(name="ctx"), MPServerConfig(**config), MagicMock(url="")
     )
 
@@ -316,10 +326,11 @@ def test_server_builds_q_store_module(stub_server_modules) -> None:
         supported_transfer_mode="lmcache_driven",
     )
 
-    assert any(isinstance(m, _FakeQStore) for m in modules)
-    kwargs = stub_server_modules.call_args.kwargs
+    assert any(type(m).__name__ == "QStoreModule" for m in modules)
+    kwargs = stub_server_modules["ManagementModule"]
     assert kwargs["experimental_transfer"] == [TRANSFER_QUERY]
-    assert any(isinstance(t, _FakeQStore) for t in kwargs["liveness_targets"])
+    liveness_names = [type(t).__name__ for t in kwargs["liveness_targets"]]
+    assert "QStoreModule" in liveness_names
 
 
 def test_server_builds_nothing_when_no_feature_is_enabled(
@@ -328,5 +339,5 @@ def test_server_builds_nothing_when_no_feature_is_enabled(
     """Check that the server builds nothing when no feature is enabled."""
     modules = _build(stub_server_modules)
 
-    assert not any(isinstance(m, _FakeQStore) for m in modules)
-    assert stub_server_modules.call_args.kwargs["experimental_transfer"] == []
+    assert not any(type(m).__name__ == "QStoreModule" for m in modules)
+    assert stub_server_modules["ManagementModule"]["experimental_transfer"] == []

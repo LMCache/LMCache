@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Management and utility operations for the MPCacheServer."""
 
+# Future
+from __future__ import annotations
+
 # Standard
 from collections.abc import Sequence
 import threading
@@ -10,7 +13,11 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    InstanceLivenessTarget,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -22,7 +29,7 @@ from lmcache.v1.periodic_thread import (
 logger = init_logger(__name__)
 
 
-class ManagementModule:
+class ManagementModule(DiscoverableModule):
     """Handles management and utility operations for the cache engine.
 
     Owns the lock used during cache clearing and provides handlers for
@@ -43,6 +50,31 @@ class ManagementModule:
         experimental_transfer: Types of experimental intermediate tensor
             transfer built in the server.
     """
+
+    module_name = "management"
+    # High close-order rank on purpose: the reaper must stop before the modules
+    # it drives clear their state. Built after the out-of-tree plugin modules
+    # (deferred) because it consumes their liveness targets too.
+    module_order = 30
+    deferred = True
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> ManagementModule | None:
+        """Build with every liveness target collected so far.
+
+        Returning ``None`` is never correct here -- the server always needs
+        management handlers -- so this returns a module unconditionally.
+        """
+        mp_config = build_ctx.mp_config
+        return cls(
+            build_ctx.engine_context,
+            liveness_targets=build_ctx.liveness_targets,
+            worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
+            worker_registration_grace_seconds=(
+                mp_config.worker_registration_grace_seconds
+            ),
+            experimental_transfer=mp_config.enable,
+        )
 
     def __init__(
         self,

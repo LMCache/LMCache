@@ -107,20 +107,38 @@ Engine and Modules
 All server entry points share the same ``MPCacheServer`` and
 ``StorageManager`` core. ``MPCacheServer`` is now a thin compositor:
 it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
-instances assembled by ``_build_modules()`` (in ``server.py``)
+instances assembled by ``ModuleCreator`` (in ``module_creator.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
+**``module_creator.py``** -- Assembles the engine modules. It names no
+module itself: it discovers every ``DiscoverableModule`` subclass by
+scanning the ``modules`` package, then asks each one to build itself from
+a ``ModuleBuildContext``. Each module declares its own ``module_name`` and
+``module_order`` (its close-order rank) and returns ``None`` from
+``create()`` when it does not apply to the current configuration, so
+adding a module means adding a file -- no list to edit:
+
+.. code-block:: text
+
+    order  10  LookupModule
+    order  20  P2PController
+    order  30  ManagementModule      <- closes first: stops the reaper
+    order  40  LMCacheDrivenTransferModule / EngineDrivenTransferModule
+    order  50  QStoreModule          (--enable)
+    order  60  BlendModule           (--engine-type blend)
+
+Construction order and close order differ on purpose. Modules are built in
+ascending ``module_order`` and closed in that same order, which is what
+lets the reaper stop before the modules it drives clear their state.
+``ManagementModule`` is the one module built *after* the out-of-tree
+``--server-module`` plugins (it consumes their liveness targets) while
+still closing early; it declares ``deferred = True`` for that.
+
 **``server.py``** -- The transport-neutral server compositor. Creates an
-``MPCacheServer``, assembles the engine modules
-(``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
-and/or ``EngineDrivenTransferModule`` depending on
-``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
-``engine_driven`` loads just one,
-``auto`` loads both — plus the blend module when
-``--engine-type blend`` is set). It calls ``create_request_server()`` to build
-the ZMQ or gRPC request server selected by ``--transport``, discovers the
-annotated operations exposed by the loaded modules, and blocks in a keep-alive
-loop.
+``MPCacheServer`` from the assembled modules, calls
+``create_request_server()`` to build the ZMQ or gRPC request server
+selected by ``--transport``, discovers the annotated operations exposed by
+the loaded modules, and blocks in a keep-alive loop.
 
 **``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
 blend pipeline that enables non-prefix KV cache reuse (e.g. across
@@ -271,7 +289,7 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
        prefix. Returns a task id which the caller passes to
        ``P2P_QUERY_LOOKUP_RESULTS`` to poll for the transfer addresses.
        Served by ``P2PController`` (loaded unconditionally by
-       ``_build_modules()``); whether this server also acts as a P2P
+       ``ModuleCreator``); whether this server also acts as a P2P
        client is controlled by ``--p2p-advertise-url`` -- see
        :doc:`p2p`.
    * - ``P2P_QUERY_LOOKUP_RESULTS``

@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Engine-driven KV cache transfer operations for the MPCacheServer."""
 
+# Future
+from __future__ import annotations
+
 # Standard
 from dataclasses import dataclass
 import threading
@@ -24,7 +27,11 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
-from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    InstanceLivenessTarget,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 
@@ -58,7 +65,7 @@ class EngineDrivenContextEntry:
     has_liveness_signal: bool = False
 
 
-class EngineDrivenTransferModule(InstanceLivenessTarget):
+class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """Handles Engine-driven KV cache transfer operations.
 
     Owns non-GPU context registrations and provides handlers for
@@ -68,6 +75,17 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
     Args:
         ctx: The shared engine context.
     """
+
+    module_name = "engine_driven_transfer"
+    module_order = 41
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineDrivenTransferModule | None:
+        """Build unless the transfer mode excludes the engine-driven path."""
+        mode = build_ctx.mp_config.supported_transfer_mode
+        if mode == "lmcache_driven":
+            return None
+        return cls(build_ctx.engine_context)
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx

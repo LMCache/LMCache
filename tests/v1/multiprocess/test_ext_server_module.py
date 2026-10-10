@@ -11,7 +11,7 @@ import sys
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess import server as server_mod
+from lmcache.v1.multiprocess import module_creator
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleBuildContext,
@@ -24,8 +24,24 @@ from lmcache.v1.multiprocess.ext_server_module import (
     register_zmq_services,
     server_module_handler,
 )
+from lmcache.v1.multiprocess.modules import engine_driven_transfer as ed_mod
+from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as ld_mod
+from lmcache.v1.multiprocess.modules import lookup as lookup_mod
+from lmcache.v1.multiprocess.modules import management as management_mod
+from lmcache.v1.multiprocess.modules import p2p_controller as p2p_mod
 from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
 from lmcache.v1.multiprocess.request_handler import iter_request_handlers
+
+# Modules whose constructors are stubbed in the build tests below. Each entry
+# is (defining module, class name); the classes are patched in place so the
+# discovery contract stays intact.
+_BUILTIN_MODULES = [
+    (lookup_mod, "LookupModule"),
+    (p2p_mod, "P2PController"),
+    (ld_mod, "LMCacheDrivenTransferModule"),
+    (ed_mod, "EngineDrivenTransferModule"),
+    (management_mod, "ManagementModule"),
+]
 
 
 class _FakeLMCacheDriven:
@@ -102,6 +118,32 @@ def _install_fake_factory(
     setattr(module, factory_name, factory)
     monkeypatch.setitem(sys.modules, module_name, module)
     return module_name
+
+
+def _stub_builtin_modules(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Short-circuit every built-in module's constructor.
+
+    Returns a dict that records the keyword arguments each module was
+    constructed with, keyed by class name, so tests can assert on what the
+    management module received.
+
+    ``__init__`` is patched on the real classes rather than replacing them:
+    discovery skips abstract classes, so a synthetic stand-in that drops the
+    inherited ``create()`` would silently vanish from the composition.
+    """
+    captured: dict = {}
+
+    def _capture(class_name: str):
+        def __init__(self, *args, **kwargs):
+            captured[class_name] = kwargs
+
+        return __init__
+
+    for module, class_name in _BUILTIN_MODULES:
+        monkeypatch.setattr(
+            getattr(module, class_name), "__init__", _capture(class_name)
+        )
+    return captured
 
 
 def test_parse_server_module_specs_accepts_object_and_list() -> None:
@@ -278,21 +320,16 @@ def test_build_modules_loads_plugin_and_registers_liveness_target(
         return plugin_module
 
     module_name = _install_fake_factory(monkeypatch, factory)
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
-    monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
-    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
-    management = MagicMock(name="ManagementModule")
-    monkeypatch.setattr(server_mod, "ManagementModule", management)
+    management = _stub_builtin_modules(monkeypatch)
 
-    modules = server_mod._build_modules(
+    modules = module_creator.build_modules(
         ctx,
         MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
         MagicMock(url=""),
     )
 
     assert modules[-1] is plugin_module
-    assert plugin_module in management.call_args.kwargs["liveness_targets"]
+    assert plugin_module in management["ManagementModule"]["liveness_targets"]
 
 
 def test_build_modules_adds_server_module_router(
@@ -306,13 +343,9 @@ def test_build_modules_adds_server_module_router(
         return plugin_module
 
     module_name = _install_fake_factory(monkeypatch, factory)
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
-    monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
-    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
-    monkeypatch.setattr(server_mod, "ManagementModule", MagicMock())
+    _stub_builtin_modules(monkeypatch)
 
-    modules = server_mod._build_modules(
+    modules = module_creator.build_modules(
         ctx,
         MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
         MagicMock(url=""),
@@ -337,13 +370,9 @@ def test_build_server_components_collects_transport_service_registrars(
         )
 
     module_name = _install_fake_factory(monkeypatch, factory)
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
-    monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
-    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
-    monkeypatch.setattr(server_mod, "ManagementModule", MagicMock())
+    _stub_builtin_modules(monkeypatch)
 
-    components = server_mod._build_server_components(
+    components = module_creator.build_server_components(
         ctx,
         MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
         MagicMock(url=""),

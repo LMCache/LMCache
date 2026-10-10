@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """P2PController: peer discovery, adapter lifecycle, and lookup serving."""
 
+# Future
+from __future__ import annotations
+
 # Standard
 from dataclasses import dataclass
 from enum import Enum
@@ -31,6 +34,7 @@ from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_module import DiscoverableModule, ModuleBuildContext
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -146,7 +150,7 @@ class _P2PLookupJob:
     object group; the status result is one bitmap per row """
 
 
-class P2PController:
+class P2PController(DiscoverableModule):
     """Serves lookup requests from peers and maintains one L2 adapter per peer.
 
     P2P is enabled when ``p2p_config`` carries an advertise URL; otherwise the
@@ -162,6 +166,24 @@ class P2PController:
         request_transport: Request transport exposed by this server and its
             discovered peers.
     """
+
+    module_name = "p2p_controller"
+    module_order = 20
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> P2PController | None:
+        """Build the controller; it applies to every configuration.
+
+        Its five constructor arguments all come from the build context, which
+        is why the constructor stays private to this factory in practice.
+        """
+        return cls(
+            build_ctx.engine_context,
+            build_ctx.mp_config.p2p_config,
+            build_ctx.coordinator_config,
+            build_ctx.mp_config.instance_id,
+            build_ctx.mp_config.transport,
+        )
 
     def __init__(
         self,
