@@ -169,8 +169,8 @@ def plan(
     Candidates come newest first. The best copies the most whole chunks, then
     the most tokens, with the fewest pieces; ties keep the newest. Only
     candidates that share P's first ``keep_prefix`` tokens are copied, and
-    those tokens stay in place. A plan never serves fewer whole chunks than
-    ``baseline_chunks``, the exact prefix P already has.
+    those tokens stay in place. A plan must copy more whole chunks than
+    ``baseline_chunks``, the exact prefix P already has; a tie keeps P.
 
     Returns:
         The order to serve P in (``[P[i] for i in perm]``), or None to keep
@@ -194,14 +194,10 @@ def plan(
             if best is None or score > best[0]:
                 best = (score, pieces, Hn)
     except PlanBudgetExceeded:
-        # Out of time: a finished plan still counts if it beats P's own prefix.
-        if best is not None and best[0][0] <= baseline_chunks:
-            return None
-    if best is None:
+        pass  # out of time: a finished plan still counts
+    if best is None or best[0][0] <= baseline_chunks:
         return None
-    (chunks, k, _), pieces, Hn = best
-    if k == keep_prefix or chunks < baseline_chunks:
-        return None
+    (_, k, _), pieces, Hn = best
     used = np.zeros(len(P), dtype=bool)
     perm: list[int] = []
     for i, j in pieces:
@@ -237,7 +233,9 @@ class PromptStore:
         # (ns, request_id) -> [seq, token ids, chain hashes]
         self._entries: "OrderedDict[tuple, list]" = OrderedDict()
         self._owner: dict[tuple, tuple] = {}  # (ns, chain hash) -> (ns, request_id)
-        self._newest: dict[NS, tuple] = {}  # ns -> its newest (ns, request_id)
+        # cache_salt -> (model_name, world_size) -> [its number of prompts, its
+        # newest (ns, request_id)]; a namespace goes with its last prompt.
+        self._ns: dict[str, dict[tuple[str, int], list]] = {}
 
     def record(
         self,
@@ -257,7 +255,9 @@ class PromptStore:
                 ids = np.asarray(token_ids, dtype=np.uint32)
                 e = self._entries[key] = [self._seq, ids, set()]
                 self._tokens += len(ids)
-                self._newest[ns] = key
+                n = self._ns.setdefault(ns[2], {}).setdefault(ns[:2], [0, key])
+                n[0] += 1
+                n[1] = key
             self._entries.move_to_end(key)
             for h in chain_hashes:
                 e[2].add(h)
@@ -268,6 +268,13 @@ class PromptStore:
                 for h in hashes:
                     if self._owner.get((old[0], h)) == old:
                         del self._owner[(old[0], h)]
+                salt, name = old[0][2], old[0][:2]
+                n = self._ns[salt][name]
+                n[0] -= 1
+                if not n[0]:  # the namespace's last prompt
+                    del self._ns[salt][name]
+                    if not self._ns[salt]:
+                        del self._ns[salt]
 
     def resolve(self, model_name: str, world_size: int, cache_salt: str) -> NS | None:
         """The one recorded namespace (model_name, world_size, cache_salt) that
@@ -275,11 +282,10 @@ class PromptStore:
         zero world_size match any. None if zero or several match."""
         with self._lock:
             hits = [
-                ns
-                for ns in self._newest
-                if ns[2] == cache_salt
-                and (not model_name or ns[0] == model_name)
-                and (not world_size or ns[1] == world_size)
+                (m, w, cache_salt)
+                for m, w in self._ns.get(cache_salt, ())
+                if (not model_name or m == model_name)
+                and (not world_size or w == world_size)
             ]
         return hits[0] if len(hits) == 1 else None
 
@@ -306,7 +312,8 @@ class PromptStore:
                 base += 1
             if base:
                 keys.add(self._owner[(ns, prompt_chain[base - 1])])
-            if self._newest.get(ns) in self._entries:
-                keys.add(self._newest[ns])
+            newest = self._ns.get(ns[2], {}).get(ns[:2])
+            if newest and newest[1] in self._entries:
+                keys.add(newest[1])
             entries = sorted((self._entries[x] for x in keys), key=lambda e: -e[0])
             return [e[1] for e in entries], base

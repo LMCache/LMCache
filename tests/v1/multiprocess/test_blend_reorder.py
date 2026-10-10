@@ -84,10 +84,15 @@ def test_budget_returns_identity():
     assert _serve(P, [_prompt(a, b)], deadline=time.monotonic() - 1) == P
 
 
-def test_never_serves_fewer_chunks_than_the_prompt_already_has():
+def test_a_plan_must_gain_a_whole_chunk():
     a, b = _doc(60), _doc(61)
-    P = _prompt(b, a)
-    assert _serve(P, [_prompt(a, b)], baseline_chunks=10**6) == P
+    P, cached = _prompt(b, a), _prompt(a, b, _doc(62))
+    served = _serve(P, [cached])
+    same = [x == y for x, y in zip(served, cached, strict=False)]
+    n = same.index(False) // C  # the whole chunks the plan copies
+    assert n > 0
+    assert _serve(P, [cached], baseline_chunks=n - 1) == served
+    assert _serve(P, [cached], baseline_chunks=n) == P  # a tie keeps P
 
 
 def test_budget_expiry_keeps_a_finished_plan_only_if_it_gains(monkeypatch):
@@ -152,12 +157,19 @@ def test_prompt_store_candidates():
 
 def test_prompt_store_namespaces():
     store = br.PromptStore(max_tokens=10)
-    store.record(("m", 1, ""), "r1", [1] * 6, [b"a"])
-    store.record(("m", 1, "salt"), "r2", [2] * 3, [b"b"])
-    assert store.resolve("", 0, "") == ("m", 1, "")  # salt must match exactly
-    assert store.resolve("", 0, "salt") == ("m", 1, "salt")
+    ns, salted = ("m", 1, ""), ("m", 1, "salt")
+    store.record(ns, "r1", [1] * 3, [b"a"])
+    store.record(ns, "r2", [2] * 3, [b"b"])  # the namespace's newest
+    store.record(salted, "r3", [3] * 3, [b"c"])
+    assert store.resolve("", 0, "") == ns  # salt must match exactly
+    assert store.resolve("", 0, "salt") == salted
     assert store.resolve("m", 2, "") is None and store.resolve("x", 0, "") is None
-    store.record(("m", 1, "salt"), "r3", [3] * 6, [b"c"])  # 15 > 10: evicts r1
-    # the namespace stays known after its newest prompt is evicted
-    assert store.resolve("", 0, "") == ("m", 1, "")
-    assert store.candidates(("m", 1, ""), [b"a"], []) == ([], 0)
+    store.record(ns, "r1", [1] * 4, [b"d"])  # touch r1: r2 is now the LRU
+    store.record(salted, "r4", [4] * 3, [b"e"])  # 12 > 10: evicts r2
+    # the namespace stays while it holds a prompt (r1); its newest is gone
+    assert store.resolve("", 0, "") == ns
+    assert [list(c) for c in store.candidates(ns, [b"a"], [])[0]] == [[1] * 3]
+    store.record(salted, "r5", [5] * 6, [b"f"])  # evicts r3, then r1: ns's last
+    assert store.resolve("", 0, "") is None
+    assert store.candidates(ns, [b"a"], []) == ([], 0)
+    assert store._ns == {"salt": {("m", 1): [2, (salted, "r5")]}}  # nothing left
