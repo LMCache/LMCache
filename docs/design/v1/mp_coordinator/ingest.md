@@ -42,13 +42,14 @@ consumer is a `register_consumer` call in `create_app`.
 ## Admission (`EventGate.ingest`)
 
 One batch = `(instance_id, incarnation, seq, event_type, tier, backend,
-entries[], ts)`. The gate enforces, in order:
+entries[], ts, dropped_events)`. The gate enforces, in order:
 
 | mechanism | rule | why |
 | --- | --- | --- |
 | Incarnation fencing | `incarnation <` current → drop batch (`STALE_INCARNATION`). `incarnation >` current → `fence_instance(id)` on every consumer, then start a fresh cursor. | A restart empties the reporter's *memory* — its L1 placements must not survive. L2 bytes persist on disk across restarts, so L2 is deliberately not fenced (consumers that track L2 only no-op the hook). |
 | Seq dedup | `seq <=` last admitted (same incarnation) → drop batch (`DUPLICATE`). | Replays (retry, event-bus redelivery) must be idempotent. |
-| Gap detection | `seq >` last admitted `+ 1` → set the emitter's `gap_detected` flag, admit anyway. | Events may be lost; the flag marks the emitter's slice as stale until the stream is replayed (durable-transport retention). Consumer application is idempotent, so admitting past a gap is safe. |
+| Gap detection | `seq >` last admitted `+ 1`, or `dropped_events` grew → set the emitter's `gap_detected` flag, admit anyway. | Events may be lost; the flag marks the emitter's slice as stale until the stream is replayed (durable-transport retention). Consumer application is idempotent, so admitting past a gap is safe. |
+| Loss accounting | Per admitted batch: add the skipped `seq` count to `missing_batches` (not for the first batch of a stream the gate was not tracking), and the increase of `dropped_events` to `events_dropped`. | The flag says *that* the slice is incomplete; the counts say *how much*, and their rate says whether loss is ongoing. A skipped `seq` is loss in transit; `dropped_events` is what the emitter itself threw away. |
 
 Per-instance FIFO by `seq` is the **only** ordering the design needs:
 each instance is the sole writer of its own facts, so there is no
@@ -172,18 +173,23 @@ registration order.
 | How many bytes is this salt using? What should be evicted? | `FleetEvictionController` |
 
 `EventGate.stats()` has **no HTTP endpoint yet** — `GET /directory/stats`
-deliberately reports directory contents only. So `gap_detected` is
-currently invisible to operators; exposing it is part of the replay
-follow-up below.
+deliberately reports directory contents only. Its loss state is exported
+as metrics instead: fleet counters
+`lmcache_coordinator.ingest.event_batches_missing` and
+`...events_dropped_by_servers`, and per-`instance_id` gauges
+`...server_event_batches_missing`, `...server_events_dropped` and
+`...server_view_incomplete` (the `gap_detected` flag). The per-instance
+counts cover the emitter's current incarnation and are not
+checkpointed; the last `dropped_events` seen is, so a restarted
+coordinator keeps measuring against the last report. See
+[observability.md](observability.md).
 
 ## Deliberately out of scope (follow-ups)
 
-- **Gap visibility**: `gap_detected` still has no HTTP endpoint --
-  `GET /directory/stats` deliberately reports directory contents only.
-  Nor is consumer lag exposed anywhere: a restart is consistent whatever
-  its lag (see `StreamPosition` above), so nothing in the coordinator
-  needs the number, and an operator who wants it can read the topic's
-  high watermark directly.
+- **Gap visibility over HTTP**: `gap_detected` is a metric but still has
+  no HTTP endpoint (the planned `GET /status`, see
+  [observability.md](observability.md)). Consumer lag is not exposed
+  yet either; it is part of the same plan.
 - **Operator-driven replay from an arbitrary point**: a restart already
   resumes correctly on its own. Replaying from further back --
   reprocessing retained history the checkpoint has already moved past --

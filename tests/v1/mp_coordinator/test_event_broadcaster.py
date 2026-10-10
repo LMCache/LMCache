@@ -12,7 +12,10 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
-from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
+from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
+    CacheEventBroadcaster,
+    ConsumerStats,
+)
 import lmcache.v1.mp_coordinator.ingest.event_broadcaster as event_broadcaster
 
 
@@ -133,3 +136,37 @@ def test_a_fence_that_raises_does_not_stop_the_others(
 
     assert log == [("after", "node-a")]
     assert errors == ["Cache-event consumer _RaisingConsumer failed to fence node-a"]
+
+
+def test_stats_tally_each_consumer_s_batches_and_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broadcaster = CacheEventBroadcaster()
+    broadcaster.register_consumer(_RaisingConsumer())
+    broadcaster.register_consumer(_RecordingConsumer("ok", []))
+    _capture_exceptions(monkeypatch)
+
+    broadcaster.broadcast(_batch(seq=1))
+    broadcaster.broadcast(_batch(seq=2))
+    broadcaster.fence_instance("node-a")
+
+    stats = broadcaster.stats()
+    raising, recording = stats["_RaisingConsumer"], stats["_RecordingConsumer"]
+    assert (
+        raising.batches_delivered,
+        raising.consume_failures,
+        raising.fence_failures,
+    ) == (2, 2, 1)
+    assert (
+        recording.batches_delivered,
+        recording.consume_failures,
+        recording.fence_failures,
+    ) == (2, 0, 0)
+    assert raising.apply_seconds >= 0 and recording.apply_seconds >= 0
+
+
+def test_stats_list_every_consumer_before_any_batch() -> None:
+    broadcaster = CacheEventBroadcaster()
+    broadcaster.register_consumer(_RecordingConsumer("ok", []))
+
+    assert broadcaster.stats() == {"_RecordingConsumer": ConsumerStats()}

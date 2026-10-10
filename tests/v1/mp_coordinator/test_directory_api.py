@@ -125,6 +125,22 @@ def test_delete_event_removes_placement():
         assert result[0]["placements"] == []
 
 
+def test_a_batch_without_dropped_events_reads_as_zero():
+    """Emitters that predate the field omit it."""
+    batch = _batch()
+    assert "dropped_events" not in batch
+    with _client() as client:
+        assert _post_events(client, [batch])["applied"] == 1
+
+
+def test_a_negative_dropped_events_is_rejected():
+    with _client() as client:
+        resp = client.post(
+            "/events", json={"batches": [{**_batch(), "dropped_events": -1}]}
+        )
+    assert resp.status_code == 422
+
+
 def test_duplicate_and_stale_batches_are_counted():
     with _client() as client:
         _post_events(client, [_batch(incarnation=2, seq=1)])
