@@ -3,7 +3,6 @@
 
 # Standard
 from dataclasses import dataclass
-import asyncio
 import random
 
 # First Party
@@ -12,7 +11,10 @@ from lmcache.cli.commands.bench.engine_bench.request_sender import (
     RequestSender,
 )
 from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
-from lmcache.cli.commands.bench.engine_bench.workloads.base import BaseWorkload
+from lmcache.cli.commands.bench.engine_bench.workloads.base import (
+    BaseWorkload,
+    DispatchTracker,
+)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -131,8 +133,9 @@ class LongDocQAWorkload(BaseWorkload):
         self._schedule = self._build_schedule()
         self._schedule_index = 0
 
-        self._semaphore = asyncio.Semaphore(config.num_inflight_requests)
-        self._pending_tasks: set[asyncio.Task] = set()
+        self._dispatch_tracker = DispatchTracker(
+            progress_monitor, config.num_inflight_requests
+        )
 
     def log_config(self) -> None:
         """Log key workload config before the benchmark starts."""
@@ -236,23 +239,23 @@ class LongDocQAWorkload(BaseWorkload):
     # ------------------------------------------------------------------
 
     async def step(self, time_offset: float) -> float:
-        """Dispatch the next request if semaphore allows."""
-        if self._schedule_index < len(self._schedule):
-            await self._semaphore.acquire()
-            doc_idx, q_idx = self._schedule[self._schedule_index]
-            self._schedule_index += 1
+        """Dispatch the next request when a concurrency slot is available.
 
-            task = asyncio.create_task(self._dispatch(doc_idx, q_idx))
-            self._pending_tasks.add(task)
-            task.add_done_callback(self._on_task_done)
+        Args:
+            time_offset: Seconds since benchmark start (unused).
+
+        Returns:
+            0.0 for an immediate re-call, or -1.0 when all sends have finished.
+        """
+        if self._schedule_index < len(self._schedule):
+            doc_idx, q_idx = self._schedule[self._schedule_index]
+            await self._dispatch_tracker.start(lambda: self._dispatch(doc_idx, q_idx))
+            self._schedule_index += 1
             return 0.0  # immediate re-call
 
         # All dispatched — wait for pending tasks.
-        if self._pending_tasks:
-            await asyncio.wait(
-                self._pending_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+        if self._dispatch_tracker.has_pending:
+            await self._dispatch_tracker.wait_one()
             return 0.0
 
         return -1.0  # all done
@@ -262,29 +265,23 @@ class LongDocQAWorkload(BaseWorkload):
         doc_index: int,
         query_index: int,
     ) -> None:
-        """Send a single benchmark request, then release the semaphore."""
+        """Send one document question.
+
+        Args:
+            doc_index: Index of the document in this request.
+            query_index: Index of the question for that document.
+        """
         request_id = f"doc{doc_index}_q{query_index}"
         messages = self._build_messages(doc_index, query_index)
         self._progress_monitor.on_request_sent(request_id)
         self._progress_monitor.log_message(
             f"Dispatched request {request_id} (doc {doc_index}, query {query_index})"
         )
-        try:
-            await self._request_sender.send_request(
-                request_id,
-                messages,
-                max_tokens=self._config.max_output_length,
-            )
-        finally:
-            self._semaphore.release()
-
-    def _on_task_done(self, task: asyncio.Task) -> None:
-        """Clean up completed tasks and log unexpected errors."""
-        self._pending_tasks.discard(task)
-        if not task.cancelled():
-            exc = task.exception()
-            if exc is not None:
-                self._progress_monitor.log_message(f"Dispatch task failed: {exc}")
+        await self._request_sender.send_request(
+            request_id,
+            messages,
+            max_tokens=self._config.max_output_length,
+        )
 
     def on_request_finished(self, request_id: str, output: str) -> None:
         """No-op — this workload is stateless."""

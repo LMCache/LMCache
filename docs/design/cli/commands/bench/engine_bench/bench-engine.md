@@ -183,6 +183,22 @@ drain_finished_queue()
 **`step()` contract:** returns the absolute time offset (from benchmark start)
 at which to be called again, or a negative value when complete.
 
+Concurrent workloads opt into `DispatchTracker` from `workloads/base.py`.
+`await tracker.start(send)` tracks one send; an optional `max_inflight` acquires
+a slot before scheduling it. The tracker releases that slot when the task
+finishes or is cancelled, logs unexpected task exceptions, and exposes
+`has_pending` / `wait_one()` for the workload's termination path. Pass a
+coroutine factory so no send coroutine is created while waiting for a slot.
+Each workload still chooses its own request order and wakeup time: the tracker
+does not impose a dispatch policy. For example:
+
+```python
+tracker = DispatchTracker(progress_monitor, max_inflight=8)
+await tracker.start(lambda: send_one_request(request_id, messages))
+if tracker.has_pending:
+    await tracker.wait_one()
+```
+
 **`request_finished()`** matches `OnFinishedCallback` and is registered on the
 sender by the orchestrator. It enqueues `(request_id, response_text)`; the
 loop thread drains it, so workloads never handle cross-thread concerns.
@@ -251,7 +267,8 @@ Repeated questions over long synthetic documents; tests prefix reuse.
 | `max_output_length` | `--ldqa-max-output-length` | 128 |
 
 **Warmup:** each document once (`max_tokens=1`). **Dispatch:**
-semaphore-controlled; `step()` acquires, fires an async task, returns `0.0`.
+`step()` asks the tracker for a concurrency slot, starts the next send, and
+returns `0.0`.
 **`on_request_finished`:** no-op. **Termination:** `-1.0` when the schedule is
 exhausted and all tasks are done.
 
@@ -285,7 +302,8 @@ Raw prefill throughput; fires everything at once.
 | `num_requests` | `--rp-num-requests` | 50 |
 
 **Warmup:** none. **Dispatch:** first `step()` dispatches all requests
-(`max_tokens=1`); later calls wait on `asyncio.wait(FIRST_COMPLETED)`.
+(`max_tokens=1`); later calls use the tracker to wait for completion. No
+concurrency limit is applied.
 
 ### 4.4 `long-doc-permutator`
 
@@ -423,10 +441,9 @@ chunk-level cache lookup and eviction.
   random permutations into a `set` to avoid exhausting an enormous search
   space. Returns all `N!` permutations when `num_permutations >= N!`.
 - **Warmup:** A single dummy request (`max_tokens=1`) to prime the engine.
-- **Dispatch:** Semaphore-controlled — `step()` acquires the semaphore, fires
-  an async task with the next permutation, returns `0.0` for immediate
-  re-call. Once all permutations are dispatched, awaits remaining tasks via
-  `asyncio.wait(FIRST_COMPLETED)`.
+- **Dispatch:** `step()` asks the tracker for a concurrency slot, starts a
+  task with the next permutation, and returns `0.0` for immediate re-call.
+  Once all permutations are dispatched, it waits for tracked tasks to finish.
 - **`on_request_finished`:** No-op (stateless).
 - **Termination:** Returns `-1.0` when the request list is exhausted and all
   pending tasks have completed.
