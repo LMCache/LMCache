@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Iterable
-from contextlib import closing
-from itertools import groupby, islice
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -45,11 +43,7 @@ from lmcache.utils import (
     compress_slot_mapping,
     convert_tokens_to_list,
 )
-from lmcache.v1.broadcast_transfer import (
-    BroadcastTransfer,
-    RetrievalBuffer,
-    RetrievalChunk,
-)
+from lmcache.v1.broadcast_transfer import StagedChunk, Window, pack, plan_windows
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
@@ -130,8 +124,11 @@ class LMCacheEngine:
             and metadata.use_mla
         )
 
-        self.retrieval_buffer: Optional[RetrievalBuffer] = None
-        self._failed_retrieval: Optional[Generator[RetrievalChunk, None, None]] = None
+        # Fixed device staging for first-rank broadcast retrieval. Its capacity
+        # is the configured budget, checked to hold at least one chunk, and it
+        # never grows: every rank must be able to receive any window the first
+        # rank can send.
+        self._staging: Optional[torch.Tensor] = None
         if (
             self.save_only_first_rank
             and not config.use_layerwise
@@ -142,15 +139,26 @@ class LMCacheEngine:
                 if hasattr(self.gpu_connector, "load_stream")
                 else torch_dev.Stream()
             )
+            chunk_bytes = self._chunk_bytes()
+            if config.retrieve_buffer_size < chunk_bytes:
+                raise ValueError(
+                    f"retrieve_buffer_size={config.retrieve_buffer_size} must hold "
+                    f"at least one KV chunk of {chunk_bytes} bytes "
+                    f"(chunk_size={config.chunk_size})"
+                )
             try:
-                self.retrieval_buffer = RetrievalBuffer.get(
-                    torch.device(torch_device_type, metadata.local_worker_id),
+                # The device the serving engine made current for this worker.
+                # Rank ids do not identify it: under vLLM data parallelism every
+                # DP engine's TP world starts at rank 0.
+                self._staging = torch.empty(
                     config.retrieve_buffer_size,
+                    dtype=torch.uint8,
+                    device=torch.device(torch_device_type, torch_dev.current_device()),
                 )
             except (RuntimeError, MemoryError):
                 # Peers learn about this at retrieval admission, before any
-                # tensor collective. Do not let one rank leave them waiting.
-                logger.exception("Could not reserve the KV retrieval buffer")
+                # tensor collective, so this rank never leaves them waiting.
+                logger.exception("Could not reserve the KV retrieval staging buffer")
 
         self.enable_controller = config.enable_controller
 
@@ -847,7 +855,9 @@ class LMCacheEngine:
         retrieval, the caller must release its pins with ``lookup_unpin(lookup_id)``
         before issuing further blocking retrievals that may need cache space.
         """
-        # Health check: block operation if LMCache is unhealthy
+        # Health check: block operation if LMCache is unhealthy. A first-rank
+        # broadcast rank must still join its peers' collectives, so it enters
+        # the exchange and simply never writes (see _retrieve_broadcast).
         if not self.is_healthy() and not self.save_only_first_rank:
             logger.warning("LMCache is unhealthy, skipping retrieve operation")
             return torch.zeros(len(tokens), dtype=torch.bool)
@@ -879,19 +889,14 @@ class LMCacheEngine:
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
         if self.save_only_first_rank:
-            ret_mask, tot_kv_size = self._retrieve_broadcast(
-                tokens, mask, retrieve_stats, **kwargs
+            tot_kv_size = self._retrieve_broadcast(
+                tokens, mask, ret_mask, retrieve_stats, **kwargs
             )
         else:
             with retrieve_stats.profile_process_tokens():
-                if self.async_loading:
-                    reordered_chunks, tot_kv_size = self._async_process_tokens_internal(
-                        tokens, mask, ret_mask, **kwargs
-                    )
-                else:
-                    reordered_chunks, tot_kv_size = self._process_tokens_internal(
-                        tokens, mask, ret_mask, **kwargs
-                    )
+                reordered_chunks, tot_kv_size = self._acquire_chunks(
+                    tokens, mask, ret_mask, **kwargs
+                )
             if reordered_chunks:
                 try:
                     with retrieve_stats.profile_to_gpu():
@@ -902,6 +907,9 @@ class LMCacheEngine:
                             list(memory_objs), list(starts), list(ends), **kwargs
                         )
                 finally:
+                    # Enqueued writes may still read the sources, even when the
+                    # connector raised. Fence before handing them back so a
+                    # failed load can neither leak nor free memory in use.
                     self.gpu_connector.synchronize_load()
                     for key, memory_obj, _, _ in reordered_chunks:
                         self._release_retrieval_chunk(key, memory_obj)
@@ -1587,19 +1595,6 @@ class LMCacheEngine:
         """Close the cache engine and free all the resources"""
         logger.info("Closing LMCacheEngine...")
 
-        if self._failed_retrieval is not None:
-            try:
-                self.broadcast_stream.synchronize()
-                assert self.gpu_connector is not None
-                self.gpu_connector.synchronize_load()
-            except Exception:
-                logger.exception(
-                    "Cannot release failed retrieval until device recovery"
-                )
-                return
-            self._failed_retrieval.close()
-            self._failed_retrieval = None
-
         if self.hidden_state_store is not None:
             try:
                 logger.info("Closing hidden_state_store...")
@@ -1623,7 +1618,7 @@ class LMCacheEngine:
         except Exception as e:
             logger.error("Error closing storage_manager: %s", e)
 
-        self.retrieval_buffer = None
+        self._staging = None
         logger.info("LMCacheEngine closed.")
 
     def _async_process_tokens_internal(
@@ -1661,6 +1656,10 @@ class LMCacheEngine:
         except Exception as e:
             logger.error("Error popping event for request %s: %s", kwargs["req_id"], e)
             return [], 0
+        # This retrieval now owns every prefetched reference and releases the
+        # ones it uses. Drop the event so a later lookup_unpin cannot release
+        # the same objects a second time.
+        self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
 
         for backend_results in keyed_memory_objs:
             for key, memory_obj in backend_results:
@@ -1799,179 +1798,230 @@ class LMCacheEngine:
             reordered_chunks = kept_chunks
         return reordered_chunks, tot_kv_size
 
+    def _acquire_chunks(
+        self,
+        tokens: Union[torch.Tensor, list[int]],
+        mask: Optional[torch.Tensor],
+        ret_mask: torch.Tensor,
+        **kwargs: Any,
+    ) -> ProcessTokensInternalResult:
+        """Take ownership of the hit chunks from prefetch results or storage.
+
+        Args:
+            tokens: Tokens of the requested KV cache.
+            mask: Optional prefix mask; see :meth:`retrieve`.
+            ret_mask: Mask updated in place with the tokens the chunks cover.
+            **kwargs: Request identity and configuration for the storage layer.
+
+        Returns:
+            The token-ordered chunks and their total size in bytes. The caller
+            must release every chunk with :meth:`_release_retrieval_chunk`.
+        """
+        if self.async_loading:
+            return self._async_process_tokens_internal(tokens, mask, ret_mask, **kwargs)
+        return self._process_tokens_internal(tokens, mask, ret_mask, **kwargs)
+
     def _retrieve_broadcast(
         self,
         tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor],
+        ret_mask: torch.Tensor,
         stats: RetrieveRequestStats,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, int]:
-        assert self.gpu_connector is not None
+    ) -> int:
+        """Stream the first rank's chunks to every rank through the staging buffer.
+
+        One host agreement admits the retrieval: every rank must hold a staging
+        buffer at least as large as the first rank's, be healthy, and be serving
+        the same request. The first rank then acquires its chunks exactly as a
+        single-rank retrieval would and packs consecutive chunks into windows
+        bounded by its buffer. Per window, every rank receives the same host
+        header, joins one tensor broadcast into its own staging buffer, and
+        writes the window into its KV pages. A ``None`` header ends the
+        exchange. After admission every rank performs the same sequence of
+        collectives whatever happens locally: a rank whose write fails stops
+        writing and reports the prefix it committed, but keeps receiving so its
+        peers never wait on it. Missing tokens surface to the serving engine
+        through the returned mask, as in single-rank retrieval.
+
+        Args:
+            tokens: Tokens of the requested KV cache.
+            mask: Optional prefix mask; see :meth:`retrieve`.
+            ret_mask: Output mask updated in place with the tokens this rank
+                has written.
+            stats: Per-request statistics receiving the phase timings.
+            **kwargs: Serving-engine arguments forwarded to the GPU connector.
+
+        Returns:
+            Total bytes acquired by the first rank; zero on other ranks.
+
+        Raises:
+            RuntimeError: If the engine was created without a GPU connector or
+                in layerwise mode.
+            ValueError: If a chunk is larger than the staging buffer. Peers are
+                released with an empty result first.
+            Exception: Storage, device, or collective failures. A storage
+                failure on the first rank ends the exchange for its peers
+                before propagating.
+        """
+        if self.gpu_connector is None or self.config.use_layerwise:
+            raise RuntimeError(
+                "First-rank retrieval needs a GPU connector and non-layerwise mode"
+            )
         connector = self.gpu_connector
-        total_size = 0
+        source_rank = self.metadata.first_rank
+        is_source = self.metadata.is_first_rank()
+        request_id = kwargs.get("req_id")
+        buffer = self._staging
 
-        def synchronize() -> None:
-            if getattr(connector, "load_stream", None) is not self.broadcast_stream:
-                self.broadcast_stream.synchronize()
-            connector.synchronize_load()
-
-        def write(
-            memory_objs: list[MemoryObj], starts: list[int], ends: list[int]
-        ) -> None:
-            with stats.profile_to_gpu():
-                connector.batched_to_gpu(memory_objs, starts, ends, **kwargs)
-
-        def broadcast(tensor: torch.Tensor, rank: int) -> None:
-            with stats.profile_broadcast():
-                self.broadcast_fn(tensor, rank)
-                self.broadcast_stream.synchronize()
-
-        def chunks() -> Generator[RetrievalChunk, None, None]:
-            nonlocal total_size
-            with closing(self._iter_retrieval_chunks(tokens, mask, **kwargs)) as source:
-                while True:
-                    with stats.profile_process_tokens():
-                        chunk = next(source, None)
-                    if chunk is None:
-                        break
-                    memory_obj, start, end = chunk
-                    total_size += memory_obj.get_size()
-                    yield memory_obj, start, end
-
-        # Single-rank integrations need not supply collective callbacks.
-        broadcast_object = self.broadcast_object_fn
-        if self.metadata.world_size == 1:
-            broadcast_object = lambda obj, src: obj
-        transfer = BroadcastTransfer(
-            self.retrieval_buffer if self.is_healthy() else None,
-            is_source=self.metadata.is_first_rank(),
-            source_rank=self.metadata.first_rank,
-            broadcast=broadcast,
-            broadcast_object=broadcast_object,
-            agree=self._all_ranks_agree,
-            synchronize=synchronize,
+        # Admission: one host agreement per retrieval. Windows then fit on every
+        # rank and no later collective can lack a participant.
+        capacity = buffer.numel() if buffer is not None else 0
+        reservation = (capacity, len(tokens), request_id)
+        source_reservation = self.broadcast_object_fn(
+            reservation if is_source else None, source_rank
         )
-        source = chunks()
+        ready = (
+            buffer is not None
+            and self.is_healthy()
+            and source_reservation is not None
+            and capacity >= source_reservation[0]
+            and reservation[1:] == source_reservation[1:]
+        )
+        if not self._all_ranks_agree(ready):
+            logger.warning(
+                "[req_id=%s] rank %d: first-rank retrieval was not admitted "
+                "(this rank ready=%s)",
+                request_id,
+                self.metadata.worker_id,
+                ready,
+            )
+            return 0
+        assert buffer is not None
+        writable = True
+        chunks: list[ProcessedChunk] = []
+        tot_kv_size = 0
+
+        def exchange(window: Window) -> None:
+            """Broadcast one packed window and write it into this rank's pages."""
+            nonlocal writable
+            with stats.profile_broadcast():
+                self.broadcast_fn(buffer[: window.num_bytes], source_rank)
+            if not writable:
+                return
+            written = True
+            try:
+                with stats.profile_to_gpu():
+                    if not hasattr(connector, "load_stream"):
+                        # The connector writes on its own stream; the payload
+                        # must have landed before it reads the staging buffer.
+                        self.broadcast_stream.synchronize()
+                    connector.batched_to_gpu(
+                        window.views(buffer),
+                        list(window.starts),
+                        list(window.ends),
+                        **kwargs,
+                    )
+            except Exception:
+                logger.exception(
+                    "[req_id=%s] rank %d could not write a KV window; "
+                    "reporting the prefix committed so far",
+                    request_id,
+                    self.metadata.worker_id,
+                )
+                written = False
+            # Work enqueued before a failed write may still read the staging
+            # buffer; it must finish before the buffer is reused. A failed
+            # fence is a device failure and propagates.
+            connector.synchronize_load()
+            if not written:
+                writable = False
+                ret_mask[window.starts[0] :] = False
+                return
+            ret_mask[window.starts[0] : window.ends[-1]] = True
+
         try:
             with torch_dev.stream(self.broadcast_stream):
-                result = transfer.retrieve(
-                    source, len(tokens), write, request_id=kwargs.get("req_id")
-                )
-        except BaseException:
-            # A failed device fence cannot establish that sources are reusable.
-            # Keep their ownership until close() can fence a recovered device.
-            self._failed_retrieval = source
-            self.mark_init_failed("Fatal KV retrieval transfer failure")
-            raise
-        else:
-            source.close()
-        return result, total_size if result.any() else 0
-
-    def _iter_retrieval_chunks(
-        self,
-        tokens: Union[torch.Tensor, list[int]],
-        mask: Optional[torch.Tensor],
-        **kwargs: Any,
-    ) -> Generator[RetrievalChunk, None, None]:
-        # The iterator owns source references. The transfer fences every read
-        # before advancing it, and closes it on both success and failure.
-        if self.async_loading:
-            pending, _ = self._async_process_tokens_internal(
-                tokens, mask, torch.zeros(len(tokens), dtype=torch.bool), **kwargs
-            )
-            # This iterator now owns all returned references; lookup_unpin must
-            # not later release the same prefetch result a second time.
-            self.event_manager.pop_event(EventType.LOADING, kwargs["req_id"])
-            yield from self._consume_retrieval_batch(pending)
-            return
-
-        assert self.storage_manager is not None
-        chunk_infos = []
-        for start, end, chunk_key in self.token_database.process_tokens(
-            tokens=tokens, mask=mask, request_configs=kwargs.get("request_configs")
-        ):
-            assert isinstance(chunk_key, CacheEngineKey)
-            chunk_infos.append((chunk_key, start, end))
-        pins = self.lookup_pins.get(self._get_req_id(kwargs))
-        if pins and len(pins) == 1:
-            block_mapping = {next(iter(pins)): chunk_infos}
-        else:
-            block_mapping = self.storage_manager.get_block_mapping(chunk_infos)
-        plan = sorted(
-            (
-                (start, end, key, location)
-                for location, blocks in block_mapping.items()
-                for key, start, end in blocks
-            ),
-            key=lambda item: item[0],
-        )
-        chunk_bytes = sum(
-            shape.numel() * dtype.itemsize
-            for shape, dtype in zip(
-                self.metadata.get_shapes(self.config.chunk_size),
-                self.metadata.get_dtypes(),
-                strict=True,
-            )
-        )
-        batch_size = max(1, self.config.retrieve_buffer_size // chunk_bytes)
-        for location, blocks in groupby(plan, key=lambda item: item[3]):
-            # Preserve concurrent backend I/O without materializing the whole
-            # hit. A source chunk larger than the window is sliced by transfer.
-            while batch := list(islice(blocks, batch_size)):
-                memory_objs = self.storage_manager.batched_get(
-                    [key for _, _, key, _ in batch], location
-                )
-                if len(memory_objs) != len(batch) or any(
-                    obj is None for obj in memory_objs
-                ):
-                    for (_, _, key, _), obj in zip(batch, memory_objs, strict=False):
-                        if obj is not None:
-                            self._release_retrieval_chunk(key, obj)
-                    raise OSError("A KV chunk disappeared before retrieval")
-                pending = [
-                    (key, obj, start, end)
-                    for (start, end, key, _), obj in zip(
-                        batch, memory_objs, strict=True
-                    )
-                    if obj is not None
-                ]
-                yield from self._consume_retrieval_batch(pending)
-
-    def _consume_retrieval_batch(
-        self, batch: list[ProcessedChunk]
-    ) -> Generator[RetrievalChunk, None, None]:
-        chunks = deque(batch)
-        try:
-            while chunks:
-                key, memory_obj, start, end = chunks.popleft()
+                if not is_source:
+                    try:
+                        while (
+                            window := self.broadcast_object_fn(None, source_rank)
+                        ) is not None:
+                            exchange(window)
+                    except Exception:
+                        self._disable_after_fatal_transfer_failure()
+                        raise
+                    return 0
+                # Everything that can fail for local reasons happens before any
+                # device or collective work. Peers are waiting for the first
+                # header, so release them and keep this engine usable.
                 try:
-                    yield memory_obj, start, end
-                finally:
-                    self._release_retrieval_chunk(key, memory_obj)
+                    with stats.profile_process_tokens():
+                        chunks, tot_kv_size = self._acquire_chunks(
+                            tokens, mask, torch.zeros_like(ret_mask), **kwargs
+                        )
+                    staged: list[StagedChunk] = [
+                        (memory_obj, start, end) for _, memory_obj, start, end in chunks
+                    ]
+                    if any(
+                        memory_obj.raw_tensor is None for memory_obj, _, _ in staged
+                    ):
+                        raise ValueError("A KV chunk no longer exposes its tensor")
+                    windows = [
+                        (group, Window.from_chunks(group))
+                        for group in plan_windows(staged, capacity)
+                    ]
+                    for _, window in windows:
+                        if window.num_bytes > capacity:
+                            raise ValueError(
+                                f"A KV chunk of {window.num_bytes} bytes exceeds "
+                                f"retrieve_buffer_size={capacity}"
+                            )
+                except Exception:
+                    self.broadcast_object_fn(None, source_rank)
+                    raise
+                # From here on every failure is a device or collective failure.
+                # Peers block on a header between windows; when they are still
+                # waiting, the terminating header lets them finish this request.
+                peers_await_header = True
+                try:
+                    for group, window in windows:
+                        # Pack before announcing the window so its payload is
+                        # ready the moment peers join the tensor broadcast.
+                        pack(group, window.views(buffer))
+                        self.broadcast_object_fn(window, source_rank)
+                        peers_await_header = False
+                        exchange(window)
+                        peers_await_header = True
+                    peers_await_header = False
+                    self.broadcast_object_fn(None, source_rank)
+                except Exception:
+                    self._disable_after_fatal_transfer_failure()
+                    if peers_await_header:
+                        self.broadcast_object_fn(None, source_rank)
+                    raise
         finally:
+            # Staging copies may still be reading the sources.
+            self.broadcast_stream.synchronize()
             for key, memory_obj, _, _ in chunks:
                 self._release_retrieval_chunk(key, memory_obj)
-
-    def _release_retrieval_chunk(
-        self, key: CacheEngineKey, memory_obj: MemoryObj
-    ) -> None:
-        if self.remove_after_retrieve:
-            assert self.storage_manager is not None
-            self.storage_manager.remove(key, self.retrieve_locations)
-            if self._is_sync_pd_backend():
-                memory_obj.ref_count_down()
-        else:
-            if memory_obj.is_pinned:
-                memory_obj.unpin()
-            memory_obj.ref_count_down()
+        return tot_kv_size
 
     def _all_ranks_agree(self, ready: bool) -> bool:
+        """Return True only if every rank of the retrieval group voted True.
+
+        Args:
+            ready: This rank's vote.
+
+        Returns:
+            The conjunction of all votes, identical on every rank.
+        """
         if self.all_ranks_agree_fn is not None:
             return self.all_ranks_agree_fn(ready)
         if self.metadata.world_size == 1:
             return ready
-        # Compatibility for integrations providing only object broadcasts.
-        # Evaluate every vote even after a failure to preserve collective order.
+        # Integrations providing only object broadcasts: every rank publishes
+        # its vote in rank order, so the collective sequence stays identical.
         votes = [
             self.broadcast_object_fn(
                 ready if rank == self.metadata.worker_id else None, rank
@@ -1979,6 +2029,49 @@ class LMCacheEngine:
             for rank in range(self.metadata.world_size)
         ]
         return all(vote is True for vote in votes)
+
+    def _disable_after_fatal_transfer_failure(self) -> None:
+        """Refuse further first-rank retrievals after a device or collective error.
+
+        The collective sequence of this rank can no longer be trusted, and the
+        serving engine decides whether the worker group is torn down. Until
+        then every later retrieval is refused at admission, so peers receive a
+        clean all-false result instead of waiting on a broadcast this rank
+        never joins.
+        """
+        self.mark_init_failed("Fatal KV retrieval transfer failure")
+
+    def _chunk_bytes(self) -> int:
+        """Return the size in bytes of one full KV chunk under the current layout."""
+        return sum(
+            shape.numel() * dtype.itemsize
+            for shape, dtype in zip(
+                self.metadata.get_shapes(self.config.chunk_size),
+                self.metadata.get_dtypes(),
+                strict=True,
+            )
+        )
+
+    def _release_retrieval_chunk(
+        self, key: CacheEngineKey, memory_obj: MemoryObj
+    ) -> None:
+        """Give back one chunk acquired for retrieval.
+
+        Args:
+            key: Cache key of the chunk.
+            memory_obj: The chunk's memory object, owned by this retrieval.
+        """
+        if self.remove_after_retrieve:
+            assert self.storage_manager is not None
+            self.storage_manager.remove(key, self.retrieve_locations)
+            # Sync PDBackend.remove() does NOT call ref_count_down() internally
+            # (unlike async PD and other backends), so we must call it manually.
+            if self._is_sync_pd_backend():
+                memory_obj.ref_count_down()
+        else:
+            if memory_obj.is_pinned:
+                memory_obj.unpin()
+            memory_obj.ref_count_down()
 
     def _is_passive(self):
         """
@@ -2178,15 +2271,15 @@ class LMCacheEngineBuilder:
             broadcast_fn: Tensor broadcast callback accepting a source rank.
             broadcast_object_fn: Host metadata broadcast returning the source object.
             all_ranks_agree_fn: Optional host collective returning True only when
-                all retrieval ranks vote True. Without it, object broadcasts
-                gather votes over the metadata's world-size rank space.
+                every retrieval rank voted True. Without it, votes are gathered
+                with object broadcasts over the metadata's world-size rank space.
 
         Returns:
             The existing compatible engine or a newly initialized engine.
 
         Raises:
             ValueError: If an existing engine has a different configuration or
-                metadata, or a shared retrieval reservation has a different size.
+                metadata, or the retrieval budget cannot hold one KV chunk.
         """
         logger.info("Creating LMCacheEngine instance %s", instance_id)
         if instance_id not in cls._instances:
