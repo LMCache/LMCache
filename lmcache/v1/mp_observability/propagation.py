@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Opt-in W3C context propagation without configuring another tracer provider.
+
+Set ``LMCACHE_MP_TRACE_CONTEXT=1`` in both the caller and MP server processes.
+Configure the server's existing ``--enable-tracing`` and ``--otlp-endpoint``
+options separately. The caller must have an active OTel span when submitting
+a ZMQ request containing ``IPCCacheServerKey`` (lookup, store or retrieve).
+
+The key carries optional headers to the worker; an Event snapshots them before
+the EventBus thread creates the existing request span. Old key maps decode with
+no headers, and old msgspec key decoders ignore the additional map field.
+Disable the environment switch to stop injecting and honoring remote parents.
+The existing provider's sampler still decides whether a span is recorded.
+
+CPU submission events retain the parent before asynchronous GPU callbacks.
+gRPC carries the same headers in per-call metadata, including keyless control
+RPCs. This boundary does not cover L2 task queues or native storage backends.
+"""
+
+# Future
+from __future__ import annotations
+
+# Standard
+from collections.abc import Callable, Mapping
+from typing import ParamSpec, TypeVar
+import os
+
+# Third Party
+from opentelemetry import context
+from opentelemetry.context import Context
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+def capture_trace_context() -> dict[str, str]:
+    """Return W3C trace headers when LMCACHE_MP_TRACE_CONTEXT=1, else empty.
+
+    Only traceparent and tracestate are carried; baggage and request payloads
+    are never included. No SDK or exporter is installed by this function.
+
+    Returns:
+        W3C headers, or an empty dictionary when disabled.
+    """
+    if os.environ.get("LMCACHE_MP_TRACE_CONTEXT") != "1":
+        return {}
+    carrier: dict[str, str] = {}
+    TraceContextTextMapPropagator().inject(carrier)
+    return carrier
+
+
+def extract_trace_context(carrier: Mapping[str, str] | None) -> Context:
+    """Extract an isolated OTel context, ignoring invalid or oversized headers.
+
+    Returns an empty context when propagation is disabled or headers are
+    absent. The OpenTelemetry API is an existing LMCache dependency.
+
+    Args:
+        carrier: Optional W3C headers captured in the submitting process.
+
+    Returns:
+        A remote parent context, or an empty context for invalid input.
+    """
+    headers: dict[str, str] = {}
+    if os.environ.get("LMCACHE_MP_TRACE_CONTEXT") == "1" and carrier:
+        for name, limit in (("traceparent", 512), ("tracestate", 512)):
+            value = carrier.get(name)
+            if isinstance(value, str) and len(value) <= limit:
+                headers[name] = value
+    return TraceContextTextMapPropagator().extract(headers, context=Context())
+
+
+def run_with_trace_context(
+    carrier: Mapping[str, str] | None,
+    handler: Callable[P, T],
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> T:
+    """Run a handler under an isolated context and restore it even on failure.
+
+    The caller must invoke this inside the executing worker, not the submitting
+    thread. Exceptions, including cancellation, propagate unchanged.
+
+    Args:
+        carrier: Optional W3C headers captured in the submitting process.
+        handler: Synchronous request handler to execute.
+        args: Positional arguments forwarded to the handler.
+        kwargs: Keyword arguments forwarded to the handler.
+
+    Returns:
+        The handler's original result.
+
+    Raises:
+        BaseException: Any exception raised by the handler, unchanged.
+    """
+    if os.environ.get("LMCACHE_MP_TRACE_CONTEXT") != "1":
+        return handler(*args, **kwargs)
+    token = context.attach(extract_trace_context(carrier))
+    try:
+        return handler(*args, **kwargs)
+    finally:
+        context.detach(token)
