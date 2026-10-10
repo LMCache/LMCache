@@ -106,3 +106,81 @@ def test_reaped_instance_loses_its_l1_usage_but_not_its_l2():
         assert not client.get("/instances").json()["instances"]
         # L2 bytes outlive the reporter and leave only via DELETE events.
         assert _total_gb(client, "l2") > 0.0
+
+
+def _register(client: TestClient, instance_id: str = "node-a") -> None:
+    client.post(
+        "/instances",
+        json={"instance_id": instance_id, "ip": "127.0.0.1", "http_port": 8080},
+    )
+
+
+def test_late_l1_events_after_deregistration_are_dropped():
+    config = MPCoordinatorConfig(health_check_interval=0.0, eviction_check_interval=0.0)
+    with TestClient(create_app(config)) as client:
+        _register(client)
+        client.post(
+            "/events", json={"batches": [_store_batch("node-a", 1, "l1", "dram", "aa")]}
+        )
+        client.delete("/instances/node-a")
+
+        late = _store_batch("node-a", 2, "l1", "dram", "bb")
+        assert client.post("/events", json={"batches": [late]}).json()["stale"] == 1
+        assert _total_gb(client, "l1") == 0.0
+
+        _register(client)
+        again = _store_batch("node-a", 3, "l1", "dram", "cc")
+        assert client.post("/events", json={"batches": [again]}).json()["applied"] == 1
+
+
+def test_restored_instance_that_never_returns_loses_its_l1(tmp_path):
+    config = MPCoordinatorConfig(
+        checkpoint_path=str(tmp_path / "checkpoint"),
+        checkpoint_interval=0.0,
+        health_check_interval=0.05,
+        instance_timeout=0.5,
+        eviction_check_interval=0.0,
+    )
+    with TestClient(create_app(config)) as client:
+        _register(client)
+        client.post(
+            "/events",
+            json={
+                "batches": [
+                    _store_batch("node-a", 1, "l1", "dram", "aa"),
+                    _store_batch("node-a", 2, "l2", "fs", "bb"),
+                ]
+            },
+        )
+
+    with TestClient(create_app(config)) as client:
+        assert _total_gb(client, "l1") > 0.0
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and _total_gb(client, "l1") > 0.0:
+            time.sleep(0.05)
+
+        assert _total_gb(client, "l1") == 0.0
+        assert _total_gb(client, "l2") > 0.0
+
+
+def test_restored_instance_that_re_registers_keeps_its_l1(tmp_path):
+    config = MPCoordinatorConfig(
+        checkpoint_path=str(tmp_path / "checkpoint"),
+        checkpoint_interval=0.0,
+        health_check_interval=0.05,
+        instance_timeout=1.0,
+        eviction_check_interval=0.0,
+    )
+    with TestClient(create_app(config)) as client:
+        _register(client)
+        client.post(
+            "/events", json={"batches": [_store_batch("node-a", 1, "l1", "dram", "aa")]}
+        )
+
+    with TestClient(create_app(config)) as client:
+        _register(client)
+        time.sleep(0.6)
+        client.put("/instances/node-a/heartbeat")
+        time.sleep(0.7)
+
+        assert _total_gb(client, "l1") > 0.0

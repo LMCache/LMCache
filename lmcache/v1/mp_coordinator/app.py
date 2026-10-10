@@ -21,6 +21,7 @@ from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 import asyncio
+import time
 
 # Third Party
 from fastapi import FastAPI
@@ -154,6 +155,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # Before the checkpoint, so a restored key arrives already pinned.
     metadata_persister.load()
     load_checkpoint(checkpoint_store, checkpoint_components)
+    restored_instances = set(event_gate.stats())
+    restored_deadline = time.monotonic() + config.instance_timeout
     if config.metrics_enabled:
         register_key_directory_metrics(views.get(KeyDirectory))
 
@@ -194,6 +197,15 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
             await asyncio.sleep(config.health_check_interval)
             for instance_id in evict_stale(registry, config.instance_timeout):
                 event_gate.drop_instance(instance_id)
+            if restored_instances and time.monotonic() >= restored_deadline:
+                for instance_id in restored_instances:
+                    if not registry.contains(instance_id):
+                        logger.warning(
+                            "Instance %s did not re-register after restore; evicted",
+                            instance_id,
+                        )
+                        event_gate.drop_instance(instance_id)
+                restored_instances.clear()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
