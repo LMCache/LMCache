@@ -768,6 +768,27 @@ def test_invalid_outbound_request_does_not_block_later_requests() -> None:
         server.close()
 
 
+def test_server_answers_a_burst_larger_than_one_poll() -> None:
+    server_url = "tcp://127.0.0.1:16031"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        num_requests = 3 * MessageQueueServer.MAX_REQUESTS_PER_POLL + 1
+        futures: list[MessagingFuture[str]] = [
+            client.submit_request("noop", []) for _ in range(num_requests)
+        ]
+        assert [future.result(timeout=10) for future in futures] == [
+            "NOOP_OK"
+        ] * num_requests
+    finally:
+        client.close()
+        server.close()
+
+
 def test_client_survives_undecodable_response() -> None:
     """
     Test that an undecodable response does not stop later requests working.

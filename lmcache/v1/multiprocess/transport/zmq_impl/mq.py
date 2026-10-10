@@ -519,6 +519,8 @@ class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
 
 
 class MessageQueueServer(RequestServer):
+    MAX_REQUESTS_PER_POLL = 64
+
     def __init__(self, bind_url: str, context: zmq.Context) -> None:
         # Socket
         self.ctx = context
@@ -626,6 +628,39 @@ class MessageQueueServer(RequestServer):
             case _:
                 raise ValueError("Unknown handler type")
 
+    def _handle_request(self, msg: list[bytes]) -> None:
+        assert len(msg) >= 3, (
+            "Expected at least 3 message parts "
+            "[identity, request_uid, operation, *payloads]"
+        )
+
+        identity, b_request_uid, b_operation, *payloads = msg
+        try:
+            operation = decode_operation(b_operation)
+        except (TypeError, ValueError):
+            logger.exception("Invalid ZMQ operation identifier")
+            return
+
+        if handler_entry := self.handlers.get(operation):
+            try:
+                self._call_handler(
+                    handler_entry=handler_entry,
+                    payloads=payloads,
+                    prefix_frames=[identity, b_request_uid, b_operation],
+                )
+            except Exception:
+                logger.exception("Error handling operation %s", operation)
+        else:
+            logger.error("No handler registered for operation %s", operation)
+            logger.error("Available handlers: %s", list(self.handlers.keys()))
+
+    def _send_responses(self) -> None:
+        try:
+            while frames_to_send := self.output_queue.get_nowait():
+                self.socket.send_multipart(frames_to_send)
+        except queue.Empty:
+            pass
+
     def _main_loop(self):
         output_fd = self._output_efd.fileno()
         while not self.is_finished.is_set():
@@ -633,45 +668,22 @@ class MessageQueueServer(RequestServer):
             inbound_state = socks.get(self.socket, None)
             outbound_state = socks.get(output_fd, None)
 
-            # Process the incoming requests
-            if inbound_state and inbound_state & zmq.POLLIN:
-                msg = self.socket.recv_multipart()
-                assert len(msg) >= 3, (
-                    "Expected at least 3 message parts "
-                    "[identity, request_uid, operation, *payloads]"
-                )
-
-                identity, b_request_uid, b_operation, *payloads = msg
-                try:
-                    operation = decode_operation(b_operation)
-                except (TypeError, ValueError):
-                    logger.exception("Invalid ZMQ operation identifier")
-                    continue
-
-                if handler_entry := self.handlers.get(operation):
-                    try:
-                        self._call_handler(
-                            handler_entry=handler_entry,
-                            payloads=payloads,
-                            prefix_frames=[identity, b_request_uid, b_operation],
-                        )
-                    except Exception:
-                        logger.exception("Error handling operation %s", operation)
-                else:
-                    logger.error("No handler registered for operation %s", operation)
-                    logger.error("Available handlers: %s", list(self.handlers.keys()))
-
-            # Send the responses
             if outbound_state and outbound_state & zmq.POLLIN:
                 # Consume the notifier counter (resets atomically)
                 self._output_efd.consume()
 
-                # Process the output tasks
-                try:
-                    while frames_to_send := self.output_queue.get_nowait():
-                        self.socket.send_multipart(frames_to_send)
-                except queue.Empty:
-                    pass
+            # Process the incoming requests
+            if inbound_state and inbound_state & zmq.POLLIN:
+                for _ in range(self.MAX_REQUESTS_PER_POLL):
+                    try:
+                        msg = self.socket.recv_multipart(zmq.NOBLOCK)
+                    except zmq.Again:
+                        break
+                    self._handle_request(msg)
+                    self._send_responses()
+
+            # Send the responses
+            self._send_responses()
 
     def _inspect_handler_signature(
         self, rpc_spec: RpcSpec, handler: Callable[..., Any]
