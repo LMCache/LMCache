@@ -848,12 +848,20 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
-       ``auto`` (CUDA -> lmcache_driven, others -> engine_driven),
-       ``lmcache_driven`` (force the IPC / SHM zero-copy handle path —
-       LMCache server pulls data via device handles), or
-       ``engine_driven`` (force the worker-side gather/scatter copy
-       path). Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when
-       set.
+       ``auto`` (resolves to the device spec's declared default via
+       :meth:`DeviceSpec.default_mp_transfer_mode
+       <lmcache.v1.platform.base.device_spec.DeviceSpec.default_mp_transfer_mode>`:
+       devices with a complete LMCache-driven stack default to
+       ``lmcache_driven`` -- CUDA and NPU -- while opt-in-only stacks
+       such as CPU SHM and MUSA handles, and every other device, stay
+       on ``engine_driven``), ``lmcache_driven`` (force the IPC / SHM
+       zero-copy handle path -- LMCache server pulls data via device
+       handles; requires
+       :meth:`DeviceSpec.is_lmcache_driven_available
+       <lmcache.v1.platform.base.device_spec.DeviceSpec.is_lmcache_driven_available>`
+       to return ``True`` for the worker's device), or ``engine_driven``
+       (force the worker-side gather/scatter copy path). Overrides the
+       ``LMCACHE_MP_TRANSFER_MODE`` env var when set.
    * - ``lmcache.mp.isolated_ipc``
      - ``false``
      - Assume the vLLM workers and the LMCache server run in containers
