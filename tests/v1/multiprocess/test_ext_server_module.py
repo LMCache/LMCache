@@ -11,7 +11,7 @@ import sys
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess import module_creator
+from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleBuildContext,
@@ -322,7 +322,7 @@ def test_build_modules_loads_plugin_and_registers_liveness_target(
     module_name = _install_fake_factory(monkeypatch, factory)
     management = _stub_builtin_modules(monkeypatch)
 
-    modules = module_creator.build_modules(
+    modules = server_mod._build_modules(
         ctx,
         MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
         MagicMock(url=""),
@@ -345,7 +345,7 @@ def test_build_modules_adds_server_module_router(
     module_name = _install_fake_factory(monkeypatch, factory)
     _stub_builtin_modules(monkeypatch)
 
-    modules = module_creator.build_modules(
+    modules = server_mod._build_modules(
         ctx,
         MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
         MagicMock(url=""),
@@ -372,7 +372,7 @@ def test_build_server_components_collects_transport_service_registrars(
     module_name = _install_fake_factory(monkeypatch, factory)
     _stub_builtin_modules(monkeypatch)
 
-    components = module_creator.build_server_components(
+    components = server_mod._build_server_components(
         ctx,
         MPServerConfig(server_modules=[ExtServerModuleSpec(module_name)]),
         MagicMock(url=""),

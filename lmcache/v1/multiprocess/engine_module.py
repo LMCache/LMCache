@@ -113,16 +113,14 @@ class InstanceLivenessTarget(Protocol):
 class ModuleBuildContext:
     """Standard inputs handed to every :meth:`DiscoverableModule.create`.
 
-    A build context is the single seam between the module creator and the
-    modules it constructs. Modules never import each other to learn about
-    their siblings; they read what they need from here.
+    Modules never import each other for wiring; a module reads its siblings
+    off this context instead. The creator records each module as it is built.
 
     Attributes:
         engine_context: The shared engine context.
         mp_config: Parsed multiprocess server configuration.
         coordinator_config: Parsed coordinator configuration.
-        liveness_targets: Instance-liveness targets collected from the modules
-            built so far, in build order.
+        liveness_targets: Liveness targets collected so far, in build order.
     """
 
     def __init__(
@@ -140,34 +138,24 @@ class ModuleBuildContext:
     @property
     def built(self) -> list[EngineModule]:
         """Return the modules built so far, in close order."""
-        return self.built_in_close_order()
+        return [
+            module
+            for _, module in sorted(self._built.values(), key=lambda entry: entry[0])
+        ]
 
     @property
     def module_names(self) -> list[str]:
         """Return the names of the modules built so far."""
         return sorted(self._built)
 
-    def built_in_close_order(self) -> list[EngineModule]:
-        """Return the modules built so far, sorted by close-order rank."""
-        return [module for _, module in sorted(self._built.values(), key=_by_rank)]
-
     def require(
         self, module_name: str, module_type: type[EngineModuleT]
     ) -> EngineModuleT:
-        """Return an already-built module by name, checked against its type.
-
-        Args:
-            module_name: The ``module_name`` of a sibling built earlier.
-            module_type: The class the caller expects, used to verify that
-                ``module_name`` still refers to the same module.
-
-        Returns:
-            The sibling module instance.
+        """Return an already-built sibling module, checked against its type.
 
         Raises:
-            ValueError: If no module with that name has been built yet.
-                Modules declare their ordering precisely so this cannot
-                happen for a well-formed configuration.
+            ValueError: If no module with that name is built yet, or the
+                name maps to a different class than ``module_type``.
         """
         entry = self._built.get(module_name)
         if entry is None:
@@ -184,16 +172,12 @@ class ModuleBuildContext:
         return module
 
     def register(self, module: EngineModule) -> None:
-        """Record a constructed module and collect it if it is a liveness target.
+        """Record a constructed module, collecting it if it is a liveness target.
 
-        The module creator calls this after each successful ``create()``, so
-        modules do not have to announce themselves.
-
-        Args:
-            module: The freshly constructed module.
+        The creator calls this after each successful ``create()``.
 
         Raises:
-            ValueError: If the module does not declare a ``module_name``.
+            ValueError: If the module declares no ``module_name``.
         """
         name = getattr(type(module), "module_name", "")
         if not name:
@@ -206,58 +190,27 @@ class ModuleBuildContext:
             self.liveness_targets.append(module)
 
     def add_liveness_target(self, module: EngineModule) -> None:
-        """Collect an out-of-tree module as a liveness target.
-
-        Out-of-tree modules are not registered (they have no close-order rank
-        in this table) but they can still satisfy the liveness contract, so
-        they are folded into the target list directly.
-
-        Args:
-            module: An out-of-tree module that may be a liveness target.
-        """
+        """Collect an out-of-tree module that satisfies the liveness contract."""
         if _is_liveness_target(module):
             self.liveness_targets.append(module)
-
-
-def _by_rank(entry: tuple[int, EngineModule]) -> int:
-    """Sort key extracting the close-order rank."""
-    return entry[0]
 
 
 class DiscoverableModule(abc.ABC):
     """Base class for engine modules the server discovers by scanning.
 
-    Subclassing this is what makes a module discoverable:
     :func:`discover_modules` walks ``lmcache.v1.multiprocess.modules`` and
     collects every concrete subclass, so adding a module means adding a file
     with a subclass -- no registry list to edit.
 
-    A subclass declares two class attributes and implements
-    :meth:`create`:
+    A subclass declares ``module_name`` (the key
+    :meth:`ModuleBuildContext.require` resolves siblings by) and
+    ``module_order`` (its close-order rank; lower closes earlier), then
+    implements :meth:`create`, which returns ``None`` when the module does
+    not apply to the current configuration. That keeps enablement logic
+    inside the module that owns it.
 
-    * ``module_name`` -- stable key used by :meth:`ModuleBuildContext.require`.
-    * ``module_order`` -- close-order rank; lower closes earlier.
-
-    ``create()`` returns ``None`` to signal that the module does not apply to
-    the current configuration (for example a transfer module under a mode that
-    excludes it). That keeps enablement logic inside the module that owns it
-    instead of in the creator.
-
-    A module whose construction needs the *out-of-tree* plugin modules (today
-    only :class:`ManagementModule`, which consumes their liveness targets) sets
-    ``deferred = True`` so the creator builds it after plugins are loaded.
-    That is separate from ``module_order``, which only governs closing.
-
-    Example:
-        class MyModule(DiscoverableModule):
-            module_name = "my_module"
-            module_order = 45
-
-            @classmethod
-            def create(cls, build_ctx: ModuleBuildContext) -> MyModule | None:
-                if not build_ctx.mp_config.enable_my_module:
-                    return None
-                return cls(build_ctx.engine_context)
+    A module that needs the *out-of-tree* plugin modules at construction
+    time sets ``deferred = True`` to be built after them.
     """
 
     module_name: ClassVar[str] = ""
@@ -267,20 +220,7 @@ class DiscoverableModule(abc.ABC):
     @classmethod
     @abc.abstractmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
-        """Construct this module for the given configuration.
-
-        Args:
-            build_ctx: Standard construction inputs, including any sibling
-                modules already built.
-
-        Returns:
-            The constructed module, or ``None`` when the module does not
-            apply to this configuration.
-
-        Raises:
-            ValueError: If the configuration requests this module but the
-                request cannot be satisfied.
-        """
+        """Construct this module, or return ``None`` if it does not apply."""
         raise NotImplementedError
 
 
@@ -292,21 +232,15 @@ def _is_liveness_target(module: EngineModule) -> TypeGuard[InstanceLivenessTarge
 
 
 def discover_modules() -> list[type[DiscoverableModule]]:
-    """Discover every built-in engine module by scanning the modules package.
+    """Scan the built-in modules package and return the module classes.
 
-    Walks ``lmcache.v1.multiprocess.modules`` (including sub-packages, so
-    ``blend`` and ``experimental`` are covered) and returns the concrete
-    :class:`DiscoverableModule` subclasses, ordered by ``module_order``.
-
-    Module imports are eager, which costs nothing here: the modules package
-    is already imported by the server entry point before this runs.
-
-    Returns:
-        Concrete module classes sorted by close order.
+    Walks ``lmcache.v1.multiprocess.modules`` -- including the ``blend`` and
+    ``experimental`` sub-packages -- and returns the concrete
+    :class:`DiscoverableModule` subclasses sorted by ``module_order``.
 
     Raises:
-        ImportError: If a module file exists but fails to import. Surfacing it
-            is deliberate -- silently dropping a module would start a server
+        ImportError: If a module file fails to import. Surfacing it is
+            deliberate: silently dropping a module would start the server
             with a missing capability.
     """
     # First Party
@@ -326,13 +260,5 @@ def discover_modules() -> list[type[DiscoverableModule]]:
 
 
 def _raise_import_error(module_name: str, exc: Exception) -> None:
-    """Re-raise a module import failure during discovery.
-
-    Args:
-        module_name: The dotted path that failed to import.
-        exc: The original import error.
-
-    Raises:
-        ImportError: Always, chaining the original error.
-    """
+    """Turn a module import failure into a loud startup error."""
     raise ImportError(f"Failed to import engine module {module_name}: {exc}") from exc

@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Management and utility operations for the MPCacheServer."""
 
-# Future
-from __future__ import annotations
-
 # Standard
 from collections.abc import Sequence
 import threading
@@ -15,6 +12,7 @@ from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
+    EngineModule,
     InstanceLivenessTarget,
     ModuleBuildContext,
 )
@@ -59,11 +57,10 @@ class ManagementModule(DiscoverableModule):
     deferred = True
 
     @classmethod
-    def create(cls, build_ctx: ModuleBuildContext) -> ManagementModule | None:
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
         """Build with every liveness target collected so far.
 
-        Returning ``None`` is never correct here -- the server always needs
-        management handlers -- so this returns a module unconditionally.
+        Never returns ``None``: the server always needs management handlers.
         """
         mp_config = build_ctx.mp_config
         return cls(

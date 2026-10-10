@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """LMCache-driven KV cache transfer operations for the MPCacheServer."""
 
-# Future
-from __future__ import annotations
-
 # Standard
 from dataclasses import dataclass
 from typing import Any, Sequence
@@ -33,6 +30,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
+    EngineModule,
     InstanceLivenessTarget,
     ModuleBuildContext,
 )
@@ -181,9 +179,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     module_order = 40
 
     @classmethod
-    def create(
-        cls, build_ctx: ModuleBuildContext
-    ) -> LMCacheDrivenTransferModule | None:
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
         """Build unless the transfer mode excludes the LMCache-driven path."""
         mode = build_ctx.mp_config.supported_transfer_mode
         if mode == "engine_driven":

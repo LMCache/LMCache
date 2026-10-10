@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 # Standard
+from dataclasses import dataclass
+
 import argparse
 import shutil
 import signal
@@ -46,8 +48,17 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_mp_server_config,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import EngineModule
-from lmcache.v1.multiprocess.module_creator import ModuleCreator
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    ModuleBuildContext,
+    discover_modules,
+)
+from lmcache.v1.multiprocess.ext_server_module import (
+    TransportServiceRegistrar,
+    build_server_module_router,
+    load_server_module_components,
+)
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -137,6 +148,85 @@ class MPCacheServer:
                 module.clear(force=force)
                 return
         raise RuntimeError("MPCacheServer.clear: no ManagementModule registered")
+
+
+@dataclass(frozen=True)
+class ServerBuildComponents:
+    """Modules and transport services composed for one MP server instance."""
+
+    modules: list[EngineModule]
+    grpc_service_registrars: tuple[TransportServiceRegistrar, ...] = ()
+    zmq_service_registrars: tuple[TransportServiceRegistrar, ...] = ()
+
+
+def _build_module(
+    module_cls: type[DiscoverableModule],
+    build_ctx: ModuleBuildContext,
+) -> None:
+    """Run one module factory and register whatever it returns."""
+    module = module_cls.create(build_ctx)
+    if module is not None:
+        build_ctx.register(module)
+
+
+def _build_modules(
+    ctx: MPCacheServerContext,
+    mp_config: MPServerConfig,
+    coordinator_config: CoordinatorConfig,
+) -> list[EngineModule]:
+    """Assemble only engine modules based on configuration."""
+    return _build_server_components(ctx, mp_config, coordinator_config).modules
+
+
+def _build_server_components(
+    ctx: MPCacheServerContext,
+    mp_config: MPServerConfig,
+    coordinator_config: CoordinatorConfig,
+) -> ServerBuildComponents:
+    """Assemble the modules and transport registrars for one server.
+
+    Modules are discovered by scanning ``lmcache.v1.multiprocess.modules``
+    and built in ascending ``module_order`` (lower rank first), which is also
+    their close order. ``deferred`` modules are built after the out-of-tree
+    ``--server-module`` plugins because they consume plugin contributions.
+    """
+    build_ctx = ModuleBuildContext(ctx, mp_config, coordinator_config)
+    module_classes = discover_modules()
+
+    for module_cls in module_classes:
+        if not module_cls.deferred:
+            _build_module(module_cls, build_ctx)
+
+    plugin_components = load_server_module_components(
+        mp_config.server_modules,
+        server_context=ctx,
+        mp_config=mp_config,
+        coordinator_config=coordinator_config,
+        built_modules=build_ctx.built,
+    )
+    plugin_modules = list(plugin_components.modules)
+    for module in plugin_modules:
+        build_ctx.add_liveness_target(module)
+
+    for module_cls in module_classes:
+        if module_cls.deferred:
+            _build_module(module_cls, build_ctx)
+
+    modules = [*build_ctx.built, *plugin_modules]
+    plugin_router = build_server_module_router(ctx, plugin_modules)
+    if plugin_router is not None:
+        modules.append(plugin_router)
+
+    logger.info(
+        "Composed %d engine modules: %s",
+        len(modules),
+        ", ".join(sorted(build_ctx.module_names)),
+    )
+    return ServerBuildComponents(
+        modules=modules,
+        grpc_service_registrars=tuple(plugin_components.grpc_service_registrars),
+        zmq_service_registrars=tuple(plugin_components.zmq_service_registrars),
+    )
 
 
 def run_cache_server(
@@ -236,7 +326,7 @@ def run_cache_server(
         session_ttl_seconds=mp_config.session_ttl_seconds,
     )
 
-    components = ModuleCreator(ctx, mp_config, coordinator_config).create()
+    components = _build_server_components(ctx, mp_config, coordinator_config)
     engine = MPCacheServer(ctx, components.modules)
 
     InitializeMPUsageContext(mp_config, storage_manager_config)

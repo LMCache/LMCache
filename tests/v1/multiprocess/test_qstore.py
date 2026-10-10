@@ -15,7 +15,7 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess import module_creator
+from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.modules import engine_driven_transfer as ed_mod
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as ld_mod
@@ -294,7 +294,7 @@ def stub_server_modules(monkeypatch):
 
 
 def _build(stub_server_modules, **config) -> list:
-    return module_creator.build_modules(
+    return server_mod._build_modules(
         MagicMock(name="ctx"), MPServerConfig(**config), MagicMock(url="")
     )
 

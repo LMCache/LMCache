@@ -7,9 +7,6 @@ paged KV store/retrieve machinery. This implementation is copied and modified
 from the LMCache-driven KV transfer module.
 """
 
-# Future
-from __future__ import annotations
-
 # Standard
 import threading
 import time
@@ -29,6 +26,7 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
+    EngineModule,
     InstanceLivenessTarget,
     ModuleBuildContext,
 )
@@ -68,16 +66,11 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
     module_order = 50
 
     @classmethod
-    def create(cls, build_ctx: ModuleBuildContext) -> QStoreModule | None:
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
         """Build when ``--enable`` names this experimental feature.
 
-        This module is the only reader of ``--enable``, so it also rejects
-        unknown feature names rather than silently ignoring them.
-
-        Raises:
-            ValueError: If ``--enable`` names an unknown feature, or names
-                this one when the transfer mode excludes the LMCache-driven
-                module it wraps.
+        Sole reader of ``--enable``, so it also rejects unknown feature
+        names rather than silently ignoring them.
         """
         for feature in build_ctx.mp_config.enable:
             if feature not in EXPERIMENTAL_TRANSFER:

@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """P2PController: peer discovery, adapter lifecycle, and lookup serving."""
 
-# Future
-from __future__ import annotations
-
 # Standard
 from dataclasses import dataclass
 from enum import Enum
@@ -34,7 +31,11 @@ from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import DiscoverableModule, ModuleBuildContext
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -171,7 +172,7 @@ class P2PController(DiscoverableModule):
     module_order = 20
 
     @classmethod
-    def create(cls, build_ctx: ModuleBuildContext) -> P2PController | None:
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
         """Build the controller; it applies to every configuration.
 
         Its five constructor arguments all come from the build context, which
