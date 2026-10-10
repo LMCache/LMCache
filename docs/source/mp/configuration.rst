@@ -193,6 +193,13 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - ``--engine-type blend`` only: skip fingerprint registration for a chunk
        whose content is already indexed, so the same text stored behind two
        prefixes is indexed once. No effect for other engines.
+   * - ``--enable NAME [NAME ...]``
+     - *(empty)*
+     - Opt-in experimental transfer modules. Currently the only accepted
+       value is ``transfer_query``, which enables query-tensor transfer for
+       the SDK path (see :doc:`sdk` for a worked example and
+       ``lmcache.v1.multiprocess.modules.experimental`` for the registry).
+       Accepts zero or more names; unknown names raise at startup.
    * - ``--separate-object-groups`` / ``--no-separate-object-groups``
      - ``False``
      - Split a hybrid model's kernel groups into one object group per
