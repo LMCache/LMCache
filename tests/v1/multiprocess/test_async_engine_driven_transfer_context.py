@@ -276,7 +276,8 @@ def test_sync_engine_driven_context_returns_resolved_future(
     # Sync path resolves inline.
     assert future.query()
     assert future.result(timeout=1) is True
-    assert fake.synchronize_calls >= 1
+    # CPU copies complete inline without synchronizing the global accelerator.
+    assert fake.synchronize_calls == 0
     # flush_inflight_stores is the inherited base no-op; must not raise.
     ctx.flush_inflight_stores()
     ctx.close()

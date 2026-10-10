@@ -920,6 +920,24 @@ jobs:
                   "lmcache/standalone:${LATEST_TAG}-cu129-arm64"
                 docker buildx imagetools inspect "lmcache/standalone:${LATEST_TAG}-cu129"
 
+    # Build lmcache/sglang (SGLang release image + the LMCache wheel) for every
+    # published release, stable or RC. Separate from publish-image so an SGLang
+    # build failure never blocks the vLLM and standalone images.
+    publish-image-sglang:
+        name: Build SGLang image
+        if: |
+            needs.publish-pypi.result == 'success' &&
+            !cancelled() &&
+            github.repository_owner == 'LMCache' && github.event.action == 'published'
+        needs: [publish-pypi]
+        uses: ./.github/workflows/build_sglang_image.yml
+        with:
+            lmcache_version: ${{ github.ref_name }}
+            push: true
+        # Reusable workflows do not auto-inherit secrets.
+        secrets:
+          dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+
     # Build RC container image and push to DockerHub when:
     # - a new RC GitHub release is created (e.g. v0.4.8rc1)
     # Only pushes lmcache/vllm-openai:<tag> — does not touch latest or other image variants.
@@ -971,7 +989,16 @@ jobs:
             - name: Get the release tag
               run: |
                 REF="${{ github.ref_name }}"
-                [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+rc[0-9]+$ ]] && echo "LATEST_RC_TAG=$REF" >> "$GITHUB_ENV"
+                # The 'v' is required, not cosmetic: setuptools-scm only sees v-prefixed
+                # tags (pyproject.toml git_describe_command --match), and build-artifacts
+                # deletes non-matching tags before resolving a version. A tag without it
+                # silently yields stale wheel versions, so reject it here rather than
+                # publish an image whose tag disagrees with the wheels inside it.
+                if [[ ! "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+rc[0-9]+$ ]]; then
+                  echo "::error::release tag '$REF' is not a v-prefixed RC tag (expected v<major>.<minor>.<patch>rc<n>); re-tag the release"
+                  exit 1
+                fi
+                echo "LATEST_RC_TAG=$REF" >> "$GITHUB_ENV"
 
             - name: Build lmcache/vllm-openai container image (cu13)
               run: |

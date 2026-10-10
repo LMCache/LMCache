@@ -190,7 +190,7 @@ cpp_extension.CppExtension(
     "lmcache.lmcache_mybackend",
     sources=mybackend_sources,
     include_dirs=["csrc/storage_backends", "csrc/storage_backends/mybackend"],
-    extra_compile_args={"cxx": ["-O3", "-std=c++17"]},
+    extra_compile_args={"cxx": ["-O3"]},
 ),
 ```
 

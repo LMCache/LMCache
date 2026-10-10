@@ -10,12 +10,14 @@ while using the device-independent native module for shared enums.
 # Standard
 from types import ModuleType
 from typing import Any
+from unittest.mock import MagicMock
 import importlib
 import inspect
 import sys
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache import device_ops, torch_dev, torch_device_type
@@ -64,6 +66,15 @@ def isolated_registry() -> Any:
 # -- Contract --------------------------------------------------------------
 
 
+def test_synchronize_follows_tensor_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CPU skips synchronization; CUDA uses the tensor's device index."""
+    synchronize = MagicMock()
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
+    for device in ("cpu", "cuda:1", "cpu"):
+        platform_pkg.synchronize_device(torch.device(device))
+    synchronize.assert_called_once_with(torch.device("cuda:1"))
+
+
 def test_base_class_declares_every_op_as_instance_method() -> None:
     """DeviceOps declares every op as a real instance method."""
     ops = DeviceOps()
@@ -108,10 +119,13 @@ def test_every_registered_device_has_all_ops(isolated_registry: Any) -> None:
 # -- Dispatch (MRO) --------------------------------------------------------
 
 
-def test_cpu_inherits_baseline_verbatim() -> None:
-    """CpuDeviceOps adds no overrides: every method resolves to the base."""
+def test_cpu_overrides_pointer_construction_only() -> None:
+    """CPU owns pointer construction and inherits the remaining baseline."""
     for name in _OP_NAMES:
-        assert getattr(CpuDeviceOps, name) is getattr(DeviceOps, name), name
+        if name == "tensor_from_ptr":
+            assert getattr(CpuDeviceOps, name) is not getattr(DeviceOps, name)
+        else:
+            assert getattr(CpuDeviceOps, name) is getattr(DeviceOps, name), name
 
 
 @pytest.mark.musa
@@ -131,6 +145,7 @@ def test_musa_overrides_transfer_and_stream_ordering_ops() -> None:
         "multi_layer_block_kv_transfer",
         "record_completion_on_stream",
         "record_event_on_stream",
+        "tensor_from_ptr",
     ]
 
 
