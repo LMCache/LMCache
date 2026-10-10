@@ -698,6 +698,22 @@ class StorageManager:
         for manager in self._l1_managers_by_id.values():
             manager.touch_keys(keys)
 
+    def touch_cached_keys(self, keys: list[ObjectKey]) -> None:
+        """Refresh eviction recency for ``keys`` in every tier, without I/O.
+
+        Unlike :meth:`touch_l1_keys` this also marks the keys accessed in L2,
+        matching the recency a real load gives both tiers. Nothing is read or
+        promoted; each tier ignores keys it does not hold.
+
+        Args:
+            keys (list[ObjectKey]): List of object keys to touch.
+        """
+        self.touch_l1_keys(keys)
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            adapter.touch_keys(keys)
+
     def delete_l1_keys(
         self, keys: list[ObjectKey], force: bool = False
     ) -> tuple[int, int]:

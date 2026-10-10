@@ -380,6 +380,18 @@ class L2AdapterInterface(ABC):
         self._backend_name = name
         self._shared = shared
 
+    def touch_keys(self, keys: list[ObjectKey]) -> None:
+        """Refresh the eviction recency of ``keys`` without reading them.
+
+        Emits the same accessed-notification a load would, so eviction treats
+        the keys as just-used while moving no bytes. Keys this adapter does not
+        hold are ignored by the policy.
+
+        Args:
+            keys: The object keys to mark as accessed.
+        """
+        self._notify_keys_accessed(keys)
+
     def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         """Update byte accounting and notify listeners that ``keys`` were
         stored. ``sizes[i]`` is the byte size of ``keys[i]``.

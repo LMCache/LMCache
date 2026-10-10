@@ -613,6 +613,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
         )
 
+        # skip_covered_lookup: skip lookup of the APC-covered prefix (default off).
+        self._skip_covered_lookup: bool = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.skip_covered_lookup", False
+            )
+        )
+
         # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
         # string) over the single-server lmcache.mp.host / lmcache.mp.port.
         server_urls_cfg = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -1203,6 +1210,51 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if self.lazy_offload:
                 self._lazy_offload_manager.bind_block_pool(gpu_block_pool)
 
+    # APC-covered-lookup helpers
+    def _handle_covered_shrink(
+        self,
+        request: "Request",
+        tracker: "LMCacheMPRequestTracker",
+    ) -> "tuple[int | None, bool] | None":
+        """Fall back to a full lookup from token 0 when the APC hit shrank below
+        the frozen covered boundary.
+
+        Frees the stale locks (blocking, so the re-lookup cannot race them) and
+        sets the sticky ``covered_skip_disabled``. Returns ``(None, True)`` to
+        make the scheduler re-poll, or ``None`` when no shrink occurred.
+        """
+        if not self._skip_covered_lookup or tracker.lookup_covered_tokens <= 0:
+            return None
+        if tracker.num_vllm_hit_tokens >= tracker.lookup_covered_tokens:
+            return None
+        logger.info(
+            "APC hit for request %s shrank below the covered boundary "
+            "(%d < %d); re-looking-up the full prefix from token 0.",
+            request.request_id,
+            tracker.num_vllm_hit_tokens,
+            tracker.lookup_covered_tokens,
+        )
+        # Blocking free of the stale [c0, ret) locks before the covered=0 re-lookup.
+        cached = self.scheduler_adapter.check_lookup_result(request.request_id)
+        hit_tokens = cached if cached is not None else 0
+        if hit_tokens > 0:
+            self.scheduler_adapter.free_lookup_locks_blocking(
+                token_ids=tracker.get_token_ids(),
+                start=0,
+                end=hit_tokens,
+                request_id=request.request_id,
+                cache_salt=tracker.cache_salt,
+                request_configs=tracker.request_configs,
+            )
+        self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+        # Disable the covered skip for this request; reset so the next poll re-looks up.
+        tracker.covered_skip_disabled = True
+        tracker.lookup_started_at = None
+        tracker.lookup_covered_tokens = 0
+        tracker.num_stored_tokens = 0
+        tracker.num_lmcache_hit_tokens = 0
+        return None, True
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -1268,17 +1320,33 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tracker.num_stored_tokens = 0
             tracker.num_vllm_hit_tokens = 0
             tracker.num_lmcache_hit_tokens = 0
+            tracker.lookup_covered_tokens = 0
             tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
             return 0, False
 
+        # Chunk-aligned APC-covered boundary (0 = off; stays 0 after a shrink).
+        covered_chunks = 0
+        if self._skip_covered_lookup and not tracker.covered_skip_disabled:
+            aligned = (
+                num_computed_tokens
+                // self._hit_alignment_tokens
+                * self._hit_alignment_tokens
+            )
+            covered_chunks = aligned // self.scheduler_adapter.lmcache_tokens_per_chunk
+
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
+            # Freeze the covered boundary at submit; the shrink hook keys off it.
+            tracker.lookup_covered_tokens = (
+                covered_chunks * self.scheduler_adapter.lmcache_tokens_per_chunk
+            )
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
             request_configs=tracker.request_configs,
             reserve_last_token=self._reserve_last_token_for_lookup,
+            covered_chunks=covered_chunks,
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -1299,6 +1367,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             // self._hit_alignment_tokens
             * self._hit_alignment_tokens
         )
+
+        # APC shrank below the frozen boundary: method hook re-looks-up / bypasses.
+        shrink_result = self._handle_covered_shrink(request, tracker)
+        if shrink_result is not None:
+            return shrink_result
 
         if ret == 0:
             return 0, False
@@ -1428,7 +1501,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     # be freed by vLLM's retrieve.
                     free_end = tracker.num_vllm_hit_tokens
 
-                if free_end > 0:
+                # Free-RPC elision: nothing is locked below the covered boundary.
+                if free_end > tracker.lookup_covered_tokens:
                     self.scheduler_adapter.free_lookup_locks(
                         token_ids=tracker.get_token_ids(),
                         start=0,

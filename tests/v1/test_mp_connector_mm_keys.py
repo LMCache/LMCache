@@ -224,6 +224,7 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
     connector._hit_alignment_tokens = 64
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
+    connector._skip_covered_lookup = False
 
     matched_tokens, load_async = connector.get_num_new_matched_tokens(request, 0)
 
@@ -234,6 +235,7 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
         cache_salt="",
         request_configs=None,
         reserve_last_token=True,
+        covered_chunks=0,
     )
     tracker = connector.request_trackers[request.request_id]
     assert tracker.num_lmcache_hit_tokens == 64
