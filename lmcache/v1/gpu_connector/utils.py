@@ -74,20 +74,13 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
     """
     # Import at runtime to avoid circular dependency
     # First Party
-    from lmcache.v1.gpu_connector import (
-        gpu_connectors,
-        musa_connectors,
-        xpu_connectors,
-    )
+    from lmcache.v1.gpu_connector import gpu_connectors, xpu_connectors
 
     valid_connectors = (
         gpu_connectors.VLLMPagedMemLayerwiseGPUConnector,
         gpu_connectors.VLLMBufferLayerwiseGPUConnector,
-        gpu_connectors.SGLangLayerwiseGPUConnector,
         xpu_connectors.VLLMPagedMemLayerwiseXPUConnector,
         xpu_connectors.VLLMBufferLayerwiseXPUConnector,
-        xpu_connectors.SGLangLayerwiseXPUConnector,
-        musa_connectors.SGLangLayerwiseMUSAConnector,
     )
 
     assert isinstance(gpu_connector, valid_connectors)
