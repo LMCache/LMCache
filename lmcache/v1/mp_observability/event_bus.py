@@ -119,27 +119,6 @@ class EventBus:
         self._last_discard_warning: float = 0.0
         self._subscriber_exception_counts: dict[str, int] = {}
 
-        self._register_self_gauges()
-
-    def _register_self_gauges(self) -> None:
-        """Register the two self-monitoring gauges via ``register_gauge``."""
-        register_gauge(
-            "lmcache.event_bus",
-            "lmcache_mp.event_bus.queue_depth",
-            "Events currently queued in the EventBus.",
-            self.queue_depth,
-        )
-        register_gauge(
-            "lmcache.event_bus",
-            "lmcache_mp.event_bus.drain_lag_seconds",
-            (
-                "Seconds since the oldest queued event was published; 0.0 "
-                "when empty.  Rising values mean the drain thread is "
-                "falling behind."
-            ),
-            self.oldest_event_lag_seconds,
-        )
-
     # -- Public API --------------------------------------------------------
 
     def subscribe(self, event_type: EventType, callback: EventCallback) -> None:
@@ -392,3 +371,38 @@ def init_event_bus(config: EventBusConfig | None = None) -> EventBus:
     _global_bus = EventBus(config)
     _observability_enabled = config.enabled if config else True
     return _global_bus
+
+
+# ---------------------------------------------------------------------------
+# Self-monitoring gauges
+# ---------------------------------------------------------------------------
+
+
+def _register_self_gauges() -> None:
+    """Register the EventBus self-monitoring gauges, once per process.
+
+    The callbacks look up the bus through ``get_event_bus()`` at collection
+    time instead of binding to one instance.  OTel keeps only the first
+    callback registered under an instrument name, so a gauge bound to a
+    particular bus would keep reporting the disabled import-time bus after
+    ``init_event_bus()`` replaces it (and would keep that bus alive).
+    """
+    register_gauge(
+        "lmcache.event_bus",
+        "lmcache_mp.event_bus.queue_depth",
+        "Events currently queued in the EventBus.",
+        lambda: get_event_bus().queue_depth(),
+    )
+    register_gauge(
+        "lmcache.event_bus",
+        "lmcache_mp.event_bus.drain_lag_seconds",
+        (
+            "Seconds since the oldest queued event was published; 0.0 "
+            "when empty.  Rising values mean the drain thread is "
+            "falling behind."
+        ),
+        lambda: get_event_bus().oldest_event_lag_seconds(),
+    )
+
+
+_register_self_gauges()
