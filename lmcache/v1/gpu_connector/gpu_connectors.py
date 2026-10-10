@@ -23,11 +23,11 @@ from lmcache.v1.gpu_connector.utils import (
     get_device,
     get_elements_per_layer,
     get_group_data_ptrs,
-    get_head_size,
     get_num_blocks,
     get_num_layers,
     get_page_buffer_size,
     get_tokens_per_layer,
+    get_transfer_head_size,
     normalize_and_discover_per_layer_formats,
     normalize_kv_and_discover_format,
     resolve_block_stride_and_log_layout,
@@ -262,7 +262,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         self.num_blocks = get_num_blocks(kv_caches, self.engine_kv_format)
         self.block_size = get_block_size(kv_caches, self.engine_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
-        self.head_size = get_head_size(kv_caches, self.engine_kv_format)
+        self.head_size = get_transfer_head_size(kv_caches, self.engine_kv_format)
         self.block_stride_elems = (
             resolve_block_stride_and_log_layout(
                 kv_caches, self.engine_kv_format, layer_idx=0, group_idx=0
@@ -483,7 +483,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self.num_blocks = get_num_blocks(self.kvcaches, self.engine_kv_format)
         self.block_size = get_block_size(self.kvcaches, self.engine_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
-        self.head_size = get_head_size(self.kvcaches, self.engine_kv_format)
+        self.head_size = get_transfer_head_size(self.kvcaches, self.engine_kv_format)
         self.block_stride_elems = (
             resolve_block_stride_and_log_layout(
                 self.kvcaches, self.engine_kv_format, layer_idx=0, group_idx=0
