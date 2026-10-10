@@ -8,6 +8,9 @@ Moved from test_blend_load_store_opts.py in the blend package split."""
 # Standard
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+import random
+import threading
+import time
 
 # Third Party
 import pytest
@@ -16,6 +19,7 @@ import pytest
 from lmcache import device_ops  # noqa: F401
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
+from lmcache.v1.multiprocess.modules.blend.read_locks import ReadLockReservation
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
 import lmcache.lmcache_native as lmcache_native
 
@@ -409,91 +413,79 @@ def test_reason_table():
         "matches_beyond_alloc": (True, False),
         "matches_straddle_alloc": (False, True),
         "no_object_keys": (True, True),
+        "read_locks_not_held": (False, True),
     }
     actual = {r.value: (r.scatter_ran, r.publish) for r in RetrieveReason}
     assert actual == expected
 
 
 # ---------------------------------------------------------------------------
-# L2: obj_keys cache lifecycle
+# L2: this rank's object keys from the lookup's reservation
 # ---------------------------------------------------------------------------
 
 
-def _fake_obj_key(chunk_hash: bytes, worker_id: int) -> SimpleNamespace:
-    return SimpleNamespace(chunk_hash=chunk_hash, worker_id=worker_id)
+def _fake_obj_key(chunk_hash: bytes, worker_id) -> tuple:
+    """A hashable stand-in for an ObjectKey (the ledger keys a dict by it)."""
+    return (chunk_hash, worker_id)
 
 
-def test_obj_keys_cache_round_trip_tp1():
-    """At world_size=1, retrieve can rebuild from the session stash exactly."""
-    # First Party
-    from lmcache.v1.multiprocess.session import Session
+def _reservation(per_hash, ends=None, read_locks: int = 1) -> ReadLockReservation:
+    return ReadLockReservation(
+        read_locks=read_locks,
+        per_hash=per_hash,
+        ends=ends if ends is not None else dict.fromkeys(per_hash, 0),
+    )
 
-    session = Session(request_id="req-1", hasher=MagicMock())
 
-    # Simulate what the lookup's classify stores.
-    chunk_hashes = [b"h1", b"h2", b"h3"]
-    obj_keys_per_chunk = {h: [_fake_obj_key(h, 0)] for h in chunk_hashes}
-    session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA] = {
-        "read_locks": 1,
-        "per_hash": obj_keys_per_chunk,
+def _ipc_key(worker_id, world_size, end: int = 0) -> SimpleNamespace:
+    return SimpleNamespace(
+        worker_id=worker_id, world_size=world_size, end=end, request_id="req"
+    )
+
+
+def test_rank_keys_tp1_returns_every_reserved_key():
+    """At world_size=1 a match's keys are its reserved keys, chunk-major."""
+    hashes = [b"h1", b"h2", b"h3"]
+    res = _reservation({h: [_fake_obj_key(h, 0)] for h in hashes})
+    matches = [SimpleNamespace(hash=h) for h in hashes]
+    out = res.rank_keys(matches, _ipc_key(None, 1), 1)
+    assert [ks[0][0] for ks in out] == hashes
+
+
+def test_rank_keys_tp_expanded_selects_this_ranks_keys():
+    """world_size>1: the reservation holds every rank's key per read group,
+    group-major and rank-minor; each rank gets its own, or TP mispairs."""
+    ws, n_read = 4, 2
+    per_hash = {
+        b"h1": [_fake_obj_key(b"h1", (g, r)) for g in range(n_read) for r in range(ws)]
     }
-
-    # Simulate retrieve consuming the stash (take-once).
-    matches_sorted = [
-        SimpleNamespace(hash=h, cur_st=i) for i, h in enumerate(chunk_hashes)
-    ]
-    stash = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
-    cached = stash["per_hash"] if stash else None
-
-    assert cached is not None
-    assert all(r.hash in cached for r in matches_sorted)
-    rebuilt = [k for r in matches_sorted for k in cached[r.hash]]
-    assert len(rebuilt) == 3
-    assert [k.chunk_hash for k in rebuilt] == chunk_hashes
-    # Stash is now empty: a second take (the session destroy listener after
-    # a successful retrieve) releases nothing twice.
-    assert session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None) is None
+    res = _reservation(per_hash)
+    out = res.rank_keys([SimpleNamespace(hash=b"h1")], _ipc_key(2, ws), n_read)
+    assert [k[1] for k in out[0]] == [(0, 2), (1, 2)]
 
 
-def test_obj_keys_cache_round_trip_tp_expanded():
-    """world_size>1: cached entry per hash is a list of length world_size,
-    rebuilt list is flat chunk-major."""
-    # First Party
-    from lmcache.v1.multiprocess.session import Session
-
-    session = Session(request_id="req-tp", hasher=MagicMock())
-
-    ws = 4
-    chunk_hashes = [b"h1", b"h2"]
-    per_hash = {h: [_fake_obj_key(h, w) for w in range(ws)] for h in chunk_hashes}
-    session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA] = {
-        "read_locks": 1,
-        "per_hash": per_hash,
-    }
-
-    matches_sorted = [
-        SimpleNamespace(hash=h, cur_st=i) for i, h in enumerate(chunk_hashes)
-    ]
-    stash = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
-    cached = stash["per_hash"] if stash else None
-    assert cached is not None
-    rebuilt = [k for r in matches_sorted for k in cached[r.hash]]
-    # Length = 2 chunks × 4 workers.
-    assert len(rebuilt) == 8
-    # Chunk-major: first 4 entries are h1's workers 0..3, then h2's.
-    assert [k.chunk_hash for k in rebuilt[:4]] == [b"h1"] * 4
-    assert [k.worker_id for k in rebuilt[:4]] == [0, 1, 2, 3]
-    assert [k.chunk_hash for k in rebuilt[4:]] == [b"h2"] * 4
-
-
-def test_obj_keys_cache_miss_falls_back():
-    """If the cache doesn't contain every match's hash, retrieve must
-    fall back to recompute (handled in the engine; this test just pins
-    the detection logic)."""
-    cached = {b"h1": ["k1"]}
+def test_rank_keys_none_for_a_hash_the_reservation_lacks():
+    """A match the reservation has no keys for yields None; the retrieve
+    derives its keys, and its claim then fails unless they are held."""
+    res = _reservation({b"h1": ["k1"]})
     matches = [SimpleNamespace(hash=b"h1"), SimpleNamespace(hash=b"h_missing")]
-    all_present = all(r.hash in cached for r in matches)
-    assert all_present is False
+    assert res.rank_keys(matches, _ipc_key(None, 1), 1) == [["k1"], None]
+
+
+def test_assemble_obj_keys_derives_only_the_missing_matches(monkeypatch):
+    derived_for = []
+
+    def fake_derive(key, hashes, gids):
+        derived_for.append(list(hashes))
+        return [f"d-{h.decode()}-{g}" for h in hashes for g in gids]
+
+    monkeypatch.setattr(retrieve_mod, "_cb_chunk_major_object_keys", fake_derive)
+    matches = [SimpleNamespace(hash=b"a"), SimpleNamespace(hash=b"b")]
+    out = retrieve_mod._assemble_obj_keys(
+        _ipc_key(None, 1), matches, [["a0", "a1"], None], (0, 1), 2
+    )
+    assert out == ["a0", "a1", "d-b-0", "d-b-1"]
+    assert derived_for == [[b"b"]]
 
 
 # ---------------------------------------------------------------------------
@@ -763,29 +755,26 @@ def test_repeat_lookup_releases_superseded_stash():
     assert storage.outstanding() == 0
 
 
-def test_retrieve_take_prevents_double_release_at_session_end():
-    """A consumed stash releases nothing at session end: the retrieve's
-    take empties it, so the destroy listener is a no-op (the counting fake
-    raises on any over-release)."""
+def test_a_retrieved_reservation_releases_nothing_twice_at_session_end():
+    """A retrieve that claims every key and releases its claims leaves
+    nothing for session end (the counting fake raises on over-release)."""
 
     storage = _LockCountingStorageManager()
     ctx = _unretrieved_ctx(storage)
     blend = _unretrieved_blend(ctx)
-
-    _run_unretrieved_lookup(blend, "req-retrieved")
-
-    # Emulate the retrieve's consumption + release of the taken keys.
+    key = _run_unretrieved_lookup(blend, "req-retrieved")
     session = ctx.session_manager.get("req-retrieved")
-    assert session is not None
-    stash = session.extras.pop(BlendModule.UNRETRIEVED_KEYS_EXTRA, None)
-    assert stash is not None and len(stash["per_hash"]) == _UNRETRIEVED_N_CHUNKS
-    storage.finish_read_prefetched(
-        [key for keys in stash["per_hash"].values() for key in keys],
-        read_locks=stash["read_locks"],
+
+    claim = blend._claim_read_locks(
+        session, _reserved_matches(session), key, (0,), slot_bound=key.end
     )
+    assert claim is not None
+    storage.finish_read_prefetched(claim[0])  # the retrieve's own release
     assert storage.outstanding() == 0
 
-    # Session end must not release again.
+    # Called directly: the session manager logs and swallows a listener that
+    # raises, so a release with nothing left to release must be checked here.
+    blend._release_unretrieved_locks(session)
     ctx.session_manager.remove("req-retrieved")
     assert storage.outstanding() == 0
 
@@ -849,6 +838,7 @@ def _classify_engine():
     eng.UNRETRIEVED_KEYS_EXTRA = BlendModule.UNRETRIEVED_KEYS_EXTRA
     eng._STALE_STRIKE_THRESHOLD = 2
     eng._pending_fp_lock = threading.Lock()
+    eng._cb_retain_lock = threading.Lock()
     eng._pending_fp_hashes = set()
     eng._stale_strike = {}
     eng._ctx = MagicMock()
@@ -985,3 +975,381 @@ def test_sparse_classify_unstaged_but_found_chunk_takes_no_strike():
     eng._ctx.storage_manager.finish_read_prefetched.assert_not_called()
     # "gone" is absent from every tier -> the stale path, unchanged.
     assert eng._stale_strike == {b"gone": 1}
+
+
+# ---------------------------------------------------------------------------
+# Read-lock reservation: a request retrieved over several calls (one per
+# engine prefill chunk) claims one lock per key it reads, releases the
+# matches no later call can send, and never reads or releases a lock it no
+# longer holds.
+# ---------------------------------------------------------------------------
+
+
+def _reserved_matches(session) -> list:
+    """The lookup's matches as the client would send them, by position."""
+    res = session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA]
+    return [
+        SimpleNamespace(hash=h, cur_ed=res.ends[h])
+        for h in sorted(res.per_hash, key=lambda h: res.ends[h])
+    ]
+
+
+def test_reservation_holds_every_key_read_locks_times():
+    res = _reservation({b"a": ["a0", "a1"], b"b": ["b0"]}, read_locks=3)
+    assert res.held == {"a0": 3, "a1": 3, "b0": 3}
+
+
+def test_claim_is_all_or_nothing():
+    res = _reservation({b"a": ["a0"], b"b": ["b0"]})
+    assert res.claim(["b0"])
+    assert not res.claim(["a0", "b0"]), "b0 has no lock left"
+    assert res.held == {"a0": 1, "b0": 0}, "a failed claim takes nothing"
+
+
+def test_claim_counts_a_repeated_key_per_occurrence():
+    res = _reservation({b"a": ["a0"]}, read_locks=1)
+    assert not res.claim(["a0", "a0"]), "one lock cannot cover two reads"
+    assert res.held == {"a0": 1}
+
+
+def test_unclaim_hands_a_lock_back():
+    res = _reservation({b"a": ["a0"]})
+    assert res.claim(["a0"])
+    res.unclaim(["a0"])
+    assert res.claim(["a0"])
+
+
+def test_each_mla_reader_claims_one_lock():
+    """MLA shares a key across num_kv_readers readers: each claims one."""
+    res = _reservation({b"a": ["a0"]}, read_locks=2)
+    assert res.claim(["a0"]) and res.claim(["a0"])
+    assert not res.claim(["a0"])
+
+
+def test_sweep_releases_unsent_matches_the_call_has_passed():
+    res = _reservation(
+        {b"a": ["a0"], b"b": ["b0"], b"c": ["c0"]},
+        ends={b"a": 256, b"b": 512, b"c": 768},
+    )
+    # The call was sent "b": "a" ends before it, so no later call sends it;
+    # "c" may still come in a later window.
+    assert res.sweep({b"b"}, upto=512, final=False) == {1: ["a0"]}
+    assert set(res.per_hash) == {b"b", b"c"}
+
+
+def test_final_sweep_releases_every_unsent_match():
+    res = _reservation({b"a": ["a0"], b"b": ["b0"]}, ends={b"a": 256, b"b": 512})
+    assert res.sweep({b"a"}, upto=256, final=True) == {1: ["b0"]}
+
+
+def test_sweep_never_releases_a_claimed_lock():
+    res = _reservation({b"a": ["a0"], b"b": ["b0"]}, ends={b"a": 256, b"b": 512})
+    assert res.claim(["a0"])
+    # A later call sent "b": "a" is swept, but its only lock is claimed by
+    # the earlier call, which releases it itself.
+    assert res.sweep({b"b"}, upto=512, final=True) == {}
+
+
+def test_release_all_groups_what_is_still_held():
+    res = _reservation({b"a": ["a0", "a1"], b"b": ["b0"]}, read_locks=2)
+    assert res.claim(["a0"])
+    assert res.release_all() == {1: ["a0"], 2: ["a1", "b0"]}
+    assert res.held == {} and res.per_hash == {}
+
+
+def test_lookup_installs_a_reservation_with_match_ends():
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+    _run_unretrieved_lookup(blend, "req-ends", num_kv_readers=2)
+    res = ctx.session_manager.get("req-ends").extras[BlendModule.UNRETRIEVED_KEYS_EXTRA]
+    # The query is 128 filler tokens, then the stored chunks.
+    assert sorted(res.ends.values()) == [
+        128 + (i + 1) * _UNRETRIEVED_CHUNK for i in range(_UNRETRIEVED_N_CHUNKS)
+    ]
+    assert set(res.held.values()) == {2}
+
+
+def test_windows_claim_their_matches_and_release_the_rest():
+    """Chunked prefill: each call claims its window's matches; a match no
+    call sends (the engine recomputes it) is released once a later call has
+    passed it, and on the call that sees the whole prompt allocated."""
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+    key = _run_unretrieved_lookup(blend, "req-win")
+    session = ctx.session_manager.get("req-win")
+    m0, m1, m2, m3 = _reserved_matches(session)
+
+    # Window 1 sends m0. m1 straddles the window's end, so the client never
+    # sends it; it stays held until a later call passes it.
+    claim = blend._claim_read_locks(
+        session, [m0], key, (0,), slot_bound=m0.cur_ed + 128
+    )
+    assert claim is not None
+    storage.finish_read_prefetched(claim[0])
+    assert storage.outstanding() == 3
+
+    # Window 2 (the last) sends m2: m1 and m3 can no longer be sent.
+    claim = blend._claim_read_locks(session, [m2], key, (0,), slot_bound=key.end)
+    assert claim is not None
+    assert storage.outstanding() == 1  # only m2, claimed by this call
+    storage.finish_read_prefetched(claim[0])
+    assert storage.outstanding() == 0
+
+    ctx.session_manager.remove("req-win")  # nothing left to release twice
+    assert storage.outstanding() == 0
+
+
+def test_single_shot_retrieve_releases_every_unsent_match():
+    """One call with the whole prompt allocated releases every match it was
+    not given, as a single-shot retrieve always has."""
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+    key = _run_unretrieved_lookup(blend, "req-single", num_kv_readers=2)
+    session = ctx.session_manager.get("req-single")
+    m1 = _reserved_matches(session)[1]
+
+    claim = blend._claim_read_locks(session, [m1], key, (0,), slot_bound=key.end)
+    assert claim is not None
+    # Every other match released in full; m1 keeps one lock per reader.
+    assert storage.outstanding() == 2
+
+
+def test_unknown_slot_bound_releases_nothing_early():
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+    key = _run_unretrieved_lookup(blend, "req-nobound")
+    session = ctx.session_manager.get("req-nobound")
+    m0 = _reserved_matches(session)[0]
+
+    claim = blend._claim_read_locks(session, [m0], key, (0,), slot_bound=None)
+    assert claim is not None
+    assert storage.outstanding() == _UNRETRIEVED_N_CHUNKS
+    storage.finish_read_prefetched(claim[0])
+    ctx.session_manager.remove("req-nobound")
+    assert storage.outstanding() == 0
+
+
+def test_a_released_key_is_never_read_again():
+    """Re-sending a match whose lock this request already released (e.g. a
+    re-scatter) claims nothing: reading it would rely on another request's
+    lock, and releasing it would take that lock."""
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+    key = _run_unretrieved_lookup(blend, "req-again")
+    session = ctx.session_manager.get("req-again")
+    m0 = _reserved_matches(session)[0]
+
+    claim = blend._claim_read_locks(session, [m0], key, (0,), slot_bound=None)
+    storage.finish_read_prefetched(claim[0])
+    # Another request now holds the same object.
+    storage.locks[claim[0][0]] = 1
+
+    assert blend._claim_read_locks(session, [m0], key, (0,), None) is None
+    ctx.session_manager.remove("req-again")
+    assert storage.locks == {claim[0][0]: 1}, "the other request's lock is intact"
+
+
+def test_a_failed_read_spends_the_claim():
+    """A failed read releases the keys it did read (one lock each); a retry
+    of the same matches must not read them again."""
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+    key = _run_unretrieved_lookup(blend, "req-fail")
+    session = ctx.session_manager.get("req-fail")
+    m0, m1 = _reserved_matches(session)[:2]
+
+    keys = blend._claim_read_locks(session, [m0, m1], key, (0,), None)[0]
+    # The storage read context: m0 read and released, m1 not readable.
+    storage.finish_read_prefetched([keys[0]])
+    del storage.locks[keys[1]]
+
+    assert blend._claim_read_locks(session, [m0, m1], key, (0,), None) is None
+    ctx.session_manager.remove("req-fail")
+    assert storage.outstanding() == 0
+
+
+def test_a_retrieve_after_session_end_reads_nothing():
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+    key = _run_unretrieved_lookup(blend, "req-late-retrieve")
+    session = ctx.session_manager.get("req-late-retrieve")
+    m0 = _reserved_matches(session)[0]
+
+    ctx.session_manager.remove("req-late-retrieve")
+    assert storage.outstanding() == 0
+    assert blend._claim_read_locks(session, [m0], key, (0,), key.end) is None
+
+
+def test_repeat_lookup_releases_only_unclaimed_locks():
+    """A repeat lookup (e.g. after preemption) while a retrieve still owns
+    its claims releases only the superseded reservation's unclaimed locks;
+    the retrieve releases its own."""
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+    key = _run_unretrieved_lookup(blend, "req-repeat-claim")
+    session = ctx.session_manager.get("req-repeat-claim")
+    m0 = _reserved_matches(session)[0]
+
+    in_flight = blend._claim_read_locks(session, [m0], key, (0,), None)[0]
+    assert blend.cb_unified_lookup(key, tp_size=1) is not None
+    # The new reservation holds all 4; the in-flight retrieve holds m0's.
+    assert storage.outstanding() == _UNRETRIEVED_N_CHUNKS + 1
+
+    storage.finish_read_prefetched(in_flight)
+    ctx.session_manager.remove("req-repeat-claim")
+    assert storage.outstanding() == 0
+
+
+def test_mla_readers_each_read_once_and_session_end_releases_the_rest():
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+    key = _run_unretrieved_lookup(blend, "req-mla-read", num_kv_readers=2)
+    session = ctx.session_manager.get("req-mla-read")
+    m0 = _reserved_matches(session)[0]
+
+    for _reader in range(2):
+        claim = blend._claim_read_locks(session, [m0], key, (0,), None)
+        assert claim is not None
+        storage.finish_read_prefetched(claim[0])
+    assert blend._claim_read_locks(session, [m0], key, (0,), None) is None
+
+    ctx.session_manager.remove("req-mla-read")
+    assert storage.outstanding() == 0
+
+
+def test_handshake_reports_version_2_and_accepts_version_1_clients():
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend.module import _handshake_response
+
+    assert _handshake_response(1) == (2, True)
+    assert _handshake_response(2) == (2, True)
+    assert _handshake_response(3) == (2, False)
+
+
+class _ThreadSafeLockCountingStorageManager(_LockCountingStorageManager):
+    """The lock-counting fake, safe to release from several threads."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._mutex = threading.Lock()
+
+    def finish_read_prefetched(self, keys, read_locks: int = 1, l1_owners=None) -> None:
+        with self._mutex:
+            super().finish_read_prefetched(keys, read_locks, l1_owners)
+
+
+class _SlowLookupDict(dict):
+    """A dict whose ``get`` yields the GIL after reading. Used for the
+    reservation's ledger, a claim reads a key's count, yields, then counts it
+    down: a racing thread the module lock does not exclude (session end, or
+    the other rank) then sees the same lock as held and releases or claims it
+    a second time."""
+
+    def get(self, key, default=None):
+        value = super().get(key, default)
+        time.sleep(0.0002)
+        return value
+
+
+def _race_tp_ranks_against_session_end(
+    round_no: int, n_chunks: int, end_delay_s: float
+) -> None:
+    """One race: two TP ranks retrieve ``n_chunks`` windows (claiming their
+    keys, releasing what they read, sweeping passed matches) while session
+    end releases the reservation ``end_delay_s`` after they start. Asserts
+    every read lock was released exactly once."""
+    n_hashes, ws, n_read, chunk = 8, 2, 2, 2
+    storage = _ThreadSafeLockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+    rid = f"req-tp-{round_no}"
+    session = ctx.session_manager.get_or_create(rid)
+    hashes = [f"{rid}-h{i}".encode() for i in range(n_hashes)]
+    per_hash = _SlowLookupDict()
+    for h in hashes:
+        # Group-major, rank-minor: [g0r0, g0r1, g1r0, g1r1].
+        per_hash[h] = [(h, g, r) for g in range(n_read) for r in range(ws)]
+        for k in per_hash[h]:
+            storage.locks[k] = 1
+    # Hash i ends at token i + 1; window c is allocated up to (c + 1) * chunk.
+    reservation = ReadLockReservation(
+        read_locks=1,
+        per_hash=per_hash,
+        ends={h: i + 1 for i, h in enumerate(hashes)},
+    )
+    reservation.held = _SlowLookupDict(reservation.held)
+    session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA] = reservation
+    errors: list[BaseException] = []
+    start = threading.Barrier(ws + 1)
+
+    def rank(worker_id: int) -> None:
+        try:
+            start.wait()
+            for c in range(n_chunks):
+                # The engine recomputes the window's last match: never sent.
+                window = hashes[c * chunk : (c + 1) * chunk]
+                matches = [
+                    SimpleNamespace(hash=h, cur_ed=hashes.index(h) + 1)
+                    for h in window[:-1]
+                ]
+                claim = blend._claim_read_locks(
+                    session,
+                    matches,
+                    _ipc_key(worker_id, ws, end=n_hashes),
+                    tuple(range(n_read)),
+                    (c + 1) * chunk,
+                )
+                if claim is None:
+                    return
+                storage.finish_read_prefetched(claim[0])  # read and released
+        except BaseException as exc:  # reported by the assert below
+            errors.append(exc)
+
+    def end_session() -> None:
+        try:
+            start.wait()
+            time.sleep(end_delay_s)
+            ctx.session_manager.remove(rid)
+        except BaseException as exc:  # reported by the assert below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=rank, args=(r,)) for r in range(ws)]
+    threads.append(threading.Thread(target=end_session))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in threads), "a thread hung"
+    assert not errors, errors
+    assert storage.outstanding() == 0, f"round {round_no}: leaked locks"
+
+
+def test_tp_ranks_and_session_end_release_each_lock_once(monkeypatch):
+    """Two TP ranks claim and release their keys window by window while
+    session end races them. Whatever the interleaving, every read lock is
+    released exactly once: by the rank that claimed it, by a sweep, or by
+    session end. The fake raises on any over-release, and a leak leaves a
+    lock outstanding."""
+    # After session end a rank derives keys for its matches; they are never
+    # held, so its claim fails without reading.
+    monkeypatch.setattr(
+        retrieve_mod,
+        "_cb_chunk_major_object_keys",
+        lambda key, hashes, gids: [("derived", h, g) for h in hashes for g in gids],
+    )
+    rng = random.Random(0)
+    for round_no in range(200):
+        # Session end lands anywhere from before the first claim to after the
+        # last, and the ranks may stop short of the last window.
+        _race_tp_ranks_against_session_end(
+            round_no, n_chunks=rng.randint(1, 4), end_delay_s=rng.uniform(0, 0.004)
+        )
