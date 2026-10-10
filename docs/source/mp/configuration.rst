@@ -685,6 +685,12 @@ data parallelism (``dp_size > 1``) are rejected with a clear error.
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "tcp://host1:6667,tcp://host2:6667"}}'
 
+KV dtype isolation
+~~~~~~~~~~~~~~~~~~
+
+The vLLM MP connector hashes KV precision settings into the cache model name to isolate caches.
+Upgrade all producers and consumers; new clients miss legacy undecorated objects.
+
 Decode context parallelism (DCP)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

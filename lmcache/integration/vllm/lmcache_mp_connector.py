@@ -62,6 +62,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
     get_tokens_per_block,
     is_scratch_spec,
 )
+from lmcache.integration.vllm.kv_cache_identity import get_kv_dtype_decorated_model_name
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
@@ -592,7 +593,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
         )
-        cache_model_name = get_dcp_decorated_model_name(vllm_config, kv_cache_config)
+        cache_model_name = get_kv_dtype_decorated_model_name(
+            vllm_config, get_dcp_decorated_model_name(vllm_config, kv_cache_config)
+        )
 
         assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
