@@ -367,6 +367,54 @@ class TestExportConfig:
         with pytest.raises(ValueError, match="max output length cannot be specified"):
             run_engine_bench(BenchCommand(), args)
 
+    def test_unset_max_output_length_allowed_for_unsupported_workload(
+        self,
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        # Not setting a max output length is not the same as setting it, even
+        # for a workload that has no such parameter: the guard must only fire
+        # on an explicit value.
+        args = _make_args(
+            workload="random-prefill",
+            ldqa_max_output_length=None,
+            export_config=str(tmp_path / "exported.json"),
+        )
+        run_engine_bench(BenchCommand(), args)
+
+    def test_config_file_yields_none_for_unset_max_output_length(
+        self,
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        # `--config` (and the interactive flow) resolve through
+        # `InteractiveState.to_namespace()`, which emits None for every item
+        # whose condition is unmet — so a workload that has no
+        # max-output-length parameter arrives with None rather than the
+        # argparse default.
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "engine_url": "http://localhost:8000",
+                    "model": "test-model",
+                    "workload": "random-prefill",
+                    "tokens_per_gb_kvcache": 50000,
+                    "rp_request_length": 10000,
+                    "rp_num_requests": 50,
+                }
+            )
+        )
+        args = _make_args(
+            config=str(config_path),
+            engine_url=None,
+            workload=None,
+            tokens_per_gb_kvcache=None,
+        )
+
+        resolved = _resolve_args(args)
+
+        assert resolved.workload == "random-prefill"
+        assert resolved.ldqa_max_output_length is None
+
     def test_export_config_excludes_lmcache_url(
         self,
         tmp_path,  # type: ignore[no-untyped-def]
