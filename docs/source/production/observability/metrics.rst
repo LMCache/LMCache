@@ -171,6 +171,13 @@ Cache Usage & Lifecycle Metrics
    * - ``lmcache:local_storage_usage``
      - Gauge
      - Local storage usage in bytes.
+   * - ``lmcache:local_disk_stale_index_count``
+     - Counter
+     - Local disk index entries whose backing file was missing or shorter
+       than recorded when read (e.g. deleted externally, truncated). Each
+       one is served as a miss, dropped from the index, and its space
+       released. A non-zero rate means something other than LMCache is
+       reclaiming or corrupting the cache directory.
    * - ``lmcache:request_cache_lifespan``
      - Histogram
      - Distribution of request cache lifespan in minutes.

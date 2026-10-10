@@ -72,6 +72,9 @@ class LMCacheStats:
 
     interval_forced_unpin_count: int  # forced unpin count due to timeout
 
+    # local disk index entries whose backing file was missing or truncated
+    interval_local_disk_stale_index_count: int
+
     # Real time value measurements (will be reset after each log)
     retrieve_hit_rate: float
     lookup_hit_rate: float
@@ -295,6 +298,8 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_failed_count = 0
 
         self.interval_forced_unpin_count = 0
+
+        self.interval_local_disk_stale_index_count = 0
 
         self.local_cache_usage_bytes = 0
         self.remote_cache_usage_bytes = 0
@@ -576,6 +581,10 @@ class LMCStatsMonitor:
         self.interval_forced_unpin_count += delta
 
     @thread_safe
+    def update_local_disk_stale_index_count(self, delta: int) -> None:
+        self.interval_local_disk_stale_index_count += delta
+
+    @thread_safe
     def update_active_memory_objs_count(self, active_memory_objs_count: int):
         self.active_memory_objs_count = active_memory_objs_count
 
@@ -629,6 +638,8 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_failed_count = 0
 
         self.interval_forced_unpin_count = 0
+
+        self.interval_local_disk_stale_index_count = 0
 
         self.interval_p2p_requests = 0
         self.interval_p2p_transferred_tokens = 0
@@ -793,6 +804,7 @@ class LMCStatsMonitor:
             interval_local_cpu_evict_keys_count=self.interval_local_cpu_evict_keys_count,
             interval_local_cpu_evict_failed_count=self.interval_local_cpu_evict_failed_count,
             interval_forced_unpin_count=self.interval_forced_unpin_count,
+            interval_local_disk_stale_index_count=self.interval_local_disk_stale_index_count,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
             local_storage_usage_bytes=self.local_storage_usage_bytes,
@@ -1041,6 +1053,13 @@ class PrometheusLogger:
         self.counter_forced_unpin_count = self._create_counter(
             name="lmcache:forced_unpin_count",
             documentation="Total number of forced unpin due to timeout",
+            labelnames=labelnames,
+        )
+
+        self.counter_local_disk_stale_index_count = self._create_counter(
+            name="lmcache:local_disk_stale_index_count",
+            documentation="Total number of local disk index entries whose "
+            "backing file was missing or truncated on read",
             labelnames=labelnames,
         )
 
@@ -1743,6 +1762,10 @@ class PrometheusLogger:
         self._log_counter(
             self.counter_forced_unpin_count,
             stats.interval_forced_unpin_count,
+        )
+        self._log_counter(
+            self.counter_local_disk_stale_index_count,
+            stats.interval_local_disk_stale_index_count,
         )
         self._log_counter(
             self.counter_lookup_0_hit_requests,
