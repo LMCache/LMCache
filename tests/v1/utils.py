@@ -18,7 +18,6 @@ import uuid
 import torch
 
 # First Party
-from lmcache import torch_device_type
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
@@ -306,44 +305,6 @@ def generate_kv_cache_paged_list_tensors(
     return ret
 
 
-def generate_sglang_kv_cache_paged_list_tensors(
-    num_layers,
-    num_blocks,
-    block_size,
-    num_heads,
-    head_size,
-    use_mla=False,
-    device=torch_device_type,
-    dtype=torch.bfloat16,
-):
-    """
-    Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
-    where KV are in the same tensor
-
-    For MLA: List[num_layers] of [page_buffer_size, 1, head_size]
-    For MHA: List[2] -> List[num_layers] of [page_buffer_size, num_heads, head_size]
-    """
-    shape = (
-        [num_blocks * block_size, 1, head_size]
-        if use_mla
-        else [num_blocks * block_size, num_heads, head_size]
-    )
-    if use_mla:
-        kv_cache = [
-            torch.rand(shape, dtype=dtype, device=device) for i in range(num_layers)
-        ]
-    else:
-        # MHA: List[2] -> List[num_layers]
-        k_cache = [
-            torch.rand(shape, dtype=dtype, device=device) for i in range(num_layers)
-        ]
-        v_cache = [
-            torch.rand(shape, dtype=dtype, device=device) for i in range(num_layers)
-        ]
-        kv_cache = [k_cache, v_cache]
-    return kv_cache
-
-
 def generate_kv_cache_paged(num_blocks, device, block_size=16, dtype=torch.bfloat16):
     ret = []
     num_layers = 32
@@ -545,39 +506,6 @@ def check_paged_kv_cache_equal(
             assert left_k.shape[0] >= num_tokens
             assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
             assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
-
-
-def check_sglang_paged_kv_cache_equal(
-    left, right, slot_mapping, num_heads=8, head_size=128
-):
-    """
-    check whether two paged kv caches are the same at slot_mapping
-
-    Format: List[2] -> List[num_layers] of [page_buffer_size, num_heads, head_size]
-    """
-    token_dim = 0
-    num_tokens = slot_mapping.shape[0]
-
-    # left and right are [k_list, v_list]
-    assert len(left) == 2, "Expected [k_list, v_list]"
-    assert len(right) == 2, "Expected [k_list, v_list]"
-
-    # Check K and V separately
-    for kv_idx in range(2):  # 0 for K, 1 for V
-        left_kv_list = left[kv_idx]
-        right_kv_list = right[kv_idx]
-
-        for left_kv, right_kv in zip(left_kv_list, right_kv_list, strict=False):
-            _left_kv = left_kv.reshape(-1, num_heads, head_size)
-            _right_kv = right_kv.reshape(-1, num_heads, head_size)
-
-            assert len(_left_kv.shape) == 3
-            assert len(_right_kv.shape) == 3
-
-            assert _left_kv.shape[token_dim] >= num_tokens
-            assert _right_kv.shape[token_dim] >= num_tokens
-
-            assert (_left_kv[slot_mapping, :, :] == _right_kv[slot_mapping, :, :]).all()
 
 
 def check_paged_kv_cache_equal_with_mla(left, right, slot_mapping, head_size=128):

@@ -69,93 +69,14 @@ def CreateGPUConnector(
     Args:
         config: The LMCache engine configuration.
         metadata: The LMCache metadata.
-        engine: The serving engine type (EngineType.VLLM, EngineType.SGLANG,
-                EngineType.TRTLLM, or EngineType.MOCK).
+        engine: The serving engine type (EngineType.VLLM, EngineType.TRTLLM,
+            or EngineType.MOCK).
         layout_hints: Optional hints from the serving engine about KV cache
             layout (e.g. ``{"kv_layout": "HND"}``).
     """
     use_gpu = need_gpu_interm_buffer(config)
 
-    if engine == EngineType.SGLANG:
-        num_layer, _, chunk_size, num_kv_head, head_dim = metadata.kv_shape
-        hidden_dim_size = num_kv_head * head_dim
-        local_worker_id = metadata.local_worker_id
-        torch_dev.set_device(local_worker_id)
-        device = torch.device(f"{torch_device_type}:{local_worker_id}")
-        kv_dtype = metadata.kv_dtype
-
-        if torch_device_type == "musa":
-            # First Party
-            from lmcache.v1.gpu_connector.musa_connectors import (
-                SGLangLayerwiseMUSAConnector,
-                SGLangMUSAConnector,
-            )
-
-            connector_cls = (
-                SGLangLayerwiseMUSAConnector
-                if config.use_layerwise
-                else SGLangMUSAConnector
-            )
-            return connector_cls(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
-                use_mla=metadata.use_mla,
-            )
-        elif torch_device_type == "xpu":
-            # First Party
-            from lmcache.v1.gpu_connector.xpu_connectors import (
-                SGLangLayerwiseXPUConnector,
-                SGLangXPUConnector,
-            )
-
-            if config.use_layerwise:
-                return SGLangLayerwiseXPUConnector(
-                    hidden_dim_size,
-                    num_layer,
-                    use_gpu=use_gpu,
-                    chunk_size=chunk_size,
-                    dtype=kv_dtype,
-                    device=device,
-                )
-            else:
-                return SGLangXPUConnector(
-                    hidden_dim_size,
-                    num_layer,
-                    use_gpu=use_gpu,
-                    chunk_size=chunk_size,
-                    dtype=kv_dtype,
-                    device=device,
-                )
-        else:  # GPU for SGLang
-            # First Party
-            from lmcache.v1.gpu_connector.gpu_connectors import (
-                SGLangGPUConnector,
-                SGLangLayerwiseGPUConnector,
-            )
-
-            if config.use_layerwise:
-                return SGLangLayerwiseGPUConnector(
-                    hidden_dim_size,
-                    num_layer,
-                    use_gpu=use_gpu,
-                    chunk_size=chunk_size,
-                    dtype=kv_dtype,
-                    device=device,
-                )
-            else:
-                return SGLangGPUConnector(
-                    hidden_dim_size,
-                    num_layer,
-                    use_gpu=use_gpu,
-                    chunk_size=chunk_size,
-                    dtype=kv_dtype,
-                    device=device,
-                )
-    elif engine == EngineType.VLLM:
+    if engine == EngineType.VLLM:
         _validate_vllm_device_features(config)
 
         # First Party
