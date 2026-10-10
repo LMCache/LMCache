@@ -80,9 +80,9 @@ spec:
 
   # -- Monitoring (maps to PrometheusConfig from mp_observability/config.py) --
   # Note: the CRD uses `enabled: true` by default; the CLI equivalent is
-  # the absence of the `--disable-prometheus` flag.
+  # the absence of the `--disable-metrics` flag.
   prometheus:
-    enabled: bool             # default: true  (CLI: omit --disable-prometheus)
+    enabled: bool             # default: true  (CLI: omit --disable-metrics)
     port: int                 # default: 9090
     serviceMonitor:
       enabled: bool           # default: false
@@ -606,7 +606,7 @@ controller renders each field into the matching `lmcache coordinator` CLI flag:
 env, etc.).
 
 The global-CacheBlend knobs (`blendChunkSize`, `blendProbeStride`) render into the
-`--blend-chunk-size` / `--blend-probe-stride` flags and default to 256 / 1. Note
+`--chunk-size` / `--blend-probe-stride` flags and default to 256 / 1. Note
 `blendChunkSize` **must equal** the blend servers' chunk size.
 
 > **Metrics caveat:** the coordinator process exposes only `/healthz`, not a
