@@ -132,6 +132,42 @@ def test_segment_token_database(prefix_length, chunk_lengths):
         # print(ed, ends[i])
 
 
+class _FakeTokenizer:
+    """No-BOS tokenizer: SegmentTokenDatabase's ``[1:]`` leaves sep == [7]."""
+
+    def encode(self, text):
+        return [5, 7]
+
+
+def test_segment_token_database_skips_empty_segments(monkeypatch):
+    """Adjacent separators must not yield empty segments (#3238).
+
+    store_layer skips empty ranges, so an empty segment's key is never
+    stored. If lookup yields it, the lookup misses and stops matching
+    after the first segment, even for an exact repeat of a stored prompt.
+    """
+    monkeypatch.setattr(
+        "lmcache.v1.token_database.AutoTokenizer.from_pretrained",
+        lambda *args, **kwargs: _FakeTokenizer(),
+    )
+    cfg = LMCacheEngineConfig.from_legacy(blend_special_str=" # # ")
+    db = SegmentTokenDatabase(cfg, dumb_metadata())
+    assert db.sep_tokens.tolist() == [7]
+
+    sys_tokens = [101, 102, 103]
+    doc_tokens = [201, 202, 203, 204]
+    # The prompt separator repeats the single sep token, as " # # " does
+    # for Qwen once ``[1:]`` drops its first token.
+    tokens = sys_tokens + [7, 7] + doc_tokens
+
+    results = list(db.process_tokens(tokens=tokens, make_key=False))
+
+    assert all(end > start for start, end, _ in results)
+    assert [(start, end) for start, end, _ in results] == [(0, 3), (5, 9)]
+    assert results[0][2] == db._hash_tokens(torch.tensor(sys_tokens))
+    assert results[1][2] == db._hash_tokens(torch.tensor(doc_tokens))
+
+
 def test_process_tokens_returns_int_keys_for_bytes_hash_func() -> None:
     """process_tokens must produce int chunk_hash keys even when the underlying
     hash function returns bytes (e.g. sha256_cbor). This ensures downstream
