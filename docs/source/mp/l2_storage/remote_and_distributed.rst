@@ -14,6 +14,7 @@ sharing cache across nodes.
    mooncake_store
    resp
    valkey
+   valkey_rdma
    aerospike
    hf3fs
    wqs
