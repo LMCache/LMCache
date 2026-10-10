@@ -417,6 +417,7 @@ class LMCacheMPTokenDropRequestState:
     config: dict[str, Any]
     resident_kv_tokens: int | None = None
     has_physical_override: bool = False
+    physical_block_ids: list[int] | None = None
     is_genuine_decode: bool = False
     num_decoded_tokens: int = 0
     num_new_tokens: int = 0

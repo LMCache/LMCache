@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+pytest.importorskip("vllm")
+
 # First Party
 from lmcache.integration.vllm.experimental import token_drop_worker as worker_mod
 from lmcache.integration.vllm.experimental.token_drop_worker import TokenDropWorker

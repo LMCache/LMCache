@@ -158,6 +158,12 @@ def _prepare_inputs_with_physical_frontier(
                     f"{request_state.request_id!r}: resident={resident}, "
                     f"scheduled={num_new_tokens}"
                 )
+            block_ids = request_state.physical_block_ids
+            if not block_ids:
+                raise RuntimeError(
+                    "Token-drop metadata is missing authoritative KV block ids"
+                )
+            runner.input_batch.block_table.add_row((block_ids,), row)
             start = resident - num_new_tokens
             seq_len = resident
 

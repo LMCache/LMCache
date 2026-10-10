@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 import torch
 
+pytest.importorskip("vllm")
+
 # First Party
 from lmcache.integration.vllm.token_drop_worker_adapter import (
     _compute_slot_mapping_with_physical_positions,
@@ -27,6 +29,14 @@ class _FakeBuffer:
         self.gpu[:size].copy_(torch.from_numpy(self.np[:size]))
 
 
+class _FakeBlockTable:
+    def __init__(self) -> None:
+        self.rows: dict[int, tuple[list[int], ...]] = {}
+
+    def add_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
+        self.rows[row_idx] = block_ids
+
+
 class _FakeRunner:
     def __init__(self, req_ids: list[str], logical_frontiers: list[int]):
         self.max_num_tokens = 32
@@ -35,7 +45,7 @@ class _FakeRunner:
         self.input_batch = SimpleNamespace(
             num_reqs=len(req_ids),
             req_ids=req_ids,
-            block_table=object(),
+            block_table=_FakeBlockTable(),
             num_computed_tokens_cpu=np.asarray(logical_frontiers, dtype=np.int32),
         )
         self.seq_lens = torch.zeros(self.max_num_reqs, dtype=torch.int32)
@@ -55,6 +65,7 @@ def _state(
         request_id=request_id,
         resident_kv_tokens=resident,
         has_physical_override=override,
+        physical_block_ids=[7, 8, 9] if override else None,
         num_new_tokens=num_new_tokens,
         worker_row=-1,
     )
@@ -115,6 +126,7 @@ def test_prepare_inputs_mixed_batch_overrides_only_token_drop_row() -> None:
     )
     assert torch.equal(logical_positions, torch.tensor([100, 104, 20, 21]))
     assert torch.equal(runner.seq_lens[:3], torch.tensor([101, 33, 22]))
+    assert runner.input_batch.block_table.rows == {1: ([7, 8, 9],)}
 
 
 def test_prepare_inputs_without_physical_override_is_exact_vanilla() -> None:
