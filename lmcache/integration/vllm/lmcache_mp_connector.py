@@ -77,6 +77,10 @@ from lmcache.integration.vllm.lmcache_mp_metrics import (
 from lmcache.integration.vllm.mp_server_launcher import (
     is_mp_server_autostart_enabled,
 )
+from lmcache.integration.vllm.token_drop_allocator_adapter import (
+    get_resident_kv_tokens,
+    set_resident_kv_tokens,
+)
 from lmcache.integration.vllm.utils import (
     extract_request_configs_from_request,
     mla_only,
@@ -741,6 +745,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
+            self._token_drop_allocations: dict[str, "KVCacheBlocks"] = {}
         elif self.role == KVConnectorRole.WORKER:
             # Node routing: a worker connects only to its local LMCache server.
             # Global ranks are assigned to nodes in contiguous blocks:
@@ -1204,10 +1209,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if self.lazy_offload:
                 self._lazy_offload_manager.bind_block_pool(gpu_block_pool)
 
-    def _commit_token_drop_resident_updates(self, updates: dict[str, int]) -> None:
-        """After the worker output barrier, commit new P and reclaim private blocks."""
-        raise NotImplementedError
-
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -1511,6 +1512,58 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         for request_id in actions.sessions_to_end:
             self.scheduler_adapter.end_session(request_id)
+
+    def _require_private_token_drop_blocks(self, request_id: str) -> list[Any]:
+        allocation = self._token_drop_allocations.get(request_id)
+        if allocation is None:
+            raise RuntimeError(f"Missing token-drop allocation for {request_id}")
+        if len(allocation.blocks) != 1:
+            raise ValueError("Token dropping MVP requires exactly one KV cache group")
+
+        row = allocation.blocks[0]
+        if any(block.ref_cnt != 1 or block.block_hash is not None for block in row):
+            raise ValueError(
+                "Token dropping requires exclusively owned, unhashed KV blocks"
+            )
+        return row
+
+    def _commit_token_drop_resident_updates(self, updates: dict[str, int]) -> None:
+        if self._gpu_block_pool is None:
+            raise RuntimeError("Token dropping requires the vLLM GPU block pool")
+
+        block_size = self._group_tokens_per_block[0]
+        for request_id, num_tokens in updates.items():
+            row = self._require_private_token_drop_blocks(request_id)
+            tracker = self._get_request_tracker(request_id)
+            if tracker.token_drop_spec is None:
+                raise RuntimeError(
+                    "Resident token-drop update for non-token-drop request "
+                    f"{request_id!r}"
+                )
+            current_tokens = get_resident_kv_tokens(request_id)
+            if current_tokens is None:
+                current_tokens = tracker.num_scheduled_tokens
+            if not 0 < num_tokens <= current_tokens:
+                raise ValueError(
+                    f"Invalid token-drop resident length {num_tokens} for "
+                    f"{request_id}: current={current_tokens}"
+                )
+
+            keep_blocks = (num_tokens + block_size - 1) // block_size
+            if keep_blocks > len(row):
+                raise ValueError(
+                    "Token-drop resident length exceeds allocated KV capacity"
+                )
+
+            # Reclaim exactly to the current resident frontier. Any future
+            # headroom comes from vanilla vLLM allocation, not token-drop state.
+            freed = row[keep_blocks:]
+            del row[keep_blocks:]
+            if freed:
+                self._gpu_block_pool.free_blocks(reversed(freed))
+
+            set_resident_kv_tokens(request_id, num_tokens)
+            tracker.allocated_block_ids[0] = [block.block_id for block in row]
 
     def request_finished(
         self,
