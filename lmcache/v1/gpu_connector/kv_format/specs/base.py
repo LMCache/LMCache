@@ -104,7 +104,8 @@ class KVFormatSpec(ABC):
     shape (``is_cross_layer`` / ``is_kv_list`` / ``is_layer_list``, exactly one
     true) plus the ``is_mla`` / ``is_hnd`` / ``is_fused_packed`` /
     ``is_two_major`` / ``is_pbs_fused`` / ``is_kv_second_tuple`` /
-    ``is_single_kv`` modifiers. They default to ``False``, so a spec
+    ``is_single_kv`` / ``is_blocked_scale`` modifiers. They default to
+    ``False``, so a spec
     only declares what applies to it, and every consumer reads them
     through ``get_spec_class(fmt)`` -- no format lists at call sites. The device
     kernels keep their own copy in ``csrc/engine_kv_format.h``.
@@ -121,8 +122,12 @@ class KVFormatSpec(ABC):
       :meth:`tokens_per_layer`, :meth:`elements_per_layer`. The MP path derives
       these from a per-group :class:`PageBufferShapeDesc` instead.
     * Used by pointer-backed paged-buffer reconstruction:
-      :meth:`paged_layer_shape`. It is a class method because it uses declared
-      format facts and caller-provided geometry, not borrowed KV tensors.
+      :meth:`paged_layer_shape` and :meth:`paged_pointer_shape`. They are class
+      methods because they use declared format facts and caller-provided
+      geometry, not borrowed KV tensors.
+    * Used by staging allocation: :meth:`staging_shape` centralizes the
+      leading K/V-plane axis and retains the legacy inference for descriptors
+      whose ``kv_size`` is not populated.
 
     Lifetime: a spec **borrows** ``kv_caches`` -- it does not own the GPU KV
     tensors. ``get_spec`` builds a fresh instance per call and callers use it
@@ -161,6 +166,8 @@ class KVFormatSpec(ABC):
     is_kv_second_tuple: ClassVar[bool] = False
     # Each list entry is one independent K or V tensor rather than a K/V pair.
     is_single_kv: ClassVar[bool] = False
+    # Values and scales occupy separate regions inside each physical block.
+    is_blocked_scale: ClassVar[bool] = False
 
     @classmethod
     def paged_layer_shape(cls, nb: int, bs: int, nh: int, hs: int) -> tuple[int, ...]:
@@ -203,6 +210,68 @@ class KVFormatSpec(ABC):
         if cls.is_hnd:
             return (nb, 2, nh, bs, hs)
         return (nb, 2, bs, nh, hs)
+
+    @classmethod
+    def paged_pointer_shape(cls, nb: int, bs: int, nh: int, hs: int) -> tuple[int, ...]:
+        """Return the physical shape represented by one paged data pointer.
+
+        Per-layer formats use their complete layer shape. For K/V-list formats,
+        one pointer represents one K or V leaf, so the leading K/V axis is not
+        included. Cross-layer and per-layer tuple formats do not have the
+        pointer contract required by this accessor.
+
+        Args:
+            nb: Number of paged blocks.
+            bs: Tokens in each block.
+            nh: Number of attention heads.
+            hs: Per-head content size.
+
+        Returns:
+            The physical shape for one pointer-backed paged tensor.
+
+        Raises:
+            ValueError: If the format uses a cross-layer or tuple pointer
+                structure.
+        """
+        if cls.is_cross_layer or cls.is_kv_second_tuple:
+            raise ValueError(
+                f"{cls.engine_kv_format!r} does not have a single paged pointer shape"
+            )
+        if cls.is_kv_list:
+            if cls.is_pbs_fused:
+                return (nb * bs, nh, hs)
+            return (nb, bs, nh, hs)
+        return cls.paged_layer_shape(nb, bs, nh, hs)
+
+    @classmethod
+    def staging_shape(
+        cls,
+        num_layers: int,
+        num_slots: int,
+        hidden_dim: int,
+        kv_size: int,
+    ) -> tuple[int, ...]:
+        """Return the logical shape of one LMCache staging chunk.
+
+        Args:
+            num_layers: Number of transformer layers in the kernel group.
+            num_slots: Number of token slots represented by the chunk.
+            hidden_dim: Flattened hidden width of one K or V plane.
+            kv_size: Number of K/V planes represented by the format. A
+                non-positive value infers the axis from static format facts
+                for legacy descriptors.
+
+        Returns:
+            ``(num_layers, num_slots, hidden_dim)`` for a single plane, or
+            ``(kv_size, num_layers, num_slots, hidden_dim)`` for split planes.
+        """
+        if kv_size <= 0:
+            kv_size = (
+                1 if (cls.is_mla or cls.is_fused_packed or cls.is_single_kv) else 2
+            )
+        if kv_size == 1:
+            return (num_layers, num_slots, hidden_dim)
+        return (kv_size, num_layers, num_slots, hidden_dim)
 
     def __init__(self, kv_caches: DiscoverableKVCache) -> None:
         # Borrowed, not owned: see the class docstring's "Lifetime" note. The
