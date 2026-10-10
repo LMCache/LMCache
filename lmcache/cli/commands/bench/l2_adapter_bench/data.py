@@ -109,6 +109,8 @@ def make_memory_objects(
     pre-filled with a distinguishing byte pattern
     ``(key_index + fill_offset) mod 256`` so that ``verify_round_trip``
     can detect cross-key corruption after a store -> load cycle.
+    Metadata addresses are byte offsets within ``buffer``, as required by
+    L2 adapters that index the registered L1 arena.
 
     Args:
         buffer: Contiguous benchmark L1 buffer that backs all objects.
@@ -140,7 +142,7 @@ def make_memory_objects(
         metadata = MemoryObjMetadata(
             shape=torch.Size([data_size]),
             dtype=torch.uint8,
-            address=raw_tensor.data_ptr(),
+            address=start,
             phy_size=data_size * raw_tensor.element_size(),
             fmt=MemoryFormat.KV_2LTD,
             ref_count=1,
