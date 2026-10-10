@@ -1842,6 +1842,18 @@ class LMCacheEngine:
             reordered_chunks = kept_chunks
         return reordered_chunks, tot_kv_size
 
+    @staticmethod
+    def _broadcast_device() -> str:
+        """Device for the tensors exchanged by _broadcast_or_receive_memory_objs.
+
+        The device the inference engine made current for this worker, which
+        holds its KV cache. ``worker_id`` does not identify it: with vLLM data
+        parallelism every DP engine's TP world starts at rank 0, so on DP rank
+        >= 1 ``worker_id`` (or ``worker_id % device_count``) names another
+        engine's GPU.
+        """
+        return f"{torch_device_type}:{torch_dev.current_device()}"
+
     def _broadcast_or_receive_memory_objs(
         self,
         reordered_chunks,
@@ -1889,9 +1901,7 @@ class LMCacheEngine:
                 # Broadcast tensor data
                 raw_tensor = memory_obj.raw_tensor
                 assert raw_tensor is not None
-                tensor_to_broadcast = raw_tensor.to(
-                    f"{torch_device_type}:{self.metadata.worker_id}"
-                )
+                tensor_to_broadcast = raw_tensor.to(self._broadcast_device())
                 self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
 
                 # Keep this GPU-resident copy alive so the subsequent
@@ -1929,11 +1939,10 @@ class LMCacheEngine:
 
                 # Create tensor and receive data
                 metadata = MemoryObjMetadata.from_dict(metadata_dict)
-                local_rank = self.metadata.worker_id % torch_dev.device_count()
                 raw_tensor = torch.empty(
                     torch.Size([metadata.get_size()]),
                     dtype=torch.uint8,
-                    device=f"{torch_device_type}:{local_rank}",
+                    device=self._broadcast_device(),
                 )
                 self.broadcast_fn(raw_tensor, self.metadata.first_rank)
 
