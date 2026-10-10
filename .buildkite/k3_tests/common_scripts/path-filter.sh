@@ -182,23 +182,6 @@ _path_filter_should_skip_for_pipeline() {
                     ;;
             esac
             ;;
-        sglang)
-            case "$changed_file" in
-                .buildkite/k3_harness/resolve-pinned-sglang.sh|\
-                .buildkite/k3_harness/setup-sglang-env.sh|\
-                lmcache/integration/sglang/*|\
-                .buildkite/k3_tests/sglang/*)
-                    return 1
-                    ;;
-                examples/*)
-                    # Example-only changes should not trigger sglang tests.
-                    return 0
-                    ;;
-                tests/*|.buildkite/k3_tests/*)
-                    return 0
-                    ;;
-            esac
-            ;;
         xpu)
             if declare -F "_path_filter_xpu_should_skip" >/dev/null 2>&1; then
                 _path_filter_xpu_should_skip "$changed_file"
@@ -247,7 +230,6 @@ _path_filter_pipeline_kind() {
         *k3_tests/correctness/pipeline.yml) echo correctness ;;
         *k3_tests/multiprocess/pipeline.yml) echo multiprocess ;;
         *k3_tests/blend/pipeline.yml) echo blend ;;
-        *k3_tests/sglang/pipeline.yml) echo sglang ;;
         *k3_tests/xpu/*/pipeline.yml) echo xpu ;;
         *k3_tests/musa/pipeline.yml) echo musa ;;
         *k3_tests/rbln/pipeline.yml) echo rbln ;;
