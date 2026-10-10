@@ -5,6 +5,7 @@
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, TypeVar, get_type_hints
+import contextvars
 import enum
 import inspect
 import itertools
@@ -12,6 +13,7 @@ import queue
 import threading
 
 # Third Party
+from zmq.utils.monitor import recv_monitor_message
 import msgspec
 import zmq
 
@@ -27,7 +29,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.futures import (
     MessagingFuture,
 )
-from lmcache.v1.multiprocess.request_handler import HandlerType
+from lmcache.v1.multiprocess.request_handler import HandlerType, bind_request_peer
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
@@ -489,11 +491,17 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
             "Call add_normal_thread_pool or add_affinity_thread_pool first."
         )
         decoded_payloads = unwrap_request_payloads(payloads, self.payload_clss)
+        # Run the handler in the caller's context so request-scoped values
+        # (e.g. current_request_peer) are visible on the pool thread.
+        run_in_context = contextvars.copy_context().run
         if isinstance(self.executor, AffinityThreadPool):
             return self.executor.submit(
-                self.handler, *decoded_payloads, affinity_key=affinity_key
+                run_in_context,
+                self.handler,
+                *decoded_payloads,
+                affinity_key=affinity_key,
             )
-        return self.executor.submit(self.handler, *decoded_payloads)
+        return self.executor.submit(run_in_context, self.handler, *decoded_payloads)
 
     def get_response_class(self) -> ResponseType:
         return self.response_cls
@@ -519,7 +527,23 @@ class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
 
 
 class MessageQueueServer(RequestServer):
-    def __init__(self, bind_url: str, context: zmq.Context) -> None:
+    """ROUTER-socket request server.
+
+    Args:
+        bind_url: ZMQ endpoint to bind.
+        context: ZMQ context owning the socket.
+        on_peer_disconnected: Optional callback invoked on the server loop
+            thread with a client's connection id (the value handlers see as
+            ``current_request_peer()``) once that connection closes. Only
+            connections that have sent at least one request are reported.
+    """
+
+    def __init__(
+        self,
+        bind_url: str,
+        context: zmq.Context,
+        on_peer_disconnected: Callable[[bytes], None] | None = None,
+    ) -> None:
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
@@ -535,6 +559,18 @@ class MessageQueueServer(RequestServer):
         self.poller = zmq.Poller()
         self.poller.register(self.socket, zmq.POLLIN)
         self.poller.register(self._output_efd.fileno(), zmq.POLLIN)
+
+        # Connection-loss reporting. ROUTER does not say which peer went
+        # away, but the socket monitor reports the closed connection's fd and
+        # every inbound message carries its source fd, so remember the
+        # fd -> identity binding of each peer's latest message.
+        self._on_peer_disconnected = on_peer_disconnected
+        self._peer_by_fd: dict[int, bytes] = {}
+        self._srcfd_warned = False
+        self._monitor: zmq.Socket | None = None
+        if on_peer_disconnected is not None:
+            self._monitor = self.socket.get_monitor_socket(zmq.EVENT_DISCONNECTED)
+            self.poller.register(self._monitor, zmq.POLLIN)
 
         # Main loop thread
         self.is_finished = threading.Event()
@@ -553,6 +589,7 @@ class MessageQueueServer(RequestServer):
         handler_entry: SyncRequestHandler[Any],
         payloads: list[bytes],
         prefix_frames: list[bytes],
+        peer: bytes | None = None,
     ) -> Any:
         """
         Call the sync handler and send the response back to the client.
@@ -561,8 +598,10 @@ class MessageQueueServer(RequestServer):
             handler_entry (SyncRequestHandler[Any]): The handler entry.
             payloads (list[bytes]): The payloads of the request.
             prefix_frames (list[bytes]): The prefix frames to send back.
+            peer (bytes | None): Connection id exposed to the handler.
         """
-        response = handler_entry(payloads)
+        with bind_request_peer(peer):
+            response = handler_entry(payloads)
         response_cls = handler_entry.get_response_class()
         b_response = msgspec_encode(response, cls=response_cls)
         if response is not None:
@@ -575,6 +614,7 @@ class MessageQueueServer(RequestServer):
         handler_entry: BlockingRequestHandler[Any],
         payloads: list[bytes],
         prefix_frames: list[bytes],
+        peer: bytes | None = None,
     ) -> Any:
         """
         Call the blocking handler in a separate thread and send the response
@@ -585,9 +625,11 @@ class MessageQueueServer(RequestServer):
             payloads (list[bytes]): The payloads of the request.
             prefix_frames (list[bytes]): The prefix frames to send back.
                 prefix_frames[0] is the zmq identity used as affinity key.
+            peer (bytes | None): Connection id exposed to the handler.
         """
         affinity_key = hash(prefix_frames[0])
-        future = handler_entry(payloads, affinity_key=affinity_key)
+        with bind_request_peer(peer):
+            future = handler_entry(payloads, affinity_key=affinity_key)
 
         def _notify_response(fut: Future):
             try:
@@ -613,18 +655,67 @@ class MessageQueueServer(RequestServer):
         handler_entry: RequestHandlerBase[Any],
         payloads: list[bytes],
         prefix_frames: list[bytes],
+        peer: bytes | None = None,
     ) -> Any:
         match handler_entry.get_handler_type():
             case HandlerType.SYNC:
                 assert isinstance(handler_entry, SyncRequestHandler)
-                self._call_sync_handler(handler_entry, payloads, prefix_frames)
+                self._call_sync_handler(handler_entry, payloads, prefix_frames, peer)
             case HandlerType.BLOCKING:
                 assert isinstance(handler_entry, BlockingRequestHandler)
-                self._call_blocking_handler(handler_entry, payloads, prefix_frames)
+                self._call_blocking_handler(
+                    handler_entry, payloads, prefix_frames, peer
+                )
             case HandlerType.NON_BLOCKING:
                 raise NotImplementedError("Non-blocking handler is not supported yet")
             case _:
                 raise ValueError("Unknown handler type")
+
+    def _track_peer(self, identity_frame: zmq.Frame) -> bytes | None:
+        """Bind the frame's source fd to its sender and return the sender id.
+
+        Args:
+            identity_frame: The ROUTER identity frame of an inbound message.
+
+        Returns:
+            The sender's connection id, or None if ZMQ cannot report the
+            source fd (the sender then stays untracked).
+        """
+        try:
+            fd = identity_frame.get(zmq.SRCFD)
+        except zmq.ZMQError:
+            fd = -1
+        if not isinstance(fd, int) or fd < 0:
+            if not self._srcfd_warned:
+                self._srcfd_warned = True
+                logger.warning(
+                    "ZMQ cannot report message source fds on this socket; "
+                    "closed client connections will not be detected"
+                )
+            return None
+        # A closed connection's fd can be reused by a new one: report pending
+        # closes first so the old peer is not attributed to the new binding.
+        self._report_closed_peers()
+        identity = identity_frame.bytes
+        self._peer_by_fd[fd] = identity
+        return identity
+
+    def _report_closed_peers(self) -> None:
+        """Pass every tracked peer whose connection closed to the callback."""
+        monitor, callback = self._monitor, self._on_peer_disconnected
+        if monitor is None or callback is None:
+            return
+        while monitor.poll(0):
+            event = recv_monitor_message(monitor)
+            if event["event"] != zmq.EVENT_DISCONNECTED:
+                continue
+            peer = self._peer_by_fd.pop(event["value"], None)
+            if peer is None:
+                continue
+            try:
+                callback(peer)
+            except Exception:
+                logger.exception("Peer disconnect callback failed")
 
     def _main_loop(self):
         output_fd = self._output_efd.fileno()
@@ -633,9 +724,17 @@ class MessageQueueServer(RequestServer):
             inbound_state = socks.get(self.socket, None)
             outbound_state = socks.get(output_fd, None)
 
+            self._report_closed_peers()
+
             # Process the incoming requests
             if inbound_state and inbound_state & zmq.POLLIN:
-                msg = self.socket.recv_multipart()
+                peer = None
+                if self._monitor is None:
+                    msg = self.socket.recv_multipart()
+                else:
+                    frames = self.socket.recv_multipart(copy=False)
+                    msg = [frame.bytes for frame in frames]
+                    peer = self._track_peer(frames[0])
                 assert len(msg) >= 3, (
                     "Expected at least 3 message parts "
                     "[identity, request_uid, operation, *payloads]"
@@ -654,6 +753,7 @@ class MessageQueueServer(RequestServer):
                             handler_entry=handler_entry,
                             payloads=payloads,
                             prefix_frames=[identity, b_request_uid, b_operation],
+                            peer=peer,
                         )
                     except Exception:
                         logger.exception("Error handling operation %s", operation)
@@ -903,6 +1003,9 @@ class MessageQueueServer(RequestServer):
         self.is_finished.set()
         if self.worker_thread.is_alive():
             self.worker_thread.join()
+        if self._monitor is not None:
+            self.socket.disable_monitor()
+            self._monitor.close(linger=0)
         self.socket.close()
         for pool in self.extra_pools:
             pool.shutdown(wait=False)

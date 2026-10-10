@@ -349,6 +349,7 @@ def _build_server_components(
         liveness_targets=liveness_targets,
         worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=mp_config.worker_registration_grace_seconds,
+        worker_disconnect_grace_seconds=mp_config.worker_disconnect_grace_seconds,
         experimental_transfer=experimental_transfer,
     )
 
@@ -478,11 +479,17 @@ def run_cache_server(
     InitializeL1Usage(event_bus, ctx.storage_manager)
 
     transport = mp_config.transport
+    management = next(m for m in components.modules if isinstance(m, ManagementModule))
     server: RequestServer = create_request_server(
         components.modules,
         mp_config,
         grpc_service_registrars=components.grpc_service_registrars,
         zmq_service_registrars=components.zmq_service_registrars,
+        on_peer_disconnected=(
+            management.on_peer_disconnected
+            if management.reclaims_on_disconnect
+            else None
+        ),
     )
 
     logger.info(

@@ -18,6 +18,7 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.modules import engine_driven_transfer as non_gpu_mod
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as gpu_mod
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
@@ -196,7 +197,7 @@ def test_non_gpu_resolve_for_transfer_refreshes_and_raises() -> None:
         module._resolve_for_transfer(999)
 
 
-class _FakeTarget:
+class _FakeTarget(InstanceLivenessTarget):
     """Liveness target double recording touches/drops and scripted reaps."""
 
     def __init__(self) -> None:

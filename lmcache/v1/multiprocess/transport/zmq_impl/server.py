@@ -106,6 +106,7 @@ def build_zmq_request_server(
     mp_config: MPServerConfig,
     *,
     service_registrars: Sequence[TransportServiceRegistrar] = (),
+    on_peer_disconnected: Callable[[bytes], None] | None = None,
 ) -> MessageQueueServer:
     """Build a ZMQ request server for the supplied business modules.
 
@@ -114,6 +115,8 @@ def build_zmq_request_server(
         mp_config: Multiprocess server configuration.
         service_registrars: Out-of-tree ZMQ service registrars returned by
             server-module factories.
+        on_peer_disconnected: Optional callback receiving the connection id
+            of each client connection that closes.
 
     Returns:
         Configured, but not yet started, ZMQ message queue server.
@@ -121,6 +124,7 @@ def build_zmq_request_server(
     server = MessageQueueServer(
         bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
         context=zmq.Context.instance(),
+        on_peer_disconnected=on_peer_disconnected,
     )
     all_specs = [spec for module in modules for spec in get_zmq_handler_specs(module)]
     for spec in all_specs:

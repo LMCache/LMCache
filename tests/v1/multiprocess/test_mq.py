@@ -26,7 +26,11 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.request_handler import (
+    HandlerType,
+    current_request_peer,
+    request_handler,
+)
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     CONNECT_TIMEOUT_MS,
     RECONNECT_IVL_MAX_MS,
@@ -1047,3 +1051,106 @@ def test_client_socket_bounds_connect_attempts():
     assert client.socket.getsockopt(zmq.CONNECT_TIMEOUT) == CONNECT_TIMEOUT_MS
     assert client.socket.getsockopt(zmq.RECONNECT_IVL_MAX) == RECONNECT_IVL_MAX_MS
     client.close()
+
+
+# ==============================================================================
+# Connection-loss Reporting Tests
+# ==============================================================================
+
+
+def _wait_for(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    """Poll ``predicate`` until it holds or ``timeout`` seconds pass."""
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def test_closed_connection_is_reported_with_the_request_peer() -> None:
+    """Inline and pooled handlers see the connection id that is reported
+    when that client's connection closes; other clients are not reported."""
+    server_url = "tcp://127.0.0.1:16040"
+    context = zmq.Context.instance()
+    seen: list[bytes | None] = []
+    closed: list[bytes] = []
+
+    def noop() -> str:
+        seen.append(current_request_peer())
+        return "NOOP_OK"
+
+    def ping(instance_id: int | None) -> bool:
+        seen.append(current_request_peer())
+        return True
+
+    server = MessageQueueServer(server_url, context, on_peer_disconnected=closed.append)
+    add_handler_helper(server, "noop", noop)
+    add_handler_helper(server, "ping", ping, HandlerType.BLOCKING)
+    server.add_normal_thread_pool(["ping"], max_workers=1)
+    server.start()
+    try:
+        client_a = MessageQueueClient(server_url, context)
+        client_b = MessageQueueClient(server_url, context)
+        assert client_a.submit_request("noop", []).result(timeout=5) == "NOOP_OK"
+        assert client_a.submit_request("ping", [7]).result(timeout=5) is True
+        assert client_b.submit_request("noop", []).result(timeout=5) == "NOOP_OK"
+        peer_a, _, peer_b = seen
+        assert peer_a is not None and peer_b is not None and peer_a != peer_b
+        assert seen[1] == peer_a
+
+        client_a.close()
+        assert _wait_for(lambda: closed == [peer_a])
+
+        client_b.close()
+        assert _wait_for(lambda: closed == [peer_a, peer_b])
+    finally:
+        server.close()
+
+
+def test_disconnect_callback_error_keeps_server_serving() -> None:
+    """A failing callback is logged and the server keeps serving."""
+    server_url = "tcp://127.0.0.1:16042"
+    context = zmq.Context.instance()
+    failures: list[bytes] = []
+
+    def fail(peer: bytes) -> None:
+        failures.append(peer)
+        raise RuntimeError("callback failure")
+
+    server = MessageQueueServer(server_url, context, on_peer_disconnected=fail)
+    add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
+    server.start()
+    try:
+        first = MessageQueueClient(server_url, context)
+        assert first.submit_request("noop", []).result(timeout=5) == "NOOP_OK"
+        first.close()
+        assert _wait_for(lambda: len(failures) == 1)
+
+        second = MessageQueueClient(server_url, context)
+        assert second.submit_request("noop", []).result(timeout=5) == "NOOP_OK"
+        second.close()
+    finally:
+        server.close()
+
+
+def test_no_peer_tracking_without_callback() -> None:
+    """Without a callback, handlers see no connection id."""
+    server_url = "tcp://127.0.0.1:16043"
+    context = zmq.Context.instance()
+    seen: list[bytes | None] = []
+
+    def noop() -> str:
+        seen.append(current_request_peer())
+        return "NOOP_OK"
+
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, "noop", noop)
+    server.start()
+    try:
+        client = MessageQueueClient(server_url, context)
+        assert client.submit_request("noop", []).result(timeout=5) == "NOOP_OK"
+        client.close()
+        assert seen == [None]
+    finally:
+        server.close()

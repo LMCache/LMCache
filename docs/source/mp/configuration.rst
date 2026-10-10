@@ -181,6 +181,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
        sent a PING (still warming up, or died before its first request).
        Must be >= ``--worker-reap-timeout-seconds``. Generous by default so
        slow model warmup is never mistaken for a dead worker.
+   * - ``--worker-disconnect-grace-seconds``
+     - ``30.0``
+     - How long a worker's KV cache is kept after its connection closes
+       (e.g. the process was killed); a worker that reconnects within this
+       window keeps it. Workers still warming up get
+       ``--worker-reap-timeout-seconds`` instead. ``0`` disables. Must be
+       between 30 and ``--worker-reap-timeout-seconds``; keep it above the
+       adapter's ``lmcache.mp.heartbeat_interval``.
    * - ``--enable-segmented-prefix``
      - ``False``
      - CacheBlend (``--engine-type blend``) only: on a mid-prefix L2 retrieve
