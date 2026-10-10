@@ -246,6 +246,19 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
         "QStoreService",
     }.issubset(bindings)
     assert "EngineService" not in bindings
+    # One service per server module: ManagementModule owns administration,
+    # debug and observability RPCs; server-module extensions get their own.
+    assert {m.name for m in bindings["ManagementService"].descriptor.methods} == {
+        "Clear",
+        "GetChunkSize",
+        "GetExperimental",
+        "Noop",
+        "Ping",
+        "ReportBlockAllocation",
+    }
+    assert {m.name for m in bindings["ExtensionService"].descriptor.methods} == {
+        "ServerModuleCall"
+    }
     assert {method.name for _, method in iter_methods()} >= {
         "Store",
         "PrepareStore",
@@ -270,7 +283,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     )
     assert store_codec.response_type == tuple[bytes, bool]
 
-    clear_codec = registry.by_full_name["lmcache.mp.ControllerService.Clear"]
+    clear_codec = registry.by_full_name["lmcache.mp.ManagementService.Clear"]
     assert clear_codec.operation == "clear"
     assert clear_codec.payload_types == (bool,)
     assert clear_codec.request_decoder(clear_codec.request_encoder((), {})) == (False,)
@@ -309,7 +322,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
         ),
     )
     server_module_codec = registry.by_full_name[
-        "lmcache.mp.ControllerService.ServerModuleCall"
+        "lmcache.mp.ExtensionService.ServerModuleCall"
     ]
     assert server_module_codec.operation == "server_module_call"
     assert server_module_codec.payload_types == (ServerModuleCallRequest,)

@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// ExtensionService wire contract for LMCache mp-mode gRPC.
+//
+// Static entry point for out-of-tree server modules: the server-module router
+// built in ext_server_module.py dispatches by method name to the plugin
+// registered under the same name. Unlike every other service, this one is
+// registered through TransportServiceRegistrar rather than by binding a
+// built-in server module, so it carries no @request_handler.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+message ServerModuleCallRequest {
+  string method = 1;
+  bytes payload = 2;
+}
+
+message ServerModuleCallResponse {
+  bool success = 1;
+  bytes payload = 2;
+  string error = 3;
+}
+
+service ExtensionService {
+  rpc ServerModuleCall(ServerModuleCallRequest)
+      returns (ServerModuleCallResponse);
+}
