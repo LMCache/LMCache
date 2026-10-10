@@ -10,7 +10,12 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    InstanceLivenessTarget,
+    ModuleBuildContext,
+)
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -22,7 +27,7 @@ from lmcache.v1.periodic_thread import (
 logger = init_logger(__name__)
 
 
-class ManagementModule:
+class ManagementModule(DiscoverableModule):
     """Handles management and utility operations for the cache engine.
 
     Owns the lock used during cache clearing and provides handlers for
@@ -43,6 +48,31 @@ class ManagementModule:
         experimental_transfer: Types of experimental intermediate tensor
             transfer built in the server.
     """
+
+    module_name = "management"
+    # Built after the out-of-tree plugin modules (deferred) because it
+    # consumes their liveness targets too. It holds no module_dependencies:
+    # being deferred already places it last among built-ins, and close order
+    # is the reverse of build order, so its reaper stops before the modules
+    # it drives release their state.
+    deferred = True
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Build with every liveness target collected so far.
+
+        Never returns ``None``: the server always needs management handlers.
+        """
+        mp_config = build_ctx.mp_config
+        return cls(
+            build_ctx.engine_context,
+            liveness_targets=build_ctx.liveness_targets,
+            worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
+            worker_registration_grace_seconds=(
+                mp_config.worker_registration_grace_seconds
+            ),
+            experimental_transfer=mp_config.enable,
+        )
 
     def __init__(
         self,

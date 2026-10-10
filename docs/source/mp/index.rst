@@ -105,22 +105,20 @@ Engine and Modules
 ------------------
 
 All server entry points share the same ``MPCacheServer`` and
-``StorageManager`` core. ``MPCacheServer`` is now a thin compositor:
-it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
-instances assembled by ``_build_modules()`` (in ``server.py``)
-based on ``--engine-type`` and ``--supported-transfer-mode``.
+``StorageManager`` core. ``MPCacheServer`` is a thin compositor: it holds
+an ``MPCacheServerContext`` and a list of ``EngineModule`` instances
+assembled by ``_build_server_components()`` in ``server.py`` from
+``--engine-type`` and ``--supported-transfer-mode``.
 
-**``server.py``** -- The transport-neutral server compositor. Creates an
-``MPCacheServer``, assembles the engine modules
-(``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
-and/or ``EngineDrivenTransferModule`` depending on
-``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
-``engine_driven`` loads just one,
-``auto`` loads both — plus the blend module when
-``--engine-type blend`` is set). It calls ``create_request_server()`` to build
-the ZMQ or gRPC request server selected by ``--transport``, discovers the
-annotated operations exposed by the loaded modules, and blocks in a keep-alive
-loop.
+**``server.py``** -- The transport-neutral server compositor. It discovers
+every ``DiscoverableModule`` subclass by scanning the ``modules`` package
+and asks each one to build itself from a ``ModuleBuildContext``; each
+module declares its own ``module_name`` and ``module_dependencies`` and
+returns ``None`` from ``create()`` when it does not apply, so adding a module
+means adding a file -- no list to edit. It then creates an
+``MPCacheServer``, calls ``create_request_server()`` to build the ZMQ or
+gRPC request server selected by ``--transport``, discovers the annotated
+operations exposed by the loaded modules, and blocks in a keep-alive loop.
 
 **``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
 blend pipeline that enables non-prefix KV cache reuse (e.g. across
@@ -271,7 +269,7 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
        prefix. Returns a task id which the caller passes to
        ``P2P_QUERY_LOOKUP_RESULTS`` to poll for the transfer addresses.
        Served by ``P2PController`` (loaded unconditionally by
-       ``_build_modules()``); whether this server also acts as a P2P
+       ``ModuleCreator``); whether this server also acts as a P2P
        client is controlled by ``--p2p-advertise-url`` -- see
        :doc:`p2p`.
    * - ``P2P_QUERY_LOOKUP_RESULTS``
