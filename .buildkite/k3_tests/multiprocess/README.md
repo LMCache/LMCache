@@ -186,11 +186,13 @@ must distinguish an LMCache retrieval from an engine-local hit can opt in with
 `VERIFY_LMCACHE_RETRIEVAL=true`; its adapter implements
 `engine_clear_local_cache <port>` without clearing LMCache itself.
 
-The SGLang adapter currently exercises the unified radix-cache integration in
-`lmcache_driven` mode. Its CI coverage reuses the common long-document,
-accuracy, and HTTP API workloads. Server restart recovery,
-`engine_driven`, and special deadlock launch profiles remain excluded until the
-unified connector implements those contracts.
+The SGLang adapter exercises the unified radix-cache integration in both
+`lmcache_driven` and single-group `engine_driven` modes. Its CI coverage reuses
+the common long-document, accuracy, and HTTP API workloads. Engine-driven
+hybrid models remain excluded until the shared transfer context supports
+multiple transfer groups. Server restart recovery and special deadlock launch
+profiles remain excluded until the unified connector implements those
+contracts.
 
 Workload support requires no adapter allowlist. A common workload is available
 to every adapter; an engine-specific workload is available when its script

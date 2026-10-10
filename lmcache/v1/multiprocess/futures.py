@@ -65,6 +65,28 @@ class MessagingFuture(Generic[T]):
             raise self.exception_
         return cast(T, self.result_)
 
+    def wait_on_stream(self, stream: Any, timeout: Optional[float] = None) -> T:
+        """Wait for this future before continuing work on a device stream.
+
+        Args:
+            stream: Device stream that consumes the result. Plain messaging
+                futures have no device event, so this argument is ignored.
+            timeout: Maximum time to wait in seconds. ``None`` waits
+                indefinitely.
+
+        Returns:
+            The result of the future.
+
+        Raises:
+            LMCacheTimeoutError: If the future is not done within ``timeout``.
+
+        Notes:
+            Device-aware subclasses override this method to enqueue a stream
+            wait instead of synchronously waiting for device work.
+        """
+        del stream
+        return self.result(timeout)
+
     def set_result(self, result: T) -> None:
         """
         Set the result of the future and mark it as done. This function is NOT

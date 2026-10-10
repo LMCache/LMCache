@@ -229,12 +229,14 @@ def create_engine_driven_context(
 def compute_kv_layout(
     kv_caches: dict[str, torch.Tensor],
     layout_hints: LayoutHints | None = None,
+    engine_type: EngineType = EngineType.VLLM,
 ) -> tuple[int, int, int, str, "lmcache_native.EngineKVFormat", int]:
     """Compute KV layout metadata from KV tensors.
 
     Args:
         kv_caches: Per-layer KV tensor mapping.
         layout_hints: Optional engine layout hints.
+        engine_type: Serving engine that produced the KV tensors.
 
     Returns:
         Tuple of ``(block_size, num_layers, hidden_dim_size, dtype_str,``
@@ -262,7 +264,7 @@ def compute_kv_layout(
         raise ValueError("kv_caches is empty. Cannot compute KV layout.")
 
     engine_kv_format, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        tensors, engine_type, layout_hints=layout_hints
     )
     block_size = get_block_size(normalized, engine_kv_format)
     num_layers = get_num_layers(normalized, engine_kv_format)
@@ -289,6 +291,7 @@ def gather_paged_kv_to_cpu(
     engine_kv_format: "lmcache_native.EngineKVFormat" | None = None,
     out: list[torch.Tensor] | None = None,
     chunk_indices: list[int] | None = None,
+    engine_type: EngineType = EngineType.VLLM,
 ) -> list[torch.Tensor]:
     """Gather paged KV blocks into CPU chunk tensors.
 
@@ -310,6 +313,7 @@ def gather_paged_kv_to_cpu(
             ``out``, only those chunks are gathered and written into
             ``out[i]`` in order.  When ``None``, all chunks are gathered
             (backward-compatible behaviour).
+        engine_type: Serving engine that produced the KV tensors.
 
     Returns:
         List of CPU tensors, one per chunk. For split-K/V formats each chunk
@@ -340,7 +344,7 @@ def gather_paged_kv_to_cpu(
 
     tensors = list(kv_caches.values())
     fmt, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        tensors, engine_type, layout_hints=layout_hints
     )
     # KV tensors, not process-wide accelerator availability, select the ops.
     device = get_device(normalized)
@@ -547,6 +551,7 @@ def scatter_cpu_to_paged_kv(
     skip_first_n_tokens: int = 0,
     layout_hints: LayoutHints | None = None,
     engine_kv_format: "lmcache_native.EngineKVFormat" | None = None,
+    engine_type: EngineType = EngineType.VLLM,
 ) -> None:
     """Scatter CPU chunk tensors back into paged KV tensors.
 
@@ -567,6 +572,7 @@ def scatter_cpu_to_paged_kv(
             GPU transfer path).
         layout_hints: Optional engine layout hints.
         engine_kv_format: Optional pre-detected KV format.
+        engine_type: Serving engine that produced the KV tensors.
 
     Raises:
         ValueError: If ``block_ids`` is shorter than
@@ -597,7 +603,7 @@ def scatter_cpu_to_paged_kv(
 
     tensors = list(kv_caches.values())
     fmt, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        tensors, engine_type, layout_hints=layout_hints
     )
     device = get_device(normalized)
     device_ops = resolve_device_ops(device.type)

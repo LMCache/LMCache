@@ -99,6 +99,14 @@ def test_messaging_future_basic_usage():
     assert result == 42, f"Expected result 42, got {result}"
 
 
+def test_messaging_future_wait_on_stream_returns_result() -> None:
+    """A plain future ignores the stream and waits for its host result."""
+    future = MessagingFuture[int]()
+    future.set_result(42)
+
+    assert future.wait_on_stream(object(), timeout=1) == 42
+
+
 def test_messaging_future_propagates_request_exception():
     """A transport failure is raised when the future result is consumed."""
     future = MessagingFuture[int]()
