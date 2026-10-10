@@ -34,8 +34,10 @@ CB_FINGERPRINTS_KIND = "cb_fingerprints"
 
 #: One fingerprint-registration job:
 #: (tokens_in_range, chunk_hashes, start_chunk_idx, position_offset,
-#: request_id). Also the msgspec decode type for the dispatcher payload.
-FpJob = tuple[list[int], list[bytes], int, int, str]
+#: request_id, predecessor_hash). ``predecessor_hash`` is the token hash of
+#: the chunk stored right before ``tokens_in_range`` (None at sequence start).
+#: Also the msgspec decode type for the dispatcher payload.
+FpJob = tuple[list[int], list[bytes], int, int, str, bytes | None]
 
 
 class StoreMixin:
@@ -104,6 +106,14 @@ class StoreMixin:
             tokens_in_range = list(key.token_ids)[key.start : key.end]
             # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.
             start_chunk_idx = 0 if key.start != 0 else 1
+            chunk_size = self._ctx.chunk_size
+            # The chunk stored before this range (a later prefill chunk's
+            # store), recorded as the first run's predecessor.
+            range_predecessor: bytes | None = None
+            if key.start != 0:
+                range_predecessor = TokenHasher.hash_to_bytes(
+                    session.get_hashes(key.start - chunk_size, key.start)[0]
+                )
 
             # Register only committed chunks: a fingerprint for a skipped
             # chunk would advertise content that was never persisted.
@@ -111,7 +121,6 @@ class StoreMixin:
                 return stored_mask[i] if i < len(stored_mask) else False
 
             jobs: list[FpJob] = []
-            chunk_size = self._ctx.chunk_size
             run_start: int | None = None
             for i in range(len(chunk_hashes) + 1):
                 if i < len(chunk_hashes) and _stored(i):
@@ -129,6 +138,11 @@ class StoreMixin:
                             run_sci,
                             key.start + run_start * chunk_size,
                             key.request_id,
+                            (
+                                chunk_hashes[run_start - 1]
+                                if run_start > 0
+                                else range_predecessor
+                            ),
                         )
                     )
                 run_start = None
@@ -136,7 +150,7 @@ class StoreMixin:
                 return result
 
             with self._pending_fp_lock:
-                for _, hashes, sci, _, _ in jobs:
+                for _, hashes, sci, _, _, _ in jobs:
                     self._pending_fp_hashes.update(hashes[sci:])
             entry = self._transfer_module.get_and_touch_context_entry(instance_id)
             gpu_ctx = entry.cache_context if entry is not None else None
@@ -165,13 +179,21 @@ class StoreMixin:
                 job = self._fingerprint_queue.get_nowait()
             except QueueEmpty:
                 break
-            tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
+            (
+                tokens_in_range,
+                chunk_hashes,
+                start_chunk_idx,
+                position_offset,
+                rid,
+                predecessor_hash,
+            ) = job
             try:
                 n_new = self._token_range_matcher.on_new_token_hashes(
                     tokens_in_range,
                     chunk_hashes,
                     start_chunk_idx=start_chunk_idx,
                     position_offset=position_offset,
+                    predecessor_hash=predecessor_hash,
                 )
                 self._emit_fingerprints_registered(rid, n_new)
             except Exception:
@@ -206,13 +228,21 @@ class StoreMixin:
                 job = self._fingerprint_queue.get(timeout=0.1)
             except QueueEmpty:
                 continue
-            tokens_in_range, chunk_hashes, start_chunk_idx, position_offset, rid = job
+            (
+                tokens_in_range,
+                chunk_hashes,
+                start_chunk_idx,
+                position_offset,
+                rid,
+                predecessor_hash,
+            ) = job
             try:
                 n_new = self._token_range_matcher.on_new_token_hashes(
                     tokens_in_range,
                     chunk_hashes,
                     start_chunk_idx=start_chunk_idx,
                     position_offset=position_offset,
+                    predecessor_hash=predecessor_hash,
                 )
                 self._emit_fingerprints_registered(rid, n_new)
             except Exception:

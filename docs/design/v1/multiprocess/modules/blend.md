@@ -59,8 +59,9 @@ covers, `request_id` (session tracking), and `worker_id` (TP rank).
   else `prefix_coverage_tokens` (contiguous prefix coverage in tokens, what
   the standard LOOKUP would report) and `non_prefix_segments` (fingerprint
   matches beyond the prefix, `cur_st` order, each
-  `(old_st, old_ed, cur_st, cur_ed, hash)`) — already sparse-prefetched,
-  so the retrieve set equals this set.
+  `(old_st, old_ed, cur_st, cur_ed, hash, predecessor_hash)`) — already
+  sparse-prefetched, so the retrieve set equals this set. See
+  [Stored predecessor](#stored-predecessor) for `predecessor_hash`.
 - Side effects: sparse read locks taken and stashed on the session for the
   retrieve.
 
@@ -86,7 +87,50 @@ success)`**
   for fingerprint registration through the device host-func dispatcher
   (`submit_callback_to_stream`, kind `"cb_fingerprints"`) — stream-ordered
   after the L1 commit, so a fingerprint becomes matchable only once its
-  chunk is readable. Fingerprint failures are logged, never raised.
+  chunk is readable. Each job also carries the token hash of the chunk
+  stored right before its first chunk (see below). Fingerprint failures are
+  logged, never raised.
+
+### Stored predecessor
+
+A match's `predecessor_hash` is the token hash of the chunk that was stored
+right before it, i.e. the chunk its cached KV was computed after. A client
+uses it to tell a match that continues the previous match's stored context
+from one that starts a new context:
+
+```python
+continues = b.cur_st == a.cur_ed and b.predecessor_hash == a.hash
+```
+
+Positions alone cannot decide this: two different stored sequences can sit
+at matching offsets. Stored `[S, Z, A]` and `[S, Y1, Y2, B]` with equal
+chunk lengths, then queried as `[S', X, A, B]`: A and B both match at offset
+0 and B starts where A ends, but B's KV followed `Y2`, not A.
+
+- **Recorded at STORE.** The store hook puts the predecessor of each
+  registration job's first chunk into the job: the previous chunk of the
+  stored range, or, for a range that starts mid-sequence (a later prefill
+  chunk's store), the last chunk before it. That chunk may be one the
+  transfer skipped; the run's KV was still computed after it. The matcher
+  records `token_hashes[i - 1]` for every other chunk.
+- **Exact by construction.** Token hashes are prefix hashes, so equal hashes
+  mean equal stored prefixes. `b.predecessor_hash == a.hash` therefore means
+  `b` was stored right after `a`'s whole stored prefix.
+- **Content dedup and eviction.** A chunk skipped as already indexed keeps
+  the indexed entry and its predecessor: that entry's KV is what a match
+  serves. Under `--enable-dedup-content`, a chunk stored after a skipped
+  duplicate records the duplicate's hash, which no match returns, so it never
+  chains to the served entry. An evicted chunk is never matched, so no match
+  chains to its successors; its own record is dropped with it.
+- **`None` means unknown.** Fleet-coordinator matches (the coordinator's
+  `BlendMatch` does not carry it) and segmented-prefix segments leave it
+  unset, as do servers that predate the field. A client falls back to its
+  positional test for those.
+- **Wire.** `predecessor_hash` is a defaulted trailing field of
+  `CBMatchResult` and `optional bytes predecessor_hash = 6` in
+  `blend_service.proto`. msgpack carries dataclasses as maps and ignores
+  unknown keys; protobuf ignores unknown fields. Old and new peers therefore
+  decode each other's payloads, and `_BLEND_PROTOCOL_VERSION` is unchanged.
 
 ## Unified lookup (submit-once, poll-on-recall)
 

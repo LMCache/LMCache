@@ -95,7 +95,7 @@ class TestFingerprintsRegisteredEvent:
         eng._emit_fingerprints_registered = _bind(eng, "_emit_fingerprints_registered")
         # Job size says 3 chunks; the matcher only indexed 1 of them.
         eng._fingerprint_queue.put(
-            (list(range(3 * _CHUNK)), [b"h0", b"h1", b"h2"], 0, 0, "req-sync")
+            (list(range(3 * _CHUNK)), [b"h0", b"h1", b"h2"], 0, 0, "req-sync", None)
         )
 
         _bind(eng, "_drain_fingerprints_sync")()
@@ -114,7 +114,7 @@ class TestFingerprintsRegisteredEvent:
         eng._pending_fp_hashes = set()
         eng._token_range_matcher.on_new_token_hashes.return_value = 0
         eng._emit_fingerprints_registered = _bind(eng, "_emit_fingerprints_registered")
-        eng._fingerprint_queue.put(([1], [b"h0"], 0, 0, "req-dup"))
+        eng._fingerprint_queue.put(([1], [b"h0"], 0, 0, "req-dup", None))
 
         worker = threading.Thread(
             target=_bind(eng, "_drain_fingerprint_queue"), daemon=True
@@ -139,7 +139,7 @@ class TestFingerprintsRegisteredEvent:
         eng._fingerprint_queue = Queue()
         eng._token_range_matcher.on_new_token_hashes.side_effect = RuntimeError("boom")
         eng._emit_fingerprints_registered = _bind(eng, "_emit_fingerprints_registered")
-        eng._fingerprint_queue.put(([1], [b"h0"], 0, 0, "req-fail"))
+        eng._fingerprint_queue.put(([1], [b"h0"], 0, 0, "req-fail", None))
 
         _bind(eng, "_drain_fingerprints_sync")()
 
@@ -303,7 +303,7 @@ class TestFingerprintJobTuple:
         assert _bind(eng, "store")(key, 0, [[0, 1]], b"evt") == (b"handle", True)
 
         job = eng._fingerprint_queue.get_nowait()
-        assert len(job) == 5, "job tuple must carry the request id"
+        assert len(job) == 6, "job tuple must carry the request id"
         assert job[4] == "req-store"
         assert job[2] == 1, "chunk 0 of a position-0 store is skipped"
 

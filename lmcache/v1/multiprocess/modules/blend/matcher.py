@@ -37,6 +37,9 @@ class BlendTokenRangeMatcher:
         self._mask = np.uint64(self._TABLE_SIZE - 1)
         # compact_chunk_id -> caller token_hash (full bytes); None once evicted
         self._chunk_token_hash: list[bytes | None] = []
+        # compact_chunk_id -> token_hash of the chunk stored right before it
+        # (None = not known); reported as CBMatchResult.predecessor_hash
+        self._chunk_predecessor_hash: list[bytes | None] = []
         # token_hash -> start position in its registered sequence
         self._token_hash_to_start: dict[bytes, int] = {}
         # compact_chunk_id -> table slot (reverse lookup for eviction)
@@ -53,18 +56,24 @@ class BlendTokenRangeMatcher:
         token_hashes: list[bytes],
         start_chunk_idx: int = 0,
         position_offset: int = 0,
+        predecessor_hash: bytes | None = None,
     ) -> int:
         """Index a stored sequence's non-overlapping chunks. Thread-safe.
 
         Already-indexed token hashes are skipped; under ``dedup_content``,
         already-indexed poly hashes are skipped too (same text behind
-        different prefixes is indexed once).
+        different prefixes is indexed once). Each indexed chunk records its
+        stored predecessor: ``token_hashes[i - 1]``, or ``predecessor_hash``
+        for chunk 0. A skipped chunk keeps the entry it already has, whose
+        predecessor is the one its KV was computed after.
 
         Args:
             token_ids: The stored sequence's token IDs.
             token_hashes: Per-chunk content hashes (dedup/eviction key).
             start_chunk_idx: First chunk to index.
             position_offset: Added to each recorded start position.
+            predecessor_hash: Token hash of the chunk stored immediately
+                before ``token_ids``, or ``None`` if unknown.
 
         Returns:
             Number of chunks newly indexed (0 if all registered, no full
@@ -121,6 +130,9 @@ class BlendTokenRangeMatcher:
                 poly_hash = int(new_chunk_hashes[k])
                 slot = poly_hash & int(self._mask)
                 self._chunk_token_hash.append(th)
+                self._chunk_predecessor_hash.append(
+                    token_hashes[orig_i - 1] if orig_i > 0 else predecessor_hash
+                )
                 self._chunk_poly_hash.append(poly_hash)
                 self._token_hash_to_start[th] = (
                     position_offset + orig_i * self.chunk_size
@@ -151,7 +163,8 @@ class BlendTokenRangeMatcher:
 
         Returns:
             One result per unique reused chunk (cur_st = first query
-            position, old_st = stored position); empty if the query is
+            position, old_st = stored position, predecessor_hash = the
+            chunk's recorded stored predecessor); empty if the query is
             shorter than one chunk or nothing matched.
         """
         if len(token_ids) < self.chunk_size:
@@ -193,6 +206,7 @@ class BlendTokenRangeMatcher:
                         cur_st=pos,
                         cur_ed=pos + self.chunk_size,
                         hash=th,
+                        predecessor_hash=self._chunk_predecessor_hash[cid],
                     )
                 )
             logger.info(
@@ -222,6 +236,7 @@ class BlendTokenRangeMatcher:
                 self._table_id[slot] = -1
                 self._compact_id_to_slot[cid] = -1
                 self._chunk_token_hash[cid] = None
+                self._chunk_predecessor_hash[cid] = None
                 self._chunk_poly_hash[cid] = 0
                 self._token_hash_to_start.pop(th, None)
                 del self._token_hash_to_compact_id[th]

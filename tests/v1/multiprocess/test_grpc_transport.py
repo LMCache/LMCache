@@ -70,6 +70,12 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server import (
 )
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
+# One match with a recorded predecessor, one without (unset on the wire).
+_BLEND_SEGMENTS = [
+    CBMatchResult(0, 2, 4, 6, b"hash", predecessor_hash=b"prev"),
+    CBMatchResult(2, 4, 6, 8, b"hash2"),
+]
+
 
 @dataclass
 class _Calls:
@@ -186,7 +192,7 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             assert tp_size == 2
             return CBUnifiedLookupResult(
                 prefix_coverage_tokens=16,
-                non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash")],
+                non_prefix_segments=_BLEND_SEGMENTS,
             )
 
         @request_handler(HandlerType.BLOCKING)
@@ -580,7 +586,7 @@ def test_generated_grpc_services_communicate_end_to_end(
     blend_result = client.cb_unified_lookup(key, 2).result(5)
     assert blend_result == CBUnifiedLookupResult(
         prefix_coverage_tokens=16,
-        non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash")],
+        non_prefix_segments=_BLEND_SEGMENTS,
     )
 
     task_id = client.p2p_lookup_and_lock(
