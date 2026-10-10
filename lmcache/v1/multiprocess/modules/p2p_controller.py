@@ -169,7 +169,6 @@ class P2PController(DiscoverableModule):
     """
 
     module_name = "p2p_controller"
-    module_order = 20
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:

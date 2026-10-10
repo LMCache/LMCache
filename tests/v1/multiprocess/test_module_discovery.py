@@ -19,16 +19,16 @@ from lmcache.v1.multiprocess.modules import p2p_controller as p2p_mod
 from lmcache.v1.multiprocess.modules.blend import module as blend_mod
 from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
 
-# Every built-in module and its close-order rank. Adding a module means adding
+# Every built-in module the builder discovers. Adding a module means adding
 # it here too; the builder itself never names one.
-EXPECTED_MODULES = {
-    "LookupModule": 10,
-    "P2PController": 20,
-    "ManagementModule": 30,
-    "LMCacheDrivenTransferModule": 40,
-    "EngineDrivenTransferModule": 41,
-    "QStoreModule": 50,
-    "BlendModule": 60,
+EXPECTED_MODULE_NAMES = {
+    "lookup",
+    "p2p_controller",
+    "management",
+    "lmcache_driven_transfer",
+    "engine_driven_transfer",
+    "qstore",
+    "blend",
 }
 
 
@@ -76,14 +76,19 @@ def _names(modules) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_discovery_finds_every_builtin_module_in_order() -> None:
-    """Check the scan reports exactly the built-in set, in close order."""
-    found = [(cls.__name__, cls.module_order) for cls in discover_modules()]
+def test_discovery_finds_every_builtin_module() -> None:
+    """Check the scan reports exactly the built-in set with valid deps."""
+    found = {cls.module_name: cls for cls in discover_modules()}
 
-    assert dict(found) == EXPECTED_MODULES
-    assert found == sorted(found, key=lambda item: item[1])
-    names = [cls.module_name for cls in discover_modules()]
-    assert all(names) and len(names) == len(set(names))
+    assert set(found) == EXPECTED_MODULE_NAMES
+    # A module must not depend on itself, and every declared dependency must
+    # name a real discoverable module (order_modules would also reject that).
+    for cls in found.values():
+        assert cls.module_name not in cls.module_dependencies
+    # Modules that wrap / require the LMCache-driven transfer path declare it
+    # so the builder constructs that module first.
+    assert found["blend"].module_dependencies == ["lmcache_driven_transfer"]
+    assert found["qstore"].module_dependencies == ["lmcache_driven_transfer"]
 
 
 # ---------------------------------------------------------------------------
@@ -92,43 +97,55 @@ def test_discovery_finds_every_builtin_module_in_order() -> None:
 
 
 @pytest.mark.parametrize(
-    ("mode", "expected"),
+    ("mode", "expected_present", "expected_absent"),
     [
         (
             "lmcache_driven",
-            [
+            {
                 "LookupModule",
                 "P2PController",
                 "ManagementModule",
                 "LMCacheDrivenTransferModule",
-            ],
+            },
+            {"EngineDrivenTransferModule", "QStoreModule", "BlendModule"},
         ),
         (
             "engine_driven",
-            [
+            {
                 "LookupModule",
                 "P2PController",
                 "ManagementModule",
                 "EngineDrivenTransferModule",
-            ],
+            },
+            {"LMCacheDrivenTransferModule", "QStoreModule", "BlendModule"},
         ),
         (
             "auto",
-            [
+            {
                 "LookupModule",
                 "P2PController",
                 "ManagementModule",
                 "LMCacheDrivenTransferModule",
                 "EngineDrivenTransferModule",
-            ],
+            },
+            {"QStoreModule", "BlendModule"},
         ),
     ],
 )
-def test_transfer_mode_gates_and_orders_modules(
-    stub_constructors, mode: str, expected: list[str]
+def test_transfer_mode_gates_modules(
+    stub_constructors,
+    mode: str,
+    expected_present: set[str],
+    expected_absent: set[str],
 ) -> None:
-    """Check --supported-transfer-mode selects modules, in close order."""
-    assert _names(_build(supported_transfer_mode=mode)) == expected
+    """Check --supported-transfer-mode selects which modules are composed.
+
+    The ordering itself is exercised by the close-order invariant tests; here
+    we only assert which modules the mode admits.
+    """
+    names = set(_names(_build(supported_transfer_mode=mode)))
+    assert expected_present <= names
+    assert expected_absent & names == set()
 
 
 def test_management_closes_before_the_modules_it_reaps(
@@ -181,7 +198,6 @@ class _Other:
     """A registered module that is not a LookupModule."""
 
     module_name = "other"
-    module_order = 99
 
     @property
     def context(self):

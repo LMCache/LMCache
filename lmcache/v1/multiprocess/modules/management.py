@@ -50,10 +50,11 @@ class ManagementModule(DiscoverableModule):
     """
 
     module_name = "management"
-    # High close-order rank on purpose: the reaper must stop before the modules
-    # it drives clear their state. Built after the out-of-tree plugin modules
-    # (deferred) because it consumes their liveness targets too.
-    module_order = 30
+    # Built after the out-of-tree plugin modules (deferred) because it
+    # consumes their liveness targets too. It holds no module_dependencies:
+    # being deferred already places it last among built-ins, and close order
+    # is the reverse of build order, so its reaper stops before the modules
+    # it drives release their state.
     deferred = True
 
     @classmethod

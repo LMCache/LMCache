@@ -52,6 +52,7 @@ from lmcache.v1.multiprocess.engine_module import (
     EngineModule,
     ModuleBuildContext,
     discover_modules,
+    order_modules,
 )
 from lmcache.v1.multiprocess.ext_server_module import (
     TransportServiceRegistrar,
@@ -185,16 +186,20 @@ def _build_server_components(
     """Assemble the modules and transport registrars for one server.
 
     Modules are discovered by scanning ``lmcache.v1.multiprocess.modules``
-    and built in ascending ``module_order`` (lower rank first), which is also
-    their close order. ``deferred`` modules are built after the out-of-tree
-    ``--server-module`` plugins because they consume plugin contributions.
+    and built in dependency order (each module after the siblings named in
+    its ``module_dependencies``). Close order is the reverse of build order,
+    so a module is torn down before the dependencies it holds. ``deferred``
+    modules are built after the out-of-tree ``--server-module`` plugins
+    because they consume plugin contributions.
     """
     build_ctx = ModuleBuildContext(ctx, mp_config, coordinator_config)
     module_classes = discover_modules()
+    known_names = {cls.module_name for cls in module_classes}
 
-    for module_cls in module_classes:
-        if not module_cls.deferred:
-            _build_module(module_cls, build_ctx)
+    for module_cls in order_modules(
+        [cls for cls in module_classes if not cls.deferred], known_names
+    ):
+        _build_module(module_cls, build_ctx)
 
     plugin_components = load_server_module_components(
         mp_config.server_modules,
@@ -207,9 +212,10 @@ def _build_server_components(
     for module in plugin_modules:
         build_ctx.add_liveness_target(module)
 
-    for module_cls in module_classes:
-        if module_cls.deferred:
-            _build_module(module_cls, build_ctx)
+    for module_cls in order_modules(
+        [cls for cls in module_classes if cls.deferred], known_names
+    ):
+        _build_module(module_cls, build_ctx)
 
     modules = [*build_ctx.built, *plugin_modules]
     plugin_router = build_server_module_router(ctx, plugin_modules)

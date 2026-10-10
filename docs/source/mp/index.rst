@@ -113,8 +113,8 @@ assembled by ``_build_server_components()`` in ``server.py`` from
 **``server.py``** -- The transport-neutral server compositor. It discovers
 every ``DiscoverableModule`` subclass by scanning the ``modules`` package
 and asks each one to build itself from a ``ModuleBuildContext``; each
-module declares its own ``module_name`` and ``module_order`` and returns
-``None`` from ``create()`` when it does not apply, so adding a module
+module declares its own ``module_name`` and ``module_dependencies`` and
+returns ``None`` from ``create()`` when it does not apply, so adding a module
 means adding a file -- no list to edit. It then creates an
 ``MPCacheServer``, calls ``create_request_server()`` to build the ZMQ or
 gRPC request server selected by ``--transport``, discovers the annotated

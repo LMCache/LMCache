@@ -176,7 +176,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """
 
     module_name = "lmcache_driven_transfer"
-    module_order = 40
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:

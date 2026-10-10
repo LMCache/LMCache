@@ -75,7 +75,6 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """
 
     module_name = "engine_driven_transfer"
-    module_order = 41
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:

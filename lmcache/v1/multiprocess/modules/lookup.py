@@ -123,7 +123,6 @@ class LookupModule(DiscoverableModule):
     """
 
     module_name = "lookup"
-    module_order = 10
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:

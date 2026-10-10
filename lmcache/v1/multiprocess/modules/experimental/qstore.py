@@ -63,7 +63,9 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
     """
 
     module_name = "qstore"
-    module_order = 50
+    # Requires the LMCache-driven transfer path to exist; create() gates on it
+    # via build_ctx.module_names, so it must be built after that module.
+    module_dependencies = ["lmcache_driven_transfer"]
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:

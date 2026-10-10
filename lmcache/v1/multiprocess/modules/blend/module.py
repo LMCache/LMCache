@@ -68,7 +68,9 @@ class BlendModule(
     GPU state via :class:`LMCacheDrivenTransferModule.cache_contexts`."""
 
     module_name = "blend"
-    module_order = 60
+    # Must be built after LMCacheDrivenTransferModule, which it wraps and whose
+    # cache_contexts it reads at construction time via build_ctx.require().
+    module_dependencies = ["lmcache_driven_transfer"]
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:

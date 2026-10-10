@@ -7,6 +7,7 @@ from __future__ import annotations
 # Standard
 from typing import TYPE_CHECKING, ClassVar, Protocol, TypeGuard, TypeVar, cast
 import abc
+import heapq
 
 if TYPE_CHECKING:
     # First Party
@@ -134,13 +135,22 @@ class ModuleBuildContext:
         self.coordinator_config = coordinator_config
         self.liveness_targets: list[InstanceLivenessTarget] = []
         self._built: dict[str, tuple[int, EngineModule]] = {}
+        self._build_index = 0
 
     @property
     def built(self) -> list[EngineModule]:
-        """Return the modules built so far, in close order."""
+        """Return the modules built so far, in close order.
+
+        Close order is the reverse of build order, so a module is torn down
+        before the dependencies it holds references to. ``ManagementModule`` is
+        built last (deferred, after the plugins) and therefore closes first,
+        which stops its reaper before the transfer modules release state.
+        """
         return [
             module
-            for _, module in sorted(self._built.values(), key=lambda entry: entry[0])
+            for _, module in sorted(
+                self._built.values(), key=lambda entry: entry[0], reverse=True
+            )
         ]
 
     @property
@@ -185,7 +195,8 @@ class ModuleBuildContext:
                 f"{type(module).__name__} does not define module_name; every "
                 "DiscoverableModule must."
             )
-        self._built[name] = (getattr(type(module), "module_order", 0), module)
+        self._built[name] = (self._build_index, module)
+        self._build_index += 1
         if _is_liveness_target(module):
             self.liveness_targets.append(module)
 
@@ -202,19 +213,27 @@ class DiscoverableModule(abc.ABC):
     collects every concrete subclass, so adding a module means adding a file
     with a subclass -- no registry list to edit.
 
-    A subclass declares ``module_name`` (the key
-    :meth:`ModuleBuildContext.require` resolves siblings by) and
-    ``module_order`` (its close-order rank; lower closes earlier), then
-    implements :meth:`create`, which returns ``None`` when the module does
-    not apply to the current configuration. That keeps enablement logic
-    inside the module that owns it.
+    A subclass declares:
 
-    A module that needs the *out-of-tree* plugin modules at construction
-    time sets ``deferred = True`` to be built after them.
+    * ``module_name`` -- the key :meth:`ModuleBuildContext.require` resolves
+      sibling modules by, and the key the builder records it under.
+    * ``module_dependencies`` -- the ``module_name`` values of sibling modules
+      it must be built *after*. The builder topologically sorts the discovered
+      modules so every dependency is constructed first; a module that calls
+      :meth:`ModuleBuildContext.require` must name that sibling here, otherwise
+      ``require`` would raise because the sibling is not built yet.
+    * ``deferred`` -- build this module *after* the out-of-tree
+      ``--server-module`` plugins rather than before them. A module that
+      consumes plugin contributions at construction time sets this;
+      ``ManagementModule`` reads the liveness targets those plugins register.
+
+    Every subclass implements :meth:`create`, which returns ``None`` when the
+    module does not apply to the current configuration. That keeps enablement
+    logic inside the module that owns it.
     """
 
     module_name: ClassVar[str] = ""
-    module_order: ClassVar[int] = 0
+    module_dependencies: ClassVar[list[str]] = []
     deferred: ClassVar[bool] = False
 
     @classmethod
@@ -231,12 +250,82 @@ def _is_liveness_target(module: EngineModule) -> TypeGuard[InstanceLivenessTarge
     )
 
 
+def order_modules(
+    module_classes: list[type[DiscoverableModule]],
+    known_names: "set[str] | None" = None,
+) -> list[type[DiscoverableModule]]:
+    """Topologically sort modules so each is built after its dependencies.
+
+    A module lists the ``module_name`` values it requires in
+    ``module_dependencies``; those are constructed first. Dependencies that
+    are not part of ``module_classes`` are treated as already satisfied and
+    skipped -- this is how a deferred module can depend on a sibling that is
+    built in an earlier phase.
+
+    The result is deterministic: among modules that are equally free to
+    build, they are ordered by ``module_name``.
+
+    Args:
+        module_classes: The modules to order (one build phase).
+        known_names: The set of every discoverable ``module_name``; a
+            dependency that is not in this set is a typo and is rejected.
+            Defaults to the names in ``module_classes``.
+
+    Raises:
+        ValueError: If a module names a dependency that is not discoverable,
+            or if the dependencies form a cycle.
+    """
+    if known_names is None:
+        known_names = {cls.module_name for cls in module_classes}
+
+    for cls in module_classes:
+        for dep in cls.module_dependencies:
+            if dep not in known_names:
+                raise ValueError(
+                    f"{cls.__name__} depends on {dep!r}, which is not a "
+                    "discoverable module (check the module_name spelling)."
+                )
+
+    by_name = {cls.module_name: cls for cls in module_classes}
+    in_degree: dict[str, int] = {name: 0 for name in by_name}
+    dependents: dict[str, list[type[DiscoverableModule]]] = {
+        name: [] for name in by_name
+    }
+    for cls in module_classes:
+        for dep in cls.module_dependencies:
+            if dep in by_name:  # an in-phase dependency to honor
+                in_degree[cls.module_name] += 1
+                dependents[dep].append(cls)
+
+    ready: list[str] = [name for name, deg in in_degree.items() if deg == 0]
+    heapq.heapify(ready)
+    ordered: list[type[DiscoverableModule]] = []
+    while ready:
+        name = heapq.heappop(ready)
+        ordered.append(by_name[name])
+        for dependent in dependents[name]:
+            in_degree[dependent.module_name] -= 1
+            if in_degree[dependent.module_name] == 0:
+                heapq.heappush(ready, dependent.module_name)
+
+    if len(ordered) != len(module_classes):
+        unresolved = sorted(
+            cls.__name__
+            for cls in module_classes
+            if cls.module_name not in {o.module_name for o in ordered}
+        )
+        raise ValueError(f"Module dependency cycle among: {', '.join(unresolved)}")
+    return ordered
+
+
 def discover_modules() -> list[type[DiscoverableModule]]:
     """Scan the built-in modules package and return the module classes.
 
     Walks ``lmcache.v1.multiprocess.modules`` -- including the ``blend`` and
     ``experimental`` sub-packages -- and returns the concrete
-    :class:`DiscoverableModule` subclasses sorted by ``module_order``.
+    :class:`DiscoverableModule` subclasses. Ordering for construction is
+    applied later by the builder via :func:`order_modules`; this function
+    only discovers.
 
     Raises:
         ImportError: If a module file fails to import. Surfacing it is
@@ -246,7 +335,7 @@ def discover_modules() -> list[type[DiscoverableModule]]:
     # First Party
     from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
-    modules = list(
+    return list(
         discover_subclasses(
             "lmcache.v1.multiprocess.modules",
             DiscoverableModule,  # type: ignore[type-abstract]
@@ -256,7 +345,6 @@ def discover_modules() -> list[type[DiscoverableModule]]:
             levels=[],
         )
     )
-    return sorted(modules, key=lambda cls: cls.module_order)
 
 
 def _raise_import_error(module_name: str, exc: Exception) -> None:
