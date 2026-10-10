@@ -261,7 +261,38 @@ def test_drop_instance_fences_consumers_and_forgets_the_cursor():
     assert consumer.fenced == ["node-a"]
     assert gate.stats() == {}
     # A reconnect starts fresh with any incarnation.
+    gate.readmit_instance("node-a")
     assert gate.ingest(_batch(incarnation=1, seq=1)) == IngestResult.ADMITTED
+
+
+def test_late_l1_batch_from_a_dropped_incarnation_is_stale():
+    consumer = _RecordingConsumer()
+    gate = _gate(consumer)
+    gate.ingest(_batch(incarnation=5, seq=1))
+
+    gate.drop_instance("node-a")
+
+    assert gate.ingest(_batch(incarnation=5, seq=2)) == IngestResult.STALE_INCARNATION
+    assert len(consumer.batches) == 1
+
+
+def test_late_l2_batch_from_a_dropped_incarnation_is_admitted():
+    gate = _gate()
+    gate.ingest(_batch(incarnation=5, seq=1))
+
+    gate.drop_instance("node-a")
+
+    late = _batch(incarnation=5, seq=2, tier=Tier.L2, backend="fs")
+    assert gate.ingest(late) == IngestResult.ADMITTED
+
+
+def test_restart_after_drop_is_admitted():
+    gate = _gate()
+    gate.ingest(_batch(incarnation=5, seq=1))
+
+    gate.drop_instance("node-a")
+
+    assert gate.ingest(_batch(incarnation=6, seq=1)) == IngestResult.ADMITTED
 
 
 def test_drop_unknown_instance_is_noop_for_the_cursor():
