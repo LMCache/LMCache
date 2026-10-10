@@ -1,0 +1,155 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Memory orchestrator: allocation and readiness authority for one shared
+// memory region. Metadata only; KV bytes never cross this API.
+
+syntax = "proto3";
+
+package lmcache.memory_orchestrator.v1;
+
+service MemoryOrchestrator {
+  rpc DescribeRegion (Envelope)              returns (RegionContract);
+  rpc RegisterClient (RegisterClientRequest) returns (RegisterClientReply);
+  rpc ReserveWrite   (ReserveWriteRequest)   returns (ReserveWriteReply);
+  rpc FinishWrite    (TokenBatch)            returns (ResultBatch);
+  rpc AbortWrite     (TokenBatch)            returns (ResultBatch);
+  rpc ReserveRead    (ReserveReadRequest)    returns (ReserveReadReply);
+  rpc FinishRead     (TokenBatch)            returns (ResultBatch);
+  rpc Usage          (Envelope)              returns (RegionUsage);
+  rpc CloseClient    (Envelope)              returns (CloseClientReply);
+}
+
+message Envelope {
+  string region_id = 1;
+  uint64 expected_region_epoch = 2;  // 0 only on DescribeRegion
+  string client_id = 3;              // stable across restarts of one MP server
+  uint64 client_incarnation = 4;     // unique per MP server start
+  uint64 request_id = 5;             // idempotency key, unique per (client_id, client_incarnation)
+}
+
+message RegionContract {
+  string region_id = 1;
+  uint64 region_epoch = 2;
+  uint64 capacity_bytes = 3;
+  uint64 alignment_bytes = 4;
+  bytes layout_fingerprint = 5;
+  string visibility_mode = 6;
+  uint32 max_batch_entries = 7;
+  bool reset_required = 8;
+}
+
+message RegisterClientRequest {
+  Envelope env = 1;
+  bytes layout_fingerprint = 2;
+  uint64 mapped_bytes = 3;
+  string visibility_mode = 4;
+}
+
+message RegisterClientReply {
+  uint64 region_epoch = 1;
+  uint32 retired_writes = 2;   // WRITING objects of an older incarnation moved to CONSUMED
+  uint32 released_leases = 3;  // read leases of an older incarnation dropped
+}
+
+message ObjectKey {
+  bytes chunk_hash = 1;
+  string model_name = 2;
+  int64 kv_rank = 3;
+  int64 object_group_id = 4;
+  string cache_salt = 5;
+}
+
+message TensorShape { repeated int64 dims = 1; }
+
+message ObjectLayout {
+  repeated TensorShape shapes = 1;
+  repeated string dtypes = 2;  // torch dtype names without the "torch." prefix
+}
+
+message Handle {
+  uint64 offset = 1;      // byte offset inside the region
+  uint64 length = 2;      // aligned extent length
+  uint64 generation = 3;  // always 1 in this milestone (no extent reuse)
+}
+
+message WriteEntry {
+  ObjectKey key = 1;
+  uint64 payload_bytes = 2;  // unaligned payload size, > 0
+  ObjectLayout layout = 3;   // stored verbatim and returned to readers
+}
+
+message ReserveWriteRequest {
+  Envelope env = 1;
+  repeated WriteEntry entries = 2;
+}
+
+message WriteGrant {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    WRITE_GRANTED = 1;
+    EXISTS_VALID = 2;
+    BUSY_WRITING = 3;
+    OUT_OF_SPACE = 4;
+  }
+  Status status = 1;
+  Handle handle = 2;  // WRITE_GRANTED only
+  bytes token = 3;    // WRITE_GRANTED only
+}
+
+message ReserveWriteReply { repeated WriteGrant grants = 1; }  // request order
+
+message ReadEntry {
+  ObjectKey key = 1;
+  uint32 reader_count = 2;  // >= 1; one lease per reader
+}
+
+message ReserveReadRequest {
+  Envelope env = 1;
+  repeated ReadEntry entries = 2;
+}
+
+message ReadGrant {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    READ_GRANTED = 1;
+    MISS = 2;
+    BUSY_WRITING = 3;
+  }
+  Status status = 1;
+  Handle handle = 2;          // READ_GRANTED only
+  repeated bytes leases = 3;  // reader_count leases, READ_GRANTED only
+  ObjectLayout layout = 4;    // READ_GRANTED only
+  uint64 payload_bytes = 5;   // READ_GRANTED only
+}
+
+message ReserveReadReply { repeated ReadGrant grants = 1; }  // request order
+
+message TokenBatch {
+  Envelope env = 1;
+  repeated bytes tokens = 2;
+}
+
+message ResultBatch {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    OK = 1;
+    STALE_TOKEN = 2;
+  }
+  repeated Status results = 1;  // token order
+}
+
+message RegionUsage {
+  uint64 capacity_bytes = 1;
+  uint64 allocated_bytes = 2;  // monotonic bump pointer, includes CONSUMED extents
+  uint64 valid_bytes = 3;      // sum of aligned lengths of VALID objects
+  uint32 writing = 4;
+  uint32 valid = 5;
+  uint32 consumed = 6;
+  uint32 read_leases = 7;
+  uint32 clients = 8;
+}
+
+message CloseClientReply {
+  uint32 aborted_writes = 1;
+  uint32 released_leases = 2;
+}

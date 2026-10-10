@@ -26,7 +26,6 @@ def test_generated_import_check_does_not_import_lmcache_root(
 ) -> None:
     generator = _load_proto_generator()
     package = "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen"
-    package_parts = package.split(".")
     package_dir = tmp_path.joinpath(*package.split("."))
     package_dir.mkdir(parents=True)
     root_init = tmp_path / "lmcache/__init__.py"
@@ -42,7 +41,5 @@ def test_generated_import_check_does_not_import_lmcache_root(
     )
 
     monkeypatch.setattr(generator, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(generator, "GENERATED_DIR", package_dir)
-    monkeypatch.setattr(generator, "GENERATED_PACKAGE", ".".join(package_parts))
 
-    assert generator._check_generated_imports((pb2, pb2_grpc))
+    assert generator._check_generated_imports((pb2, pb2_grpc), package)
