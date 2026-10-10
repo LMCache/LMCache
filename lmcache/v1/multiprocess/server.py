@@ -6,7 +6,6 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-
 import argparse
 import shutil
 import signal
