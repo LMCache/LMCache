@@ -631,6 +631,83 @@ class TestLocalCPUBackendAllocatorRecovery:
             memory_obj.ref_count_down()
         allocator.close()
 
+    def test_lfu_hit_on_candidate_skipped_by_batched_allocate(self):
+        """Regression test for issue #5444."""
+        chunk_bytes = 4096
+        batch_size = 2
+        shape = torch.Size([1, chunk_bytes])
+        config = create_test_config()
+        config.cache_policy = "LFU"
+        PinMonitor.GetOrCreate(config)
+        allocator = MixedMemoryAllocator(chunk_bytes * batch_size)
+        backend = LocalCPUBackend(config=config, memory_allocator=allocator)
+        layer_keys = create_test_key("lfu_skipped").split_layers(batch_size)
+
+        memory_objs = backend.batched_allocate(
+            shape,
+            torch.uint8,
+            batch_size=batch_size,
+            fmt=MemoryFormat.KV_T2D,
+            busy_loop=False,
+        )
+        assert memory_objs is not None
+        backend.batched_submit_put_task(layer_keys, memory_objs)
+        for memory_obj in memory_objs:
+            memory_obj.ref_count_down()
+
+        assert backend.pin(layer_keys[0])
+        assert (
+            backend.batched_allocate(
+                shape,
+                torch.uint8,
+                batch_size=batch_size,
+                fmt=MemoryFormat.KV_T2D,
+                busy_loop=False,
+            )
+            is None
+        )
+        assert backend.unpin(layer_keys[0])
+
+        assert backend.contains(layer_keys[1], pin=True)
+        backend.touch_cache()
+        assert backend.unpin(layer_keys[1])
+
+        recovered = backend.batched_allocate(
+            shape,
+            torch.uint8,
+            batch_size=batch_size,
+            fmt=MemoryFormat.KV_T2D,
+            busy_loop=False,
+        )
+        assert recovered is not None
+        assert all(key not in backend.hot_cache for key in layer_keys)
+
+        for memory_obj in recovered:
+            memory_obj.ref_count_down()
+        allocator.close()
+
+    def test_lfu_allocate_evicts_repeatedly(self):
+        chunk_bytes = 4096
+        shape = torch.Size([1, chunk_bytes])
+        config = create_test_config()
+        config.cache_policy = "LFU"
+        PinMonitor.GetOrCreate(config)
+        allocator = MixedMemoryAllocator(chunk_bytes)
+        backend = LocalCPUBackend(config=config, memory_allocator=allocator)
+
+        for idx in range(3):
+            key = create_test_key(f"lfu_evict_{idx}")
+            memory_obj = backend.allocate(
+                shape, torch.uint8, fmt=MemoryFormat.KV_T2D, busy_loop=False
+            )
+            assert memory_obj is not None
+            backend.submit_put_task(key, memory_obj)
+            memory_obj.ref_count_down()
+
+        assert backend.get_keys() == [create_test_key("lfu_evict_2")]
+        backend.clear()
+        allocator.close()
+
     def test_batched_allocate_recovers_with_fully_evictable_group(self):
         chunk_bytes = 4096
         batch_size = 2

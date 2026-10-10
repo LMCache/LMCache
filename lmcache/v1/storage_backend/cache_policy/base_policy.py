@@ -60,7 +60,7 @@ class BaseCachePolicy(Generic[KeyType, MapType], metaclass=abc.ABCMeta):
         key: KeyType,
     ) -> None:
         """
-        Update internal states when a cache is force evicted
+        Update internal states when a cache is removed, forced or not
 
         Input:
             key: an object of KeyType
@@ -75,7 +75,8 @@ class BaseCachePolicy(Generic[KeyType, MapType], metaclass=abc.ABCMeta):
         num_candidates: int = 1,
     ) -> list[KeyType]:
         """
-        Evict cache when a new cache comes and the storage is full
+        Select eviction candidates without modifying any state; the caller
+        must call `update_on_force_evict` for the keys it actually removes
 
         Input:
             cache_dict: a dict consists of current cache

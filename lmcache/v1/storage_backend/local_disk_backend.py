@@ -289,8 +289,8 @@ class LocalDiskBackend(StorageBackendInterface):
 
             os.remove(path)
 
-            if force:
-                self.cache_policy.update_on_force_evict(key)
+            # LFU needs this on internal (force=False) evictions too.
+            self.cache_policy.update_on_force_evict(key)
 
         # Push kv evict msg with batching
         if self.batched_msg_sender is not None:

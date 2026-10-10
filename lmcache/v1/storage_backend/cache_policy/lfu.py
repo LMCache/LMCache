@@ -82,24 +82,13 @@ class LFUCachePolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         cache_dict: dict[KeyType, Any],
         num_candidates: int = 1,
     ) -> list[KeyType]:
-        evict_keys = []
-        evict_freqs = []
-        for curr_min_freq, fifo_keys in self.freq_to_keys.items():
+        evict_keys: list[KeyType] = []
+        for fifo_keys in self.freq_to_keys.values():
             for key in fifo_keys:
                 if not cache_dict[key].can_evict:
                     continue
                 evict_keys.append(key)
-                evict_freqs.append(curr_min_freq)
-                self.key_to_freq.pop(key)
                 if len(evict_keys) == num_candidates:
-                    break
-
-            if len(evict_keys) == num_candidates:
-                break
-
-        for freq, key in zip(evict_freqs, evict_keys, strict=False):
-            self.freq_to_keys[freq].pop(key)
-            if not self.freq_to_keys[freq]:
-                self.freq_to_keys.pop(freq)
+                    return evict_keys
 
         return evict_keys
