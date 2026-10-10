@@ -47,6 +47,36 @@ When LMCache is integrated with vLLM, the inference pipeline is augmented to loo
 
 **Async Cache Write**: After processing the prompt, any newly generated KV cache chunks (corresponding to this prompt's content) are handed off to LMCache for storage. This put operation is done asynchronously (in the background) so it doesn't delay the response. The response is returned to the user promptly, and LMCache's background tasks will offload the new KV data to CPU, disk, or other backends for future reuse.
 
+LoRA cache isolation
+^^^^^^^^^^^^^^^^^^^^
+
+A LoRA adapter changes the attention projections, so the same prompt tokens
+produce different KV values under the base model and under each adapter. The
+in-process vLLM connector (``LMCacheConnectorV1``) therefore adds the active
+vLLM ``lora_name`` to every cache key as the ``lora`` tag. The base model and
+each adapter use separate keyspaces even when their prompt token IDs are
+identical, and base-model keys are unchanged:
+
+.. code-block:: text
+
+   Qwen/Qwen2.5-0.5B@1@0@1234abcd@bfloat16                   # base model
+   Qwen/Qwen2.5-0.5B@1@0@1234abcd@bfloat16@lora%sql-adapter  # adapter "sql-adapter"
+
+``lora_name`` is the cache identity, not a checksum of the adapter weights. If
+an adapter's weights change, serve it under a new name (for example
+``sql-adapter-v2``). Reusing a name can load KV computed with the previous
+weights from a persistent backend.
+
+.. warning::
+
+   Earlier versions stored KV computed under an adapter with base-model keys.
+   When upgrading, clear persistent backends (local disk and remote storage)
+   that may hold entries written by LoRA requests. Otherwise, base-model
+   requests can still load them. The in-memory CPU cache starts empty when
+   vLLM restarts.
+
+The multiprocess (MP) connector does not isolate LoRA adapters yet.
+
 SGLang on MUSA
 --------------
 

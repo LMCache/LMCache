@@ -9,6 +9,7 @@ import threading
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.request import Request
 
@@ -18,6 +19,7 @@ import torch
 # First Party
 from lmcache import torch_device_type
 from lmcache.logging import init_logger
+from lmcache.utils import LORA_TAG_KEY
 from lmcache.utils import get_size_bytes as get_size_bytes
 from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
@@ -158,6 +160,33 @@ def extract_request_configs_from_request(
     return extract_request_configs_from_sampling_params(
         getattr(request, "sampling_params", None)
     )
+
+
+def add_lora_tag(
+    request_configs: dict[str, object] | None,
+    lora_request: "LoRARequest | None",
+) -> dict[str, object] | None:
+    """Add a request's vLLM LoRA adapter to its LMCache request configs.
+
+    The adapter becomes the ``lora`` tag of every ``CacheEngineKey`` built from
+    the returned configs, so the base model and each adapter get separate keys
+    for identical tokens. ``lora_name`` is the adapter identity because vLLM's
+    ``LoRARequest`` equality and hashing use it.
+
+    Args:
+        request_configs: Configs from
+            ``extract_request_configs_from_sampling_params``, or ``None``.
+        lora_request: The request's active LoRA adapter, or ``None`` for the
+            base model.
+
+    Returns:
+        ``request_configs`` unchanged for a base-model request. Otherwise a new
+        dict with the same entries plus ``lmcache.tag.lora`` set to
+        ``lora_request.lora_name``.
+    """
+    if lora_request is None:
+        return request_configs
+    return {**(request_configs or {}), LORA_TAG_KEY: lora_request.lora_name}
 
 
 def lmcache_get_or_create_config() -> LMCacheEngineConfig:
