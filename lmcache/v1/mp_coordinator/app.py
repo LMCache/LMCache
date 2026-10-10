@@ -172,15 +172,26 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         Only derived state runs on a timer: it changes continuously, so a
         cadence is the only sensible cost. Operator intent is written when
         it changes instead (see ``MetadataPersister``).
+
+        Cancellation drains the current write before returning, so teardown
+        and the final checkpoint cannot race a still-running writer thread.
         """
         while True:
             await asyncio.sleep(config.checkpoint_interval)
-            await asyncio.to_thread(
-                save_checkpoint,
-                checkpoint_store,
-                quiesce,
-                checkpoint_components,
+            writing = asyncio.create_task(
+                asyncio.to_thread(
+                    save_checkpoint,
+                    checkpoint_store,
+                    quiesce,
+                    checkpoint_components,
+                )
             )
+            try:
+                await asyncio.shield(writing)
+            except asyncio.CancelledError:
+                # Cancelling to_thread's awaiter cannot stop its thread.
+                await writing
+                raise
 
     async def _health_loop() -> None:
         """Evict stale instances on a timer until cancelled.
