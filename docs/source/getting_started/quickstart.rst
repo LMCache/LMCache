@@ -509,10 +509,11 @@ For gRPC, start the server with ``--transport grpc`` and use a
 **CPU-only (no GPU)** -- the server runs with a ``StubCPUDevice`` and shares
 KV tensors with vLLM over POSIX shared memory. Start ``lmcache server``
 normally, then set ``lmcache.mp.mp_transfer_mode=lmcache_driven`` on the vLLM
-side to enable the zero-copy SHM handle path (the default ``auto`` routing
-maps non-CUDA devices to ``engine_driven``, a worker-side gather/scatter
-copy path that the server only loads when started with
-``--supported-transfer-mode engine_driven`` or ``auto``).
+side to enable the zero-copy SHM handle path (CPU SHM is an opt-in-only
+LMCache-driven stack, so the default ``auto`` resolves CPU workers to
+``engine_driven`` -- a worker-side gather/scatter copy path that the server
+only loads when started with ``--supported-transfer-mode engine_driven`` or
+``auto``).
 
 **Docker** -- see :doc:`../production/docker_deployment`.
 
