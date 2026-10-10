@@ -113,6 +113,12 @@ class CoordinatorCommand(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--blend-chunk-size",
+            dest="chunk_size",
+            type=int,
+            help=argparse.SUPPRESS,
+        )
+        parser.add_argument(
             "--hash-algorithm",
             type=str,
             default=None,
