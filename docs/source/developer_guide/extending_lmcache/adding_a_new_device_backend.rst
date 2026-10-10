@@ -461,9 +461,10 @@ checks — both must succeed, otherwise the factory raises
    :attr:`~lmcache.v1.platform.base.device_spec.DeviceSpec.ipc_wrapper_cls`.
    :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
    binding off the registered spec — no separate registry / auto-scan.
-2. ``DeviceSpec.is_handle_transfer_available()`` must return ``True``
-   (the base-class default; override to ``False`` only if your device
-   lacks IPC handle transfer).
+2. Your ``DeviceSpec`` subclass must override
+   ``DeviceSpec.is_lmcache_driven_available()`` and return ``True`` to
+   opt in. The base-class default is ``False``, so a backend that does
+   not opt in fails fast at the capability check.
 
 Separately, the LMCache-driven server module also requires a
 ``BaseCacheContext`` subclass next to the backend (for example,
@@ -573,9 +574,9 @@ Override these methods in your ``DeviceSpec``:
 
             return FooIPCWrapper
 
-        def is_handle_transfer_available(self) -> bool:
-            """Return True if your device supports IPC handle transfer."""
-            return True  # base-class default; override to False if unsupported
+        def is_lmcache_driven_available(self) -> bool:
+            """Return True to opt into the LMCache-driven IPC path."""
+            return True  # base-class default is False; opt in explicitly
 
         @property
         def pin_memory_backend(self):

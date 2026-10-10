@@ -77,7 +77,7 @@ class MusaDeviceSpec(DeviceSpec):
         except Exception:
             return False
 
-    def is_handle_transfer_available(self) -> bool:
+    def is_lmcache_driven_available(self) -> bool:
         # First Party
         from lmcache.v1.platform.devices.musa.ipc_wrapper import (
             is_musa_handle_transfer_available,

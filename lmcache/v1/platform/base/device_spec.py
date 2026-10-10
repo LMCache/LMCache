@@ -141,10 +141,17 @@ class DeviceSpec:
         """
         return False
 
-    def is_handle_transfer_available(self) -> bool:
-        """Return ``True`` when the device is usable for handle transfer."""
-        # TODO(chunxiaozheng): implement on subclasses
-        return True
+    def is_lmcache_driven_available(self) -> bool:
+        """Return ``True`` when the device can join the LMCache-driven path.
+
+        The LMCache-driven path ships KV tensors as IPC handles and needs
+        ordered cross-process event publication, so a device must opt in
+        explicitly.  The fallback therefore returns ``False``: a backend that
+        has not been wired up yet fails fast at the capability check instead of
+        crashing deeper in the transfer path.  Backends that do support the
+        path (e.g. CUDA and CPU) override this and return ``True``.
+        """
+        return False
 
     def current_stream(self, device: object) -> object:
         """Return the current stream for ``device`` on the active platform."""

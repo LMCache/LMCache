@@ -71,11 +71,11 @@ def test_neuron_not_available_without_sdk(
     assert neuron_spec.is_available() is False
 
 
-def test_neuron_no_handle_transfer(
+def test_neuron_no_lmcache_driven(
     neuron_spec: NeuronDeviceSpec,
 ) -> None:
-    """Trainium does not support IPC handle transfer."""
-    assert neuron_spec.is_handle_transfer_available() is False
+    """Trainium does not support the LMCache-driven IPC path."""
+    assert neuron_spec.is_lmcache_driven_available() is False
 
 
 def test_neuron_no_ipc_wrapper(

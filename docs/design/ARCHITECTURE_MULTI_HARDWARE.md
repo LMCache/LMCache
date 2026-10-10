@@ -98,7 +98,7 @@ multiprocess (MP) mode.
 | **Middle** engine / storage / multiprocess | `from lmcache import torch_dev` | Hardware-agnostic unified code |
 | **Middle** ops call sites | `from lmcache import device_ops` | Direct reference to the resolved `DeviceOps` singleton. |
 | **Middle** IPC-capable / device-specific APIs | `hasattr(torch_dev, 'xxx')` guard | Graceful runtime degradation |
-| **Bottom** Transfer Context | `create_transfer_context(kv_caches, mode)` | Per-device routing. In `AUTO` mode: CUDA→LMCacheDriven, other devices→EngineDriven. Other IPC-capable devices (e.g. MUSA) can opt-in to LMCacheDriven via explicit `mode=lmcache_driven` when their `DeviceSpec` reports `is_handle_transfer_available() == True`. |
+| **Bottom** Transfer Context | `create_transfer_context(kv_caches, mode)` | Per-device routing. In `AUTO` mode: CUDA→LMCacheDriven, other devices→EngineDriven. Other IPC-capable devices (e.g. MUSA, CPU) opt in to LMCacheDriven by registering a KV wrapper factory for their device type (a non-`None` `DeviceSpec.ipc_wrapper_cls`) and returning `True` from `DeviceSpec.is_lmcache_driven_available()`, then requesting explicit `mode=lmcache_driven` (the base-class default is `False`). |
 | **Bottom** Cache Context | `DeviceSpec.create_cache_context()` | Per-device cache context factory dispatched via `DeviceSpec` registry. |
 
 ## DeviceOps Architecture
@@ -163,9 +163,12 @@ MPTransferMode.ENGINE_DRIVEN:
   any device             -->  EngineDrivenTransferContext
 
 MPTransferMode.LMCACHE_DRIVEN:
-  any device that reports  --> LMCacheDrivenTransferContext
-  `DeviceSpec.is_handle_transfer_available() == True`
-  (otherwise the factory raises and the caller must fall back)
+  reaches LMCacheDrivenTransferContext only when BOTH hold:
+    • a KV wrapper factory is registered for the device type
+      (DeviceSpec.ipc_wrapper_cls is not None), and
+    • DeviceSpec.is_lmcache_driven_available() == True
+  otherwise _build_lmcache_driven_context raises ValueError
+  (callers do not auto-fallback to EngineDriven — they must handle the error)
 
 Override: LMCACHE_MP_TRANSFER_MODE env var or the mode argument to create_transfer_context()
 ```

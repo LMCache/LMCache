@@ -78,6 +78,10 @@ class CpuDeviceSpec(DeviceSpec):
 
         return CpuShmTensorWrapper
 
+    def is_lmcache_driven_available(self) -> bool:
+        """Report that CPU can ship KV tensors as POSIX-SHM handles."""
+        return True
+
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         # First Party
         from lmcache.v1.platform.devices.cpu.cache_context import CPUCacheContext

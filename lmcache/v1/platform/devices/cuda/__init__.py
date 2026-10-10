@@ -142,6 +142,10 @@ class CudaDeviceSpec(DeviceSpec):
         """Return the KV-cache IPC wrapper class (isolated-IPC aware)."""
         return _select_ipc_wrapper_cls()
 
+    def is_lmcache_driven_available(self) -> bool:
+        """CUDA supports the LMCache-driven IPC path."""
+        return True
+
     def is_available(self) -> bool:
         """Check CUDA availability without importing lmcache.__init__."""
         try:

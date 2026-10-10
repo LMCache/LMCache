@@ -11,7 +11,7 @@ Scope: **engine-driven** multiprocess (MP) transfer only.  ``torch.rbln``
 exposes device discovery and ``synchronize()`` but no ``Stream`` / ``Event``
 types, so the LMCache-driven path (which needs cross-process event IPC and
 an IPC handle wrapper) cannot be supported.  The spec therefore reports
-:meth:`RblnDeviceSpec.is_handle_transfer_available` as ``False`` and leaves
+:meth:`RblnDeviceSpec.is_lmcache_driven_available` as ``False`` and leaves
 ``ipc_wrapper_cls`` / ``event_ipc_backend`` at their ``None`` defaults, so
 requesting ``mp_transfer_mode=lmcache_driven`` fails fast with a clear
 error rather than crashing deeper in the transfer path.
@@ -78,17 +78,6 @@ class RblnDeviceSpec(DeviceSpec):
         except Exception:
             return False
 
-    def is_handle_transfer_available(self) -> bool:
-        """Report that RBLN cannot ship KV tensors as IPC handles.
-
-        The base class defaults to ``True``; RBLN overrides it to ``False``
-        because ``torch.rbln`` exposes no ``Event`` type, so the ordered
-        cross-process publication the LMCache-driven path depends on cannot
-        be expressed.  Returning ``False`` keeps
-        ``mp_transfer_mode=lmcache_driven`` failing at its documented
-        validation point instead of at an attribute lookup later on.
-
-        Returns:
-            bool: Always ``False``.
-        """
+    def is_lmcache_driven_available(self) -> bool:
+        """RBLN cannot join the LMCache-driven path."""
         return False

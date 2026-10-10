@@ -101,7 +101,7 @@ def _wrap_sglang_kv_caches(
     device = _validate_sglang_kv_pools(k_pool, v_pool)
     tensors = [*k_pool, *v_pool]
     device_spec = get_device_spec(device.type)
-    if device_spec is None or not device_spec.is_handle_transfer_available():
+    if device_spec is None or not device_spec.is_lmcache_driven_available():
         raise ValueError(
             "SGLang MP handle transfer is unavailable for device type "
             f"{device.type!r}: required memory IPC, event IPC, cache context, "
