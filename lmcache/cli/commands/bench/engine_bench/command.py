@@ -107,6 +107,7 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
         "--workload",
         default=None,
         choices=[
+            "kv-tier-pressure",
             "long-doc-permutator",
             "long-doc-qa",
             "multi-round-chat",
@@ -232,6 +233,83 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
         help="Max tokens to generate per permutation request (default: 128). "
         "Use 1 to measure prefill alone; combine larger values with "
         "--ignore-eos for a reproducible decode phase.",
+    )
+
+    # --- KV-tier-pressure workload args ---
+    ktp_group = parser.add_argument_group("kv-tier-pressure workload options")
+    ktp_group.add_argument(
+        "--ktp-overflow-factor",
+        type=float,
+        default=2.0,
+        help="Working set as a multiple of the LMCache server's L1 capacity "
+        "(default: 2.0). Used only when --ktp-pool-size is omitted: the pool "
+        "is then sized from the capacity reported by --lmcache-url, so you "
+        "do not have to convert GB to tokens to documents yourself. Above "
+        "1.0 forces eviction to the storage tier.",
+    )
+    ktp_group.add_argument(
+        "--ktp-pool-size",
+        type=int,
+        default=None,
+        help="Total documents in the corpus. Derived from the server's L1 "
+        "capacity and --ktp-overflow-factor when omitted. "
+        "This sets the working "
+        "set -- pool_size x --ktp-context-length tokens -- independently of "
+        "how large one prompt is, and only what exceeds L1 can reach the "
+        "storage tier. To overflow a cache of V GB by a factor F: "
+        "ceil(F * V * tokens_per_gb_kvcache / context_length).",
+    )
+    ktp_group.add_argument(
+        "--ktp-docs-per-request",
+        type=int,
+        default=16,
+        help="Documents sampled into each request (default: 16). Bounded by "
+        "the engine's context limit, not by the pool size.",
+    )
+    ktp_group.add_argument(
+        "--ktp-context-length",
+        type=int,
+        default=2560,
+        help="Exact token length of each document (default: 2560, which is "
+        "10 whole 256-token chunks). Requires a loadable tokenizer; pass "
+        "--model when the engine reports a name that is not a HuggingFace "
+        "repo ID or local path.",
+    )
+    ktp_group.add_argument(
+        "--ktp-system-prompt-length",
+        type=int,
+        default=256,
+        help="Exact token length of the shared system prompt (default: 256). "
+        "Use 0 for no system prompt.",
+    )
+    ktp_group.add_argument(
+        "--ktp-num-requests",
+        type=int,
+        default=200,
+        help="Number of measured requests (default: 200). The warm-up sweep "
+        "is separate and sized automatically from the pool.",
+    )
+    ktp_group.add_argument(
+        "--ktp-access-skew",
+        type=float,
+        default=0.0,
+        help="Zipf exponent for document popularity (default: 0.0 = uniform). "
+        "Larger values concentrate reads on a hot subset, raising the L1 hit "
+        "rate and lowering the L2 share.",
+    )
+    ktp_group.add_argument(
+        "--ktp-num-inflight-requests",
+        type=int,
+        default=8,
+        help="Max concurrent in-flight requests (default: 8).",
+    )
+    ktp_group.add_argument(
+        "--ktp-max-output-length",
+        type=int,
+        default=1,
+        help="Max tokens to generate per request (default: 1). The default "
+        "isolates prefill, which is the phase the cache tier affects; larger "
+        "values add decode time that dilutes the measurement.",
     )
 
     # --- Long-doc-qa workload args ---
@@ -472,6 +550,20 @@ def _resolve_args(args: argparse.Namespace) -> argparse.Namespace:
             cli_val = getattr(args, attr, None)
             if cli_val is not None:
                 setattr(resolved, attr, cli_val)
+        # A config file can omit a workload-specific required value -- it is
+        # only written when the flag was supplied. Catch it here rather than
+        # letting None reach the workload and surface as a TypeError.
+        missing = [
+            flag
+            for attr, flag in _REQUIRED_WORKLOAD_ARGS.get(resolved.workload, ())
+            if getattr(resolved, attr, None) is None
+        ]
+        if missing:
+            raise SystemExit(
+                f"Config {config_path} is missing required arguments for the "
+                f"{resolved.workload!r} workload: " + ", ".join(missing) + ". "
+                "Add them to the config, or pass them on the command line."
+            )
         return resolved
 
     # Case 2: --no-interactive or --export-config — error if missing

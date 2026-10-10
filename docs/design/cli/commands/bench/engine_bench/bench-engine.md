@@ -327,7 +327,87 @@ into a `set` when `N!` far exceeds `num_permutations * 10`.
 `asyncio.run()` as the loop, so `asyncio.run()` cannot orphan open `httpx`
 connections. The orchestrator's later `close()` then finds nothing to do.
 
-### 4.5 `prefix-suffix-tuner`
+### 4.5 `kv-tier-pressure`
+
+Exercises the **L2 storage tier**, which `long-doc-permutator` structurally
+cannot.
+
+**Why 4.4 cannot reach L2.** Every permutation carries *all* `num_contexts`
+documents, so the distinct working set equals the bytes of a single request
+and `num_permutations` adds requests without adding content. L1 must hold at
+least `num_inflight_requests` requests just to run, so
+
+```
+working_set / min_viable_L1 = 1 / num_inflight_requests
+```
+
+independent of document count, document length and permutation count. The
+ratio can never exceed 1.0, so no flag setting makes that workload spill.
+This is algebraic, not a tuning gap.
+
+**The fix.** Decouple corpus size from prompt size: hold a pool of `D`
+documents and sample `K` of them per request (`K << D`). The prompt keeps the
+permutator's shape — system prompt plus concatenated documents — so TTFT and
+prefill stay comparable, while the working set scales with `D` alone.
+
+| Field | CLI arg | Default |
+|-------|---------|---------|
+| `pool_size` | `--ktp-pool-size` | **required** |
+| `docs_per_request` | `--ktp-docs-per-request` | 16 |
+| `context_length` | `--ktp-context-length` | 2560 (exact tokens) |
+| `system_prompt_length` | `--ktp-system-prompt-length` | 256 (`0` disables) |
+| `num_requests` | `--ktp-num-requests` | 200 |
+| `access_skew` | `--ktp-access-skew` | 0.0 (uniform) |
+| `vocab_size` | hardcoded in factory | 8000 |
+| `num_inflight_requests` | `--ktp-num-inflight-requests` | 8 |
+| `max_output_length` | `--ktp-max-output-length` | 1 |
+
+**Sizing contract.** `pool_size` is required and used verbatim -- there is no
+derivation. The working set is `pool_size x context_length` tokens, and only
+what exceeds L1 can be evicted and read back. To overflow a cache of `V` GB
+by a factor `F`:
+
+```
+pool_size = ceil(F x V x tokens_per_gb_kvcache / context_length)
+```
+
+An earlier `--ktp-overflow-factor` flag applied that formula automatically.
+It was removed: it duplicated `pool_size`, and the share it implied
+(`1 - 1 / F`) does not hold -- 45% measured at `F = 1` on one stack, 36% at
+`F = 2` on another, because the formula assumes pure LRU over uniformly-drawn
+whole documents and ignores prefetch re-admission, chunk-level sharing and
+intra-request re-reads. The formula survives as documented guidance; the real
+share comes from the tier counters.
+
+`access_skew` applies Zipf weights `1 / (rank + 1) ** skew`, which raises the
+L1 hit rate and *lowers* the L2 share -- it models a hot subset, not extra
+pressure.
+
+**Warmup is a deterministic sweep, not a dummy request.** Two reasons, both
+measurement-correctness rather than engine warm-up:
+
+1. Until L1 fills there is no eviction, no L2 write and therefore no L2 read.
+   A share measured across a cold start is a function of run length.
+2. Random sampling covers the pool too slowly to warm it. Coupon-collector
+   cost is `(D / K) x ln(D)` — ~855 requests at `D=1,820, K=16`, which a
+   200-request run would never reach.
+
+The sweep partitions the pool into `ceil(D / K)` non-overlapping groups and
+sends one request per group, so every document is stored exactly once. The
+final group back-fills from the front of the pool to keep every request the
+same token shape; those repeats are harmless because the sweep is excluded
+from the measurement.
+
+**Exact lengths and tokenizer requirement:** as in 4.4.
+
+**Dispatch:** semaphore-controlled, as in 4.1.
+
+**Extra metrics.** Reports a `kv_tier_pressure` section carrying the resolved
+pool size, docs per request, working-set tokens, access skew, sweep size and
+measured tokens per request. Inputs only -- the share of reads actually served
+by L2 comes from the cache's tier counters, not from this workload.
+
+### 4.6 `prefix-suffix-tuner`
 
 One sequential workload run **unchanged** across three configurations to
 demonstrate each cache tier:
@@ -439,7 +519,7 @@ closing the client here ensures clean teardown. The orchestrator's subsequent
 `asyncio.run(request_sender.close())` then finds nothing to close and
 completes without error.
 
-### 4.5 `prefix-suffix-tuner` — Tiered KV-Cache Demonstrator
+### 4.7 `prefix-suffix-tuner` — Tiered KV-Cache Demonstrator
 
 A single sequential workload designed to be run **unchanged** across three
 LMCache configurations to demonstrate the value of each cache tier:
@@ -458,7 +538,7 @@ request falls through to the next tier without overprovisioning by 2×.
 
 `--kv-cache-volume` is unused by this workload.
 
-### 4.6 `rag-qa-quality`
+### 4.8 `rag-qa-quality`
 
 The only workload measuring **correctness** rather than speed — every other
 one would report an unchanged number if the cache returned subtly wrong KV.

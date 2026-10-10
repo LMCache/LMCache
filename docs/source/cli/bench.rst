@@ -147,8 +147,8 @@ General Options
    * - ``--workload TYPE``
      - Yes
      - Workload type: ``long-doc-qa``, ``multi-round-chat``,
-       ``long-doc-permutator``, ``prefix-suffix-tuner``,
-       ``rag-qa-quality``, or ``random-prefill``.
+       ``long-doc-permutator``, ``kv-tier-pressure``,
+       ``prefix-suffix-tuner``, ``rag-qa-quality``, or ``random-prefill``.
    * - ``--tokens-per-gb-kvcache N``
      - \*
      - Tokens per GB of KV cache. Required unless ``--lmcache-url`` is set.
@@ -214,9 +214,10 @@ Most workloads run a warmup phase before the measured run. What it sends is
 workload-specific -- ``long-doc-qa`` prefills each document, ``rag-qa-quality``
 prefills each document behind the system block, ``prefix-suffix-tuner`` sends a
 full pass over its prefix pool, ``multi-round-chat`` primes each session, and
-``long-doc-permutator`` sends a single dummy request. ``random-prefill`` has no
-warmup at all. Warmup requests are sent with ``max_tokens=1`` and their stats
-are discarded, so they never appear in the reported numbers.
+``long-doc-permutator`` sends a single dummy request, and ``kv-tier-pressure``
+sweeps its whole document pool once. ``random-prefill`` has no warmup at all.
+Warmup requests are sent with ``max_tokens=1`` and their stats are discarded,
+so they never appear in the reported numbers.
 
 Warmup serves two purposes: it absorbs the engine's one-time first-request cost
 (``torch.compile``, CUDA-graph capture, weight paging), and -- for the workloads
@@ -395,6 +396,134 @@ dispatched with semaphore-controlled concurrency.
        --ldp-context-length 8000 \
        --ldp-num-permutations 24 \
        --ldp-num-inflight-requests 2
+
+
+kv-tier-pressure
+^^^^^^^^^^^^^^^^
+
+Exercises the **L2 storage tier**. Where ``long-doc-permutator`` puts every
+document in every request -- so the distinct working set equals one prompt and
+can never overflow L1 -- this workload keeps a document *pool* larger than the
+cache and samples a subset into each request:
+
+.. code-block:: text
+
+   [System Prompt] + [Doc_a] + [Doc_b] + ... + [Doc_k]   (k of D, k << D)
+
+.. important::
+
+   This workload assumes **CacheBlend** (``enable_blending``). Each request
+   concatenates a random subset of the pool in random order, so without
+   blending a document is reused only when everything before it in the prompt
+   also matches — which these prompts almost never satisfy. Such a run writes
+   a great deal to storage and reads very little back, while the *share* of
+   reads served by storage still looks healthy.
+
+   Watch **cache-hit tokens per request**, reported whenever ``--lmcache-url``
+   is given, rather than the storage read share — the share is a ratio between
+   tiers and cannot tell the two cases apart.
+
+   Without blending, use ``--ktp-docs-per-request 1``. Each prompt is then
+   ``[system prompt][document]``, which is prefix-stable and reuses normally.
+   When ``--lmcache-url`` is given the workload verifies this for you. After
+   the warm-up sweep it checks which lookup counter family moved: the blend
+   counters move only when the server runs the blend module *and* vLLM drives
+   it through ``CBKVConnector``. If a multi-document run was not blended it
+   stops there, rather than producing a result that looks reasonable and
+   means nothing.
+
+``--ktp-pool-size`` is what decides whether the storage tier is reached: the
+working set is ``pool_size x --ktp-context-length`` tokens, and only what
+exceeds cache capacity can be evicted and read back. Omit it and the pool is
+sized automatically from the capacity the LMCache server reports via
+``--lmcache-url``, multiplied by ``--ktp-overflow-factor``. To size it by hand
+against a cache of ``V`` GB with a factor of ``F``:
+
+.. code-block:: text
+
+   pool_size = ceil(F * V * tokens_per_gb_kvcache / context_length)
+
+``tokens_per_gb_kvcache`` comes from the engine's KV layout and is resolved
+automatically from ``--lmcache-url`` (see :ref:`bench-tokens-per-gb`). An
+``F`` of 2 means half the working set cannot be resident, so roughly half of
+all cache reads must come from L2.
+
+Treat that only as a dial. The idealised share ``1 - 1 / F`` assumes pure LRU
+over uniformly-drawn whole documents and ignores prefetch re-admission and
+chunk-level sharing: 45% was measured at ``F = 1`` on one stack and 36% at
+``F = 2`` on another. Size the pool with it, then read the share that actually
+occurred from the cache's tier counters.
+
+Warmup is a deterministic sweep: the pool is partitioned into
+``ceil(pool_size / docs_per_request)`` non-overlapping groups and each is sent
+once, so every document is cached exactly once before measurement. This matters
+because until L1 fills there is no eviction and therefore no L2 read -- a share
+measured across a cold start describes run length, not the system.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 10 55
+
+   * - Flag
+     - Default
+     - Description
+   * - ``--ktp-pool-size``
+     - derived
+     - Total documents in the corpus. Sets the working set, and therefore
+       whether the storage tier is reached. Derived from the server's cache
+       capacity and ``--ktp-overflow-factor`` when omitted.
+   * - ``--ktp-overflow-factor``
+     - 2.0
+     - Working set as a multiple of the server's cache capacity. Used only
+       when ``--ktp-pool-size`` is omitted. Above 1.0 forces eviction to
+       storage.
+   * - ``--ktp-docs-per-request``
+     - 16
+     - Documents sampled into each request. Bounded by the engine's context
+       limit, not by the pool size.
+   * - ``--ktp-context-length``
+     - 2560
+     - Token length of each document (10 whole 256-token chunks).
+   * - ``--ktp-system-prompt-length``
+     - 256
+     - Token length of the shared system prompt. Use ``0`` for none.
+   * - ``--ktp-num-requests``
+     - 200
+     - Number of measured requests. The warmup sweep is separate and sized
+       automatically from the pool.
+   * - ``--ktp-access-skew``
+     - 0.0
+     - Zipf exponent for document popularity. ``0.0`` is uniform; larger
+       values concentrate reads on a hot subset, raising the L1 hit rate and
+       lowering the L2 share.
+   * - ``--ktp-num-inflight-requests``
+     - 8
+     - Maximum concurrent in-flight requests.
+   * - ``--ktp-max-output-length``
+     - 1
+     - Maximum tokens to generate per request. The default isolates prefill,
+       the phase the cache tier affects; larger values add decode time that
+       dilutes the measurement.
+
+The run reports a **Document pool** section alongside the standard metrics,
+giving the resolved pool size, working set, access skew and sweep size. These are inputs: the share of reads actually served by L2 comes
+from the cache's own tier counters, not from this workload.
+
+**Example** -- target ~50% of cache reads from L2 against a 100 GB L1:
+
+.. code-block:: bash
+
+   lmcache bench engine \
+       --engine-url http://localhost:8000 \
+       --workload kv-tier-pressure \
+       --lmcache-url http://localhost:8080 \
+       --ktp-pool-size 910 \
+       --ktp-docs-per-request 16 \
+       --ktp-context-length 2560 \
+       --ktp-num-requests 200
+
+Raise ``--ktp-pool-size`` for a larger share of reads from storage, and keep
+it pinned when reproducing an earlier run so the corpus is identical.
 
 
 prefix-suffix-tuner
