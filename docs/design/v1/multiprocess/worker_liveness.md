@@ -119,6 +119,9 @@ class InstanceLivenessTarget(Protocol):
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
     ) -> list[int]: ...
+    def mark_peer_disconnected(
+        self, peer: bytes, proven_grace_s: float, unproven_grace_s: float
+    ) -> None: ...  # Section 5.5
     def tracked_instance_count(self) -> int: ...
     def drop_instance_state(self, instance_id: int) -> None: ...
 ```
@@ -136,6 +139,40 @@ reap timeout — a tighter grace would reap warming workers faster than crashed
 ones), with matching CLI flags. Keep the timeout `>= 3 x` the client's
 `lmcache.mp.heartbeat_interval` so a few missed pings never reap a live worker;
 the worker adapter warns at startup when `3 x interval` exceeds the 30 s floor.
+
+### 5.5 Connection-loss reclaim
+
+Silence is slow evidence of death: a SIGKILLed worker is reaped only after
+`timeout + timeout/4` (~150 s by default), or after the registration grace (1 h)
+if it dies before its first PING. The kernel, however, closes a dead process's
+TCP connection at once. On the ZMQ transport the server watches for that close
+and starts a short countdown instead of waiting out the silence budget.
+
+A ROUTER socket does not report which peer closed, so `MessageQueueServer`
+monitors `EVENT_DISCONNECTED` (which carries the fd) and maps each fd to the
+ROUTER identity of the messages arriving on it (`ZMQ_SRCFD`); a reused fd is
+never attributed to the closed peer. `REGISTER_KV_CACHE` binds that identity to
+the `ContextEntry`. A worker sends all its requests over one connection, so a
+connection maps to one instance. Disconnects are handled on the MQ loop thread,
+which also runs REGISTER, so the two never race.
+
+On close, `mark_peer_disconnected` only sets `reclaim_at`:
+`worker_disconnect_grace_seconds` (default 30 s) for a ping-proven instance, the
+reap timeout for a never-pinged one (a warming worker sends nothing, so it
+cannot prove itself sooner). The reaper then releases the entry through the
+UNREGISTER cleanup; scanning every `min(timeout/4, disconnect_grace/3)`, it
+reclaims a killed ping-proven worker ~30-40 s after death. A request for the
+instance over a new connection (PING, transfer, or the NOOP re-register) cancels
+the countdown; ZMQ clients reconnect on their own, and the default 10 s heartbeat
+does so well within 30 s. Requests still queued from the closed connection and
+HTTP calls do not cancel it.
+
+Cases the transport cannot see keep the silence budgets: the gRPC transport,
+platforms that cannot report the source fd, and hosts that vanish without
+closing the connection. Only `LMCacheDrivenTransferModule` tracks connections;
+engine-driven and QStore registrations keep the timeout path, and plugin
+targets, matched by method names, may omit `mark_peer_disconnected`.
+`worker_disconnect_grace_seconds = 0`, or disabled reaping, turns the feature off.
 
 ## 6. Adapter Side
 
@@ -175,8 +212,9 @@ stop is already requested — a straggling cycle cannot re-create a ghost contex
 
 | Scenario | Behavior |
 |---|---|
-| Worker crash (SIGKILL, no UNREGISTER) after serving | Pings stop; reaped within ~`timeout + timeout/4`. Context, IPC handles, layout-desc refcount, and non-GPU strategy released via the same cleanup as a clean unregister; blend rope state dropped via the reap listener. The bug being fixed. |
-| Worker crash during warmup (registered, never pinged) | Reaped on the registration grace. Bounded leak instead of a permanent one. |
+| Worker crash (SIGKILL, no UNREGISTER) after serving | Over ZMQ the closed connection starts the disconnect countdown; reaped ~`disconnect_grace + disconnect_grace/3` after death (Section 5.5). Otherwise pings stop; reaped within ~`timeout + timeout/4`. Context, IPC handles, layout-desc refcount, and non-GPU strategy released via the same cleanup as a clean unregister; blend rope state dropped via the reap listener. The bug being fixed. |
+| Worker crash during warmup (registered, never pinged) | Over ZMQ reaped ~`timeout` after the connection closes; otherwise on the registration grace. Bounded leak instead of a permanent one. |
+| Connection drops, worker alive (ZMQ) | The client reconnects; its next PING, transfer or re-register over the new connection cancels the countdown. A never-pinged worker that sends nothing before the countdown (`timeout`) expires is reaped. |
 | Worker alive but never pinged, idle past the grace | Reaped while alive only if it never pinged (heartbeat never started). Once the heartbeat is running, pings refresh `last_seen` every interval, so a live worker is never reaped regardless of traffic. |
 | Heartbeat thread starved, worker transferring | Store/retrieve/prepare/commit refresh `last_seen`; never reaped. |
 | Partition shorter than the reap window | No reap. On heal, the recover callback re-registers; the NOOP path refreshes `last_seen`; zero context churn. |

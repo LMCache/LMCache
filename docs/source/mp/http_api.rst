@@ -406,7 +406,8 @@ Prometheus metrics for time-series data — see :doc:`observability/index`).
                 "attention_backend": "..."
               }
             ]
-          }
+          },
+          "connection_closed": false
         }
       },
       "active_prefetch_jobs": 0,
