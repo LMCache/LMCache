@@ -30,7 +30,11 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
-from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
+from lmcache.observability import (
+    LMCacheStatsLogger,
+    LMCStatsMonitor,
+    StoreRequestStats,
+)
 from lmcache.usage_telemetry import InitializeUsageContext
 from lmcache.utils import (
     CacheEngineKey,
@@ -599,6 +603,33 @@ class LMCacheEngine:
             store_stats.put_time * 1000,
         )
 
+    def _store_layer_skipped(
+        self,
+        monitor_req_id: Optional[StoreRequestStats] = None,
+    ) -> Generator[None, None, None]:
+        """Stand in for a ``store_layer`` that stores nothing.
+
+        ``store_layer``'s callers advance it a fixed number of times and cannot
+        know in advance whether the store will be skipped: the vLLM adapter
+        advances it once per layer from ``save_kv_layer`` and once more from
+        ``wait_for_save``. Every exit path therefore has to yield
+        ``num_layers + 1`` times, or the caller's ``next()`` raises
+        ``StopIteration`` -- which vLLM surfaces as ``EngineDeadError``, killing
+        the engine rather than degrading.
+
+        :param monitor_req_id: the stats-monitor request opened by
+            ``on_store_request``, if one was opened before the store was
+            skipped. It is closed here with zero stored tokens, in the same
+            position the hit and miss paths close theirs -- after the per-layer
+            yields and before the finalizing one. The unhealthy path returns
+            before the request is opened and passes nothing.
+        """
+        for _ in range(self.num_layers):
+            yield
+        if monitor_req_id is not None:
+            self.stats_monitor.on_store_finished(monitor_req_id, 0)
+        yield
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store_layer(
@@ -630,6 +661,7 @@ class LMCacheEngine:
         # Health check: block operation if LMCache is unhealthy
         if not self.is_healthy():
             logger.warning("LMCache is unhealthy, skipping store_layer operation")
+            yield from self._store_layer_skipped()
             return
 
         assert self.storage_manager is not None
@@ -661,9 +693,10 @@ class LMCacheEngine:
                 "Freeze mode enabled, skipping store_layer for %d tokens",
                 num_to_store_tokens,
             )
-            # Still need to yield to avoid StopIteration
-            for layer_id in range(self.num_layers):
-                yield
+            # Still need to yield to avoid StopIteration -- including the
+            # finalizing advance from wait_for_save. The monitor request opened
+            # just above is closed by the helper, as on the hit and miss paths.
+            yield from self._store_layer_skipped(monitor_req_id)
             return
 
         starts = []
