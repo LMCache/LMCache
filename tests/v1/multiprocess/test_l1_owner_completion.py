@@ -131,6 +131,7 @@ def test_store_owner_callback_round_trip(
         num_object_groups=2,
         num_kernel_groups=2,
         object_groups=[ObjectGroupInfo(kernel_group_indices=[i]) for i in range(2)],
+        get_subchunk_sw_size_tokens=lambda _: 1,
     )
     entry = SimpleNamespace(
         cache_context=cache_context, model_name="model", event_backend=backend

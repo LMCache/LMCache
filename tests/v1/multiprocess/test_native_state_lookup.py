@@ -35,7 +35,9 @@ from lmcache.v1.multiprocess.engine_context import (
     MPCacheServerContext,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import all_null_chunk_masks
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    incomplete_chunk_masks,
+)
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -192,7 +194,7 @@ def _lookup(
         # Every native store contributes PAGE for its token range and only
         # one STATE object at its endpoint, exactly as the ATOM worker emits.
         for ordinal, endpoint in enumerate(endpoints):
-            masks = all_null_chunk_masks(
+            masks = incomplete_chunk_masks(
                 [
                     list(range(endpoint * 4)),
                     [-1] * (endpoint - 1) + [ordinal],

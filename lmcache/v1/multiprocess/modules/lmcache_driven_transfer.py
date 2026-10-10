@@ -81,47 +81,46 @@ def get_layout_desc(
     return MemoryLayoutDesc(shapes=list(shapes), dtypes=list(dtypes))
 
 
-def all_null_chunk_masks(
+def incomplete_chunk_masks(
     block_ids: Sequence[Sequence[int]],
     object_groups: Sequence[ObjectGroupInfo],
     blocks_per_chunk: Sequence[int],
     num_chunks: int,
     null_block_id: int = 0,
 ) -> list[list[bool]]:
-    """Mark, per object group, the chunks whose engine block ids are all null.
+    """Mark chunks missing any block required by their object group.
 
-    A chunk is null for an object group when every block ID of every kernel
-    group equals the server's null marker. Align-mode Mamba/linear
-    layers produce such chunks: only the block holding the last recurrent state
-    is real, so every earlier chunk is null. These chunks must not be stored --
-    the null block carries no valid KV, and object keys are content hashes, so
-    committing them would serve garbage to a later prefix hit.
+    Every retained block of every kernel group must be present before an object
+    can be stored. A real full-attention block does not make an absent
+    sliding-window slice valid. The null block carries no valid KV; committing
+    its contents under a token hash would corrupt a later prefix hit.
 
     Args:
-        block_ids: Raw per-kernel-group engine block ids (before any downsample),
-            indexed by kernel-group index.
+        block_ids: Per-kernel-group engine block IDs after
+            ``downsample_and_stage_block_ids`` has removed unused blocks.
         object_groups: The object groups, indexed by object-group id.
-        blocks_per_chunk: Blocks in one chunk per kernel group, indexed by
-            kernel-group index.
+        blocks_per_chunk: Retained blocks in one chunk per kernel group,
+            indexed by kernel-group index.
         num_chunks: Number of chunks in the request.
         null_block_id: Server-wide block ID denoting absent data. Defaults to
             the historical vLLM null block zero.
 
     Returns:
-        ``mask[g][i]`` is True iff chunk ``i`` is all-null for object group ``g``.
+        ``mask[g][i]`` is True iff chunk ``i`` has a null block in object group
+        ``g``. Null blocks discarded by downsampling do not affect the mask.
     """
     masks: list[list[bool]] = []
     for group in object_groups:
         chunk_null: list[bool] = []
         for i in range(num_chunks):
-            is_null = True
+            is_null = False
             for kg in group.kernel_group_indices:
                 bpc = blocks_per_chunk[kg]
                 if any(
-                    block != null_block_id
+                    block == null_block_id
                     for block in block_ids[kg][i * bpc : (i + 1) * bpc]
                 ):
-                    is_null = False
+                    is_null = True
                     break
             chunk_null.append(is_null)
         masks.append(chunk_null)
@@ -600,6 +599,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             RuntimeError: If the backend does not support IPC event handles.
 
         Notes:
+            An object with any null block in its retained slices is skipped;
+            complete objects in other chunks or object groups can still be stored.
             All-or-nothing. If ``gpu_block_ids`` do not fully cover every chunk
             ``key`` resolves to for every LMCache group (e.g. a caller/protocol
             bug), a copy fails, or completion ownership is invalid, the whole
@@ -681,21 +682,30 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     [],
                 )
 
-            # Chunks whose block ids are all the null block (e.g. align-mode
-            # Mamba chunks holding no real state) carry no valid KV and must not
-            # be committed. Computed on the raw block ids before downsampling
-            # mutates them.
-            null_block_id = self._ctx.null_block_id
-            skipped_chunks = all_null_chunk_masks(
-                gpu_block_ids,
-                cache_context.kv_layer_groups_manager.object_groups,
-                blocks_per_chunk,
-                num_chunks,
-                null_block_id,
-            )
-
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
+            )
+
+            # Downsampling mutates gpu_block_ids in place. Check those retained
+            # slices: discarded null blocks are harmless, but any missing
+            # retained block invalidates the whole object.
+            retained_blocks_per_chunk = [
+                cache_context.calculate_num_blocks(
+                    cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(
+                        group_idx
+                    ),
+                    group_idx,
+                )
+                for group_idx in range(
+                    cache_context.kv_layer_groups_manager.num_kernel_groups
+                )
+            ]
+            skipped_chunks = incomplete_chunk_masks(
+                gpu_block_ids,
+                cache_context.kv_layer_groups_manager.object_groups,
+                retained_blocks_per_chunk,
+                num_chunks,
+                self._ctx.null_block_id,
             )
 
             producer_event = event_backend.import_event(
@@ -769,7 +779,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             iter(reserved_dict.values())
                         ).get_size() * len(reserved_dict)
 
-                    # Keys not in reserved_dict (all-null chunks skipped above, or
+                    # Keys not in reserved_dict (incomplete chunks skipped above, or
                     # skipped by the storage manager) become None entries; the
                     # helper skips them for D2H.
                     memory_objs: list[MemoryObj | None] = [
