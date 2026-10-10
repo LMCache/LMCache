@@ -54,9 +54,11 @@ State machine overview (worker-side):
                  |                               |
                  v                               v
       LMCacheDrivenTransferContext    EngineDrivenTransferContext
-          (device == CUDA)            (device != CUDA, sync fallback)
+          (device declares              (device declares
+           lmcache-driven;               engine-driven;
+           CUDA, NPU)                    sync fallback)
                  |                       AsyncEngineDrivenTransferContext
-                 |                       (device != CUDA, async primitives available)
+                 |                       (engine-driven, async primitives available)
                  |                               |
                  v                               v
               register()                      register()
@@ -140,10 +142,15 @@ Why `prepare → data operation → commit`:
   CPU chunks, performed between protocol phases.
 - `commit_*`: finalize and notify server to consume or release transfer state.
 
-`create_transfer_context()` selects the implementation once based on device type
-and async capability:
-- CUDA device → `LMCacheDrivenTransferContext`
-- Non-CUDA device → `_build_engine_driven_context()`, which probes async primitives:
+`create_transfer_context()` selects the implementation once based on the
+resolved mode and async capability. An explicit mode (extra_config /
+`LMCACHE_MP_TRANSFER_MODE`) wins; `auto` resolves to the device spec's
+declared default (`DeviceSpec.default_mp_transfer_mode()` — the base
+derives it from `is_lmcache_driven_available()`, so CUDA and NPU get
+lmcache-driven while opt-in-only stacks and every other device stay
+engine-driven):
+- Resolved lmcache-driven → `_build_lmcache_driven_context()`
+- Resolved engine-driven → `_build_engine_driven_context()`, which probes async primitives:
   - async primitives available (stream, event with record/synchronize/wait, pin_memory) →
     `AsyncEngineDrivenTransferContext`
   - otherwise → `EngineDrivenTransferContext` (synchronous fallback)
