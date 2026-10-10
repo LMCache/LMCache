@@ -1348,6 +1348,42 @@ class TestReservationFailures:
             adapter.close()
             l1_manager.close()
 
+    def test_out_of_memory_keeps_columns_completed_by_l1_hits(self):
+        layout = make_layout()
+        object_bytes = 100 * 2 * 512 * 2
+        l1_manager = L1Manager(
+            make_l1_config(size_in_bytes=object_bytes * 5 + 65536, use_lazy=False)
+        )
+        adapter = make_adapter()
+        rows = [
+            make_group([make_object_key(i, gid=gid) for i in range(2)], gid=gid)
+            for gid in range(3)
+        ]
+        resident = [rows[0].keys[0], rows[2].keys[0]]
+        write_keys_to_l1(l1_manager, resident, layout)
+        store_keys_in_l2(
+            adapter, [rows[1].keys[0]] + [row.keys[1] for row in rows], layout
+        )
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+        try:
+            req_id = ctrl.submit_prefetch_request(
+                make_spec(rows, fetching_policy="full")
+            )
+            result = wait_for_result(ctrl, req_id, timeout=10.0)
+
+            assert [row_bits(result, r) for r in range(3)] == [[0], [0], [0]]
+            held = [row.keys[0] for row in rows]
+            assert_read_locked(l1_manager, held)
+            assert_absent(l1_manager, [row.keys[1] for row in rows])
+            assert l1_manager.get_staging_memory_usage() == 0
+            assert_l2_unlocked(adapter)
+            l1_manager.finish_read(held)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            l1_manager.close()
+
     def test_contended_key_is_dropped_under_prefix(self, l1_manager):
         """A key admitted by another writer after the lock pass fails to
         reserve; under "prefix" the hit stops before it."""
