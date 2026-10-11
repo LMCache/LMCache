@@ -106,6 +106,29 @@ def _quota_entries_for_tier(store: QuotaManager, tier: Tier) -> dict[str, int]:
     return {entry.cache_salt: entry.limit_bytes for entry in store.list_quotas()}
 
 
+def _effective_limit_gb_for_tier(
+    store: QuotaManager, tier: Tier, cache_salt: str
+) -> float:
+    """Return the effective quota limit for a status row, in GiB.
+
+    ``quota_exists`` is deliberately separate from this value: a default
+    quota applies to an unregistered L2 salt without creating an explicit
+    registry entry. L1 has no applicable quota, regardless of the L2 default.
+
+    Args:
+        store: Registry containing explicit quotas and the default limit.
+        tier: The concrete tier requested by the status reader.
+        cache_salt: Tenant whose effective limit is being reported.
+
+    Returns:
+        The applicable budget in GiB, or zero if no quota applies.
+    """
+    if tier != _QUOTA_TIER:
+        return 0.0
+    limit = store.effective_limit_bytes(cache_salt)
+    return _gb(limit) if limit is not None else 0.0
+
+
 def _gb(n_bytes: int) -> float:
     """Convert bytes to GiB."""
     return n_bytes / _GB
@@ -244,10 +267,9 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         quota = controller.quota
         usage = ctx.views.get(CacheUsageManager).get_salt_bytes(tier, cache_salt)
         exists = tier == _QUOTA_TIER and quota.has_quota(cache_salt)
-        limit = quota.get_limit_bytes(cache_salt) if exists else 0
         return StatusResponse(
             cache_salt=cache_salt,
-            quota_limit_gb=_gb(limit),
+            quota_limit_gb=_effective_limit_gb_for_tier(quota, tier, cache_salt),
             quota_exists=exists,
             usage_gb=_gb(usage),
         )
@@ -278,9 +300,9 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
             by_cache_salt=[
                 StatusResponse(
                     cache_salt=salt,
-                    quota_limit_gb=_gb(quota_entries[salt])
-                    if salt in quota_entries
-                    else 0.0,
+                    quota_limit_gb=_effective_limit_gb_for_tier(
+                        controller.quota, tier, salt
+                    ),
                     quota_exists=salt in quota_entries,
                     usage_gb=_gb(by_salt.get(salt, 0)),
                 )
