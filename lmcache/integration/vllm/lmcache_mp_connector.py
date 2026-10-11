@@ -1547,11 +1547,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 
-        # Drop lookup state for a request aborted before its lookup was
-        # consumed (update_state_after_alloc never ran for it). Both the eager
-        # and the lazy path need this, so it runs before they diverge.
-        self.scheduler_adapter.cleanup_lookup_result(request.request_id)
-
+        # Notify LMCache to end the session for this request BEFORE
+        # cleaning up lookup state. end_session() waits for any pending
+        # LOOKUP ack; if cleanup_lookup_result() runs first it clears
+        # the unacked lookups and end_session() returns immediately,
+        # allowing the server to handle END_SESSION before LOOKUP
+        # (issue #5578).
         if self.lazy_offload:
             # Blocks return to the free queue (False) and remain observable;
             # the manager ends the LMCache session after all deferred stores
@@ -1559,10 +1560,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             actions = self._lazy_offload_manager.on_request_finished(request.request_id)
             for request_id in actions.sessions_to_end:
                 self.scheduler_adapter.end_session(request_id)
+        else:
+            self.scheduler_adapter.end_session(request.request_id)
+
+        # Drop lookup state for a request aborted before its lookup was
+        # consumed (update_state_after_alloc never ran for it).
+        self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+
+        if self.lazy_offload:
             return False, (return_params or None)
 
-        # Notify LMCache to end the session for this request
-        self.scheduler_adapter.end_session(request.request_id)
         return self._can_store, (return_params or None)
 
     def request_finished_all_groups(
