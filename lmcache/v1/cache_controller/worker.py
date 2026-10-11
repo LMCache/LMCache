@@ -338,10 +338,19 @@ class LMCacheWorker:
         self._create_req_socket()
 
     def _get_full_sync_sender(self):
-        """Lazy initialization of FullSyncSender"""
+        """Lazy initialization of FullSyncSender.
+
+        Returns None until the engine has created its storage manager, which
+        happens only after the KV caches are registered. A worker registers
+        with the controller before that, so the first FullSyncCommand can
+        arrive while there is nothing to sync yet.
+        """
         if self._full_sync_sender is None:
+            storage_manager = getattr(self.lmcache_engine, "storage_manager", None)
+            if storage_manager is None:
+                return None
             # Get the local_cpu_backend from lmcache_engine
-            local_cpu_backend = self.lmcache_engine.storage_manager.local_cpu_backend
+            local_cpu_backend = storage_manager.local_cpu_backend
             self._full_sync_sender = FullSyncSender(
                 config=self.config,
                 worker=self,
