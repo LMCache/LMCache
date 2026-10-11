@@ -1252,6 +1252,31 @@ def test_failed_receive_request_ids(
     assert adapter.get_failed_request_ids() == set()
 
 
+@pytest.mark.parametrize("unhealthy", [False, True])
+def test_failed_retrieve_does_not_report_skipped_prefix_blocks(
+    fake_adapter, unhealthy: bool
+) -> None:
+    adapter, _, _ = fake_adapter
+    adapter.transfer_ctx = MagicMock()
+    future = adapter.transfer_ctx.submit_retrieve.return_value
+    future.query.return_value = True
+    future.result.return_value = False
+    if unhealthy:
+        FakeHeartbeatThread.start_hook = lambda hb: hb.health_event.clear()
+    op = LoadStoreOp(
+        token_ids=list(range(64)),
+        block_ids=[[3, 4, 5, 6]],
+        start=0,
+        end=64,
+        skip_first_n_tokens=32,
+    )
+
+    adapter.submit_retrieve_request("req-1", op, None)
+
+    assert adapter.get_finished(set())[1] == {"req-1"}
+    assert adapter.get_block_ids_with_load_errors() == {5, 6}
+
+
 def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> None:
     """A failed full async load must not re-enter remote wait forever."""
     pytest.importorskip("vllm")
