@@ -86,8 +86,8 @@ class ReadLockReservation:
 
         :param keys: The keys one retrieve reads.
         :return: True if every key had a lock left for each of its
-            occurrences; the caller then owns those locks and must release or
-            :meth:`unclaim` them. False (and nothing claimed) otherwise.
+            occurrences; the caller then owns those locks and must release
+            them. False (and nothing claimed) otherwise.
         """
         need = Counter(keys)
         if any(self.held.get(k, 0) < n for k, n in need.items()):
@@ -95,11 +95,6 @@ class ReadLockReservation:
         for k, n in need.items():
             self.held[k] -= n
         return True
-
-    def unclaim(self, keys: list[ObjectKey]) -> None:
-        """Hand back claimed locks a retrieve did not use (still held)."""
-        for k in keys:
-            self.held[k] = self.held.get(k, 0) + 1
 
     def sweep(
         self, sent: set[bytes], upto: int, final: bool

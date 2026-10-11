@@ -763,8 +763,15 @@ class RetrieveMixin:
                     f"/{len(cb_match_result)} match(es) beyond "
                     f"slot_bound={slot_bound}",
                 )
-        # Configuration checks that can raise run before the read locks are
-        # claimed below, so a raise never strands a claimed lock.
+        if not cb_match_result:
+            return _no_scatter(RetrieveReason.NO_OBJECT_KEYS)
+        # Non-prefix sparse hits split by re-rope need (not prefix coverage).
+        n_non_shifted = sum(1 for r in cb_match_result if r.old_st == r.cur_st)
+        n_shifted = len(cb_match_result) - n_non_shifted
+
+        # Everything that can raise and does not need the read locks runs
+        # before they are claimed: from the claim on, only the storage read
+        # context below can own them.
         # CB supports only uncompressed single-block-id-space layouts, so the
         # first staged kernel group is representative.
         tokens_per_block = gpu_context.kv_layer_groups_manager.kernel_groups[
@@ -795,93 +802,43 @@ class RetrieveMixin:
             group_bs = kgm.kernel_groups[group_idx].tokens_per_block
             cpu_block_tables.append((block_ids_np[eg_idx], group_bs))
 
-        # The lookup read-locked every match it found and reserved those locks
-        # on the session. A request can be retrieved over several calls, one
-        # per engine prefill chunk, each with only that chunk's matches. Each
-        # call claims one lock per key it reads (and then owns its release),
-        # and releases the matches no later call can send. A call whose keys
-        # the request no longer holds reads nothing: the L1 read check only
-        # sees that *some* request holds a lock, so reading (and later
-        # releasing) them could take another request's lock. ``get``, not
-        # ``get_or_create``: a retrieve after session end must not recreate
-        # ownership state.
-        session = self._ctx.session_manager.get(key.request_id)
-        claim = (
-            self._claim_read_locks(
-                session, cb_match_result, key, read_groups.blend_gids, slot_bound
-            )
-            if session is not None
-            else None
-        )
-        if claim is None:
-            return _no_scatter(
-                RetrieveReason.READ_LOCKS_NOT_HELD,
-                "the request no longer holds a read lock on every matched key",
-            )
-        all_obj_keys, l1_owners = claim
-
-        # Non-prefix sparse hits split by re-rope need (not prefix coverage).
-        n_non_shifted = sum(1 for r in cb_match_result if r.old_st == r.cur_st)
-        n_shifted = len(cb_match_result) - n_non_shifted
-
-        if not all_obj_keys:
-            return _no_scatter(RetrieveReason.NO_OBJECT_KEYS)
-
-        logger.debug("CB retrieving object keys: %s", all_obj_keys)
-
-        # Retrieve-owned stream: never the shared stream (FIFO behind store
-        # copies re-creates the device-sync stall).
-        retrieve_stream = self._cb_retrieve_streams.get(gpu_context)
-        if retrieve_stream is None:
-            if gpu_context.device.type == "cuda":
-                retrieve_stream = torch_dev.Stream(device=gpu_context.device)
-                # Third Party
-                import cupy
-
-                retrieve_cupy_stream = cupy.cuda.ExternalStream(
-                    retrieve_stream.cuda_stream, gpu_context.device.index
-                )
-            else:
-                retrieve_stream = gpu_context.stream
-                retrieve_cupy_stream = gpu_context.cupy_stream
-            self._cb_retrieve_streams[gpu_context] = retrieve_stream
-            self._cb_retrieve_cupy_streams[gpu_context] = retrieve_cupy_stream
-        retrieve_cupy_stream = self._cb_retrieve_cupy_streams[gpu_context]
-
+        retrieve_stream, retrieve_cupy_stream = self._cb_retrieve_stream(gpu_context)
         with (
             torch_dev.device(gpu_context.device),
             torch_dev.stream(retrieve_stream),
         ):
             event = event_backend.create_event(gpu_context.device)
-
-            # CPU-synchronous sentinel holds cb.request open across the GPU
-            # work so another worker's no-op CB_REQUEST_END cannot close the
-            # root early; the root closes on the last CB_RETRIEVE_END.
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.CB_RETRIEVE_SUBMITTED,
-                    session_id=key.request_id,
-                    metadata={"instance_id": instance_id},
-                )
-            )
-
-            self._event_bus.publish_on_stream(
-                gpu_context.cupy_stream,
-                Event(
-                    event_type=EventType.CB_RETRIEVE_START,
-                    session_id=key.request_id,
-                    metadata={
-                        "num_chunks": len(cb_match_result),
-                        "model_name": key.model_name,
-                        "worker_id": key.worker_id,
-                    },
-                ),
-            )
-
+            # The client supplies this handle, so importing it can raise.
             vllm_event = event_backend.import_event(
                 event_ipc_handle, gpu_context.device
             )
             event_backend.wait_event(vllm_event, retrieve_stream)
+
+            # The lookup read-locked every match it found and reserved those
+            # locks on the session. A request can be retrieved over several
+            # calls, one per engine prefill chunk, each with only that chunk's
+            # matches. Each call claims one lock per key it reads (and then
+            # owns its release), and releases the matches no later call can
+            # send. A call whose keys the request no longer holds reads
+            # nothing: the L1 read check only sees that *some* request holds a
+            # lock, so reading (and later releasing) them could take another
+            # request's lock. ``get``, not ``get_or_create``: a retrieve after
+            # session end must not recreate ownership state.
+            session = self._ctx.session_manager.get(key.request_id)
+            claim = (
+                self._claim_read_locks(
+                    session, cb_match_result, key, read_groups.blend_gids, slot_bound
+                )
+                if session is not None
+                else None
+            )
+            if claim is None:
+                return _no_scatter(
+                    RetrieveReason.READ_LOCKS_NOT_HELD,
+                    "the request no longer holds a read lock on every matched key",
+                )
+            all_obj_keys, l1_owners = claim
+            logger.debug("CB retrieving object keys: %s", all_obj_keys)
 
             # Stage marks for the scatter_ms log line (CPU enqueue wall time):
             # fetch = prefetched read, plan = table build, exec = native enqueue.
@@ -890,10 +847,37 @@ class RetrieveMixin:
             # cb.scatter opens mid-try; track it so a failure closes the span.
             scatter_open = False
             try:
+                # The read context owns the claimed locks from here: it
+                # releases the keys it read when the read fails or anything
+                # inside it raises, and the release after it takes over on a
+                # clean exit.
                 with self._ctx.storage_manager.read_prefetched_results(
                     all_obj_keys, l1_owners=l1_owners
                 ) as memory_objs:
                     _stage_ms["fetch"] = (time.perf_counter() - _stage_t) * 1000
+                    # CPU-synchronous sentinel holds cb.request open across the
+                    # GPU work so another worker's no-op CB_REQUEST_END cannot
+                    # close the root early; the root closes on the last
+                    # CB_RETRIEVE_END.
+                    self._event_bus.publish(
+                        Event(
+                            event_type=EventType.CB_RETRIEVE_SUBMITTED,
+                            session_id=key.request_id,
+                            metadata={"instance_id": instance_id},
+                        )
+                    )
+                    self._event_bus.publish_on_stream(
+                        gpu_context.cupy_stream,
+                        Event(
+                            event_type=EventType.CB_RETRIEVE_START,
+                            session_id=key.request_id,
+                            metadata={
+                                "num_chunks": len(cb_match_result),
+                                "model_name": key.model_name,
+                                "worker_id": key.worker_id,
+                            },
+                        ),
+                    )
                     if memory_objs is None:
                         # Read failed. The read context releases the keys it
                         # did read (one lock each), which spends this call's
@@ -1125,6 +1109,29 @@ class RetrieveMixin:
             ),
         )
         return event_backend.export_event(event, gpu_context.device), True
+
+    def _cb_retrieve_stream(self, gpu_context: BaseCacheContext) -> tuple[Any, Any]:
+        """Return the context's retrieve-owned ``(stream, cupy_stream)``.
+
+        Never the shared stream: FIFO behind store copies re-creates the
+        device-sync stall. Created on first use, then cached per context.
+        """
+        retrieve_stream = self._cb_retrieve_streams.get(gpu_context)
+        if retrieve_stream is None:
+            if gpu_context.device.type == "cuda":
+                retrieve_stream = torch_dev.Stream(device=gpu_context.device)
+                # Third Party
+                import cupy
+
+                retrieve_cupy_stream = cupy.cuda.ExternalStream(
+                    retrieve_stream.cuda_stream, gpu_context.device.index
+                )
+            else:
+                retrieve_stream = gpu_context.stream
+                retrieve_cupy_stream = gpu_context.cupy_stream
+            self._cb_retrieve_streams[gpu_context] = retrieve_stream
+            self._cb_retrieve_cupy_streams[gpu_context] = retrieve_cupy_stream
+        return retrieve_stream, self._cb_retrieve_cupy_streams[gpu_context]
 
     def _claim_read_locks(
         self,

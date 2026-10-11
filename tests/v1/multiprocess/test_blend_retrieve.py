@@ -6,6 +6,8 @@ wave slotting, and the fallback gates (non-lazy objects, compressed groups).
 Moved from test_blend_load_store_opts.py in the blend package split."""
 
 # Standard
+from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 import random
@@ -14,6 +16,7 @@ import time
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache import device_ops  # noqa: F401
@@ -582,11 +585,18 @@ _UNRETRIEVED_TTL_NEVER = 3600.0
 
 class _LockCountingStorageManager:
     """Counts read locks per key: the sparse prefetch locks every submitted
-    key; ``finish_read_prefetched`` is the only release. Over-release raises.
+    key; ``finish_read_prefetched`` is the only release. Over-release raises
+    and is recorded in ``over_released`` (a retrieve swallows the raise).
+
+    ``read_prefetched_results`` follows the real storage manager: a key is
+    readable while any request holds a lock on it, and the context releases
+    one lock per key it read when the read fails or its body raises.
     """
 
     def __init__(self) -> None:
         self.locks: dict = {}
+        self.over_released: list = []
+        self.reads: list = []
 
     def submit_prefetch_task(self, spec, external_request_id=None):
         if spec.fetching_policy == "full":
@@ -600,8 +610,8 @@ class _LockCountingStorageManager:
         return handle
 
     def query_prefetch_status(self, handle):
-        # Every submitted key is found and was loaded from L2: one all-set
-        # bitmap per row.
+        # Every submitted key is found and was loaded from L2 into L1 0: one
+        # all-set bitmap per row.
         # First Party
         from lmcache.lmcache_native import Bitmap
         from lmcache.v1.distributed.api import PrefetchResult
@@ -613,12 +623,27 @@ class _LockCountingStorageManager:
             hit_cells=rows(),
             l1_hit_cells=[Bitmap(len(row.keys)) for row in handle.key_groups],
             l2_hit_cells=rows(),
+            l1_owners={key: 0 for row in handle.key_groups for key in row.keys},
         )
+
+    @contextmanager
+    def read_prefetched_results(self, keys, l1_owners=None):
+        self.reads.append(list(keys))
+        good = [k for k in dict.fromkeys(keys) if self.locks.get(k, 0) > 0]
+        all_good = len(good) == len(set(keys))
+        yielded = False
+        try:
+            yield [object() for _ in good] if all_good else None
+            yielded = True
+        finally:
+            if not all_good or not yielded:
+                self.finish_read_prefetched(good)
 
     def finish_read_prefetched(self, keys, read_locks: int = 1, l1_owners=None) -> None:
         for key in keys:
             held = self.locks.get(key, 0)
             if held < read_locks:
+                self.over_released.append(key)
                 raise AssertionError(f"over-release on {key}")
             if held == read_locks:
                 del self.locks[key]
@@ -662,9 +687,15 @@ def _unretrieved_blend(ctx: MagicMock):
 
 
 def _run_unretrieved_lookup(blend, request_id: str, num_kv_readers: int = 1):
+    """:func:`_run_lookup`, returning only the lookup key."""
+    return _run_lookup(blend, request_id, num_kv_readers)[0]
+
+
+def _run_lookup(blend, request_id: str, num_kv_readers: int = 1):
     """Register ``_UNRETRIEVED_N_CHUNKS`` fingerprints and run a lookup that
     finds them all shifted (prefix coverage 0), i.e. the sparse leg locks
-    every chunk with ``num_kv_readers`` locks each. Returns the lookup key."""
+    every chunk with ``num_kv_readers`` locks each. Returns the lookup key and
+    the matches it found, in prompt order."""
     # First Party
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
@@ -693,7 +724,7 @@ def _run_unretrieved_lookup(blend, request_id: str, num_kv_readers: int = 1):
     assert result is not None
     assert result.prefix_coverage_tokens == 0
     assert len(result.non_prefix_segments) == _UNRETRIEVED_N_CHUNKS
-    return key
+    return key, result.non_prefix_segments
 
 
 def test_session_end_releases_unretrieved_sparse_locks():
@@ -1002,13 +1033,6 @@ def test_claim_counts_a_repeated_key_per_occurrence():
     res = _reservation({b"a": ["a0"]}, read_locks=1)
     assert not res.claim(["a0", "a0"]), "one lock cannot cover two reads"
     assert res.held == {"a0": 1}
-
-
-def test_unclaim_hands_a_lock_back():
-    res = _reservation({b"a": ["a0"]})
-    assert res.claim(["a0"])
-    res.unclaim(["a0"])
-    assert res.claim(["a0"])
 
 
 def test_each_mla_reader_claims_one_lock():
@@ -1338,3 +1362,279 @@ def test_tp_ranks_and_session_end_release_each_lock_once():
         _race_tp_ranks_against_session_end(
             round_no, n_chunks=rng.randint(1, 4), end_delay_s=rng.uniform(0, 0.004)
         )
+
+
+# ---------------------------------------------------------------------------
+# The retrieve handler end to end: cb_retrieve_pre_computed against the real
+# lookup, ledger and session manager. The GPU side is a CPU stand-in (no-op
+# streams and events, a stubbed native scatter), the storage manager is the
+# lock-counting fake, and stream-ordered releases run when enqueued.
+# ---------------------------------------------------------------------------
+
+_TOKENS_PER_BLOCK = 16
+
+
+class _InjectedError(RuntimeError):
+    """The failure a test injects into the retrieve."""
+
+
+class _FakeEventBackend:
+    """No-op device events; ``import_error`` makes the client's handle fail."""
+
+    def __init__(self, import_error: BaseException | None = None) -> None:
+        self.import_error = import_error
+
+    def create_event(self, device):
+        return object()
+
+    def record_event(self, event, stream) -> None:
+        pass
+
+    def export_event(self, event, device) -> bytes:
+        return b"server-event"
+
+    def import_event(self, handle, device):
+        if self.import_error is not None:
+            raise self.import_error
+        return object()
+
+    def wait_event(self, event, stream) -> None:
+        pass
+
+
+class _FakeGpuContext:
+    """One attention object group on one kernel group, on the CPU."""
+
+    def __init__(self, tokens_per_block: int, engine_group_idx: int = 0) -> None:
+        # First Party
+        from lmcache.v1.distributed.api import AttnWindowDesc
+
+        attn_desc = AttnWindowDesc(
+            num_chunks_in_sw=[-1], world_size=1, group_kinds=("attention",)
+        )
+        self.device = torch.device("cpu")
+        self.stream = None
+        self.cupy_stream = MagicMock(name="cupy_stream")
+        self.max_batch_size = 4
+        self.kv_layer_groups_manager = SimpleNamespace(
+            get_attn_desc=lambda: attn_desc,
+            object_groups=[SimpleNamespace(kernel_group_indices=[0])],
+            kernel_groups=[
+                SimpleNamespace(
+                    tokens_per_block=tokens_per_block,
+                    engine_group_idx=engine_group_idx,
+                )
+            ],
+        )
+
+
+def _retrieve_rig(
+    monkeypatch,
+    request_id: str,
+    *,
+    tokens_per_block: int = _TOKENS_PER_BLOCK,
+    engine_group_idx: int = 0,
+    import_error: BaseException | None = None,
+):
+    """Run the real lookup, then return ``(blend, ctx, storage, key,
+    matches, retrieve)``; ``retrieve(matches, alloc_tokens)`` calls the
+    handler as TP rank 0 with ``alloc_tokens`` of the prompt allocated."""
+    storage = _LockCountingStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+    key, matches = _run_lookup(blend, request_id)
+    gpu_context = _FakeGpuContext(tokens_per_block, engine_group_idx)
+    blend._transfer_module.get_and_touch_context_entry.return_value = SimpleNamespace(
+        cache_context=gpu_context,
+        event_backend=_FakeEventBackend(import_error),
+    )
+    blend._cb_rope_state[0] = MagicMock(name="rope_state")
+    monkeypatch.setattr(
+        retrieve_mod,
+        "torch_dev",
+        SimpleNamespace(device=lambda d: nullcontext(), stream=lambda s: nullcontext()),
+    )
+    monkeypatch.setattr(
+        blend,
+        "_build_cb_retrieve_plan_flat",
+        lambda *args: ([], (None, None, None, None), []),
+    )
+    monkeypatch.setattr(
+        retrieve_mod.device_ops,
+        "execute_cb_retrieve_plan_flat",
+        lambda *args: None,
+        raising=False,
+    )
+
+    def release_when_enqueued(stream, kind, payload) -> None:
+        if kind == "finish_read_by_owner":
+            for _owner, keys in payload:
+                storage.finish_read_prefetched(keys)
+        else:
+            storage.finish_read_prefetched(payload)
+
+    monkeypatch.setattr(
+        retrieve_mod, "submit_callback_to_stream", release_when_enqueued
+    )
+    rank_key = replace(key, worker_id=0)
+
+    def retrieve(sent, alloc_tokens: int):
+        n_blocks = -(-alloc_tokens // tokens_per_block)
+        return blend.cb_retrieve_pre_computed(
+            rank_key, list(sent), [list(range(n_blocks))], 0, b"client-event"
+        )
+
+    return blend, ctx, storage, key, matches, retrieve
+
+
+def _inject_on_publish(ctx, event_type) -> None:
+    """Make publishing ``event_type`` on a stream raise."""
+
+    def publish_on_stream(stream, event) -> None:
+        if event.event_type is event_type:
+            raise _InjectedError(f"injected at {event_type}")
+
+    ctx.event_bus.publish_on_stream.side_effect = publish_on_stream
+
+
+def test_handler_single_shot_reads_each_match_and_releases_each_lock_once(
+    monkeypatch,
+):
+    blend, ctx, storage, key, matches, retrieve = _retrieve_rig(
+        monkeypatch, "req-h-single"
+    )
+    m0, m1, m2, m3 = matches
+
+    # The engine recomputes m2: the client sends the rest in one call.
+    assert retrieve([m0, m1, m3], key.end)[1] is True
+    assert len(storage.reads) == 1 and len(storage.reads[0]) == 3
+    assert storage.outstanding() == 0, "read locks released and m2 swept"
+
+    ctx.session_manager.remove("req-h-single")
+    assert storage.outstanding() == 0 and storage.over_released == []
+
+
+def test_handler_reads_each_window_under_its_own_locks(monkeypatch):
+    """Chunked prefill: one call per window, each scattering its matches."""
+    blend, ctx, storage, key, matches, retrieve = _retrieve_rig(
+        monkeypatch, "req-h-windows"
+    )
+    m0, m1, m2, m3 = matches
+
+    assert retrieve([m0, m1], m1.cur_ed)[1] is True
+    assert storage.outstanding() == 2, "m2 and m3 stay held for later windows"
+    assert retrieve([m2, m3], key.end)[1] is True
+    assert storage.outstanding() == 0
+
+    ctx.session_manager.remove("req-h-windows")
+    assert storage.over_released == []
+
+
+def test_handler_refuses_a_match_the_lookup_did_not_reserve(monkeypatch):
+    """A match outside the reservation (e.g. a segmented-prefix tail chunk,
+    which the lookup does not reserve) reads nothing, and the request's
+    locks stay with its reservation."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+
+    blend, ctx, storage, key, matches, retrieve = _retrieve_rig(
+        monkeypatch, "req-h-unreserved"
+    )
+    st = 0  # the filler before the stored chunks: nothing matched there
+    unreserved = CBMatchResult(
+        old_st=st, old_ed=st + 128, cur_st=st, cur_ed=st + 128, hash=b"tail"
+    )
+
+    assert retrieve([unreserved, matches[0]], key.end)[1] is False
+    assert storage.reads == []
+    ctx.session_manager.remove("req-h-unreserved")
+    assert storage.outstanding() == 0 and storage.over_released == []
+
+
+@pytest.mark.parametrize(
+    "rig_kwargs",
+    [
+        pytest.param({"tokens_per_block": 96}, id="chunk_size_not_block_aligned"),
+        pytest.param({"engine_group_idx": 1}, id="missing_block_table"),
+    ],
+)
+def test_handler_config_error_leaves_every_lock_to_the_reservation(
+    monkeypatch, rig_kwargs
+):
+    """A misconfigured retrieve raises before it claims anything, so the
+    request's reservation still holds every lock and session end frees it."""
+    blend, ctx, storage, key, matches, retrieve = _retrieve_rig(
+        monkeypatch, "req-h-config", **rig_kwargs
+    )
+    with pytest.raises(ValueError):
+        retrieve(matches[:1], key.end)
+    assert storage.reads == []
+
+    ctx.session_manager.remove("req-h-config")
+    assert storage.outstanding() == 0 and storage.over_released == []
+
+
+def test_handler_failed_read_releases_what_it_read_once(monkeypatch):
+    blend, ctx, storage, key, matches, retrieve = _retrieve_rig(
+        monkeypatch, "req-h-badread"
+    )
+    session = ctx.session_manager.get("req-h-badread")
+    lost = session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA].per_hash[matches[1].hash][
+        0
+    ]
+    del storage.locks[lost]  # e.g. expired: the read finds it unreadable
+
+    assert retrieve(matches[:2], key.end)[1] is False
+    ctx.session_manager.remove("req-h-badread")
+    assert storage.outstanding() == 0 and storage.over_released == []
+
+
+def _inject_import(ctx, blend) -> None:
+    entry = blend._transfer_module.get_and_touch_context_entry.return_value
+    entry.event_backend.import_error = _InjectedError("bad client event handle")
+
+
+def _inject_retrieve_start(ctx, blend) -> None:
+    # First Party
+    from lmcache.v1.mp_observability.event import EventType
+
+    _inject_on_publish(ctx, EventType.CB_RETRIEVE_START)
+
+
+def _inject_plan(ctx, blend) -> None:
+    def plan(*args):
+        raise _InjectedError("plan")
+
+    blend._build_cb_retrieve_plan_flat = plan
+
+
+def _inject_scatter_end(ctx, blend) -> None:
+    # First Party
+    from lmcache.v1.mp_observability.event import EventType
+
+    _inject_on_publish(ctx, EventType.CB_SCATTER_END)
+
+
+@pytest.mark.parametrize(
+    "inject",
+    [_inject_import, _inject_retrieve_start, _inject_plan, _inject_scatter_end],
+    ids=["import_event", "retrieve_start", "plan", "scatter_end"],
+)
+def test_handler_raise_releases_each_claimed_lock_exactly_once(monkeypatch, inject):
+    """A raise anywhere in the retrieve neither strands a claimed lock (it
+    would stay pinned until the L1 read TTL) nor releases one twice (that
+    would take another request's lock)."""
+    blend, ctx, storage, key, matches, retrieve = _retrieve_rig(
+        monkeypatch, "req-h-raise"
+    )
+    inject(ctx, blend)
+
+    try:
+        scatter_ran = retrieve(matches[:2], key.end)[1]
+    except _InjectedError:
+        scatter_ran = False
+    assert scatter_ran is False
+
+    ctx.session_manager.remove("req-h-raise")
+    assert storage.over_released == []
+    assert storage.outstanding() == 0, "a claimed lock was stranded"
