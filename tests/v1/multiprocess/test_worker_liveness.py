@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for server-side worker liveness tracking and reaping.
+"""Unit tests for server management: liveness and CPU KV event subscriptions.
 
 Cover the public liveness interfaces of the transfer modules, the
 management reaper wiring, the blend reap listener, and config validation.
@@ -8,27 +8,67 @@ are stubbed.
 """
 
 # Standard
-from typing import cast
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Literal, cast
 from unittest.mock import MagicMock
 import threading
 import time
 
 # Third Party
 import pytest
+import zmq
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.custom_types import KV_EVENT_CAPABILITY
 from lmcache.v1.multiprocess.modules import engine_driven_transfer as non_gpu_mod
+from lmcache.v1.multiprocess.modules import kv_events as kv_events_mod
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as gpu_mod
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
+from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
+
+
+def _event_module(
+    size: int = 3,
+    bus: EventBus | None = None,
+) -> tuple[KVEventModule, EventBus]:
+    bus = bus or EventBus(EventBusConfig())
+    ctx = MagicMock(event_bus=bus)
+    return KVEventModule(ctx, kv_event_log_size=size), bus
+
+
+def _publish_kv(bus: EventBus, event_type: EventType, **metadata: Any) -> None:
+    bus.publish(Event(event_type, metadata=metadata))
+    bus.stop()  # Public shutdown flushes queued callbacks synchronously.
+
+
+def _event_key(index: int, model: str = "model", rank: int = 0) -> ObjectKey:
+    return ObjectKey(bytes([index]) * 32, model, rank)
+
+
+def _bind_kv(bus: EventBus, keys: list[ObjectKey]) -> None:
+    hashes = [key.chunk_hash for key in keys]
+    _publish_kv(
+        bus,
+        EventType.MP_TOKENS,
+        chunk_hashes=hashes,
+        token_chunks=[[i] for i in range(len(keys))],
+        token_offsets=list(range(len(keys))),
+        parent_hashes=[None] + hashes[:-1],
+    )
 
 
 def _bare_gpu_module() -> LMCacheDrivenTransferModule:
@@ -306,7 +346,7 @@ def test_management_report_status_summarizes_liveness() -> None:
     finally:
         mgmt.close()
 
-    assert ManagementModule(MagicMock()).report_status() == {}
+    assert "worker_liveness" not in ManagementModule(MagicMock()).report_status()
 
 
 def test_blend_drop_instance_state_drops_rope_state() -> None:
@@ -346,3 +386,250 @@ def test_config_accepts_disabled_and_defaults() -> None:
     default = MPServerConfig()
     assert default.worker_reap_timeout_seconds == 120.0
     assert default.worker_registration_grace_seconds == 3600.0
+
+
+def test_cpu_events_preserve_tokens_parents_and_deduplicate_ranks() -> None:
+    module, bus = _event_module()
+    keys = [_event_key(1), _event_key(2)]
+    _bind_kv(bus, keys)
+    _publish_kv(
+        bus,
+        EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
+        keys=[*keys, _event_key(1, rank=1)],
+    )
+    result = module.read_kv_events("model", 0, 8)
+    assert [
+        (r.kind, r.block_hashes, r.token_ids, r.parent_block_hash)
+        for r in result.events
+    ] == [
+        ("stored", [keys[0].chunk_hash], [0], None),
+        ("stored", [keys[1].chunk_hash], [1], keys[0].chunk_hash),
+    ]
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[keys[0], _event_key(1, rank=1)])
+    removed = module.read_kv_events("model", result.next_cursor, 8)
+    assert [(r.kind, r.medium, r.block_hashes) for r in removed.events] == [
+        ("removed", "CPU", [keys[0].chunk_hash]),
+    ]
+    assert removed.incarnation == result.incarnation and not removed.lost
+    assert module.read_kv_events("model", removed.next_cursor, 8).events == []
+
+
+def test_event_log_pages_filters_models_and_reports_overflow() -> None:
+    module, bus = _event_module(size=3)
+    for index, model in enumerate(("model", "other", "model")):
+        _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[_event_key(index, model)])
+    first = module.read_kv_events("model", 0, 1)
+    assert [r.seq for r in first.events] == [1] and first.next_cursor == 1
+    second = module.read_kv_events("model", first.next_cursor, 1)
+    assert [r.seq for r in second.events] == [3] and second.next_cursor == 3
+    assert not second.lost
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[_event_key(3)])
+    assert module.read_kv_events("model", 0, 8).lost
+    assert not module.read_kv_events("model", 1, 8).lost
+    stale = module.read_kv_events("model", 99, 8)
+    assert stale.lost and stale.next_cursor == 4 and stale.events == []
+
+
+def test_bus_loss_is_visible_without_later_bus_traffic() -> None:
+    module, bus = _event_module(bus=EventBus(EventBusConfig(max_queue_size=1)))
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[_event_key(1)])
+    event = Event(EventType.L1_KEYS_EVICTED, metadata={"keys": [_event_key(2)]})
+    bus.publish(event)
+    bus.publish(event)
+    bus.stop()
+    result = module.read_kv_events("model", 0, 8)
+    assert result.lost and result.events == [] and result.next_cursor == 3
+    assert not module.read_kv_events("model", result.next_cursor, 8).lost
+    assert module.report_status()["kv_events"]["lost_markers"] == 1
+    bus.stop()
+
+
+@pytest.mark.parametrize(
+    "bus_enabled, size",
+    [
+        (False, 3),
+        (True, 0),
+        (True, 3),
+    ],
+)
+def test_event_channel_enabled_and_disabled_state(
+    bus_enabled: bool,
+    size: int,
+) -> None:
+    module, _ = _event_module(
+        size,
+        EventBus(EventBusConfig(enabled=bus_enabled)),
+    )
+    enabled = bus_enabled and size > 0
+    result = module.read_kv_events("model", 0, 8)
+    assert result.enabled == enabled and result.events == []
+    assert module.enabled == enabled
+    assert (
+        _event_module()[0].read_kv_events("model", 0, 8).incarnation
+        != result.incarnation
+    )
+
+
+def test_event_log_validates_arguments() -> None:
+    with pytest.raises(ValueError, match="kv_event_log_size"):
+        _event_module(size=-1)
+    module, _ = _event_module()
+    for cursor, size in ((-1, 1), (0, 0)):
+        with pytest.raises(ValueError, match="cursor|max_events"):
+            module.read_kv_events("model", cursor, size)
+
+
+def test_unknown_and_expired_token_bindings_skip_stores(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.modules.kv_events._TOKEN_BINDING_CACHE_SIZE",
+        4,
+    )
+    module, bus = _event_module()
+    keys = [_event_key(i) for i in range(5)]
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[keys[0]])
+    _bind_kv(bus, keys)
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[keys[0], keys[-1]])
+    result = module.read_kv_events("model", 0, 8)
+    assert [r.block_hashes for r in result.events] == [[keys[-1].chunk_hash]]
+    assert module.report_status()["kv_events"]["unbound_stores"] == 2
+
+
+@pytest.mark.parametrize("transport", ["zmq", "grpc"])
+def test_event_subscription_pushes_without_polling_and_keeps_requests_live(
+    transport: Literal["zmq", "grpc"],
+) -> None:
+    """Real sockets: one subscription pushes store/remove and wakes on shutdown."""
+    module, bus = _event_module()
+    config = MPServerConfig(
+        transport=transport,
+        host="127.0.0.1",
+        port=0,
+        max_cpu_workers=1,
+        grpc_server_workers=1,
+    )
+    management = ManagementModule(
+        module.context,
+        liveness_targets=[module],
+        experimental_transfer=[KV_EVENT_CAPABILITY],
+    )
+    server: Any = create_request_server([management, module], config)
+    if transport == "grpc":
+        url = f"grpc://127.0.0.1:{server.bound_port}"
+    else:
+        url = server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
+    server.start()
+    client = RequestClientFactory.create(url, context=zmq.Context.instance())
+    streams = []
+    pool = ThreadPoolExecutor(max_workers=3)
+    try:
+        # More idle streams than unary workers must not starve ping/lookup.
+        for instance_id in range(3):
+            stream = client.subscribe_kv_events(instance_id, "model", 0, 8)
+            streams.append(stream)
+            assert pool.submit(next, stream).result(timeout=5).events == []
+        waiting_readers = [pool.submit(next, stream) for stream in streams]
+        assert client.ping(0).result(timeout=5)
+        assert all(not future.done() for future in waiting_readers)
+
+        key = _event_key(1)
+        _bind_kv(bus, [key])
+        _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[key])
+        for future in waiting_readers:
+            batch = future.result(timeout=5)
+            assert [(r.kind, r.medium, r.token_ids) for r in batch.events] == [
+                ("stored", "CPU", [0])
+            ]
+        waiting = pool.submit(next, streams[0])
+        _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[key])
+        assert waiting.result(timeout=5).events[0].kind == "removed"
+        waiting = pool.submit(next, streams[0])
+        old_incarnation = batch.incarnation
+        server.close()
+        with pytest.raises((StopIteration, ConnectionError)):
+            waiting.result(timeout=5)
+        module.close()
+        # Reuse the same client/channel after a server restart.
+        module, bus = _event_module()
+        config.port = int(url.rsplit(":", 1)[1])
+        management = ManagementModule(module.context, liveness_targets=[module])
+        server = create_request_server([management, module], config)
+        server.start()
+        resumed = client.subscribe_kv_events(0, "model", 2, 8)
+        streams.append(resumed)
+        batch = pool.submit(next, resumed).result(timeout=5)
+        assert batch.incarnation != old_incarnation and batch.lost
+        waiting = pool.submit(next, resumed)
+        resumed.close()
+        with pytest.raises((StopIteration, ConnectionError)):
+            waiting.result(timeout=5)
+    finally:
+        for stream in streams:
+            stream.close()
+        client.close()
+        server.close()
+        module.close()
+        pool.shutdown(wait=True)
+
+
+def test_subscription_wakes_for_final_dropped_event_and_close() -> None:
+    module, bus = _event_module(bus=EventBus(EventBusConfig(max_queue_size=0)))
+    stream = module.subscribe_kv_events(1, "model", 0, 8)
+    assert next(stream).events == []
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(next, stream)
+        try:
+            _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[_event_key(1)])
+            assert pending.result(timeout=5).lost
+        finally:
+            stream.close()
+
+
+@pytest.mark.parametrize("log_size", [0, 3])
+def test_subscription_liveness_uses_management_ping_without_reaping_workers(
+    monkeypatch: pytest.MonkeyPatch,
+    log_size: int,
+) -> None:
+    now = 0.0
+    monkeypatch.setattr(kv_events_mod.time, "monotonic", lambda: now)
+    module, _ = _event_module(size=log_size)
+    management = ManagementModule(module.context, liveness_targets=[module])
+    streams = [module.subscribe_kv_events(i, "model", 0, 8) for i in (1, 2)]
+    try:
+        now = 10.0
+        management.ping(1)
+        now = 15.0
+        assert module.reap_stale_instances(10.0, 120.0) == []
+        assert module.report_status()["kv_events"]["subscribers"] == 1
+        with pytest.raises(StopIteration):
+            next(streams[1])
+        # A subscription is not another worker registration in status counts.
+        assert management.report_status()["worker_liveness"]["tracked_instances"] == 0
+        module.drop_instance_state(1)
+        with pytest.raises(StopIteration):
+            next(streams[0])
+    finally:
+        management.close()
+        module.close()
+
+
+def test_management_reaper_closes_subscription_for_reaped_worker() -> None:
+    module, _ = _event_module()
+    target = _FakeTarget()
+    management = ManagementModule(
+        module.context,
+        liveness_targets=[target, module],
+        worker_reap_timeout_seconds=0.4,
+        worker_registration_grace_seconds=0.8,
+    )
+    stream = module.subscribe_kv_events(7, "model", 0, 8)
+    assert next(stream).events == []
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        waiting = pool.submit(next, stream)
+        try:
+            target.to_reap = [7]
+            with pytest.raises(StopIteration):
+                waiting.result(timeout=5)
+            assert 7 in target.dropped
+        finally:
+            management.close()
+            module.close()

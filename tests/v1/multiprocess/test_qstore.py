@@ -17,9 +17,11 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.custom_types import KV_EVENT_CAPABILITY
 from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
+from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import ContextEntry
 
 REGISTER_ARGS = ("model##query", 2)
@@ -284,6 +286,7 @@ def stub_server_modules(monkeypatch):
 
 
 def _build(stub_server_modules, **config) -> list:
+    config.setdefault("kv_event_log_size", 0)
     return server_mod._build_modules(
         MagicMock(name="ctx"), MPServerConfig(**config), MagicMock(url="")
     )
@@ -330,3 +333,16 @@ def test_server_builds_nothing_when_no_feature_is_enabled(
 
     assert not any(isinstance(m, _FakeQStore) for m in modules)
     assert stub_server_modules.call_args.kwargs["experimental_transfer"] == []
+
+
+@pytest.mark.parametrize("log_size", [0, 3])
+def test_server_wires_event_module_liveness_capability_and_close_order(
+    stub_server_modules: MagicMock,
+    log_size: int,
+) -> None:
+    modules = _build(stub_server_modules, kv_event_log_size=log_size)
+    events = next(module for module in modules if isinstance(module, KVEventModule))
+    kwargs = stub_server_modules.call_args.kwargs
+    assert events in kwargs["liveness_targets"]
+    assert (KV_EVENT_CAPABILITY in kwargs["experimental_transfer"]) == (log_size > 0)
+    assert modules.index(stub_server_modules.return_value) < modules.index(events)

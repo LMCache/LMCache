@@ -20,7 +20,33 @@ message ReportBlockAllocationRequest {
 
 message ReportBlockAllocationResponse {}
 
+message SubscribeKvEventsRequest {
+  int64 instance_id = 1;
+  string model_name = 2;
+  int64 cursor = 3;
+  int64 max_events = 4;
+}
+
+message KVEventRecord {
+  int64 seq = 1;
+  string kind = 2;
+  string medium = 3;
+  string model_name = 4;
+  repeated bytes block_hashes = 5;
+  optional bytes parent_block_hash = 6;
+  repeated int64 token_ids = 7;
+}
+
+message KVEventBatch {
+  bool enabled = 1;
+  int64 incarnation = 2;
+  int64 next_cursor = 3;
+  bool lost = 4;
+  repeated KVEventRecord events = 5;
+}
+
 service ObservabilityService {
   rpc ReportBlockAllocation(ReportBlockAllocationRequest)
       returns (ReportBlockAllocationResponse);
+  rpc SubscribeKvEvents(SubscribeKvEventsRequest) returns (stream KVEventBatch);
 }

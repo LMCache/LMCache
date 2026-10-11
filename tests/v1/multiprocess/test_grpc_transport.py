@@ -35,6 +35,7 @@ from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
+from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -321,6 +322,7 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
     module_types = (
         LookupModule,
         ManagementModule,
+        KVEventModule,
         P2PController,
         LMCacheDrivenTransferModule,
         EngineDrivenTransferModule,
