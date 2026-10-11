@@ -322,6 +322,7 @@ class PrefetchKeyState:
     # Keys that read-locked in L1 (i.e. finished prefetch)
     # Mapping from l1 manager index to the global bitmap
     l1_locked_keys: MapState = field(default_factory=MapState)
+    l1_read_generations: dict[int, dict[ObjectKey, int]] = field(default_factory=dict)
 
     # Keys that read-locked in L2 (i.e. finished L2 lookup and lock)
     # Mapping from l2 adapter index to the global bitmap
@@ -1089,7 +1090,12 @@ class PrefetchController(StorageControllerInterface):
         completed = False
         try:
             for l1_idx, l1_manager in self._l1_managers.items():
-                result = l1_manager.reserve_read(flattened_keys, request.num_kv_readers)
+                generations = request.key_states.l1_read_generations.setdefault(
+                    l1_idx, {}
+                )
+                result = l1_manager.reserve_read(
+                    flattened_keys, request.num_kv_readers, read_generations=generations
+                )
                 res_bitmap = Bitmap(len(flattened_keys))
                 for i, key in enumerate(flattened_keys):
                     error, _obj = result[key]
@@ -1136,7 +1142,11 @@ class PrefetchController(StorageControllerInterface):
         for l1_idx, cells in l1_dropped.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys:
-                self._l1_managers[l1_idx].finish_read(keys, request.num_kv_readers)
+                self._l1_managers[l1_idx].finish_read(
+                    keys,
+                    request.num_kv_readers,
+                    read_generations=states.l1_read_generations[l1_idx],
+                )
         for l2_idx, cells in l2_dropped.items():
             keys = _gather_keys(request.key_groups, cells)
             if keys:
@@ -1434,7 +1444,10 @@ class PrefetchController(StorageControllerInterface):
             # Update L1 key status
             if loaded_keys:
                 l1_manager.finish_write_and_reserve_read(
-                    loaded_keys, read_locks=request.num_kv_readers, tag=tag
+                    loaded_keys,
+                    read_locks=request.num_kv_readers,
+                    tag=tag,
+                    read_generations=states.l1_read_generations[l1_idx],
                 )
             if failed_keys:
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
@@ -1528,6 +1541,7 @@ class PrefetchController(StorageControllerInterface):
         else:
             hit_cells = found
 
+        read_generations: dict[ObjectKey, int] = {}
         for l1_idx, locked in states.l1_locked_keys.items():
             if request.lock_mode == PrefetchLockMode.NO_LOCK:
                 release = locked
@@ -1536,13 +1550,22 @@ class PrefetchController(StorageControllerInterface):
             release_keys = _gather_keys(request.key_groups, release)
             if release_keys:
                 self._l1_managers[l1_idx].finish_read(
-                    release_keys, read_locks=request.num_kv_readers
+                    release_keys,
+                    read_locks=request.num_kv_readers,
+                    read_generations=states.l1_read_generations[l1_idx],
                 )
 
             # Notify the eviction module
             hit_keys = _gather_keys(request.key_groups, locked & hit_cells)
             if hit_keys:
                 self._l1_managers[l1_idx].touch_keys(hit_keys)
+                if request.lock_mode == PrefetchLockMode.LOCK:
+                    generations = states.l1_read_generations[l1_idx]
+                    read_generations.update(
+                        (key, generations[key])
+                        for key in hit_keys
+                        if key in generations
+                    )
 
         if len(request.l2_loaded_cells) > 0:
             l2_hit_cells = hit_cells & request.l2_loaded_cells
@@ -1571,6 +1594,7 @@ class PrefetchController(StorageControllerInterface):
                 }
                 if request.lock_mode == PrefetchLockMode.LOCK
                 else {},
+                read_generations=read_generations,
             ),
         )
         logger.debug(
@@ -1630,7 +1654,9 @@ class PrefetchController(StorageControllerInterface):
             keys = _gather_keys(request.key_groups, cells)
             if keys:
                 self._l1_managers[l1_idx].finish_read(
-                    keys, read_locks=request.num_kv_readers
+                    keys,
+                    read_locks=request.num_kv_readers,
+                    read_generations=states.l1_read_generations[l1_idx],
                 )
 
         request.key_states = PrefetchKeyState()

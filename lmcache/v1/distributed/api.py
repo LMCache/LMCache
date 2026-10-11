@@ -582,6 +582,8 @@ class PrefetchResult:
     they are not persisted. Tags name configured L1s for affinity and reporting
     and are the appropriate identity at process boundaries.
     """
+    read_generations: dict[ObjectKey, int] = field(default_factory=dict)
+    """Lock generations retained by this prefetch, for conditional cleanup."""
     _l1_hit_count: int = field(init=False, repr=False, compare=False)
     _l2_hit_count: int = field(init=False, repr=False, compare=False)
 
