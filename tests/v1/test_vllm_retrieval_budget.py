@@ -23,6 +23,7 @@ def config(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(utils, "_config_instance", LMCacheEngineConfig.from_defaults())
     return SimpleNamespace(
         model_config=SimpleNamespace(use_mla=True),
+        parallel_config=SimpleNamespace(world_size=2),
         cache_config=SimpleNamespace(kv_cache_memory_bytes=None),
         kv_transfer_config=SimpleNamespace(kv_connector_extra_config={}),
     )
@@ -38,10 +39,14 @@ def test_planned_budget_matches_worker_config(config: Any, budget: int) -> None:
     assert planned == worker_config.retrieve_buffer_size == budget
 
 
-@pytest.mark.parametrize("disabled_by", ["model", "layerwise", "first_rank"])
+@pytest.mark.parametrize(
+    "disabled_by", ["model", "layerwise", "first_rank", "single_worker"]
+)
 def test_inactive_retrieval_reserves_nothing(config: Any, disabled_by: str) -> None:
     if disabled_by == "model":
         config.model_config.use_mla = False
+    elif disabled_by == "single_worker":
+        config.parallel_config.world_size = 1
     elif disabled_by == "layerwise":
         config.kv_transfer_config.kv_connector_extra_config = {
             "lmcache.use_layerwise": True,

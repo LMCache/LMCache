@@ -23,7 +23,11 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import (
+    CacheEngineKey,
+    mock_up_broadcast_fn,
+    mock_up_broadcast_object_fn,
+)
 from lmcache.v1.broadcast_transfer import CHUNK_ALIGNMENT
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
@@ -49,6 +53,11 @@ TOKENS = list(range(NUM_TOKENS))
 TWO_CHUNK_BUDGET = CHUNK_ALIGNMENT + CHUNK_BYTES
 
 TwoRanks = Callable[..., tuple[list[LMCacheEngine], list["RecordingConnector"]]]
+Collectives = tuple[
+    Callable[[torch.Tensor, int], None],
+    Callable[[Any, int], Any],
+    Callable[[bool], bool] | None,
+]
 
 
 class FakeTensorParallelGroup:
@@ -90,6 +99,21 @@ class FakeTensorParallelGroup:
             self._votes.clear()
         self._barrier.wait(TIMEOUT)
         return result
+
+    def bind(self, rank: int) -> Collectives:
+        """The broadcast, object broadcast, and agreement callbacks of ``rank``."""
+        return (
+            partial(self.broadcast, rank),
+            partial(self.broadcast_object, rank),
+            partial(self.agree, rank),
+        )
+
+
+class BrokenCommunicatorGroup(FakeTensorParallelGroup):
+    """Every rank's tensor broadcast fails, as a dead communicator does."""
+
+    def broadcast(self, rank: int, tensor: torch.Tensor, src: int) -> None:
+        raise RuntimeError("injected communicator failure")
 
 
 class RecordingConnector(MockGPUConnector):
@@ -152,7 +176,7 @@ def make_sources(
 
 def make_engine(
     rank: int,
-    group: FakeTensorParallelGroup,
+    collectives: Collectives,
     connector: MockGPUConnector,
     *,
     world_size: int = 2,
@@ -177,13 +201,7 @@ def make_engine(
         use_mla=use_mla,
     )
     return LMCacheEngine(
-        config,
-        metadata,
-        MagicMock(spec=TokenDatabase),
-        connector,
-        partial(group.broadcast, rank),
-        partial(group.broadcast_object, rank),
-        partial(group.agree, rank),
+        config, metadata, MagicMock(spec=TokenDatabase), connector, *collectives
     )
 
 
@@ -258,7 +276,13 @@ def two_ranks() -> Generator[TwoRanks, None, None]:
             for rank in range(2)
         ]
         engines.extend(
-            make_engine(rank, group, connectors[rank], budget=budgets[rank], **options)
+            make_engine(
+                rank,
+                group.bind(rank),
+                connectors[rank],
+                budget=budgets[rank],
+                **options,
+            )
             for rank in range(2)
         )
         return engines, connectors
@@ -470,39 +494,15 @@ def test_source_storage_failure_releases_peers_before_propagating(
 
 
 def test_multi_rank_engine_requires_an_agreement_callback() -> None:
-    group = FakeTensorParallelGroup(1)
-    config = LMCacheEngineConfig.from_defaults(
-        chunk_size=CHUNK_TOKENS,
-        retrieve_buffer_size=TWO_CHUNK_BUDGET,
-        py_enable_gc=True,
-    )
-    metadata = LMCacheMetadata(
-        model_name="test",
-        world_size=2,
-        local_world_size=2,
-        worker_id=0,
-        local_worker_id=0,
-        kv_dtype=torch.float32,
-        kv_shape=(2, 1, CHUNK_TOKENS, 1, 3),
-        use_mla=True,
-    )
+    broadcast, broadcast_object, _ = FakeTensorParallelGroup(2).bind(0)
     with pytest.raises(ValueError, match="all_ranks_agree_fn"):
-        LMCacheEngine(
-            config,
-            metadata,
-            MagicMock(spec=TokenDatabase),
-            RecordingConnector(),
-            partial(group.broadcast, 0),
-            partial(group.broadcast_object, 0),
-        )
+        make_engine(0, (broadcast, broadcast_object, None), RecordingConnector())
 
 
 def test_budget_smaller_than_one_chunk_is_rejected_at_init() -> None:
-    group = FakeTensorParallelGroup(1)
+    group = FakeTensorParallelGroup(2)
     with pytest.raises(ValueError, match="at least one KV chunk"):
-        make_engine(
-            0, group, RecordingConnector(), world_size=1, budget=CHUNK_BYTES - 1
-        )
+        make_engine(0, group.bind(0), RecordingConnector(), budget=CHUNK_BYTES - 1)
 
 
 def test_chunk_larger_than_the_buffer_fails_before_any_window(
@@ -516,7 +516,7 @@ def test_chunk_larger_than_the_buffer_fails_before_any_window(
 
     leader, follower = retrieve_on_all(engines)
 
-    with pytest.raises(ValueError, match="exceeds retrieve_buffer_size"):
+    with pytest.raises(ValueError, match="exceeds"):
         leader.result()
     assert not follower.result().any()
     assert not group.payload_sizes
@@ -524,31 +524,53 @@ def test_chunk_larger_than_the_buffer_fails_before_any_window(
     assert engines[0].is_healthy()
 
 
-def test_single_rank_stages_through_the_buffer_without_peers() -> None:
-    group = FakeTensorParallelGroup(1)
+@pytest.mark.parametrize("async_loading", [False, True])
+def test_single_rank_writes_its_chunks_without_staging_or_collectives(
+    async_loading: bool,
+) -> None:
+    """One rank has nobody to broadcast to; it retrieves like any other model.
+
+    The callbacks are the placeholders SGLang and TensorRT-LLM pass, which raise
+    if called, and a budget below one chunk is accepted because nothing is
+    reserved.
+    """
     connector = RecordingConnector()
-    engine = make_engine(0, group, connector, world_size=1, budget=TWO_CHUNK_BUDGET)
+    engine = make_engine(
+        0,
+        (mock_up_broadcast_fn, mock_up_broadcast_object_fn, None),
+        connector,
+        world_size=1,
+        budget=1,
+        async_loading=async_loading,
+    )
     keys, sources = make_sources()
     attach_storage(engine, keys, sources)
+    if async_loading:
+        prefetch(engine, keys, sources, "req")
     try:
         mask = engine.retrieve(TOKENS, req_id="req")
     finally:
         engine.close()
 
     assert mask.all()
+    assert not connector.pending
     torch.testing.assert_close(connector.destination, expected_kv())
-    assert len(group.payload_sizes) == 3
     assert all(source.get_ref_count() == 0 for source in sources)
+    assert all(source.metadata.pin_count == 0 for source in sources)
 
 
 def test_single_rank_async_retrieval_releases_prefetched_objects_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Plain (non-broadcast) retrieval must not let lookup_unpin free twice."""
-    group = FakeTensorParallelGroup(1)
     connector = RecordingConnector()
     engine = make_engine(
-        0, group, connector, world_size=1, async_loading=True, use_mla=False
+        0,
+        FakeTensorParallelGroup(1).bind(0),
+        connector,
+        world_size=1,
+        async_loading=True,
+        use_mla=False,
     )
     keys, sources = make_sources()
     attach_storage(engine, keys, sources)
@@ -568,9 +590,10 @@ def test_single_rank_async_retrieval_releases_prefetched_objects_once(
 
 def test_single_rank_write_failure_is_fenced_before_sources_are_released() -> None:
     """Plain retrieval fences queued reads even when the connector raised."""
-    group = FakeTensorParallelGroup(1)
     connector = RecordingConnector(fail_on_write=1)
-    engine = make_engine(0, group, connector, world_size=1, use_mla=False)
+    engine = make_engine(
+        0, FakeTensorParallelGroup(1).bind(0), connector, world_size=1, use_mla=False
+    )
     keys, sources = make_sources()
     attach_storage(engine, keys, sources)
     try:
@@ -584,47 +607,21 @@ def test_single_rank_write_failure_is_fenced_before_sources_are_released() -> No
     assert all(source.get_ref_count() == 0 for source in sources)
 
 
-def test_fatal_transfer_failure_disables_the_engine() -> None:
-    """After a collective failure the engine refuses retrievals at admission."""
-    group = FakeTensorParallelGroup(1)
-    connector = RecordingConnector()
+def test_fatal_transfer_failure_disables_the_engine(two_ranks: TwoRanks) -> None:
+    """After a collective failure every rank refuses retrievals at admission."""
+    group = BrokenCommunicatorGroup(2)
+    engines, _ = two_ranks(group)
     keys, sources = make_sources()
+    storage = attach_storage(engines[0], keys, sources)
 
-    def failing_broadcast(tensor: torch.Tensor, src: int) -> None:
-        raise RuntimeError("injected communicator failure")
-
-    config = LMCacheEngineConfig.from_defaults(
-        chunk_size=CHUNK_TOKENS,
-        retrieve_buffer_size=TWO_CHUNK_BUDGET,
-        py_enable_gc=True,
-    )
-    metadata = LMCacheMetadata(
-        model_name="test",
-        world_size=1,
-        local_world_size=1,
-        worker_id=0,
-        local_worker_id=0,
-        kv_dtype=torch.float32,
-        kv_shape=(2, 1, CHUNK_TOKENS, 1, 3),
-        use_mla=True,
-    )
-    engine = LMCacheEngine(
-        config,
-        metadata,
-        MagicMock(spec=TokenDatabase),
-        connector,
-        failing_broadcast,
-        partial(group.broadcast_object, 0),
-    )
-    storage = attach_storage(engine, keys, sources)
-    try:
+    for future in retrieve_on_all(engines):
         with pytest.raises(RuntimeError, match="communicator failure"):
-            engine.retrieve(TOKENS, req_id="first")
-        assert not engine.is_healthy()
-        assert all(source.get_ref_count() == 0 for source in sources)
-        assert not engine.retrieve(TOKENS, req_id="second").any()
-    finally:
-        engine.close()
+            future.result()
+    assert not any(engine.is_healthy() for engine in engines)
+    assert all(source.get_ref_count() == 0 for source in sources)
+
+    for future in retrieve_on_all(engines):
+        assert not future.result().any()
     storage.batched_get.assert_called_once()
 
 

@@ -36,6 +36,7 @@ from lmcache.integration.vllm.utils import (
     extract_mm_features,
     extract_request_configs_from_sampling_params,
     lmcache_get_or_create_config,
+    validate_retrieval_memory_budget,
 )
 from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.logging import init_logger
@@ -469,9 +470,6 @@ class LMCacheConnectorV1Impl:
         self.config = config
 
         if role == KVConnectorRole.WORKER:
-            # First Party
-            from lmcache.integration.vllm.utils import validate_retrieval_memory_budget
-
             validate_retrieval_memory_budget(vllm_config)
 
         service_factory = VllmServiceFactory(config, vllm_config, role.name.lower())

@@ -68,7 +68,7 @@ def test_plan_windows_packs_consecutive_chunks_within_capacity() -> None:
     chunks = make_chunks(5, 2)  # 48 bytes each, each starting on an aligned offset
     capacity = 2 * CHUNK_ALIGNMENT + 48  # exactly three chunks
 
-    groups = list(plan_windows(chunks, capacity))
+    groups = plan_windows(chunks, capacity)
 
     assert [len(group) for group in groups] == [3, 2]
     assert list(groups[0]) == chunks[:3]
@@ -77,17 +77,29 @@ def test_plan_windows_packs_consecutive_chunks_within_capacity() -> None:
         assert Window.from_chunks(group).num_bytes <= capacity
 
 
-def test_plan_windows_isolates_a_chunk_larger_than_the_capacity() -> None:
+def test_plan_windows_puts_each_chunk_alone_when_only_one_fits() -> None:
     chunks = make_chunks(3, 2)
 
-    groups = list(plan_windows(chunks, 10))
+    groups = plan_windows(chunks, 48)
 
     assert [list(group) for group in groups] == [[chunk] for chunk in chunks]
-    assert Window.from_chunks(groups[0]).num_bytes == 48
 
 
-def test_plan_windows_yields_nothing_without_chunks() -> None:
-    assert list(plan_windows([], 1024)) == []
+def test_plan_windows_rejects_a_chunk_larger_than_the_capacity() -> None:
+    with pytest.raises(ValueError, match="exceeds the 47-byte staging buffer"):
+        plan_windows(make_chunks(3, 2), 47)
+
+
+def test_plan_windows_rejects_a_chunk_without_storage() -> None:
+    chunks = make_chunks(3, 2)
+    chunks[2][0].invalidate()
+
+    with pytest.raises(ValueError, match="no longer exposes its tensor"):
+        plan_windows(chunks, 1024)
+
+
+def test_plan_windows_returns_nothing_without_chunks() -> None:
+    assert plan_windows([], 1024) == []
 
 
 def test_window_requires_at_least_one_chunk() -> None:

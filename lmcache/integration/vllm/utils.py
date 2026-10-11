@@ -256,8 +256,9 @@ def get_required_device_memory(vllm_config: "VllmConfig") -> int:
         vllm_config: Serving configuration, including LMCache connector overrides.
 
     Returns:
-        The fixed staging budget, or zero when first-rank retrieval is disabled.
-        This function does not initialize an engine or allocate device memory.
+        The fixed staging budget, or zero when first-rank retrieval is disabled
+        or a single worker has no peers to broadcast to. This function does not
+        initialize an engine or allocate device memory.
 
     Raises:
         ValueError: If the LMCache configuration is invalid.
@@ -268,6 +269,7 @@ def get_required_device_memory(vllm_config: "VllmConfig") -> int:
         config.use_layerwise
         or not use_mla
         or not config.get_extra_config_value("save_only_first_rank", use_mla)
+        or vllm_config.parallel_config.world_size == 1
     ):
         return 0
     return config.retrieve_buffer_size

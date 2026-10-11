@@ -23,11 +23,17 @@ of consecutive chunks that fit in the buffer. Each window costs one host object
 broadcast (the header), one tensor broadcast (the packed bytes), one connector
 write, and one fence. The buffer is reused for the next window and never grows.
 
+A single rank has no peers, so none of this applies: it takes the ordinary
+retrieval path, writing from the acquired chunks directly, and reserves no
+buffer. Staging there would only add a device copy of bytes that cross PCIe
+either way. This also keeps single-rank integrations that supply placeholder
+collectives (SGLang, TensorRT-LLM) working.
+
 The module is deliberately pure:
 
 | Piece | Responsibility |
 |---|---|
-| `plan_windows(chunks, capacity)` | Split token-ordered chunks into runs whose packed layout fits `capacity`. A chunk larger than `capacity` forms its own window, which the engine rejects. |
+| `plan_windows(chunks, capacity)` | Split token-ordered chunks into runs whose packed layout fits `capacity`. Rejects a chunk it cannot send (larger than `capacity`, or without tensor storage) before returning any window. |
 | `Window.from_chunks(group)` | Lay the chunks out back to back on `CHUNK_ALIGNMENT` boundaries and record their token ranges and metadata as plain data. |
 | `Window.views(buffer)` | Rebuild identical `TensorMemoryObj` views over any rank's buffer. Views own nothing. |
 | `pack(group, views)` | Enqueue the host-to-device copies of the sources on the current stream. |
@@ -75,9 +81,11 @@ broadcast_object(None)        ------------->  return
 fence; release chunks
 ```
 
-The first rank packs a window *before* announcing it, so any failure while
-preparing a window happens while peers are still waiting for a header and can
-be answered with the terminating `None`.
+Everything that can fail for local reasons on the first rank (storage reads,
+planning) happens before its first header, while peers are still waiting for
+one, so it can be answered with the terminating `None`. The first rank packs a
+window before announcing it, so a peer joining the tensor broadcast finds the
+payload already queued.
 
 ## Failure semantics
 
@@ -92,9 +100,9 @@ or remove collectives.
 |---|---|---|
 | Buffer reservation failed at init, budgets differ, health monitor disabled a rank, or ranks serve different requests | Not admitted: all-false, no transfer | Same |
 | Chunk missing in storage | Prefix truncated by `_process_tokens_internal`, as in single-rank retrieval | Same prefix (they only see the windows that were sent) |
-| Storage raises while acquiring, or a chunk exceeds the buffer | Sends the terminator, then re-raises | All-false mask |
+| Storage raises while acquiring, or a chunk cannot be sent (exceeds the buffer, no tensor storage) | Sends the terminator, then re-raises; the engine stays usable | All-false mask |
 | `batched_to_gpu` raises on a rank | That rank fences the work it queued, stops writing, keeps receiving, returns the prefix it committed, and logs the error | Unaffected |
-| Device or collective error | Propagates; the engine marks itself failed and refuses later retrievals at admission | Same |
+| Device or collective error, including a failed `pack` or fence | Propagates; the engine marks itself failed and refuses later retrievals at admission | Same |
 
 The serving engine already handles per-rank partial loads: the vLLM adapter
 reports the tokens missing from the returned mask and vLLM recomputes those
@@ -169,9 +177,9 @@ adds `retrieve_buffer_size` of resident memory.
 
 - A connector that writes from several streams should override
   `synchronize_load()` to fence all of them.
-- A new integration needs the two broadcast callbacks and, for more than one
-  rank, `all_ranks_agree_fn` (the engine refuses to start without it). The
+- A new integration with more than one rank needs the two broadcast callbacks
+  and `all_ranks_agree_fn` (the engine refuses to start without it). The
   object-broadcast callback cannot stand in: it addresses the integration's
   group by that group's own rank space, not by `worker_id`. The integration
   must call `retrieve` in the same order on every rank of the group, which
-  the collectives require anyway.
+  the collectives require anyway. A single rank calls none of the callbacks.

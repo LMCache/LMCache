@@ -10,8 +10,9 @@ hit. The collective choreography (which rank sends what, and when) lives in
 """
 
 # Standard
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 # Third Party
 import torch
@@ -55,7 +56,7 @@ class Window:
     starts: tuple[int, ...]
     ends: tuple[int, ...]
     offsets: tuple[int, ...]
-    metadata: tuple[dict, ...]
+    metadata: tuple[dict[str, Any], ...]
     num_bytes: int
 
     @classmethod
@@ -76,7 +77,7 @@ class Window:
         starts: list[int] = []
         ends: list[int] = []
         offsets: list[int] = []
-        metadata: list[dict] = []
+        metadata: list[dict[str, Any]] = []
         num_bytes = 0
         for memory_obj, start, end in chunks:
             offset = _align(num_bytes)
@@ -126,31 +127,44 @@ class Window:
 
 def plan_windows(
     chunks: Sequence[StagedChunk], capacity: int
-) -> Iterator[Sequence[StagedChunk]]:
+) -> list[Sequence[StagedChunk]]:
     """Split token-ordered chunks into runs whose packed layout fits ``capacity``.
 
-    A chunk larger than ``capacity`` forms a window of its own whose
-    ``num_bytes`` exceeds ``capacity``; the caller rejects such a window, since
-    the staging buffer never grows.
+    Every chunk is checked before any window is returned, so a caller that
+    plans before announcing anything never has to abandon a transfer midway.
 
     Args:
         chunks: Chunks in token order.
         capacity: Staging buffer size in bytes.
 
-    Yields:
-        Consecutive, non-empty slices of ``chunks``.
+    Returns:
+        Consecutive, non-empty slices of ``chunks``, each packing into at most
+        ``capacity`` bytes.
+
+    Raises:
+        ValueError: If a chunk exposes no tensor, or is larger than
+            ``capacity``; the staging buffer never grows.
     """
+    windows: list[Sequence[StagedChunk]] = []
     begin = 0
     used = 0
     for index, (memory_obj, _, _) in enumerate(chunks):
         size = memory_obj.get_size()
+        if memory_obj.raw_tensor is None:
+            raise ValueError("A KV chunk no longer exposes its tensor")
+        if size > capacity:
+            raise ValueError(
+                f"A KV chunk of {size} bytes exceeds the {capacity}-byte "
+                "staging buffer (retrieve_buffer_size)"
+            )
         if index > begin and _align(used) + size > capacity:
-            yield chunks[begin:index]
+            windows.append(chunks[begin:index])
             begin = index
             used = 0
         used = _align(used) + size
     if begin < len(chunks):
-        yield chunks[begin:]
+        windows.append(chunks[begin:])
+    return windows
 
 
 def pack(chunks: Sequence[StagedChunk], views: Sequence[MemoryObj]) -> None:

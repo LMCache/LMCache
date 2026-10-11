@@ -2,11 +2,9 @@
 """Measure device staging and verify paged KV writes for first-rank retrieval.
 
 Drives a real ``LMCacheEngine`` with the vLLM paged connector on CUDA. Run with
-the tested checkout on ``PYTHONPATH``. Single process::
-
-    python -m tests.v1.manual_bounded_retrieval
-
-Two NCCL ranks, one visible GPU each, the same rendezvous on both::
+the tested checkout on ``PYTHONPATH``. A single rank retrieves directly without
+staging, so the harness needs at least two NCCL ranks, one visible GPU each,
+the same rendezvous on all::
 
     python -m tests.v1.manual_bounded_retrieval --world-size 2 --rank 0 \
         --rendezvous tcp://HOST:PORT
@@ -103,7 +101,7 @@ def build_engine(
     dtype: torch.dtype,
     connector: VLLMPagedMemGPUConnectorV2,
 ) -> LMCacheEngine:
-    """Create a first-rank retrieval engine wired to NCCL/Gloo or to itself."""
+    """Create a first-rank retrieval engine wired to NCCL and Gloo."""
     config = LMCacheEngineConfig.from_defaults(
         chunk_size=CHUNK_TOKENS, retrieve_buffer_size=budget, py_enable_gc=True
     )
@@ -119,20 +117,16 @@ def build_engine(
     )
 
     def broadcast_object(obj: Any, src: int) -> Any:
-        if world_size == 1:
-            return obj
         objects = [obj]
         dist.broadcast_object_list(objects, src=src, group=host_group)
         return objects[0]
 
     def broadcast(tensor: torch.Tensor, src: int) -> None:
-        if world_size > 1:
-            dist.broadcast(tensor, src=src)
+        dist.broadcast(tensor, src=src)
 
     def agree(ready: bool) -> bool:
         flag = torch.tensor(int(ready), dtype=torch.int32)
-        if world_size > 1:
-            dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=host_group)
+        dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=host_group)
         return bool(flag.item())
 
     return LMCacheEngine(
@@ -220,7 +214,7 @@ def run_case(
         dtype: KV element type.
         rank: This process's rank; rank zero owns the sources.
         world_size: Number of participating ranks.
-        host_group: Gloo group for headers and votes, or None in one process.
+        host_group: Gloo group for headers and votes.
         failure: ``"none"``, ``"read"`` (chunk 2 missing on the first rank) or
             ``"write"`` (the last rank fails its second window write).
 
@@ -338,22 +332,22 @@ def run_case(
 def main() -> None:
     """Run a matrix of budgets, hit sizes, dtypes, and injected failures."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--world-size", type=int, default=1)
-    parser.add_argument("--rank", type=int, default=0)
+    parser.add_argument("--world-size", type=int, default=2)
+    parser.add_argument("--rank", type=int, required=True)
     parser.add_argument("--rendezvous", default="tcp://127.0.0.1:29673")
     args = parser.parse_args()
+    if args.world_size < 2:
+        parser.error("first-rank broadcast retrieval needs at least two ranks")
     torch.cuda.set_device(0)
-    host_group = None
-    if args.world_size > 1:
-        dist.init_process_group(
-            "nccl",
-            init_method=args.rendezvous,
-            rank=args.rank,
-            world_size=args.world_size,
-            timeout=timedelta(seconds=60),
-            device_id=torch.device("cuda", 0),
-        )
-        host_group = dist.new_group(backend="gloo", timeout=timedelta(seconds=60))
+    dist.init_process_group(
+        "nccl",
+        init_method=args.rendezvous,
+        rank=args.rank,
+        world_size=args.world_size,
+        timeout=timedelta(seconds=60),
+        device_id=torch.device("cuda", 0),
+    )
+    host_group = dist.new_group(backend="gloo", timeout=timedelta(seconds=60))
     try:
         for dtype in (torch.float16, torch.bfloat16):
             for count in (1, 16, 128):
@@ -376,8 +370,7 @@ def main() -> None:
             print(json.dumps(result), flush=True)
             gc.collect()
     finally:
-        if args.world_size > 1:
-            dist.destroy_process_group()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

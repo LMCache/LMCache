@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -127,10 +127,11 @@ class LMCacheEngine:
         # Fixed device staging for first-rank broadcast retrieval. Its capacity
         # is the configured budget, checked to hold at least one chunk, and it
         # never grows: every rank must be able to receive any window the first
-        # rank can send.
+        # rank can send. A single rank has nobody to broadcast to and retrieves
+        # directly, like any other model, so it reserves nothing.
         self._staging: Optional[torch.Tensor] = None
         if (
-            self.save_only_first_rank
+            self._retrieves_by_broadcast()
             and not config.use_layerwise
             and self.gpu_connector is not None
         ):
@@ -139,7 +140,7 @@ class LMCacheEngine:
                 if hasattr(self.gpu_connector, "load_stream")
                 else torch_dev.Stream()
             )
-            if metadata.world_size > 1 and all_ranks_agree_fn is None:
+            if all_ranks_agree_fn is None:
                 # Votes must travel over the integration's own host group; the
                 # object-broadcast callback addresses that group by its own
                 # rank space, not by worker_id, so it cannot stand in.
@@ -863,10 +864,10 @@ class LMCacheEngine:
         retrieval, the caller must release its pins with ``lookup_unpin(lookup_id)``
         before issuing further blocking retrievals that may need cache space.
         """
-        # Health check: block operation if LMCache is unhealthy. A first-rank
-        # broadcast rank must still join its peers' collectives, so it enters
-        # the exchange and simply never writes (see _retrieve_broadcast).
-        if not self.is_healthy() and not self.save_only_first_rank:
+        # Health check: block operation if LMCache is unhealthy. A rank of a
+        # broadcast retrieval must still join its peers' admission vote, where
+        # it votes not ready (see _retrieve_broadcast).
+        if not self.is_healthy() and not self._retrieves_by_broadcast():
             logger.warning("LMCache is unhealthy, skipping retrieve operation")
             return torch.zeros(len(tokens), dtype=torch.bool)
 
@@ -896,7 +897,7 @@ class LMCacheEngine:
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
-        if self.save_only_first_rank:
+        if self._retrieves_by_broadcast():
             tot_kv_size = self._retrieve_broadcast(
                 tokens, mask, ret_mask, retrieve_stats, **kwargs
             )
@@ -1859,18 +1860,20 @@ class LMCacheEngine:
     ) -> int:
         """Stream the first rank's chunks to every rank through the staging buffer.
 
-        One host agreement admits the retrieval: every rank must hold a staging
-        buffer at least as large as the first rank's, be healthy, and be serving
-        the same request. The first rank then acquires its chunks exactly as a
-        single-rank retrieval would and packs consecutive chunks into windows
-        bounded by its buffer. Per window, every rank receives the same host
-        header, joins one tensor broadcast into its own staging buffer, and
-        writes the window into its KV pages. A ``None`` header ends the
-        exchange. After admission every rank performs the same sequence of
-        collectives whatever happens locally: a rank whose write fails stops
-        writing and reports the prefix it committed, but keeps receiving so its
-        peers never wait on it. Missing tokens surface to the serving engine
-        through the returned mask, as in single-rank retrieval.
+        After :meth:`_admit_broadcast_retrieval`, the first rank acquires its
+        chunks exactly as a single-rank retrieval would and packs consecutive
+        chunks into windows bounded by its buffer. Per window, every rank
+        receives the same host header, joins one tensor broadcast into its own
+        staging buffer, and writes the window into its KV pages. A ``None``
+        header ends the exchange.
+
+        Every rank performs the same sequence of collectives. A failure on the
+        first rank before its first header is local: it sends the ``None``
+        header, propagates, and leaves the engine usable. A failed write is
+        absorbed by :meth:`_write_window`, which shrinks that rank's committed
+        prefix only. Any other failure is a device or collective failure: the
+        engine disables itself and propagates, and peers of the request in
+        flight may wait until their communicator times out.
 
         Args:
             tokens: Tokens of the requested KV cache.
@@ -1884,150 +1887,55 @@ class LMCacheEngine:
             Total bytes acquired by the first rank; zero on other ranks.
 
         Raises:
-            RuntimeError: If the engine was created without a GPU connector or
-                in layerwise mode.
-            ValueError: If a chunk is larger than the staging buffer. Peers are
-                released with an empty result first.
-            Exception: Storage, device, or collective failures. A storage
-                failure on the first rank ends the exchange for its peers
-                before propagating.
+            RuntimeError: In layerwise mode, which retrieves through
+                :meth:`retrieve_layer`.
+            ValueError: If a chunk exposes no tensor or is larger than the
+                staging buffer. Peers are released with an empty result first.
+            Exception: A storage failure on the first rank, after its peers
+                were released; a device or collective failure, after the
+                engine disabled itself.
         """
-        if self.gpu_connector is None or self.config.use_layerwise:
-            raise RuntimeError(
-                "First-rank retrieval needs a GPU connector and non-layerwise mode"
-            )
-        connector = self.gpu_connector
-        source_rank = self.metadata.first_rank
-        is_source = self.metadata.is_first_rank()
-        request_id = kwargs.get("req_id")
-        buffer = self._staging
-
-        # Admission: one host agreement per retrieval. Windows then fit on every
-        # rank and no later collective can lack a participant.
-        capacity = buffer.numel() if buffer is not None else 0
-        reservation = (capacity, len(tokens), request_id)
-        source_reservation = self.broadcast_object_fn(
-            reservation if is_source else None, source_rank
-        )
-        ready = (
-            buffer is not None
-            and self.is_healthy()
-            and source_reservation is not None
-            and capacity >= source_reservation[0]
-            and reservation[1:] == source_reservation[1:]
-        )
-        if not self._all_ranks_agree(ready):
-            logger.warning(
-                "[req_id=%s] rank %d: first-rank retrieval was not admitted "
-                "(this rank ready=%s)",
-                request_id,
-                self.metadata.worker_id,
-                ready,
-            )
+        if self.use_layerwise:
+            raise RuntimeError("Layerwise retrieval goes through retrieve_layer")
+        if not self._admit_broadcast_retrieval(len(tokens), kwargs.get("req_id")):
             return 0
-        assert buffer is not None
-        writable = True
+        buffer = self._staging
+        assert buffer is not None, "admission requires a staging buffer"
         chunks: list[ProcessedChunk] = []
+        windows: list[tuple[Sequence[StagedChunk], Window]] = []
         tot_kv_size = 0
-
-        def exchange(window: Window) -> None:
-            """Broadcast one packed window and write it into this rank's pages."""
-            nonlocal writable
-            with stats.profile_broadcast():
-                self.broadcast_fn(buffer[: window.num_bytes], source_rank)
-            if not writable:
-                return
-            written = True
-            try:
-                with stats.profile_to_gpu():
-                    if not hasattr(connector, "load_stream"):
-                        # The connector writes on its own stream; the payload
-                        # must have landed before it reads the staging buffer.
-                        self.broadcast_stream.synchronize()
-                    connector.batched_to_gpu(
-                        window.views(buffer),
-                        list(window.starts),
-                        list(window.ends),
-                        **kwargs,
-                    )
-            except Exception:
-                logger.exception(
-                    "[req_id=%s] rank %d could not write a KV window; "
-                    "reporting the prefix committed so far",
-                    request_id,
-                    self.metadata.worker_id,
-                )
-                written = False
-            # Work enqueued before a failed write may still read the staging
-            # buffer; it must finish before the buffer is reused. A failed
-            # fence is a device failure and propagates.
-            connector.synchronize_load()
-            if not written:
-                writable = False
-                ret_mask[window.starts[0] :] = False
-                return
-            for start, end in zip(window.starts, window.ends, strict=True):
-                ret_mask[start:end] = True
-
         try:
             with torch_dev.stream(self.broadcast_stream):
-                if not is_source:
+                if self.metadata.is_first_rank():
                     try:
-                        while (
-                            window := self.broadcast_object_fn(None, source_rank)
-                        ) is not None:
-                            exchange(window)
-                    except Exception:
-                        self._disable_after_fatal_transfer_failure()
-                        raise
-                    return 0
-                # Everything that can fail for local reasons happens before any
-                # device or collective work. Peers are waiting for the first
-                # header, so release them and keep this engine usable.
-                try:
-                    with stats.profile_process_tokens():
-                        chunks, tot_kv_size = self._acquire_chunks(
-                            tokens, mask, torch.zeros_like(ret_mask), **kwargs
-                        )
-                    staged: list[StagedChunk] = [
-                        (memory_obj, start, end) for _, memory_obj, start, end in chunks
-                    ]
-                    if any(
-                        memory_obj.raw_tensor is None for memory_obj, _, _ in staged
-                    ):
-                        raise ValueError("A KV chunk no longer exposes its tensor")
-                    windows = [
-                        (group, Window.from_chunks(group))
-                        for group in plan_windows(staged, capacity)
-                    ]
-                    for _, window in windows:
-                        if window.num_bytes > capacity:
-                            raise ValueError(
-                                f"A KV chunk of {window.num_bytes} bytes exceeds "
-                                f"retrieve_buffer_size={capacity}"
+                        with stats.profile_process_tokens():
+                            chunks, tot_kv_size = self._acquire_chunks(
+                                tokens, mask, torch.zeros_like(ret_mask), **kwargs
                             )
-                except Exception:
-                    self.broadcast_object_fn(None, source_rank)
-                    raise
-                # From here on every failure is a device or collective failure.
-                # Peers block on a header between windows; when they are still
-                # waiting, the terminating header lets them finish this request.
-                peers_await_header = True
+                        staged = [(obj, start, end) for _, obj, start, end in chunks]
+                        windows = [
+                            (group, Window.from_chunks(group))
+                            for group in plan_windows(staged, buffer.numel())
+                        ]
+                    except Exception:
+                        # Peers are still waiting for the first header.
+                        self.broadcast_object_fn(None, self.metadata.first_rank)
+                        raise
+                writable = True
                 try:
-                    for group, window in windows:
-                        # Pack before announcing the window so its payload is
-                        # ready the moment peers join the tensor broadcast.
-                        pack(group, window.views(buffer))
-                        self.broadcast_object_fn(window, source_rank)
-                        peers_await_header = False
-                        exchange(window)
-                        peers_await_header = True
-                    peers_await_header = False
-                    self.broadcast_object_fn(None, source_rank)
+                    for window in self._announce_windows(windows, buffer):
+                        with stats.profile_broadcast():
+                            self.broadcast_fn(
+                                buffer[: window.num_bytes], self.metadata.first_rank
+                            )
+                        writable = writable and self._write_window(
+                            window, buffer, ret_mask, stats, **kwargs
+                        )
                 except Exception:
-                    self._disable_after_fatal_transfer_failure()
-                    if peers_await_header:
-                        self.broadcast_object_fn(None, source_rank)
+                    # This rank's collective sequence can no longer be trusted.
+                    # Every later retrieval votes not ready at admission, until
+                    # the serving engine decides the worker's fate.
+                    self.mark_init_failed("Fatal KV retrieval transfer failure")
                     raise
         finally:
             # Staging copies may still be reading the sources.
@@ -2036,33 +1944,136 @@ class LMCacheEngine:
                 self._release_retrieval_chunk(key, memory_obj)
         return tot_kv_size
 
-    def _all_ranks_agree(self, ready: bool) -> bool:
-        """Return True only if every rank of the retrieval group voted True.
+    def _admit_broadcast_retrieval(
+        self, num_tokens: int, request_id: str | None
+    ) -> bool:
+        """Agree, once and before any tensor collective, that every rank can join.
+
+        A rank is ready when it is healthy, holds a staging buffer at least as
+        large as the first rank's, and serves the same request as the first
+        rank. Readiness is agreed rather than decided per rank because a rank
+        that cannot join the tensor broadcasts would stall its peers; with the
+        capacity check, any window the first rank sends fits on every rank.
 
         Args:
-            ready: This rank's vote.
+            num_tokens: Length of the requested token sequence.
+            request_id: The serving engine's request id, if it supplied one.
 
         Returns:
-            The conjunction of all votes, identical on every rank.
+            Whether every rank is ready; identical on every rank.
         """
-        if self.metadata.world_size == 1:
-            return ready
-        if self.all_ranks_agree_fn is None:
-            raise RuntimeError(
-                "First-rank retrieval across ranks requires all_ranks_agree_fn"
+        assert self.all_ranks_agree_fn is not None, "required at engine creation"
+        capacity = self._staging.numel() if self._staging is not None else 0
+        reservation = (capacity, num_tokens, request_id)
+        source = self.broadcast_object_fn(
+            reservation if self.metadata.is_first_rank() else None,
+            self.metadata.first_rank,
+        )
+        ready = (
+            self._staging is not None
+            and self.is_healthy()
+            and source is not None
+            and capacity >= source[0]
+            and reservation[1:] == source[1:]
+        )
+        if self.all_ranks_agree_fn(ready):
+            return True
+        logger.warning(
+            "[req_id=%s] rank %d: first-rank retrieval was not admitted "
+            "(this rank ready=%s)",
+            request_id,
+            self.metadata.worker_id,
+            ready,
+        )
+        return False
+
+    def _announce_windows(
+        self,
+        windows: list[tuple[Sequence[StagedChunk], Window]],
+        buffer: torch.Tensor,
+    ) -> Generator[Window, None, None]:
+        """Yield the windows of a broadcast retrieval as every rank learns of them.
+
+        The first rank packs each window into ``buffer`` before announcing it,
+        so a peer joining the tensor broadcast finds the payload already
+        queued, and ends with a ``None`` header. Other ranks yield the headers
+        they receive until that end.
+
+        Args:
+            windows: The first rank's windows with their source chunks; other
+                ranks pass an empty list.
+            buffer: This rank's staging buffer.
+
+        Yields:
+            The next window, identical on every rank.
+        """
+        source_rank = self.metadata.first_rank
+        if not self.metadata.is_first_rank():
+            while (window := self.broadcast_object_fn(None, source_rank)) is not None:
+                yield window
+            return
+        for group, window in windows:
+            pack(group, window.views(buffer))
+            self.broadcast_object_fn(window, source_rank)
+            yield window
+        self.broadcast_object_fn(None, source_rank)
+
+    def _write_window(
+        self,
+        window: Window,
+        buffer: torch.Tensor,
+        ret_mask: torch.Tensor,
+        stats: RetrieveRequestStats,
+        **kwargs: Any,
+    ) -> bool:
+        """Write a received window into this rank's KV pages and commit its tokens.
+
+        A failed write is logged, not raised, so this rank keeps joining the
+        remaining broadcasts and its peers never wait on it. Either way the
+        connector is fenced before returning: a write that raised may already
+        have queued reads of ``buffer``, which the next window overwrites.
+
+        Args:
+            window: The window whose payload ``buffer`` holds.
+            buffer: This rank's staging buffer.
+            ret_mask: Output mask; the window's tokens are set if it was written.
+            stats: Per-request statistics receiving the write timing.
+            **kwargs: Serving-engine arguments forwarded to the GPU connector.
+
+        Returns:
+            Whether the window was written and committed.
+
+        Raises:
+            RuntimeError: If the fence fails, which is a device failure.
+        """
+        assert self.gpu_connector is not None, "checked by retrieve"
+        connector = self.gpu_connector
+        written = True
+        try:
+            with stats.profile_to_gpu():
+                if not hasattr(connector, "load_stream"):
+                    # The connector writes on its own stream; the payload must
+                    # have landed before it reads the staging buffer.
+                    self.broadcast_stream.synchronize()
+                connector.batched_to_gpu(
+                    window.views(buffer),
+                    list(window.starts),
+                    list(window.ends),
+                    **kwargs,
+                )
+        except Exception:
+            logger.exception(
+                "[req_id=%s] rank %d could not write a KV window; "
+                "reporting the prefix committed so far",
+                kwargs.get("req_id"),
+                self.metadata.worker_id,
             )
-        return self.all_ranks_agree_fn(ready)
-
-    def _disable_after_fatal_transfer_failure(self) -> None:
-        """Refuse further first-rank retrievals after a device or collective error.
-
-        The collective sequence of this rank can no longer be trusted, and the
-        serving engine decides whether the worker group is torn down. Until
-        then every later retrieval is refused at admission, so peers receive a
-        clean all-false result instead of waiting on a broadcast this rank
-        never joins.
-        """
-        self.mark_init_failed("Fatal KV retrieval transfer failure")
+            written = False
+        connector.synchronize_load()
+        if written:
+            for start, end in zip(window.starts, window.ends, strict=True):
+                ret_mask[start:end] = True
+        return written
 
     def _chunk_bytes(self) -> int:
         """Return the size in bytes of one full KV chunk under the current layout."""
@@ -2094,8 +2105,8 @@ class LMCacheEngine:
         else:
             # Blocking gets acquire references, not ownership of lookup pins;
             # the lookup owner releases those through lookup_unpin(). Async
-            # prefetch results and passively received chunks own their pins.
-            if (self.async_loading or self._is_passive()) and memory_obj.is_pinned:
+            # prefetch results own their pins.
+            if self.async_loading and memory_obj.is_pinned:
                 memory_obj.unpin()
             memory_obj.ref_count_down()
 
@@ -2105,6 +2116,14 @@ class LMCacheEngine:
         the data directly, but from the "active" worker (i.e., rank 0 in MLA)
         """
         return self.save_only_first_rank and not self.metadata.is_first_rank()
+
+    def _retrieves_by_broadcast(self) -> bool:
+        """Return whether retrieval streams the first rank's chunks to its peers.
+
+        Only the first rank stores KV under ``save_only_first_rank``. A single
+        rank has no peers, so it retrieves directly like any other model.
+        """
+        return self.save_only_first_rank and self.metadata.world_size > 1
 
     def _is_sync_pd_backend(self) -> bool:
         """Check if the PD backend is the sync variant.

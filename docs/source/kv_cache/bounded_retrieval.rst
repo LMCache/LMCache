@@ -6,6 +6,8 @@ with ``extra_config.save_only_first_rank`` and broadcast it to the other ranks
 at retrieval time. Non-layerwise retrieval streams the cache hit through one
 fixed device staging buffer per engine instead of materializing a device copy
 of the whole hit, so device memory no longer grows with the length of the hit.
+A single rank has nobody to broadcast to: it writes its chunks into its KV
+pages directly, like any other model, and reserves no staging buffer.
 
 Configuration
 -------------
@@ -20,7 +22,7 @@ Configuration
 value must be positive, must hold at least one KV chunk (``chunk_size`` tokens
 of KV data, checked when the engine is created), and must be identical on all
 ranks. The buffer never grows: it is the hard upper bound on the device memory
-a retrieval stages.
+a retrieval stages. With a single rank the setting is unused.
 
 How a retrieval proceeds
 ------------------------
@@ -86,9 +88,10 @@ its peers waiting:
   writing, keeps receiving the remaining windows, and returns the prefix it
   committed. The integration reports the missing tokens to the serving engine
   through its normal load-failure path.
-- A storage failure on the first rank, or a chunk larger than the staging
-  buffer, ends the exchange for its peers, which return all-false masks,
-  before the error propagates on the first rank.
+- A storage failure on the first rank, or a chunk it cannot send (larger than
+  the staging buffer, or without tensor storage), is detected before the first
+  window. It ends the exchange for its peers, which return all-false masks,
+  before the error propagates on the first rank, whose engine stays usable.
 - Device and collective failures propagate and are not cache misses. The
   affected engine marks itself failed and refuses every later retrieval at
   admission, so peers receive all-false results from then on; peers of the
