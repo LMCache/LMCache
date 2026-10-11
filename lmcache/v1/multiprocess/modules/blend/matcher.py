@@ -46,6 +46,8 @@ class BlendTokenRangeMatcher:
         self._lock = threading.Lock()
         # compact_chunk_id -> full poly hash, for collision reject.
         self._chunk_poly_hash: list[int] = []
+        # Free list of evicted compact IDs available for reuse (issue #5598).
+        self._free_ids: list[int] = []
 
     def on_new_token_hashes(
         self,
@@ -93,7 +95,11 @@ class BlendTokenRangeMatcher:
             n_new = len(new_idxs)
             new_chunk_hashes = chunk_hashes[new_idxs]
 
-            base_id = len(self._chunk_token_hash)
+            if self._free_ids:
+                base_id = self._free_ids.pop(0)
+                n_new = 1
+            else:
+                base_id = len(self._chunk_token_hash)
             if base_id + n_new > self._TABLE_SIZE:
                 logger.error(
                     "BlendTokenRangeMatcher compact-ID overflow: %d chunks "
@@ -219,9 +225,16 @@ class BlendTokenRangeMatcher:
                         cid,
                     )
                     continue
-                self._table_id[slot] = -1
+                # Only clear the slot if this chunk actually holds it.
+                # Multiple live chunks can map to the same slot (same text
+                # behind different prefixes, or bucket collisions). Clearing
+                # unconditionally would hide the other live copies
+                # (issue #5597).
+                if self._table_id[slot] == cid:
+                    self._table_id[slot] = -1
                 self._compact_id_to_slot[cid] = -1
                 self._chunk_token_hash[cid] = None
+                self._free_ids.append(cid)
                 self._chunk_poly_hash[cid] = 0
                 self._token_hash_to_start.pop(th, None)
                 del self._token_hash_to_compact_id[th]
