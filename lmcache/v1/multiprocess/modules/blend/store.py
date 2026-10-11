@@ -23,6 +23,9 @@ if TYPE_CHECKING:
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.modules.blend.read_set import (
+    _classify_cb_read_groups,
+)
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -76,7 +79,12 @@ class StoreMixin:
             The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
-        handle, store_ok, stored_mask = self._transfer_module.store_with_chunk_mask(
+        (
+            handle,
+            store_ok,
+            stored_mask,
+            group_masks,
+        ) = self._transfer_module.store_with_chunk_mask(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
         result = (handle, store_ok)
@@ -109,10 +117,28 @@ class StoreMixin:
             # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.
             start_chunk_idx = 0 if key.start != 0 else 1
 
-            # Register only committed chunks: a fingerprint for a skipped
-            # chunk would advertise content that was never persisted.
+            # Register only chunks the blend leg can actually read: every
+            # group in blend_gids must have committed the chunk. With
+            # --separate-object-groups + Mamba align-mode, the recurrent
+            # group commits only at state-snapshot boundaries, so using the
+            # all-groups mask would never fingerprint most chunks even
+            # though the blend leg reads attention + aux only (issue #5601).
+            entry = self._transfer_module.get_and_touch_context_entry(
+                instance_id
+            )
+            gpu_ctx = entry.cache_context if entry is not None else None
+            blend_gids: tuple[int, ...] = tuple(range(len(group_masks)))
+            if gpu_ctx is not None:
+                attn_desc = gpu_ctx.kv_layer_groups_manager.get_attn_desc()
+                blend_gids = _classify_cb_read_groups(
+                    attn_desc.num_object_groups, attn_desc.group_kinds
+                ).blend_gids
+
             def _stored(i: int) -> bool:
-                return stored_mask[i] if i < len(stored_mask) else False
+                return i < len(group_masks) and all(
+                    g < len(group_masks) and group_masks[g][i]
+                    for g in blend_gids
+                )
 
             jobs: list[FpJob] = []
             chunk_size = self._ctx.chunk_size
@@ -142,8 +168,6 @@ class StoreMixin:
             with self._pending_fp_lock:
                 for _, hashes, sci, _, _ in jobs:
                     self._pending_fp_hashes.update(hashes[sci:])
-            entry = self._transfer_module.get_and_touch_context_entry(instance_id)
-            gpu_ctx = entry.cache_context if entry is not None else None
             for job in jobs:
                 if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
                     submit_callback_to_stream(

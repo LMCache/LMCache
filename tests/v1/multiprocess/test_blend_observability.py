@@ -279,6 +279,7 @@ class TestFingerprintJobTuple:
             b"handle",
             True,
             [True, True],
+            [[True, True]],
         )
         eng._transfer_module.get_and_touch_context_entry.return_value = None
         eng._pending_fp_lock = threading.Lock()
