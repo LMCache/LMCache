@@ -91,6 +91,10 @@ class EventGate:
         self._lock = threading.Lock()
         self._broadcaster = broadcaster
         self._cursors: dict[str, _StreamCursor] = {}
+        # Instances that have been deregistered. Late events from these
+        # instances are rejected so their placements do not linger in
+        # the directory (issue #5626).
+        self._dropped_instances: set[str] = set()
         # Acquired outside self._lock on every mutating path, so a capture
         # and an ingest take the two locks in the same order.
         self._quiesce = quiesce
@@ -107,6 +111,8 @@ class EventGate:
             it was dropped.
         """
         with self._quiesce.applying(), self._lock:
+            if batch.instance_id in self._dropped_instances:
+                return IngestResult.STALE_INCARNATION
             cursor = self._cursors.get(batch.instance_id)
             if cursor is not None:
                 if batch.incarnation < cursor.incarnation:
@@ -179,6 +185,7 @@ class EventGate:
         with self._quiesce.applying(), self._lock:
             self._broadcaster.fence_instance(instance_id)
             self._cursors.pop(instance_id, None)
+            self._dropped_instances.add(instance_id)
 
     @property
     def name(self) -> str:
