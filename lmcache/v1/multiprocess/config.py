@@ -136,6 +136,11 @@ class MPServerConfig:
     sent a PING (model warmup, or death before its first request). Must be
     >= worker_reap_timeout_seconds."""
 
+    worker_disconnect_grace_seconds: float = 30.0
+    """Seconds a worker's KV cache is kept after its connection closes, unless
+    it reconnects; workers still warming up get worker_reap_timeout_seconds.
+    0 disables; otherwise must be between 30 and worker_reap_timeout_seconds."""
+
     enable: list[str] = field(default_factory=list)
     """List of experimental transfer modules to enable. Options: transfer_query
     (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
@@ -153,8 +158,9 @@ class MPServerConfig:
 
         Raises:
             ValueError: If a timeout is non-finite, the reap timeout is
-                negative or a non-zero value below the 30 s floor, or the
-                registration grace is below the reap timeout.
+                negative or a non-zero value below the 30 s floor, the
+                registration grace is below the reap timeout, or a non-zero
+                disconnect grace is below 30 s or above the reap timeout.
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
@@ -172,6 +178,17 @@ class MPServerConfig:
             raise ValueError(
                 "worker registration grace must be >= the worker reap timeout "
                 f"({reap}s); got {grace}"
+            )
+        disconnect = self.worker_disconnect_grace_seconds
+        if (
+            not math.isfinite(disconnect)
+            or disconnect < 0
+            or (disconnect != 0 and disconnect < 30.0)
+            or (reap != 0 and disconnect > reap)
+        ):
+            raise ValueError(
+                "worker disconnect grace must be 0 (disabled) or between 30s "
+                f"and the worker reap timeout ({reap}s); got {disconnect}"
             )
 
 
@@ -527,6 +544,14 @@ def add_mp_server_args(
         "timeout. Default is 3600.",
     )
     mp_group.add_argument(
+        "--worker-disconnect-grace-seconds",
+        type=float,
+        default=30.0,
+        help="Seconds a worker's KV cache is kept after its connection "
+        "closes, unless it reconnects. 0 disables. Must be between 30 and "
+        "the worker reap timeout. Default is 30.",
+    )
+    mp_group.add_argument(
         "--enable-segmented-prefix",
         action="store_true",
         help="CacheBlend (--engine-type blend) only: on a mid-prefix L2 "
@@ -617,6 +642,7 @@ def parse_args_to_mp_server_config(
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         session_ttl_seconds=args.session_ttl_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
+        worker_disconnect_grace_seconds=args.worker_disconnect_grace_seconds,
         enable=args.enable or [],
         server_modules=parse_server_module_specs(args.server_module or []),
     )

@@ -2,6 +2,9 @@
 """Transport-neutral request handler metadata and discovery."""
 
 # Standard
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Callable, TypeVar, get_type_hints
@@ -13,6 +16,34 @@ from lmcache.v1.multiprocess.rpc import RpcOperation, get_rpc_spec
 F = TypeVar("F", bound=Callable[..., Any])
 
 _HANDLER_OPTIONS_ATTR = "__lmcache_request_handler_options__"
+
+_REQUEST_PEER: ContextVar[bytes | None] = ContextVar(
+    "lmcache_request_peer", default=None
+)
+
+
+def current_request_peer() -> bytes | None:
+    """Return the client connection the current request arrived on.
+
+    Set by transports that can report connection loss (ZMQ) for the duration
+    of a handler call, including handlers run on a worker pool. None for
+    other transports (gRPC) and for calls made outside a request (HTTP APIs).
+    """
+    return _REQUEST_PEER.get()
+
+
+@contextmanager
+def bind_request_peer(peer: bytes | None) -> Iterator[None]:
+    """Expose ``peer`` through :func:`current_request_peer` inside the block.
+
+    Args:
+        peer: Opaque connection id, or None when it is unknown.
+    """
+    token = _REQUEST_PEER.set(peer)
+    try:
+        yield
+    finally:
+        _REQUEST_PEER.reset(token)
 
 
 class HandlerType(Enum):

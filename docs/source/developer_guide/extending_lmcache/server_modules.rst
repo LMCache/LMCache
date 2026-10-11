@@ -270,4 +270,7 @@ If a plugin owns per-worker state that should be pinged and reaped by
 - ``drop_instance_state(instance_id)``
 
 LMCache detects that method set when loading plugin modules and includes the
-module in the management reaper targets.
+module in the management reaper targets. To also reclaim a worker soon after
+its connection closes, implement the optional
+``mark_peer_disconnected(peer, proven_grace_s, unproven_grace_s)``; see
+``InstanceLivenessTarget`` for its contract.
