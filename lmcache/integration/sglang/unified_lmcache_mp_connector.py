@@ -5,6 +5,10 @@ This module deliberately talks to LMCache's engine-neutral MP protocol.  It
 does not use LMCache's legacy SGLang integration and it never constructs an
 in-process LMCache engine.  The registered SGLang GPU KV tensors remain owned
 by SGLang; LMCache accesses them through device-memory and event IPC handles.
+
+Devices without KV-tensor and event IPC (for example Intel XPU) use host
+staging instead: the connector registers CPU shared-memory mirrors of the KV
+tensors and copies the transferred blocks between device and mirror itself.
 """
 
 # Future
@@ -292,7 +296,26 @@ class UnifiedLMCacheMPConnector:
         self.page_size = int(page_size)
         self.device = kv_tensors[0].device
         self.instance_id = uuid.uuid4().int & ((1 << 63) - 1)
-        self._kv_caches = {f"kv_{i}": tensor for i, tensor in enumerate(kv_tensors)}
+        # Only CUDA tensors can be exported to the server directly. Other
+        # devices register CPU mirrors (moved to shared memory at registration)
+        # and copy each transferred block between device and mirror.
+        self._host_staged = self.device.type != "cuda"
+        self._device_kv_tensors = tuple(kv_tensors)
+        self._kv_caches = {
+            f"kv_{i}": (
+                torch.empty(tensor.shape, dtype=tensor.dtype, device="cpu")
+                if self._host_staged
+                else tensor
+            )
+            for i, tensor in enumerate(kv_tensors)
+        }
+        if self._host_staged:
+            logger.warning(
+                "LMCache MP: %s KV tensors have no IPC support; staging %.2f GiB "
+                "of KV through host shared memory",
+                self.device.type,
+                sum(t.numel() * t.element_size() for t in kv_tensors) / 2**30,
+            )
         self._kv_groups = tuple(wire_groups)
         (
             self._engine_group_info_specs,
@@ -532,8 +555,8 @@ class UnifiedLMCacheMPConnector:
 
         if self._registered:
             raise RuntimeError("LMCache KV tensors are already registered")
-        self._event_backend = get_event_ipc_backend(self.device)
-        self._event_backend.check_event_support(self.device)
+        self._event_backend = get_event_ipc_backend(self._event_device)
+        self._event_backend.check_event_support(self._event_device)
         transfer_ctx = create_transfer_context(
             self._kv_caches,
             instance_id=self.instance_id,
@@ -598,9 +621,11 @@ class UnifiedLMCacheMPConnector:
             logger.info("LMCache MP heartbeat thread started")
 
     def _new_event(self, stream: Any = None) -> Any:
-        event = self._event_backend.create_event(self.device)
-        if stream is None:
-            stream = torch.get_device_module(self.device).current_stream()
+        event = self._event_backend.create_event(self._event_device)
+        # Host-staged copies are synchronous, so the server-facing event lives
+        # on the CPU and never waits on a device stream.
+        if stream is None or self._host_staged:
+            stream = torch.get_device_module(self._event_device).current_stream()
         self._event_backend.record_event(event, stream)
         return event
 
@@ -923,6 +948,7 @@ class UnifiedLMCacheMPConnector:
             ),
             future=future,
             lookup=operation,
+            staged_block_ids=block_ids if self._host_staged else None,
         )
 
     def prepare_load_on_stream(
@@ -944,12 +970,18 @@ class UnifiedLMCacheMPConnector:
             wait, so the CPU does not wait for H2D. On a cross-rank failure the
             successful ranks synchronize their local work before the caller
             releases destination slots.
+
+            Host-staged connectors instead wait for the server to fill the
+            host mirrors, then enqueue the mirror-to-device copy on ``stream``.
         """
         local_success = False
         try:
-            local_success = bool(
-                operation.future.wait_on_stream(stream, timeout=self._mq_timeout)
-            )
+            if self._host_staged:
+                local_success = bool(operation.future.result(timeout=self._mq_timeout))
+            else:
+                local_success = bool(
+                    operation.future.wait_on_stream(stream, timeout=self._mq_timeout)
+                )
         except Exception:
             logger.exception(
                 "LMCache retrieve preparation failed for %s", operation.request_id
@@ -957,6 +989,10 @@ class UnifiedLMCacheMPConnector:
 
         success = self._sync_success(local_success)
         if success:
+            if operation.staged_block_ids is not None:
+                self._copy_staged_blocks(
+                    operation.staged_block_ids, to_host=False, stream=stream
+                )
             return True
 
         # Another rank may have failed after this rank successfully enqueued
@@ -1119,6 +1155,8 @@ class UnifiedLMCacheMPConnector:
                 key = self._create_key(
                     lookup, start=start, end=aligned_end, worker_id=self.kv_worker_id
                 )
+                if self._host_staged:
+                    self._copy_staged_blocks(blocks, to_host=True)
                 event = self._new_event()
                 future = transfer_ctx.submit_store(
                     request_id,
@@ -1258,3 +1296,59 @@ class UnifiedLMCacheMPConnector:
             transfer_ctx.close()
             self._transfer_ctx = None
         self._req_client.close()
+
+    @property
+    def _event_device(self) -> torch.device:
+        """Device whose events order transfers with the LMCache server."""
+        return torch.device("cpu") if self._host_staged else self.device
+
+    def _copy_staged_blocks(
+        self,
+        block_ids: list[list[int]],
+        *,
+        to_host: bool,
+        stream: Any = None,
+    ) -> None:
+        """Copy blocks between the device KV tensors and their host mirrors.
+
+        Args:
+            block_ids: Block IDs per copy-kernel group, in the order of
+                ``self._engine_group_info_specs`` (the same list sent to the
+                server for the transfer).
+            to_host: ``True`` copies device to host before a store; ``False``
+                copies host to device after a retrieve.
+            stream: Device stream for host-to-device copies; the current
+                stream when ``None``.
+
+        Notes:
+            Block 0 of attention groups is SGLang's padding sink and doubles as
+            the placeholder for skipped prefix blocks, so it is never copied.
+            Recurrent-state groups address real slots only and are copied as is.
+            Device-to-host copies return only after the data is on the host, so
+            the server may read the mirror as soon as the store is submitted.
+        """
+        host_tensors = tuple(self._kv_caches.values())
+        device_module = torch.get_device_module(self.device)
+        with device_module.stream(
+            stream if stream is not None else device_module.current_stream()
+        ):
+            for spec, ids in zip(self._engine_group_info_specs, block_ids, strict=True):
+                if not spec["recurrent_state"]:
+                    ids = [block_id for block_id in ids if block_id != 0]
+                if not ids:
+                    continue
+                host_ids = torch.tensor(ids, dtype=torch.int64)
+                device_ids = host_ids.to(self.device)
+                for index in spec["layer_indices"]:
+                    host = host_tensors[index]
+                    device = self._device_kv_tensors[index]
+                    if to_host:
+                        host.index_copy_(
+                            0, host_ids, device.index_select(0, device_ids).cpu()
+                        )
+                    else:
+                        device.index_copy_(
+                            0,
+                            device_ids,
+                            host.index_select(0, host_ids).to(self.device),
+                        )
