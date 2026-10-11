@@ -53,7 +53,10 @@ class IPCCacheServerKey:
     dtype: str = ""
 
     # === Session tracking (not part of cache identity) ===
-    request_id: str = field(compare=False)
+    # A default is required: this field follows the defaulted ``dtype``
+    # above, and Python dataclasses reject a non-default field after a
+    # defaulted one. "" means "no session id".
+    request_id: str = field(default="", compare=False)
 
     # === Per-user isolation salt (part of cache identity) ===
     # msgspec encodes dataclasses as maps, so forward wire compatibility
