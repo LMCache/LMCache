@@ -258,6 +258,14 @@ Exit Codes
    * - ``1``
      - Error (connection failure, server error, bad arguments).
 
+Salt Identifiers
+----------------
+
+Pass salt identifiers as literal strings, with shell quoting when needed:
+``lmcache quota get 'tenant?blue'``. The CLI URL-encodes characters such as
+``?``, ``#``, ``%``, spaces, and Unicode; do not URL-encode them yourself.
+Salts containing ``/`` are not supported by the HTTP API's path route.
+
 The ``_default`` Salt
 ---------------------
 
