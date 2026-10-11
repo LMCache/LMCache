@@ -1544,6 +1544,52 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
 
+        # A request aborted between LOOKUP and RETRIEVE leaves its hit
+        # chunks read-locked: END_SESSION drops the session without
+        # releasing them, so they stay locked until the read-lock TTL
+        # (300 s default), exactly when the engine is overloaded and L1
+        # is under pressure (issue #5656). FREE_LOOKUP_LOCKS must be sent
+        # before END_SESSION, while the server session still carries the
+        # lookup result the release is derived from.
+        #
+        # Free exactly the range still locked: update_state_after_alloc
+        # already freed the vLLM-covered prefix when it moved to
+        # WAITING_FOR_LOAD, and READY means the retrieve was submitted
+        # (it releases its own locks), so only PREFETCHING (lookup hit
+        # consumed, no allocation yet) and WAITING_FOR_LOAD (retrieve not
+        # yet submitted) still hold locks here.
+        tracker = self.request_trackers.get(request.request_id)
+        if (
+            tracker is not None
+            and tracker.num_lmcache_hit_tokens > 0
+            and tracker.state
+            in (
+                LMCacheMPRequestState.PREFETCHING,
+                LMCacheMPRequestState.WAITING_FOR_LOAD,
+            )
+        ):
+            free_start = (
+                tracker.num_vllm_hit_tokens
+                if tracker.state == LMCacheMPRequestState.WAITING_FOR_LOAD
+                else 0
+            )
+            if free_start < tracker.num_lmcache_hit_tokens:
+                self.scheduler_adapter.free_lookup_locks(
+                    token_ids=tracker.get_token_ids(),
+                    start=free_start,
+                    end=tracker.num_lmcache_hit_tokens,
+                    request_id=request.request_id,
+                    cache_salt=tracker.cache_salt,
+                    request_configs=tracker.request_configs,
+                )
+                logger.debug(
+                    "Free locks of tokens %d-%d for request %s ending before "
+                    "its retrieve.",
+                    free_start,
+                    tracker.num_lmcache_hit_tokens,
+                    request.request_id,
+                )
+
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 
