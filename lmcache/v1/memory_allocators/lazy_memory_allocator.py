@@ -62,8 +62,9 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
     the size to the required size in the background.
 
     Background expansion logic:
-    - Chunks are registered one at a time; each is committed with sbrk until
-      the initial size is reached, then commits are batched by COMMIT_SIZE
+    - The address space is opened to the initial size at construction
+    - Chunks are registered one at a time; beyond the initial size each
+      COMMIT_SIZE of registered memory is committed with sbrk
     - Once everything is registered, the background thread stops
 
     Deferred pinning:
@@ -72,7 +73,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
       is known, so pinning there would bind that context to the default
       device. Pinning therefore must stay out of ``__init__``: it is bound
       to a device by :meth:`ensure_pinning`, triggered at the latest by the
-      first :meth:`allocate` / :meth:`batched_allocate`.
+      first :meth:`allocate` / :meth:`batched_allocate`, which then wait
+      until the initial size is pinned before handing out memory.
     """
 
     PIN_CHUNK_SIZE = 1 << 26  # 64 MB pin chunk
@@ -107,8 +109,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         # Whether using NUMA allocation
         self._use_numa = numa_mapping is not None
-        # Pin-ahead target: committed chunk by chunk so early allocations find
-        # space right away; beyond it commits are batched by COMMIT_SIZE.
+        # Address space opened at construction; pinned first once a device is
+        # bound, and allocations wait for it.
         self._init_size = align_to(init_size, self.PIN_CHUNK_SIZE)
         # Currently pinned size, only written by ensure_pinning and the
         # expansion thread
@@ -161,7 +163,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._allocator = TensorMemoryAllocator(
             tensor=self._buffer,
             align_bytes=align_bytes,
-            init_address_space=0,
+            init_address_space=self._init_size,
         )
 
         # Get the address manager
@@ -170,8 +172,6 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         # NOTE(ApostaC): this also assumes that the behavior of the allocation is
         # completely determined by the address manager.
         self._address_manager = self._allocator.address_manager
-        # Bytes made allocatable so far; advanced by _commit_expansion.
-        self._committed_size = 0
 
         # Deferred-pinning state, all guarded by _init_lock:
         # _pin_device is bound once by the first ensure_pinning() and never
@@ -180,6 +180,9 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._pinning_started = False
         self._closed = False
         self._init_lock = threading.Lock()
+        # Set once the initial size is pinned (or on close); allocations wait
+        # on it so nothing is handed out from the unpinned address space.
+        self._init_pinned = threading.Event()
 
         # The expansion thread is created here but started only after the
         # initial pinning is bound to a device.
@@ -194,8 +197,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         Pin the first chunk on ``device`` and start background expansion.
 
         Only one chunk is pinned inline (tens of milliseconds); the expansion
-        thread pins the rest, committing chunk by chunk up to the configured
-        initial size so the pool is usable right away.
+        thread pins the rest. Allocations wait until the initial size is
+        pinned.
 
         Idempotent and thread-safe: only the first call pins and binds the
         device; subsequent calls (and calls after :meth:`close`) are no-ops.
@@ -211,7 +214,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             self._pin_device = device
             self._pin_memory_chunk(0, self.PIN_CHUNK_SIZE)
             self._curr_size = self.PIN_CHUNK_SIZE
-            self._commit_expansion(self.PIN_CHUNK_SIZE)
+            if self._curr_size >= self._init_size:
+                self._init_pinned.set()
             self._pinning_started = True
             self._expand_thread.start()
 
@@ -240,11 +244,11 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         ).start()
 
     def pin_status(self) -> tuple[int, int]:
-        """Return (committed pinned bytes, final pool bytes).
+        """Return (pinned bytes, final pool bytes).
 
         The two are equal once background pinning has finished.
         """
-        return self._committed_size, self._final_size
+        return self._curr_size, self._final_size
 
     def allocate(
         self,
@@ -265,9 +269,10 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             A memory object, or ``None`` if the committed address space is full.
 
         Note:
-            The first allocation (across all threads) pins the initial chunk,
-            which blocks the caller and creates a CUDA context on the calling
-            thread's current device unless :meth:`ensure_pinning` already ran.
+            Blocks until the initial size is pinned. The first allocation
+            (across all threads) also starts the pinning, which creates a
+            CUDA context on the calling thread's current device unless
+            :meth:`ensure_pinning` already ran.
         """
         self._ensure_pinned_for_use()
         obj = self._allocator.allocate(shapes, dtypes, fmt, allocator_type)
@@ -299,9 +304,10 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             Memory objects for the batch, or ``None`` if allocation fails.
 
         Note:
-            The first allocation (across all threads) pins the initial chunk,
-            which blocks the caller and creates a CUDA context on the calling
-            thread's current device unless :meth:`ensure_pinning` already ran.
+            Blocks until the initial size is pinned. The first allocation
+            (across all threads) also starts the pinning, which creates a
+            CUDA context on the calling thread's current device unless
+            :meth:`ensure_pinning` already ran.
         """
         self._ensure_pinned_for_use()
         # HACK(ApostaC): reset the parent allocator to this lazy allocator
@@ -360,6 +366,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         """
         with self._init_lock:
             self._closed = True
+            self._init_pinned.set()
 
             # Stop the expansion thread and unpin only if pinning started.
             # The expansion thread never takes _init_lock, so joining it
@@ -402,11 +409,13 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         Fallback for callers that never invoke :meth:`ensure_pinning`
         explicitly: the first allocation binds pinning to whatever device is
-        current on the calling thread.
+        current on the calling thread. Then waits until the initial size is
+        pinned, since the address space already covers it.
         """
         if not self._pinning_started:
             device = torch_dev.current_device() if torch_dev.is_available() else 0
             self.ensure_pinning(device)
+        self._init_pinned.wait()
 
     def _pin_memory_chunk(self, offset: int, size: int) -> None:
         """
@@ -447,7 +456,6 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         Call sbrk in the address manager to commit the expansion.
         """
         self._address_manager.sbrk(expand_size)
-        self._committed_size += expand_size
 
     def _log_expansion_progress(self, expanded_since_last_log: int) -> None:
         """
@@ -467,24 +475,23 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         """
         Background worker to expand the pinned memory.
         """
-        last_commit_size = self._curr_size
+        # The address space already covers the initial size.
+        last_commit_size = self._init_size
         last_log_size = self._curr_size
         while self._curr_size < self._final_size and not self._stop_expand.is_set():
-            # Commit every chunk until the initial size is pinned, then batch.
-            chunks_per_commit = (
-                1
-                if self._curr_size < self._init_size
-                else self.COMMIT_SIZE // self.PIN_CHUNK_SIZE
-            )
-            for _ in range(chunks_per_commit):
+            # Expand chunk by chunk and commit
+            for _ in range(self.COMMIT_SIZE // self.PIN_CHUNK_SIZE):
                 if self._curr_size >= self._final_size or self._stop_expand.is_set():
                     break
                 self._pin_memory_chunk(self._curr_size, self.PIN_CHUNK_SIZE)
                 self._curr_size += self.PIN_CHUNK_SIZE
+                if self._curr_size >= self._init_size:
+                    self._init_pinned.set()
 
             expand_size = self._curr_size - last_commit_size
-            self._commit_expansion(expand_size)
-            last_commit_size = self._curr_size
+            if expand_size > 0:
+                self._commit_expansion(expand_size)
+                last_commit_size = self._curr_size
 
             # Log every LOG_INTERVAL bytes, and always on the final commit.
             expanded_since_last_log = self._curr_size - last_log_size

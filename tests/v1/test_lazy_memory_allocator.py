@@ -69,6 +69,18 @@ def test_construction_does_not_touch_device(mock_device_spec, mock_torch_dev, mo
     mock_torch_dev.device.assert_not_called()
 
 
+def test_construction_opens_initial_address_space(
+    mock_device_spec, mock_torch_dev, mock_tma
+):
+    """Only the pinning is deferred: the address space already covers the
+    initial size at construction, so memory accounting matches a pool that
+    was pinned at boot."""
+    _make_allocator(init=2 * PIN_CHUNK, final=4 * PIN_CHUNK)
+
+    assert mock_tma.call_args.kwargs["init_address_space"] == 2 * PIN_CHUNK
+    mock_tma.return_value.address_manager.sbrk.assert_not_called()
+
+
 def test_ensure_pinning_pins_initial_chunk_on_device(
     mock_device_spec, mock_torch_dev, mock_tma
 ):
