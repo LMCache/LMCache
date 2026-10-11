@@ -93,6 +93,10 @@ pytest with `--confcutdir` skips ancestor fixtures but does not remove runtime
 native-extension dependencies imported by platform/gpu-connector modules.
 For serial CUDA verification builds, set both `MAX_JOBS=1` and `NVCC_THREADS=1`;
 `MAX_JOBS` alone does not cap the CUDA profile's automatic NVCC thread count.
+For network deserialization regressions, check execution markers in the server's
+filesystem namespace after confirming that the request was processed. An immediate
+client-side file check can report a false negative. Use a vulnerable-revision
+positive control and verify that normal requests still succeed after rejection.
 
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 
