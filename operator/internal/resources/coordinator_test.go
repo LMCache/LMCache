@@ -53,7 +53,7 @@ func TestBuildCoordinatorArgs_Defaults(t *testing.T) {
 	}
 	// Unset blend knobs are omitted so the coordinator image applies its own
 	// defaults; emitting them would break images whose CLI predates the flags.
-	if slices.Contains(args, "--blend-chunk-size") {
+	if slices.Contains(args, "--chunk-size") {
 		t.Errorf("--blend-chunk-size should be omitted when unset, got args %v", args)
 	}
 	if slices.Contains(args, "--blend-probe-stride") {
@@ -74,7 +74,7 @@ func TestBuildCoordinatorArgs_Overrides(t *testing.T) {
 	if got := findArgValue(t, args, "--eviction-ratio"); got != "0.5" {
 		t.Errorf("--eviction-ratio = %q, want 0.5", got)
 	}
-	if got := findArgValue(t, args, "--blend-chunk-size"); got != "512" {
+	if got := findArgValue(t, args, "--chunk-size"); got != "512" {
 		t.Errorf("--blend-chunk-size = %q, want 512", got)
 	}
 	if got := findArgValue(t, args, "--blend-probe-stride"); got != "4" {
