@@ -883,3 +883,18 @@ def test_reorder_store_records_once_a_prefix_hit_can_end_in_it():
     )
     assert _recorded_prompts(no_state) == {}
     assert _store_hook_jobs(no_state) == [(1, 0, 4)]
+
+
+def test_reorder_store_record_ignores_the_aux_group():
+    """The prefix leg never reads the aux group, so a chunk with attention
+    and state but no aux object is still one a prefix hit can end on: the
+    store records the prompt although that chunk is not blendable."""
+    eng = _reorder_store_engine(
+        [[True] * 4, [False, False, False, True], [True, True, True, False]],
+        ("attention", "recurrent", "aux"),
+    )
+    eng.store(
+        _store_hook_key(4), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+    assert list(_recorded_prompts(eng)) == [(("m", 1, ""), "req-store-mask")]
+    assert _store_hook_jobs(eng) == [(1, 0, 3)]
