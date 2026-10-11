@@ -133,7 +133,9 @@ class RequestSender:
 Streams via `AsyncOpenAI`, measures TTFT / decode speed / latency, reads token
 counts from server usage reports, then invokes every `on_finished` callback
 with `(RequestResult, response_text)`. Each call is a self-contained
-coroutine — concurrency is the workload's job.
+coroutine — concurrency is the workload's job. TTFT starts at the first
+non-empty content, `reasoning_content`, or `reasoning` text; reasoning text is
+included in the callback response even when `content` is empty.
 
 `ignore_eos` and `extra_body` are merged into the request body; `extra_body`
 carries options the OpenAI client has no parameter for, notably
