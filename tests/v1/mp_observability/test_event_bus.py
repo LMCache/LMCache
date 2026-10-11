@@ -583,23 +583,37 @@ _REGISTER_GAUGE = "lmcache.v1.mp_observability.event_bus.register_gauge"
 
 
 class TestSelfMonitoringGauges:
-    def test_init_registers_both_gauges(self):
+    def test_module_registration_registers_both_gauges(self):
+        """The gauges are registered once, at module level (issue #5496)."""
         with patch(_REGISTER_GAUGE) as mock_register:
-            EventBus(EventBusConfig(enabled=True))
+            _bus_module._register_self_gauges()
             names = [c.args[1] for c in mock_register.call_args_list]
             assert set(names) == {
                 "lmcache_mp.event_bus.queue_depth",
                 "lmcache_mp.event_bus.drain_lag_seconds",
             }
 
-    def test_queue_depth_callback_reflects_bus(self):
+    def test_constructor_does_not_register(self):
+        """Per-instance registration let the disabled import-time bus win
+        the OTel instrument; every later bus's callback was dropped, so
+        both gauges exported 0 forever (issue #5496)."""
+        with patch(_REGISTER_GAUGE) as mock_register:
+            EventBus(EventBusConfig(enabled=True))
+            mock_register.assert_not_called()
+
+    def test_queue_depth_callback_reflects_live_bus(self):
         captured: dict[str, object] = {}
 
         def _capture(_meter, name, _desc, func):
             captured[name] = func
 
         with patch(_REGISTER_GAUGE, side_effect=_capture):
-            bus = EventBus(EventBusConfig(enabled=True))
+            _bus_module._register_self_gauges()
+        previous = _bus_module.get_event_bus()
+        try:
+            bus = _bus_module.init_event_bus(EventBusConfig(enabled=True))
             bus.publish(_make_event(session_id="s1"))
             bus.publish(_make_event(session_id="s2"))
             assert captured["lmcache_mp.event_bus.queue_depth"]() == 2
+        finally:
+            _bus_module._global_bus = previous
