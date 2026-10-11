@@ -175,6 +175,13 @@ Source: ``lmcache/v1/multiprocess/config.py``
        adapter's ``lmcache.mp.heartbeat_interval`` (default 10s) so a few
        missed pings never reap a live worker; the adapter warns at startup
        if its interval is raised without raising this.
+   * - ``--session-ttl-seconds``
+     - ``600.0``
+     - Idle seconds before a request session is reaped. A session carries
+       the lookup state ``free_lookup_locks`` needs, so it must outlive the
+       longest time a request can wait in the engine's queue between its
+       lookup and its admission. Raise it above the longest engine queueing
+       delay seen under deep agentic backlogs.
    * - ``--worker-registration-grace-seconds``
      - ``3600.0``
      - Silence budget (seconds) for a worker that registered but has never
