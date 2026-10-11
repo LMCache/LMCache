@@ -190,7 +190,12 @@ def _tq_fused_store_fp8(
     d_offs = tl.arange(0, BLOCK_D)
     d_mask = d_offs < D
     k_vals = tl.load(Key_ptr + base + d_offs, mask=d_mask, other=0.0)
-    k_fp8 = k_vals.to(tl.float8e4b15) if FP8_E4B15 else k_vals.to(tl.float8e4nv)
+    # On SM80 (Ampere), Triton's convert_custom_float8 asserts that the
+    # source scalar type is fp16 or fp32. bfloat16 triggers the assertion;
+    # widening to float32 first is safe because float32 is a superset of
+    # bfloat16 and the FP8 target has far less precision.
+    k_vals_f32 = k_vals.to(tl.float32)
+    k_fp8 = k_vals_f32.to(tl.float8e4b15) if FP8_E4B15 else k_vals_f32.to(tl.float8e4nv)
     k_bytes = k_fp8.to(tl.uint8, bitcast=True)
     tl.store(KV_cache_ptr + slot_base + d_offs, k_bytes, mask=d_mask)
 
