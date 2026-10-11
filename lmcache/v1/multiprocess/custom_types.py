@@ -46,6 +46,12 @@ class IPCCacheServerKey:
     start: int
     end: int
 
+    # === KV cache dtype (part of cache identity) ===
+    # Different dtypes produce different cache keys so that instances
+    # sharing an L2 backend (e.g. Mooncake) do not collide on
+    # incompatible cache objects.
+    dtype: str = ""
+
     # === Session tracking (not part of cache identity) ===
     request_id: str = field(compare=False)
 

@@ -135,6 +135,15 @@ class ObjectKey:
     128 to stay well within ``NAME_MAX`` (255) after the model, rank,
     hash, and extension are added.
     """
+    dtype: str = ""
+    """ KV cache dtype (e.g. ``"bfloat16"``, ``"float8_e4m3fn"``).
+
+    Different dtypes produce different ObjectKeys so that instances
+    sharing an L2 backend (e.g. Mooncake) do not collide on
+    incompatible cache objects. Defaults to empty string for
+    backward compatibility with pre-dtype wire payloads.
+    """
+
 
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
     _SALT_MAX_LEN = 128
@@ -167,6 +176,7 @@ class ObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            dtype=self.dtype,
         )
 
     @staticmethod
@@ -262,6 +272,9 @@ class EncodedObjectKey:
 
     cache_salt: str = ""
 
+    dtype: str = ""
+    """ KV cache dtype. Empty string for backward compatibility. """
+
     def to_object_key(self) -> ObjectKey:
         """Recover the corresponding :class:`ObjectKey`.
 
@@ -275,6 +288,7 @@ class EncodedObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            dtype=self.dtype,
         )
 
 
@@ -609,6 +623,7 @@ def ipc_key_to_object_keys(
     ipc_key: "IPCCacheServerKey",
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
+    dtype: str = "",
 ) -> list[list[ObjectKey]]:
     """
     Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
@@ -639,6 +654,7 @@ def ipc_key_to_object_keys(
     # so compute it once and reuse it for every group.
     kv_ranks = _lookup_kv_ranks(ipc_key)
 
+    dtype = getattr(ipc_key, "dtype", "") or ""
     return [
         [
             ObjectKey(
@@ -647,6 +663,7 @@ def ipc_key_to_object_keys(
                 kv_rank=kv_rank,
                 object_group_id=object_group_id,
                 cache_salt=cache_salt,
+                dtype=dtype,
             )
             for chunk_hash in chunk_hashes
             for kv_rank in kv_ranks
