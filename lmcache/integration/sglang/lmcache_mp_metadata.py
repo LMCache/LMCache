@@ -53,6 +53,9 @@ class LMCacheLoadOperation:
     future: Any
     lookup: LMCacheLookupOperation
     result: Optional[bool] = None
+    # Kernel-group block IDs to copy from host mirrors to the device once the
+    # retrieve completes; only set by host-staged connectors.
+    staged_block_ids: Optional[list[list[int]]] = None
 
     def query(self) -> bool:
         return self.result is not None or bool(self.future.query())
