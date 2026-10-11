@@ -286,6 +286,12 @@ Store:
 If all chunks are already cached, server returns empty `slots/chunk_indices` and
 worker short-circuits store as success (no gather, no commit payload).
 
+If the worker unregisters or is reaped between `prepare_store` and
+`commit_store` (crash, or a gather that raised), the server aborts the pending
+reservations with `StorageManager.abort_write`. The slots were never written,
+so admitting them would cache garbage KV under the prompt's content hash and
+serve it to the next request with the same prefix.
+
 Retrieve:
 1. Worker `prepare_retrieve` asks server to populate SHM.
 2. Server reads from storage and returns SHM slot descriptors.
