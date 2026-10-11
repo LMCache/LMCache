@@ -160,6 +160,37 @@ def extract_request_configs_from_request(
     )
 
 
+def extract_cache_salt_from_request(request: "Request") -> str:
+    """Return the ``cache_salt`` under which the MP server keys this request's KV.
+
+    Base-model requests keep vLLM's ``cache_salt`` (``""`` when unset), so
+    their keys do not change. LoRA requests fold the salt, the adapter name and
+    the adapter path into one SHA-256 digest, mirroring how the SGLang
+    connector folds its extra key into the salt, so KV computed under one
+    adapter is never served to another adapter or to the base model. Hashing
+    the name together with the path follows vLLM's prefix cache
+    (vllm-project/vllm#59335): a name re-pointed at different weights misses
+    instead of hitting stale KV, and replicas must load an adapter from the
+    same path string to share its KV.
+
+    Args:
+        request (Request): The vLLM request. ``lora_request`` is None for
+            base-model requests.
+
+    Returns:
+        str: ``request.cache_salt`` (or ``""``) for base-model requests,
+        otherwise a 64-character hex digest, which always satisfies the
+        ``ObjectKey`` salt invariants (no ``@``, ``/``, ``\\`` or NUL, at
+        most 128 characters).
+    """
+    cache_salt = request.cache_salt or ""
+    lora_request = request.lora_request
+    if lora_request is None:
+        return cache_salt
+    payload = f"{cache_salt}\0{lora_request.lora_name}\0{lora_request.lora_path}"
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def lmcache_get_or_create_config() -> LMCacheEngineConfig:
     """Get the LMCache configuration from the environment variable
     `LMCACHE_CONFIG_FILE`. If the environment variable is not set, this
