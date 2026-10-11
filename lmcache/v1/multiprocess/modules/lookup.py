@@ -465,6 +465,11 @@ class LookupModule:
         Args:
             request_id: The request ID whose session should be removed.
         """
+        # Reclaim any prefetch job still tracked for this request so
+        # abandoned requests do not leak memory (issue #5339).
+        with self._prefetch_job_lock:
+            self._prefetch_jobs.pop(request_id, None)
+
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_VLLM_END_SESSION,
