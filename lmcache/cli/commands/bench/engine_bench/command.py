@@ -668,8 +668,9 @@ def run_engine_bench(command: "BaseCommand", args: argparse.Namespace) -> None:
 
     # 1a. A max output length can only be set for workloads that have a
     # max-output-length parameter; reject it for any other workload.
-    if args.ldqa_max_output_length != _LDQA_MAX_OUTPUT_LENGTH_DEFAULT:
-        validate_max_output_length_supported(config.workload)
+    if args.ldqa_max_output_length is not None:
+        if args.ldqa_max_output_length != _LDQA_MAX_OUTPUT_LENGTH_DEFAULT:
+            validate_max_output_length_supported(config.workload)
 
     # 1b. --export-config: save resolved config and exit
     export_path = getattr(args, "export_config", None)
