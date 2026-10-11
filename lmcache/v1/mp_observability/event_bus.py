@@ -119,7 +119,11 @@ class EventBus:
         self._last_discard_warning: float = 0.0
         self._subscriber_exception_counts: dict[str, int] = {}
 
-        self._register_self_gauges()
+        # Only register self-monitoring gauges if the bus is enabled.
+        # They will be re-registered when init_event_bus() switches to the
+        # real bus, so that the OTel SDK keeps the correct instrument.
+        if self._config.enabled:
+            self._register_self_gauges()
 
     def _register_self_gauges(self) -> None:
         """Register the two self-monitoring gauges via ``register_gauge``."""
@@ -391,4 +395,7 @@ def init_event_bus(config: EventBusConfig | None = None) -> EventBus:
     global _global_bus, _observability_enabled
     _global_bus = EventBus(config)
     _observability_enabled = config.enabled if config else True
+    # Re-register self-monitoring gauges so they are attached to the new bus.
+    if config is None or config.enabled:
+        _global_bus._register_self_gauges()
     return _global_bus
