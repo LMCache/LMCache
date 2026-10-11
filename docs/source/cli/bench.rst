@@ -569,8 +569,10 @@ first use and cache under ``HF_HOME``; any other value is a local path.
      - Parquet (distractor/validation); requires ``pyarrow``.
 
 Local files load unchanged if their records carry passages, a question, and
-gold answers -- ``ctxs[].{title,text}``, ``paragraphs[].paragraph_text``, or
-``context``. Records missing any of the three are skipped.
+gold answers -- ``ctxs[].{title,text}``, ``paragraphs[].paragraph_text``,
+``context``, or the RAGAS hand-off fields ``retrieved_contexts``,
+``user_input`` and ``reference``. Records missing any of the three are
+skipped.
 
 **Comparing two stacks.** The workload reports one arm; run it twice and diff
 the files by ``sample_id``:

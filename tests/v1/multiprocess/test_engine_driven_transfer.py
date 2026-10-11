@@ -450,6 +450,67 @@ def test_auto_non_cuda_context_does_not_require_event_ipc(
     assert isinstance(context, worker_transfer.EngineDrivenTransferContext)
 
 
+def test_auto_npu_context_routes_to_lmcache_driven(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AUTO on NPU must route to LMCacheDrivenTransferContext.
+
+    AUTO resolves to the device spec's declared default; NpuDeviceSpec
+    declares lmcache-driven, so an unconfigured NPU worker pairs with the
+    default-configured server (``--supported-transfer-mode lmcache_driven``).
+    """
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+
+    class NpuDevice:
+        type = "npu"
+
+    monkeypatch.setattr(worker_transfer, "get_device", lambda _t: NpuDevice())
+    monkeypatch.setattr(worker_transfer, "get_device_spec", lambda _dt: NpuDeviceSpec())
+    # The npu wrapper factory is only discoverable where the npu platform
+    # imports cleanly; stub it so the routing assertion holds on any host.
+    monkeypatch.setattr(
+        worker_transfer,
+        "resolve_kv_wrapper_factory",
+        lambda _dt: (lambda tensor: tensor),
+    )
+
+    context = worker_transfer.create_transfer_context(
+        {"layer_0": MagicMock()},
+        instance_id=1,
+        req_client=MagicMock(),
+    )
+
+    assert isinstance(context, worker_transfer.LMCacheDrivenTransferContext)
+
+
+def test_default_mp_transfer_mode_declarations() -> None:
+    """AUTO routing defaults must stay pinned per device spec.
+
+    The base default derives from ``is_lmcache_driven_available``:
+    cuda and npu (capability ``True``) default to lmcache-driven; the
+    fallback spec and opt-in-only stacks (cpu SHM, musa handles) stay
+    engine-driven.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
+    from lmcache.v1.platform.base.device_spec import DeviceSpec
+    from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
+    from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
+    from lmcache.v1.platform.devices.musa import MusaDeviceSpec
+    from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+
+    assert DeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
+    assert CudaDeviceSpec().is_lmcache_driven_available() is True
+    assert CudaDeviceSpec().default_mp_transfer_mode() is MPTransferMode.LMCACHE_DRIVEN
+    assert NpuDeviceSpec().is_lmcache_driven_available() is True
+    assert NpuDeviceSpec().default_mp_transfer_mode() is MPTransferMode.LMCACHE_DRIVEN
+    # Available but opt-in-only stacks keep the portable data path as AUTO.
+    assert CpuDeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
+    assert MusaDeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
+
+
 def test_create_transfer_context_invalid_mode_raises() -> None:
     """Unknown mode strings must raise a clear ValueError."""
     # First Party

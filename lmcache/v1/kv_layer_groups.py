@@ -41,6 +41,7 @@ DTYPE_MAP: dict[str, torch.dtype] = {
     "float32": torch.float32,
     "bfloat16": torch.bfloat16,
     "uint8": torch.uint8,
+    "int8": torch.int8,
 }
 
 

@@ -23,12 +23,13 @@ it explicitly. It provides device discovery, `set_device()` and `synchronize()`,
 but no `Stream` / `Event` types. The LMCache-driven path publishes KV buffers
 across processes by exporting a device IPC handle and ordering the handoff with
 a cross-process event, which cannot be expressed without an event type.
-`RblnDeviceSpec` therefore overrides `is_handle_transfer_available()` to `False`
+`RblnDeviceSpec` therefore reports `is_lmcache_driven_available()` as `False`
 and leaves `ipc_wrapper_cls` / `event_ipc_backend` at their `None` defaults, so
 `mp_transfer_mode=lmcache_driven` fails at its documented validation point
 instead of crashing later on an attribute lookup. `mp_transfer_mode=auto`
-already routes every non-CUDA device to the engine-driven context, so the
-default needs no special casing.
+resolves to the device spec's declared default, which `RblnDeviceSpec`
+derives from that `False` capability as engine-driven, so the default
+needs no special casing.
 
 ## The 6-D KV cache
 
