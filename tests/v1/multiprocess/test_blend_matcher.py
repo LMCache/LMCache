@@ -1039,6 +1039,27 @@ def test_repeated_registration_of_same_hash_is_idempotent():
     assert matches[0].old_st == 0
 
 
+def test_dedup_sees_content_shadowed_by_a_collision():
+    """A live chunk shadowed by a bucket collision is still indexed: storing
+    its text again behind another prefix is a duplicate, so it must not be
+    indexed again and take the slot from the colliding chunk."""
+    other = _colliding_content_seed(1)
+    matcher = _SmallTableMatcher(chunk_size=CHUNK_SIZE, dedup_content=True)
+    _register_content(matcher, _content_chunk(1), [101])
+    _register_content(matcher, _content_chunk(other), [202])
+
+    assert (
+        matcher.on_new_token_hashes(_content_chunk(1), [ObjectKey.IntHash2Bytes(303)])
+        == 0
+    )
+    assert _matched_hashes(matcher, _content_chunk(other)) == {
+        ObjectKey.IntHash2Bytes(202)
+    }
+    # The shadowed copy is still the one indexed: evicting the holder exposes it.
+    matcher.remove_chunks([ObjectKey.IntHash2Bytes(202)])
+    assert _matched_hashes(matcher, _content_chunk(1)) == {ObjectKey.IntHash2Bytes(101)}
+
+
 # -- Config -------------------------------------------------------------------
 
 

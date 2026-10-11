@@ -133,7 +133,9 @@ behind two prefixes is two chunks (unless `--enable-dedup-content`), and
 distinct text can collide on the slot bits. The slot holds the newest;
 the others are shadowed, and a probe returns only the holder. Eviction
 passes the slot to the newest remaining chunk, so evicting one copy of a
-document never hides another copy that is still stored:
+document never hides another copy that is still stored. Under
+`--enable-dedup-content` a text is indexed again only when no live chunk
+holds it, whether that chunk holds its slot or is shadowed:
 
 ```text
 store D behind P1  -> chunk c1 holds slot S

@@ -135,15 +135,11 @@ class BlendTokenRangeMatcher:
         return n_new
 
     def _poly_hash_registered(self, poly_hash: int) -> bool:
-        """Whether a live chunk with this poly hash is indexed (bucket-only
-        collisions report False). Caller must hold ``self._lock``."""
-        cid = int(self._table_id[poly_hash & int(self._mask)])
-        if cid < 0:
-            return False
-        return (
-            self._chunk_poly_hash[cid] == poly_hash
-            and self._chunk_token_hash[cid] is not None
-        )
+        """Whether a live chunk with this poly hash is indexed, holding its
+        slot or shadowed by a bucket collision (a collision alone reports
+        False). Caller must hold ``self._lock``."""
+        live = self._slot_live_ids.get(poly_hash & int(self._mask), ())
+        return any(self._chunk_poly_hash[cid] == poly_hash for cid in live)
 
     def match_sub_sequence(
         self,
