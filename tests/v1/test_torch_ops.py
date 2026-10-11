@@ -2971,12 +2971,13 @@ def scenario_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor
     fallback enqueues immediately with time.time(). Both paths satisfy every
     assertion below.
     """
-    # ``drain_recorded_events`` owns a process-global native buffer. Earlier
+    # ``drain_recorded_events`` owns a process-global buffer. Earlier
     # observability tests can leave an EventBus drain thread running; stop it
     # before this low-level test so it cannot consume a callback between the
     # stream synchronization and the assertions below.
     # First Party
     from lmcache.v1.mp_observability.event_bus import (
+        EventBus,
         EventBusConfig,
         get_event_bus,
         init_event_bus,
@@ -2995,6 +2996,10 @@ def scenario_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor
         0, "mp.store.end", "sess-1", {"device": "cuda:0"}, {"count": 10}
     )
     device_sync(device)
+    if device == "xpu":
+        # A different bus must not consume events recorded through the XPU
+        # fallback's process-global buffer, even during its final drain.
+        EventBus(EventBusConfig(enabled=True)).stop()
     result = ops.drain_recorded_events()
     assert len(result) == 2
 

@@ -25,8 +25,13 @@ try:
 
     # First Party
     from lmcache import device_ops as _device_ops
+    from lmcache.v1.platform.base.device_ops import DeviceOps
 
-    _has_native_recorder = hasattr(_device_ops, "record_event_on_stream")
+    _has_native_recorder = (
+        "record_event_on_stream" in vars(_device_ops)
+        or type(_device_ops).record_event_on_stream
+        is not DeviceOps.record_event_on_stream
+    )
 except ImportError:
     _has_native_recorder = False
 
@@ -165,10 +170,11 @@ class EventBus:
         return bool(self._subscribers.get(event_type))
 
     def publish_on_stream(self, stream: Any, event: Event) -> None:
-        """Schedule event recording as a CUDA host function on *stream*.
+        """Record an event on *stream* when a native recorder is available.
 
-        Uses a C++ callback via ``cudaLaunchHostFunc`` so the callback
-        never touches the GIL, avoiding the CUDA-driver/GIL deadlock.
+        Native backends use their stream-ordered recorder. The torch fallback
+        publishes immediately, without sharing its process-global recorder
+        buffer with unrelated EventBus instances.
 
         No-op when the EventBus is disabled, avoiding the overhead of
         scheduling a host function on the CUDA stream entirely.
@@ -191,7 +197,7 @@ class EventBus:
                 int_metadata,
             )
         else:
-            stream.launch_host_func(self.publish, event)
+            self.publish(event)
 
     def publish(self, event: Event) -> None:
         """Submit an event (hot path — non-blocking).
@@ -317,7 +323,7 @@ class EventBus:
 
     def _drain_all(self) -> None:
         """Pop all queued events and dispatch to subscribers."""
-        # Drain events buffered on the C++ side (from CUDA host callbacks)
+        # Only native callbacks write events to a shared recorder for the bus.
         if _has_native_recorder:
             native_events = _device_ops.drain_recorded_events()
             for name, sid, ts, str_meta, int_meta in native_events:
