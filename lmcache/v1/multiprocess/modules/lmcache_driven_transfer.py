@@ -114,14 +114,18 @@ def all_null_chunk_masks(
     for group in object_groups:
         chunk_null: list[bool] = []
         for i in range(num_chunks):
-            is_null = True
+            # A chunk is null when ANY kernel group has only null blocks.
+            # For Mamba hybrids, the recurrent-state kernel group may be
+            # null while the attention kernel group has real data. In that
+            # case the chunk must not be stored (issue #5600).
+            is_null = False
             for kg in group.kernel_group_indices:
                 bpc = blocks_per_chunk[kg]
-                if any(
-                    block != null_block_id
+                if all(
+                    block == null_block_id
                     for block in block_ids[kg][i * bpc : (i + 1) * bpc]
                 ):
-                    is_null = False
+                    is_null = True
                     break
             chunk_null.append(is_null)
         masks.append(chunk_null)
