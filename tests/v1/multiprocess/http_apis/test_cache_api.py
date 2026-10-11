@@ -362,6 +362,7 @@ class TestListObjectsEndpoint:
                     "kv_rank": 2,
                     "object_group_id": 0,
                     "cache_salt": "alice",
+                    "cache_format": "",
                 },
                 "size_bytes": 4096,
             }
@@ -442,12 +443,14 @@ class _FakeLayoutRegistry:
     lookup_calls: list[tuple[str, int]] = field(default_factory=list)
 
     def find_group_layout_descs(
-        self, model_name: str, world_size: int
+        self, model_name: str, world_size: int, cache_format: str = ""
     ) -> Optional[dict[int, object]]:
         self.lookup_calls.append((model_name, world_size))
         return None if self.layout is None else {0: self.layout}
 
-    def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
+    def find_attn_desc(
+        self, model_name: str, world_size: int, cache_format: str = ""
+    ) -> AttnWindowDesc:
         if self.layout is None:
             raise ValueError(f"no attention-window descriptor for {model_name!r}")
         return replace(DEFAULT_ATTN_WINDOW_DESC, world_size=world_size)

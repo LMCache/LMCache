@@ -6,6 +6,7 @@ A single ``finish_write`` with mixed-model keys must result in per-model
 """
 
 # Standard
+from dataclasses import replace
 from unittest.mock import patch
 import time
 
@@ -83,7 +84,8 @@ class TestStoreControllerMultimodel:
     """Mixed-model keys in one ``finish_write`` must be split per model
     before reaching ``submit_store_task``."""
 
-    def test_each_submit_store_task_has_uniform_shape(self):
+    @pytest.mark.parametrize("same_model", [False, True])
+    def test_each_submit_store_task_has_uniform_shape(self, same_model: bool):
         layout_a = MemoryLayoutDesc(
             shapes=[torch.Size([100, 2, 512])], dtypes=[torch.bfloat16]
         )
@@ -92,6 +94,12 @@ class TestStoreControllerMultimodel:
         )
         keys_a = [make_object_key(i, "model_a") for i in range(3)]
         keys_b = [make_object_key(100 + i, "model_b") for i in range(3)]
+
+        if same_model:
+            keys_b = [
+                replace(k, model_name="model_a", cache_format="fp8") for k in keys_b
+            ]
+            layout_b = MemoryLayoutDesc(layout_a.shapes, [torch.uint8])
 
         # Record the (shape, dtype) set observed per submit_store_task call.
         submit_shape_groups = []

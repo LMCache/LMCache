@@ -16,16 +16,16 @@ from vllm.config import CacheConfig, VllmConfig  # noqa: E402
 
 # First Party
 from lmcache.integration.vllm.kv_cache_identity import (  # noqa: E402
-    get_kv_dtype_decorated_model_name,
+    get_kv_cache_format,
 )
 
 
-def name(cache: CacheConfig, model_dtype: torch.dtype = torch.bfloat16) -> str:
-    """Compute a cache name using validated vLLM cache configuration."""
+def cache_format(cache: CacheConfig, model_dtype: torch.dtype = torch.bfloat16) -> str:
+    """Compute a cache format using validated vLLM cache configuration."""
     config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=model_dtype), cache_config=cache
     )
-    return get_kv_dtype_decorated_model_name(cast(VllmConfig, config), "org/model")
+    return get_kv_cache_format(cast(VllmConfig, config))
 
 
 @pytest.mark.parametrize(
@@ -41,11 +41,13 @@ def name(cache: CacheConfig, model_dtype: torch.dtype = torch.bfloat16) -> str:
 def test_different_precision_settings_are_isolated(
     left: CacheConfig, right: CacheConfig
 ) -> None:
-    assert name(left) != name(right)
+    assert cache_format(left) != cache_format(right)
 
 
 def test_same_precision_shares_across_cache_capacities() -> None:
-    assert name(CacheConfig(gpu_memory_utilization=0.7)) == name(
+    assert cache_format(CacheConfig(gpu_memory_utilization=0.7)) == cache_format(
         CacheConfig(gpu_memory_utilization=0.9)
     )
-    assert name(CacheConfig(), torch.float16) != name(CacheConfig(), torch.bfloat16)
+    assert cache_format(CacheConfig(), torch.float16) != cache_format(
+        CacheConfig(), torch.bfloat16
+    )

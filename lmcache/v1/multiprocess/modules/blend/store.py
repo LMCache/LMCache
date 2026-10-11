@@ -169,7 +169,7 @@ class StoreMixin:
                 TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0, key.end)
             ]
             self._prompt_store.record(
-                (key.model_name, key.world_size, key.cache_salt),
+                (key.model_name, key.world_size, key.cache_salt, key.cache_format),
                 key.request_id,
                 key.token_ids,
                 chain,

@@ -747,8 +747,8 @@ data parallelism (``dp_size > 1``) are rejected with a clear error.
 KV dtype isolation
 ~~~~~~~~~~~~~~~~~~
 
-The vLLM MP connector hashes KV precision settings into the cache model name to isolate caches.
-Upgrade all producers and consumers; new clients miss legacy undecorated objects.
+The vLLM MP connector hashes KV precision settings into ``cache_format`` to isolate incompatible caches without changing model names.
+Upgrade clients and servers together; formatted keys miss legacy objects.
 
 Decode context parallelism (DCP)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

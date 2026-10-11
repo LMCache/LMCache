@@ -22,7 +22,7 @@ class BigtableL2KeyEncoder:
         """Translates a logical ObjectKey into a physical Bigtable row key.
 
         Formats the row key using the configured template, injecting the model
-        name, rank, group, chunk hash, and optional cache salt.
+        name, rank, group, chunk hash, and optional cache salt/format.
 
         Args:
             key: The ObjectKey to encode.
@@ -31,8 +31,8 @@ class BigtableL2KeyEncoder:
             The formatted row key as bytes.
         """
         template = self.template
-        # Strip @{salt} if salt is empty to prevent a trailing @
-        if not key.cache_salt and template.endswith("@{salt}"):
+        # Preserve an empty salt slot when a format follows it.
+        if not key.cache_salt and not key.cache_format and template.endswith("@{salt}"):
             template = template[:-7]
 
         model_name = key.model_name
@@ -48,6 +48,8 @@ class BigtableL2KeyEncoder:
             hash=hash_hex,
             salt=key.cache_salt,
         )
+        if key.cache_format:
+            row_key_str += f"@format:{key.cache_format}"
         if hasattr(key, "layer_id"):
             row_key_str += f"@layer_{key.layer_id}"
         return row_key_str.encode("utf-8")

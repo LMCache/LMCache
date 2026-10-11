@@ -55,6 +55,7 @@ def _ipc_key(world_size: int, worker_id: int | None = None) -> IPCCacheServerKey
         end=0,
         request_id="r",
         cache_salt="salt",
+        cache_format="fp8",
     )
 
 
@@ -130,6 +131,7 @@ class TestIpcKeyToGroupedObjectKeys:
             assert [k.chunk_hash for k in row.keys] == hashes
             assert {k.object_group_id for k in row.keys} == {row.object_group_id}
             assert {k.cache_salt for k in row.keys} == {"salt"}
+            assert {k.cache_format for k in row.keys} == {"fp8"}
             assert len({k.kv_rank for k in row.keys}) == 1
         # Same rank order in every group; ranks distinct within a group.
         assert rows[0].keys[0].kv_rank != rows[1].keys[0].kv_rank

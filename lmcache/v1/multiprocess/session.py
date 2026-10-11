@@ -191,6 +191,7 @@ class Session:
 
             same_lookup = (
                 key.model_name == lookup_key.model_name
+                and key.cache_format == lookup_key.cache_format
                 and key.world_size == lookup_key.world_size
                 and key.token_ids == lookup_key.token_ids
                 and key.cache_salt == lookup_key.cache_salt
@@ -236,6 +237,7 @@ class Session:
 
             same_lookup = (
                 key.model_name == lookup_key.model_name
+                and key.cache_format == lookup_key.cache_format
                 and key.world_size == lookup_key.world_size
                 and key.token_ids == lookup_key.token_ids
                 and key.cache_salt == lookup_key.cache_salt

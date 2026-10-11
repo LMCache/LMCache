@@ -211,6 +211,7 @@ class BlendCoordinatorClient:
                     "tokens_b64": encode_tokens(item.tokens),
                     "model_name": item.namespace.model_name,
                     "cache_salt": item.namespace.cache_salt,
+                    "cache_format": item.namespace.cache_format,
                     "world_size": item.namespace.world_size,
                 },
             )

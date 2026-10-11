@@ -69,6 +69,9 @@ class IPCCacheServerKey:
     # lookups reject it.
     num_kv_readers: int = field(default=0, compare=False)
 
+    cache_format: str = ""
+    """KV encoding identity; empty for legacy keys."""
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -100,6 +103,7 @@ class IPCCacheServerKey:
         cache_salt: str = "",
         num_kv_readers: int = 1,
         request_configs: dict[str, Any] | None = None,
+        cache_format: str = "",
     ) -> "IPCCacheServerKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
@@ -112,6 +116,7 @@ class IPCCacheServerKey:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            cache_format=cache_format,
             request_configs=request_configs,
         )
 
@@ -144,6 +149,7 @@ class IPCCacheServerKey:
             end=self.end,
             request_id=self.request_id,
             cache_salt=self.cache_salt,
+            cache_format=self.cache_format,
             request_configs=self.request_configs,
         )
 
@@ -164,6 +170,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         hidden_dim_size: Flattened hidden dimension per token.
         dtype_str: Torch dtype name (e.g. ``"float16"``).
         use_mla: Whether the worker KV format is MLA.
+        cache_format: KV encoding identity.
         num_physical_slots: Number of physical KV slots gathered into one
             LMCache chunk. ``None`` accepts the legacy protocol, where the
             server assumed one physical slot per logical token.
@@ -178,6 +185,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     dtype_str: str
     use_mla: bool
     num_physical_slots: int | None = None
+    cache_format: str = ""
 
 
 @dataclass

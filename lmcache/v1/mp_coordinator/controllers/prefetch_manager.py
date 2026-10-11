@@ -41,6 +41,7 @@ class PrefetchManager(Controller):
         world_size: int,
         token_ids: list[int],
         cache_salt: str,
+        cache_format: str = "",
     ) -> dict[str, Any]:
         """``POST /cache/prefetches`` to ``target`` and return its JSON reply.
 
@@ -50,6 +51,7 @@ class PrefetchManager(Controller):
             model_name: Model whose layout the target uses to allocate L1.
             world_size: World size selecting the layout and per-rank fan-out.
             token_ids: Prompt tokens whose complete chunks should be warmed.
+            cache_format: KV encoding identity.
             cache_salt: Per-tenant isolation salt applied to the produced keys.
 
         Returns:
@@ -65,6 +67,7 @@ class PrefetchManager(Controller):
             "world_size": world_size,
             "token_ids": token_ids,
             "cache_salt": cache_salt,
+            "cache_format": cache_format,
         }
         resp = await http_client.post(url, json=body)
         resp.raise_for_status()

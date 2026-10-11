@@ -12,9 +12,9 @@ from typing import cast
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 
-EncodedKey = tuple[bytes, str, int, int, str]
+EncodedKey = tuple[bytes, str, int, int, str, str]
 """An :class:`ObjectKey` as ``(chunk_hash, model_name, kv_rank,
-object_group_id, cache_salt)``."""
+object_group_id, cache_salt, cache_format)``."""
 
 
 def encode_key(key: ObjectKey) -> EncodedKey:
@@ -25,6 +25,7 @@ def encode_key(key: ObjectKey) -> EncodedKey:
         key.kv_rank,
         key.object_group_id,
         key.cache_salt,
+        key.cache_format,
     )
 
 
@@ -41,13 +42,4 @@ def decode_key(encoded: object) -> ObjectKey:
     Raises:
         ValueError: If a field violates an ``ObjectKey`` invariant.
     """
-    chunk_hash, model_name, kv_rank, object_group_id, cache_salt = cast(
-        "EncodedKey", encoded
-    )
-    return ObjectKey(
-        chunk_hash=chunk_hash,
-        model_name=model_name,
-        kv_rank=kv_rank,
-        object_group_id=object_group_id,
-        cache_salt=cache_salt,
-    )
+    return ObjectKey(*cast("EncodedKey", encoded))

@@ -142,9 +142,9 @@ class LookupMixin:
         return kept
 
     def _resolve_cb_read_layouts(
-        self, model_name: str, world_size: int
+        self, model_name: str, world_size: int, cache_format: str
     ) -> "tuple[_BlendReadGroups, dict[int, MemoryLayoutDesc], AttnWindowDesc] | None":
-        """Resolve blend's read set and layouts for ``(model_name, world_size)``.
+        """Resolve blend read layouts for the requested model, world size and format.
 
         Returns ``(read_groups, group_layout_descs, attn_desc)`` — the FULL
         registration descriptor; each leg narrows it to its own gids — or
@@ -154,10 +154,10 @@ class LookupMixin:
             RuntimeError: If the layout has no resolvable blend read set.
         """
         registry = self._ctx.layout_desc_registry
-        layouts = registry.find_group_layout_descs(model_name, world_size)
+        layouts = registry.find_group_layout_descs(model_name, world_size, cache_format)
         if not layouts:
             return None
-        attn_desc = registry.find_attn_desc(model_name, world_size)
+        attn_desc = registry.find_attn_desc(model_name, world_size, cache_format)
         read = _classify_cb_read_groups(
             attn_desc.num_object_groups, attn_desc.group_kinds
         )
@@ -349,7 +349,9 @@ class LookupMixin:
             Event(event_type=EventType.CB_PREFIX_LOOKUP_START, session_id=rid)
         )
 
-        resolved = self._resolve_cb_read_layouts(model_name, world_size)
+        resolved = self._resolve_cb_read_layouts(
+            model_name, world_size, key.cache_format
+        )
         if resolved is None:
             logger.error(
                 "No CB GPU context for model %s ws %d during prefix lookup!",
@@ -493,7 +495,9 @@ class LookupMixin:
             # Segmented prefix is forced OFF for recurrent registrations:
             # pure-load post-gap rows would hole the recurrence scan, so a
             # gap must truncate the prefix.
-            resolved_pre = self._resolve_cb_read_layouts(key.model_name, key.world_size)
+            resolved_pre = self._resolve_cb_read_layouts(
+                key.model_name, key.world_size, key.cache_format
+            )
             use_segmented = self._segmented_prefix and not (
                 resolved_pre is not None and resolved_pre[0].recurrent_gids
             )
@@ -589,7 +593,9 @@ class LookupMixin:
             # so the winner is chosen among chunks that can actually be fetched.
             job.non_prefix = [c for c in candidates if c.cur_st >= prefix_tokens]
             if job.non_prefix:
-                resolved = self._resolve_cb_read_layouts(key.model_name, key.world_size)
+                resolved = self._resolve_cb_read_layouts(
+                    key.model_name, key.world_size, key.cache_format
+                )
                 if resolved is not None:
                     (
                         job.handle,
@@ -752,6 +758,7 @@ class LookupMixin:
                 BlendNamespace(
                     model_name=key.model_name,
                     cache_salt=key.cache_salt,
+                    cache_format=key.cache_format,
                     world_size=key.world_size,
                 ),
             )

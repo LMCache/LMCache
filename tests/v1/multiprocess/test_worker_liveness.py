@@ -137,7 +137,7 @@ def test_gpu_register_inserts_unlatched_entry(monkeypatch) -> None:
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     module = _bare_gpu_module()
 
-    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
+    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), {}, [])
 
     assert module.tracked_instance_count() == 1
     entry = module.get_and_touch_context_entry(1)
@@ -156,10 +156,10 @@ def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:
     monkeypatch.setattr(gpu_mod, "create_cache_context", create)
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     module = _bare_gpu_module()
-    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
+    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), {}, [])
     module._cache_contexts[1].last_seen = 0.0
 
-    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
+    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), {}, [])
 
     assert create.call_count == 1  # not rebuilt
     assert module._cache_contexts[1].last_seen > 0.0  # refreshed
@@ -197,7 +197,7 @@ def test_gpu_reap_two_tier_windows() -> None:
     assert module.tracked_instance_count() == 2
     cast(
         MagicMock, module._ctx.layout_desc_registry.unregister
-    ).assert_called_once_with("m", 1)
+    ).assert_called_once_with("m", 1, "")
 
 
 def test_gpu_unregister_cleans_up() -> None:
@@ -209,7 +209,7 @@ def test_gpu_unregister_cleans_up() -> None:
     assert module.tracked_instance_count() == 0
     cast(
         MagicMock, module._ctx.layout_desc_registry.unregister
-    ).assert_called_once_with("m", 1)
+    ).assert_called_once_with("m", 1, "")
 
     module.unregister_kv_cache(1)  # already gone -> no exception
 

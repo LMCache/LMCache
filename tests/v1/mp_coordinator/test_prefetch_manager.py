@@ -49,6 +49,7 @@ async def test_submit_prefetch_posts_body_and_returns_reply():
             world_size=2,
             token_ids=[1, 2, 3, 4],
             cache_salt="alice",
+            cache_format="fp8",
         )
 
     assert captured["method"] == "POST"
@@ -58,6 +59,7 @@ async def test_submit_prefetch_posts_body_and_returns_reply():
         "world_size": 2,
         "token_ids": [1, 2, 3, 4],
         "cache_salt": "alice",
+        "cache_format": "fp8",
     }
     assert result == {"request_id": "abc", "chunks": 2, "status": "submitted"}
 

@@ -85,11 +85,14 @@ def _object_key_to_string(key: ObjectKey) -> str:
     ``<model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>``. Salted
     keys append ``@<cache_salt>`` so tenants/users with identical token chunks
     do not collide in the backing bucket.
+    Formatted keys append ``@salt@cache_format``; salt may be empty.
     """
     base = (
         f"{key.model_name}@{key.kv_rank:08x}"
         f"@{key.object_group_id:x}@{key.chunk_hash.hex()}"
     )
+    if key.cache_format:
+        return f"{base}@{key.cache_salt}@{key.cache_format}"
     if key.cache_salt:
         return f"{base}@{key.cache_salt}"
     return base

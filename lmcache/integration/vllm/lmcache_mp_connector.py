@@ -63,7 +63,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
     get_tokens_per_block,
     is_scratch_spec,
 )
-from lmcache.integration.vllm.kv_cache_identity import get_kv_dtype_decorated_model_name
+from lmcache.integration.vllm.kv_cache_identity import get_kv_cache_format
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
@@ -603,9 +603,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
         )
-        cache_model_name = get_kv_dtype_decorated_model_name(
-            vllm_config, get_dcp_decorated_model_name(vllm_config, kv_cache_config)
-        )
+        cache_model_name = get_dcp_decorated_model_name(vllm_config, kv_cache_config)
+        cache_format = get_kv_cache_format(vllm_config)
 
         assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
@@ -735,6 +734,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 server_urls=server_urls,
                 context=zmq_context,
                 model_name=cache_model_name,
+                cache_format=cache_format,
                 vllm_block_size=scheduler_block_size,
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
@@ -768,6 +768,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 server_url=local_server_url,
                 context=zmq_context,
                 model_name=cache_model_name,
+                cache_format=cache_format,
                 vllm_block_size=scheduler_block_size,
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,

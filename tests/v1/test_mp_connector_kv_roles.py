@@ -181,7 +181,7 @@ def mock_io(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     telemetry = MagicMock()
     pool = MagicMock(blocks=[SimpleNamespace(block_hash=bytes([i])) for i in range(8)])
     monkeypatch.setattr(
-        connector_mod, "LMCacheMPSchedulerAdapter", lambda **kw: scheduler
+        connector_mod, "LMCacheMPSchedulerAdapter", MagicMock(return_value=scheduler)
     )
     monkeypatch.setattr(connector_mod, "print_banner_once", MagicMock())
     monkeypatch.setattr(connector_mod, "vllm_layout_hints", lambda config: {})
@@ -226,6 +226,15 @@ def connectors(
     worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
     scheduler.bind_gpu_block_pool(mock_io.pool)
     worker.register_kv_caches(mock_io.kv_caches)
+    scheduler_adapter = cast(MagicMock, connector_mod.LMCacheMPSchedulerAdapter)
+    scheduler_args = scheduler_adapter.call_args.kwargs
+    assert scheduler_args["model_name"] == worker.worker_adapter.model_name
+    assert scheduler_args["model_name"] == config.model_config.model
+    assert scheduler_args["cache_format"] == worker.worker_adapter.cache_format
+    assert (
+        mock_io.transfer.register.call_args.kwargs["cache_format"]
+        == scheduler_args["cache_format"]
+    )
     try:
         yield scheduler, worker
     finally:
