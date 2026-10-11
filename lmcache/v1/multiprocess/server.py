@@ -291,6 +291,7 @@ def _build_server_components(
             coordinator=coordinator,
             enable_segmented_prefix=mp_config.enable_segmented_prefix,
             enable_dedup_content=mp_config.enable_dedup_content,
+            enable_reorder=mp_config.enable_blend_reorder,
         )
         blend_module = blend
         # The blend module mirrors per-instance CB rope state, so the reaper
