@@ -77,6 +77,39 @@ Discards are deliberately not published as `L1_KEYS_EVICTED`: the coordinator
 cache-event reporter and the L1 byte metrics treat that event as the deletion
 of an admitted object.
 
+## Write-back holds
+
+**Problem (#5350).** The `StoreController` learns about a new key from
+`on_l1_keys_write_finished`, but only takes its read lock later, on its own
+thread. In between, the key is resident and unlocked, so `is_key_evictable`
+is true and the eviction loop may discard it. `reserve_read` then returns
+`KEY_NOT_EXIST` and the chunk is never written to L2, even when L2 has room.
+In cache terms: dirty data evicted before write-back.
+
+**Contract.** A listener registered with `register_write_back_listener`
+gets, per admitted non-temporary key, one *write-back hold* taken inside the
+admission critical section, before the listener is notified:
+
+- `is_key_evictable(key)` is false while any hold is outstanding, so the
+  eviction loop skips the key.
+- `delete()` ignores holds. Explicit deletes (API, store policies dropping a
+  key from L1 after L2 success) keep their behavior.
+- `release_write_back_holds(keys)` drops one hold per key and publishes
+  nothing. Holds are TTL locks with the read TTL, so a hold that is never
+  released stops pinning after `read_ttl_seconds`.
+
+```text
+finish_write ──(hold)──> StoreListener queue ──> _process_new_keys:
+                                                   reserve_read per target
+                                                   release_write_back_holds
+            evictable?  no ───────────────────────────────────────> yes (after
+                                                                   store locks)
+```
+
+The `StoreController` releases the holds after every target adapter has
+taken its read lock (or no adapter was selected), and releases holds of keys
+still queued when it stops. A hold normally lasts one store-loop iteration.
+
 ## Staging area accounting
 
 `get_staging_memory_usage()` returns the bytes held by staging objects (a
@@ -96,5 +129,6 @@ That window is the L2 lookup latency, not the L2 load time as before; see
 
 ## Contract-anchoring tests
 
-`tests/v1/distributed/test_l1_manager.py` (`TestStaging*` classes) and
-`tests/v1/distributed/test_prefetch_controller.py::TestConcurrentPrefetchSameKeys`.
+`tests/v1/distributed/test_l1_manager.py` (`TestStaging*` classes),
+`tests/v1/distributed/test_prefetch_controller.py::TestConcurrentPrefetchSameKeys`
+and `tests/v1/distributed/test_l1_write_back_hold.py` (write-back holds).
