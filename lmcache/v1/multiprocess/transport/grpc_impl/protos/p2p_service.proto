@@ -6,12 +6,21 @@ syntax = "proto3";
 
 package lmcache.mp;
 
+// Wire form of lmcache.v1.distributed.api.ObjectKey.
+//
+// Field order must match the ObjectKey dataclass: proto_codec.py builds
+// the structural codec by zipping dataclass fields to these fields
+// positionally.
 message ObjectKey {
   bytes chunk_hash = 1;
   string model_name = 2;
   int64 kv_rank = 3;
   int64 object_group_id = 4;
   string cache_salt = 5;
+  // KV cache dtype (part of cache identity): different dtypes produce
+  // different cache keys so instances sharing an L2 backend do not
+  // collide on incompatible objects. Empty for pre-dtype peers.
+  string dtype = 6;
 }
 
 message TensorShape {

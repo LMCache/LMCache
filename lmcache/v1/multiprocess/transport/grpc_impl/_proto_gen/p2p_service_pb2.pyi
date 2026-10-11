@@ -11,18 +11,20 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class ObjectKey(_message.Message):
-    __slots__ = ("chunk_hash", "model_name", "kv_rank", "object_group_id", "cache_salt")
+    __slots__ = ("chunk_hash", "model_name", "kv_rank", "object_group_id", "cache_salt", "dtype")
     CHUNK_HASH_FIELD_NUMBER: _ClassVar[int]
     MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
     KV_RANK_FIELD_NUMBER: _ClassVar[int]
     OBJECT_GROUP_ID_FIELD_NUMBER: _ClassVar[int]
     CACHE_SALT_FIELD_NUMBER: _ClassVar[int]
+    DTYPE_FIELD_NUMBER: _ClassVar[int]
     chunk_hash: bytes
     model_name: str
     kv_rank: int
     object_group_id: int
     cache_salt: str
-    def __init__(self, chunk_hash: _Optional[bytes] = ..., model_name: _Optional[str] = ..., kv_rank: _Optional[int] = ..., object_group_id: _Optional[int] = ..., cache_salt: _Optional[str] = ...) -> None: ...
+    dtype: str
+    def __init__(self, chunk_hash: _Optional[bytes] = ..., model_name: _Optional[str] = ..., kv_rank: _Optional[int] = ..., object_group_id: _Optional[int] = ..., cache_salt: _Optional[str] = ..., dtype: _Optional[str] = ...) -> None: ...
 
 class TensorShape(_message.Message):
     __slots__ = ("dims",)
