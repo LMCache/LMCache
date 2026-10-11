@@ -248,6 +248,12 @@ class MPCacheServerContext:
         """Chunk size for KV cache operations."""
         return self._chunk_size
 
+    @property
+    def finalized_chunk_size(self) -> int | None:
+        """Return the immutable chunk size, or ``None`` before negotiation."""
+        with self._chunk_size_lock:
+            return self._chunk_size if self._chunk_size_finalized else None
+
     def finalize_chunk_size(self) -> int:
         """Return the current chunk size and prevent future renegotiation."""
         with self._chunk_size_lock:

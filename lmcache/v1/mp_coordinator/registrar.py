@@ -23,13 +23,35 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.schemas import RegisterRequest, RegisterResponse
+from lmcache.v1.mp_coordinator.schemas import (
+    ChunkSizeBindRequest,
+    ChunkSizeBindResponse,
+    RegisterRequest,
+    RegisterResponse,
+)
 from lmcache.v1.rpc_utils import get_ip
 
 logger = init_logger(__name__)
 
 
 _DEFAULT_HEARTBEAT_INTERVAL = 5.0
+_DEFAULT_CHUNK_SIZE_BIND_TIMEOUT = 10.0
+
+
+def bind_coordinator_chunk_size(
+    base_url: str,
+    chunk_size: int,
+    timeout: float = _DEFAULT_CHUNK_SIZE_BIND_TIMEOUT,
+) -> int:
+    """Synchronously bind coordinator hashing to an MP server's final size."""
+    body = ChunkSizeBindRequest(chunk_size=chunk_size)
+    response = httpx.put(
+        f"{base_url.rstrip('/')}/config/chunk-size",
+        json=body.model_dump(mode="json"),
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return ChunkSizeBindResponse.model_validate(response.json()).chunk_size
 
 
 async def register(
@@ -41,6 +63,7 @@ async def register(
     instance_id: str = "",
     p2p_advertised_url: str = "",
     mq_port: int = 0,
+    chunk_size: int | None = None,
 ) -> str:
     """Register an MP server with the coordinator and return its id.
 
@@ -54,6 +77,7 @@ async def register(
             when P2P is disabled.
         mq_port: Port of this server's ZMQ message-queue server for P2P lookup
             RPCs. 0 when P2P is disabled.
+        chunk_size: Finalized MP chunk size, if negotiation has completed.
 
     Returns:
         The registered instance id (coordinator-assigned if ``instance_id`` was
@@ -68,6 +92,7 @@ async def register(
         http_port=http_port,
         p2p_advertised_url=p2p_advertised_url,
         mq_port=mq_port,
+        chunk_size=chunk_size,
     )
     response = await client.post(
         f"{base_url}/instances", json=body.model_dump(mode="json")
@@ -87,6 +112,7 @@ async def keep_registered(
     p2p_advertised_url: str = "",
     mq_port: int = 0,
     on_registered: Callable[[], None],
+    chunk_size_provider: Callable[[], int | None] | None = None,
 ) -> None:
     """Register, heartbeat on a timer, and deregister on cancellation.
 
@@ -115,6 +141,8 @@ async def keep_registered(
             some state only in memory -- capacity declarations above all --
             and a caller that republishes nothing has to say so. Pass
             ``lambda: None`` to mean it.
+        chunk_size_provider: Returns the finalized chunk size for each
+            registration, or ``None`` while negotiation is still pending.
     """
     base_url = coordinator_url.rstrip("/")
     ip = advertise_ip or get_ip()
@@ -131,6 +159,11 @@ async def keep_registered(
                         instance_id=instance_id,
                         p2p_advertised_url=p2p_advertised_url,
                         mq_port=mq_port,
+                        chunk_size=(
+                            chunk_size_provider()
+                            if chunk_size_provider is not None
+                            else None
+                        ),
                     )
                     logger.info("Registered with coordinator as %s", assigned_id)
                     on_registered()
