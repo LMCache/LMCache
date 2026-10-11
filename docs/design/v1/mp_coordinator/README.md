@@ -313,6 +313,14 @@ The previous design — `blend_directory.py` (`GlobalBlendMatcher`) with its own
   stream, so after a coordinator restart they start empty and refill as
   events arrive — quotas under-report until they do.
 
+## Observability
+
+Every answer the coordinator gives is derived from the cache-event stream,
+so its observability is organized around ingest fidelity, freshness, and
+control-loop liveness rather than request rates. Metrics catalog,
+`/status`, cardinality rules, and phasing: see
+[observability.md](observability.md).
+
 ## Running
 
 ```

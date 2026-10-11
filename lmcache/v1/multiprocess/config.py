@@ -13,6 +13,10 @@ import uuid
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.ext_server_module import (
+    ExtServerModuleSpec,
+    parse_server_module_specs,
+)
 
 logger = init_logger(__name__)
 
@@ -69,6 +73,11 @@ class MPServerConfig:
     """engine_type='blend' only: skip fingerprint registration for a chunk whose
     content is already indexed, so the same text stored behind two prefixes is
     indexed once. No effect for other engines."""
+
+    enable_blend_reorder: bool = False
+    """engine_type='blend' only: record stored prompts' token ids and answer
+    the ``cb_reorder_plan`` RPC, which orders a prompt so it starts with an
+    exact copy of a cached prompt. No effect for other engines."""
 
     supported_transfer_mode: Literal["lmcache_driven", "engine_driven", "auto"] = (
         "lmcache_driven"
@@ -138,6 +147,9 @@ class MPServerConfig:
     """Engine block ID that denotes absent KV data. The default ``0`` keeps
     compatibility with vLLM; engines where block zero is valid can select a
     different sentinel, for example ``-1``."""
+
+    server_modules: list[ExtServerModuleSpec] = field(default_factory=list)
+    """Out-of-tree server-module factories to load after built-in modules."""
 
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
@@ -532,6 +544,12 @@ def add_mp_server_args(
         "behind different prefixes is indexed once. No effect otherwise.",
     )
     mp_group.add_argument(
+        "--enable-blend-reorder",
+        action="store_true",
+        help="--engine-type blend only: answer the cb_reorder_plan RPC, which "
+        "orders a prompt so it starts with an exact copy of a cached prompt.",
+    )
+    mp_group.add_argument(
         "--enable",
         type=str,
         nargs="*",
@@ -546,6 +564,16 @@ def add_mp_server_args(
         default=MPServerConfig.kv_event_log_size,
         help="CPU store/eviction records retained for KV-event subscribers. "
         "0 disables the channel. Default is %(default)s.",
+    )
+    mp_group.add_argument(
+        "--server-module",
+        action="append",
+        default=[],
+        help="JSON object describing an out-of-tree server-module factory. "
+        "Repeat to load multiple modules. Example: "
+        '\'{"module_path":"my_pkg.server_module",'
+        '"factory_name":"build_server_modules",'
+        '"config":{"name":"demo"}}\'.',
     )
     return parser
 
@@ -585,6 +613,7 @@ def parse_args_to_mp_server_config(
         separate_object_groups=args.separate_object_groups,
         enable_segmented_prefix=args.enable_segmented_prefix,
         enable_dedup_content=args.enable_dedup_content,
+        enable_blend_reorder=args.enable_blend_reorder,
         supported_transfer_mode=args.supported_transfer_mode,
         isolated_ipc=args.isolated_ipc,
         runtime_plugin_config=RuntimePluginConfig(
@@ -600,6 +629,7 @@ def parse_args_to_mp_server_config(
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
         kv_event_log_size=args.kv_event_log_size,
+        server_modules=parse_server_module_specs(args.server_module or []),
     )
 
 

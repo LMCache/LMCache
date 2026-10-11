@@ -58,6 +58,17 @@ message CbUnifiedLookupResponse {
   optional CbUnifiedLookupPayload payload = 1;
 }
 
+message CbReorderPlanRequest {
+  IpcCacheServerKey key = 1;
+  int64 keep_prefix = 2;
+  int64 budget_ms = 3;
+}
+
+message CbReorderPlanResponse {
+  // The reordered prompt; empty = keep the prompt as it is.
+  repeated int64 token_ids = 1;
+}
+
 message RopeWindow {
   repeated int64 values = 1;
 }
@@ -85,4 +96,5 @@ service BlendService {
   rpc CbRetrievePreComputed(CbRetrievePreComputedRequest)
       returns (CbRetrievePreComputedResponse);
   rpc CbUnifiedLookup(CbUnifiedLookupRequest) returns (CbUnifiedLookupResponse);
+  rpc CbReorderPlan(CbReorderPlanRequest) returns (CbReorderPlanResponse);
 }

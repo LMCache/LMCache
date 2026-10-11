@@ -207,9 +207,7 @@ def test_wrap_sglang_kv_caches_requires_full_handle_capability(
     monkeypatch.setattr(
         adapter_mod,
         "get_device_spec",
-        lambda _device_type: SimpleNamespace(
-            is_handle_transfer_available=lambda: False
-        ),
+        lambda _device_type: SimpleNamespace(is_lmcache_driven_available=lambda: False),
     )
 
     with pytest.raises(ValueError, match="required memory IPC, event IPC"):
@@ -267,7 +265,7 @@ def test_mp_connector_registration_marks_kv_list_layout(monkeypatch) -> None:
     monkeypatch.setattr(
         adapter_mod,
         "get_device_spec",
-        lambda _device_type: SimpleNamespace(is_handle_transfer_available=lambda: True),
+        lambda _device_type: SimpleNamespace(is_lmcache_driven_available=lambda: True),
     )
     monkeypatch.setattr(adapter_mod, "wrap_one_kv_cache", lambda tensor: tensor)
 
