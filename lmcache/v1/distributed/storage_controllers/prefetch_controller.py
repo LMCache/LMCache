@@ -1235,6 +1235,11 @@ class PrefetchController(StorageControllerInterface):
         # row reserved; trim to whole columns and release the rest.
         if request.fetching_policy == "full" and num_failed_reservations > 0:
             merged = l1_reserved_keys.merge()
+            # Also count rows already locked in L1 (from prior lookups) so
+            # a column that is partly in L1 and partly from L2 is seen as whole.
+            if request.key_states.l1_locked_keys:
+                locked = request.key_states.l1_locked_keys.merge()
+                merged = merged.merge(locked)
             if len(merged) > 0:
                 kept = Bitmap2D(all_grouped(merged.to_list()))
                 for l1_idx, grid in l1_reserved_keys.items():
