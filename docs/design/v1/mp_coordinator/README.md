@@ -121,6 +121,11 @@ idempotent, while a different value is rejected. An MP server also includes the
 value on later registrations once finalization has completed, so a restarted
 coordinator restores the same binding.
 
+A finalized MP server can serve another model only when its chunk size is a
+multiple of that model's required alignment. Otherwise, preconfigure a common
+multiple or use a separate MP server. MP servers using different final chunk
+sizes also need separate coordinators.
+
 Heartbeat is `PUT /instances/{id}/heartbeat` → `registry.update_heartbeat`; a
 404 tells the client to re-register. The health loop (in `app.py`, started by
 the lifespan) evicts instances whose heartbeat lapsed. Server push resolves

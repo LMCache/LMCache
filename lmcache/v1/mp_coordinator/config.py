@@ -71,7 +71,9 @@ class MPCoordinatorConfig:
             of the quota (0.0 to 1.0).
         chunk_size: Minimum tokens per KV chunk. The first MP server negotiation
             binds the coordinator to the fleet's final value, which drives both
-            CacheBlend matching and pin-request token hashing.
+            CacheBlend matching and pin-request token hashing. A coordinator
+            serves one final chunk size; fleets using different final values
+            need separate coordinators.
         hash_algorithm: Token hash algorithm for pin key resolution. Must equal
             the MP servers' ``--hash-algorithm`` (default ``blake3``, which is
             self-contained; other algorithms require vLLM importable in the

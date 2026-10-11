@@ -104,7 +104,8 @@ def test_negotiated_chunk_size_rejects_later_incompatible_alignment() -> None:
         ctx = _context(chunk_size=256)
 
         assert ctx.negotiate_chunk_size(32) == 256
-        with pytest.raises(ValueError, match="must be a multiple"):
+        assert ctx.negotiate_chunk_size(64) == 256
+        with pytest.raises(ValueError, match="separate MP servers"):
             ctx.negotiate_chunk_size(400)
 
 
@@ -184,6 +185,9 @@ def test_chunk_size_bind_listener_failure_is_retried() -> None:
         with pytest.raises(RuntimeError, match="transient"):
             ctx.negotiate_chunk_size(640)
         assert ctx.chunk_size == 640
+
+        with pytest.raises(ValueError, match="separate MP servers"):
+            ctx.negotiate_chunk_size(400)
 
         assert ctx.negotiate_chunk_size(640) == 640
         completed_listener.assert_called_once_with(640)

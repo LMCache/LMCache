@@ -294,7 +294,9 @@ class MPCacheServerContext:
                     return self._chunk_size
                 raise ValueError(
                     f"LMCache chunk size {self._chunk_size} must be a multiple "
-                    f"of required chunk alignment {required_alignment}"
+                    f"of required chunk alignment {required_alignment}. This MP "
+                    f"server has already selected its chunk size; models that "
+                    f"require incompatible alignments must use separate MP servers."
                 )
 
             resolved = _round_up_to_multiple(
