@@ -1627,7 +1627,38 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
             removed = self.storage_manager.remove(key, locations)
             num_removed += removed
+            if removed and self.lookup_pins:
+                self._drop_key_from_lookup_pins(key, locations)
         return num_removed
+
+    def _drop_key_from_lookup_pins(
+        self,
+        key: "CacheEngineKey",
+        locations: Optional[List[str]] = None,
+    ) -> None:
+        """Remove a cleared key from every lookup-pin claim.
+
+        A targeted clear force-removes the old object and releases its
+        pins, but the ledger keeps the old key.  If that key is stored
+        again before the earlier request calls ``lookup_unpin``, the
+        stale claim would resolve against the replacement object and
+        unpin it.  Dropping the key here prevents that.
+        """
+        target_locations = (
+            set(locations) if locations is not None else None
+        )
+        empty_locations: list[str] = []
+        for lookup_id, pin_map in self.lookup_pins.items():
+            for location in list(pin_map.keys()):
+                if target_locations is not None and location not in target_locations:
+                    continue
+                keys = pin_map[location]
+                if key in keys:
+                    keys.remove(key)
+                    if not keys:
+                        empty_locations.append(location)
+            for location in empty_locations:
+                pin_map.pop(location, None)
 
     @_lmcache_nvtx_annotate
     def health(
