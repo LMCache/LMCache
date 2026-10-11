@@ -131,7 +131,7 @@ class MPCacheServer:
         sm = self._context.storage_manager.report_status()
         status: dict = {
             "is_healthy": sm["is_healthy"],
-            "engine_type": self.__class__.__name__,
+            "engine_type": self._context.mp_config.engine_type,
             "chunk_size": self._context.chunk_size,
             "hash_algorithm": self._context.token_hasher.hash_algorithm_name,
             "active_sessions": self._context.session_manager.active_count(),
