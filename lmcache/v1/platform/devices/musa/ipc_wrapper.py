@@ -21,7 +21,6 @@ import torch
 from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
-from lmcache.v1.gpu_connector.utils import assert_contiguous
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 ENV_MUSA_HANDLE_TRANSFER = "LMCACHE_MUSA_HANDLE_TRANSFER"
@@ -224,14 +223,14 @@ class MusaIPCWrapper(DeviceIPCWrapper):
         return cls(tensor)
 
     def __init__(self, tensor: torch.Tensor) -> None:
-        """Export a contiguous MUSA tensor through TorchMUSA IPC.
+        """Export a MUSA tensor view through TorchMUSA IPC.
 
         Args:
-            tensor: A contiguous MUSA tensor to export.
+            tensor: A MUSA tensor view to export. Non-contiguous views are
+                preserved through their shape, stride, and storage offset.
 
         Raises:
-            ValueError: If ``tensor`` is not a MUSA tensor or cannot be
-                represented as a contiguous view.
+            ValueError: If ``tensor`` is not a MUSA tensor.
             RuntimeError: If the opt-in TorchMUSA memory IPC capability is
                 unavailable.
         """
@@ -242,7 +241,6 @@ class MusaIPCWrapper(DeviceIPCWrapper):
         ):
             raise ValueError("expected a MUSA tensor for MusaIPCWrapper")
         tensor = tensor_view
-        assert_contiguous(tensor)
 
         ipc_module = _torch_musa_ipc_module_if_ready()
         if ipc_module is None:
