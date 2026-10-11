@@ -22,6 +22,9 @@ reports metrics. ``--prompt`` supports placeholders: ``{lmcache}`` loads
 ``lmcache/cli/documents/lmcache.txt``, and custom documents can be passed with
 ``--documents NAME=PATH``. The prompt token count is taken directly from the
 usage data reported by the engine (``stream_options: {include_usage: true}``).
+The output token count also uses the reported ``completion_tokens``, including
+zero. If that count is absent, the requested ``--max-tokens`` is used as an
+estimate.
 
 .. code-block:: bash
 
