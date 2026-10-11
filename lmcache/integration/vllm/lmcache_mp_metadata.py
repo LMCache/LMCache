@@ -393,6 +393,14 @@ class LMCacheMPRequestMetadata:
                 start=start_token_idx,
                 end=end_token_idx,
                 skip_first_n_tokens=skip_first_n_tokens,
+                # Per-group leading blocks the retrieve skips: a failed
+                # retrieve must not report these as load errors — they
+                # were never written and are usually APC-shared with
+                # other running requests (issue #5653).
+                skip_first_n_blocks=[
+                    skip_first_n_tokens // gtpb if gtpb else 0
+                    for gtpb in group_tokens_per_block
+                ],
             )
 
             ret = LMCacheMPRequestMetadata(
