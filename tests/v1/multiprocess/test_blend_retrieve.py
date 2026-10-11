@@ -449,7 +449,7 @@ def test_rank_keys_tp1_returns_every_reserved_key():
     res = _reservation({h: [_fake_obj_key(h, 0)] for h in hashes})
     matches = [SimpleNamespace(hash=h) for h in hashes]
     out = res.rank_keys(matches, _ipc_key(None, 1), 1)
-    assert [ks[0][0] for ks in out] == hashes
+    assert [k[0] for k in out] == hashes
 
 
 def test_rank_keys_tp_expanded_selects_this_ranks_keys():
@@ -461,31 +461,23 @@ def test_rank_keys_tp_expanded_selects_this_ranks_keys():
     }
     res = _reservation(per_hash)
     out = res.rank_keys([SimpleNamespace(hash=b"h1")], _ipc_key(2, ws), n_read)
-    assert [k[1] for k in out[0]] == [(0, 2), (1, 2)]
+    assert [k[1] for k in out] == [(0, 2), (1, 2)]
 
 
-def test_rank_keys_none_for_a_hash_the_reservation_lacks():
-    """A match the reservation has no keys for yields None; the retrieve
-    derives its keys, and its claim then fails unless they are held."""
+def test_rank_keys_refuses_a_match_the_reservation_lacks():
+    """A match the lookup did not reserve gets no keys at all: the call reads
+    nothing rather than keys this request never locked."""
     res = _reservation({b"h1": ["k1"]})
     matches = [SimpleNamespace(hash=b"h1"), SimpleNamespace(hash=b"h_missing")]
-    assert res.rank_keys(matches, _ipc_key(None, 1), 1) == [["k1"], None]
+    assert res.rank_keys(matches, _ipc_key(None, 1), 1) is None
 
 
-def test_assemble_obj_keys_derives_only_the_missing_matches(monkeypatch):
-    derived_for = []
-
-    def fake_derive(key, hashes, gids):
-        derived_for.append(list(hashes))
-        return [f"d-{h.decode()}-{g}" for h in hashes for g in gids]
-
-    monkeypatch.setattr(retrieve_mod, "_cb_chunk_major_object_keys", fake_derive)
-    matches = [SimpleNamespace(hash=b"a"), SimpleNamespace(hash=b"b")]
-    out = retrieve_mod._assemble_obj_keys(
-        _ipc_key(None, 1), matches, [["a0", "a1"], None], (0, 1), 2
-    )
-    assert out == ["a0", "a1", "d-b-0", "d-b-1"]
-    assert derived_for == [[b"b"]]
+def test_rank_keys_rejects_a_layout_the_lookup_did_not_reserve():
+    """A reserved match without one key per (read group, rank) means the
+    lookup and the retrieve disagree on the layout: refuse before claiming."""
+    res = _reservation({b"h1": ["k-g0r0", "k-g0r1"]})
+    with pytest.raises(ValueError, match="reserved 2 key"):
+        res.rank_keys([SimpleNamespace(hash=b"h1")], _ipc_key(0, 2), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -1333,19 +1325,12 @@ def _race_tp_ranks_against_session_end(
     assert storage.outstanding() == 0, f"round {round_no}: leaked locks"
 
 
-def test_tp_ranks_and_session_end_release_each_lock_once(monkeypatch):
+def test_tp_ranks_and_session_end_release_each_lock_once():
     """Two TP ranks claim and release their keys window by window while
     session end races them. Whatever the interleaving, every read lock is
     released exactly once: by the rank that claimed it, by a sweep, or by
     session end. The fake raises on any over-release, and a leak leaves a
     lock outstanding."""
-    # After session end a rank derives keys for its matches; they are never
-    # held, so its claim fails without reading.
-    monkeypatch.setattr(
-        retrieve_mod,
-        "_cb_chunk_major_object_keys",
-        lambda key, hashes, gids: [("derived", h, g) for h in hashes for g in gids],
-    )
     rng = random.Random(0)
     for round_no in range(200):
         # Session end lands anywhere from before the first claim to after the

@@ -48,33 +48,37 @@ class ReadLockReservation:
         cb_match_result: list[CBMatchResult],
         key: IPCCacheServerKey,
         n_read: int,
-    ) -> list[list[ObjectKey] | None]:
-        """This rank's stashed keys for each match, or None if not stashed.
+    ) -> list[ObjectKey] | None:
+        """This rank's reserved keys for every match, chunk-major.
+
+        A retrieve reads only keys its request's lookup locked, so a match the
+        lookup did not reserve is never given keys to read.
 
         :param cb_match_result: The matches a retrieve consumes.
         :param key: The retrieve's cache key (``worker_id`` / ``world_size``).
         :param n_read: Read groups per hash.
-        :return: Per match, ``n_read`` keys, or None when the reservation has
-            no keys for this rank (the caller derives them).
+        :return: ``n_read`` keys per match, in match order, or None when any
+            match is not in the reservation.
+        :raises ValueError: If a reserved match does not hold ``n_read`` keys
+            per rank, i.e. the lookup and the retrieve disagree on the layout.
         """
         if key.worker_id is not None and key.world_size > 1:
             ws, rank = key.world_size, key.worker_id
         else:
             ws, rank = 1, 0
-        out: list[list[ObjectKey] | None] = []
+        out: list[ObjectKey] = []
         for r in cb_match_result:
             keys = self.per_hash.get(r.hash)
             if keys is None:
-                out.append(None)
-                continue
-            idx = (
-                [g * ws + rank for g in range(n_read)]
-                if ws > 1
-                else list(range(len(keys)))
-            )
-            out.append(
-                [keys[i] for i in idx] if all(i < len(keys) for i in idx) else None
-            )
+                return None
+            if len(keys) != n_read * ws:
+                raise ValueError(
+                    f"CB retrieve: the lookup reserved {len(keys)} key(s) for a "
+                    f"match, but the retrieve reads {n_read} group(s) x "
+                    f"{ws} rank(s)."
+                )
+            # Group-major, rank-minor: this rank's key of each read group.
+            out.extend(keys[g * ws + rank] for g in range(n_read))
         return out
 
     def claim(self, keys: list[ObjectKey]) -> bool:

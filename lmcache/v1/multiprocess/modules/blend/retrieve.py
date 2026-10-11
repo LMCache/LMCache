@@ -35,7 +35,6 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups,
-    _cb_chunk_major_object_keys,
     _classify_cb_read_groups,
 )
 from lmcache.v1.multiprocess.modules.blend.rope import (
@@ -53,42 +52,6 @@ logger = init_logger(__name__)
 
 #: No-op reasons already reported (bounded set); each is logged only once.
 _NOOP_REASONS_SEEN: set[str] = set()
-
-
-def _assemble_obj_keys(
-    key: IPCCacheServerKey,
-    cb_match_result: list[CBMatchResult],
-    per_match: list[list[ObjectKey] | None],
-    blend_gids: tuple[int, ...],
-    n_read: int,
-) -> list[ObjectKey]:
-    """Build the chunk-major object keys this retrieve reads.
-
-    Matches whose keys the lookup's reservation holds for this rank use them;
-    the others derive their keys exactly as a retrieve without a reservation
-    does.
-
-    :param key: This retrieve's cache key.
-    :param cb_match_result: The matches this retrieve consumes.
-    :param per_match: Per match, this rank's reserved keys or ``None``.
-    :param blend_gids: The read groups' group ids.
-    :param n_read: Read groups per hash.
-    :return: All keys, ``n_read`` consecutive keys per match.
-    """
-    missing = [
-        r for r, ks in zip(cb_match_result, per_match, strict=True) if ks is None
-    ]
-    derived = iter(
-        _cb_chunk_major_object_keys(key, [r.hash for r in missing], blend_gids)
-        if missing
-        else []
-    )
-    all_obj_keys: list[ObjectKey] = []
-    for ks in per_match:
-        if ks is None:
-            ks = [next(derived) for _ in range(n_read)]
-        all_obj_keys.extend(ks)
-    return all_obj_keys
 
 
 class RetrieveReason(enum.Enum):
@@ -1193,10 +1156,11 @@ class RetrieveMixin:
         :param key: This retrieve's cache key.
         :param blend_gids: The read groups' group ids.
         :param slot_bound: Tokens the engine has allocated for the request.
-        :return: ``None`` when the request holds no reservation or no longer
-            holds a lock on every key this call would read (nothing claimed);
-            else the keys to read, ``len(blend_gids)`` per match, each with
-            one claimed lock this call must release, and the L1 owners.
+        :return: ``None`` when the request holds no reservation, a match is
+            not in it, or the request no longer holds a lock on every key
+            this call would read (nothing claimed); else the keys to read,
+            ``len(blend_gids)`` per match, each with one claimed lock this
+            call must release, and the L1 owners.
         """
         n_read = len(blend_gids)
         to_release: dict[int, list[ObjectKey]] = {}
@@ -1204,14 +1168,10 @@ class RetrieveMixin:
             reservation = session.extras.get(self.UNRETRIEVED_KEYS_EXTRA)
             if reservation is None:
                 return None
-            all_obj_keys = _assemble_obj_keys(
-                key,
-                cb_match_result,
-                reservation.rank_keys(cb_match_result, key, n_read),
-                blend_gids,
-                n_read,
-            )
-            claimed = reservation.claim(all_obj_keys)
+            # A match the lookup did not reserve fails the call outright.
+            claimed = reservation.rank_keys(cb_match_result, key, n_read)
+            if claimed is not None and not reservation.claim(claimed):
+                claimed = None
             if slot_bound is not None and cb_match_result:
                 to_release = reservation.sweep(
                     {r.hash for r in cb_match_result},
@@ -1230,4 +1190,4 @@ class RetrieveMixin:
                 sum(len(keys) for keys in to_release.values()),
                 key.request_id,
             )
-        return (all_obj_keys, l1_owners) if claimed else None
+        return None if claimed is None else (claimed, l1_owners)
