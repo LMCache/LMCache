@@ -518,10 +518,19 @@ class LookupModule:
         Returns:
             The object keys of all groups and kv ranks for ``chunk_hashes``.
         """
-        num_groups = self._ctx.layout_desc_registry.find_attn_desc(
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
             key.model_name, key.world_size
-        ).num_object_groups
-        per_group = ipc_key_to_object_keys(key, chunk_hashes, list(range(num_groups)))
+        )
+        num_groups = attn_desc.num_object_groups
+        # Derive dtype string from layout descriptor so that different
+        # KV encodings (e.g. FP8 vs BF16) produce different cache keys
+        # and do not collide when sharing an L2 backend (issue #5616).
+        dtype_str = ""
+        if attn_desc.dtypes:
+            dtype_str = str(attn_desc.dtypes[0]).replace("torch.", "")
+        per_group = ipc_key_to_object_keys(
+            key, chunk_hashes, list(range(num_groups)), dtype=dtype_str
+        )
         return [obj_key for group_keys in per_group for obj_key in group_keys]
 
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:
