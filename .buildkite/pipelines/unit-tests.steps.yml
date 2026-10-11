@@ -25,7 +25,8 @@ steps:
       uv pip install -e . --no-build-isolation
       uv pip freeze
 
-      LMCACHE_TRACK_USAGE="false" \
+      RUN_DEVDAX_L1_INTEGRATION=1 RUN_DAX_L2_INTEGRATION=1 \
+      LMCACHE_TEST_DEVDAX_L1_PATHS="" LMCACHE_TRACK_USAGE="false" \
       pytest --maxfail=1 --cov=lmcache \
         --cov-report term --cov-report=html:coverage-test \
         --cov-report=xml:coverage-test.xml --html=durations/test.html \
