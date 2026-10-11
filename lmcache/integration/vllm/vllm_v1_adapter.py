@@ -781,6 +781,11 @@ class LMCacheConnectorV1Impl:
 
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
+            # vLLM >= 0.31 V2 model runner may call start_load_kv outside
+            # a forward context (attn_metadata is None). Fall back to
+            # kwargs before giving up (issue #5576).
+            attn_metadata = kwargs.get("attn_metadata")
+        if attn_metadata is None:
             logger.debug("In connector.start_load_kv, but the attn_metadata is None")
             return
 
