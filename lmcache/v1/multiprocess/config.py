@@ -35,7 +35,8 @@ class MPServerConfig:
     """Request server port."""
 
     chunk_size: int = 256
-    """Chunk size for KV cache operations."""
+    """Minimum chunk size for KV cache operations. vLLM connector startup may
+    negotiate this upward to satisfy model-specific KV geometry."""
 
     max_workers: int = 1
     """Base number of worker threads. Sets default for both GPU and CPU pools."""
@@ -149,15 +150,18 @@ class MPServerConfig:
     """Out-of-tree server-module factories to load after built-in modules."""
 
     def __post_init__(self) -> None:
-        """Validate the worker-reaping timeouts.
+        """Validate the chunk size and worker-reaping timeouts.
 
         Raises:
-            ValueError: If a timeout is non-finite, the reap timeout is
-                negative or a non-zero value below the 30 s floor, or the
-                registration grace is below the reap timeout.
+            ValueError: If the chunk size is not positive, a timeout is
+                non-finite, the reap timeout is negative or a non-zero value
+                below the 30 s floor, or the registration grace is below the
+                reap timeout.
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
+        if self.chunk_size < 1:
+            raise ValueError(f"chunk size must be positive; got {self.chunk_size}")
         if self.grpc_server_workers < 1:
             raise ValueError(
                 f"grpc server workers must be >= 1; got {self.grpc_server_workers}"
@@ -378,7 +382,9 @@ def add_mp_server_args(
         "--chunk-size",
         type=int,
         default=256,
-        help="Chunk size for KV cache operations. Default is 256.",
+        help="Minimum chunk size for KV cache operations. The vLLM connector "
+        "may negotiate this upward to satisfy model-specific KV geometry. "
+        "Default is 256.",
     )
     mp_group.add_argument(
         "--null-block-id",

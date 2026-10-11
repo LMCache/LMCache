@@ -31,6 +31,7 @@ shape.
 | `DELETE /instances/{id}` | mp → coordinator | deregister (idempotent, 204) |
 | `GET /instances` | operator/tools | list the fleet |
 | `GET /healthz` | k8s probe | liveness |
+| `PUT /config/chunk-size` | mp → coordinator | bind token hashing and blend lookup to the fleet's negotiated chunk size |
 | `PUT/GET /quota/config` | operator | fleet-wide quota configuration |
 | `PUT/GET/DELETE /quota/{cache_salt}` | operator | per-tenant byte budgets |
 | `GET /quota` | operator | fleet-wide usage summary |
@@ -107,11 +108,23 @@ sequenceDiagram
     participant API as POST /instances
     participant Reg as InstanceRegistry
 
-    C->>API: POST /instances {instance_id, ip, http_port}
+    C->>API: POST /instances {instance_id, ip, http_port, chunk_size?}
     API->>API: validate JSON body
     API->>Reg: register(MPInstance(...))
     API-->>C: 200 {instance_id, re_registered}
 ```
+
+Chunk size is a fleet invariant. Before an MP server reports chunk-size
+negotiation success, it calls `PUT /config/chunk-size`; the coordinator updates
+its `TokenHasher` and optional `BlendIndex` first. Repeating the same binding is
+idempotent, while a different value is rejected. An MP server also includes the
+value on later registrations once finalization has completed, so a restarted
+coordinator restores the same binding.
+
+A finalized MP server can serve another model only when its chunk size is a
+multiple of that model's required alignment. Otherwise, preconfigure a common
+multiple or use a separate MP server. MP servers using different final chunk
+sizes also need separate coordinators.
 
 Heartbeat is `PUT /instances/{id}/heartbeat` → `registry.update_heartbeat`; a
 404 tells the client to re-register. The health loop (in `app.py`, started by

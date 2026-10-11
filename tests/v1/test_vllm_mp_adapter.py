@@ -25,6 +25,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
     ParallelStrategy,
+    get_lmcache_chunk_size,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -188,6 +189,32 @@ def _make_scheduler_adapter(
 def _op(block_ids: list[list[int]]) -> LoadStoreOp:
     """Build a minimal four-token ``LoadStoreOp`` over *block_ids*."""
     return LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=block_ids, start=0, end=4)
+
+
+def test_get_lmcache_chunk_size_uses_plain_query_without_alignment() -> None:
+    client = MagicMock()
+    client.get_chunk_size.return_value.result.return_value = 256
+
+    assert get_lmcache_chunk_size(client) == 256
+
+    client.get_chunk_size.assert_called_once_with()
+    client.negotiate_chunk_size.assert_not_called()
+
+
+def test_get_lmcache_chunk_size_negotiates_with_alignment() -> None:
+    client = MagicMock()
+    client.negotiate_chunk_size.return_value.result.return_value = 640
+
+    assert (
+        get_lmcache_chunk_size(
+            client,
+            required_chunk_alignment=640,
+        )
+        == 640
+    )
+
+    client.negotiate_chunk_size.assert_called_once_with(640)
+    client.get_chunk_size.assert_not_called()
 
 
 def _patch_transfer_context_factory(
@@ -418,7 +445,7 @@ def test_scheduler_starts_one_heartbeat_per_server_on_first_lookup(monkeypatch) 
     assert len(FakeHeartbeatThread.instances) == len(servers)
     for heartbeat in FakeHeartbeatThread.instances:
         assert heartbeat.req_client in clients.values()
-        assert heartbeat.calls == ["start"]
+        assert heartbeat.calls == ["register_recover_callback", "start"]
 
     adapter.maybe_submit_lookup_request("request-1", list(range(256)))
     assert len(FakeHeartbeatThread.instances) == len(servers)
@@ -427,7 +454,42 @@ def test_scheduler_starts_one_heartbeat_per_server_on_first_lookup(monkeypatch) 
     for client in clients.values():
         client.close.assert_called_once()
     for heartbeat in FakeHeartbeatThread.instances:
-        assert heartbeat.calls == ["start", "stop"]
+        assert heartbeat.calls == ["register_recover_callback", "start", "stop"]
+
+
+def test_scheduler_recovery_keeps_mismatched_server_unhealthy(monkeypatch) -> None:
+    server = "tcp://server-a:5555"
+    client = MagicMock(name="req_client", spec=RequestClient)
+    client.lookup.return_value = MagicMock(name="lookup_future")
+    monkeypatch.setattr(
+        adapter_mod.RequestClientFactory, "create", lambda *_args, **_kwargs: client
+    )
+    get_chunk_size = MagicMock(return_value=256)
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", get_chunk_size)
+    FakeHeartbeatThread.instances.clear()
+    FakeHeartbeatThread.start_hook = None
+    monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
+    adapter = LMCacheMPSchedulerAdapter(
+        server_urls=[server],
+        context=MagicMock(name="zmq_context"),
+        model_name="test-model",
+        vllm_block_size=16,
+        parallel_strategy=_parallel_strategy(),
+        required_chunk_alignment=32,
+    )
+    adapter.maybe_submit_lookup_request("request-1", list(range(256)))
+    heartbeat = FakeHeartbeatThread.instances[0]
+
+    get_chunk_size.return_value = 512
+    heartbeat.health_event.clear()
+    heartbeat.simulate_successful_ping()
+
+    assert not adapter.is_healthy
+    get_chunk_size.assert_called_with(
+        client,
+        timeout=adapter._mq_timeout,
+        required_chunk_alignment=32,
+    )
 
 
 def test_worker_zero_autostarts_before_mq_client(monkeypatch) -> None:
@@ -1691,6 +1753,23 @@ def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
     assert len(contexts) == 3
     assert adapter.transfer_ctx is contexts[2]
     contexts[1].close.assert_not_called()
+
+
+def test_worker_recovery_rejects_changed_chunk_size(fake_adapter, monkeypatch) -> None:
+    adapter, _send_mock, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    heartbeat = FakeHeartbeatThread.instances[0]
+
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 640)
+    heartbeat.health_event.clear()
+    heartbeat.simulate_successful_ping()
+
+    assert not adapter.is_healthy
+    assert len(contexts) == 1
 
 
 # For the experimental dispatcher

@@ -240,20 +240,60 @@ class _LookupAck:
 def get_lmcache_chunk_size(
     req_client: RequestClient,
     timeout: float = DEFAULT_MQ_TIMEOUT,
+    required_chunk_alignment: int | None = None,
 ) -> int:
     """
-    Helper function to get the LMCache chunk size from the server
+    Helper function to get or negotiate the LMCache chunk size from the server
 
     Args:
         req_client: The LMCache multiprocess request client.
         timeout: Timeout in seconds for the blocking request.
+        required_chunk_alignment: Optional model-derived chunk alignment. When
+            provided, the server rounds its configured minimum chunk size up
+            to a compatible multiple if needed.
 
     Returns:
         An integer representing the LMCache chunk size
     """
-    future = req_client.get_chunk_size()
+    if required_chunk_alignment is None:
+        future = req_client.get_chunk_size()
+    else:
+        future = req_client.negotiate_chunk_size(required_chunk_alignment)
     lmcache_tokens_per_chunk = future.result(timeout=timeout)
     return lmcache_tokens_per_chunk
+
+
+def _verify_recovered_chunk_size(
+    req_client: RequestClient,
+    expected_chunk_size: int,
+    timeout: float,
+    required_chunk_alignment: int | None,
+    server_url: str,
+) -> bool:
+    """Re-negotiate after recovery and verify the adapter's cached size."""
+    try:
+        recovered_chunk_size = get_lmcache_chunk_size(
+            req_client,
+            timeout=timeout,
+            required_chunk_alignment=required_chunk_alignment,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to restore chunk-size agreement with %s; "
+            "will retry on next heartbeat",
+            server_url,
+        )
+        return False
+    if recovered_chunk_size != expected_chunk_size:
+        logger.error(
+            "LMCache server %s recovered with chunk size %d, but this adapter "
+            "is using %d; keeping it unhealthy",
+            server_url,
+            recovered_chunk_size,
+            expected_chunk_size,
+        )
+        return False
+    return True
 
 
 def get_experimental(
@@ -649,6 +689,7 @@ class LMCacheMPSchedulerAdapter:
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         extra_config: dict[str, Any] | None = None,
+        required_chunk_alignment: int | None = None,
     ):
         """
         Args:
@@ -669,6 +710,8 @@ class LMCacheMPSchedulerAdapter:
             extra_config: Optional dict with keys starting with
                 ``lmcache.mp.`` (e.g., ``lmcache.mp.mq_timeout``). When
                 provided, it overrides ``mq_timeout`` / ``heartbeat_interval``.
+            required_chunk_alignment: Optional model-derived chunk alignment
+                used to bind or validate the LMCache server chunk size.
         """
         (
             vllm_block_size,
@@ -698,6 +741,7 @@ class LMCacheMPSchedulerAdapter:
                 ExtraConfigDefault.nonblocking_lookup_status.name
             ]
         self._mq_timeout = mq_timeout
+        self._required_chunk_alignment = required_chunk_alignment
 
         # Lookup state tracking:
         # - _pending_lookups: request_ids submitted but not yet resolved
@@ -729,7 +773,9 @@ class LMCacheMPSchedulerAdapter:
         for url, client in self.req_clients.items():
             try:
                 chunk_sizes[url] = get_lmcache_chunk_size(
-                    client, timeout=self._mq_timeout
+                    client,
+                    timeout=self._mq_timeout,
+                    required_chunk_alignment=required_chunk_alignment,
                 )
             except TimeoutError:
                 for c in self.req_clients.values():
@@ -807,9 +853,28 @@ class LMCacheMPSchedulerAdapter:
                     health_event=self._health_events[url],
                     interval=self._heartbeat_interval,
                 )
+
+                def recover(
+                    server_url: str = url, req_client: RequestClient = client
+                ) -> bool:
+                    return self._recover_server_chunk_size(server_url, req_client)
+
+                hb.register_recover_callback(recover)
                 hb.start()
                 heartbeats[url] = hb
             self._heartbeats = heartbeats
+
+    def _recover_server_chunk_size(
+        self, server_url: str, req_client: RequestClient
+    ) -> bool:
+        """Restore one server's chunk-size agreement before marking it healthy."""
+        return _verify_recovered_chunk_size(
+            req_client,
+            self.lmcache_tokens_per_chunk,
+            self._mq_timeout,
+            self._required_chunk_alignment,
+            server_url,
+        )
 
     @_lmcache_nvtx_annotate
     def maybe_submit_lookup_request(
@@ -1294,6 +1359,7 @@ class LMCacheMPWorkerAdapter:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         extra_config: dict[str, Any] | None = None,
         enable_kv_events: bool = False,
+        required_chunk_alignment: int | None = None,
     ):
         """Initialize the worker adapter for current or legacy vLLM callers.
 
@@ -1316,6 +1382,8 @@ class LMCacheMPWorkerAdapter:
                 provided, it overrides ``mq_timeout`` / ``heartbeat_interval``.
             enable_kv_events: Whether to collect completed store operations
                 for vLLM's KV event publisher.
+            required_chunk_alignment: Optional model-derived chunk alignment
+                used to bind or validate the LMCache server chunk size.
 
         Raises:
             TypeError: If the connector argument shape is unsupported.
@@ -1376,6 +1444,8 @@ class LMCacheMPWorkerAdapter:
             self._mp_transfer_mode = None
         self.req_client = RequestClientFactory.create(server_url, context=context)
         self._mq_timeout = mq_timeout
+        self._server_url = server_url
+        self._required_chunk_alignment = required_chunk_alignment
 
         # Instance id for GPU worker. uuid4-derived (OS entropy) rather
         # than os.getpid() to avoid collision in containerized deployments.
@@ -1428,7 +1498,9 @@ class LMCacheMPWorkerAdapter:
         # Read chunk size from lmcache
         try:
             lmcache_tokens_per_chunk = get_lmcache_chunk_size(
-                self.req_client, timeout=self._mq_timeout
+                self.req_client,
+                timeout=self._mq_timeout,
+                required_chunk_alignment=required_chunk_alignment,
             )
         except TimeoutError:
             self.req_client.close()
@@ -1677,16 +1749,25 @@ class LMCacheMPWorkerAdapter:
             succeeds; ``False`` on failure or a requested heartbeat stop
             (event stays cleared; retried on the next successful PING).
         """
+        # Skip all recovery RPCs if shutdown already requested a stop.
+        if self._heartbeat_stop_requested():
+            logger.info("Heartbeat stop requested; skipping server recovery")
+            return False
+
+        if not _verify_recovered_chunk_size(
+            self.req_client,
+            self.lmcache_tokens_per_chunk,
+            self._mq_timeout,
+            self._required_chunk_alignment,
+            self._server_url,
+        ):
+            return False
+
         if not self.kv_caches:
             # Nothing was registered yet (server flapped before the
             # very first register_kv_caches). Treat as success so the
             # health event can be set.
             return True
-
-        # Skip the rebuild if a shutdown already requested the heartbeat stop.
-        if self._heartbeat_stop_requested():
-            logger.info("Heartbeat stop requested; skipping KV cache re-registration")
-            return False
 
         try:
             self._send_register_kv_caches_request(self.kv_caches)

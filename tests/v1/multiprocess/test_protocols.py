@@ -102,3 +102,7 @@ def test_rpc_types_come_from_request_client_annotations() -> None:
     assert clear.bind_payloads((), {}) == (False,)
     assert clear.bind_payloads((), {"force": True}) == (True,)
     assert clear.response_type is type(None)
+
+    negotiate = get_rpc_spec("negotiate_chunk_size")
+    assert negotiate.payload_types == (int,)
+    assert negotiate.response_type is int
