@@ -27,13 +27,22 @@ L1OperationResult = tuple[L1Error, "MemoryObj | None"]
 
 @dataclass(frozen=True)
 class L1MemoryDesc:
-    """
-    Describes the L1 memory buffer registered with an external backend (e.g. Nixl).
+    """Describe the contiguous L1 memory arena exposed to external backends.
+
+    Attributes:
+        ptr: Base address of the L1 arena.
+        size: Final size of the L1 arena in bytes.
+        align_bytes: Allocation alignment within the arena.
+        stable_registration_size: Stable size of the L1 arena. For a lazy
+            allocator, this is a snapshot of the currently pinned prefix and
+            does not change as the allocator grows. ``None`` means that no
+            stable size is exposed.
     """
 
     ptr: int
     size: int
     align_bytes: int
+    stable_registration_size: int | None = None
 
 
 @dataclass(frozen=True)

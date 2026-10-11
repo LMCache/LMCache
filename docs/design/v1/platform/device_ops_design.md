@@ -50,8 +50,8 @@ Plain instance methods + inheritance:
   Partial backends (XPU: 12 SYCL + 24 torch) shadow only what they ship.
   Focused backends (MUSA) override individual methods directly.
 - Raw-pointer tensor construction is resolved through
-  `DeviceOps.tensor_from_ptr()`. CPU, CUDA, and MUSA override that method, so
-  adding another pointer-capable device does not change the central
+  `DeviceOps.tensor_from_ptr()`. CPU, CUDA, MUSA, and NPU override that method,
+  so adding another pointer-capable device does not change the central
   `_tensor_from_ptr()` entry point.
 
 The one-line base methods are intentional boilerplate: they keep the contract
@@ -167,6 +167,7 @@ classDiagram
     DeviceOps <|-- MusaDeviceOps
     DeviceOps <|-- HpuDeviceOps
     DeviceOps <|-- CudaDeviceOps
+    DeviceOps <|-- NpuDeviceOps
     class DeviceOps {
       +device_type = "" (unregistered)
       torch/CPU baseline (36 ops)
@@ -177,6 +178,7 @@ classDiagram
     class CudaDeviceOps { "cuda"; +tensor_from_ptr(); bind_native(cuda_ops) }
     class XpuDeviceOps { "xpu"; bind_native(xpu_ops): 12 SYCL + 24 torch }
     class MusaDeviceOps { "musa"; +tensor_from_ptr(); transfer overrides }
+    class NpuDeviceOps { "npu"; +tensor_from_ptr(); sync-recorder; memcpy }
     class HpuDeviceOps { "hpu"; pure inherit }
 ```
 

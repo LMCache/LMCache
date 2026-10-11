@@ -125,7 +125,7 @@ jobs:
                         raise RuntimeError(module.__name__ + " is missing: " + ", ".join(missing))
                 print("LMCache XPU extension API surface OK")
                 PY
-                    python3 -c "import lmcache; print(\"LMCache import OK\")"
+                    python3 -c "import lmcache, torch; print(\"LMCache import OK\"); print(\"Torch:\", torch.__version__)"
                   '
 
             - name: Upload XPU release artifacts to GHA

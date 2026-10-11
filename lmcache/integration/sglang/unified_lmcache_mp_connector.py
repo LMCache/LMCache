@@ -62,7 +62,7 @@ class _ImmediateFuture:
 
 
 class UnifiedLMCacheMPConnector:
-    """Asynchronous, CUDA-IPC connector to a standalone LMCache server."""
+    """Asynchronous device-IPC connector to a standalone LMCache server."""
 
     def __init__(
         self,
@@ -113,8 +113,6 @@ class UnifiedLMCacheMPConnector:
         if not kv_groups or any(not group.kv_tensors for group in kv_groups):
             raise ValueError("LMCache KV group registration cannot be empty")
         kv_tensors = [tensor for group in kv_groups for tensor in group.kv_tensors]
-        if any(t.device.type != "cuda" for t in kv_tensors):
-            raise NotImplementedError("LMCache MP currently requires CUDA KV tensors")
         if any(t.device != kv_tensors[0].device for t in kv_tensors):
             raise ValueError("All LMCache-registered KV tensors must share one device")
         if any(t.dim() < 2 for t in kv_tensors):

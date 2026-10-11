@@ -83,7 +83,6 @@ def build_common_cpp(
     # Third Party
     from torch.utils import cpp_extension
 
-    cxx_standard = "-std=c++20" if profile and profile.name == "sycl" else "-std=c++17"
     ext_modules = [
         cpp_extension.CppExtension(
             "lmcache." + spec.name,
@@ -91,8 +90,7 @@ def build_common_cpp(
             include_dirs=[str(ROOT_DIR / d) for d in spec.include_dirs],
             extra_compile_args={
                 "cxx": (
-                    (profile.extra_cxx_flags_for(spec) if profile else [])
-                    + ["-O3", cxx_standard]
+                    (profile.extra_cxx_flags_for(spec) if profile else []) + ["-O3"]
                 ),
             },
         )

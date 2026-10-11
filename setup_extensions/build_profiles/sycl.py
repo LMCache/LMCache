@@ -58,7 +58,6 @@ class SyclProfile(BuildProfile):
                 library_dirs=library_dirs,
                 extra_compile_args={
                     "cxx": [
-                        "-std=c++20",
                         "-D_GLIBCXX_USE_CXX11_ABI=1",
                         "-O3",
                         "-fsycl",
