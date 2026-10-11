@@ -687,27 +687,32 @@ def test_kv_events_standalone_use_hook_only(
 def test_kv_events_worker_reports_merge_across_ranks(
     mock_io: SimpleNamespace, kv_events_queue: list[list[CacheStoreEvent]]
 ) -> None:
-    """Merging rank reports keeps every rank's events and counts each rank.
+    """TP ranks' worker-metadata events merge and publish common events once.
 
-    The worker never sees the vLLM hook here, as under MultiConnector, so its
-    events ride in worker metadata. Which merged events get published is
-    ``LMCacheMPKVEvents.aggregate()``'s rule; this only pins that worker
-    metadata hands it all of them.
+    The workers never see the vLLM hook here, as under MultiConnector, so their
+    events ride in worker metadata. Only event 11 is reported by both ranks, so
+    only it is published, exactly once.
     """
     config = _config(
         KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
     )
     cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
     worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
     try:
         kv_events_queue.extend([[_kv_event(11), _kv_event(12)], [_kv_event(11)]])
         rank0 = worker.build_connector_worker_meta()
         rank1 = worker.build_connector_worker_meta()
         assert rank0 is not None and rank1 is not None
+        # What vLLM's KVOutputAggregator does with the ranks' worker metadata.
         merged = rank0.aggregate(rank1)
         assert merged.kv_events is not None
         assert merged.kv_events.get_number_of_workers() == 2
-        hashes = [e.block_hashes[0] for e in merged.kv_events.get_all_events()]
-        assert sorted(hashes) == [11, 11, 12]
+        scheduler.update_connector_output(
+            KVConnectorOutput(kv_connector_worker_meta=merged)
+        )
+        assert _stored_hashes(scheduler) == [11]
+        assert _stored_hashes(scheduler) == []
     finally:
         worker.shutdown()
+        scheduler.shutdown()

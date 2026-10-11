@@ -1098,6 +1098,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         Returns:
             The worker metadata, or None when there is nothing to report.
         """
+        # TODO: Remove this KV event fallback (and LMCacheMPWorkerMetadata.kv_events)
+        # once upstream vLLM forwards get_kv_connector_kv_cache_events through
+        # MultiConnector and our minimum supported vLLM includes it.
         kv_events = (
             None
             if self._kv_events_hook_called
