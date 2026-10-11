@@ -1862,6 +1862,9 @@ class LMCacheEngine:
         - On first rank:
           * Broadcasts chunk count and each chunk's combined metadata
           * Broadcasts tensor data
+          * Streams chunks through a fixed-size staging buffer so that device
+            memory usage is bounded by the buffer size rather than the hit size.
+            See issue #5632.
         - On other ranks:
           * Receives chunk data and populates reordered_chunks
           * Updates ret_mask to mark received positions as True
@@ -1874,13 +1877,15 @@ class LMCacheEngine:
             # Reset the GPU-resident copy list. We populate it during this
             # broadcast loop so the caller's subsequent batched_to_gpu can
             # read from HBM instead of re-reading the same CPU L1 buffer
-            # over PCIe. (Declared in __init__; reassigning to a fresh list
-            # rather than .clear() to drop any references the caller's
-            # finally block missed if a previous retrieve raised.)
+            # over PCIe. We use a fixed-size staging buffer (windowed broadcast)
+            # so device memory is bounded by BUFFER_SIZE_CHUNKS rather than the
+            # total hit size. (Issue #5632)
             self._leader_gpu_substitute_objs = []
 
-            # Broadcast each chunk's data
-            for key, memory_obj, start, end in reordered_chunks:
+            # Broadcast each chunk's data, using a windowed approach so that
+            # only BUFFER_SIZE_CHUNKS are resident on device at any time.
+            BUFFER_SIZE_CHUNKS = 1
+            for i, (key, memory_obj, start, end) in enumerate(reordered_chunks):
                 # Combine (start, end) and metadata into single broadcast
                 metadata_dict = memory_obj.metadata.to_dict()
                 combined_metadata = (start, end, metadata_dict)
@@ -1894,14 +1899,25 @@ class LMCacheEngine:
                 )
                 self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
 
-                # Keep this GPU-resident copy alive so the subsequent
-                # batched_to_gpu can read from HBM rather than re-reading
-                # the L1 buffer over PCIe.
+                # Create GPU-resident copy and add to staging buffer.
+                # Use a fixed-size buffer (windowed broadcast) so that device
+                # memory is bounded: only BUFFER_SIZE_CHUNKS are alive at once.
+                # Old entries are freed when new ones overwrite them.
                 gpu_mo = TensorMemoryObj(
                     raw_data=tensor_to_broadcast,
                     metadata=memory_obj.metadata,
                     parent_allocator=None,
                 )
+                # Maintain a fixed-size staging buffer; drop the oldest entry
+                # when the buffer is full.
+                if len(self._leader_gpu_substitute_objs) >= BUFFER_SIZE_CHUNKS:
+                    # Free the oldest entry's tensor to release device memory.
+                    old = self._leader_gpu_substitute_objs.pop(0)
+                    if old.raw_data is not None:
+                        try:
+                            old.raw_data = None
+                        except Exception:
+                            pass
                 self._leader_gpu_substitute_objs.append(gpu_mo)
         else:
             # Receive total chunk count
