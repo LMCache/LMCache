@@ -63,3 +63,99 @@ class TestFSNativeCapacityHelpText:
         # read as an enforced cap; it must name the eviction requirement.
         assert "eviction" in help_text
         assert "max L2 capacity" not in help_text
+
+
+EVICTION = {"eviction_policy": "LRU"}
+
+
+class TestFSNativeDiskLimits:
+    def test_disabled_by_default(self):
+        cfg, _ = _from_dict(max_capacity_gb=1500, eviction=EVICTION)
+        assert cfg.disk_high_watermark == 0
+        assert cfg.disk_min_free_gb == 0
+
+    def test_limits_are_parsed(self):
+        cfg, _ = _from_dict(
+            max_capacity_gb=1500,
+            eviction=EVICTION,
+            disk_high_watermark=0.8,
+            disk_min_free_gb=2300,
+        )
+        assert cfg.disk_high_watermark == 0.8
+        assert cfg.disk_min_free_gb == 2300
+
+    def test_limits_need_a_capacity_and_eviction_to_act_on(self):
+        for extra in (
+            {"disk_high_watermark": 0.8},
+            {"disk_high_watermark": 0.8, "max_capacity_gb": 1500},
+            {"disk_min_free_gb": 2300, "eviction": EVICTION},
+        ):
+            try:
+                _from_dict(**extra)
+            except ValueError as e:
+                assert "eviction" in str(e)
+            else:
+                raise AssertionError(f"accepted {extra}")
+
+    def test_out_of_range_limits_are_rejected(self):
+        for extra in (
+            {"disk_high_watermark": 1.2},
+            {"disk_high_watermark": -0.1},
+            {"disk_high_watermark": "0.8"},
+            {"disk_min_free_gb": -1},
+            {"disk_min_free_gb": True},
+        ):
+            try:
+                _from_dict(max_capacity_gb=1500, eviction=EVICTION, **extra)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"accepted {extra}")
+
+
+class TestFSNativePurgeOnClose:
+    def test_off_by_default(self):
+        cfg, _ = _from_dict()
+        assert cfg.purge_on_close is False
+
+    def test_parsed(self):
+        cfg, _ = _from_dict(purge_on_close=True)
+        assert cfg.purge_on_close is True
+
+    def test_must_be_a_boolean(self):
+        for value in ("true", 1, None):
+            try:
+                _from_dict(purge_on_close=value)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"accepted {value!r}")
+
+    def test_purge_removes_only_the_adapters_files(self, tmp_path):
+        (tmp_path / "model@0x08000800@0@abc.data").write_bytes(b"x" * 100)
+        (tmp_path / "model@0x08000800@0@def.tmp").write_bytes(b"x" * 10)
+        (tmp_path / "tmp").mkdir()
+        (tmp_path / "tmp" / "model@0x08000800@0@ghi.data").write_bytes(b"x" * 5)
+        (tmp_path / "notes.txt").write_text("keep")
+        (tmp_path / "weights").mkdir()
+        (tmp_path / "weights" / "blob.data").write_bytes(b"keep")
+        outside = tmp_path.parent / "outside.data"
+        outside.write_bytes(b"keep")
+        (tmp_path / "link.data").symlink_to(outside)
+
+        removed, freed = fs_native_l2_adapter.purge_adapter_files(str(tmp_path), "tmp")
+
+        assert (removed, freed) == (3, 115)
+        assert sorted(p.name for p in tmp_path.iterdir()) == [
+            "link.data",
+            "notes.txt",
+            "tmp",
+            "weights",
+        ]
+        assert (tmp_path / "weights" / "blob.data").exists()
+        assert outside.read_bytes() == b"keep"
+
+    def test_purge_of_a_missing_directory_is_a_no_op(self, tmp_path):
+        assert fs_native_l2_adapter.purge_adapter_files(
+            str(tmp_path / "gone"), "tmp"
+        ) == (0, 0)

@@ -23,8 +23,9 @@ from __future__ import annotations
 # Standard
 from collections import defaultdict
 from functools import cache
-from typing import Any
+from typing import Any, Callable
 import ctypes
+import dataclasses
 import select
 import threading
 
@@ -34,9 +35,11 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
+    AdapterUsage,
     L2AdapterInterface,
     L2TaskId,
 )
+from lmcache.v1.distributed.l2_adapters.disk_guard import DiskGuard
 from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
 from lmcache.v1.platform import create_event_notifier
 
@@ -160,6 +163,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         type_name: str = "",
         extra_status: dict[str, Any] | None = None,
         pad_buffers_to_alignment: bool = False,
+        disk_guard: "DiskGuard | None" = None,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         """Initialize the adapter over a native connector client.
 
@@ -181,6 +186,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 ``_obj_to_memoryview``.
         """
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
+        self._disk_guard = disk_guard
+        self._on_close = on_close
         self._client = native_client
         self._client_fd: int = int(native_client.event_fd())
         self._type_name: str = type_name or type(native_client).__name__
@@ -424,6 +431,19 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # Status Interface
     # ---------------------------------------------------------------
 
+    def get_usage(self) -> AdapterUsage:
+        """Usage against the configured capacity, or against what the
+        filesystem still allows when a ``DiskGuard`` leaves less room."""
+        usage = super().get_usage()
+        if self._disk_guard is None:
+            return usage
+        capacity = self._disk_guard.effective_capacity(
+            usage.total_bytes_used, usage.total_capacity_bytes
+        )
+        if capacity == usage.total_capacity_bytes:
+            return usage
+        return dataclasses.replace(usage, total_capacity_bytes=capacity)
+
     def report_status(self) -> dict[str, Any]:
         """Return a status dict for this native-connector L2 adapter.
 
@@ -441,6 +461,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             "type": self._type_name,
         }
         status.update(self._extra_status)
+        if self._disk_guard is not None:
+            status["disk_guard"] = self._disk_guard.status()
         return status
 
     # ---------------------------------------------------------------
@@ -456,6 +478,15 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._store_efd.close()
         self._lookup_efd.close()
         self._load_efd.close()
+
+        # After the client is closed nothing writes any more, so a hook that
+        # removes the backing data cannot race a store.
+        if self._on_close is not None:
+            on_close, self._on_close = self._on_close, None
+            try:
+                on_close()
+            except Exception:
+                logger.exception("L2 adapter on_close hook failed")
 
     # ---------------------------------------------------------------
     # Internal helpers
