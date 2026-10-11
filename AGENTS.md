@@ -84,6 +84,16 @@ pytest -xvs tests/v1/test_cache_engine.py::test_function_name
 
 Test dependencies: `uv pip install -r requirements/test.txt`
 
+For source-checkout gRPC codec tests, first install `requirements/proto.txt` and
+run `python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate`.
+Generated `*_pb2.py` files are build artifacts, not tracked source. Transfer
+checkouts from macOS with `git archive` (or disable tar copyfile/xattr metadata);
+AppleDouble `._*.proto` sidecars are otherwise picked up by the proto generator. Limiting
+pytest with `--confcutdir` skips ancestor fixtures but does not remove runtime
+native-extension dependencies imported by platform/gpu-connector modules.
+For serial CUDA verification builds, set both `MAX_JOBS=1` and `NVCC_THREADS=1`;
+`MAX_JOBS` alone does not cap the CUDA profile's automatic NVCC thread count.
+
 Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 
 ### Testing Practices
