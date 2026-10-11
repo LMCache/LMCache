@@ -41,6 +41,26 @@ _PagedBufferOperand: TypeAlias = (
 _PagedLayers: TypeAlias = list[torch.Tensor] | list[list[torch.Tensor]]
 
 
+def get_spec_class(
+    engine_kv_format: EngineKVFormat,
+) -> "type[KVFormatSpec]":
+    """Resolve a KV-format spec without importing the registry at module load.
+
+    Args:
+        engine_kv_format: Engine KV format whose static spec should be resolved.
+
+    Returns:
+        The spec class that declares the layout of ``engine_kv_format``.
+
+    Raises:
+        ValueError: If ``engine_kv_format`` has no registered spec.
+    """
+    # First Party
+    from lmcache.v1.gpu_connector.kv_format import get_spec_class as resolve_spec_class
+
+    return resolve_spec_class(engine_kv_format)
+
+
 def _current_musa_device() -> torch.device:
     """Return the MUSA device associated with the current worker thread."""
     musa = getattr(torch, "musa", None)
@@ -419,9 +439,6 @@ def _musa_multi_layer_block_kv_transfer(
     skip_prefix_n_blocks: int,
 ) -> None:
     """Reconstruct MUSA operands, then use native or torch transfer."""
-    # First Party
-    from lmcache.v1.gpu_connector.kv_format import get_spec_class
-
     format_spec = get_spec_class(engine_kv_format)
     _validate_musa_mp_block_transfer_format(format_spec)
     resolved_device = _as_device(device, paged_buffer_ptrs_tensor, lmcache_objects_ptrs)

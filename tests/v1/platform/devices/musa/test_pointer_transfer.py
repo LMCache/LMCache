@@ -10,7 +10,6 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
-from lmcache.v1.gpu_connector import kv_format
 from lmcache.v1.platform.devices.musa import device_ops
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
@@ -22,7 +21,7 @@ def test_pointer_operands_are_reconstructed_inside_musa_adapter(
     fake_device = SimpleNamespace(type="musa", index=0)
     calls: list[tuple[int, tuple[int, ...], torch.dtype, tuple[int, ...] | None]] = []
     format_spec_lookups = 0
-    real_get_spec_class = kv_format.get_spec_class
+    real_get_spec_class = device_ops.get_spec_class
 
     def get_spec_class_once(fmt: EngineKVFormat) -> object:
         nonlocal format_spec_lookups
@@ -51,7 +50,7 @@ def test_pointer_operands_are_reconstructed_inside_musa_adapter(
         "construct_musa_tensor_from_data_pointer",
         construct,
     )
-    monkeypatch.setattr(kv_format, "get_spec_class", get_spec_class_once)
+    monkeypatch.setattr(device_ops, "get_spec_class", get_spec_class_once)
     monkeypatch.setattr(
         "lmcache.v1.platform.devices.musa.native_kv_transfer"
         ".try_native_multi_layer_block_kv_transfer",
