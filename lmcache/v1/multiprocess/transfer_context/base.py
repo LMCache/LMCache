@@ -28,14 +28,13 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.platform import resolve_device_ops
+from lmcache.v1.platform import resolve_device_ops, synchronize_device
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -522,7 +521,7 @@ def gather_paged_kv_to_cpu(
         # The CPU MUST block and wait for the GPU ONLY when a temporary
         # staging buffer is used. This is because the CPU needs to immediately
         # read this data for the memory copy below.
-        torch_dev.synchronize()
+        synchronize_device(device)
 
         for dst, src in zip(_target_out, staged_chunks, strict=False):
             dst.copy_(src)  # High-speed CPU-to-CPU memory copy
@@ -534,7 +533,7 @@ def gather_paged_kv_to_cpu(
 
     # Fast path: The async GPU copy might still be in progress.
     # We intentionally omit synchronization here for performance.
-    # WARNING: The caller MUST explicitly call `torch_dev.synchronize()`
+    # WARNING: The caller MUST explicitly synchronize the KV tensor device
     # before consuming these chunks to ensure data validity.
 
     return chunks
@@ -725,7 +724,7 @@ def scatter_cpu_to_paged_kv(
             )
     # Fast path: The async GPU copy might still be in progress.
     # We intentionally omit synchronization here for performance.
-    # WARNING: The caller MUST explicitly call `torch_dev.synchronize()`
+    # WARNING: The caller MUST explicitly synchronize the KV tensor device
     # before consuming these chunks to ensure data validity.
 
     if dynamically_pinned:
@@ -738,4 +737,4 @@ def scatter_cpu_to_paged_kv(
         # cannot cover this: by then the temporaries are already gone.
         # Only the dynamically pinned case pays this; caller-owned pinned
         # chunks keep the fast path.
-        torch_dev.synchronize()
+        synchronize_device(device)

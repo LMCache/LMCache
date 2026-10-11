@@ -289,6 +289,23 @@ def unfold_grouped(
     return _native_unfold_grouped(hit_length, num_chunks, list(windows))
 
 
+def all_grouped(rows: "Sequence[Bitmap]") -> list[Bitmap]:
+    """The ``"full"``-policy counterpart of :func:`fold_unfold_grouped`:
+    restrict every row to the columns present in all rows (one blended chunk
+    needs every row), with no prefix or window folding.
+
+    Args:
+        rows: presence bitmaps, all of the same length.
+
+    Returns:
+        Retain rows, parallel to ``rows``: each is the AND across ``rows``.
+    """
+    common = rows[0]
+    for row in rows[1:]:
+        common = common & row
+    return [common] * len(rows)
+
+
 def fold_unfold_grouped(
     rows: Sequence[Bitmap],
     windows: Sequence[int],

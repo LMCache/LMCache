@@ -24,12 +24,19 @@ from lmcache.v1.platform import consume_fd
 _KB = 1024
 
 
-def make_aligned_tensor(num_bytes: int, align_bytes: int = 1) -> torch.Tensor:
+def make_aligned_tensor(
+    num_bytes: int, align_bytes: int = 1, use_hugepages: bool = False
+) -> torch.Tensor:
     """Create a 1-D uint8 tensor whose data pointer is aligned.
 
     Args:
         num_bytes: Number of bytes in the returned tensor.
         align_bytes: Required data pointer alignment in bytes.
+        use_hugepages: When True, allocate the buffer from the pre-allocated
+            2 MiB hugepage pool (via ``_allocate_cpu_memory``) instead of
+            regular pinned memory. The returned pointer is already
+            hugepage-aligned, which satisfies any ``align_bytes`` that divides
+            the page size.
 
     Returns:
         A 1-D ``torch.uint8`` tensor with ``num_bytes`` elements.
@@ -43,6 +50,11 @@ def make_aligned_tensor(num_bytes: int, align_bytes: int = 1) -> torch.Tensor:
         raise ValueError("num_bytes must be non-negative")
     if align_bytes <= 0:
         raise ValueError("align_bytes must be positive")
+    if use_hugepages:
+        # First Party
+        from lmcache.v1.memory_management import _allocate_cpu_memory
+
+        return _allocate_cpu_memory(num_bytes, use_hugepages=True).view(-1)
     if align_bytes == 1:
         return torch.empty(num_bytes, dtype=torch.uint8)
 

@@ -93,8 +93,8 @@ Commonly used flags include:
    * - ``--coordinator-kafka-topic TOPIC``
      - Kafka topic receiving cache events (default ``lmcache-cache-events``).
    * - ``--coordinator-kafka-delivery-timeout SECONDS``
-     - Seconds one flush waits for broker acknowledgement (``> 0``, default
-       ``10``).
+     - Seconds the producer retries a record before dropping it (``> 0``,
+       default ``300``).
    * - ``--p2p-advertise-url HOST:PORT``
      - Enable P2P KV cache sharing and advertise this server's
        transfer-channel endpoint to peers (e.g. ``10.0.0.1:8500``). Setting it
@@ -111,6 +111,9 @@ Commonly used flags include:
        (default ``30``).
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation for P2P reads (default ``nixl``).
+   * - ``--server-module JSON``
+     - Load an out-of-tree multiprocess server module factory. Repeatable.
+       See :doc:`/developer_guide/extending_lmcache/server_modules`.
    * - ``--trace-level {storage,events}``
      - Enable trace recording: ``storage`` records StorageManager calls for
        replay, ``events`` records the cache-event stream emitted for the

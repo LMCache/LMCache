@@ -37,6 +37,25 @@ LMCACHE_REQUEST_TRANSPORT=zmq \
 The request transport can be `zmq` or `grpc`. The harness maps these values to
 the `tcp://` and `grpc://` connector addresses respectively.
 
+## SGLang nightly validation
+
+Normal SGLang jobs install the source revision recorded in
+`buildkite_latest_tested_sglang/latest_tested_sglang.txt`. A scheduled
+Buildkite build can set `VERIFY_AND_PIN_SGLANG=true` to run the canary path:
+
+```text
+official SGLang nightly index
+  -> resolve newest nightly version and commit
+  -> run lm_eval with LMCache over ZMQ and gRPC
+  -> require both jobs to report identical metadata
+  -> update latest_tested_sglang.txt and tested_runtimes.jsonl
+```
+
+The canary installs the nightly's exact source commit because the LMCache CI
+image uses Python 3.12 while SGLang currently publishes its nightly wheel for
+CPython 3.10. `SGLANG_INSTALL_SPEC` remains available for an explicit per-build
+override.
+
 ## Directory layout
 
 ```text

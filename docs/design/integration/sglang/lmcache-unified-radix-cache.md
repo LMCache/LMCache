@@ -44,7 +44,7 @@ The design has the following goals:
 The initial implementation does not:
 
 - represent LMCache CPU or remote tiers in SGLang's radix tree;
-- reuse the legacy `LMCRadixCache` or legacy SGLang LMCache connector;
+- provide an in-process LMCache connector;
 - use HiCache's host pool or `HybridCacheController`;
 - overlap individual layer loads with model execution.
 
@@ -57,7 +57,6 @@ non-GPU state lives:
 | --- | --- | --- | --- | --- |
 | `RadixCache` | GPU prefix tree | None | None | Data is already resident |
 | HiCache / `UnifiedRadixCache` | GPU and host metadata | SGLang host pool | Optional L3 | L2 to L1, with per-layer overlap |
-| Legacy `LMCRadixCache` | Independent legacy implementation | Integration-dependent | LMCache | Outside this design |
 | `LMCacheUnifiedRadixCache` | SGLang GPU-resident data only | None | LMCache-managed CPU or remote tiers | LMCache MP writes directly to SGLang GPU tensors |
 
 For `LMCacheUnifiedRadixCache`, every LMCache tier is external to SGLang's
@@ -104,13 +103,14 @@ and node locks. It does not initialize a HiCache host pool.
 SGLang enables the integration with:
 
 ```text
---enable-unified-lmcache
+--enable-lmcache
 --lmcache-config-file <path-to-lmcache-config>
 ```
 
-The legacy `--enable-lmcache` option continues to select `LMCRadixCache`. The
-two LMCache modes are mutually exclusive. Unified LMCache is also incompatible
-with `--enable-hierarchical-cache` and
+The integration supports only MP mode and requires a standalone LMCache
+server. `--enable-lmcache` selects `LMCacheUnifiedRadixCache`; the configuration
+file supplies the MP server address. LMCache is incompatible with
+`--enable-hierarchical-cache` and
 `--enable-unified-cache-external-linker`, and requires radix caching to remain
 enabled.
 

@@ -486,6 +486,41 @@ def extract_mm_features(
         return ([], [])
 
 
+def _vllm_local_device_index(parallel_config: Any) -> int:
+    """Return the device index vLLM binds this worker to on a single node.
+
+    Each vLLM data-parallel rank is its own engine whose TP/PCP/PP world
+    starts at rank 0, so ``parallel_config.rank`` alone repeats on every
+    data-parallel rank. This mirrors ``Worker.init_device`` in vLLM: offset
+    by the local data-parallel rank, then map through the platform's
+    logical-to-visible device mapping.
+    """
+    local_rank = parallel_config.rank
+    if (
+        parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
+        and getattr(parallel_config, "data_parallel_backend", None) != "ray"
+        and getattr(parallel_config, "nnodes_within_dp", 1) == 1
+    ):
+        dp_local_rank = parallel_config.data_parallel_rank_local
+        if dp_local_rank is None:
+            dp_local_rank = getattr(
+                parallel_config,
+                "data_parallel_index",
+                parallel_config.data_parallel_rank,
+            )
+        local_rank += dp_local_rank * parallel_config.world_size
+
+    try:
+        # Third Party
+        from vllm.platforms import current_platform
+    except ImportError:
+        return local_rank
+    to_visible = getattr(
+        current_platform, "logical_device_id_to_visible_device_id", None
+    )
+    return to_visible(local_rank) if to_visible is not None else local_rank
+
+
 def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
     """
     Calculate the local worker id and local world size.
@@ -506,7 +541,7 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
     num_gpus = torch_dev.device_count()
     if global_world_size <= num_gpus:
         # single node case
-        return parallel_config.rank, parallel_config.world_size
+        return _vllm_local_device_index(parallel_config), global_world_size
     else:
         tp_size = parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size

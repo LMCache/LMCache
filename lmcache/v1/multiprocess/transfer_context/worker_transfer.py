@@ -4,7 +4,6 @@
 # Standard
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from enum import Enum
 from typing import Any, Callable, Protocol, cast
 import os
 import threading
@@ -31,8 +30,13 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
+from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.platform import get_device_spec, resolve_kv_wrapper_factory
+from lmcache.v1.platform import (
+    get_device_spec,
+    resolve_kv_wrapper_factory,
+    synchronize_device,
+)
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
@@ -44,8 +48,8 @@ logger = init_logger(__name__)
 # Environment variable that lets the user override the default routing
 # performed by :func:`create_transfer_context`. Accepted values match the
 # string values of :class:`MPTransferMode` (``auto`` / ``engine_driven`` /
-# ``lmcache_driven``); ``auto`` reproduces the historical device-type-based
-# dispatch.
+# ``lmcache_driven``); ``auto`` defers to the device spec's declared
+# default (:meth:`DeviceSpec.default_mp_transfer_mode`).
 ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
 
 
@@ -114,23 +118,6 @@ def _build_engine_driven_context(
     return EngineDrivenTransferContext(instance_id, req_client)
 
 
-class MPTransferMode(str, Enum):
-    """Routing mode used by :func:`create_transfer_context`.
-
-    * ``AUTO``: dispatch by ``tensor.device.type`` (CUDA -> lmcache-driven,
-      others -> engine-driven). Preserves the historical behaviour.
-    * ``ENGINE_DRIVEN``: force :class:`EngineDrivenTransferContext`
-      (worker-side gather / scatter copy path).
-    * ``LMCACHE_DRIVEN``: force :class:`LMCacheDrivenTransferContext`
-      (IPC / SHM zero-copy path). Requires a registered KV-wrapper factory
-      for the device.
-    """
-
-    AUTO = "auto"
-    ENGINE_DRIVEN = "engine_driven"
-    LMCACHE_DRIVEN = "lmcache_driven"
-
-
 def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
     """Coerce ``mode`` into :class:`MPTransferMode`, falling back to env."""
     raw = (
@@ -161,14 +148,14 @@ def _build_lmcache_driven_context(
         raise ValueError(
             "MP transfer mode 'lmcache_driven' is not supported for device type "
             "%r: no KV-cache wrapper factory is registered. "
-            "Use mode 'engine_driven' or 'auto' instead." % device_type
+            "Use mode 'engine_driven' instead." % device_type
         ) from exc
     device_spec = get_device_spec(device_type)
-    if device_spec and not device_spec.is_handle_transfer_available():
+    if device_spec and not device_spec.is_lmcache_driven_available():
         raise ValueError(
             "MP transfer mode 'lmcache_driven' is not available for device type "
             "%r: required platform capability checks failed. "
-            "Use mode 'engine_driven' or 'auto' instead." % device_type
+            "Use mode 'engine_driven' instead." % device_type
         )
     return LMCacheDrivenTransferContext(instance_id, req_client)
 
@@ -202,7 +189,7 @@ def _get_kv_device(kv_caches: dict[str, torch.Tensor]) -> torch.device:
         ValueError: If ``kv_caches`` is empty.
     """
     if not kv_caches:
-        raise ValueError("LMCache-driven transfer requires at least one KV cache")
+        raise ValueError("Transfer requires at least one KV cache")
     return get_device(next(iter(kv_caches.values())))
 
 
@@ -899,7 +886,7 @@ class EngineDrivenTransferContext(TransferContext):
         """Return no event for the synchronous engine-driven transfer path.
 
         Returns:
-            ``None`` because store and retrieve synchronize the active device
+            ``None`` because store and retrieve synchronize the KV tensor device
             before accessing or releasing KV-cache buffers.
 
         Raises:
@@ -927,7 +914,8 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_store()."
             )
 
-        torch_dev.synchronize()
+        device = _get_kv_device(kv_caches)
+        synchronize_device(device)
         result = self._engine_driven_context.prepare_store(key, self._instance_id)
         out_buffers, chunk_indices = result if result is not None else (None, None)
         # All chunks already in cache — nothing to gather or commit.
@@ -949,7 +937,7 @@ class EngineDrivenTransferContext(TransferContext):
         # commit_store serializes immediately. Either way the copies must be
         # complete first, so this is unconditional -- guarding it on out_buffers
         # left the pickle path serializing a buffer still being written.
-        torch_dev.synchronize()
+        synchronize_device(device)
         ok = self._engine_driven_context.commit_store(
             key, self._instance_id, cpu_chunks
         )
@@ -974,6 +962,7 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
 
+        device = _get_kv_device(kv_caches)
         src_buffers = self._engine_driven_context.prepare_retrieve(
             key, self._instance_id
         )
@@ -994,7 +983,7 @@ class EngineDrivenTransferContext(TransferContext):
                 ok = False
             # SHM path: ensure all device writes are complete before releasing
             # the SHM slot (server may immediately reuse it after commit_retrieve).
-            torch_dev.synchronize()
+            synchronize_device(device)
         self._engine_driven_context.commit_retrieve(key, self._instance_id)
 
         future: MessagingFuture[bool] = MessagingFuture()
@@ -1024,6 +1013,8 @@ def create_transfer_context(
     The device check is intentionally centralized here. Routing can be
     overridden via the ``mode`` argument or the ``LMCACHE_MP_TRANSFER_MODE``
     environment variable; see :class:`MPTransferMode` for accepted values.
+    ``auto`` resolves to the device spec's declared default
+    (:meth:`DeviceSpec.default_mp_transfer_mode`).
 
     Args:
         kv_caches: Worker KV cache tensors keyed by layer name.
@@ -1032,7 +1023,7 @@ def create_transfer_context(
             ownership and must close it after the context.
         mode: Optional routing override. When ``None`` the value of
             ``LMCACHE_MP_TRANSFER_MODE`` is consulted, defaulting to
-            :attr:`MPTransferMode.AUTO`.
+            :attr:`MPTransferMode.AUTO` (the device-declared default).
         **kwargs: Unused placeholder for forward-compatible factory extension.
 
     Returns:
@@ -1052,6 +1043,13 @@ def create_transfer_context(
         )
     device_type = next(iter(device_types))
     resolved_mode = _resolve_mode(mode)
+    if resolved_mode is MPTransferMode.AUTO:
+        device_spec = get_device_spec(device_type)
+        resolved_mode = (
+            device_spec.default_mp_transfer_mode()
+            if device_spec is not None
+            else MPTransferMode.ENGINE_DRIVEN
+        )
     logger.info(
         "Creating transfer context (device_type=%s, mode=%s)",
         device_type,
@@ -1059,9 +1057,4 @@ def create_transfer_context(
     )
     if resolved_mode is MPTransferMode.LMCACHE_DRIVEN:
         return _build_lmcache_driven_context(device_type, instance_id, req_client)
-    if resolved_mode is MPTransferMode.ENGINE_DRIVEN:
-        return _build_engine_driven_context(instance_id, req_client)
-    # AUTO: dispatch by device type (CUDA -> handle path, else -> data path).
-    if device_type == "cuda":
-        return LMCacheDrivenTransferContext(instance_id, req_client)
     return _build_engine_driven_context(instance_id, req_client)

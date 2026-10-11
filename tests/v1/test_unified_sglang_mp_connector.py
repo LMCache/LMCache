@@ -2,7 +2,7 @@
 """Small, server-free tests for the unified SGLang MP connector contracts."""
 
 # Standard
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 import unittest
 
@@ -443,6 +443,58 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.assertEqual(kernel_to_engine, (0, 0))
         self.assertEqual([spec["layer_indices"] for spec in specs], [(0,), (1,)])
         self.assertEqual([spec["engine_group_id"] for spec in specs], [0, 0])
+
+    def test_dsv41_sidecars_share_full_page_block_ids(self) -> None:
+        try:
+            # First Party
+            from lmcache.integration.sglang.unified_kv_adapter import (
+                SGLangUnifiedKVAdapter,
+            )
+        except ImportError as exc:
+            self.skipTest(f"SGLang is not installed: {exc}")
+
+        class _IndexerPool:
+            def __init__(self, page_size: int, buffers: list[torch.Tensor]) -> None:
+                self.page_size = page_size
+                self.buffers = buffers
+
+            def contiguous_page_row_buffers(self) -> list[torch.Tensor]:
+                return self.buffers
+
+        adapter = object.__new__(SGLangUnifiedKVAdapter)
+        adapter.page_size = 256
+
+        c4 = torch.arange(4 * 2, dtype=torch.uint8).reshape(4, 2)
+        c4_index = torch.arange(4 * 3, dtype=torch.uint8).reshape(4, 3)
+        c128 = torch.zeros(130, 4, dtype=torch.uint8)
+        c1 = torch.arange(3 * 5, dtype=torch.uint8).reshape(3, 5)
+        c1_index = torch.arange(13 * 7, dtype=torch.uint8).reshape(13, 7)
+        c2 = torch.arange(4 * 6, dtype=torch.uint8).reshape(4, 6)
+        c2_index = torch.arange(7 * 8, dtype=torch.uint8).reshape(7, 8)
+        kv_pool = SimpleNamespace(
+            _unified_kv=False,
+            full_size=512,
+            kv_pools={
+                4: SimpleNamespace(kv_buffer=[c4]),
+                128: SimpleNamespace(kv_buffer=[c128]),
+                1: SimpleNamespace(kv_buffer=[c1]),
+                2: SimpleNamespace(kv_buffer=[c2]),
+            },
+            index_pools={
+                4: _IndexerPool(64, [c4_index]),
+                1: _IndexerPool(64, [c1_index]),
+                2: _IndexerPool(64, [c2_index]),
+            },
+        )
+
+        tensors = adapter._resolve_dsv4_full_page_tensors(kv_pool)
+
+        self.assertEqual(
+            [tuple(tensor.shape) for tensor in tensors],
+            [(3, 2), (3, 3), (3, 4), (3, 5), (3, 28), (3, 6), (3, 16)],
+        )
+        self.assertTrue(torch.equal(tensors[4].reshape(-1), c1_index[:12].reshape(-1)))
+        self.assertTrue(torch.equal(tensors[6].reshape(-1), c2_index[:6].reshape(-1)))
 
     def test_submit_store_passes_list_of_block_ids_per_group(self):
         connector = object.__new__(UnifiedLMCacheMPConnector)
