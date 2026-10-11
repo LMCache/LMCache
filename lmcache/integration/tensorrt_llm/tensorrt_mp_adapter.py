@@ -384,7 +384,19 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             )
 
     def start_load_kv(self, stream: torch_dev.Stream) -> None:
-        """Send ``RETRIEVE`` requests for each pending load."""
+        """Retrieve complete LMCache chunks for each pending load.
+
+        Block IDs are trimmed to the key's aligned token range without changing
+        the bound metadata. Requests without a complete chunk are skipped;
+        undersized block lists still reach the server's validation.
+
+        Args:
+            stream: Device stream recorded in the transfer synchronization event.
+
+        Raises:
+            RuntimeError: KV caches are not registered, or a retrieve fails or
+                reports that the requested blocks were not loaded.
+        """
         meta: Optional[LMCacheMPConnectorMetadata] = self._metadata
         if meta is None or not meta.loads:
             return
@@ -398,10 +410,17 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
             key = self._create_key(spec.tokens, req_id)
             try:
+                # The key ends at the last complete LMCache chunk.  TRT-LLM
+                # may still report the request's trailing partial block; it
+                # must not reach the server's chunk downsampler.  The server
+                # retains its own underflow checks for short block-id lists.
+                block_ids = spec.block_ids[: key.end // self._block_size]
+                if not block_ids:
+                    continue
                 raw_future = self._req_client.retrieve(
                     key,
                     self._instance_id,
-                    [spec.block_ids],
+                    [block_ids],
                     self._export_event(event),
                     0,  # skip_first_n_tokens
                 )
@@ -441,7 +460,19 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         pass
 
     def wait_for_save(self, stream: torch_dev.Stream) -> None:
-        """Send ``STORE`` requests for each pending save."""
+        """Store complete LMCache chunks for each pending save.
+
+        Block IDs are trimmed to the key's aligned token range without changing
+        the bound metadata. Requests without a complete chunk are skipped;
+        undersized block lists still reach the server's validation. Store
+        failures are logged so inference can continue without cached blocks.
+
+        Args:
+            stream: Device stream recorded in the transfer synchronization event.
+
+        Raises:
+            RuntimeError: KV caches are not registered for a pending save.
+        """
         meta: Optional[LMCacheMPConnectorMetadata] = self._metadata
         if meta is None or not meta.saves:
             return
@@ -455,10 +486,15 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
 
             key = self._create_key(spec.tokens, req_id)
             try:
+                # Match the STORE block IDs to the complete chunks in key;
+                # the server still validates that the list is not too short.
+                block_ids = spec.block_ids[: key.end // self._block_size]
+                if not block_ids:
+                    continue
                 raw_future = self._req_client.store(
                     key,
                     self._instance_id,
-                    [spec.block_ids],
+                    [block_ids],
                     self._export_event(event),
                 )
                 raw_future.retain_reference(event)
