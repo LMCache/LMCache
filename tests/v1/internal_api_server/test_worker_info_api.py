@@ -19,7 +19,7 @@ from lmcache.v1.internal_api_server.api_server import app
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 
 # Test utilities
-from tests.v1.utils import get_available_port
+from tests.v1.utils import get_available_ports
 
 logger = init_logger(__name__)
 
@@ -33,13 +33,11 @@ class TestWorkerInfoAPI:
 
     @pytest.fixture
     def controller_urls(self):
-        pull_port = get_available_port()
-        reply_port = get_available_port()
-        heartbeat_port = get_available_port()
+        ports = get_available_ports(3)
         return {
-            "pull": f"127.0.0.1:{pull_port}",
-            "reply": f"127.0.0.1:{reply_port}",
-            "heartbeat": f"127.0.0.1:{heartbeat_port}",
+            "pull": f"127.0.0.1:{ports[0]}",
+            "reply": f"127.0.0.1:{ports[1]}",
+            "heartbeat": f"127.0.0.1:{ports[2]}",
         }
 
     @pytest.fixture
