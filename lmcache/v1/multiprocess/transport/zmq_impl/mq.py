@@ -670,8 +670,12 @@ class MessageQueueServer(RequestServer):
                         except Exception:
                             logger.exception("Error handling operation %s", operation)
                     else:
-                        logger.error("No handler registered for operation %s", operation)
-                        logger.error("Available handlers: %s", list(self.handlers.keys()))
+                        logger.error(
+                            "No handler registered for operation %s", operation
+                        )
+                        logger.error(
+                            "Available handlers: %s", list(self.handlers.keys())
+                        )
 
             # Send the responses
             if outbound_state and outbound_state & zmq.POLLIN:

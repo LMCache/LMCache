@@ -144,7 +144,6 @@ class ObjectKey:
     backward compatibility with pre-dtype wire payloads.
     """
 
-
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
     _SALT_MAX_LEN = 128
 

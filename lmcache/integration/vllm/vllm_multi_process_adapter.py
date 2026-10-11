@@ -1843,11 +1843,7 @@ class LMCacheMPWorkerAdapter:
             groups = [list(g) for g in op.block_ids]
         out: list[int] = []
         for g, group_blocks in enumerate(groups):
-            skip_n = (
-                op.skip_first_n_blocks[g]
-                if g < len(op.skip_first_n_blocks)
-                else 0
-            )
+            skip_n = op.skip_first_n_blocks[g] if g < len(op.skip_first_n_blocks) else 0
             out.extend(group_blocks[skip_n:])
         return out
 

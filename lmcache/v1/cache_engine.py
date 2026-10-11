@@ -1644,9 +1644,7 @@ class LMCacheEngine:
         stale claim would resolve against the replacement object and
         unpin it.  Dropping the key here prevents that.
         """
-        target_locations = (
-            set(locations) if locations is not None else None
-        )
+        target_locations = set(locations) if locations is not None else None
         empty_locations: list[str] = []
         for lookup_id, pin_map in self.lookup_pins.items():
             for location in list(pin_map.keys()):

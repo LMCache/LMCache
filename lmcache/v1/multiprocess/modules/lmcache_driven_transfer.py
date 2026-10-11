@@ -854,10 +854,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # fingerprints when every blend-read group committed, even if
         # the recurrent-state group did not (issue #5601).
         group_masks = [
-            [
-                store_succeeded and keys[i] in all_dict
-                for i in range(num_chunks)
-            ]
+            [store_succeeded and keys[i] in all_dict for i in range(num_chunks)]
             for keys in obj_keys_per_obj_group
         ]
         return (

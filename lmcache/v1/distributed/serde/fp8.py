@@ -100,7 +100,12 @@ class Fp8QuantizationDeserializer(Deserializer):
             raise ValueError("Fp8 serde requires src and dst to have tensors")
 
         # Check if using separate-object-groups layout (has per-group shapes/dtypes)
-        if src.meta.shapes is not None and src.meta.dtypes is not None and dst.meta.shapes is not None and dst.meta.dtypes is not None:
+        if (
+            src.meta.shapes is not None
+            and src.meta.dtypes is not None
+            and dst.meta.shapes is not None
+            and dst.meta.dtypes is not None
+        ):
             # Iterate over groups when using separate-object-groups layout
             for i in range(len(dst.meta.shapes)):
                 dst_group_tensor = dst.get_tensor(i)
@@ -114,7 +119,9 @@ class Fp8QuantizationDeserializer(Deserializer):
                 if src_group_tensor is None:
                     continue
                 fp8_bytes = src_group_tensor.flatten()[:n_elements]
-                fp8_tensor = fp8_bytes.view(self._fp8_dtype).reshape(dst_group_tensor.shape)
+                fp8_tensor = fp8_bytes.view(self._fp8_dtype).reshape(
+                    dst_group_tensor.shape
+                )
                 dst_group_tensor.copy_(fp8_tensor.to(dst_group_tensor.dtype))
         else:
             # Legacy single-group path (fallback for backward compatibility)

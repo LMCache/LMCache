@@ -123,9 +123,7 @@ class StoreMixin:
             # group commits only at state-snapshot boundaries, so using the
             # all-groups mask would never fingerprint most chunks even
             # though the blend leg reads attention + aux only (issue #5601).
-            entry = self._transfer_module.get_and_touch_context_entry(
-                instance_id
-            )
+            entry = self._transfer_module.get_and_touch_context_entry(instance_id)
             gpu_ctx = entry.cache_context if entry is not None else None
             blend_gids: tuple[int, ...] = tuple(range(len(group_masks)))
             if gpu_ctx is not None:
@@ -136,8 +134,7 @@ class StoreMixin:
 
             def _stored(i: int) -> bool:
                 return i < len(group_masks) and all(
-                    g < len(group_masks) and group_masks[g][i]
-                    for g in blend_gids
+                    g < len(group_masks) and group_masks[g][i] for g in blend_gids
                 )
 
             jobs: list[FpJob] = []
