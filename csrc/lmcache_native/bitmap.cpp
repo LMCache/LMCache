@@ -176,6 +176,11 @@ Bitmap Bitmap::operator|(const Bitmap& other) const {
   for (size_t i = 0; i < result.data_.size(); ++i) {
     result.data_[i] = data_[i] | other.data_[i];
   }
+  // The longer operand may set padding bits beyond the truncated result.
+  const unsigned remaining_bits = result_size % kBitsPerByte;
+  if (remaining_bits > 0) {
+    result.data_.back() &= static_cast<uint8_t>((1u << remaining_bits) - 1u);
+  }
   return result;
 }
 
