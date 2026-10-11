@@ -753,7 +753,7 @@ class RetrieveMixin:
         # session end must not recreate ownership state.
         session = self._ctx.session_manager.get(key.request_id)
         _stash = (
-            session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
+            session.extras.get(self.UNRETRIEVED_KEYS_EXTRA, None)
             if session is not None
             else None
         )
