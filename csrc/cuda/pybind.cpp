@@ -119,6 +119,11 @@ PYBIND11_MODULE(cuda_ops, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("free_shm_pinned_ptr", &free_shm_pinned_ptr,
         py::call_guard<py::gil_scoped_release>());
+  // DMA-completion-safe deferred free of pinned host buffers.
+  m.def("defer_free_pinned", &defer_free_pinned, py::arg("kind"),
+        py::arg("ptr"), py::arg("size"), py::arg("shm_name"),
+        py::arg("stream_ptr"), py::call_guard<py::gil_scoped_release>());
+  m.def("deferred_free_pending_count", &deferred_free_pending_count);
   m.def("batched_memcpy", &batched_memcpy, py::arg("src_ptrs"),
         py::arg("dst_ptrs"), py::arg("sizes"),
         py::call_guard<py::gil_scoped_release>());
