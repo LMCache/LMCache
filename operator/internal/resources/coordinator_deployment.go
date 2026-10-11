@@ -121,13 +121,14 @@ func formatFloat(v float64) string {
 // BuildCoordinatorDeployment constructs the Deployment for the given
 // LMCacheCoordinator. Unlike the engine DaemonSets, the coordinator is a plain
 // fleet-wide service: no GPU runtime class, hostIPC, or privileged container.
+// Selector labels take precedence over additional pod labels.
 func BuildCoordinatorDeployment(coordinator *lmcachev1alpha1.LMCacheCoordinator) *appsv1.Deployment {
 	spec := &coordinator.Spec
 	name := coordinator.Name
 	namespace := coordinator.Namespace
 
 	selectorLabels := CoordinatorSelectorLabels(name)
-	podLabels := MergeLabels(CoordinatorStandardLabels(name), spec.PodLabels)
+	podLabels := MergeLabels(CoordinatorStandardLabels(name), spec.PodLabels, selectorLabels)
 
 	port := CoordinatorPort(spec)
 
