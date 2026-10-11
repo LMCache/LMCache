@@ -49,8 +49,13 @@ class BenchResult:
     data_size_bytes: int
     round_durations: list[float] = field(default_factory=list)
     success_counts: list[int] = field(default_factory=list)
-    # Rounds that hit the wait timeout and therefore have no duration.
+
+    # One timeout flag per attempted round, aligned with success_counts.
+    round_timed_out: list[bool] = field(default_factory=list)
+
+    # Timeout count for the rounds represented by this result.
     timed_out_rounds: int = 0
+
     # Lookup-specific metadata (left as defaults for store/load).
     expected_max_hit_rate: float = 0.0
     expected_hit_count: int = 0
