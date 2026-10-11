@@ -653,7 +653,10 @@ def ipc_key_to_object_keys(
     # so compute it once and reuse it for every group.
     kv_ranks = _lookup_kv_ranks(ipc_key)
 
-    dtype = getattr(ipc_key, "dtype", "") or ""
+    # Prefer an explicitly passed dtype (callers that derive it from the
+    # memory layout), falling back to the key's own dtype — same
+    # source-of-truth pattern as cache_salt above.
+    dtype = dtype or getattr(ipc_key, "dtype", "") or ""
     return [
         [
             ObjectKey(
