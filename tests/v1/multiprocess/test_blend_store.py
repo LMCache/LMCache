@@ -571,32 +571,50 @@ def test_classify_read_groups_recurrent_first_layout():
 # ---------------------------------------------------------------------------
 
 
+class _StoreGpuContext:
+    """A registered GPU context as the store sees it: its object-group
+    layout, and no CUDA stream (fingerprint jobs land on the plain queue).
+    A class, not a namespace, so the read-set cache can weakly key it."""
+
+    def __init__(self, attn_desc):
+        self.kv_layer_groups_manager = MagicMock()
+        self.kv_layer_groups_manager.get_attn_desc.return_value = attn_desc
+        self.cupy_stream = None
+
+
 def _store_hook_engine(committed, group_kinds=()):
     """Engine with the real ``store`` bound; transfer and session mocked.
     ``committed[g][i]`` is what the transfer reports per object group;
     ``group_kinds`` labels the registered object groups (empty: one fused
-    group). No GPU context -> fingerprint jobs land on the plain queue."""
+    group)."""
     # Standard
     from queue import Queue
+    import weakref
 
     # First Party
     from lmcache.v1.distributed.api import AttnWindowDesc
 
     eng = MagicMock(spec=BlendModule)
     eng.store = BlendModule.store.__get__(eng)
+    eng._cb_store_read_groups = BlendModule._cb_store_read_groups.__get__(eng)
     eng._record_prompt = BlendModule._record_prompt.__get__(eng)
+    eng._cb_store_read_sets = weakref.WeakKeyDictionary()
     eng._transfer_module = MagicMock()
     eng._transfer_module.store_with_chunk_mask.return_value = (
         b"evt",
         True,
         committed,
     )
-    eng._transfer_module.get_and_touch_context_entry.return_value = None
+    eng.gpu_ctx = _StoreGpuContext(
+        AttnWindowDesc(
+            num_chunks_in_sw=[-1] * len(committed), group_kinds=tuple(group_kinds)
+        )
+    )
+    eng._transfer_module.get_and_touch_context_entry.return_value = SimpleNamespace(
+        cache_context=eng.gpu_ctx
+    )
     eng._ctx = MagicMock()
     eng._ctx.chunk_size = 4
-    eng._ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
-        num_chunks_in_sw=[-1] * len(committed), group_kinds=tuple(group_kinds)
-    )
     session = MagicMock()
     session.get_hashes.return_value = list(range(100, 100 + len(committed[0])))
     eng._ctx.session_manager.get_or_create.return_value = session
@@ -676,7 +694,7 @@ def test_store_registers_nothing_for_a_rejected_store():
 
     assert result == (b"", False)
     assert eng._fingerprint_queue.empty()
-    eng._ctx.layout_desc_registry.find_attn_desc.assert_not_called()
+    eng.gpu_ctx.kv_layer_groups_manager.get_attn_desc.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -774,6 +792,36 @@ def test_chunks_available_reads_only_the_reader_s_groups():
     assert _cb_chunks_available([], read.blend_gids) == []
     fused = _classify_cb_read_groups(1, ())
     assert _cb_chunks_available([[False, True]], fused.blend_gids) == [False, True]
+
+
+def test_store_resolves_the_read_set_once_per_context():
+    """The read set is resolved on a context's first store and reused; a new
+    context (a re-registration) resolves its own."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+
+    eng = _store_hook_engine([[True] * 3, [True] * 3], ("attention", "aux"))
+    for _ in range(3):
+        eng.store(
+            _store_hook_key(3), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+        )
+    assert eng.gpu_ctx.kv_layer_groups_manager.get_attn_desc.call_count == 1
+
+    # Re-registered as a fused layout: the new context is classified afresh.
+    fresh = _StoreGpuContext(AttnWindowDesc(num_chunks_in_sw=[-1]))
+    eng._transfer_module.get_and_touch_context_entry.return_value = SimpleNamespace(
+        cache_context=fresh
+    )
+    eng._transfer_module.store_with_chunk_mask.return_value = (
+        b"evt",
+        True,
+        [[True, True, True]],
+    )
+    eng.store(
+        _store_hook_key(3), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+    assert fresh.kv_layer_groups_manager.get_attn_desc.call_count == 1
+    assert eng._cb_store_read_sets[fresh].blend_gids == (0,)
 
 
 # ---------------------------------------------------------------------------

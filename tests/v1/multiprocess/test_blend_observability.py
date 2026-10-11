@@ -15,6 +15,7 @@ import ast
 import inspect
 import threading
 import time
+import weakref
 
 # First Party
 from lmcache.v1.distributed.api import AttnWindowDesc
@@ -280,15 +281,21 @@ class TestFingerprintJobTuple:
             True,
             [[True, True]],
         )
-        eng._transfer_module.get_and_touch_context_entry.return_value = None
+        gpu_ctx = MagicMock()  # a registered fused layout, no CUDA stream
+        gpu_ctx.kv_layer_groups_manager.get_attn_desc.return_value = AttnWindowDesc(
+            num_chunks_in_sw=[-1]
+        )
+        gpu_ctx.cupy_stream = None
+        eng._transfer_module.get_and_touch_context_entry.return_value = SimpleNamespace(
+            cache_context=gpu_ctx
+        )
+        eng._cb_store_read_sets = weakref.WeakKeyDictionary()
+        eng._cb_store_read_groups = _bind(eng, "_cb_store_read_groups")
         eng._pending_fp_lock = threading.Lock()
         eng._pending_fp_hashes = set()
         eng._coordinator = None
         eng._ctx = MagicMock()
         eng._ctx.chunk_size = 256
-        eng._ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
-            num_chunks_in_sw=[-1]
-        )
         eng._ctx.session_manager.get_or_create.return_value.get_hashes.return_value = [
             123,
             456,

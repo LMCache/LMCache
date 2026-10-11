@@ -96,7 +96,7 @@ success)`**
   object group, and the transfer commits only valid objects (a chunk whose
   pages are all null, or whose recurrent-state page is null, is skipped; see
   `sparse_null_policy.md`). The store applies the rule for two readers, over
-  the read sets the lookup resolves for the same `(model, world size)`:
+  read sets resolved once per registered GPU context:
   - Fingerprints: a chunk is registered when every group of the blend read
     set (attention + aux, see the table below) committed it. Recurrent-state
     groups do not gate it: the blend leg never reads them, and under vLLM's

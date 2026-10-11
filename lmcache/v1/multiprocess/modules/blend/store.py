@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     # Standard
     from queue import Queue
     import threading
+    import weakref
 
     # First Party
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -24,6 +25,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.blend.read_set import (
+    _BlendReadGroups,
     _cb_chunks_available,
     _classify_cb_read_groups,
 )
@@ -57,6 +59,7 @@ class StoreMixin:
         _pending_fp_hashes: set[bytes]
         _pending_fp_lock: "threading.Lock"
         _prompt_store: Any
+        _cb_store_read_sets: "weakref.WeakKeyDictionary[Any, _BlendReadGroups | None]"
 
     @request_handler(
         HandlerType.BLOCKING,
@@ -111,23 +114,13 @@ class StoreMixin:
             ]
             if not chunk_hashes or not any(any(group) for group in committed):
                 return result
-            # The read sets are the ones the lookup resolves for this (model,
-            # world size).
-            attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
-                key.model_name, key.world_size
-            )
-            try:
-                read = _classify_cb_read_groups(
-                    attn_desc.num_object_groups, attn_desc.group_kinds
-                )
-            except RuntimeError:
-                # Neither blend leg can read this layout (the lookup reports
-                # why), so no chunk of it is available to either.
-                logger.debug(
-                    "CB store side effects skipped for %s: no blend read set",
-                    key.request_id,
-                    exc_info=True,
-                )
+            entry = self._transfer_module.get_and_touch_context_entry(instance_id)
+            if entry is None:
+                # Unregistered since the store: its layout is gone with it.
+                return result
+            gpu_ctx = entry.cache_context
+            read = self._cb_store_read_groups(gpu_ctx)
+            if read is None:
                 return result
             # The reorder planner's copies are served as exact-prefix hits, so
             # it records a prompt only once a store committed a chunk a prefix
@@ -175,10 +168,8 @@ class StoreMixin:
             with self._pending_fp_lock:
                 for _, hashes, sci, _, _ in jobs:
                     self._pending_fp_hashes.update(hashes[sci:])
-            entry = self._transfer_module.get_and_touch_context_entry(instance_id)
-            gpu_ctx = entry.cache_context if entry is not None else None
             for job in jobs:
-                if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
+                if gpu_ctx.cupy_stream is not None:
                     submit_callback_to_stream(
                         gpu_ctx.cupy_stream, CB_FINGERPRINTS_KIND, job
                     )
@@ -192,6 +183,30 @@ class StoreMixin:
             )
 
         return result
+
+    def _cb_store_read_groups(self, gpu_ctx: Any) -> "_BlendReadGroups | None":
+        """The read sets of a registered GPU context, resolved on its first
+        store and reused after. Keyed by the context, so a re-registration
+        (a new context) resolves again.
+
+        Returns:
+            The read sets, or ``None`` when the layout has no blend read set
+            (the lookup reports why): no chunk of it is available to either
+            blend leg.
+        """
+        if gpu_ctx in self._cb_store_read_sets:
+            return self._cb_store_read_sets[gpu_ctx]
+        attn_desc = gpu_ctx.kv_layer_groups_manager.get_attn_desc()
+        read: _BlendReadGroups | None
+        try:
+            read = _classify_cb_read_groups(
+                attn_desc.num_object_groups, attn_desc.group_kinds
+            )
+        except RuntimeError:
+            logger.debug("CB store: no blend read set", exc_info=True)
+            read = None
+        self._cb_store_read_sets[gpu_ctx] = read
+        return read
 
     def _record_prompt(self, key: IPCCacheServerKey, session: Any) -> None:
         """Remember a stored prompt for the reorder planner. The chain starts
