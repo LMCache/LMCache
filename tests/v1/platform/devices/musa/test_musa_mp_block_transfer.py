@@ -433,7 +433,7 @@ def test_musa_cache_context_sglang_mha_operand_round_trip() -> None:
         wrappers,
         lmcache_tokens_per_chunk=block_size,
         engine_type=EngineType.SGLANG,
-        layout_hints={"tokens_per_block": block_size},
+        layout_hints={"tokens_per_block": block_size, "kv_list_layout": "k_v"},
         engine_group_infos=[],
     )
     try:

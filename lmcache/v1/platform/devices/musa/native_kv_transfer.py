@@ -15,7 +15,6 @@ import os
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.platform.devices.musa.format_capabilities import (
     is_supported_musa_native_block_transfer_spec,
 )
@@ -127,6 +126,9 @@ def try_native_multi_layer_block_kv_transfer(
         return False
     if not object_tensors or lmcache_chunk_size <= 0:
         return False
+    # First Party
+    from lmcache.v1.gpu_connector.kv_format import get_spec_class
+
     format_spec = get_spec_class(engine_kv_format)
     if not is_supported_musa_native_block_transfer_spec(format_spec):
         return False

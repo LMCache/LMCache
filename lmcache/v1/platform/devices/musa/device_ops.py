@@ -20,7 +20,6 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
-from lmcache.v1.gpu_connector.kv_format import get_spec_class
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.devices.musa import native_kv_transfer
@@ -420,6 +419,9 @@ def _musa_multi_layer_block_kv_transfer(
     skip_prefix_n_blocks: int,
 ) -> None:
     """Reconstruct MUSA operands, then use native or torch transfer."""
+    # First Party
+    from lmcache.v1.gpu_connector.kv_format import get_spec_class
+
     format_spec = get_spec_class(engine_kv_format)
     _validate_musa_mp_block_transfer_format(format_spec)
     resolved_device = _as_device(device, paged_buffer_ptrs_tensor, lmcache_objects_ptrs)

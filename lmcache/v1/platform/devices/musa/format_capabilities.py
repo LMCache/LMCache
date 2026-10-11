@@ -1,10 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """MUSA transfer capability predicates derived from KV format traits."""
 
+# Future
+from __future__ import annotations
+
+# Standard
+from typing import TYPE_CHECKING
+
 # First Party
 from lmcache.lmcache_native import EngineKVFormat
-from lmcache.v1.gpu_connector.kv_format import get_spec_class
-from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
 
 
 def _is_regular_per_layer_layout(spec: type[KVFormatSpec]) -> bool:
@@ -32,6 +40,9 @@ def is_supported_musa_mp_block_transfer_format(
         ``TWO_NB`` per-layer layouts, and the current SGLang K/V-list layout.
         ``False`` for all other physical contracts.
     """
+    # First Party
+    from lmcache.v1.gpu_connector.kv_format import get_spec_class
+
     return is_supported_musa_mp_block_transfer_spec(get_spec_class(engine_kv_format))
 
 
@@ -79,6 +90,9 @@ def is_supported_musa_native_block_transfer_format(
         ``False`` for K/V-list, HND, fused, blocked-scale, tuple, and other
         layouts that the current native ABI does not describe.
     """
+    # First Party
+    from lmcache.v1.gpu_connector.kv_format import get_spec_class
+
     return is_supported_musa_native_block_transfer_spec(
         get_spec_class(engine_kv_format)
     )
