@@ -109,7 +109,17 @@ type CacheBlendEngineSpec struct {
 	// +kubebuilder:validation:Enum=nvidia;amd
 	GPUVendor *string `json:"gpuVendor,omitempty"`
 
-	// image defines the container image to use for the blend_v3 engine. This
+	// runtimeClassName overrides the RuntimeClass for the engine pods. When unset,
+	// it is derived from gpuVendor: "nvidia" uses the NVIDIA GPU Operator's
+	// "nvidia" RuntimeClass, "amd" uses none (the default container runtime). An
+	// empty string omits runtimeClassName so pods use the default container
+	// runtime. On GPU Operator NRI/CDI clusters, combine an empty string with
+	// spec.podAnnotations nvidia.cdi.k8s.io/container.lmcache:
+	// management.nvidia.com/gpu=all.
+	// +optional
+	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
+
+	// image defines the container image to use for the blend engine. This
 	// may be a PRIVATE image; use imagePullSecrets to pull it.
 	// +optional
 	Image *ImageSpec `json:"image,omitempty"`
@@ -234,6 +244,14 @@ type CacheBlendEngineSpec struct {
 	// They are appended last and can override any auto-generated flag.
 	// +optional
 	ExtraArgs []string `json:"extraArgs,omitempty"`
+
+	// pd enables PD (Prefill-Decode) disaggregation. The prefiller config
+	// pairs the CacheBlend connector with NIXL in a MultiConnector; the
+	// decoder config is a bare NixlConnector (kv_consumer). The webhook
+	// selects the config by the lmcache.ai/pd-role pod annotation and
+	// injects the NIXL side-channel env vars.
+	// +optional
+	PD *PDSpec `json:"pd,omitempty"`
 }
 
 // CacheBlendEngineStatus defines the observed state of CacheBlendEngine.

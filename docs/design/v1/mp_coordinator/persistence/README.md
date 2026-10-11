@@ -19,6 +19,13 @@ contract below and restores itself from its own section:
 | `FleetEvictionController` | `pins` | Operator intent |
 | `QuotaManager` | `quotas` | Operator intent |
 
+Nothing in `create_app` enumerates them. Controllers are discovered by
+scanning `controllers/`, each advertises what it needs persisted, and each
+component says which artifact it belongs in -- so a new controller with
+durable state is one file, and the wiring follows. The directory and the
+ingest gate are named explicitly because they are durable but are not
+controllers.
+
 The alternative -- restore the directory, then re-deliver its placements
 as synthesized `STORE` batches to rebuild the views -- couples every
 component to a fake event stream and to an ordering: views must be

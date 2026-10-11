@@ -222,6 +222,18 @@ ALL_ITEMS: list[ConfigItem] = [
         default=False,
         phase=PHASE_GENERAL,
     ),
+    ConfigItem(
+        key="no_warmup",
+        display_name="Skip warmup",
+        description=(
+            "Skip the warmup phase and start measuring immediately. The "
+            "first requests then pay the engine's first-request cost and "
+            "run against a cold cache."
+        ),
+        input_type="bool",
+        default=False,
+        phase=PHASE_GENERAL,
+    ),
     # ── Phase 3: long-doc-permutator ─────────────────────────────────
     ConfigItem(
         key="ldp_num_contexts",

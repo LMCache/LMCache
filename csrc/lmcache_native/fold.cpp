@@ -3,6 +3,8 @@
 #include "fold.h"
 
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 
 namespace lmcache {
 
@@ -77,6 +79,67 @@ Bitmap unfold(size_t hit_length, size_t num_chunks, size_t num_ranks,
     }
   }
   return retain_mask;
+}
+
+Bitmap fold_grouped(const std::vector<Bitmap>& rows,
+                    const std::vector<int64_t>& windows) {
+  if (rows.size() != windows.size()) {
+    throw std::invalid_argument(
+        "fold_grouped: rows and windows must have the same length, got " +
+        std::to_string(rows.size()) + " rows and " +
+        std::to_string(windows.size()) + " windows");
+  }
+  const size_t num_chunks = rows.empty() ? 0 : rows[0].size();
+  for (const Bitmap& row : rows) {
+    if (row.size() != num_chunks) {
+      throw std::invalid_argument(
+          "fold_grouped: all rows must have the same size, got " +
+          std::to_string(row.size()) + " vs " + std::to_string(num_chunks));
+    }
+  }
+
+  // ``servable[j]`` (prefix length ``j + 1``) stays set only if every row can
+  // serve that length: ``run`` counts consecutive present chunks ending at
+  // ``j``, and a length-L prefix needs ``run >= min(window, L)``.
+  std::vector<char> servable(num_chunks, 1);
+  for (size_t i = 0; i < rows.size(); ++i) {
+    const int64_t window = windows[i];
+    const size_t eff_window =
+        (window <= 0) ? num_chunks : static_cast<size_t>(window);
+    const Bitmap& row = rows[i];
+    size_t run = 0;
+    for (size_t prefix_len = 1; prefix_len <= num_chunks; ++prefix_len) {
+      const size_t j = prefix_len - 1;
+      run = row.test(j) ? run + 1 : 0;
+      if (servable[j] && run < std::min(eff_window, prefix_len)) {
+        servable[j] = 0;
+      }
+    }
+  }
+
+  Bitmap servable_lengths(num_chunks);
+  for (size_t j = 0; j < num_chunks; ++j) {
+    if (servable[j]) servable_lengths.set(j);
+  }
+  return servable_lengths;
+}
+
+std::vector<Bitmap> unfold_grouped(size_t hit_length, size_t num_chunks,
+                                   const std::vector<int64_t>& windows) {
+  if (hit_length > num_chunks) hit_length = num_chunks;
+
+  std::vector<Bitmap> rows;
+  rows.reserve(windows.size());
+  for (const int64_t window : windows) {
+    size_t lo = 0;
+    if (window > 0 && hit_length > static_cast<size_t>(window)) {
+      lo = hit_length - static_cast<size_t>(window);
+    }
+    Bitmap row(num_chunks);
+    if (hit_length > 0) row.set_range(lo, hit_length);
+    rows.push_back(std::move(row));
+  }
+  return rows;
 }
 
 }  // namespace lmcache_native

@@ -5,6 +5,17 @@ MODEL="${MODEL:-Qwen/Qwen2.5-7B-Instruct}"
 DAEMON_PORT="${DAEMON_PORT:-6200}"
 DAEMON_HTTP_PORT="${DAEMON_HTTP_PORT:-7200}"
 LMC_CONFIG_FILE="${LMC_CONFIG_FILE:-/tmp/lmcache_mp_ci.yaml}"
+LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+
+case "${LMCACHE_REQUEST_TRANSPORT}" in
+    zmq) LMCACHE_REQUEST_SCHEME="tcp" ;;
+    grpc) LMCACHE_REQUEST_SCHEME="grpc" ;;
+    *)
+        echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'" >&2
+        echo "Valid values: zmq, grpc" >&2
+        exit 1
+        ;;
+esac
 
 DAEMON_PID=""
 SGLANG_PID=""
@@ -28,16 +39,18 @@ cleanup_all() {
 launch_daemon() {
     local log_file="$1"
     cat > "${LMC_CONFIG_FILE}" <<EOF
-mp_host: 127.0.0.1
+mp_host: ${LMCACHE_REQUEST_SCHEME}://127.0.0.1
 mp_port: ${DAEMON_PORT}
 EOF
     lmcache server \
+        --transport "${LMCACHE_REQUEST_TRANSPORT}" \
         --host 127.0.0.1 --port "${DAEMON_PORT}" --http-port "${DAEMON_HTTP_PORT}" \
         --chunk-size 256 --l1-size-gb 20 --eviction-policy LRU \
         > "${log_file}" 2>&1 &
     DAEMON_PID=$!
     for ((i = 0; i < 60; i++)); do
-        if grep -q "ZMQ cache server is running" "${log_file}" 2>/dev/null; then
+        if curl -sf "http://127.0.0.1:${DAEMON_HTTP_PORT}/healthcheck" \
+                >/dev/null 2>&1; then
             echo "  daemon ready (${i}s, log=${log_file})"
             return 0
         fi

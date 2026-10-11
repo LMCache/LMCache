@@ -41,6 +41,14 @@ class ObservabilityConfig:
     metrics_enabled: bool = True
     """Register metrics subscribers (OTel counters / histograms)."""
 
+    grpc_metrics_enabled: bool | None = None
+    """Register gRPC Python runtime metrics with the OTel provider.
+
+    ``None`` means the MP server resolves this from its request transport:
+    enabled for gRPC, disabled for ZMQ. Non-MP callers leave it disabled
+    unless they opt in explicitly.
+    """
+
     logging_enabled: bool = True
     """Register logging subscribers."""
 
@@ -77,8 +85,10 @@ class ObservabilityConfig:
     """Seconds between extra-stats log flushes."""
 
     trace_level: str | None = None
-    """If set, enables trace recording at the given level.  Currently
-    only ``"storage"`` is supported.  See
+    """If set, enables trace recording at the given level: ``"storage"``
+    records StorageManager calls for replay; ``"events"`` records the
+    cache-event stream the server emits for the coordinator, with or
+    without a coordinator configured.  See
     :mod:`lmcache.v1.mp_observability.trace` for details."""
 
     trace_output: str | None = None
@@ -127,6 +137,16 @@ def add_observability_args(
         action="store_true",
         default=False,
         help="Disable metrics subscribers (OTel counters).",
+    )
+    group.add_argument(
+        "--disable-grpc-metrics",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable gRPC Python runtime metrics. Has no effect when "
+            "--disable-metrics is set. By default, MP server enables "
+            "these metrics only when --transport grpc is selected."
+        ),
     )
     group.add_argument(
         "--disable-logging",
@@ -270,10 +290,12 @@ def add_observability_args(
     trace_group.add_argument(
         "--trace-level",
         type=str,
-        choices=["storage"],
+        choices=["storage", "events"],
         default=None,
-        help="Enable trace recording at the given level. Currently only "
-        "'storage' is supported (records StorageManager public-API calls).",
+        help="Enable trace recording at the given level. 'storage' records "
+        "StorageManager public-API calls for replay. 'events' records the "
+        "cache-event stream this server emits for the coordinator, with or "
+        "without --coordinator-url, so a fleet can be captured for replay.",
     )
     trace_group.add_argument(
         "--trace-output",
@@ -302,6 +324,7 @@ def parse_args_to_observability_config(
         enabled=not args.disable_observability,
         max_queue_size=args.event_bus_queue_size,
         metrics_enabled=not args.disable_metrics,
+        grpc_metrics_enabled=False if args.disable_grpc_metrics else None,
         logging_enabled=not args.disable_logging,
         tracing_enabled=args.enable_tracing,
         otlp_endpoint=args.otlp_endpoint,
@@ -340,6 +363,24 @@ def parse_args_to_observability_config(
         raise ValueError("--extra-logging-interval must be > 0.")
 
     return config
+
+
+def resolve_grpc_metrics_enabled(
+    grpc_metrics_enabled: bool | None,
+    transport: str,
+) -> bool:
+    """Resolve the gRPC runtime metrics auto setting for a request transport.
+
+    Args:
+        grpc_metrics_enabled: User/programmatic setting. ``None`` means auto.
+        transport: MP request transport name.
+
+    Returns:
+        True when gRPC runtime metrics should be registered.
+    """
+    if grpc_metrics_enabled is not None:
+        return grpc_metrics_enabled
+    return transport == "grpc"
 
 
 def init_observability(
@@ -382,6 +423,7 @@ def init_observability(
             prometheus_port=obs_config.prometheus_port,
             resource_attributes=resource_attrs,
             start_http_server=start_prometheus_http_server,
+            enable_grpc_metrics=bool(obs_config.grpc_metrics_enabled),
         )
 
     if obs_config.enabled and obs_config.tracing_enabled:
@@ -400,6 +442,14 @@ def init_observability(
         )
     )
 
+    if obs_config.metrics_enabled or obs_config.tracing_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.transfer_phase_sampler import (
+            TransferPhaseSampler,
+        )
+
+        bus.register_subscriber(TransferPhaseSampler(bus))
+
     if obs_config.metrics_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.metrics import (
@@ -416,8 +466,10 @@ def init_observability(
             L2MetricsSubscriber,
             L2ThroughputSubscriber,
             LookupMetricsSubscriber,
+            MPTransferCountersSubscriber,
             SMLifecycleSubscriber,
             TimeoutMetricsSubscriber,
+            TransferPhaseMetricsSubscriber,
         )
 
         sample_rate = obs_config.metrics_sample_rate
@@ -427,6 +479,7 @@ def init_observability(
         bus.register_subscriber(L1FailureMetricsSubscriber())
         bus.register_subscriber(L1EvictionLoopSubscriber())
         bus.register_subscriber(L0L1ThroughputSubscriber())
+        bus.register_subscriber(MPTransferCountersSubscriber())
         bus.register_subscriber(L2MetricsSubscriber())
         bus.register_subscriber(L2FailureMetricsSubscriber())
         bus.register_subscriber(L2ThroughputSubscriber())
@@ -436,6 +489,7 @@ def init_observability(
         bus.register_subscriber(EngineMetricsSubscriber())
         bus.register_subscriber(EventBusSelfMetricsSubscriber(bus))
         bus.register_subscriber(TimeoutMetricsSubscriber())
+        bus.register_subscriber(TransferPhaseMetricsSubscriber())
 
     if obs_config.logging_enabled:
         # First Party
@@ -461,13 +515,17 @@ def init_observability(
             BlendTracingSubscriber,
             MPServerTracingSubscriber,
             TimeoutTracingSubscriber,
+            TransferPhaseTracingSubscriber,
             get_span_registry,
         )
 
         registry = get_span_registry()
+        # MPServerTracingSubscriber must register first: the transfer-phase
+        # subscriber reads the store/retrieve span it opens on the same event.
         bus.register_subscriber(MPServerTracingSubscriber(registry))
         bus.register_subscriber(BlendTracingSubscriber(registry))
         bus.register_subscriber(TimeoutTracingSubscriber(registry))
+        bus.register_subscriber(TransferPhaseTracingSubscriber(registry))
 
     # Lookup hash file logging (independent of the logging_enabled flag —
     # it has its own enable gate via output_dir).

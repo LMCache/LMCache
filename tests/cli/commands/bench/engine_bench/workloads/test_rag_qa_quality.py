@@ -2,6 +2,7 @@
 """Tests for the rag-qa-quality workload."""
 
 # Standard
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 import json
 
@@ -9,6 +10,8 @@ import json
 import pytest
 
 # First Party
+from lmcache.cli.commands.bench.engine_bench.config import WarmupPolicy
+from lmcache.cli.commands.bench.engine_bench.quality import alignment
 from lmcache.cli.commands.bench.engine_bench.stats import RequestResult
 from lmcache.cli.commands.bench.engine_bench.workloads import rag_qa_quality
 from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
@@ -21,6 +24,15 @@ from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
 from ..fake_tokenizer import make_fake_tokenizer
 
 _CHUNK = rag_qa_quality.DEFAULT_DOC_ALIGN_TOKENS
+
+
+def _tokens(text: str) -> int:
+    """Token length of *text* under the fake tokenizer the workload loads."""
+    return len(make_fake_tokenizer().encode(text, add_special_tokens=False))
+
+
+# Tokens the fake chat template places ahead of the user content.
+_PREFIX_TOKENS = _tokens("user\n")
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +97,7 @@ def _make_workload(
     ``output_path`` defaults to a file under ``tmp_path``, which is not
     known until call time.
     """
-    monkeypatch.setattr(rag_qa_quality, "_FILLER_VOCAB_SIZE", 200)
+    monkeypatch.setattr(alignment, "_FILLER_VOCAB_SIZE", 200)
     monkeypatch.setattr(
         rag_qa_quality, "try_load_tokenizer", lambda _name: make_fake_tokenizer()
     )
@@ -210,25 +222,21 @@ class TestPromptConstruction:
         """A document must occupy whole chunks or none of it is reusable."""
         workload, _ = _make_workload(tmp_path, monkeypatch)
         for block in workload._document_blocks.values():
-            assert workload._token_length(block) % _CHUNK == 0
+            assert _tokens(block) % _CHUNK == 0
 
     def test_documents_honour_a_custom_alignment(self, tmp_path, monkeypatch) -> None:
         """Alignment tracks the deployment's chunk size, not the default."""
         align = 64
         workload, _ = _make_workload(tmp_path, monkeypatch, doc_align_tokens=align)
         for block in workload._document_blocks.values():
-            assert workload._token_length(block) % align == 0
-        total = workload._chat_prefix_tokens() + workload._token_length(
-            workload._system_block
-        )
+            assert _tokens(block) % align == 0
+        total = _PREFIX_TOKENS + _tokens(workload._system_block)
         assert total % align == 0
 
     def test_system_block_ends_on_a_chunk_boundary(self, tmp_path, monkeypatch) -> None:
         """So every document starts on a boundary."""
         workload, _ = _make_workload(tmp_path, monkeypatch)
-        total = workload._chat_prefix_tokens() + workload._token_length(
-            workload._system_block
-        )
+        total = _PREFIX_TOKENS + _tokens(workload._system_block)
         assert total % _CHUNK == 0
 
     def test_shared_documents_are_padded_once(self, tmp_path, monkeypatch) -> None:
@@ -389,6 +397,30 @@ class TestStep:
 
 
 class TestReporting:
+    def test_truncated_answer_is_exported_as_unparsed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Truncated answers contribute to parse failures, not quality scores."""
+        workload, sender = _make_workload(
+            tmp_path,
+            monkeypatch,
+            records=_RECORDS[:1],
+            responses=[
+                "Example: <final_answer>Paris</final_answer>. "
+                "My answer: <final_answer>Ber"
+            ],
+        )
+        sender.close = AsyncMock()
+        workload.run(WarmupPolicy.SKIP)
+
+        payload = json.loads((tmp_path / "out.json").read_text())
+        assert payload["summary"]["num_samples"] == 1
+        assert payload["summary"]["num_parsed"] == 0
+        assert payload["summary"]["parse_rate"] == 0.0
+        assert payload["per_sample"][0]["parsed"] is False
+        assert payload["per_sample"][0]["answer"] == ""
+        assert payload["per_sample"][0]["f1"] is None
+
     @pytest.mark.asyncio
     async def test_metric_sections_report_quality_and_parse_rate(
         self, tmp_path, monkeypatch

@@ -610,3 +610,47 @@ class TestBatchedGetBlocking:
         results = local_disk_backend.batched_get_blocking([])
         assert results == []
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+
+class TestSubmitPutTask:
+    """Tests for LocalDiskBackend.submit_put_task()."""
+
+    @pytest.mark.parametrize(
+        "put_in_progress",
+        [False, True],
+        ids=["resident_only", "resident_and_inflight"],
+    )
+    def test_already_stored_key_is_not_rewritten(self, put_in_progress: bool) -> None:
+        key = create_test_key(1)
+        resident_metadata = MagicMock()
+        backend = object.__new__(LocalDiskBackend)
+        backend.disk_lock = threading.Lock()
+        backend.dict = {key: resident_metadata}
+        backend.cache_policy = MagicMock()
+        backend.disk_worker = MagicMock()
+        backend.current_cache_size = 4096
+        backend.usage = 4096
+
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.tensor = torch.empty(1, dtype=torch.bfloat16)
+        callback = MagicMock()
+
+        with patch.object(
+            backend, "exists_in_put_tasks", return_value=put_in_progress
+        ) as mock_exists_in_put_tasks:
+            result = backend.submit_put_task(
+                key,
+                memory_obj,
+                on_complete_callback=callback,
+            )
+
+        assert result is None
+        assert backend.current_cache_size == 4096
+        assert backend.usage == 4096
+        backend.cache_policy.update_on_hit.assert_called_once_with(key, backend.dict)
+        mock_exists_in_put_tasks.assert_not_called()
+        backend.disk_worker.insert_put_task.assert_not_called()
+        backend.disk_worker.submit_task.assert_not_called()
+        memory_obj.get_physical_size.assert_not_called()
+        memory_obj.ref_count_up.assert_not_called()
+        callback.assert_not_called()

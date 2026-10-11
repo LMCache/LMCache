@@ -16,6 +16,7 @@ depend on any one of them. See
 from __future__ import annotations
 
 # Standard
+from collections import deque
 from typing import Protocol, runtime_checkable
 import inspect
 
@@ -160,7 +161,12 @@ class EventIPCBackend(Protocol):
         ...
 
 
-class DefaultEventIPCBackend:
+# Persist the reference to the IPC events for a while so that the inference engine
+# won't access the dangling references to the events.
+_EXPORTED_EVENT_RING_SIZE = 2048
+
+
+class DefaultEventIPCBackend(EventIPCBackend):
     """CUDA-style event IPC backend over an injectable event module.
 
     Works for any backend whose ``Event`` class supports interprocess handles,
@@ -183,6 +189,7 @@ class DefaultEventIPCBackend:
     ) -> None:
         self._event_module = event_module if event_module is not None else torch_dev
         self.device_type = device_type if device_type is not None else torch_device_type
+        self._exported_events: deque[object] = deque(maxlen=_EXPORTED_EVENT_RING_SIZE)
 
     def check_event_support(self, device: object) -> None:
         """Raise ``RuntimeError`` if interprocess events are unsupported.
@@ -216,8 +223,19 @@ class DefaultEventIPCBackend:
         return self._event_module.Event(interprocess=True)  # type: ignore[union-attr]
 
     def export_event(self, event: object, device: object) -> bytes:
-        """Serialize ``event`` into a process-portable IPC handle."""
-        return event.ipc_handle()  # type: ignore[attr-defined]
+        """Serialize ``event`` into a process-portable IPC handle.
+
+        Args:
+            event: The interprocess-capable event to export.
+            device: Device that owns the event (unused; part of the protocol
+                signature).
+
+        Returns:
+            The IPC handle bytes for ``event``.
+        """
+        handle = event.ipc_handle()  # type: ignore[attr-defined]
+        self._exported_events.append(event)
+        return handle
 
     def import_event(self, handle: bytes, device: object) -> object:
         """Reconstruct an event from an IPC handle on ``device``."""

@@ -2,8 +2,9 @@
 """Admission stage of the coordinator's cache-event ingest layer.
 
 Every cache event the coordinator acts on enters through
-:meth:`EventGate.ingest`, which owns the per-emitter stream cursor and
-decides what reaches the consumers holding the state.
+:meth:`EventGate.ingest` or :meth:`EventGate.ingest_batches`, which own
+the per-emitter stream cursor and decide what reaches the consumers
+holding the state.
 
 See ``docs/design/v1/mp_coordinator/ingest.md``.
 """
@@ -35,6 +36,21 @@ class IngestResult(str, Enum):
     ADMITTED = "admitted"
     DUPLICATE = "duplicate"
     STALE_INCARNATION = "stale_incarnation"
+
+
+@dataclass(frozen=True)
+class CacheEventIngestSummary:
+    """Aggregate outcomes from ingesting one ordered list of batches.
+
+    Attributes:
+        applied: Batches admitted and broadcast to consumers.
+        duplicates: Batches dropped because their sequence was already seen.
+        stale: Batches dropped because their incarnation was outdated.
+    """
+
+    applied: int = 0
+    duplicates: int = 0
+    stale: int = 0
 
 
 @dataclass(frozen=True)
@@ -119,6 +135,37 @@ class EventGate:
             cursor.last_seq = batch.seq
             self._broadcaster.broadcast(batch)
             return IngestResult.ADMITTED
+
+    def ingest_batches(self, batches: list[CacheEventBatch]) -> CacheEventIngestSummary:
+        """Offer ``batches`` to the gate in list order.
+
+        Args:
+            batches: Event batches ordered by their source.
+
+        Returns:
+            Counts of admitted, duplicate, and stale batches.
+
+        Raises:
+            RuntimeError: If :meth:`ingest` returns an unknown outcome.
+        """
+        applied = 0
+        duplicates = 0
+        stale = 0
+        for batch in batches:
+            result = self.ingest(batch)
+            if result == IngestResult.ADMITTED:
+                applied += 1
+            elif result == IngestResult.DUPLICATE:
+                duplicates += 1
+            elif result == IngestResult.STALE_INCARNATION:
+                stale += 1
+            else:
+                raise RuntimeError(f"unknown cache-event ingest result: {result!r}")
+        return CacheEventIngestSummary(
+            applied=applied,
+            duplicates=duplicates,
+            stale=stale,
+        )
 
     def drop_instance(self, instance_id: str) -> None:
         """Fence ``instance_id`` and forget its cursor, so a later

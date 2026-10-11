@@ -84,7 +84,7 @@ class ConnectorBase : public IStorageConnector {
     validate_batch_inputs(keys, bufs, lens);
 
     size_t num_items = keys.size();
-    auto [batch_future_id, batch_state, num_tiles, tile_size] =
+    auto [batch_future_id, batch_state, num_tiles] =
         prepare_batch_operation(num_items, Op::BATCH_TILE_GET);
 
     // pre-allocate per-key results for load error tolerance
@@ -93,7 +93,7 @@ class ConnectorBase : public IStorageConnector {
     // fan out work to threads
     for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
       auto tile_req = create_tile_request(
-          keys, bufs, lens, tile_idx, tile_size, num_items, batch_future_id,
+          keys, bufs, lens, tile_idx, num_tiles, num_items, batch_future_id,
           batch_state, Op::BATCH_TILE_GET, batch_chunk_num_bytes);
       enqueue_request(std::move(tile_req));
     }
@@ -108,13 +108,13 @@ class ConnectorBase : public IStorageConnector {
     validate_batch_inputs(keys, bufs, lens);
 
     size_t num_items = keys.size();
-    auto [batch_future_id, batch_state, num_tiles, tile_size] =
+    auto [batch_future_id, batch_state, num_tiles] =
         prepare_batch_operation(num_items, Op::BATCH_TILE_SET);
 
     // fan out work to threads
     for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
       auto tile_req = create_tile_request(
-          keys, bufs, lens, tile_idx, tile_size, num_items, batch_future_id,
+          keys, bufs, lens, tile_idx, num_tiles, num_items, batch_future_id,
           batch_state, Op::BATCH_TILE_SET, batch_chunk_num_bytes);
       enqueue_request(std::move(tile_req));
     }
@@ -128,7 +128,7 @@ class ConnectorBase : public IStorageConnector {
     }
 
     size_t num_items = keys.size();
-    auto [batch_future_id, batch_state, num_tiles, tile_size] =
+    auto [batch_future_id, batch_state, num_tiles] =
         prepare_batch_operation(num_items, Op::BATCH_TILE_EXISTS);
 
     // pre-allocate results vector with correct size
@@ -136,8 +136,7 @@ class ConnectorBase : public IStorageConnector {
 
     // fan out work to threads
     for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
-      size_t start = tile_idx * tile_size;
-      size_t end = std::min(start + tile_size, num_items);
+      auto [start, end] = get_tile_range(tile_idx, num_items, num_tiles);
 
       Request tile_req;
       tile_req.op = Op::BATCH_TILE_EXISTS;
@@ -161,7 +160,7 @@ class ConnectorBase : public IStorageConnector {
     }
 
     size_t num_items = keys.size();
-    auto [batch_future_id, batch_state, num_tiles, tile_size] =
+    auto [batch_future_id, batch_state, num_tiles] =
         prepare_batch_operation(num_items, Op::BATCH_TILE_DELETE);
 
     // pre-allocate per-key results (1 = deleted, 0 = not found)
@@ -169,8 +168,7 @@ class ConnectorBase : public IStorageConnector {
 
     // fan out work to threads
     for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
-      size_t start = tile_idx * tile_size;
-      size_t end = std::min(start + tile_size, num_items);
+      auto [start, end] = get_tile_range(tile_idx, num_items, num_tiles);
 
       Request tile_req;
       tile_req.op = Op::BATCH_TILE_DELETE;
@@ -372,6 +370,23 @@ class ConnectorBase : public IStorageConnector {
     std::vector<std::thread> workers;
   };
 
+  struct TileRange {
+    size_t start;
+    size_t end;
+  };
+
+  static TileRange get_tile_range(size_t tile_idx, size_t num_items,
+                                  size_t num_tiles) {
+    // Distribute the remainder across the first tiles so tile sizes differ
+    // by at most one. The quotient/remainder calculation also avoids
+    // overflow-prone round-up and tile_idx * num_items formulas.
+    size_t base_tile_size = num_items / num_tiles;
+    size_t larger_tiles = num_items % num_tiles;
+    size_t start = tile_idx * base_tile_size + std::min(tile_idx, larger_tiles);
+    size_t tile_size = base_tile_size + (tile_idx < larger_tiles ? 1 : 0);
+    return {start, start + tile_size};
+  }
+
   void validate_batch_inputs(const std::vector<std::string>& keys,
                              const std::vector<void*>& bufs,
                              const std::vector<size_t>& lens) {
@@ -383,15 +398,14 @@ class ConnectorBase : public IStorageConnector {
     }
   }
 
-  // returns: (batch_future_id, batch_state, num_tiles, tile_size)
-  std::tuple<uint64_t, std::shared_ptr<BatchState>, size_t, size_t>
+  // returns: (batch_future_id, batch_state, num_tiles)
+  std::tuple<uint64_t, std::shared_ptr<BatchState>, size_t>
   prepare_batch_operation(size_t num_items, Op op) {
     size_t num_tiles = choose_num_tiles(op, num_items);
     if (num_tiles == 0 || num_tiles > num_items) {
       throw std::runtime_error(
           "choose_num_tiles must return a value in [1, num_items]");
     }
-    size_t tile_size = (num_items + num_tiles - 1) / num_tiles;  // round up
 
     // create shared batch state
     uint64_t batch_future_id =
@@ -400,18 +414,17 @@ class ConnectorBase : public IStorageConnector {
     batch_state->remaining_tiles.store(num_tiles, std::memory_order_relaxed);
     batch_state->batch_op = op;
 
-    return {batch_future_id, batch_state, num_tiles, tile_size};
+    return {batch_future_id, batch_state, num_tiles};
   }
 
   Request create_tile_request(const std::vector<std::string>& keys,
                               const std::vector<void*>& bufs,
                               const std::vector<size_t>& lens, size_t tile_idx,
-                              size_t tile_size, size_t num_items,
+                              size_t num_tiles, size_t num_items,
                               uint64_t batch_future_id,
                               std::shared_ptr<BatchState> batch_state, Op op,
                               size_t batch_chunk_num_bytes) {
-    size_t start = tile_idx * tile_size;
-    size_t end = std::min(start + tile_size, num_items);  // clip last tile
+    auto [start, end] = get_tile_range(tile_idx, num_items, num_tiles);
 
     Request tile_req;
     tile_req.op = op;

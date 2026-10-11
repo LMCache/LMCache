@@ -19,6 +19,58 @@ from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 logger = init_logger(__name__)
 
 
+def _is_attention_spec(spec: Any) -> bool:
+    """Return whether the KV cache spec is a vLLM attention spec.
+
+    Checked by class name so this module stays importable without vLLM.
+    ``UniformTypeKVCacheSpecs`` is unwrapped first (same-typed layers, one
+    leaf suffices); it does not derive from ``AttentionSpec`` itself.
+    """
+    inner = getattr(spec, "kv_cache_specs", None)
+    if isinstance(inner, dict) and inner:
+        spec = next(iter(inner.values()))
+    return any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
+
+
+def is_scratch_spec(spec: Any) -> bool:
+    """Return whether vLLM marks the spec ``prefix_cacheable = False``.
+
+    vLLM never hashes or restores the blocks of such a scratch group, so they
+    carry no token range LMCache could store (e.g. the per-request rings
+    ``CircularBufferSpec`` and ``KpoolTailSpec``). Specs without the property
+    (older vLLM) are prefix-cacheable. ``UniformTypeKVCacheSpecs`` is
+    unwrapped first.
+
+    Args:
+        spec: A vLLM KV cache spec, or a ``UniformTypeKVCacheSpecs`` container.
+
+    Returns:
+        ``True`` for a scratch spec, ``False`` for a prefix-cacheable one.
+    """
+    inner = getattr(spec, "kv_cache_specs", None)
+    if isinstance(inner, dict) and inner:
+        spec = next(iter(inner.values()))
+    return not getattr(spec, "prefix_cacheable", True)
+
+
+def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
+    """Global tokens covered by one block id of ``kv_cache_spec``.
+
+    Attention blocks span ``block_size * dcp_size`` tokens under DCP
+    (vLLM's ``resolve_kv_cache_block_sizes`` rule); recurrent state is
+    replicated, not sharded, and stays at ``block_size``. Scratch specs
+    (see :func:`is_scratch_spec`) cover no tokens and yield ``0``.
+    """
+    if is_scratch_spec(kv_cache_spec):
+        return 0
+    block_size = kv_cache_spec.block_size
+    if dcp_size <= 1:
+        return block_size
+    if _is_attention_spec(kv_cache_spec):
+        return block_size * dcp_size
+    return block_size
+
+
 def _is_sliding_window_spec(spec: Any) -> bool:
     """Return whether the KV cache spec is a vLLM sliding-window spec.
 
@@ -209,6 +261,7 @@ def create_engine_group_infos_from_vllm(
     kv_cache_config: Any,
     kv_caches: Mapping[str, Any],
     layout_hints: "LayoutHints | None" = None,
+    dcp_size: int = 1,
 ) -> list[EngineGroupInfo]:
     """Build the LMCache engine group infos from vLLM metadata and registered tensors.
 
@@ -228,6 +281,15 @@ def create_engine_group_infos_from_vllm(
             are inspected for physical shape and dtype.
         layout_hints: Optional engine-provided layout hints forwarded to format
             detection (e.g. ``NHD``/``HND`` and compression metadata).
+        dcp_size: Decode context parallel size.
+
+    Note:
+        Under DCP each attention group's ``tokens_per_block`` is scaled by
+        ``dcp_size`` to stay in the scheduler's coordinate space; its ratio
+        to the physical slot count is what sizes each rank's memory object.
+        Mamba groups are replicated per rank and stay unscaled. Layers of
+        scratch groups (see :func:`is_scratch_spec`) are excluded and never
+        form an info.
 
     Returns:
         The list of ``EngineGroupInfo`` in protocol order, i.e. the LMCache group
@@ -257,8 +319,13 @@ def create_engine_group_infos_from_vllm(
         else ()
     )
 
+    # Scratch groups skip format discovery: their layers are excluded below and
+    # never transferred, so a layout the transfer kernels reject must not fail
+    # registration.
     layer_index_groups = [
-        [layer_to_idx[name] for name in group.layer_names] for group in vllm_groups
+        [layer_to_idx[name] for name in group.layer_names]
+        for group in vllm_groups
+        if not is_scratch_spec(group.kv_cache_spec)
     ]
 
     # CacheBlend fused-aux (presence-gated): the pool joins detection as
@@ -277,6 +344,7 @@ def create_engine_group_infos_from_vllm(
     # target owner's KV tensor, so the owner's group already covers them. Tag
     # them EXCLUDED_ENGINE_GROUP so they form no group of their own (a
     # wrong-block-size group would corrupt the per-group block-id counts).
+    # Scratch groups (tokens_per_block 0) are excluded the same way.
     per_layer_group_idx: list[int] | None = None
     group_tokens_per_block: dict[int, int] = {}
     per_layer_sw_size = [-1] * num_layers
@@ -287,7 +355,12 @@ def create_engine_group_infos_from_vllm(
             # The spec's block_size is the logical tokens covered by one of
             # this group's paged chunks (block IDs); the physical slot count
             # per chunk is discovered later from the registered tensors.
-            group_tokens_per_block[engine_group_id] = group.kv_cache_spec.block_size
+            # Under DCP the two diverge (see get_tokens_per_block).
+            group_tokens_per_block[engine_group_id] = get_tokens_per_block(
+                group.kv_cache_spec, dcp_size
+            )
+            if group_tokens_per_block[engine_group_id] == 0:
+                continue
             for name in group.layer_names:
                 per_layer_group_idx[layer_to_idx[name]] = engine_group_id
         per_layer_sw_size = _resolve_per_layer_sw_sizes(

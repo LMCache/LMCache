@@ -2,12 +2,15 @@ NIXL
 ====
 
 NIXL-based persistent storage — the primary production L2 backend, using NIXL
-(NVIDIA Interconnect Library) for high-performance storage I/O. Two adapter
+(NVIDIA Interconnect Library) for high-performance storage I/O. Three adapter
 types share this backend:
 
 - ``nixl_store`` — a fixed pool of storage descriptors pre-allocated at init.
 - ``nixl_store_dynamic`` — opens and registers files per operation, adding
   persist/recover across restarts and removing the open-file-descriptor limit.
+- :doc:`nixl_native` — an optional C++20 connector that registers the L1 arena
+  once per worker and supports both generic ``FILE_SEG`` and ``OBJ_SEG``
+  strategies.
 
 .. note::
 
@@ -17,6 +20,10 @@ types share this backend:
    .. code-block:: bash
 
        uv pip install lmcache[nixl]
+
+   ``nixl_native`` additionally requires NIXL 1.3 or newer development headers
+   and a build with ``BUILD_WITH_NIXL=1``. See :doc:`nixl_native` for complete
+   build and operational instructions.
 
 Static pool — ``nixl_store``
 ----------------------------
@@ -113,11 +120,9 @@ per-operation instead of pre-allocating them at init. This enables:
 - ``shard_dirs``: ``"true"`` or ``"false"`` (default ``"false"``). When
   ``"true"``, data files are spread across a two-level subdirectory tree
   under ``file_path`` instead of all living in one flat directory. The two
-  levels are the first four hex characters of the chunk hash, matching the
-  hash prefix already embedded in the filename
-  (for example ``834ebc79...`` is stored as ``83/4e/<filename>``), giving a
-  fanout of up to 256 × 256 subdirectories. Leaving it unset preserves the
-  original flat layout.
+  levels use the first four hex characters of the chunk hash for both salted
+  and unsalted keys, providing up to 256 × 256 subdirectories. Leaving
+  ``shard_dirs`` unset preserves the flat layout.
 
   Large flat directories slow down metadata operations on many filesystems,
   so sharding helps once a single cache directory holds a large number of
@@ -131,6 +136,15 @@ per-operation instead of pre-allocating them at init. This enables:
      directory makes previously written files unreachable (they are not
      deleted, just no longer found). Choose the layout when the cache
      directory is first created, or clear it when changing the setting.
+
+     Releases that predate salted dynamic-NIXL filenames wrote salted traffic
+     to salt-blind legacy paths. Those files cannot be safely attributed to a
+     salt and are not used as a fallback. Clear or quarantine that cache
+     directory when upgrading a deployment that used non-empty salts.
+
+For both flat and sharded layouts, a non-empty ``cache_salt`` is appended to
+the filename as ``@<cache_salt>`` before ``.bin``. An empty salt retains the
+legacy filename.
 
 **Optional fields (for persist):**
 

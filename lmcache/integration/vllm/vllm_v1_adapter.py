@@ -34,6 +34,7 @@ from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
+    extract_request_configs_from_sampling_params,
     lmcache_get_or_create_config,
 )
 from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
@@ -96,15 +97,7 @@ tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 
 def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
-    request_configs = None
-    if sampling_params and sampling_params.extra_args is not None:
-        if kv_transfer_params := sampling_params.extra_args.get("kv_transfer_params"):
-            for k, v in kv_transfer_params.items():
-                if k.startswith("lmcache."):
-                    if request_configs is None:
-                        request_configs = {}
-                    request_configs[k] = v
-    return request_configs
+    return extract_request_configs_from_sampling_params(sampling_params)
 
 
 @dataclass
@@ -764,6 +757,9 @@ class LMCacheConnectorV1Impl:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
 
+        Non-layerwise synchronous loads release each request's lookup pins
+        before loading the next request, allowing CPU cache space to be reused.
+
         Args:
             forward_context (ForwardContext): the forward context.
             **kwargs: additional arguments for the load operation
@@ -865,6 +861,11 @@ class LMCacheConnectorV1Impl:
                     request_configs=request.request_configs,
                     req_id=request.req_id,
                 )
+                if not self.async_loading:
+                    # Blocking retrieve releases get references, not lookup pins.
+                    # Release this request's pins before the next load may need
+                    # CPU staging space; wait_for_save cleanup is idempotent.
+                    self.lmcache_engine.lookup_unpin(request.req_id)
 
                 # Check the result
                 num_retrieved_tokens = ret_token_mask.sum().item()
@@ -979,7 +980,7 @@ class LMCacheConnectorV1Impl:
             layer_name: the name of that layer
         """
         if self.layerwise_retrievers:
-            logger.debug(f"Waiting for layer {self.current_layer} to be loaded")
+            logger.debug("Waiting for layer %s to be loaded", self.current_layer)
 
         # Wait for the layer to be loaded
         for layerwise_retriever in self.layerwise_retrievers:
@@ -988,7 +989,7 @@ class LMCacheConnectorV1Impl:
             if self.current_layer == self.num_layers - 1:
                 assert ret_token_mask is not None
                 num_retrieved_tokens = ret_token_mask.sum().item()
-                logger.info(f"Retrieved {num_retrieved_tokens} tokens")
+                logger.info("Retrieved %s tokens", num_retrieved_tokens)
 
         if self.layerwise_retrievers:
             self.current_layer += 1
@@ -1261,9 +1262,9 @@ class LMCacheConnectorV1Impl:
         """Query the decoder's cache to check which blocks are already cached.
 
         This is the bidirectional NIXL cache probe: the prefiller queries the
-        decoder via ZMQ to find out which KV blocks are already in the
-        decoder's GPU memory. This validates the cache query channel works
-        E2E through the real inference path.
+        decoder through the configured request transport to find out which KV
+        blocks are already in the decoder's GPU memory. This validates the
+        cache query channel works E2E through the real inference path.
 
         In the future, this information can be used to skip prefill
         computation for cached blocks.
@@ -1382,7 +1383,8 @@ class LMCacheConnectorV1Impl:
         # 1. lookup_client caches a result
         #     uncached in `update_state_after_alloc` if this request can be scheduled
         # 2. cache engine will pin the KV caches for the request
-        #     unpinned in `wait_for_save` if this request can be scheduled
+        #     unpinned after a synchronous non-layerwise load in `start_load_kv`,
+        #     with remaining scheduled-request cleanup in `wait_for_save`
         if self.kv_role == "kv_producer" and not hasattr(
             self.lookup_client, "supports_producer_reuse"
         ):
@@ -1402,11 +1404,12 @@ class LMCacheConnectorV1Impl:
             # -1 means no result cached
             # None or int means ongoing (async) or cached result
             logger.debug(
-                f"Found {num_external_hit_tokens} hit tokens for request"
-                f" {req_id} in the lookup cache."
+                "Found %s hit tokens for request %s in the lookup cache.",
+                num_external_hit_tokens,
+                req_id,
             )
         else:
-            logger.debug(f"Looking up cache for the first time for request {req_id}!")
+            logger.debug("Looking up cache for the first time for request %s!", req_id)
             self._requests_priority[req_id] = getattr(request, "priority", 0)
 
             # token_ids = request.prompt_token_ids
