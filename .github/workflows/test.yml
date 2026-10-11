@@ -112,6 +112,10 @@ jobs:
           NO_GPU_EXT=1 python -m pip install -e . --no-build-isolation
 
       - name: "CPU only unit tests"
+        env:
+          RUN_DEVDAX_L1_INTEGRATION: "1"
+          RUN_DAX_L2_INTEGRATION: "1"
+          LMCACHE_TEST_DEVDAX_L1_PATHS: ""
         run: |
           pytest -m "not (cuda or musa or xpu or npu or neuron or rbln)"
 
