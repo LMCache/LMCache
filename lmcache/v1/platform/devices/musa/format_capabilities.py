@@ -28,9 +28,9 @@ def is_supported_musa_mp_block_transfer_format(
         engine_kv_format: Engine KV format to classify.
 
     Returns:
-        ``True`` for ordinary MLA, NHD ``TWO_NB`` per-layer layouts, and the
-        current SGLang K/V-list layout. ``False`` for all other physical
-        contracts.
+        ``True`` for ordinary MLA, the DSV4 blocked-scale indexer, NHD
+        ``TWO_NB`` per-layer layouts, and the current SGLang K/V-list layout.
+        ``False`` for all other physical contracts.
     """
     return is_supported_musa_mp_block_transfer_spec(get_spec_class(engine_kv_format))
 
@@ -44,10 +44,17 @@ def is_supported_musa_mp_block_transfer_spec(
         spec: Resolved KV-format spec class to classify.
 
     Returns:
-        ``True`` for ordinary MLA, NHD ``TWO_NB`` per-layer layouts, and the
-        current SGLang K/V-list layout. ``False`` for all other physical
-        contracts.
+        ``True`` for ordinary MLA, the DSV4 blocked-scale indexer, NHD
+        ``TWO_NB`` per-layer layouts, and the current SGLang K/V-list layout.
+        ``False`` for all other physical contracts.
     """
+    if spec.is_blocked_scale:
+        return (
+            spec.is_layer_list
+            and spec.is_mla
+            and spec.blocked_value_width > 0
+            and spec.blocked_scale_width > 0
+        )
     if _is_regular_per_layer_layout(spec):
         return spec.is_mla or spec.is_two_major
     return (

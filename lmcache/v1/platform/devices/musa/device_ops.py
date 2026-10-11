@@ -169,11 +169,14 @@ def _paged_shape_and_stride(
     bs = int(shape_desc.bs)
     nh = int(shape_desc.nh)
     hs = int(shape_desc.hs)
-    shape = format_spec.paged_pointer_shape(nb, bs, nh, hs)
-    if format_spec.is_mla:
-        block_stride = int(getattr(shape_desc, "block_stride_elems", 0))
-        return shape, (block_stride or bs * hs, hs, 1)
-    return shape, None
+    block_stride = int(getattr(shape_desc, "block_stride_elems", 0))
+    return format_spec.paged_pointer_layout(
+        nb,
+        bs,
+        nh,
+        hs,
+        block_stride_elems=block_stride,
+    )
 
 
 def _staging_shape(

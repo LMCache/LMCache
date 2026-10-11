@@ -168,6 +168,17 @@ def test_blocked_scale_is_distinct_from_regular_mla() -> None:
     assert get_spec_class(F.NL_X_NB_BSV_BSS).is_blocked_scale is True
 
 
+def test_blocked_scale_spec_declares_pointer_regions() -> None:
+    """Keep DSV4 physical regions in the format contract."""
+    spec = get_spec_class(F.NL_X_NB_BSV_BSS)
+    assert spec.blocked_value_width == 128
+    assert spec.blocked_scale_width == 4
+    assert spec.paged_pointer_layout(2, 4, 1, 132, 528) == (
+        (2, 528),
+        (528, 1),
+    )
+
+
 def _all_formats():
     return [v for v in vars(F).values() if isinstance(v, F)]
 

@@ -104,8 +104,9 @@ class KVFormatSpec(ABC):
     shape (``is_cross_layer`` / ``is_kv_list`` / ``is_layer_list``, exactly one
     true) plus the ``is_mla`` / ``is_hnd`` / ``is_fused_packed`` /
     ``is_two_major`` / ``is_pbs_fused`` / ``is_kv_second_tuple`` /
-    ``is_single_kv`` / ``is_blocked_scale`` modifiers. They default to
-    ``False``, so a spec
+    ``is_single_kv`` / ``is_blocked_scale`` modifiers. Blocked-scale specs also
+    declare their value/scale region widths. These facts default to ``False``
+    or zero, so a spec
     only declares what applies to it, and every consumer reads them
     through ``get_spec_class(fmt)`` -- no format lists at call sites. The device
     kernels keep their own copy in ``csrc/engine_kv_format.h``.
@@ -122,9 +123,10 @@ class KVFormatSpec(ABC):
       :meth:`tokens_per_layer`, :meth:`elements_per_layer`. The MP path derives
       these from a per-group :class:`PageBufferShapeDesc` instead.
     * Used by pointer-backed paged-buffer reconstruction:
-      :meth:`paged_layer_shape` and :meth:`paged_pointer_shape`. They are class
-      methods because they use declared format facts and caller-provided
-      geometry, not borrowed KV tensors.
+      :meth:`paged_layer_shape`, :meth:`paged_pointer_shape`, and
+      :meth:`paged_pointer_layout`. They are class methods because they use
+      declared format facts and caller-provided geometry, not borrowed KV
+      tensors.
     * Used by staging allocation: :meth:`staging_shape` centralizes the
       leading K/V-plane axis and retains the legacy inference for descriptors
       whose ``kv_size`` is not populated.
@@ -168,6 +170,10 @@ class KVFormatSpec(ABC):
     is_single_kv: ClassVar[bool] = False
     # Values and scales occupy separate regions inside each physical block.
     is_blocked_scale: ClassVar[bool] = False
+    # Widths, in bytes, of the two blocked-scale regions for one token.
+    # Non-blocked formats leave both values at zero.
+    blocked_value_width: ClassVar[int] = 0
+    blocked_scale_width: ClassVar[int] = 0
 
     @classmethod
     def paged_layer_shape(cls, nb: int, bs: int, nh: int, hs: int) -> tuple[int, ...]:
@@ -242,6 +248,42 @@ class KVFormatSpec(ABC):
                 return (nb * bs, nh, hs)
             return (nb, bs, nh, hs)
         return cls.paged_layer_shape(nb, bs, nh, hs)
+
+    @classmethod
+    def paged_pointer_layout(
+        cls,
+        nb: int,
+        bs: int,
+        nh: int,
+        hs: int,
+        block_stride_elems: int = 0,
+    ) -> tuple[tuple[int, ...], tuple[int, ...] | None]:
+        """Return a pointer-backed shape and optional physical stride.
+
+        Args:
+            nb: Number of paged blocks.
+            bs: Tokens in each block.
+            nh: Number of attention heads.
+            hs: Per-head content size.
+            block_stride_elems: Physical elements between block starts. A
+                non-positive value means the tight layout.
+
+        Returns:
+            A ``(shape, stride)`` pair suitable for non-owning tensor
+            reconstruction. Blocked-scale formats use a raw two-dimensional
+            byte view so their separate value and scale regions remain
+            addressable.
+
+        Raises:
+            ValueError: If the format has no single pointer representation.
+        """
+        block_stride = block_stride_elems if block_stride_elems > 0 else bs * hs
+        if cls.is_blocked_scale:
+            return (nb, block_stride), (block_stride, 1)
+        shape = cls.paged_pointer_shape(nb, bs, nh, hs)
+        if cls.is_mla:
+            return shape, (block_stride, hs, 1)
+        return shape, None
 
     @classmethod
     def staging_shape(

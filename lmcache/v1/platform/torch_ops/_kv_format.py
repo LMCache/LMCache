@@ -80,3 +80,8 @@ def _is_mla_plane_tuple_format(engine_kv_format: EngineKVFormat) -> bool:
         _is_kv_second_tuple_format(engine_kv_format)
         and _format_spec(engine_kv_format).is_mla
     )
+
+
+def _is_blocked_scale_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when values and scales use separate physical regions."""
+    return _format_spec(engine_kv_format).is_blocked_scale
