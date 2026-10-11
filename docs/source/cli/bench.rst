@@ -35,8 +35,10 @@ engine
 The ``lmcache bench engine`` command runs sustained performance benchmarks
 against an inference engine (e.g., vLLM). It supports multiple workload types
 that exercise different caching patterns and reports TTFT, decoding speed, and
-throughput metrics. One workload, :ref:`rag-qa-quality
-<bench-rag-qa-quality>`, measures answer *correctness* instead of speed.
+throughput metrics. TTFT starts at the first non-empty content or reasoning
+text, including streams with an empty ``content`` field. One workload,
+:ref:`rag-qa-quality <bench-rag-qa-quality>`, measures answer *correctness*
+instead of speed.
 
 .. code-block:: bash
 
