@@ -635,31 +635,43 @@ class MessageQueueServer(RequestServer):
 
             # Process the incoming requests
             if inbound_state and inbound_state & zmq.POLLIN:
-                msg = self.socket.recv_multipart()
-                assert len(msg) >= 3, (
-                    "Expected at least 3 message parts "
-                    "[identity, request_uid, operation, *payloads]"
-                )
-
-                identity, b_request_uid, b_operation, *payloads = msg
-                try:
-                    operation = decode_operation(b_operation)
-                except (TypeError, ValueError):
-                    logger.exception("Invalid ZMQ operation identifier")
-                    continue
-
-                if handler_entry := self.handlers.get(operation):
+                # Drain all available requests before polling again.
+                # Reading only one request per poll cycle causes the
+                # server to stop scaling under concurrent load
+                # (issue #5613).
+                while True:
                     try:
-                        self._call_handler(
-                            handler_entry=handler_entry,
-                            payloads=payloads,
-                            prefix_frames=[identity, b_request_uid, b_operation],
+                        msg = self.socket.recv_multipart(zmq.NOBLOCK)
+                    except zmq.Again:
+                        break
+                    if len(msg) < 3:
+                        logger.error(
+                            "Expected at least 3 message parts "
+                            "[identity, request_uid, operation, *payloads], "
+                            "got %d",
+                            len(msg),
                         )
-                    except Exception:
-                        logger.exception("Error handling operation %s", operation)
-                else:
-                    logger.error("No handler registered for operation %s", operation)
-                    logger.error("Available handlers: %s", list(self.handlers.keys()))
+                        continue
+
+                    identity, b_request_uid, b_operation, *payloads = msg
+                    try:
+                        operation = decode_operation(b_operation)
+                    except (TypeError, ValueError):
+                        logger.exception("Invalid ZMQ operation identifier")
+                        continue
+
+                    if handler_entry := self.handlers.get(operation):
+                        try:
+                            self._call_handler(
+                                handler_entry=handler_entry,
+                                payloads=payloads,
+                                prefix_frames=[identity, b_request_uid, b_operation],
+                            )
+                        except Exception:
+                            logger.exception("Error handling operation %s", operation)
+                    else:
+                        logger.error("No handler registered for operation %s", operation)
+                        logger.error("Available handlers: %s", list(self.handlers.keys()))
 
             # Send the responses
             if outbound_state and outbound_state & zmq.POLLIN:
