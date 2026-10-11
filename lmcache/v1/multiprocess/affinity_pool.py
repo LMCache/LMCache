@@ -46,6 +46,8 @@ class AffinityThreadPool:
         # Maps an affinity_key -> the worker slot (thread index) bound to it.
         self._key_to_slot: dict[int, int] = {}
         self._next_slot = 0
+        # Maps an affinity_key -> number of in-flight submissions.
+        self._key_usage: dict[int, int] = {}
         self._overflow_warned = False
         for i in range(max_workers):
             t = threading.Thread(
@@ -127,6 +129,28 @@ class AffinityThreadPool:
             )
         return slot
 
+    def _remove_key(self, affinity_key: int) -> None:
+        """Remove a key from the affinity pool, freeing its worker slot.
+
+        Called when an engine instance disconnects or its affinity key is
+        no longer in use.  After this call the slot becomes available for
+        new keys.
+        """
+        if affinity_key in self._key_to_slot:
+            slot = self._key_to_slot.pop(affinity_key)
+            # Only reset _next_slot if the freed slot is before it,
+            # so we don't shrink the slot numbering unnecessarily.
+            if slot < self._next_slot:
+                self._next_slot = slot
+            logger.info(
+                "AffinityThreadPool: removed affinity_key=%d from slot %d "
+                "of %d; %d distinct key(s) now bound",
+                affinity_key,
+                slot,
+                self._num_workers,
+                len(self._key_to_slot),
+            )
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -139,7 +163,32 @@ class AffinityThreadPool:
         future: Future = Future()
         slot = self._slot_for_key(affinity_key)
         self._queues[slot].put((future, fn, args, kwargs))
+        # Track that this key is in use
+        self._key_usage[affinity_key] = self._key_usage.get(affinity_key, 0) + 1
         return future
+
+    def remove_key(self, affinity_key: int) -> None:
+        """Remove a key from the affinity pool, freeing its worker slot.
+
+        Decrements the usage count, and if the count reaches zero, the key
+        is unbound from its slot so it can be reassigned.
+        """
+        if affinity_key in self._key_to_slot:
+            self._key_usage[affinity_key] = self._key_usage.get(affinity_key, 0) - 1
+            if self._key_usage[affinity_key] <= 0:
+                # Free the slot and remove the key
+                slot = self._key_to_slot.pop(affinity_key)
+                if slot < self._next_slot:
+                    self._next_slot = slot
+                self._key_to_slot.pop(affinity_key, None)
+                logger.info(
+                    "AffinityThreadPool: removed affinity_key=%d from slot %d "
+                    "of %d; %d distinct key(s) now bound",
+                    affinity_key,
+                    slot,
+                    self._num_workers,
+                    len(self._key_to_slot),
+                )
 
     def shutdown(self, wait: bool = True) -> None:
         """Shut down the pool.
