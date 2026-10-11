@@ -58,7 +58,7 @@ def _register(module: QStoreModule, instance_id: int = 1) -> None:
     """Registers a Q ring with the module, using the stubbed
     create_cache_context."""
     module.register_q_cache(
-        instance_id, MagicMock(), *REGISTER_ARGS, MagicMock(), MagicMock(), []
+        instance_id, MagicMock(), *REGISTER_ARGS, MagicMock(), {}, []
     )
 
 
@@ -109,7 +109,7 @@ def test_reap_uses_two_tier_windows() -> None:
     assert module.tracked_instance_count() == 2
     cast(
         MagicMock, module.context.layout_desc_registry.unregister
-    ).assert_called_once_with(*REGISTER_ARGS)
+    ).assert_called_once_with(*REGISTER_ARGS, "")
 
 
 def test_unregister_releases_context_and_layout(monkeypatch) -> None:
@@ -137,7 +137,7 @@ def test_unregister_releases_context_and_layout(monkeypatch) -> None:
     assert calls == ["close", "empty_cache", "ipc_collect"]
     cast(
         MagicMock, module.context.layout_desc_registry.unregister
-    ).assert_called_once_with(*REGISTER_ARGS)
+    ).assert_called_once_with(*REGISTER_ARGS, "")
 
     module.unregister_q_cache(1)  # already gone -> no exception
 

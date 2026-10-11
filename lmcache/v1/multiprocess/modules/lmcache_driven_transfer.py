@@ -151,6 +151,7 @@ class ContextEntry:
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
         event_backend: Cached event backend selected for this context's device.
+        cache_format: KV encoding identity.
     """
 
     cache_context: BaseCacheContext
@@ -159,6 +160,7 @@ class ContextEntry:
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
+    cache_format: str = ""
 
 
 class LMCacheDrivenTransferModule(InstanceLivenessTarget):
@@ -391,7 +393,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         for entry in entries:
             entry.cache_context.close()
             self._ctx.layout_desc_registry.unregister(
-                entry.model_name, entry.world_size
+                entry.model_name, entry.world_size, entry.cache_format
             )
         del entry
         entries.clear()
@@ -419,6 +421,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             cache_context_meta[str(instance_id)] = {
                 "model_name": entry.model_name,
                 "world_size": entry.world_size,
+                "cache_format": entry.cache_format,
                 "kv_cache_layout": ctx.report_status(),
             }
 
@@ -464,6 +467,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
         """
+        cache_format = layout_hints.get("cache_format", "")
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
@@ -511,6 +515,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             layout_desc,
             attn_desc,
             group_layout_descs=group_layout_descs,
+            cache_format=cache_format,
         )
 
         with self._lock:
@@ -518,6 +523,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 cache_context=cache_context,
                 model_name=model_name,
                 world_size=world_size,
+                cache_format=cache_format,
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
@@ -1088,6 +1094,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "engine_id": instance_id,
                             "model_name": model_name,
                             "cache_salt": key.cache_salt,
+                            "cache_format": key.cache_format,
                             "total_bytes": total_bytes,
                             "num_tokens": num_tokens,
                             "transfer_key": transfer_key,

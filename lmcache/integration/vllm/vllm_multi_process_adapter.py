@@ -680,11 +680,13 @@ class LMCacheMPSchedulerAdapter:
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         extra_config: dict[str, Any] | None = None,
+        cache_format: str = "",
     ):
         """
         Args:
             server_urls: LMCache multiprocess request server URLs.
             context: The ZMQ context
+            cache_format: KV encoding identity.
             model_name: The model name used for LMCache keys
             vllm_block_size: The block size used in vLLM
             parallel_strategy:
@@ -753,6 +755,7 @@ class LMCacheMPSchedulerAdapter:
         ] = {}
 
         self.model_name = model_name
+        self.cache_format = cache_format
         self.parallel_strategy = parallel_strategy
 
         # Read chunk size from lmcache
@@ -1272,6 +1275,7 @@ class LMCacheMPSchedulerAdapter:
         return IPCCacheServerKey(
             num_kv_readers=self.parallel_strategy.num_kv_readers,
             model_name=self.model_name,
+            cache_format=self.cache_format,
             world_size=self.world_size,
             worker_id=None,
             token_ids=tuple(token_ids),
@@ -1325,12 +1329,14 @@ class LMCacheMPWorkerAdapter:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         extra_config: dict[str, Any] | None = None,
         enable_kv_events: bool = False,
+        cache_format: str = "",
     ):
         """Initialize the worker adapter for current or legacy vLLM callers.
 
         Args:
             server_url: LMCache multiprocess request server URL.
             context: The ZMQ context.
+            cache_format: KV encoding identity.
             model_name: The model name used for LMCache keys.
             vllm_block_size: The block size used in vLLM, or legacy KV world
                 size when ``parallel_strategy`` is an int.
@@ -1454,6 +1460,7 @@ class LMCacheMPWorkerAdapter:
         self._returned_finished: set[str] = set()
 
         self.model_name = model_name
+        self.cache_format = cache_format
         self.parallel_strategy = parallel_strategy
 
         # Read chunk size from lmcache
@@ -1671,6 +1678,7 @@ class LMCacheMPWorkerAdapter:
                 layout_hints=layout_hints,
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
+                cache_format=self.cache_format,
             )
         except TimeoutError:
             raise ConnectionError(
@@ -2679,6 +2687,7 @@ class LMCacheMPWorkerAdapter:
         return IPCCacheServerKey(
             num_kv_readers=self.parallel_strategy.num_kv_readers,
             model_name=self.model_name,
+            cache_format=self.cache_format,
             world_size=self.world_size,
             worker_id=self.worker_id,
             token_ids=tuple(token_ids),

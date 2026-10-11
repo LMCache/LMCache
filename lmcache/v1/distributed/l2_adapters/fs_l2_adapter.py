@@ -110,12 +110,15 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     ``kv_rank`` is written in ``0x`` prefixed hex so each byte
     of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
     is directly readable. ``object_group_id`` is written in plain hex.
+    Formatted keys append ``@salt@cache_format``; salt may be empty.
     """
     safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
     base = (
         f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}"
         f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
     )
+    if key.cache_format:
+        return f"{base}@{key.cache_salt}@{key.cache_format}{_FILE_EXT}"
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}{_FILE_EXT}"
     return f"{base}{_FILE_EXT}"
@@ -127,7 +130,8 @@ def _filename_to_object_key(
     """Reverse ``_object_key_to_filename``.
 
     Accepts both the 4-field unsalted shape and the 5-field salted
-    shape (trailing ``cache_salt``). Returns ``None`` for anything
+    shape (trailing ``cache_salt``), or 6 fields with ``cache_format``.
+    Returns ``None`` for anything
     else. Since ``model_name`` is guaranteed not to contain ``@``,
     plain ``split`` suffices — no marker, no rsplit.
     """
@@ -135,11 +139,21 @@ def _filename_to_object_key(
         return None
     stem = filename[: -len(_FILE_EXT)]
     parts = stem.split(_KEY_SEP)
+    cache_format = ""
     if len(parts) == 4:
         safe_model, kv_rank_str, object_group_str, chunk_hash_hex = parts
         cache_salt = ""
     elif len(parts) == 5:
         safe_model, kv_rank_str, object_group_str, chunk_hash_hex, cache_salt = parts
+    elif len(parts) == 6:
+        (
+            safe_model,
+            kv_rank_str,
+            object_group_str,
+            chunk_hash_hex,
+            cache_salt,
+            cache_format,
+        ) = parts
     else:
         return None
 
@@ -159,6 +173,7 @@ def _filename_to_object_key(
             kv_rank=kv_rank,
             object_group_id=object_group_id,
             cache_salt=cache_salt,
+            cache_format=cache_format,
         )
     except ValueError:
         return None

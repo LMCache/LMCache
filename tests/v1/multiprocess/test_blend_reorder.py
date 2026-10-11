@@ -141,23 +141,23 @@ def test_keep_prefix_with_a_repeated_block():
 
 def test_prompt_store_candidates():
     store = br.PromptStore(max_tokens=6)
-    store.record(("m", 1, ""), "r1", [1, 2, 3], [b"h0", b"h1"])
-    store.record(("m", 1, ""), "r2", [4, 5, 6], [b"h0", b"g1", b"g2"])
+    store.record(("m", 1, "", ""), "r1", [1, 2, 3], [b"h0", b"h1"])
+    store.record(("m", 1, "", ""), "r2", [4, 5, 6], [b"h0", b"g1", b"g2"])
     # a later store of r2 carries decode tokens: its ids stay the prompt's
-    store.record(("m", 1, ""), "r2", [4, 5, 6, 7], [b"g3"])
-    ns = ("m", 1, "")
+    store.record(("m", 1, "", ""), "r2", [4, 5, 6, 7], [b"g3"])
+    ns = ("m", 1, "", "")
     cands, base = store.candidates(ns, [b"g2"], [b"h0", b"h1", b"zz"], top_k=1)
     # r1 holds P's own 2-chunk prefix, r2 owns the hit (and is the newest)
     assert [list(c) for c in cands] == [[4, 5, 6], [1, 2, 3]] and base == 2
     store.record(ns, "r3", [8], [b"h1"])  # 7 tokens > 6: evicts r1 (LRU)
     cands, base = store.candidates(ns, [], [b"h0", b"h1"])
     assert [list(c) for c in cands] == [[8]] and base == 2  # holder r3 is also newest
-    assert store.candidates(("other", 1, ""), [b"g2"], []) == ([], 0)
+    assert store.candidates(("other", 1, "", ""), [b"g2"], []) == ([], 0)
 
 
 def test_prompt_store_namespaces():
     store = br.PromptStore(max_tokens=10)
-    ns, salted = ("m", 1, ""), ("m", 1, "salt")
+    ns, salted = ("m", 1, "", ""), ("m", 1, "salt", "")
     store.record(ns, "r1", [1] * 3, [b"a"])
     store.record(ns, "r2", [2] * 3, [b"b"])  # the namespace's newest
     store.record(salted, "r3", [3] * 3, [b"c"])
@@ -172,4 +172,17 @@ def test_prompt_store_namespaces():
     store.record(salted, "r5", [5] * 6, [b"f"])  # evicts r3, then r1: ns's last
     assert store.resolve("", 0, "") is None
     assert store.candidates(ns, [b"a"], []) == ([], 0)
-    assert store._ns == {"salt": {("m", 1): [2, (salted, "r5")]}}  # nothing left
+    assert store._ns == {"salt": {("m", 1, ""): [2, (salted, "r5")]}}  # nothing left
+
+
+def test_prompt_store_isolates_formats() -> None:
+    store = br.PromptStore(max_tokens=4)
+    fp8, bf16 = ("m", 1, "", "fp8"), ("m", 1, "", "bf16")
+    store.record(fp8, "r1", [1, 2], [b"same"])
+    store.record(bf16, "r2", [3, 4], [b"same"])
+    assert store.resolve("m", 1, "", "fp8") == fp8
+    assert store.resolve("m", 1, "") is None
+    assert [list(c) for c in store.candidates(fp8, [b"same"], [])[0]] == [[1, 2]]
+    store.record(bf16, "r3", [5, 6], [b"new"])
+    assert store.resolve("m", 1, "", "fp8") is None
+    assert store.resolve("m", 1, "", "bf16") == bf16

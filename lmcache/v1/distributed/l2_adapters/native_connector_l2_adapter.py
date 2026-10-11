@@ -81,11 +81,15 @@ def _object_key_to_string(key: ObjectKey) -> str:
     Salted (trailing ``cache_salt``)::
 
         <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
+
+    Formatted keys append ``@salt@cache_format``; salt may be empty.
     """
     base = (
         f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}"
         f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
     )
+    if key.cache_format:
+        return f"{base}{_KEY_SEP}{key.cache_salt}{_KEY_SEP}{key.cache_format}"
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}"
     return base

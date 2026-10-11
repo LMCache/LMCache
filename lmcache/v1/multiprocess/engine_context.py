@@ -48,6 +48,7 @@ class _LayoutDescEntry:
 class LayoutDescRegistry:
     """Thread-safe registry mapping (model_name, world_size) to MemoryLayoutDesc.
 
+    Each cache_format has a separate namespace.
     Modules write to this registry when KV caches are registered.
     Consumers (e.g. LookupModule) read from it to find layout descriptors
     for prefetch tasks. Multiple worker instances can share the same
@@ -56,8 +57,8 @@ class LayoutDescRegistry:
     """
 
     def __init__(self) -> None:
-        # Key: (model_name, world_size) -> layout descriptor entry
-        self._registry: dict[tuple[str, int], _LayoutDescEntry] = {}
+        # Key: (model_name, world_size, cache_format) -> layout descriptor entry
+        self._registry: dict[tuple[str, int, str], _LayoutDescEntry] = {}
         self._lock = threading.Lock()
 
     def register(
@@ -67,6 +68,7 @@ class LayoutDescRegistry:
         layout_desc: MemoryLayoutDesc,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
+        cache_format: str = "",
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -76,6 +78,7 @@ class LayoutDescRegistry:
         Args:
             model_name: The model name.
             world_size: The world size.
+            cache_format: KV encoding identity; empty for legacy keys.
             layout_desc: The memory layout descriptor.
             attn_desc: Cross-chunk attention windows of all object groups, in
                 object-group order. Defaults to a single full-attention group.
@@ -84,7 +87,7 @@ class LayoutDescRegistry:
                 one entry per object group in ``attn_desc``, all sharing
                 ``layout_desc``.
         """
-        key = (model_name, world_size)
+        key = (model_name, world_size, cache_format)
         attn_desc = replace(attn_desc, world_size=world_size)
         if group_layout_descs is None:
             group_layout_descs = {
@@ -106,7 +109,9 @@ class LayoutDescRegistry:
             entry.group_layout_descs = group_layout_descs
             entry.ref_count += 1
 
-    def unregister(self, model_name: str, world_size: int) -> None:
+    def unregister(
+        self, model_name: str, world_size: int, cache_format: str = ""
+    ) -> None:
         """Unregister one layout descriptor registration for a pair.
 
         The descriptor is removed only when the last active registration for
@@ -115,8 +120,9 @@ class LayoutDescRegistry:
         Args:
             model_name: The model name.
             world_size: The world size.
+            cache_format: KV encoding identity; empty for legacy keys.
         """
-        key = (model_name, world_size)
+        key = (model_name, world_size, cache_format)
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:
@@ -128,38 +134,44 @@ class LayoutDescRegistry:
 
             entry.ref_count -= 1
 
-    def find(self, model_name: str, world_size: int) -> MemoryLayoutDesc | None:
+    def find(
+        self, model_name: str, world_size: int, cache_format: str = ""
+    ) -> MemoryLayoutDesc | None:
         """Look up a layout descriptor by (model_name, world_size).
 
         Args:
             model_name: The model name.
             world_size: The world size.
+            cache_format: KV encoding identity; empty for legacy keys.
 
         Returns:
             The layout descriptor if found, otherwise None.
         """
         with self._lock:
-            entry = self._registry.get((model_name, world_size))
+            entry = self._registry.get((model_name, world_size, cache_format))
             if entry is None:
                 return None
             return entry.layout_desc
 
     def find_group_layout_descs(
-        self, model_name: str, world_size: int
+        self, model_name: str, world_size: int, cache_format: str = ""
     ) -> dict[int, MemoryLayoutDesc] | None:
         """Look up per-object-group layout descriptors, or ``None``."""
         with self._lock:
-            entry = self._registry.get((model_name, world_size))
+            entry = self._registry.get((model_name, world_size, cache_format))
             if entry is None:
                 return None
             return entry.group_layout_descs
 
-    def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
+    def find_attn_desc(
+        self, model_name: str, world_size: int, cache_format: str = ""
+    ) -> AttnWindowDesc:
         """Look up the attention-window descriptor for a pair.
 
         Args:
             model_name: The model name.
             world_size: The world size.
+            cache_format: KV encoding identity; empty for legacy keys.
 
         Returns:
             The :class:`AttnWindowDesc` registered for the pair.
@@ -170,7 +182,7 @@ class LayoutDescRegistry:
                 looking up its windows.
         """
         with self._lock:
-            entry = self._registry.get((model_name, world_size))
+            entry = self._registry.get((model_name, world_size, cache_format))
             if entry is None:
                 raise ValueError(
                     f"No attention-window descriptor registered for model "

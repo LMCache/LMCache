@@ -136,6 +136,9 @@ class ObjectKey:
     hash, and extension are added.
     """
 
+    cache_format: str = ""
+    """KV encoding identity; empty for legacy keys."""
+
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
     _SALT_MAX_LEN = 128
 
@@ -167,6 +170,7 @@ class ObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            cache_format=self.cache_format,
         )
 
     @staticmethod
@@ -261,6 +265,7 @@ class EncodedObjectKey:
     deserialize."""
 
     cache_salt: str = ""
+    cache_format: str = ""
 
     def to_object_key(self) -> ObjectKey:
         """Recover the corresponding :class:`ObjectKey`.
@@ -275,6 +280,7 @@ class EncodedObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            cache_format=self.cache_format,
         )
 
 
@@ -625,7 +631,7 @@ def ipc_key_to_object_keys(
 
     Args:
         ipc_key: The IPC key providing model_name, world_size, worker_id,
-            and cache_salt.
+            cache_salt and cache_format.
         chunk_hashes: List of chunk hash bytes, one per chunk.
         object_group_ids: Object group ids to produce keys for.
 
@@ -647,6 +653,7 @@ def ipc_key_to_object_keys(
                 kv_rank=kv_rank,
                 object_group_id=object_group_id,
                 cache_salt=cache_salt,
+                cache_format=ipc_key.cache_format,
             )
             for chunk_hash in chunk_hashes
             for kv_rank in kv_ranks
@@ -671,7 +678,7 @@ def ipc_key_to_grouped_object_keys(
 
     Args:
         ipc_key: The IPC key providing model_name, world_size, worker_id,
-            and cache_salt.
+            cache_salt and cache_format.
         chunk_hashes: Chunk hash bytes, one per chunk, in token order.
         object_group_ids: Object group ids to produce rows for, in the order
             the rows should appear.
@@ -716,6 +723,7 @@ def ipc_key_to_grouped_object_keys(
                             kv_rank=kv_rank,
                             object_group_id=object_group_id,
                             cache_salt=ipc_key.cache_salt,
+                            cache_format=ipc_key.cache_format,
                         )
                         for chunk_hash in chunk_hashes
                     ],
