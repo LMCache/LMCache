@@ -17,6 +17,7 @@ import torch
 # First Party
 from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
+    extract_cache_salt_from_request,
     extract_mm_features,
     extract_request_configs_from_request,
 )
@@ -93,7 +94,7 @@ class LMCacheMPRequestTracker:
 
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
-        self.cache_salt: str = request.cache_salt or ""
+        self.cache_salt: str = extract_cache_salt_from_request(request)
         self.request_configs = extract_request_configs_from_request(request)
         self.max_offload_tokens = (self.request_configs or {}).get(
             "lmcache.max_offload_tokens"
