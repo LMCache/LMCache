@@ -42,6 +42,8 @@ Prerequisites
 
 - Kubernetes 1.20+
 - ``kubectl`` configured to access your cluster
+- Helm 3.17+ for chart installation or deploying from source
+- `cert-manager <https://cert-manager.io/docs/installation/>`_ installed and ready
 - NVIDIA GPU Operator on NVIDIA clusters (default). Classic installs
   register RuntimeClass ``nvidia``. CDI+NRI installs often have no
   RuntimeClass objects; see :ref:`mp-operator-nri-cdi` below.
@@ -51,7 +53,16 @@ Prerequisites
 Installing the Operator
 -----------------------
 
-**Option A: One-line install from release (recommended)**
+**Option A: Helm chart (recommended)**
+
+.. code-block:: bash
+
+    helm upgrade --install lmcache-operator \
+      oci://registry-1.docker.io/lmcache/lmcache-operator-chart \
+      --version "<chart-version>" \
+      --namespace lmcache-operator-system --create-namespace --wait
+
+**Option B: One-line install from release**
 
 .. code-block:: bash
 
@@ -61,7 +72,7 @@ Installing the Operator
     # Or nightly build from the dev branch
     kubectl apply -f https://github.com/LMCache/LMCache/releases/download/operator-nightly-latest/install.yaml
 
-**Option B: Build from source**
+**Option C: Build from source**
 
 .. code-block:: bash
 

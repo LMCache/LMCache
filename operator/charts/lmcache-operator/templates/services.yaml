@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "webhook-service") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: 443
+      protocol: TCP
+      targetPort: 9443
+  selector:
+    {{- include "lmcache-operator.selectorLabels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lmcache-operator.resourceName" (dict "root" . "suffix" "controller-manager-metrics-service") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+spec:
+  ports:
+    - name: https
+      port: 8443
+      protocol: TCP
+      targetPort: 8443
+  selector:
+    {{- include "lmcache-operator.selectorLabels" . | nindent 4 }}

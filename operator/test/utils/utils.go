@@ -34,7 +34,7 @@ const (
 	// certManagerDefaultVersion is the cert-manager release installed on the
 	// target cluster when none is already present. cert-manager is a hard
 	// prerequisite for the operator's mutating admission webhook: it mints the
-	// serving certificate (config/certmanager) and injects the CA bundle into
+	// serving certificate (charts/lmcache-operator) and injects the CA bundle into
 	// the MutatingWebhookConfiguration. Override with CERT_MANAGER_VERSION.
 	certManagerDefaultVersion = "v1.16.3"
 	// certManagerManifestURLTmpl is the upstream static install manifest,

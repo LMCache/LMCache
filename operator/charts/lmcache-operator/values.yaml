@@ -1,0 +1,24 @@
+# Install one operator release per cluster. All namespaces are watched.
+image:
+  repository: lmcache/lmcache-operator
+  # Defaults to Chart.appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+imagePullSecrets: []
+podAnnotations: {}
+# Additional Pod labels; built-in chart labels are reserved.
+podLabels: {}
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
