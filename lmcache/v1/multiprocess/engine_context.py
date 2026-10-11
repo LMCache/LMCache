@@ -216,8 +216,10 @@ class MPCacheServerContext:
         self._hash_algorithm = hash_algorithm
         self._session_ttl_seconds = session_ttl_seconds
         self._chunk_size_lock = threading.Lock()
+        self._chunk_size_selected = False
         self._chunk_size_finalized = False
         self._chunk_size_bind_listeners: list[Callable[[int], None]] = []
+        self._next_chunk_size_bind_listener = 0
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
 
@@ -249,7 +251,8 @@ class MPCacheServerContext:
     def finalize_chunk_size(self) -> int:
         """Return the current chunk size and prevent future renegotiation."""
         with self._chunk_size_lock:
-            self._chunk_size_finalized = True
+            self._chunk_size_selected = True
+            self._finalize_chunk_size_locked()
             return self._chunk_size
 
     @property
@@ -279,11 +282,10 @@ class MPCacheServerContext:
                 f"required_chunk_alignment must be positive, got {required_alignment}"
             )
         with self._chunk_size_lock:
-            if self._chunk_size % required_alignment == 0:
-                self._chunk_size_finalized = True
-                return self._chunk_size
-
-            if self._chunk_size_finalized:
+            if self._chunk_size_selected:
+                if self._chunk_size % required_alignment == 0:
+                    self._finalize_chunk_size_locked()
+                    return self._chunk_size
                 raise ValueError(
                     f"LMCache chunk size {self._chunk_size} must be a multiple "
                     f"of required chunk alignment {required_alignment}"
@@ -292,14 +294,15 @@ class MPCacheServerContext:
             resolved = _round_up_to_multiple(
                 self._configured_chunk_size, required_alignment
             )
-            if self._session_manager.active_count():
-                raise ValueError(
-                    "Cannot negotiate LMCache chunk size after sessions have started"
-                )
-            self._bind_chunk_size_locked(resolved)
-            self._chunk_size_finalized = True
-            for listener in list(self._chunk_size_bind_listeners):
-                listener(resolved)
+            if resolved != self._chunk_size:
+                if self._session_manager.active_count():
+                    raise ValueError(
+                        "Cannot negotiate LMCache chunk size after sessions "
+                        "have started"
+                    )
+                self._bind_chunk_size_locked(resolved)
+            self._chunk_size_selected = True
+            self._finalize_chunk_size_locked()
             if resolved != self._configured_chunk_size:
                 logger.info(
                     "Negotiated LMCache MP chunk size to %d "
@@ -309,6 +312,22 @@ class MPCacheServerContext:
                     required_alignment,
                 )
             return resolved
+
+    def _finalize_chunk_size_locked(self) -> None:
+        """Notify dependents, then commit the current size as immutable.
+
+        A listener may perform a remote update and fail transiently. Keep the
+        size unfinalized until every listener succeeds so the next negotiation
+        retries the notification instead of returning a false success.
+        """
+        if self._chunk_size_finalized:
+            return
+        listeners = list(self._chunk_size_bind_listeners)
+        while self._next_chunk_size_bind_listener < len(listeners):
+            listener = listeners[self._next_chunk_size_bind_listener]
+            listener(self._chunk_size)
+            self._next_chunk_size_bind_listener += 1
+        self._chunk_size_finalized = True
 
     def add_chunk_size_bind_listener(self, listener: Callable[[int], None]) -> None:
         """Register a callback for chunk-size changes during negotiation."""

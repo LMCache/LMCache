@@ -167,6 +167,46 @@ def test_chunk_size_bind_listener_runs_after_resize() -> None:
         listener.assert_called_once_with(640)
 
 
+def test_chunk_size_bind_listener_failure_is_retried() -> None:
+    with (
+        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
+        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_mgr,
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
+    ):
+        session_mgr.return_value.active_count.return_value = 0
+        ctx = _context(chunk_size=256)
+        completed_listener = MagicMock()
+        retried_listener = MagicMock(side_effect=[RuntimeError("transient"), None])
+        ctx.add_chunk_size_bind_listener(completed_listener)
+        ctx.add_chunk_size_bind_listener(retried_listener)
+
+        with pytest.raises(RuntimeError, match="transient"):
+            ctx.negotiate_chunk_size(640)
+        assert ctx.chunk_size == 640
+
+        assert ctx.negotiate_chunk_size(640) == 640
+        completed_listener.assert_called_once_with(640)
+        assert retried_listener.call_count == 2
+
+
+def test_get_chunk_size_notifies_listener_before_finalizing() -> None:
+    with (
+        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
+        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
+    ):
+        ctx = _context(chunk_size=256)
+        listener = MagicMock()
+        ctx.add_chunk_size_bind_listener(listener)
+
+        assert ctx.finalize_chunk_size() == 256
+        assert ctx.finalize_chunk_size() == 256
+
+        listener.assert_called_once_with(256)
+
+
 def test_server_status_reports_current_chunk_size() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager") as storage_mgr,
