@@ -328,6 +328,10 @@ in `lmcache/cli/corpora/`.
 - **Framework:** `argparse` with subparsers (no new deps). Reuses existing
   `add_*_args()` helpers.
 - **`--url` flag:** Configured per-subcommand (ZMQ vs HTTP semantics vary).
+- **Quota salts:** `quota set/get/delete` and `query coordinator --api quota`
+  percent-encode the literal salt as a URL path component. Shell quoting is
+  sufficient for spaces and reserved URL characters; callers do not pre-encode
+  the value. The HTTP routes do not support salts containing `/`.
 
 ### File layout
 

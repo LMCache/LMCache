@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import quote
 import json
 import sys
 import urllib.error
@@ -317,7 +318,9 @@ APIS: dict[str, CoordinatorApi] = {
     "quota": CoordinatorApi(
         summary="per-salt usage against quota",
         path=lambda a: (
-            f"/quota/{a.cache_salt}" if a.cache_salt is not None else "/quota"
+            f"/quota/{quote(a.cache_salt, safe='')}"
+            if a.cache_salt is not None
+            else "/quota"
         ),
         render=_render_quota,
     ),

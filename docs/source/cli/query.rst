@@ -251,6 +251,10 @@ when no explicit quota exists for that salt — such a salt is governed by
 
 With ``--cache-salt``, one tenant:
 
+Pass the literal salt, using shell quotes when needed (for example,
+``--cache-salt 'tenant?blue'``). The CLI URL-encodes it for the request.
+Salts containing ``/`` are not supported by the HTTP API's path route.
+
 .. code-block:: bash
 
    $ lmcache query coordinator --api quota --cache-salt tenant-a

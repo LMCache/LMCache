@@ -2,6 +2,7 @@
 """``lmcache quota get`` — read the quota and usage for a cache_salt."""
 
 # Standard
+from urllib.parse import quote
 import argparse
 
 # First Party
@@ -39,10 +40,15 @@ class GetCommand(BaseCommand):
         )
 
     def execute(self, args: argparse.Namespace) -> None:
+        """Read the quota and usage for the literal command-line salt.
+
+        Args:
+            args: Parsed salt and server URL.
+        """
         base_url = normalize_url(args.url)
         salt = escape_salt(args.salt)
 
-        result = http_request("GET", f"{base_url}/quota/{salt}")
+        result = http_request("GET", f"{base_url}/quota/{quote(salt, safe='')}")
 
         metrics = self.create_metrics("Quota Info", args)
         metrics.add("cache_salt", "Cache salt", result.get("cache_salt", salt))
