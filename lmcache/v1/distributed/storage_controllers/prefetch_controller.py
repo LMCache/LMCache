@@ -1233,8 +1233,10 @@ class PrefetchController(StorageControllerInterface):
 
         # Step 3.5: a whole-columns request can use a column only if every
         # row reserved; trim to whole columns and release the rest.
+        # Include l1_locked_keys so that rows already in L1 count toward making
+        # a column whole (issue #5581).
         if request.fetching_policy == "full" and num_failed_reservations > 0:
-            merged = l1_reserved_keys.merge()
+            merged = (l1_reserved_keys | l1_locked_keys).merge()
             if len(merged) > 0:
                 kept = Bitmap2D(all_grouped(merged.to_list()))
                 for l1_idx, grid in l1_reserved_keys.items():
