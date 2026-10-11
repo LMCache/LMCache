@@ -131,7 +131,8 @@ class EventManager:
         event_id: str,
     ) -> asyncio.Future:
         """
-        Pop and return the event with the given type and id.
+        Return the done event with the given type and id without removing it.
+        Use pop_event() to consume it.
         """
         with self.lock:
             status_dict = self.events.get(event_type, None)
