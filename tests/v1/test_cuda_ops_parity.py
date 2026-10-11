@@ -220,6 +220,7 @@ _EXCLUDED_FUNCS: set[str] = {
     "execute_direct_copy_transfer",
     "batch_memcpy_supported",
     "direct_copy_format_supported",
+    "fp8_quantize_scaled",
 }
 
 # CUDA-only plan descriptors intentionally remain native-only. Descriptor
