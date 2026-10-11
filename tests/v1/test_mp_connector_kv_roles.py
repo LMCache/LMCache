@@ -44,6 +44,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
+from lmcache.utils import CacheStoreEvent  # noqa: E402
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -560,3 +561,158 @@ def test_multi_connector_child_role_and_completion(
     mock_io.scheduler.end_session.assert_called_once_with("request")
     worker.shutdown()
     scheduler.shutdown()
+
+
+def _kv_event(block_hash: int) -> CacheStoreEvent:
+    """An adapter-level completed-store event, as ``get_kv_events`` returns."""
+    return CacheStoreEvent(
+        block_hashes=[block_hash],
+        parent_block_hash=None,
+        token_ids=[0, 1, 2, 3],
+        lora_id=None,
+        block_size=4,
+        medium="CPU",
+        lora_name=None,
+    )
+
+
+def _stored_hashes(connector: KVConnectorBase_V1) -> list[Any]:
+    """Block hashes of the BlockStored events a scheduler connector publishes."""
+    return [e.block_hashes[0] for e in connector.take_events()]
+
+
+@pytest.fixture
+def kv_events_queue(monkeypatch: pytest.MonkeyPatch) -> list[list[CacheStoreEvent]]:
+    """Per-call results of ``LMCacheMPWorkerAdapter.get_kv_events``."""
+    queue: list[list[CacheStoreEvent]] = []
+    monkeypatch.setattr(
+        adapter_mod.LMCacheMPWorkerAdapter,
+        "get_kv_events",
+        lambda self: queue.pop(0) if queue else [],
+    )
+    return queue
+
+
+def test_kv_events_survive_multi_connector(
+    lazy_offload: bool,
+    mock_io: SimpleNamespace,
+    kv_events_queue: list[list[CacheStoreEvent]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LMCache store events reach a real MultiConnector's take_events (P/D).
+
+    Two steps, so events keep flowing after the first step.
+    """
+    peer = MagicMock()
+    peer.take_events.return_value = []
+    peer.get_kv_connector_kv_cache_events.return_value = None
+    peer.build_connector_worker_meta.return_value = None
+    monkeypatch.setattr(
+        KVConnectorFactory,
+        "get_connector_class",
+        lambda c: LMCacheMPConnector
+        if c.kv_connector == "LMCacheMPConnector"
+        else MagicMock(return_value=peer),
+    )
+    config = _config(
+        KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_producer",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "NixlConnector", "kv_role": "kv_producer"},
+                    {
+                        "kv_connector": "LMCacheMPConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "lmcache.mp.lazy_offload": lazy_offload
+                        },
+                    },
+                ]
+            },
+        )
+    )
+    cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
+    scheduler = MultiConnector(config, KVConnectorRole.SCHEDULER, None)
+    worker = MultiConnector(config, KVConnectorRole.WORKER, None)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+    try:
+        kv_events_queue.extend([[_kv_event(11)], [_kv_event(12)]])
+        for expected in ([11], [12]):
+            # Same calls vLLM's model runner makes after each step.
+            scheduler.update_connector_output(
+                KVConnectorOutput(
+                    kv_cache_events=worker.get_kv_connector_kv_cache_events(),
+                    kv_connector_worker_meta=worker.build_connector_worker_meta(),
+                )
+            )
+            assert _stored_hashes(scheduler) == expected
+        assert _stored_hashes(scheduler) == []
+    finally:
+        worker.shutdown()
+        scheduler.shutdown()
+
+
+def test_kv_events_standalone_use_hook_only(
+    mock_io: SimpleNamespace, kv_events_queue: list[list[CacheStoreEvent]]
+) -> None:
+    """Standalone, events leave only via the vLLM hook, never worker metadata.
+
+    The second queue entry stands in for events that arrive between the hook
+    and ``build_connector_worker_meta`` in one step; they must wait for the
+    next hook call rather than leak into worker metadata.
+    """
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    try:
+        kv_events_queue.extend([[_kv_event(11)], [_kv_event(12)]])
+        for expected in ([11], [12]):
+            # Same calls vLLM's model runner makes after each step.
+            output = KVConnectorOutput(
+                kv_cache_events=worker.get_kv_connector_kv_cache_events(),
+                kv_connector_worker_meta=worker.build_connector_worker_meta(),
+            )
+            assert getattr(output.kv_connector_worker_meta, "kv_events", None) is None
+            scheduler.update_connector_output(output)
+            assert _stored_hashes(scheduler) == expected
+    finally:
+        worker.shutdown()
+        scheduler.shutdown()
+
+
+def test_kv_events_worker_reports_merge_across_ranks(
+    mock_io: SimpleNamespace, kv_events_queue: list[list[CacheStoreEvent]]
+) -> None:
+    """TP ranks' worker-metadata events merge and publish common events once.
+
+    The workers never see the vLLM hook here, as under MultiConnector, so their
+    events ride in worker metadata. Only event 11 is reported by both ranks, so
+    only it is published, exactly once.
+    """
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    cast(Any, config).kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    try:
+        kv_events_queue.extend([[_kv_event(11), _kv_event(12)], [_kv_event(11)]])
+        rank0 = worker.build_connector_worker_meta()
+        rank1 = worker.build_connector_worker_meta()
+        assert rank0 is not None and rank1 is not None
+        # What vLLM's KVOutputAggregator does with the ranks' worker metadata.
+        merged = rank0.aggregate(rank1)
+        assert merged.kv_events is not None
+        assert merged.kv_events.get_number_of_workers() == 2
+        scheduler.update_connector_output(
+            KVConnectorOutput(kv_connector_worker_meta=merged)
+        )
+        assert _stored_hashes(scheduler) == [11]
+        assert _stored_hashes(scheduler) == []
+    finally:
+        worker.shutdown()
+        scheduler.shutdown()

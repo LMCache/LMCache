@@ -758,6 +758,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
                 enable_kv_events=self._enable_kv_events,
             )
+            # Whether vLLM called get_kv_connector_kv_cache_events this step; it
+            # never does for a MultiConnector child (see build_connector_worker_meta).
+            self._kv_events_hook_called = False
             if self.transfer_intermediate_tensors:
                 # First Party
                 from lmcache.integration.vllm.experimental import (
@@ -1085,15 +1088,38 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             ),
         )
 
-    def build_connector_worker_meta(self):
+    def build_connector_worker_meta(self) -> LMCacheMPWorkerMetadata | None:
+        """Build this step's worker-to-scheduler metadata.
+
+        Carries lazy-offload store results, and the step's KV events when vLLM
+        did not call ``get_kv_connector_kv_cache_events`` first (e.g. as a
+        ``MultiConnector`` child, which never forwards that hook).
+
+        Returns:
+            The worker metadata, or None when there is nothing to report.
+        """
+        # TODO: Remove this KV event fallback (and LMCacheMPWorkerMetadata.kv_events)
+        # once upstream vLLM forwards get_kv_connector_kv_cache_events through
+        # MultiConnector and our minimum supported vLLM includes it.
+        kv_events = (
+            None
+            if self._kv_events_hook_called
+            else self.get_kv_connector_kv_cache_events()
+        )
+        self._kv_events_hook_called = False
         if not self.lazy_offload:
-            return None
+            if kv_events is None:
+                return None
+            return LMCacheMPWorkerMetadata(
+                completed_store_requests={}, kv_events=kv_events
+            )
         completed_store_requests = self.worker_adapter.get_completed_store_requests()
         failed_store_requests = self.worker_adapter.get_failed_store_requests()
-        if completed_store_requests or failed_store_requests:
+        if completed_store_requests or failed_store_requests or kv_events:
             return LMCacheMPWorkerMetadata(
                 completed_store_requests=completed_store_requests or {},
                 failed_store_requests=failed_store_requests or set(),
+                kv_events=kv_events,
             )
         else:
             return None
@@ -1127,6 +1153,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             A vLLM KV event container with completed LMCache store events, or
             None when disabled or when no store completed.
         """
+        self._kv_events_hook_called = True
         if not self._enable_kv_events:
             return None
         events = self.worker_adapter.get_kv_events()
@@ -1485,7 +1512,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
-        kv_cache_events = connector_output.kv_cache_events
+        # Worker metadata carries the events only when the hook is not called.
+        kv_cache_events = connector_output.kv_cache_events or getattr(
+            connector_output.kv_connector_worker_meta, "kv_events", None
+        )
         if kv_cache_events and isinstance(kv_cache_events, LMCacheMPKVEvents):
             if self._kv_cache_events is None:
                 self._kv_cache_events = kv_cache_events
