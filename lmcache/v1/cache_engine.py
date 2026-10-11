@@ -1617,6 +1617,17 @@ class LMCacheEngine:
         # Clear all caches if tokens is None
         if tokens is None or len(tokens) == 0:
             num_cleared = self.storage_manager.clear(locations)
+            # Also clean up lookup_pins so stale keys don't unpin replacement objects
+            # (issue #5629: delayed cleanup can unpin a replacement after targeted clear)
+            if self.lookup_pins:
+                # Remove any lookup_pins entries for keys that were just cleared
+                keys_to_remove = set()
+                for k in self.token_database.process_tokens(
+                    tokens=None, request_configs=request_configs
+                ):
+                    keys_to_remove.add(str(k))
+                for k in keys_to_remove:
+                    self.lookup_pins.pop(k, None)
             return num_cleared
 
         num_removed = 0
@@ -1627,6 +1638,9 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
             removed = self.storage_manager.remove(key, locations)
             num_removed += removed
+            # Also clean up lookup_pins so stale keys don't unpin replacement objects
+            # (issue #5629: delayed cleanup can unpin a replacement after targeted clear)
+            self.lookup_pins.pop(str(key), None)
         return num_removed
 
     @_lmcache_nvtx_annotate
