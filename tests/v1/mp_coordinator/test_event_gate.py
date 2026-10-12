@@ -11,7 +11,10 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
-from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate, IngestResult
+from lmcache.v1.mp_coordinator.ingest.event_gate import (
+    EventGate,
+    IngestResult,
+)
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
@@ -44,6 +47,7 @@ def _batch(
     keys: list[ObjectKey] | None = None,
     size_bytes: int = 1024,
     shared: bool = False,
+    dropped_events: int = 0,
 ) -> CacheEventBatch:
     return CacheEventBatch(
         instance_id=instance_id,
@@ -57,6 +61,7 @@ def _batch(
             for k in (keys or [_key(0xAA)])
         ],
         shared=shared,
+        dropped_events=dropped_events,
     )
 
 
@@ -65,6 +70,11 @@ def _gate(*consumers: _RecordingConsumer | KeyDirectory) -> EventGate:
     for consumer in consumers:
         broadcaster.register_consumer(consumer)
     return EventGate(broadcaster, QuiesceLock())
+
+
+def _loss(gate: EventGate, instance_id: str = "node-a") -> tuple[int, int, bool]:
+    stream = gate.stats().streams[instance_id]
+    return stream.missing_batches, stream.events_dropped, stream.gap_detected
 
 
 # -- Admission ---------------------------------------------------------------
@@ -164,7 +174,7 @@ def test_seq_gap_sets_the_gap_flag_but_admits():
 
     assert gate.ingest(_batch(seq=5)) == IngestResult.ADMITTED
 
-    stream = gate.stats()["node-a"]
+    stream = gate.stats().streams["node-a"]
     assert stream.gap_detected is True
     assert stream.last_seq == 5
     assert len(consumer.batches) == 2
@@ -175,7 +185,7 @@ def test_contiguous_seqs_do_not_flag_gap():
     gate.ingest(_batch(seq=1))
     gate.ingest(_batch(seq=2))
 
-    assert gate.stats()["node-a"].gap_detected is False
+    assert gate.stats().streams["node-a"].gap_detected is False
 
 
 def test_each_instance_has_its_own_cursor():
@@ -183,7 +193,7 @@ def test_each_instance_has_its_own_cursor():
     gate.ingest(_batch(instance_id="node-a", seq=1))
 
     assert gate.ingest(_batch(instance_id="node-b", seq=1)) == IngestResult.ADMITTED
-    assert set(gate.stats()) == {"node-a", "node-b"}
+    assert set(gate.stats().streams) == {"node-a", "node-b"}
 
 
 # -- Incarnation fencing -----------------------------------------------------
@@ -197,7 +207,7 @@ def test_new_incarnation_fences_consumers_before_admitting():
     assert gate.ingest(_batch(incarnation=2, seq=1)) == IngestResult.ADMITTED
 
     assert consumer.fenced == ["node-a"]
-    stream = gate.stats()["node-a"]
+    stream = gate.stats().streams["node-a"]
     assert stream.incarnation == 2
     assert stream.last_seq == 1
 
@@ -259,7 +269,7 @@ def test_drop_instance_fences_consumers_and_forgets_the_cursor():
     gate.drop_instance("node-a")
 
     assert consumer.fenced == ["node-a"]
-    assert gate.stats() == {}
+    assert gate.stats().streams == {}
     # A reconnect starts fresh with any incarnation.
     assert gate.ingest(_batch(incarnation=1, seq=1)) == IngestResult.ADMITTED
 
@@ -268,11 +278,136 @@ def test_drop_unknown_instance_is_noop_for_the_cursor():
     gate = _gate()
     gate.drop_instance("ghost")
 
-    assert gate.stats() == {}
+    assert gate.stats().streams == {}
 
 
 # -- Stats -------------------------------------------------------------------
 
 
 def test_stats_are_empty_before_any_event():
-    assert _gate().stats() == {}
+    assert _gate().stats().streams == {}
+
+
+# -- Loss accounting ---------------------------------------------------------
+
+
+def test_every_skipped_seq_counts_while_the_flag_stays_set():
+    """The flag says the slice is incomplete; the count says how much."""
+    gate = _gate()
+    gate.ingest(_batch(seq=1))
+    gate.ingest(_batch(seq=4))  # 2..3 missing
+    gate.ingest(_batch(seq=5))
+    gate.ingest(_batch(seq=7))  # 6 missing
+
+    assert _loss(gate) == (3, 0, True)
+
+
+def test_first_batch_of_an_untracked_stream_counts_no_missing_batches():
+    """Earlier batches were sent before the gate was listening: the slice
+    is incomplete, but nothing was lost in transit."""
+    gate = _gate()
+    gate.ingest(_batch(seq=50))
+
+    assert _loss(gate) == (0, 0, True)
+
+
+def test_a_restarted_emitter_that_skips_its_first_seqs_counts_them():
+    gate = _gate()
+    gate.ingest(_batch(incarnation=1, seq=1))
+    gate.ingest(_batch(incarnation=2, seq=3))  # 1..2 of the new run missing
+
+    assert _loss(gate) == (2, 0, True)
+
+
+def test_dropped_events_count_the_increases_of_the_reported_total():
+    gate = _gate()
+    gate.ingest(_batch(seq=1))
+    gate.ingest(_batch(seq=2, dropped_events=3))
+    gate.ingest(_batch(seq=3, dropped_events=3))
+    gate.ingest(_batch(seq=4, dropped_events=10))
+
+    assert _loss(gate) == (0, 10, True)
+
+
+def test_a_stream_joined_midway_only_remembers_its_first_drop_count():
+    gate = _gate()
+    gate.ingest(_batch(seq=7, dropped_events=40))
+    gate.ingest(_batch(seq=8, dropped_events=45))
+
+    assert gate.stats().streams["node-a"].events_dropped == 5
+
+
+def test_a_stream_seen_from_its_first_batch_counts_its_first_report():
+    gate = _gate()
+    gate.ingest(_batch(seq=1, dropped_events=4))
+
+    assert _loss(gate) == (0, 4, True)
+
+
+def test_a_restart_counts_the_new_run_s_drops_from_zero():
+    gate = _gate()
+    gate.ingest(_batch(incarnation=1, seq=1, dropped_events=9))
+    gate.ingest(_batch(incarnation=2, seq=1, dropped_events=2))
+
+    assert gate.stats().streams["node-a"].events_dropped == 2
+
+
+def test_rejected_batches_do_not_change_the_last_drop_count():
+    gate = _gate()
+    gate.ingest(_batch(incarnation=2, seq=1))
+    gate.ingest(_batch(incarnation=2, seq=1, dropped_events=50))  # duplicate
+    gate.ingest(_batch(incarnation=1, seq=9, dropped_events=70))  # stale
+    gate.ingest(_batch(incarnation=2, seq=2, dropped_events=5))
+
+    assert gate.stats().streams["node-a"].events_dropped == 5
+
+
+def test_loss_counts_start_over_when_the_emitter_leaves():
+    gate = _gate()
+    gate.ingest(_batch(seq=1))
+    gate.ingest(_batch(seq=3, dropped_events=2))
+    gate.drop_instance("node-a")
+    gate.ingest(_batch(seq=4))
+
+    assert _loss(gate) == (0, 0, True)
+
+
+def test_totals_cover_the_whole_fleet_and_outlive_departures():
+    gate = _gate()
+    gate.ingest(_batch(instance_id="node-a", seq=1))
+    gate.ingest(_batch(instance_id="node-a", seq=3, dropped_events=4))
+    gate.ingest(_batch(instance_id="node-a", seq=3))  # duplicate
+    gate.ingest(_batch(instance_id="node-b", incarnation=2, seq=1))
+    gate.ingest(_batch(instance_id="node-b", incarnation=1, seq=2))  # stale
+    gate.ingest(_batch(instance_id="node-b", incarnation=2, seq=4))
+    gate.drop_instance("node-a")
+
+    stats = gate.stats()
+    assert (
+        stats.batches_applied,
+        stats.batches_duplicate,
+        stats.batches_stale,
+        stats.batches_missing,
+        stats.events_dropped,
+    ) == (4, 1, 1, 3, 4)
+
+
+def test_restored_gate_measures_drops_against_the_checkpointed_last_count():
+    live = _gate()
+    live.ingest(_batch(seq=1, dropped_events=6))
+    restored = _gate()
+    restored.restore(live.capture())
+
+    restored.ingest(_batch(seq=2, dropped_events=8))
+
+    assert _loss(restored) == (0, 2, True)
+
+
+def test_a_cursor_checkpointed_without_a_last_drop_count_restores_unknown():
+    restored = _gate()
+    restored.restore({"cursors": {"node-a": (1, 4, False)}})
+
+    restored.ingest(_batch(seq=5, dropped_events=30))
+    restored.ingest(_batch(seq=6, dropped_events=31))
+
+    assert _loss(restored) == (0, 1, True)
