@@ -11,6 +11,7 @@ gather/scatter round-trip for that layout.
 """
 
 # Third Party
+import pytest
 import torch
 
 # First Party
@@ -64,6 +65,10 @@ def test_accessors():
     assert not lmcache_native.is_mla(fmt)
 
 
+@pytest.mark.skipif(
+    torch_device_type == "rbln",
+    reason="RBLN refuses fused K/V layouts, which vLLM-RBLN never allocates",
+)
 def test_mp_gather_scatter_roundtrip():
     # Paged buffers live on the active device: the MP gather/scatter path
     # dispatches to the device kernel on GPU hosts and the fallback on CPU.
