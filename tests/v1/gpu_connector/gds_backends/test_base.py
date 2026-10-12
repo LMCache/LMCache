@@ -106,6 +106,7 @@ def extra_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[N
         ("12.9", None, "hipfile", "ROCm"),
         (None, None, "ugds", "ROCm or CUDA"),
         (None, None, "phx", "ROCm or CUDA"),
+        (None, "6.3", "opends", "CUDA"),
         (None, None, "auto", "no default GDS backend"),
     ],
 )

@@ -9,6 +9,9 @@ import os
 # First Party
 from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend, GDSHandle
 
+# Name of the slab file inside the GDS L1 directory.
+SLAB_FILE_NAME = "lmcache_gds_slab.bin"
+
 
 class FDGDSBackend(GDSBackend):
     """Share native descriptor registration with FDGDSHandle."""
@@ -36,7 +39,7 @@ class FileGDSBackend(FDGDSBackend):
         failures propagate after closing any descriptor opened by this method.
         """
         os.makedirs(location, exist_ok=True)
-        path = os.path.join(location, "lmcache_gds_slab.bin")
+        path = os.path.join(location, SLAB_FILE_NAME)
         fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_TRUNC, 0o644)
         try:
             os.posix_fallocate(fd, 0, size)
