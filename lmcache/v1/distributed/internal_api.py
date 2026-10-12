@@ -294,6 +294,40 @@ class L1ManagerInterface(Protocol):
         """Reserve a write buffer per key for the writer ``tag``."""
         ...
 
+    def pin_write_buffers(
+        self, keys: list[ObjectKey], tag: str = ""
+    ) -> dict[ObjectKey, L1Error]:
+        """Keep writer-owned staging buffers alive until asynchronous I/O ends.
+
+        Each successful call acquires one non-expiring pin per key, independent
+        of its write TTL. Pins prevent admission, discard and normal eviction.
+
+        Args:
+            keys: Object keys whose staging buffers will be borrowed.
+            tag: The writer tag used to reserve these buffers.
+
+        Returns:
+            SUCCESS per pinned key, or KEY_NOT_EXIST when this writer has no
+            staging buffer. Other writers and resident objects are unaffected.
+        """
+        ...
+
+    def unpin_write_buffers(
+        self, keys: list[ObjectKey], tag: str = ""
+    ) -> dict[ObjectKey, L1Error]:
+        """Release one completed I/O borrow per writer-owned staging buffer.
+
+        Args:
+            keys: Object keys whose I/O has completed.
+            tag: The writer tag passed to pin_write_buffers.
+
+        Returns:
+            SUCCESS per released pin, KEY_NOT_EXIST after force deletion, or
+            KEY_IN_WRONG_STATE when no pin is held. Buffers remain staged for
+            admission or explicit discard.
+        """
+        ...
+
     def finish_write(
         self, keys: list[ObjectKey], tag: str = ""
     ) -> dict[ObjectKey, L1Error]:
@@ -309,7 +343,7 @@ class L1ManagerInterface(Protocol):
     def finish_write_and_delete(
         self, keys: list[ObjectKey], tag: str = ""
     ) -> dict[ObjectKey, L1Error]:
-        """Discard ``tag``'s write reservations without committing them."""
+        """Discard ``tag``'s reservations, including expired ones, after I/O ends."""
         ...
 
     def delete(
