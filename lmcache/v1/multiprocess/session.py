@@ -7,7 +7,7 @@ in the multiprocess cache server.
 # Standard
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Optional, overload
+from typing import TYPE_CHECKING, Any, Optional, overload
 import threading
 import time
 
@@ -24,7 +24,29 @@ from lmcache.v1.periodic_thread import (
     create_periodic_thread,
 )
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.lmcache_native import Bitmap
+
 logger = init_logger(__name__)
+
+#: ``(object_group_id, kv_rank) -> (l1_hit_cells, l2_hit_cells)`` for every
+#: key row of a finished prefetch.  Recorded by the lookup so ``retrieve()``
+#: can attribute the keys it delivers to the tier that served them.
+PrefetchTierCells = dict[tuple[int, int], tuple["Bitmap", "Bitmap"]]
+
+
+@dataclass(frozen=True)
+class PrefetchTierSplit:
+    """Which tier held each hit cell of one lookup, per key row.
+
+    The lookup prefetches only ``[start_chunk, end)`` -- chunks below
+    ``start_chunk`` are engine-covered and never looked up -- so bit ``j`` of
+    every row in ``rows`` is chunk ``start_chunk + j``.
+    """
+
+    start_chunk: int
+    rows: PrefetchTierCells
 
 
 @dataclass
@@ -47,6 +69,7 @@ class Session:
     prefetch_locked_gids: tuple = ()
     prefetch_group_windows: tuple[int, ...] = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
+    _prefetch_tier_split: Optional[PrefetchTierSplit] = field(default=None, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
     _lookup_generation: int = field(default=0, repr=False)
     _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
@@ -157,6 +180,7 @@ class Session:
             self._lookup_generation += 1
             self._failed_retrieve_releases.clear()
             self._prefetch_owners.clear()
+            self._prefetch_tier_split = None
 
     def record_prefetch_result(
         self,
@@ -164,16 +188,42 @@ class Session:
         locked_gids: tuple[int, ...],
         l1_owners: dict[ObjectKey, int] | None = None,
     ) -> None:
-        """Record the lock set acquired by the current lookup."""
+        """Record the lock set acquired by the current lookup.
+
+        A new lock set invalidates any tier split recorded for the previous
+        one; ``record_prefetch_tier_split`` re-records it afterwards.
+        """
         with self._lock:
             self.prefetch_hit_chunks = hit_chunks
             self.prefetch_locked_gids = locked_gids
             self._prefetch_owners = dict(l1_owners) if l1_owners is not None else {}
+            self._prefetch_tier_split = None
 
     def get_prefetch_owners(self) -> dict[ObjectKey, int]:
         """Snapshot the L1 owners whose read locks this session's lookup retained."""
         with self._lock:
             return self._prefetch_owners.copy()
+
+    def record_prefetch_tier_split(self, split: PrefetchTierSplit) -> None:
+        """Record which tier held each hit cell of the current lookup.
+
+        Args:
+            split: Per-row ``(l1_hit_cells, l2_hit_cells)`` keyed by
+                ``(object_group_id, kv_rank)``, with the chunk its row bits
+                start at.
+        """
+        with self._lock:
+            self._prefetch_tier_split = PrefetchTierSplit(
+                split.start_chunk, dict(split.rows)
+            )
+
+    def get_prefetch_tier_split(self) -> Optional[PrefetchTierSplit]:
+        """Snapshot the per-row tier split recorded by the current lookup."""
+        with self._lock:
+            split = self._prefetch_tier_split
+            if split is None:
+                return None
+            return PrefetchTierSplit(split.start_chunk, dict(split.rows))
 
     def prepare_failed_retrieve_release(
         self,

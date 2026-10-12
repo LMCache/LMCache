@@ -16,7 +16,12 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
+from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
+    ObjectKey,
+    PrefetchHandle,
+    PrefetchResult,
+)
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
@@ -24,14 +29,14 @@ from lmcache.v1.multiprocess.modules.lookup import LookupModule
 CHUNK_SIZE = 256
 
 
-def _lookup_key(world_size: int) -> IPCCacheServerKey:
+def _lookup_key(world_size: int, start: int = 0) -> IPCCacheServerKey:
     """A lookup-side IPC key (worker_id None -> expand over all workers)."""
     return IPCCacheServerKey(
         model_name="m",
         world_size=world_size,
         worker_id=None,
         token_ids=(0,),
-        start=0,
+        start=start,
         end=0,
         request_id="req-1",
         cache_salt="salt",
@@ -61,7 +66,7 @@ def _result(l1_rows: list[str], l2_rows: list[str]) -> PrefetchResult:
     )
 
 
-def _end_metadata(
+def _drive_lookup(
     chunk_hashes: list[bytes],
     windows: list[int] | None = None,
     world_size: int = 1,
@@ -69,8 +74,9 @@ def _end_metadata(
     l2_rows: list[str] | None = None,
     layout_found: bool = True,
     group_layouts_found: bool = True,
-) -> dict:
-    """Drive a full lookup/poll cycle and return the END event's metadata.
+    start_chunk: int = 0,
+) -> MagicMock:
+    """Drive a full lookup/poll cycle against a mocked server context.
 
     Args:
         chunk_hashes: Chunk hashes the token hasher reports; empty triggers the
@@ -85,13 +91,15 @@ def _end_metadata(
         layout_found: False triggers the ``no_gpu_context`` early exit.
         group_layouts_found: False triggers the ``no_group_layout_descs``
             early exit.
+        start_chunk: Engine-covered chunks below the lookup's ``start``; the
+            submitted rows cover ``chunk_hashes[start_chunk:]`` only.
 
     Returns:
-        The metadata dict of the published ``MP_LOOKUP_PREFETCH_END`` event.
+        The mocked server context after the cycle ran.
     """
     windows = windows if windows is not None else [-1]
     num_rows = len(windows) * world_size
-    miss_rows = ["0" * len(chunk_hashes)] * num_rows
+    miss_rows = ["0" * (len(chunk_hashes) - start_chunk)] * num_rows
     l1_rows = l1_rows if l1_rows is not None else miss_rows
     l2_rows = l2_rows if l2_rows is not None else miss_rows
 
@@ -121,9 +129,14 @@ def _end_metadata(
     ctx.storage_manager.query_prefetch_status.return_value = _result(l1_rows, l2_rows)
 
     module = LookupModule(ctx)
-    module.lookup(_lookup_key(world_size), tp_size=1)
+    module.lookup(_lookup_key(world_size, start=start_chunk * CHUNK_SIZE), tp_size=1)
     module.query_prefetch_status("req-1")
+    return ctx
 
+
+def _end_metadata(**kwargs) -> dict:
+    """Drive a full lookup/poll cycle and return the END event's metadata."""
+    ctx = _drive_lookup(**kwargs)
     for call in ctx.event_bus.publish.call_args_list:
         event = call.args[0]
         if event.event_type is EventType.MP_LOOKUP_PREFETCH_END:
@@ -226,3 +239,62 @@ def test_early_exit_reason(kwargs, reason):
     assert meta["hit_tokens"] == 0
     assert meta["l1_hit_keys"] == 0
     assert meta["l2_hit_keys"] == 0
+
+
+def test_tier_cells_recorded_on_session_per_row():
+    """The finished result's per-row L1/L2 cells reach the session keyed by
+    ``(object_group_id, kv_rank)``, for ``retrieve()`` to attribute the keys it
+    delivers."""
+    ctx = _drive_lookup(
+        chunk_hashes=[b"c0", b"c1", b"c2"],
+        windows=[-1, 1],
+        world_size=2,
+        l1_rows=["111", "111", "000", "000"],
+        l2_rows=["000", "000", "001", "001"],
+    )
+    session = ctx.session_manager.get_or_create.return_value
+    session.record_prefetch_tier_split.assert_called_once()
+    (split,) = session.record_prefetch_tier_split.call_args.args
+    assert split.start_chunk == 0
+    cells = split.rows
+
+    ranks = [
+        ObjectKey.ComputeKVRank(
+            world_size=2, global_rank=w, local_world_size=2, local_rank=w
+        )
+        for w in range(2)
+    ]
+    assert set(cells) == {(g, r) for g in range(2) for r in ranks}
+    for rank in ranks:
+        l1_row, l2_row = cells[(0, rank)]
+        assert (l1_row.popcount(), l2_row.popcount()) == (3, 0)
+        l1_row, l2_row = cells[(1, rank)]
+        assert (l1_row.popcount(), l2_row.popcount()) == (0, 1)
+
+
+def test_tier_split_starts_at_the_looked_up_range():
+    """With an engine-covered prefix the lookup submits rows for
+    ``[start_chunk, end)`` only; the recorded split says where their bits
+    start so ``retrieve()`` can index them by absolute chunk."""
+    ctx = _drive_lookup(
+        chunk_hashes=[b"c0", b"c1", b"c2"],
+        start_chunk=1,
+        l1_rows=["10"],
+        l2_rows=["01"],
+    )
+    session = ctx.session_manager.get_or_create.return_value
+    (split,) = session.record_prefetch_tier_split.call_args.args
+    assert split.start_chunk == 1
+    rank = ObjectKey.ComputeKVRank(
+        world_size=1, global_rank=0, local_world_size=1, local_rank=0
+    )
+    l1_row, l2_row = split.rows[(0, rank)]
+    assert (l1_row.size(), l1_row.popcount(), l2_row.popcount()) == (2, 1, 1)
+
+
+def test_tier_cells_not_recorded_on_early_exit():
+    """An early-exit lookup submits no rows, so nothing is recorded and a later
+    retrieve reports its keys as unattributed."""
+    ctx = _drive_lookup(chunk_hashes=[])
+    session = ctx.session_manager.get_or_create.return_value
+    session.record_prefetch_tier_split.assert_not_called()

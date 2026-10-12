@@ -250,6 +250,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         null_block_id=0,
         storage_manager=storage_manager,
         get_read_owners=lambda request_id: None,
+        session_manager=SimpleNamespace(get=lambda request_id: None),
         event_bus=SimpleNamespace(
             publish=lambda event: None,
             publish_on_stream=lambda stream, event: None,

@@ -2,6 +2,7 @@
 """Tests for Session and SessionManager."""
 
 # Standard
+from unittest.mock import MagicMock
 import threading
 import time
 
@@ -10,7 +11,7 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.session import Session, SessionManager
+from lmcache.v1.multiprocess.session import PrefetchTierSplit, Session, SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
@@ -357,3 +358,50 @@ class TestSessionManagerRemoveReturnsSession:
         """remove() on a non-existent request_id should return None."""
         mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         assert mgr.remove("no-such-id") is None
+
+
+def _lookup_key() -> IPCCacheServerKey:
+    return IPCCacheServerKey(
+        model_name="m",
+        world_size=1,
+        worker_id=None,
+        token_ids=(1, 2, 3, 4),
+        start=0,
+        end=4,
+        request_id="req-1",
+        cache_salt="",
+        num_kv_readers=1,
+    )
+
+
+class TestSessionPrefetchTierSplit:
+    """The per-row tier split a lookup records for ``retrieve()`` attribution."""
+
+    @staticmethod
+    def _split(start_chunk: int = 0) -> PrefetchTierSplit:
+        return PrefetchTierSplit(
+            start_chunk=start_chunk,
+            rows={(0, 0): (MagicMock(name="l1"), MagicMock(name="l2"))},
+        )
+
+    def test_none_by_default(self, session: Session) -> None:
+        assert session.get_prefetch_tier_split() is None
+
+    def test_record_and_snapshot_is_a_copy(self, session: Session) -> None:
+        split = self._split(start_chunk=2)
+        session.record_prefetch_tier_split(split)
+        snapshot = session.get_prefetch_tier_split()
+        assert snapshot == split
+        assert snapshot.start_chunk == 2
+        snapshot.rows.clear()
+        assert session.get_prefetch_tier_split() == split
+
+    def test_begin_lookup_clears(self, session: Session) -> None:
+        session.record_prefetch_tier_split(self._split())
+        session.begin_lookup(_lookup_key(), (-1,))
+        assert session.get_prefetch_tier_split() is None
+
+    def test_new_prefetch_result_clears(self, session: Session) -> None:
+        session.record_prefetch_tier_split(self._split())
+        session.record_prefetch_result(3, (0,))
+        assert session.get_prefetch_tier_split() is None

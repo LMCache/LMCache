@@ -45,6 +45,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.session import PrefetchTierSplit
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
@@ -55,6 +56,63 @@ from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
+
+
+def _count_set_bits_in_range(bitmap: lmcache_native.Bitmap, lo: int, hi: int) -> int:
+    """Return the number of set bits of ``bitmap`` at indices in ``[lo, hi)``."""
+    size = bitmap.size()
+    lo = max(lo, 0)
+    hi = min(hi, size)
+    if lo >= hi:
+        return 0
+    window = lmcache_native.Bitmap(size, hi)
+    if lo > 0:
+        window = window & ~lmcache_native.Bitmap(size, lo)
+    return (bitmap & window).popcount()
+
+
+def attribute_delivered_keys(
+    tier_rows: tuple[lmcache_native.Bitmap, lmcache_native.Bitmap] | None,
+    first_chunk: int,
+    num_keys: int,
+) -> tuple[int, int, int]:
+    """Split the keys a retrieve delivered for one key row by serving tier.
+
+    Args:
+        tier_rows: The row's ``(l1_hit_cells, l2_hit_cells)`` as recorded by
+            the request's lookup, or ``None`` when the session holds no
+            record for the row.
+        first_chunk: Index of the first delivered key in the rows' bit space,
+            i.e. its chunk index minus the lookup's ``start_chunk``.  Negative
+            when the retrieve starts below the looked-up range; those keys
+            have no record and count as unattributed.
+        num_keys: Number of delivered keys, one per consecutive chunk.
+
+    Returns:
+        ``(l1, l2, unattributed)``: keys L1 already held when the lookup ran,
+        keys the lookup's prefetch loaded from L2, and keys with no record
+        to consult.  The three always sum to ``num_keys``.
+    """
+    if num_keys <= 0:
+        return 0, 0, 0
+    if tier_rows is None:
+        return 0, 0, num_keys
+    l1_row, l2_row = tier_rows
+    end_chunk = first_chunk + num_keys
+    l1_keys = _count_set_bits_in_range(l1_row, first_chunk, end_chunk)
+    l2_keys = _count_set_bits_in_range(l2_row, first_chunk, end_chunk)
+    return l1_keys, l2_keys, num_keys - l1_keys - l2_keys
+
+
+def format_by_group(counts: list[int]) -> str:
+    """Encode per-object-group counts for an ``MP_RETRIEVE_END`` field.
+
+    Comma-separated, index = object group id.  A string rather than a list
+    because ``EventBus.publish_on_stream`` keeps only int and str metadata
+    values (anything else is ``str()``-ed) and the subscriber must be able to
+    read the field on both publish paths.
+    """
+    return ",".join(str(count) for count in counts)
 
 
 def get_layout_desc(
@@ -864,6 +922,18 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             stored_mask,
         )
 
+    def _prefetch_tier_split(self, request_id: str) -> PrefetchTierSplit | None:
+        """The per-row L1/L2 split the request's lookup recorded, if any.
+
+        ``None`` when the request has no session or its lookup recorded
+        nothing (early exit, result shape mismatch): the retrieve then reports
+        every delivered key as unattributed rather than guessing.
+        """
+        session = self._ctx.session_manager.get(request_id)
+        if session is None:
+            return None
+        return session.get_prefetch_tier_split()
+
     @request_handler(
         HandlerType.BLOCKING,
         requires_client_affinity=True,
@@ -1034,6 +1104,15 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
             prefetched_keys: list[ObjectKey] = []
             read_owners = self._ctx.get_read_owners(key.request_id)
+            # Serve-side attribution: which tier held each delivered key when
+            # the request's lookup ran (see ``attribute_delivered_keys``).
+            tier_split = self._prefetch_tier_split(key.request_id)
+            retrieve_first_chunk = (
+                key.start // self._ctx.chunk_size if tier_split is not None else 0
+            )
+            l1_delivered = [0] * num_object_groups
+            l2_delivered = [0] * num_object_groups
+            unattributed_delivered = [0] * num_object_groups
             retained_keys = [
                 obj_key
                 for group, keys in enumerate(obj_keys_per_obj_group)
@@ -1076,6 +1155,21 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         block_ids_host=gpu_block_ids,
                     )
                     prefetched_keys.extend(in_window_keys)
+                    tier_rows = None
+                    row_first = 0
+                    if tier_split is not None and in_window_keys:
+                        tier_rows = tier_split.rows.get(
+                            (obj_group_id, in_window_keys[0].kv_rank)
+                        )
+                        # Row bits start at the lookup's first chunk; keys
+                        # below it were never looked up and stay unattributed.
+                        row_first = retrieve_first_chunk + skip - tier_split.start_chunk
+                    l1_keys, l2_keys, other_keys = attribute_delivered_keys(
+                        tier_rows, row_first, len(in_window_keys)
+                    )
+                    l1_delivered[obj_group_id] += l1_keys
+                    l2_delivered[obj_group_id] += l2_keys
+                    unattributed_delivered[obj_group_id] += other_keys
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
@@ -1106,6 +1200,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                             "total_bytes": total_bytes,
                             "num_tokens": num_tokens,
                             "transfer_key": transfer_key,
+                            "l1_delivered_keys": sum(l1_delivered),
+                            "l2_delivered_keys": sum(l2_delivered),
+                            "unattributed_delivered_keys": sum(unattributed_delivered),
+                            "l1_delivered_keys_by_group": format_by_group(l1_delivered),
+                            "l2_delivered_keys_by_group": format_by_group(l2_delivered),
+                            "unattributed_delivered_keys_by_group": format_by_group(
+                                unattributed_delivered
+                            ),
                         },
                     ),
                 )

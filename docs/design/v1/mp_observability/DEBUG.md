@@ -43,6 +43,29 @@ full-attention keys all came from L1 (L2 served only the sliding-window
 keys). `lmcache_mp_lookup_hit_{l1,l2}_keys_total` count hit keys per tier
 and show that case directly.
 
+## Served from L1 vs loaded from L2 (delivery side)
+
+`MP_RETRIEVE_END` attributes every key a worker delivered to the engine to
+the tier that served it, per object group
+(`l1 + l2 + unattributed == retrieved_count`, so the split is exact):
+
+```
+delivered_from_l1 = increase(lmcache_mp_retrieve_delivered_l1_keys_total)
+delivered_from_l2 = increase(lmcache_mp_retrieve_delivered_l2_keys_total)
+unattributed      = increase(lmcache_mp_retrieve_delivered_unattributed_keys_total)
+l1_served_share   = delivered_from_l1 / (delivered_from_l1 + delivered_from_l2)
+l2_load_waste     = increase(lmcache_mp_l2_prefetch_load_completed_chunks_total)
+                  - sum(delivered_from_l2)   # loaded into L1, never delivered
+```
+
+Units are keys (one per object group, kv rank and chunk), summed over the
+workers of a request to cover every kv rank.  `unattributed` should be
+`0`; a non-zero value means retrieves ran without a lookup record for
+their request (see EVENTS.md).  The lookup-side split above measures what
+each tier *held* when the lookup ran; this one measures what was *moved*
+into the engine, so the two differ by whatever was found but never
+retrieved (aborted requests, sub-range retrieves).
+
 ## Blend total hit rate
 
 ```

@@ -10,14 +10,17 @@
 
 # Standard
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, call
 
 # Third Party
 import pytest
 
 # First Party
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -26,6 +29,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
 )
+from lmcache.v1.multiprocess.session import PrefetchTierSplit, Session
 
 # ------------------------------------------------------------------ #
 #  all_null_chunk_masks (store-side skip)                              #
@@ -130,10 +134,24 @@ def _staging_context(
 # ------------------------------------------------------------------ #
 
 
-def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
+def _make_module(
+    monkeypatch,
+    num_chunks,
+    num_chunks_in_sw,
+    group_kinds=(),
+    *,
+    obj_keys=None,
+    session=None,
+    missing_keys=(),
+):
     """Build an LMCacheDrivenTransferModule with its collaborators mocked, and
     return (module, read_calls, transfer_calls) capturing what retrieve reads
-    and transfers per object group."""
+    and transfers per object group.
+
+    ``obj_keys`` overrides the per-group keys ``resolve_obj_keys`` returns,
+    ``session`` is what ``session_manager.get`` returns (``None``: no session)
+    and ``missing_keys`` are keys ``unsafe_read`` reports absent.
+    """
     num_object_groups = len(num_chunks_in_sw)
 
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
@@ -157,22 +175,23 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     module.get_and_touch_context_entry = MagicMock(return_value=entry)
 
     # Object keys: one distinct key per (group, chunk).
-    obj_keys = [
-        [f"g{g}c{c}" for c in range(num_chunks)] for g in range(num_object_groups)
-    ]
+    if obj_keys is None:
+        obj_keys = [
+            [f"g{g}c{c}" for c in range(num_chunks)] for g in range(num_object_groups)
+        ]
     ctx = MagicMock()
     ctx.get_read_owners.return_value = None
+    ctx.session_manager.get.return_value = session
     ctx.chunk_size = 256
     ctx.null_block_id = 0
     ctx.resolve_obj_keys.return_value = obj_keys
 
-    read_calls: list[list[str]] = []
+    read_calls: list[list] = []
 
     def fake_read(keys, l1_owners=None):
         read_calls.append(list(keys))
-        return list(keys), [
-            MagicMock(get_size=MagicMock(return_value=10)) for _ in keys
-        ]
+        found = [key for key in keys if key not in missing_keys]
+        return found, [MagicMock(get_size=MagicMock(return_value=10)) for _ in found]
 
     ctx.storage_manager.unsafe_read = MagicMock(side_effect=fake_read)
     module._ctx = ctx
@@ -414,3 +433,292 @@ def test_downsample_full_attention_keeps_every_block():
     raw = [list(range(n_chunks * bpc))]
     out = mod.downsample_and_stage_block_ids(ctx, [list(raw[0])])
     assert out[0] == raw[0]
+
+
+# ------------------------------------------------------------------ #
+#  retrieve (serve-side L1/L2 attribution on MP_RETRIEVE_END)        #
+# ------------------------------------------------------------------ #
+
+
+def _bits(pattern: str) -> Bitmap:
+    """A bitmap with bit ``i`` set iff ``pattern[i] == "1"``."""
+    bitmap = Bitmap(len(pattern))
+    for i, bit in enumerate(pattern):
+        if bit == "1":
+            bitmap.set(i)
+    return bitmap
+
+
+def _real_obj_keys(num_chunks: int, num_groups: int, kv_rank: int):
+    """Per-group ObjectKeys for the retrieve range, one per chunk."""
+    return [
+        [
+            ObjectKey(
+                chunk_hash=f"c{c}".encode(),
+                model_name="m",
+                kv_rank=kv_rank,
+                object_group_id=g,
+                cache_salt="salt",
+            )
+            for c in range(num_chunks)
+        ]
+        for g in range(num_groups)
+    ]
+
+
+def _session_with_tier_cells(rows: dict, start_chunk: int = 0) -> Session:
+    """A request session whose lookup recorded ``(l1, l2)`` row patterns keyed
+    by ``(object_group_id, kv_rank)``; bit ``j`` is chunk ``start_chunk + j``."""
+    session = Session(request_id="req", hasher=MagicMock())
+    session.record_prefetch_tier_split(
+        PrefetchTierSplit(
+            start_chunk=start_chunk,
+            rows={row_id: (_bits(l1), _bits(l2)) for row_id, (l1, l2) in rows.items()},
+        )
+    )
+    return session
+
+
+def _by_group(meta: dict, field: str) -> list[int]:
+    """Decode a comma-separated per-object-group count field."""
+    return [int(x) for x in meta[field].split(",")]
+
+
+def _retrieve_end_metadata() -> dict:
+    """Metadata of the MP_RETRIEVE_END event handed to the (mocked) Event."""
+    # ``mod.Event`` is a MagicMock here (see ``_make_module``); tell mypy so.
+    event_mock: Any = mod.Event
+    for event_call in event_mock.call_args_list:
+        if event_call.kwargs.get("event_type") is EventType.MP_RETRIEVE_END:
+            return event_call.kwargs["metadata"]
+    raise AssertionError("no MP_RETRIEVE_END event was published")
+
+
+def _retrieve_key(start_chunk: int = 0):
+    return SimpleNamespace(
+        request_id="req", cache_salt="salt", worker_id=0, start=start_chunk * 256
+    )
+
+
+@pytest.mark.parametrize(
+    ("l1", "l2", "first_chunk", "num_keys", "expected"),
+    [
+        ("1100", "0011", 0, 4, (2, 2, 0)),
+        ("1100", "0011", 2, 2, (0, 2, 0)),
+        # Chunk 3 is outside the lookup's hit: unattributed, not guessed.
+        ("1100", "0010", 1, 3, (1, 1, 1)),
+        # A range running past the recorded rows attributes nothing there.
+        ("1100", "0011", 2, 5, (0, 2, 3)),
+        # A range starting below the looked-up rows: that key has no record.
+        ("1100", "0011", -1, 3, (2, 0, 1)),
+        ("1100", "0011", 0, 0, (0, 0, 0)),
+    ],
+)
+def test_attribute_delivered_keys(l1, l2, first_chunk, num_keys, expected):
+    rows = (_bits(l1), _bits(l2))
+    assert mod.attribute_delivered_keys(rows, first_chunk, num_keys) == expected
+
+
+def test_attribute_delivered_keys_without_record():
+    assert mod.attribute_delivered_keys(None, 3, 4) == (0, 0, 4)
+
+
+def test_retrieve_end_splits_delivered_keys_by_tier_per_group(monkeypatch):
+    """Delivered keys are attributed per object group from the lookup's record."""
+    kv_rank = 7
+    session = _session_with_tier_cells(
+        {
+            # Full-attention group: chunks 0-2 were L1-resident, 3-4 came
+            # from L2.
+            (0, kv_rank): ("11100", "00011"),
+            # Window group (window 1): only its last chunk was hit, from L2.
+            (1, kv_rank): ("00000", "00001"),
+        }
+    )
+    module, _reads, _transfers = _make_module(
+        monkeypatch,
+        5,
+        num_chunks_in_sw=[-1, 1],
+        obj_keys=_real_obj_keys(5, 2, kv_rank),
+        session=session,
+    )
+    _handle, ok = module.retrieve(
+        key=_retrieve_key(),
+        instance_id=1,
+        gpu_block_ids=[[1, 2, 3, 4, 5], [0, 0, 0, 0, 9]],
+        event_ipc_handle=b"x",
+    )
+    assert ok is True
+
+    meta = _retrieve_end_metadata()
+    assert meta["retrieved_count"] == 6
+    assert _by_group(meta, "l1_delivered_keys_by_group") == [3, 0]
+    assert _by_group(meta, "l2_delivered_keys_by_group") == [2, 1]
+    assert _by_group(meta, "unattributed_delivered_keys_by_group") == [0, 0]
+    assert (meta["l1_delivered_keys"], meta["l2_delivered_keys"]) == (3, 3)
+    assert meta["unattributed_delivered_keys"] == 0
+
+
+def test_retrieve_end_reports_unattributed_without_lookup_record(monkeypatch):
+    """No session record: every delivered key is unattributed, never guessed."""
+    module, _reads, _transfers = _make_module(
+        monkeypatch, 5, num_chunks_in_sw=[-1, 1], obj_keys=_real_obj_keys(5, 2, 0)
+    )
+    _handle, ok = module.retrieve(
+        key=_retrieve_key(),
+        instance_id=1,
+        gpu_block_ids=[[1, 2, 3, 4, 5], [0, 0, 0, 0, 9]],
+        event_ipc_handle=b"x",
+    )
+    assert ok is True
+
+    meta = _retrieve_end_metadata()
+    assert meta["retrieved_count"] == 6
+    assert meta["unattributed_delivered_keys"] == 6
+    assert _by_group(meta, "unattributed_delivered_keys_by_group") == [5, 1]
+    assert _by_group(meta, "l1_delivered_keys_by_group") == [0, 0]
+    assert _by_group(meta, "l2_delivered_keys_by_group") == [0, 0]
+
+
+@pytest.mark.parametrize(
+    ("start_chunk", "expected_l1", "expected_l2", "expected_unattributed"),
+    [
+        # Range [3, 5): the window group's last chunk (4) is the lookup's L2 hit.
+        (3, [2, 0], [0, 1], [0, 0]),
+        # Range [1, 3): the window group reads chunk 2, which the lookup never
+        # hit (its window ended at chunk 4) -> unattributed, not guessed.
+        (1, [2, 0], [0, 0], [0, 1]),
+    ],
+    ids=["range_ends_at_hit", "window_outside_hit"],
+)
+def test_sub_range_retrieve_uses_absolute_chunk_indices(
+    monkeypatch, start_chunk, expected_l1, expected_l2, expected_unattributed
+):
+    """A retrieve of ``[start, end)`` maps its keys onto the lookup's rows by
+    absolute chunk index, so chunked-prefill sub-ranges attribute correctly."""
+    session = _session_with_tier_cells(
+        {(0, 0): ("11111", "00000"), (1, 0): ("00000", "00001")}
+    )
+    num_chunks = 2
+    module, _reads, _transfers = _make_module(
+        monkeypatch,
+        num_chunks,
+        num_chunks_in_sw=[-1, 1],
+        obj_keys=_real_obj_keys(num_chunks, 2, 0),
+        session=session,
+    )
+    _handle, ok = module.retrieve(
+        key=_retrieve_key(start_chunk),
+        instance_id=1,
+        gpu_block_ids=[[1, 2], [0, 9]],
+        event_ipc_handle=b"x",
+    )
+    assert ok is True
+
+    meta = _retrieve_end_metadata()
+    assert _by_group(meta, "l1_delivered_keys_by_group") == expected_l1
+    assert _by_group(meta, "l2_delivered_keys_by_group") == expected_l2
+    assert (
+        _by_group(meta, "unattributed_delivered_keys_by_group") == expected_unattributed
+    )
+    assert (
+        meta["l1_delivered_keys"]
+        + meta["l2_delivered_keys"]
+        + meta["unattributed_delivered_keys"]
+        == meta["retrieved_count"]
+        == 3
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "retrieve_start",
+        "num_chunks",
+        "gpu_block_ids",
+        "expected_l1",
+        "expected_l2",
+        "expected_unattributed",
+        "expected_count",
+    ),
+    [
+        # Retrieve == looked-up range [2, 5): bit 0 of each row is chunk 2.
+        (2, 3, [[1, 2, 3], [0, 0, 9]], [3, 0], [0, 1], [0, 0], 4),
+        # The engine's hit grew to chunk 3 before allocation: retrieve [3, 5).
+        (3, 2, [[1, 2], [0, 9]], [2, 0], [0, 1], [0, 0], 3),
+        # Retrieve [1, 3) reaches below the looked-up range: chunk 1 has no
+        # record, and the window group's chunk 2 was not a hit.
+        (1, 2, [[1, 2], [0, 9]], [1, 0], [0, 0], [1, 1], 3),
+    ],
+    ids=["same_range", "engine_hit_grew", "below_looked_up_range"],
+)
+def test_retrieve_indexes_rows_from_the_lookup_start(
+    monkeypatch,
+    retrieve_start,
+    num_chunks,
+    gpu_block_ids,
+    expected_l1,
+    expected_l2,
+    expected_unattributed,
+    expected_count,
+):
+    """After an engine-covered prefix the lookup's rows start at
+    ``start_chunk``; the retrieve maps its absolute chunk range onto them."""
+    session = _session_with_tier_cells(
+        {(0, 0): ("111", "000"), (1, 0): ("000", "001")}, start_chunk=2
+    )
+    module, _reads, _transfers = _make_module(
+        monkeypatch,
+        num_chunks,
+        num_chunks_in_sw=[-1, 1],
+        obj_keys=_real_obj_keys(num_chunks, 2, 0),
+        session=session,
+    )
+    _handle, ok = module.retrieve(
+        key=_retrieve_key(retrieve_start),
+        instance_id=1,
+        gpu_block_ids=gpu_block_ids,
+        event_ipc_handle=b"x",
+    )
+    assert ok is True
+
+    meta = _retrieve_end_metadata()
+    assert _by_group(meta, "l1_delivered_keys_by_group") == expected_l1
+    assert _by_group(meta, "l2_delivered_keys_by_group") == expected_l2
+    assert (
+        _by_group(meta, "unattributed_delivered_keys_by_group") == expected_unattributed
+    )
+    assert (
+        meta["l1_delivered_keys"]
+        + meta["l2_delivered_keys"]
+        + meta["unattributed_delivered_keys"]
+        == meta["retrieved_count"]
+        == expected_count
+    )
+
+
+def test_partial_failure_attributes_only_transferred_groups(monkeypatch):
+    """A retrieve that fails on a later group counts, on both sides of the
+    invariant, only the keys the earlier groups transferred."""
+    keys = _real_obj_keys(3, 2, 0)
+    session = _session_with_tier_cells({(0, 0): ("111", "000"), (1, 0): ("000", "001")})
+    module, _reads, _transfers = _make_module(
+        monkeypatch,
+        3,
+        num_chunks_in_sw=[-1, 1],
+        obj_keys=keys,
+        session=session,
+        missing_keys=(keys[1][2],),
+    )
+    _handle, ok = module.retrieve(
+        key=_retrieve_key(),
+        instance_id=1,
+        gpu_block_ids=[[1, 2, 3], [0, 0, 9]],
+        event_ipc_handle=b"x",
+    )
+    assert ok is False
+
+    meta = _retrieve_end_metadata()
+    assert meta["retrieved_count"] == 3
+    assert _by_group(meta, "l1_delivered_keys_by_group") == [3, 0]
+    assert _by_group(meta, "l2_delivered_keys_by_group") == [0, 0]
+    assert _by_group(meta, "unattributed_delivered_keys_by_group") == [0, 0]
