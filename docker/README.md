@@ -57,7 +57,7 @@ docker build \
 export HF_TOKEN=<your_huggingface_token>
 
 docker run --runtime nvidia --gpus all \
-  -v ~/.cache/huggingface:/home/lmcache/.cache/huggingface \
+  -v hf-cache:/home/lmcache/.cache/huggingface \
   -p 8000:8000 \
   --ipc=host \
   lmcache/vllm-openai:latest \
@@ -68,10 +68,19 @@ docker run --runtime nvidia --gpus all \
 
 **Note**: The image runs as the non-root user `lmcache` (uid 1000) by
 default, so Hugging Face caches under the user's home directory
-(`/home/lmcache/.cache/huggingface`). If you need to run as root (for
-example, to reuse a cache previously populated under `/root`), use
-`docker run --user 0 ...`. On Kubernetes, set
-`securityContext.runAsUser: 0` (or use the `lmcache` uid 1000).
+(`/home/lmcache/.cache/huggingface`).
+
+- Use a **named volume** (as above) for the HF cache: Docker initializes
+  it with the image's ownership, so `lmcache` can write to it without
+  extra setup.
+- If you prefer a bind mount (`-v ~/.cache/huggingface:/home/lmcache/.cache/huggingface`),
+  the host directory must be writable by uid 1000 (e.g.
+  `chown -R 1000:1000 ~/.cache/huggingface`), otherwise model downloads
+  fail with a permission error.
+- To reuse a cache previously populated under `/root` (or to run with
+  root for any other reason), use `docker run --user 0 ...`. On
+  Kubernetes, set `securityContext.runAsUser: 0` (or use the `lmcache`
+  uid 1000).
 
 ---
 
