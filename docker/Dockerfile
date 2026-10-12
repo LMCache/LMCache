@@ -39,6 +39,12 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 WORKDIR /workspace
 
+# Create a dedicated non-root user. Final images run as this user by default
+# so that a container compromise does not grant root privileges on the host
+# (see CVE-2026-105192).
+RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin lmcache \
+    && chown -R lmcache:lmcache /workspace
+
 # CUDA arch list used by torch
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
@@ -109,6 +115,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     uv pip install ./dist_lmcache/*.whl --verbose
 
 WORKDIR /workspace
+USER lmcache
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release, cu13) #######################
@@ -137,6 +144,7 @@ RUN . /opt/venv/bin/activate && \
     uv pip install --reinstall-package nixl nixl
 
 WORKDIR /workspace
+USER lmcache
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release, cu129) ######################
@@ -166,4 +174,5 @@ RUN . /opt/venv/bin/activate && \
     uv pip install --reinstall-package nixl nixl
 
 WORKDIR /workspace
+USER lmcache
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
