@@ -15,7 +15,7 @@ emission thread or task. See
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING
 import functools
@@ -466,13 +466,28 @@ _NO_BINDING = _ChunkTokens(token_ids=(), token_offset=UNKNOWN_TOKEN_OFFSET)
 class _PendingBatch:
     """A buffered batch-to-be: entries sharing one ``(event_type, tier,
     backend, shared)`` identity. Becomes exactly one
-    :class:`CacheEventBatch` at flush, which stamps ``seq`` and ``ts``."""
+    :class:`CacheEventBatch` at flush, which stamps ``seq`` and ``ts``.
+    ``first_recorded_at`` is the wall-clock time its first entry arrived."""
 
     event_type: CacheEventType
     tier: Tier
     backend: str
     shared: bool
     entries: list[CacheEventEntry]
+    first_recorded_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class CacheEventSubscriberStats:
+    """What the subscriber has sent.
+
+    Attributes:
+        last_send_delay_seconds: At the last flush that carried events, how
+            long the oldest of them had waited since it was recorded;
+            ``None`` before the first such flush.
+    """
+
+    last_send_delay_seconds: float | None = None
 
 
 class CacheEventSubscriber(EventSubscriber):
@@ -524,6 +539,7 @@ class CacheEventSubscriber(EventSubscriber):
         # ahead of the write-finished events), used to stamp STORE
         # entries. LRU-bounded; a miss stamps nothing.
         self._token_bindings: OrderedDict[bytes, _ChunkTokens] = OrderedDict()
+        self._stats = CacheEventSubscriberStats()
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         """Return the bus events this subscriber consumes."""
@@ -555,6 +571,12 @@ class CacheEventSubscriber(EventSubscriber):
         capacity = self._pending_capacity
         self._pending_capacity = None
         ts = time.time()
+        if pending_batches:
+            # Pending batches are appended in arrival order, so the first
+            # holds the oldest event.
+            self._stats.last_send_delay_seconds = (
+                ts - pending_batches[0].first_recorded_at
+            )
         dropped_events = self._sink.dropped_events
         # Declaration first, so a flush that also carries placements gives
         # the coordinator its denominator before the bytes it divides.
@@ -628,6 +650,11 @@ class CacheEventSubscriber(EventSubscriber):
             )
             for offset, module in enumerate(capacity.modules)
         ]
+
+    def stats(self) -> CacheEventSubscriberStats:
+        """Return a copy of what the subscriber has sent; see
+        :class:`CacheEventSubscriberStats`."""
+        return replace(self._stats)
 
     def shutdown(self) -> None:
         """Flush buffered events and close the sink. Called by

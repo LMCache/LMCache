@@ -358,6 +358,40 @@ def test_kafka_source_moves_past_a_record_that_makes_a_consumer_raise(
     assert position.next_offset(_TOPIC, 0) == 2
 
 
+def test_kafka_source_counts_records_by_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = FakeKafkaBroker()
+    broker.append(_TOPIC, key=None, value=b"not json")
+    _record(broker, _batch(1))
+    _record(broker, _batch(2))
+    source, _, recording = _source(monkeypatch, broker)
+    monkeypatch.setattr(kafka_event_source.logger, "warning", lambda *args: None)
+
+    assert asyncio.run(_run_until(source, lambda: len(recording.batches) == 2))
+
+    stats = source.stats()
+    assert (
+        stats.records_applied,
+        stats.records_undecodable,
+        stats.records_failed,
+    ) == (2, 1, 0)
+    assert stats.partitions_assigned == 1
+
+
+def test_kafka_source_reports_no_unread_records_once_caught_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = FakeKafkaBroker()
+    for seq in (1, 2, 3):
+        _record(broker, _batch(seq))
+    source, _, _ = _source(monkeypatch, broker)
+
+    assert asyncio.run(
+        _run_until(source, lambda: source.stats().unread_records == {0: 0})
+    )
+
+
 def test_kafka_source_reports_seekable_status(monkeypatch: pytest.MonkeyPatch) -> None:
     source, _, _ = _source(monkeypatch, FakeKafkaBroker())
 

@@ -50,6 +50,7 @@ from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
 from lmcache.v1.mp_coordinator.observability import (
     register_broadcaster_metrics,
     register_event_gate_metrics,
+    register_kafka_source_metrics,
     register_key_directory_metrics,
 )
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
@@ -162,6 +163,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         register_key_directory_metrics(views.get(KeyDirectory))
         register_event_gate_metrics(event_gate)
         register_broadcaster_metrics(event_broadcaster)
+        if isinstance(event_source, KafkaCacheEventSource):
+            register_kafka_source_metrics(event_source)
 
     ctx = CoordinatorContext(
         views=views,
