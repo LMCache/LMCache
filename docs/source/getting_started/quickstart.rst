@@ -249,6 +249,10 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          source .venv/bin/activate
          uv pip install --prerelease=allow lmcache "sglang"
 
+      To run SGLang in a container instead, use ``lmcache/sglang``: the
+      official SGLang release image with the matching LMCache wheel
+      installed. The ``sglang.launch_server`` command below is the same.
+
       **Configure the LMCache connection**
 
       .. code-block:: bash

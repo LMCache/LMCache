@@ -75,7 +75,7 @@ def test_neuron_no_handle_transfer(
     neuron_spec: NeuronDeviceSpec,
 ) -> None:
     """Trainium does not support IPC handle transfer."""
-    assert neuron_spec.is_handle_transfer_available() is False
+    assert neuron_spec.is_lmcache_driven_available() is False
 
 
 def test_neuron_no_ipc_wrapper(

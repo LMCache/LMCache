@@ -79,6 +79,10 @@ class NpuDeviceSpec(DeviceSpec):
             self._event_backend_cache = backend
         return backend
 
+    def is_lmcache_driven_available(self) -> bool:
+        """Ascend NPU has the full IPC stack for LMCache-driven transfer."""
+        return True
+
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         """Create the NPU cache context for LMCache-driven transfer."""
         # First Party
