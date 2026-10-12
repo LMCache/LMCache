@@ -2,7 +2,7 @@
 
 # Standard
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Third Party
 import pytest
@@ -36,17 +36,43 @@ def test_token_drop_fails_before_lookup_or_lazy_offload(entry: str) -> None:
     request = SimpleNamespace(
         request_id="req",
         resumable=False,
+        status=None,
         sampling_params=SimpleNamespace(
-            extra_args={"kv_transfer_params": {"lmcache.token_drop": {}}}
+            extra_args={
+                "kv_transfer_params": {
+                    "lmcache.token_drop": {"algorithm": "rkv", "config": {}}
+                }
+            }
         ),
     )
-    with pytest.raises(NotImplementedError, match="not enabled yet"):
+    request.cache_salt = None
+    request.all_token_ids = [1, 2]
+    request.num_prompt_tokens = 2
+    request.prompt_token_ids = [1, 2]
+    request.skip_reading_prefix_cache = False
+    # Keep the skeleton's fail-closed guarantee at scheduling rather than
+    # rejecting before safe request-local admission.
+    # Third Party
+    import vllm
+
+    if vllm.__version__.split("+", 1)[0] != "0.25.1":
+        with pytest.raises(NotImplementedError, match="requires vLLM 0.25.1"):
+            if entry == "lookup":
+                connector.get_num_new_matched_tokens(request, 0)
+            else:
+                connector.on_new_request(request)
+        connector.scheduler_adapter.maybe_submit_lookup_request.assert_not_called()
+        return
+
+    with patch(
+        "lmcache.integration.vllm.lmcache_mp_metadata.extract_mm_features",
+        return_value=(None, None),
+    ):
         if entry == "lookup":
-            connector.get_num_new_matched_tokens(request, 0)
+            assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
         else:
             connector.on_new_request(request)
-
-    assert not connector.request_trackers
+    assert request.skip_reading_prefix_cache
     connector._lazy_offload_manager.on_request_arrived.assert_not_called()
     connector.scheduler_adapter.maybe_submit_lookup_request.assert_not_called()
 

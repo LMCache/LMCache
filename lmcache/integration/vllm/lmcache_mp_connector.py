@@ -77,6 +77,7 @@ from lmcache.integration.vllm.lmcache_mp_metrics import (
 from lmcache.integration.vllm.mp_server_launcher import (
     is_mp_server_autostart_enabled,
 )
+from lmcache.integration.vllm.token_drop import parse_token_drop_config
 from lmcache.integration.vllm.utils import (
     extract_request_configs_from_request,
     mla_only,
@@ -796,6 +797,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # boundary; used to round down vLLM APC hit counts.
         self._hit_alignment_tokens = math.lcm(*cached_spans)
         if self.role == KVConnectorRole.SCHEDULER:
+            # First Party
+            from lmcache.integration.vllm.token_drop_apc_adapter import (
+                install_token_drop_apc_guard,
+            )
+
+            # Protect shared APC reads and publications before request admission.
+            install_token_drop_apc_guard()
             # Chunk boundaries must land on every group's paged-chunk
             # boundary so per-group block-id slicing stays aligned.
             lmcache_tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
@@ -1241,6 +1249,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             into account.
         """
         tracker = self._get_or_create_request_tracker(request)
+        if parse_token_drop_config(tracker.request_configs) is not None:
+            tracker.state = LMCacheMPRequestState.BYPASS_LMCACHE
+            return 0, False
 
         # A failed asynchronous load is bypassed until vLLM admits the request
         # for local computation via update_state_after_alloc().  The scheduler
@@ -1343,6 +1354,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request (Request): The request object.
         """
         if self.role != KVConnectorRole.SCHEDULER:
+            return
+        if (
+            parse_token_drop_config(extract_request_configs_from_request(request))
+            is not None
+        ):
+            self._get_or_create_request_tracker(request)
             return
         if not self._eager_prefetch or request.resumable:
             return
@@ -1460,6 +1477,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
+        # Admission and cache isolation are ready, but executing TD is deferred
+        # until the worker/scheduler compaction lifecycle is wired.
+        scheduled = [r.req_id for r in scheduler_output.scheduled_new_reqs]
+        scheduled.extend(scheduler_output.scheduled_cached_reqs.req_ids)
+        if any(
+            parse_token_drop_config(self._get_request_tracker(rid).request_configs)
+            is not None
+            for rid in scheduled
+        ):
+            raise NotImplementedError("GPU-native token dropping is not enabled yet")
+
         metadata = LMCacheMPConnectorMetadata()
         metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
 
@@ -1551,6 +1579,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
+
+        if (
+            parse_token_drop_config(extract_request_configs_from_request(request))
+            is not None
+        ):
+            return False, (return_params or None)
 
         # Drop lookup state for a request aborted before its lookup was
         # consumed (update_state_after_alloc never ran for it). Both the eager
@@ -1692,7 +1726,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             num_new_tokens = scheduler_output.num_scheduled_tokens[new_request.req_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
-            if not self._can_store:
+            if (
+                not self._can_store
+                or parse_token_drop_config(request_tracker.request_configs) is not None
+            ):
                 continue
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
@@ -1731,7 +1768,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
-            if not self._can_store:
+            if (
+                not self._can_store
+                or parse_token_drop_config(request_tracker.request_configs) is not None
+            ):
                 continue
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
@@ -1820,11 +1860,20 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     def _get_or_create_request_tracker(
         self, request: "Request"
     ) -> LMCacheMPRequestTracker:
-        # Reject token-drop requests before LMCache lookup or offload starts.
-        if "lmcache.token_drop" in (
-            extract_request_configs_from_request(request) or {}
-        ):
-            raise NotImplementedError("GPU-native token dropping is not enabled yet")
+        token_drop = (
+            parse_token_drop_config(extract_request_configs_from_request(request))
+            is not None
+        )
+        if token_drop:
+            # Third Party
+            from vllm.version import __version__ as vllm_version
+
+            if vllm_version.split("+", 1)[0] != "0.25.1":
+                raise NotImplementedError(
+                    "GPU-native token dropping requires vLLM 0.25.1, "
+                    f"got {vllm_version}"
+                )
+            request.skip_reading_prefix_cache = True
 
         request_id = request.request_id
         # Remove the old trackers that is created before the preemption
@@ -1841,13 +1890,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # state, i.e., PREFETCHING
             if tracker.state != LMCacheMPRequestState.PREFETCHING:
                 self.request_trackers.pop(request_id)
-                if self.lazy_offload:
+                if self.lazy_offload and not token_drop:
                     # The recreated tracker restarts at token zero, so its
                     # manager discards overlapping buffered metadata.
                     self._lazy_offload_manager.on_request_reset(request_id)
 
         if request_id not in self.request_trackers:
-            if self.lazy_offload:
+            if self.lazy_offload and not token_drop:
                 actions = self._lazy_offload_manager.on_request_arrived(request_id)
                 for session_id in actions.sessions_to_end:
                     self.scheduler_adapter.end_session(session_id)
