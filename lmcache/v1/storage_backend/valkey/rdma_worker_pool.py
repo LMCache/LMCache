@@ -2,17 +2,17 @@
 """
 Valkey worker pool that moves KV cache bytes over RDMA.
 
-``ValkeyRdmaWorkerPool`` is a ``ValkeyWorkerPool`` whose SET and GET never
-carry the value in the RESP stream. Each worker thread's glide client is
-configured for RDMA and registers the whole L1 arena once; every operation
-then names a window of that registration, and the server moves the bytes
-itself with the valkey-large-object module's ``BLOB.GET`` / ``BLOB.SET``.
+``ValkeyRdmaWorkerPool`` is the ``ValkeyWorkerPool`` behind the ``valkey``
+adapter's ``transport: "rdma"``: its SET and GET never carry the value in the
+RESP stream. Each worker thread's glide client registers the whole L1 arena
+once; every operation then names a window of that registration, and the
+server moves the bytes itself with the valkey-large-object module's
+``BLOB.GET`` / ``BLOB.SET``.
 
 One registration per worker is forced by glide's API: an ``RdmaRegion`` is
 bound to the client that registered it and carries one transfer at a time.
 The window is derived from the ``memoryview`` the adapter already passes, so
-the submit API is unchanged. A buffer outside the arena fails its key; in MP
-mode every object lives in the arena.
+the submit API is unchanged. A buffer outside the arena fails its key.
 
 The keys are the module's own data type, so a plain ``GET`` / ``SET`` cannot
 read or replace them. ``EXISTS`` and ``DEL`` are inherited unchanged, and

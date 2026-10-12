@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Integration test for the Valkey RDMA L2 adapter in MP mode.
+Integration test for the ``valkey`` adapter's RDMA transport in MP mode.
 
 Real transfers against a **real** valkey-server running the valkey-large-object
 module, through the installed ``valkey-glide-sync`` with RDMA support.
@@ -36,9 +36,9 @@ from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters.factory import (
     create_l2_adapter_from_registry,
 )
-from lmcache.v1.distributed.l2_adapters.valkey_rdma_l2_adapter import (
-    ValkeyRdmaL2Adapter,
-    ValkeyRdmaL2AdapterConfig,
+from lmcache.v1.distributed.l2_adapters.valkey_l2_adapter import (
+    ValkeyL2Adapter,
+    ValkeyL2AdapterConfig,
 )
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -147,7 +147,7 @@ def _wait(fd: int, ready: Callable[[], Any], timeout: float = 30.0) -> Any:
     raise AssertionError(f"no completion within {timeout}s")
 
 
-def _store(adapter: ValkeyRdmaL2Adapter, keys: list, objs: list) -> Any:
+def _store(adapter: ValkeyL2Adapter, keys: list, objs: list) -> Any:
     task_id = adapter.submit_store_task(keys, objs)
     return _wait(
         adapter.get_store_event_fd(),
@@ -155,14 +155,14 @@ def _store(adapter: ValkeyRdmaL2Adapter, keys: list, objs: list) -> Any:
     )
 
 
-def _load(adapter: ValkeyRdmaL2Adapter, keys: list, objs: list) -> Any:
+def _load(adapter: ValkeyL2Adapter, keys: list, objs: list) -> Any:
     task_id = adapter.submit_load_task(keys, objs)
     return _wait(
         adapter.get_load_event_fd(), lambda: adapter.query_load_result(task_id)
     )
 
 
-def _lookup(adapter: ValkeyRdmaL2Adapter, keys: list) -> Any:
+def _lookup(adapter: ValkeyL2Adapter, keys: list) -> Any:
     task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
     return _wait(
         adapter.get_lookup_and_lock_event_fd(),
@@ -183,9 +183,10 @@ def arena() -> _Arena:
 @pytest.fixture
 def adapter(target: tuple[str, str], arena: _Arena):
     startup_nodes, provider = target
-    config = ValkeyRdmaL2AdapterConfig.from_dict(
+    config = ValkeyL2AdapterConfig.from_dict(
         {
-            "type": "valkey_rdma",
+            "type": "valkey",
+            "transport": "rdma",
             "startup_nodes": startup_nodes,
             "num_workers": 2,
             "rdma_provider": provider,
@@ -194,14 +195,14 @@ def adapter(target: tuple[str, str], arena: _Arena):
         }
     )
     adapter = create_l2_adapter_from_registry(config, arena.desc)
-    assert isinstance(adapter, ValkeyRdmaL2Adapter)
+    assert isinstance(adapter, ValkeyL2Adapter)
     yield adapter
     adapter.close()
 
 
 class TestRdmaTransfers:
     def test_chunks_round_trip_through_the_fabric(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
+        self, adapter: ValkeyL2Adapter, arena: _Arena
     ):
         keys = [_key(1), _key(2), _key(3)]
         sources = [arena.alloc(fill=float(i + 1)) for i in range(3)]
@@ -225,7 +226,7 @@ class TestRdmaTransfers:
         assert not _lookup(adapter, keys).test(0)
 
     def test_a_missing_key_leaves_the_destination_alone(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
+        self, adapter: ValkeyL2Adapter, arena: _Arena
     ):
         dst = arena.alloc(fill=7.0)
         before = arena.bytes_of(dst)
@@ -233,7 +234,7 @@ class TestRdmaTransfers:
         assert arena.bytes_of(dst) == before
 
     def test_a_value_larger_than_the_chunk_is_refused_before_any_write(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
+        self, adapter: ValkeyL2Adapter, arena: _Arena
     ):
         # A bigger value is refused rather than overrunning the next slab.
         key = _key(5)
@@ -252,9 +253,10 @@ class TestRdmaTransfers:
 
     def test_ttl_is_applied(self, target: tuple[str, str], arena: _Arena):
         startup_nodes, provider = target
-        config = ValkeyRdmaL2AdapterConfig.from_dict(
+        config = ValkeyL2AdapterConfig.from_dict(
             {
-                "type": "valkey_rdma",
+                "type": "valkey",
+                "transport": "rdma",
                 "startup_nodes": startup_nodes,
                 "num_workers": 1,
                 "rdma_provider": provider,
@@ -273,10 +275,11 @@ class TestRdmaTransfers:
             adapter.close()
 
     def test_status_reports_the_rdma_settings(
-        self, adapter: ValkeyRdmaL2Adapter, target: tuple[str, str]
+        self, adapter: ValkeyL2Adapter, target: tuple[str, str]
     ):
         status = adapter.report_status()
         assert status["is_healthy"]
-        assert status["type"] == "valkey_rdma"
+        assert status["type"] == "valkey"
+        assert status["transport"] == "rdma"
         assert status["rdma_provider"] == target[1]
         assert status["l1_arena_bytes"] == ARENA_BYTES

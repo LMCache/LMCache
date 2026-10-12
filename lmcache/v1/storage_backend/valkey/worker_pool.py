@@ -338,11 +338,10 @@ class ValkeyWorkerPool:
         return client
 
     def _client_config_extras(self, glide_sync: Any) -> dict[str, Any]:
-        """Extra keyword arguments for the glide client configuration.
+        """Extra glide client configuration arguments; a subclass hook.
 
-        Called on the worker thread that is building its client, with the
-        lazily imported ``glide_sync`` module, so a subclass can opt into a
-        client feature without repeating the rest of the configuration.
+        Called on the worker thread building its client, with the lazily
+        imported ``glide_sync`` module.
         """
         return {}
 

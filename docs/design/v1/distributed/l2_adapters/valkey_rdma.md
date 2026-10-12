@@ -1,16 +1,16 @@
-# Valkey RDMA L2 Adapter Design
+# Valkey L2 Adapter: RDMA Transport Design
 
-This document describes the built-in `valkey_rdma` L2 adapter for LMCache
-multiprocess mode. The adapter stores KV cache chunks in a Valkey instance
-running the [valkey-large-object][module] module and moves every chunk by RDMA:
-the server reads a chunk out of, or writes it into, the L1 arena itself. It
-is the [`valkey` adapter](valkey.md) with the transport replaced, and uses
+This document describes the `"transport": "rdma"` option of the built-in
+[`valkey` L2 adapter](valkey.md) for LMCache multiprocess mode. With it the
+adapter stores KV cache chunks in a Valkey instance running the
+[valkey-large-object][module] module and moves every chunk by RDMA: the
+server reads a chunk out of, or writes it into, the L1 arena itself, through
 the RDMA API of the official `valkey-glide` Python sync client.
 
 Read the [`valkey` design doc](valkey.md) first. Everything there that is not
 about how bytes move — threading model, batch state, partial-failure
 accounting, cluster vs standalone, authentication, capacity and eviction,
-lock semantics — applies to this adapter unchanged.
+lock semantics — applies unchanged.
 
 [module]: https://github.com/valkey-io/valkey-large-object
 
@@ -26,7 +26,7 @@ lock semantics — applies to this adapter unchanged.
 - Never let a stored value larger than its destination chunk touch memory
   outside that chunk.
 
-## Why a subclass of the `valkey` adapter
+## Why a transport option, not a separate adapter
 
 The `valkey` adapter already has the shape RDMA needs: N worker threads,
 each holding its own sync glide client, with every operation expressed
@@ -37,9 +37,10 @@ RDMA API make that per-thread client the natural unit of registration:
 - A region carries **one transfer at a time**.
 
 So one registration per worker is what lets `num_workers` transfers run
-concurrently, and the pool is the only layer that needs to change. The
-adapter subclass overrides pool construction and `report_status()` and
-nothing else.
+concurrently, and the pool is the only layer that changes: with
+`transport: "rdma"` the adapter builds a `ValkeyRdmaWorkerPool` instead of
+a `ValkeyWorkerPool`, requires the L1 memory descriptor, and reports the
+RDMA settings in `report_status()`. Nothing else differs.
 
 ## Dependencies
 
@@ -79,7 +80,7 @@ ValkeyRdmaL2Adapter  ── builds ──►  ValkeyRdmaWorkerPool
 
 | File | Owns |
 |------|------|
-| `lmcache/v1/distributed/l2_adapters/valkey_rdma_l2_adapter.py` | `ValkeyRdmaL2AdapterConfig`, `ValkeyRdmaL2Adapter`, registration under `valkey_rdma` |
+| `lmcache/v1/distributed/l2_adapters/valkey_l2_adapter.py` | the `transport`, `rdma_provider` and `rdma_interface` fields; pool selection; the L1 descriptor check |
 | `lmcache/v1/storage_backend/valkey/rdma_worker_pool.py` | `ValkeyRdmaWorkerPool`: client configuration, arena registration, the two transfers, region teardown |
 
 The two parent hooks were added for this adapter: `_create_pool` /
@@ -141,7 +142,7 @@ window = region.window(offset, len(view))
 
 Deriving the window from the buffer rather than from the `MemoryObj` keeps
 the pool's submit API identical to the plain pool's, which is what lets the
-adapter subclass override nothing per operation.
+adapter override nothing per operation.
 
 A buffer outside `[l1_base, l1_base + l1_size)` has no registration to
 transfer through. The pool raises, the adapter records a per-key failure
@@ -223,7 +224,8 @@ JSON schema (CLI `--l2-adapter`); every `valkey` field is accepted, plus:
 
 ```json
 {
-  "type": "valkey_rdma",
+  "type": "valkey",
+  "transport": "rdma",
   "startup_nodes": "kv.internal:6379",
   "num_workers": 8,
   "ttl_seconds": 3600,
@@ -234,6 +236,7 @@ JSON schema (CLI `--l2-adapter`); every `valkey` field is accepted, plus:
 
 | Field | Default | Meaning |
 |-------|---------|---------|
+| `transport` | `"tcp"` | `"rdma"` selects this transport. |
 | `rdma_provider` | `"efa-direct"` | `"efa-direct"` opens EFA hardware; `"tcp"` opens libfabric's software provider, for development and tests only. |
 | `rdma_interface` | unset | Fabric domain to pin to on a host with more than one card. |
 
@@ -252,13 +255,13 @@ JSON schema (CLI `--l2-adapter`); every `valkey` field is accepted, plus:
 
 ## Testing
 
-- `tests/v1/distributed/test_valkey_rdma_l2_adapter.py` — unit tests
+- `tests/v1/distributed/test_valkey_l2_adapter_rdma.py` — unit tests
   against an in-process fake of glide's RDMA API. The fake records every
   registration and every transfer window, so the tests assert that each
   worker registers the whole arena, that each window is the object's own
   offset and size, and that bytes land in and are read from the arena
   tensor directly.
-- `tests/v1/distributed/test_valkey_rdma_l2_adapter_integration.py` —
+- `tests/v1/distributed/test_valkey_l2_adapter_rdma_integration.py` —
   real transfers against a valkey-server running the module with the
   `Emulated` fabric provider and `valkey-glide-sync` built with RDMA, using
   the `tcp` provider. Skipped unless `LMCACHE_VALKEY_RDMA_SERVER` names a

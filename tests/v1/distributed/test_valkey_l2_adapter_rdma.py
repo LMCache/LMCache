@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit tests for ValkeyRdmaL2Adapter.
+Unit tests for the ``valkey`` adapter's RDMA transport.
 
 These exercise the adapter against an in-process fake of the ``glide_sync``
 RDMA API, so neither ``valkey-glide-sync`` nor a server with the
@@ -314,11 +314,8 @@ from lmcache.v1.distributed.l2_adapters.factory import (  # noqa: E402
     create_l2_adapter_from_registry,
 )
 from lmcache.v1.distributed.l2_adapters.valkey_l2_adapter import (  # noqa: E402
+    ValkeyL2Adapter,
     ValkeyL2AdapterConfig,
-)
-from lmcache.v1.distributed.l2_adapters.valkey_rdma_l2_adapter import (  # noqa: E402
-    ValkeyRdmaL2Adapter,
-    ValkeyRdmaL2AdapterConfig,
 )
 from lmcache.v1.memory_management import (  # noqa: E402
     MemoryFormat,
@@ -416,7 +413,7 @@ def _wait(fd: int, ready: Callable[[], Any], timeout: float = 5.0) -> Any:
     raise AssertionError(f"no completion within {timeout}s")
 
 
-def _store(adapter: ValkeyRdmaL2Adapter, keys: list, objs: list) -> Any:
+def _store(adapter: ValkeyL2Adapter, keys: list, objs: list) -> Any:
     task_id = adapter.submit_store_task(keys, objs)
     return _wait(
         adapter.get_store_event_fd(),
@@ -424,14 +421,14 @@ def _store(adapter: ValkeyRdmaL2Adapter, keys: list, objs: list) -> Any:
     )
 
 
-def _load(adapter: ValkeyRdmaL2Adapter, keys: list, objs: list) -> Any:
+def _load(adapter: ValkeyL2Adapter, keys: list, objs: list) -> Any:
     task_id = adapter.submit_load_task(keys, objs)
     return _wait(
         adapter.get_load_event_fd(), lambda: adapter.query_load_result(task_id)
     )
 
 
-def _lookup(adapter: ValkeyRdmaL2Adapter, keys: list) -> Any:
+def _lookup(adapter: ValkeyL2Adapter, keys: list) -> Any:
     task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
     return _wait(
         adapter.get_lookup_and_lock_event_fd(),
@@ -462,15 +459,16 @@ def _reset_state():
     _SERVER.reset()
 
 
-def _make_config(**overrides: Any) -> ValkeyRdmaL2AdapterConfig:
+def _make_config(**overrides: Any) -> ValkeyL2AdapterConfig:
     base: dict[str, Any] = {
         "startup_nodes": [("localhost", 6379)],
         "num_workers": 2,
         "connection_timeout": 2.0,
         "request_timeout": 2.0,
+        "transport": "rdma",
     }
     base.update(overrides)
-    return ValkeyRdmaL2AdapterConfig(**base)
+    return ValkeyL2AdapterConfig(**base)
 
 
 @pytest.fixture
@@ -480,7 +478,7 @@ def arena() -> _Arena:
 
 @pytest.fixture
 def adapter(arena: _Arena):
-    a = ValkeyRdmaL2Adapter(_make_config(), arena.desc)
+    a = ValkeyL2Adapter(_make_config(), arena.desc)
     yield a
     a.close()
 
@@ -491,11 +489,20 @@ def adapter(arena: _Arena):
 
 
 class TestConfig:
-    def test_defaults_to_efa_direct_with_no_interface(self):
+    def test_defaults_to_tcp_transport(self):
+        cfg = ValkeyL2AdapterConfig(startup_nodes=[("h", 1)])
+        assert cfg.transport == "tcp"
+        assert not cfg.uses_rdma
+
+    def test_rdma_defaults_to_efa_direct_with_no_interface(self):
         cfg = _make_config()
+        assert cfg.uses_rdma
         assert cfg.rdma_provider == "efa-direct"
         assert cfg.rdma_interface is None
-        assert isinstance(cfg, ValkeyL2AdapterConfig)
+
+    def test_rejects_unknown_transport(self):
+        with pytest.raises(ValueError, match="transport"):
+            _make_config(transport="infiniband")
 
     def test_rejects_unknown_provider(self):
         with pytest.raises(ValueError, match="rdma_provider"):
@@ -507,12 +514,13 @@ class TestConfig:
 
     def test_inherited_validation_still_applies(self):
         with pytest.raises(ValueError, match="startup_nodes"):
-            ValkeyRdmaL2AdapterConfig(startup_nodes=[])
+            ValkeyL2AdapterConfig(startup_nodes=[])
 
     def test_from_dict_parses_rdma_and_inherited_fields(self):
-        cfg = ValkeyRdmaL2AdapterConfig.from_dict(
+        cfg = ValkeyL2AdapterConfig.from_dict(
             {
-                "type": "valkey_rdma",
+                "type": "valkey",
+                "transport": "rdma",
                 "startup_nodes": "h1:6379,h2:6380",
                 "num_workers": 3,
                 "ttl_seconds": 60,
@@ -523,33 +531,39 @@ class TestConfig:
         assert cfg.startup_nodes == [("h1", 6379), ("h2", 6380)]
         assert cfg.num_workers == 3
         assert cfg.ttl_seconds == 60
+        assert cfg.uses_rdma
         assert cfg.rdma_provider == "tcp"
         assert cfg.rdma_interface == "efa0"
 
-    def test_from_dict_defaults_rdma_fields(self):
-        cfg = ValkeyRdmaL2AdapterConfig.from_dict({"startup_nodes": "h:1"})
+    def test_from_dict_defaults_to_tcp_and_efa_direct(self):
+        cfg = ValkeyL2AdapterConfig.from_dict({"startup_nodes": "h:1"})
+        assert cfg.transport == "tcp"
         assert cfg.rdma_provider == "efa-direct"
         assert cfg.rdma_interface is None
 
     @pytest.mark.parametrize(
         "field, value",
-        [("rdma_provider", 7), ("rdma_interface", 7), ("rdma_provider", "verbs")],
+        [
+            ("transport", 7),
+            ("transport", "infiniband"),
+            ("rdma_provider", 7),
+            ("rdma_interface", 7),
+            ("rdma_provider", "verbs"),
+        ],
     )
     def test_from_dict_rejects_bad_rdma_values(self, field: str, value: Any):
         with pytest.raises(ValueError, match=field):
-            ValkeyRdmaL2AdapterConfig.from_dict({"startup_nodes": "h:1", field: value})
+            ValkeyL2AdapterConfig.from_dict({"startup_nodes": "h:1", field: value})
 
-    def test_help_covers_inherited_and_rdma_fields(self):
-        text = ValkeyRdmaL2AdapterConfig.help()
+    def test_help_covers_the_transport_fields(self):
+        text = ValkeyL2AdapterConfig.help()
         assert "startup_nodes" in text
+        assert "transport" in text
         assert "rdma_provider" in text
         assert "rdma_interface" in text
 
-    def test_registered_under_its_own_type_name(self):
-        assert get_type_name_for_config(_make_config()) == "valkey_rdma"
-        # The parent config still resolves to the parent type.
-        plain = ValkeyL2AdapterConfig(startup_nodes=[("h", 1)])
-        assert get_type_name_for_config(plain) == "valkey"
+    def test_is_the_valkey_type_whatever_the_transport(self):
+        assert get_type_name_for_config(_make_config()) == "valkey"
 
 
 # ===========================================================================
@@ -558,10 +572,11 @@ class TestConfig:
 
 
 class TestFactory:
-    def test_builds_the_rdma_adapter_from_the_registry(self, arena: _Arena):
+    def test_builds_an_rdma_adapter_from_the_registry(self, arena: _Arena):
         adapter = create_l2_adapter_from_registry(_make_config(), arena.desc)
         try:
-            assert isinstance(adapter, ValkeyRdmaL2Adapter)
+            assert isinstance(adapter, ValkeyL2Adapter)
+            assert adapter.report_status()["transport"] == "rdma"
         finally:
             adapter.close()
 
@@ -590,12 +605,12 @@ class TestSupportChecks:
     def test_client_built_without_rdma_is_refused(self, arena: _Arena):
         _SERVER.available = False
         with pytest.raises(RuntimeError, match="without RDMA support"):
-            ValkeyRdmaL2Adapter(_make_config(), arena.desc)
+            ValkeyL2Adapter(_make_config(), arena.desc)
 
     def test_missing_libfabric_is_refused(self, arena: _Arena):
         _SERVER.usable = False
         with pytest.raises(RuntimeError, match="libfabric"):
-            ValkeyRdmaL2Adapter(_make_config(), arena.desc)
+            ValkeyL2Adapter(_make_config(), arena.desc)
 
     def test_client_without_the_rdma_api_is_refused(
         self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
@@ -603,7 +618,7 @@ class TestSupportChecks:
         # An older glide-sync: a client class with no rdma_available at all.
         monkeypatch.delattr(sys.modules["glide_sync"].GlideClient, "rdma_available")
         with pytest.raises(RuntimeError, match="no RDMA API"):
-            ValkeyRdmaL2Adapter(_make_config(), arena.desc)
+            ValkeyL2Adapter(_make_config(), arena.desc)
 
     def test_a_failed_registration_names_workers_and_arena(
         self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
@@ -617,7 +632,7 @@ class TestSupportChecks:
 
         monkeypatch.setattr(_FakeRdmaClient, "register_rdma_region", refuse)
         with pytest.raises(RuntimeError, match="num_workers") as raised:
-            ValkeyRdmaL2Adapter(_make_config(num_workers=3), arena.desc)
+            ValkeyL2Adapter(_make_config(num_workers=3), arena.desc)
         message = str(raised.value)
         assert "3 workers" in message
         assert "fi_mr_reg" in message
@@ -626,7 +641,7 @@ class TestSupportChecks:
     def test_nothing_is_registered_when_refused(self, arena: _Arena):
         _SERVER.usable = False
         with pytest.raises(RuntimeError):
-            ValkeyRdmaL2Adapter(_make_config(), arena.desc)
+            ValkeyL2Adapter(_make_config(), arena.desc)
         assert _SERVER.registrations == []
 
 
@@ -637,7 +652,7 @@ class TestSupportChecks:
 
 class TestRegistration:
     def test_each_worker_registers_the_whole_arena(self, arena: _Arena):
-        adapter = ValkeyRdmaL2Adapter(_make_config(num_workers=3), arena.desc)
+        adapter = ValkeyL2Adapter(_make_config(num_workers=3), arena.desc)
         try:
             # Warm-up may build fewer than three clients with an instant fake;
             # every client that exists has registered the whole arena once.
@@ -651,7 +666,7 @@ class TestRegistration:
 
     def test_registration_views_the_arena_itself(self, arena: _Arena):
         # The registration is a view of the L1 memory, not a copy.
-        adapter = ValkeyRdmaL2Adapter(_make_config(num_workers=1), arena.desc)
+        adapter = ValkeyL2Adapter(_make_config(num_workers=1), arena.desc)
         try:
             _SERVER.registrations[0].memoryview()[100:104] = b"\x01\x02\x03\x04"
             assert arena.tensor[100:104].tolist() == [1, 2, 3, 4]
@@ -659,7 +674,7 @@ class TestRegistration:
             adapter.close()
 
     def test_clients_are_configured_for_the_chosen_provider(self, arena: _Arena):
-        adapter = ValkeyRdmaL2Adapter(
+        adapter = ValkeyL2Adapter(
             _make_config(num_workers=1, rdma_provider="tcp", rdma_interface="lo"),
             arena.desc,
         )
@@ -673,7 +688,7 @@ class TestRegistration:
             adapter.close()
 
     def test_default_provider_is_efa_direct(self, arena: _Arena):
-        adapter = ValkeyRdmaL2Adapter(_make_config(num_workers=1), arena.desc)
+        adapter = ValkeyL2Adapter(_make_config(num_workers=1), arena.desc)
         try:
             rdma = _SERVER.configs[0][1]["rdma"]
             assert isinstance(rdma.provider, _EfaDirect)
@@ -682,7 +697,7 @@ class TestRegistration:
             adapter.close()
 
     def test_cluster_clients_are_configured_too(self, arena: _Arena):
-        adapter = ValkeyRdmaL2Adapter(
+        adapter = ValkeyL2Adapter(
             _make_config(num_workers=1, cluster_mode=True), arena.desc
         )
         try:
@@ -693,7 +708,7 @@ class TestRegistration:
             adapter.close()
 
     def test_close_releases_every_registration_and_client(self, arena: _Arena):
-        adapter = ValkeyRdmaL2Adapter(_make_config(num_workers=2), arena.desc)
+        adapter = ValkeyL2Adapter(_make_config(num_workers=2), arena.desc)
         adapter.close()
         assert all(r.closed for r in _SERVER.registrations)
         assert all(r.client.closed for r in _SERVER.registrations)
@@ -708,7 +723,7 @@ class TestRegistration:
 
 class TestStore:
     def test_bytes_are_read_out_of_the_objects_own_window(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
+        self, adapter: ValkeyL2Adapter, arena: _Arena
     ):
         objs = [arena.alloc(256, fill=1.0), arena.alloc(512, fill=2.0)]
         keys = [_key(1), _key(2)]
@@ -727,7 +742,7 @@ class TestStore:
             assert windows[wire] == (obj.meta.address, obj.get_size())
 
     def test_ttl_is_applied_after_the_transfer(self, arena: _Arena):
-        adapter = ValkeyRdmaL2Adapter(_make_config(ttl_seconds=30), arena.desc)
+        adapter = ValkeyL2Adapter(_make_config(ttl_seconds=30), arena.desc)
         try:
             key = _key(1)
             assert _store(adapter, [key], [arena.alloc()]).is_successful()
@@ -736,12 +751,12 @@ class TestStore:
         finally:
             adapter.close()
 
-    def test_no_ttl_by_default(self, adapter: ValkeyRdmaL2Adapter, arena: _Arena):
+    def test_no_ttl_by_default(self, adapter: ValkeyL2Adapter, arena: _Arena):
         assert _store(adapter, [_key(1)], [arena.alloc()]).is_successful()
         assert _SERVER.ttls == {}
 
     def test_an_object_outside_the_arena_fails_its_key_only(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
+        self, adapter: ValkeyL2Adapter, arena: _Arena
     ):
         inside = arena.alloc()
         outside = _outside_arena_obj()
@@ -757,14 +772,14 @@ class TestStore:
         assert [k for k, _, _ in _transfers("set")] == [wires[0]]
 
     def test_a_server_failure_is_a_failed_store(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
+        self, adapter: ValkeyL2Adapter, arena: _Arena
     ):
         _SERVER.faults["set"] = RdmaError("ERR DRAM buffer pool exhausted")
         result = _store(adapter, [_key(1)], [arena.alloc()])
         assert not result.is_successful()
         assert result.bytes_transferred() == 0
 
-    def test_empty_batch_completes(self, adapter: ValkeyRdmaL2Adapter):
+    def test_empty_batch_completes(self, adapter: ValkeyL2Adapter):
         assert _store(adapter, [], []).is_successful()
 
 
@@ -775,7 +790,7 @@ class TestStore:
 
 class TestLoad:
     def test_bytes_land_in_the_destination_objects_window(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
+        self, adapter: ValkeyL2Adapter, arena: _Arena
     ):
         sources = [arena.alloc(256, fill=3.0), arena.alloc(256, fill=4.0)]
         keys = [_key(1), _key(2)]
@@ -794,7 +809,7 @@ class TestLoad:
             assert windows[wire] == (dst.meta.address, dst.get_size())
 
     def test_a_missing_key_is_a_miss_and_leaves_the_object_alone(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
+        self, adapter: ValkeyL2Adapter, arena: _Arena
     ):
         dst = arena.alloc(256, fill=9.0)
         before = arena.bytes_of(dst)
@@ -804,9 +819,7 @@ class TestLoad:
         assert not bitmap.test(0)
         assert arena.bytes_of(dst) == before
 
-    def test_a_smaller_value_is_a_miss(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
-    ):
+    def test_a_smaller_value_is_a_miss(self, adapter: ValkeyL2Adapter, arena: _Arena):
         # Fixed-size chunks must round-trip exactly, as with the plain adapter.
         key = _key(1)
         assert _store(adapter, [key], [arena.alloc(128)]).is_successful()
@@ -816,7 +829,7 @@ class TestLoad:
         assert not bitmap.test(0)
 
     def test_a_larger_value_is_refused_before_anything_lands(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
+        self, adapter: ValkeyL2Adapter, arena: _Arena
     ):
         key = _key(1)
         assert _store(adapter, [key], [arena.alloc(512, fill=5.0)]).is_successful()
@@ -828,7 +841,7 @@ class TestLoad:
         assert arena.bytes_of(dst) == bytes(256)
 
     def test_an_object_outside_the_arena_is_a_miss_without_a_transfer(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
+        self, adapter: ValkeyL2Adapter, arena: _Arena
     ):
         key = _key(1)
         assert _store(adapter, [key], [arena.alloc()]).is_successful()
@@ -839,9 +852,7 @@ class TestLoad:
         assert not bitmap.test(0)
         assert _transfers("get") == []
 
-    def test_lookup_then_load_round_trip(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
-    ):
+    def test_lookup_then_load_round_trip(self, adapter: ValkeyL2Adapter, arena: _Arena):
         keys = [_key(1), _key(2)]
         assert _store(adapter, keys, [arena.alloc(), arena.alloc()]).is_successful()
 
@@ -860,7 +871,7 @@ class TestRevokedRegion:
     def test_a_revoked_region_is_registered_again_and_the_transfer_retried(
         self, arena: _Arena
     ):
-        adapter = ValkeyRdmaL2Adapter(_make_config(num_workers=1), arena.desc)
+        adapter = ValkeyL2Adapter(_make_config(num_workers=1), arena.desc)
         try:
             # A failure that is not a server reply revokes the region.
             _SERVER.faults["set"] = ConnectionError("connection reset")
@@ -880,7 +891,7 @@ class TestRevokedRegion:
             adapter.close()
 
     def test_a_server_reply_does_not_cost_a_registration(self, arena: _Arena):
-        adapter = ValkeyRdmaL2Adapter(_make_config(num_workers=1), arena.desc)
+        adapter = ValkeyL2Adapter(_make_config(num_workers=1), arena.desc)
         try:
             key = _key(1)
             assert _store(adapter, [key], [arena.alloc(512)]).is_successful()
@@ -898,9 +909,7 @@ class TestRevokedRegion:
 
 
 class TestDeleteAndStatus:
-    def test_delete_removes_stored_keys(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
-    ):
+    def test_delete_removes_stored_keys(self, adapter: ValkeyL2Adapter, arena: _Arena):
         keys = [_key(1), _key(2)]
         assert _store(adapter, keys, [arena.alloc(), arena.alloc()]).is_successful()
 
@@ -908,12 +917,13 @@ class TestDeleteAndStatus:
 
         assert _SERVER.store == {}
 
-    def test_status_names_the_type_and_rdma_settings(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
+    def test_status_names_the_transport_and_rdma_settings(
+        self, adapter: ValkeyL2Adapter, arena: _Arena
     ):
         status = adapter.report_status()
         assert status["is_healthy"]
-        assert status["type"] == "valkey_rdma"
+        assert status["type"] == "valkey"
+        assert status["transport"] == "rdma"
         assert status["rdma_provider"] == "efa-direct"
         assert status["rdma_interface"] is None
         assert status["l1_arena_bytes"] == arena.desc.size
@@ -926,7 +936,7 @@ class TestDeleteAndStatus:
 
 class TestWindowDerivation:
     def test_a_byte_view_of_arena_memory_is_addressed_by_its_offset(
-        self, adapter: ValkeyRdmaL2Adapter, arena: _Arena
+        self, adapter: ValkeyL2Adapter, arena: _Arena
     ):
         # The pool addresses whatever buffer it is handed by where the bytes
         # are, so a view at an arbitrary offset in the arena is a window at
