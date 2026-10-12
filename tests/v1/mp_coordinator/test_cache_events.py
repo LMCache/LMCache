@@ -9,7 +9,6 @@ from dataclasses import asdict
 from unittest.mock import MagicMock
 import asyncio
 import threading
-import time
 
 # Third Party
 import httpx
@@ -634,32 +633,6 @@ def test_batches_before_any_loss_carry_no_dropped_events():
 
     [[batch]] = sink.published
     assert batch.dropped_events == 0
-
-
-def test_send_delay_is_how_long_the_oldest_event_waited_for_its_flush():
-    sink = _RecordingSink()
-    subscriber = _subscriber(sink)
-    assert subscriber.stats().last_send_delay_seconds is None
-    _dispatch(
-        subscriber,
-        Event(
-            event_type=EventType.L2_KEYS_STORED,
-            metadata={"keys": [_key(1)], "sizes": [100], "backend": "fs"},
-        ),
-    )
-    time.sleep(0.05)
-    _dispatch(
-        subscriber,
-        Event(
-            event_type=EventType.L1_KEYS_ACCESSED,
-            metadata={"keys": [_key(1)]},
-        ),
-    )
-
-    subscriber.flush()
-
-    delay = subscriber.stats().last_send_delay_seconds
-    assert delay is not None and delay >= 0.05
 
 
 def test_negative_flush_interval_rejected():

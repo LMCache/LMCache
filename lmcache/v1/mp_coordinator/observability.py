@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from opentelemetry.metrics import CallbackOptions, Meter, Observation
 
     # First Party
-    from lmcache.v1.mp_coordinator.cache_events import CacheEventSubscriber
     from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
         CacheEventBroadcaster,
     )
@@ -333,36 +332,6 @@ def register_kafka_source_metrics(
         "lmcache_coordinator.kafka.unread_records",
         callbacks=[_make_observation_callback(read_unread_records)],
         description="Cache-event records not yet read, per partition.",
-    )
-
-
-def register_cache_event_subscriber_metrics(
-    subscriber: "CacheEventSubscriber", meter: "Meter | None" = None
-) -> None:
-    """Register the mp server's cache-event send delay.
-
-    Runs in the mp server, not the coordinator: the gauge reads
-    :meth:`CacheEventSubscriber.stats` and is exported with the server's
-    own metrics.
-
-    Args:
-        subscriber: The server's cache-event subscriber.
-        meter: Meter to register on. Defaults to the global provider's
-            coordinator meter; tests pass one from a private provider.
-    """
-    if meter is None:
-        meter = metrics.get_meter(_METER_NAME)
-
-    def read_send_delay() -> list[tuple[float, dict[str, str]]]:
-        delay = subscriber.stats().last_send_delay_seconds
-        return [] if delay is None else [(delay, {})]
-
-    meter.create_observable_gauge(
-        "lmcache_mp.coordinator_event_send_delay_seconds",
-        callbacks=[_make_observation_callback(read_send_delay)],
-        unit="s",
-        description="At the last flush to the coordinator, how long the "
-        "oldest cache event in it had waited since it was recorded.",
     )
 
 

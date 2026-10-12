@@ -982,17 +982,3 @@ The freshness metrics say how old the coordinator's view is.
      - ObservableGauge (attr: ``partition``)
      - Records not yet read per partition.  Kafka's own lag tools cannot report
        this, because the coordinator never commits offsets.
-
-The MP server reports how long its events wait before they are sent:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 40 15 45
-
-   * - Metric
-     - Type
-     - Description
-   * - ``lmcache_mp.coordinator_event_send_delay_seconds``
-     - ObservableGauge
-     - At the last flush to the coordinator, how long the oldest cache event
-       in it had waited since it was recorded.

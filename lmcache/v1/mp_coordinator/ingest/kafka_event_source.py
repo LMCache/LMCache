@@ -126,7 +126,6 @@ class KafkaCacheEventSource(CacheEventSource):
         self._kafka_exception: type[Exception] = KafkaException
         # Written by the poll thread, read by metrics scrapes.
         self._stats = KafkaSourceStats()
-        self._stats_lock = threading.Lock()
         # Poll thread only.
         self._assigned: list["TopicPartition"] = []
         self._next_unread_refresh = 0.0
@@ -183,8 +182,7 @@ class KafkaCacheEventSource(CacheEventSource):
     def stats(self) -> KafkaSourceStats:
         """Return a copy of what the source has read; see
         :class:`KafkaSourceStats`."""
-        with self._stats_lock:
-            return replace(self._stats, unread_records=dict(self._stats.unread_records))
+        return replace(self._stats, unread_records=dict(self._stats.unread_records))
 
     # -- Poll thread -----------------------------------------------------------
 
@@ -213,9 +211,8 @@ class KafkaCacheEventSource(CacheEventSource):
                 partition.offset = next_offset
         consumer.assign(partitions)
         self._assigned = list(partitions)
-        with self._stats_lock:
-            self._stats.partitions_assigned = len(partitions)
-            self._stats.unread_records = {}
+        self._stats.partitions_assigned = len(partitions)
+        self._stats.unread_records = {}
         logger.info(
             "Kafka ingest assigned %d partition(s): %s",
             len(partitions),
@@ -259,8 +256,7 @@ class KafkaCacheEventSource(CacheEventSource):
                 message.value() or b""
             ).batches
         except ValidationError as e:
-            with self._stats_lock:
-                self._stats.records_undecodable += 1
+            self._stats.records_undecodable += 1
             logger.warning(
                 "Dropping undecodable cache-event record %s: %s", position, e
             )
@@ -268,12 +264,10 @@ class KafkaCacheEventSource(CacheEventSource):
         try:
             summary = self._event_gate.ingest_batches(batches)
         except Exception:
-            with self._stats_lock:
-                self._stats.records_failed += 1
+            self._stats.records_failed += 1
             logger.exception("Cache-event consumers failed on record %s", position)
             return
-        with self._stats_lock:
-            self._stats.records_applied += 1
+        self._stats.records_applied += 1
         logger.debug(
             "Kafka cache-event record %s: %d applied, %d duplicate, %d stale",
             position,
@@ -315,5 +309,4 @@ class KafkaCacheEventSource(CacheEventSource):
                 unread_records[partition.partition] = max(
                     0, high_watermark - next_offset
                 )
-        with self._stats_lock:
-            self._stats.unread_records = unread_records
+        self._stats.unread_records = unread_records

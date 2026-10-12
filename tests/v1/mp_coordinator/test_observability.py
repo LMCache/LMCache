@@ -15,10 +15,6 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
-from lmcache.v1.mp_coordinator.cache_events import (
-    CacheEventSubscriber,
-    CacheEventSubscriberStats,
-)
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
@@ -326,29 +322,4 @@ def test_kafka_source_metrics_report_reads_partitions_and_lag() -> None:
     assert values["lmcache_coordinator.kafka.unread_records"] == {
         labels(partition="0"): 0,
         labels(partition="1"): 40,
-    }
-
-
-class _StubSubscriber:
-    def __init__(self, stats: CacheEventSubscriberStats) -> None:
-        self.current = stats
-
-    def stats(self) -> CacheEventSubscriberStats:
-        return self.current
-
-
-def test_send_delay_gauge_appears_after_the_first_flush() -> None:
-    subscriber = _StubSubscriber(CacheEventSubscriberStats())
-    meter, reader = private_meter()
-    observability.register_cache_event_subscriber_metrics(
-        cast(CacheEventSubscriber, subscriber), meter
-    )
-    assert "lmcache_mp.coordinator_event_send_delay_seconds" not in (
-        read_values(reader)
-    )
-
-    subscriber.current = CacheEventSubscriberStats(last_send_delay_seconds=0.25)
-
-    assert read_values(reader)["lmcache_mp.coordinator_event_send_delay_seconds"] == {
-        labels(): 0.25
     }

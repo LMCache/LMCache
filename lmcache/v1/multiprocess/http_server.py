@@ -23,9 +23,6 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.mp_coordinator.cache_events import (
     maybe_create_cache_event_subscriber,
 )
-from lmcache.v1.mp_coordinator.observability import (
-    register_cache_event_subscriber_metrics,
-)
 from lmcache.v1.mp_coordinator.registrar import keep_registered
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
@@ -151,9 +148,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     if subscriber is not None:
         get_event_bus().register_subscriber(subscriber)
-        obs_config = _configs["observability"]
-        if obs_config.enabled and obs_config.metrics_enabled:
-            register_cache_event_subscriber_metrics(subscriber)
 
     app.state.coordinator_client = coordinator_client
     app.state.coordinator_registration_task = coordinator_registration_task
