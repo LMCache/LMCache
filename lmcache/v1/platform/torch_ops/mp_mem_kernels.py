@@ -899,10 +899,19 @@ def _transfer_per_layer_mla(
                     dst = chunk_gpu[layer_idx].view(
                         n_valid * block_size, 1, hidden_size
                     )
-                    torch.index_select(layer, 0, token_indices, out=dst)
+                    if layer.is_contiguous():
+                        torch.index_select(layer, 0, token_indices, out=dst)
+                    else:
+                        # Limit MUSA's temporary materialization to selected
+                        # blocks when the dim-0 view has physical padding.
+                        dst.copy_(layer[token_indices])
                 else:
                     dst = chunk_gpu[layer_idx].view(n_valid, block_size, hidden_size)
-                    torch.index_select(layer, 0, eff_idx, out=dst)
+                    if layer.is_contiguous():
+                        torch.index_select(layer, 0, eff_idx, out=dst)
+                    else:
+                        # See the flat-token path above.
+                        dst.copy_(layer[eff_idx])
             obj[:, offset_in_object:token_end].copy_(chunk_gpu, non_blocking=True)
         else:
             chunk_gpu = obj[:, offset_in_object:token_end].to(

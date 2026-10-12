@@ -202,6 +202,71 @@ def test_musa_block_transfer_fallback_mla_d2h_and_h2d() -> None:
 
 @pytest.mark.skipif(
     not _using_python_fallback(),
+    reason="CPU fallback correctness check needs the Python fallback backend",
+)
+def test_musa_block_transfer_fallback_mla_d2h_handles_padded_layers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallback MLA D2H avoids index_select output on padded layer views."""
+    num_blocks = 4
+    block_size = 2
+    head_size = 4
+    block_stride = block_size * head_size + 3
+    storage = torch.arange(
+        num_blocks * block_stride,
+        dtype=torch.float32,
+    ).reshape(num_blocks, block_stride)
+    source = [
+        storage.as_strided(
+            (num_blocks, block_size, head_size),
+            (block_stride, head_size, 1),
+        )
+    ]
+    block_ids = torch.tensor([1, 3], dtype=torch.int64)
+    chunk = torch.zeros(1, block_ids.numel() * block_size, head_size)
+    shape_desc = _shape_desc(
+        num_layers=1,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_heads=1,
+        head_size=head_size,
+        kv_size=1,
+        dtype=source[0].dtype,
+    )
+    shape_desc.block_stride_elems = block_stride
+
+    real_index_select = torch.index_select
+
+    def reject_noncontiguous_out(
+        input_tensor: torch.Tensor,
+        dim: int,
+        index: torch.Tensor,
+        *,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if not input_tensor.is_contiguous():
+            raise RuntimeError("MUSA index_select does not support padded views")
+        return real_index_select(input_tensor, dim, index, out=out)
+
+    monkeypatch.setattr(torch, "index_select", reject_noncontiguous_out)
+
+    device_ops.multi_layer_block_kv_transfer(
+        source,
+        [chunk],
+        block_ids,
+        torch.device("cpu"),
+        lmcache_native.TransferDirection.D2H,
+        shape_desc,
+        chunk.shape[1],
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+        0,
+    )
+
+    assert torch.equal(chunk[0], source[0][block_ids].reshape_as(chunk[0]))
+
+
+@pytest.mark.skipif(
+    not _using_python_fallback(),
     reason="CPU fallback stress check needs the Python fallback backend",
 )
 def test_musa_block_transfer_fallback_repeated_round_trip() -> None:
