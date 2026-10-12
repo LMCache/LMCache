@@ -339,12 +339,13 @@ class GdsL1Config:
     exclusive with the pinned-DRAM tier in ``memory_config``). cuFile and
     hipFile use a filesystem slab; uGDS uses a raw device. Phoenix uses a
     filesystem slab on any VFS-mounted storage: local NVMe for the DMA fast
-    path, NFS / NVMe-oF mounts with degraded (non-DMA) performance. Carries
-    the slab location, capacity, backend, and DMA mode.
+    path, NFS / NVMe-oF mounts with degraded (non-DMA) performance. OpenDS
+    uses a filesystem slab on local NVMe. Carries the slab location,
+    capacity, backend, and DMA mode.
     """
 
     file_location: str
-    """Directory for a cuFile/hipFile/phx slab, or an ``ugds_drv``
+    """Directory for a cuFile/hipFile/phx/opends slab, or an ``ugds_drv``
     character-device path for uGDS."""
 
     size_in_bytes: int
@@ -353,14 +354,16 @@ class GdsL1Config:
     must not exceed its reported namespace capacity."""
 
     use_direct_io: bool = True
-    """Use ``O_DIRECT`` for cuFile/hipFile. Ignored by uGDS."""
+    """Use ``O_DIRECT`` for cuFile/hipFile. Ignored by uGDS; required by
+    OpenDS."""
 
     backend: str = "auto"
     """GPU storage backend. ``auto`` selects cuFile on CUDA and hipFile on
     ROCm; ``ugds`` can be used on either platform with a matching
     ``libugds.so`` and treats ``file_location`` as a character-device path;
     ``phx`` uses the Phoenix phxfs DMA path with a filesystem slab and a
-    matching ``libphoenix.so``."""
+    matching ``libphoenix.so``; ``opends`` uses OpenDS (``libopends_aisio.so``)
+    with a filesystem slab."""
 
     align_bytes: int = 4096
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
@@ -933,23 +936,23 @@ def add_storage_manager_args(
         "GDS L1 tier",
         "Configuration for the GDS L1 tier. Setting --gds-l1-path makes the "
         "L1 medium an NVMe slab accessed via GPUDirect Storage DMA instead of "
-        "pinned DRAM; --l1-size-gb then sizes the slab. cuFile, hipFile, and "
-        "phx use a slab file, while uGDS uses a dedicated raw device. "
+        "pinned DRAM; --l1-size-gb then sizes the slab. cuFile, hipFile, phx, "
+        "and OpenDS use a slab file, while uGDS uses a dedicated raw device. "
         "Disable byte-array L2 adapters when this is on.",
     )
     gds_group.add_argument(
         "--gds-l1-path",
         type=str,
         default=None,
-        help="NVMe directory for cuFile/hipFile/phx, or /dev/ugds_drvX for "
-        "uGDS. Setting this enables GDS L1.",
+        help="NVMe directory for cuFile/hipFile/phx/opends, or /dev/ugds_drvX "
+        "for uGDS. Setting this enables GDS L1.",
     )
     gds_group.add_argument(
         "--gds-l1-use-direct-io",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Open the slab file with O_DIRECT (required for the GDS DMA fast "
-        "path on ext4). Default True.",
+        "path on ext4, and by opends). Default True.",
     )
     gds_group.add_argument(
         "--gds-l1-backend",
