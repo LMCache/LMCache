@@ -18,6 +18,9 @@ from unittest.mock import MagicMock, patch
 # Third Party
 import torch
 
+# First Party
+from lmcache.v1.platform.ops_types import BlockTransferInputKind
+
 
 def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
     """Unpinned input must be synced before scatter returns.
@@ -46,9 +49,10 @@ def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
 
     chunks = [_unpinned_chunk()]
 
-    # An unannotated mock op models the ptr-only backend. Keep the capability
-    # check real, and substitute only the platform resolver's selected ops.
+    # The mock ops declare the pointer convention of a compiled backend;
+    # only the platform resolver's selected ops are substituted.
     ops = MagicMock()
+    ops.block_transfer_input_kind.return_value = BlockTransferInputKind.POINTERS
     with (
         patch.object(base, "synchronize_device") as synchronize,
         patch.object(base, "resolve_device_ops", return_value=ops),

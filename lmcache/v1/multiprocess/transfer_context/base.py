@@ -17,11 +17,8 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import TYPE_CHECKING
-import inspect
 
 # Third Party
 import numpy as np
@@ -35,6 +32,7 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import resolve_device_ops, synchronize_device
+from lmcache.v1.platform.ops_types import BlockTransferInputKind
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -42,25 +40,6 @@ if TYPE_CHECKING:
     pass
 
 logger = init_logger(__name__)
-
-
-@lru_cache(maxsize=None)
-def _detect_block_transfer_accepts_tensor(transfer_fn: Callable[..., None]) -> bool:
-    """Inspect the selected transfer op, caching capabilities per callable.
-
-    Tensor-capable ops receive tensor lists directly. Native pointer-only ops
-    (including uninspectable pybind functions) need pointer conversion and
-    pinned host buffers. A process may use both CPU and accelerator ops.
-    """
-    try:
-        # TODO: Replace annotation inspection with an explicit ops capability.
-        sig = inspect.signature(transfer_fn)
-        param = sig.parameters.get("lmcache_objects_ptrs")
-        if param is not None and param.annotation is not inspect.Parameter.empty:
-            return "Tensor" in str(param.annotation)
-    except (ValueError, TypeError):
-        pass
-    return False
 
 
 def _tensors_to_ptrs(tensors: list[torch.Tensor]) -> list[int]:
@@ -349,8 +328,8 @@ def gather_paged_kv_to_cpu(
     # KV tensors, not process-wide accelerator availability, select the ops.
     device = get_device(normalized)
     device_ops = resolve_device_ops(device.type)
-    accepts_tensor = _detect_block_transfer_accepts_tensor(
-        device_ops.multi_layer_block_kv_transfer
+    accepts_tensor = (
+        device_ops.block_transfer_input_kind() is BlockTransferInputKind.TENSORS
     )
     if engine_kv_format is None:
         engine_kv_format = fmt
@@ -607,8 +586,8 @@ def scatter_cpu_to_paged_kv(
     )
     device = get_device(normalized)
     device_ops = resolve_device_ops(device.type)
-    accepts_tensor = _detect_block_transfer_accepts_tensor(
-        device_ops.multi_layer_block_kv_transfer
+    accepts_tensor = (
+        device_ops.block_transfer_input_kind() is BlockTransferInputKind.TENSORS
     )
     if engine_kv_format is None:
         engine_kv_format = fmt

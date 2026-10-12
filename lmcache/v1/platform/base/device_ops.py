@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.platform import ops_types, torch_ops
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.platform.ops_types import BlockTransferInputKind, PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -59,6 +59,9 @@ class DeviceOps:
 
     def __init__(self) -> None:
         self._native_bound: bool = False
+        self._block_transfer_input_kind: BlockTransferInputKind = (
+            BlockTransferInputKind.TENSORS
+        )
 
     def __getattr__(self, name: str) -> Any:
         """Report an unavailable optional native symbol.
@@ -94,7 +97,8 @@ class DeviceOps:
         Walks the native module's public symbols.  For each callable or
         type, binds it on this instance — replacing the torch fallback if
         one exists, or adding a native-only symbol that has no pure-Python
-        equivalent.
+        equivalent.  A bound ``multi_layer_block_kv_transfer`` switches
+        :meth:`block_transfer_input_kind` to ``POINTERS``.
         """
         bound_ops = 0
         bound_types = 0
@@ -114,6 +118,9 @@ class DeviceOps:
         ekf = getattr(module, "EngineKVFormat", None)
         if ekf is not None:
             self.GPUKVFormat = ekf
+        if callable(getattr(module, "multi_layer_block_kv_transfer", None)):
+            # Compiled block-transfer bindings take packed pointers, not tensors.
+            self._block_transfer_input_kind = BlockTransferInputKind.POINTERS
         logger.debug(
             "bind_native: %s <- %s (%d ops, %d types)",
             type(self).__name__,
@@ -191,6 +198,27 @@ class DeviceOps:
             f"Device backend {self.device_type!r} does not support "
             "tensor construction from raw pointers."
         )
+
+    def block_transfer_input_kind(self) -> BlockTransferInputKind:
+        """Return the operand convention of :meth:`multi_layer_block_kv_transfer`.
+
+        The answer describes only how this instance's public block-transfer
+        operation must be called. It does not report whether native code is
+        installed or enabled internally, nor whether a particular request is
+        supported.
+
+        The default is ``TENSORS``. :meth:`bind_native` records ``POINTERS``
+        when it installs a native ``multi_layer_block_kv_transfer``. A
+        subclass that overrides :meth:`multi_layer_block_kv_transfer` at class
+        level with a pointer-taking implementation must also override this
+        method.
+
+        Transitional: removed once block-transfer callers pass Tensor requests.
+
+        Returns:
+            The convention callers must use to build the operation's arguments.
+        """
+        return self._block_transfer_input_kind
 
     def multi_layer_block_kv_transfer(
         self,

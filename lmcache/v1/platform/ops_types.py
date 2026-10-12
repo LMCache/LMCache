@@ -12,7 +12,7 @@ module keeps placeholder stubs for those names.
 from __future__ import annotations
 
 # Standard
-from enum import IntEnum
+from enum import Enum, IntEnum
 
 # First Party
 import lmcache.lmcache_native as _native
@@ -34,6 +34,21 @@ class TransferPhase(IntEnum):
 
     KERNEL = 0
     STAGING = 1
+
+
+class BlockTransferInputKind(Enum):
+    """Operand convention of ``DeviceOps.multi_layer_block_kv_transfer``.
+
+    Python-only: callers use it to build the arguments the resolved
+    operation expects. It says nothing about whether a particular request is
+    supported.
+    """
+
+    #: Paged KV tensors, chunk tensors, and ``list[int]`` block IDs.
+    TENSORS = "tensors"
+    #: An int64 tensor of paged-buffer pointers on the KV device, chunk data
+    #: pointers as ``list[int]``, and an int64 block-ID tensor on the KV device.
+    POINTERS = "pointers"
 
 
 class _NativePlanType:

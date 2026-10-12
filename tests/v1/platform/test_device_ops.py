@@ -27,8 +27,17 @@ from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.devices.cpu.device_ops import CpuDeviceOps
 from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
+from lmcache.v1.platform.devices.hpu.device_ops import HpuDeviceOps
+from lmcache.v1.platform.devices.musa.device_ops import MusaDeviceOps
+from lmcache.v1.platform.devices.musa.native_kv_transfer import (
+    ENV_MUSA_NATIVE_KV_TRANSFER,
+)
+from lmcache.v1.platform.devices.npu.device_ops import NpuDeviceOps
+from lmcache.v1.platform.devices.rbln.device_ops import RblnDeviceOps
+from lmcache.v1.platform.devices.xpu.device_ops import XpuDeviceOps
 from lmcache.v1.platform.ops_types import (
     BatchStep,
+    BlockTransferInputKind,
     KernelGroupSpec,
     LaunchVar,
     PageBufferShapeDesc,
@@ -37,13 +46,13 @@ from lmcache.v1.platform.ops_types import (
 import lmcache.v1.platform as platform_pkg
 
 # Derive op names from the class body: regular instance-method functions,
-# excluding infrastructure helpers.
+# excluding infrastructure helpers and capability queries.
 _OP_NAMES: tuple[str, ...] = tuple(
     sorted(
         name
         for name, member in vars(DeviceOps).items()
         if not name.startswith("_")
-        and name not in ("ensure_native", "bind_native")
+        and name not in ("ensure_native", "bind_native", "block_transfer_input_kind")
         and inspect.isfunction(member)
     )
 )
@@ -285,6 +294,128 @@ def test_cuda_device_ops_loads_cuda_ops(
     ops.ensure_native()
 
     assert ops.calculate_cdf(None, 0) == "cuda-native"
+
+
+# -- Block-transfer input kind ---------------------------------------------
+
+
+def _fake_calculate_cdf(*_args: object) -> str:
+    return "native-cdf"
+
+
+def _fake_block_transfer(*_args: object) -> None:
+    return None
+
+
+class _FakeBlockTransferModule:
+    """Stand-in compiled module exporting the pointer-taking block op."""
+
+    multi_layer_block_kv_transfer = staticmethod(_fake_block_transfer)
+
+
+def _install_fake_native(
+    monkeypatch: pytest.MonkeyPatch, module_name: str, **symbols: object
+) -> None:
+    """Make ``import <module_name>`` load a fake module exporting ``symbols``."""
+    parent_name, _, child_name = module_name.rpartition(".")
+    native = ModuleType(module_name)
+    for name, value in symbols.items():
+        setattr(native, name, value)
+    parent = sys.modules.get(parent_name) or ModuleType(parent_name)
+    monkeypatch.setitem(sys.modules, parent_name, parent)
+    monkeypatch.setattr(parent, child_name, native, raising=False)
+    monkeypatch.setitem(sys.modules, module_name, native)
+
+
+# Backends that load their native module through ``bind_native``.
+_SOFT_FAIL_BINDING_BACKENDS = [
+    pytest.param(CudaDeviceOps, "lmcache.cuda_ops", id="cuda"),
+    pytest.param(XpuDeviceOps, "lmcache.xpu_ops", id="xpu"),
+]
+_BINDING_BACKENDS = [
+    *_SOFT_FAIL_BINDING_BACKENDS,
+    pytest.param(NpuDeviceOps, "lmcache_ascend.ops", id="npu"),
+]
+
+
+@pytest.mark.parametrize(
+    "ops_cls", [DeviceOps, CpuDeviceOps, HpuDeviceOps, RblnDeviceOps]
+)
+def test_block_transfer_input_kind_defaults_to_tensors(
+    ops_cls: type[DeviceOps],
+) -> None:
+    """Backends without a native block op keep the Tensor convention."""
+    ops = ops_cls()
+    ops.ensure_native()
+    assert ops.block_transfer_input_kind() is BlockTransferInputKind.TENSORS
+
+
+def test_resolved_cpu_ops_take_tensor_block_input() -> None:
+    """The CPU spec and the bare fallback both resolve to Tensor input."""
+    for device_type in ("cpu", ""):
+        ops = resolve_device_ops(device_type)
+        assert ops.block_transfer_input_kind() is BlockTransferInputKind.TENSORS
+
+
+@pytest.mark.parametrize("native_opt_in", ["0", "1"])
+def test_musa_block_transfer_input_kind_stays_tensors(
+    monkeypatch: pytest.MonkeyPatch, native_opt_in: str
+) -> None:
+    """MUSA's public block op takes tensors whether or not native is opted in."""
+    monkeypatch.setenv(ENV_MUSA_NATIVE_KV_TRANSFER, native_opt_in)
+    ops = MusaDeviceOps()
+    ops.ensure_native()
+    assert ops.block_transfer_input_kind() is BlockTransferInputKind.TENSORS
+
+
+def test_bind_native_records_pointer_block_transfer_per_instance() -> None:
+    """Only binding a native block op switches that instance to pointers."""
+    ops = DeviceOps()
+    ops.bind_native(_FakeNativeModule())
+    assert ops.block_transfer_input_kind() is BlockTransferInputKind.TENSORS
+
+    ops.bind_native(_FakeBlockTransferModule())
+    assert ops.block_transfer_input_kind() is BlockTransferInputKind.POINTERS
+    assert DeviceOps().block_transfer_input_kind() is BlockTransferInputKind.TENSORS
+
+
+@pytest.mark.parametrize(("ops_cls", "module_name"), _SOFT_FAIL_BINDING_BACKENDS)
+def test_missing_native_module_keeps_tensor_block_input(
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
+) -> None:
+    """A backend whose extension is absent stays on the Tensor baseline."""
+    monkeypatch.setitem(sys.modules, module_name, None)
+    ops = ops_cls()
+    ops.ensure_native()
+    assert ops.block_transfer_input_kind() is BlockTransferInputKind.TENSORS
+
+
+@pytest.mark.parametrize(("ops_cls", "module_name"), _BINDING_BACKENDS)
+def test_partial_native_module_keeps_tensor_block_input(
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
+) -> None:
+    """A native module without the block op does not advertise pointers."""
+    _install_fake_native(monkeypatch, module_name, calculate_cdf=_fake_calculate_cdf)
+    ops = ops_cls()
+    ops.ensure_native()
+    # The module was bound; only the block op is missing from it.
+    assert ops.calculate_cdf(None, 0) == "native-cdf"
+    assert ops.block_transfer_input_kind() is BlockTransferInputKind.TENSORS
+
+
+@pytest.mark.parametrize(("ops_cls", "module_name"), _BINDING_BACKENDS)
+def test_native_block_op_uses_pointer_block_input(
+    monkeypatch: pytest.MonkeyPatch, ops_cls: type[DeviceOps], module_name: str
+) -> None:
+    """A native module exporting the block op selects the pointer convention."""
+    _install_fake_native(
+        monkeypatch,
+        module_name,
+        multi_layer_block_kv_transfer=_fake_block_transfer,
+    )
+    ops = ops_cls()
+    ops.ensure_native()
+    assert ops.block_transfer_input_kind() is BlockTransferInputKind.POINTERS
 
 
 # -- Package export --------------------------------------------------------
