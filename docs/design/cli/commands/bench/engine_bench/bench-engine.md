@@ -130,7 +130,9 @@ class RequestSender:
     async def close(self) -> None
 ```
 
-Streams via `AsyncOpenAI`, measures TTFT / decode speed / latency, reads token
+Streams via `AsyncOpenAI` with SDK retries disabled so each scheduled request
+has one attempt and engine failures are not hidden by retries. Measures
+TTFT / decode speed / latency, reads token
 counts from server usage reports, then invokes every `on_finished` callback
 with `(RequestResult, response_text)`. Each call is a self-contained
 coroutine — concurrency is the workload's job.
