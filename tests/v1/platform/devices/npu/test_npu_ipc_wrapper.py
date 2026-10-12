@@ -8,7 +8,6 @@ spawn round-trip test gated on real Ascend hardware.
 
 # Standard
 import multiprocessing as mp
-import pickle
 
 # Third Party
 import pytest
@@ -147,10 +146,10 @@ def test_equality_compares_plane_records() -> None:
     assert hash(a) == hash(same)
 
 
-def test_pickle_roundtrip_preserves_plane_records() -> None:
+def test_wire_roundtrip_preserves_plane_records() -> None:
     wrapper = _handbuilt_wrapper((_record(1), _record(2)))
 
-    restored = pickle.loads(pickle.dumps(wrapper))
+    restored = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(wrapper))
 
     assert isinstance(restored, NpuIPCWrapper)
     assert restored == wrapper
@@ -211,12 +210,13 @@ def test_equality_distinguishes_registration_form() -> None:
     assert hash(bare) != hash(tupled)
 
 
-def test_pickle_roundtrip_preserves_registration_form() -> None:
+def test_wire_roundtrip_preserves_registration_form() -> None:
     wrapper = _handbuilt_wrapper((_record(1),), bare=False)
 
-    restored = pickle.loads(pickle.dumps(wrapper))
+    restored = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(wrapper))
 
     assert restored == wrapper
+    assert isinstance(restored, NpuIPCWrapper)
     assert restored._bare is False  # noqa: SLF001
 
 

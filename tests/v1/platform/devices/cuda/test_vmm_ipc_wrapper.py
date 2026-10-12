@@ -12,7 +12,6 @@ band -- these tests stand in for the fd transport with a
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
 import os
-import pickle
 import socket
 
 # Third Party
@@ -285,12 +284,13 @@ def test_wrap_rejects_unpermutable_noncontiguous(vmm_pool) -> None:
         VmmCudaIPCWrapper(base[::2])
 
 
-def test_pickle_strips_process_local_state(vmm_pool) -> None:
-    """The fd and registry references never travel with the pickle."""
+def test_wire_strips_process_local_state(vmm_pool) -> None:
+    """The fd and registry references never travel with the descriptor."""
     wrapper = VmmCudaIPCWrapper(vmm_pool.tensor(0, 1024))
     try:
         assert wrapper.fd_payload() is not None
-        clone = pickle.loads(pickle.dumps(wrapper))
+        clone = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(wrapper))
+        assert isinstance(clone, VmmCudaIPCWrapper)
         assert clone.fd_payload() is None
         assert clone._opens == 0  # noqa: SLF001
         assert clone._export_id == wrapper._export_id  # noqa: SLF001
@@ -316,7 +316,7 @@ def test_to_tensor_without_resolver_raises(vmm_pool, clear_fd_resolver) -> None:
     set_vmm_fd_resolver(None)
     wrapper = VmmCudaIPCWrapper(vmm_pool.tensor(0, 1024))
     try:
-        clone = pickle.loads(pickle.dumps(wrapper))
+        clone = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(wrapper))
         with pytest.raises(RuntimeError, match="resolver"):
             clone.to_tensor()
     finally:
@@ -448,7 +448,7 @@ def _fabric_consumer(conn: Connection) -> None:
 )
 def test_fabric_round_trip() -> None:
     """Fabric-kind wrappers need no fd channel: the 64-byte blob rides
-    the pickle and imports across processes on its own.
+    the descriptor and imports across processes on its own.
     """
     driver = _cuda.driver
     pool = _VmmPool(
