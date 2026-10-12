@@ -28,14 +28,13 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.platform import resolve_device_ops
+from lmcache.v1.platform import resolve_device_ops, synchronize_device
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -230,12 +229,14 @@ def create_engine_driven_context(
 def compute_kv_layout(
     kv_caches: dict[str, torch.Tensor],
     layout_hints: LayoutHints | None = None,
+    engine_type: EngineType = EngineType.VLLM,
 ) -> tuple[int, int, int, str, "lmcache_native.EngineKVFormat", int]:
     """Compute KV layout metadata from KV tensors.
 
     Args:
         kv_caches: Per-layer KV tensor mapping.
         layout_hints: Optional engine layout hints.
+        engine_type: Serving engine that produced the KV tensors.
 
     Returns:
         Tuple of ``(block_size, num_layers, hidden_dim_size, dtype_str,``
@@ -263,7 +264,7 @@ def compute_kv_layout(
         raise ValueError("kv_caches is empty. Cannot compute KV layout.")
 
     engine_kv_format, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        tensors, engine_type, layout_hints=layout_hints
     )
     block_size = get_block_size(normalized, engine_kv_format)
     num_layers = get_num_layers(normalized, engine_kv_format)
@@ -290,6 +291,7 @@ def gather_paged_kv_to_cpu(
     engine_kv_format: "lmcache_native.EngineKVFormat" | None = None,
     out: list[torch.Tensor] | None = None,
     chunk_indices: list[int] | None = None,
+    engine_type: EngineType = EngineType.VLLM,
 ) -> list[torch.Tensor]:
     """Gather paged KV blocks into CPU chunk tensors.
 
@@ -311,6 +313,7 @@ def gather_paged_kv_to_cpu(
             ``out``, only those chunks are gathered and written into
             ``out[i]`` in order.  When ``None``, all chunks are gathered
             (backward-compatible behaviour).
+        engine_type: Serving engine that produced the KV tensors.
 
     Returns:
         List of CPU tensors, one per chunk. For split-K/V formats each chunk
@@ -341,7 +344,7 @@ def gather_paged_kv_to_cpu(
 
     tensors = list(kv_caches.values())
     fmt, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        tensors, engine_type, layout_hints=layout_hints
     )
     # KV tensors, not process-wide accelerator availability, select the ops.
     device = get_device(normalized)
@@ -522,7 +525,7 @@ def gather_paged_kv_to_cpu(
         # The CPU MUST block and wait for the GPU ONLY when a temporary
         # staging buffer is used. This is because the CPU needs to immediately
         # read this data for the memory copy below.
-        torch_dev.synchronize()
+        synchronize_device(device)
 
         for dst, src in zip(_target_out, staged_chunks, strict=False):
             dst.copy_(src)  # High-speed CPU-to-CPU memory copy
@@ -534,7 +537,7 @@ def gather_paged_kv_to_cpu(
 
     # Fast path: The async GPU copy might still be in progress.
     # We intentionally omit synchronization here for performance.
-    # WARNING: The caller MUST explicitly call `torch_dev.synchronize()`
+    # WARNING: The caller MUST explicitly synchronize the KV tensor device
     # before consuming these chunks to ensure data validity.
 
     return chunks
@@ -548,6 +551,7 @@ def scatter_cpu_to_paged_kv(
     skip_first_n_tokens: int = 0,
     layout_hints: LayoutHints | None = None,
     engine_kv_format: "lmcache_native.EngineKVFormat" | None = None,
+    engine_type: EngineType = EngineType.VLLM,
 ) -> None:
     """Scatter CPU chunk tensors back into paged KV tensors.
 
@@ -568,6 +572,7 @@ def scatter_cpu_to_paged_kv(
             GPU transfer path).
         layout_hints: Optional engine layout hints.
         engine_kv_format: Optional pre-detected KV format.
+        engine_type: Serving engine that produced the KV tensors.
 
     Raises:
         ValueError: If ``block_ids`` is shorter than
@@ -598,7 +603,7 @@ def scatter_cpu_to_paged_kv(
 
     tensors = list(kv_caches.values())
     fmt, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        tensors, engine_type, layout_hints=layout_hints
     )
     device = get_device(normalized)
     device_ops = resolve_device_ops(device.type)
@@ -725,7 +730,7 @@ def scatter_cpu_to_paged_kv(
             )
     # Fast path: The async GPU copy might still be in progress.
     # We intentionally omit synchronization here for performance.
-    # WARNING: The caller MUST explicitly call `torch_dev.synchronize()`
+    # WARNING: The caller MUST explicitly synchronize the KV tensor device
     # before consuming these chunks to ensure data validity.
 
     if dynamically_pinned:
@@ -738,4 +743,4 @@ def scatter_cpu_to_paged_kv(
         # cannot cover this: by then the temporaries are already gone.
         # Only the dynamically pinned case pays this; caller-owned pinned
         # chunks keep the fast path.
-        torch_dev.synchronize()
+        synchronize_device(device)

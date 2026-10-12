@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 # First Party
+from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 if TYPE_CHECKING:
@@ -77,6 +78,20 @@ class CpuDeviceSpec(DeviceSpec):
         from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
 
         return CpuShmTensorWrapper
+
+    def is_lmcache_driven_available(self) -> bool:
+        """The CPU SHM wrapper serves the lmcache-driven path (opt-in)."""
+        return True
+
+    def default_mp_transfer_mode(self) -> MPTransferMode:
+        """CPU workers default to the portable engine-driven data path.
+
+        The SHM-based lmcache-driven path is available (see
+        :meth:`is_lmcache_driven_available`) but stays opt-in: ``auto``
+        keeps CPU on engine-driven transfer unless the caller forces
+        ``lmcache_driven`` explicitly.
+        """
+        return MPTransferMode.ENGINE_DRIVEN
 
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         # First Party

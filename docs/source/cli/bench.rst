@@ -569,8 +569,10 @@ first use and cache under ``HF_HOME``; any other value is a local path.
      - Parquet (distractor/validation); requires ``pyarrow``.
 
 Local files load unchanged if their records carry passages, a question, and
-gold answers -- ``ctxs[].{title,text}``, ``paragraphs[].paragraph_text``, or
-``context``. Records missing any of the three are skipped.
+gold answers -- ``ctxs[].{title,text}``, ``paragraphs[].paragraph_text``,
+``context``, or the RAGAS hand-off fields ``retrieved_contexts``,
+``user_input`` and ``reference``. Records missing any of the three are
+skipped.
 
 **Comparing two stacks.** The workload reports one arm; run it twice and diff
 the files by ``sample_id``:
@@ -1370,6 +1372,12 @@ support a clean store -> load round-trip.
    set that alignment, commonly ``4096`` for local block devices. The
    payload size (``--data-size-kb * 1024``) must be a multiple of the
    selected alignment.
+
+   To benchmark against a hugepage-backed L1 tier, pass
+   ``--l1-use-hugepages``. The buffer is then allocated from the 2 MiB
+   hugepage pool. Pre-allocate enough pages with ``sysctl vm.nr_hugepages``;
+   the buffer needs ``ceil(2 * in_flight * num_keys * data_size / 2 MiB)``
+   pages.
 
 
 Quick start

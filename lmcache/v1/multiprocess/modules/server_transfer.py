@@ -37,6 +37,7 @@ def _dtype_to_name(dtype: torch.dtype) -> str:
 def create_transfer_strategy(
     storage_manager: "StorageManager",
     *,
+    read_owner_resolver: Callable[[str], dict[ObjectKey, int] | None] | None = None,
     shm_name: str,
     pool_size: int,
     pending_writes: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
@@ -70,11 +71,13 @@ def create_transfer_strategy(
             pending_reads=pending_reads,
             pending_lock=pending_lock,
             transfer_key_factory=transfer_key_factory,
-            fallback_strategy=PickleTransferStrategy(storage_manager),
+            fallback_strategy=PickleTransferStrategy(
+                storage_manager, read_owner_resolver
+            ),
         )
 
     logger.info("Using pickle non-GPU transfer strategy")
-    return PickleTransferStrategy(storage_manager)
+    return PickleTransferStrategy(storage_manager, read_owner_resolver)
 
 
 class TransferStrategy(abc.ABC):
@@ -174,6 +177,7 @@ class PickleTransferStrategy(TransferStrategy):
     def __init__(
         self,
         storage_manager: "StorageManager",
+        read_owner_resolver: Callable[[str], dict[ObjectKey, int] | None] | None = None,
     ) -> None:
         """Initialize pickle transfer strategy.
 
@@ -181,6 +185,7 @@ class PickleTransferStrategy(TransferStrategy):
             storage_manager: Storage manager used for reserve/read/finish calls.
         """
         self._storage_manager = storage_manager
+        self._read_owner_resolver = read_owner_resolver
 
     def prepare_store(
         self,
@@ -253,7 +258,11 @@ class PickleTransferStrategy(TransferStrategy):
                 written_keys.append(obj_key)
         finally:
             if written_keys:
-                self._storage_manager.finish_write(written_keys)
+                self._storage_manager.finish_write_by_owner(
+                    self._storage_manager.prepare_write_completion(
+                        {k: reserved_dict[k] for k in written_keys}
+                    )
+                )
 
         success = len(written_keys) == len(reserved_dict)
         if not success:
@@ -277,8 +286,15 @@ class PickleTransferStrategy(TransferStrategy):
         """Read prefetched objects and return serialized pickle payload."""
         obj_keys = resolve_obj_keys(key)
         prefetched_keys: list[ObjectKey] = []
+        owners = (
+            self._read_owner_resolver(key.request_id)
+            if self._read_owner_resolver is not None
+            else None
+        )
         try:
-            read_ctx = self._storage_manager.read_prefetched_results(obj_keys)
+            read_ctx = self._storage_manager.read_prefetched_results(
+                obj_keys, l1_owners=owners
+            )
             with read_ctx as maybe_memory_objs:
                 if not maybe_memory_objs or len(maybe_memory_objs) != len(obj_keys):
                     return PrepareRetrieveResponse(success=False, data=b"", context={})
@@ -295,7 +311,9 @@ class PickleTransferStrategy(TransferStrategy):
                 )
         finally:
             if prefetched_keys:
-                self._storage_manager.finish_read_prefetched(prefetched_keys)
+                self._storage_manager.finish_read_prefetched(
+                    prefetched_keys, l1_owners=owners
+                )
 
     def commit_retrieve(
         self,
