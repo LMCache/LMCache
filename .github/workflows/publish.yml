@@ -42,6 +42,18 @@ jobs:
             # operator_release.yml handles those; this workflow is lmcache-only.
             lmcache: ${{ !startsWith(github.ref_name, 'operator-') && (github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || steps.filter.outputs.lmcache == 'true') }}
         steps:
+            # Reject non-v tags before any build: setuptools-scm ignores them and
+            # publishes a `.devN` guess. Keep in sync with build-artifacts' pattern.
+            - name: Validate release tag
+              if: github.event_name == 'release' && !startsWith(github.ref_name, 'operator-')
+              env:
+                  REF: ${{ github.ref_name }}
+              run: |
+                  if [[ ! "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$ ]]; then
+                    echo "::error::release tag '$REF' is not a v-prefixed release tag (expected v<major>.<minor>.<patch>[rc|a|b<n>]); re-tag the release"
+                    exit 1
+                  fi
+
             - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
               if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
               with:
@@ -290,6 +302,19 @@ jobs:
                   name: release-artifacts-arm64
                   path: dist
 
+            - name: Check artifact versions match the release tag
+              env:
+                  REF: ${{ github.ref_name }}
+              run: |
+                  # PyPI versions cannot be reused; refuse anything not built as exactly the tag.
+                  shopt -s nullglob
+                  files=(dist/*.whl dist/*.tar.gz)
+                  (( ${#files[@]} )) || { echo "::error::no wheels or sdists in dist/"; exit 1; }
+                  for f in "${files[@]}"; do
+                    v="$(basename "${f%.tar.gz}" | cut -d- -f2)"
+                    [[ "$v" == "${REF#v}" ]] || { echo "::error::$(basename "$f") has version $v, expected ${REF#v}"; exit 1; }
+                  done
+
             - name: Upload release artifacts to GitHub release
               env:
                   GITHUB_TOKEN: ${{ github.token }}
@@ -327,6 +352,19 @@ jobs:
               with:
                   name: release-cli-artifacts
                   path: dist
+
+            - name: Check artifact versions match the release tag
+              env:
+                  REF: ${{ github.ref_name }}
+              run: |
+                  # PyPI versions cannot be reused; refuse anything not built as exactly the tag.
+                  shopt -s nullglob
+                  files=(dist/*.whl dist/*.tar.gz)
+                  (( ${#files[@]} )) || { echo "::error::no wheels or sdists in dist/"; exit 1; }
+                  for f in "${files[@]}"; do
+                    v="$(basename "${f%.tar.gz}" | cut -d- -f2)"
+                    [[ "$v" == "${REF#v}" ]] || { echo "::error::$(basename "$f") has version $v, expected ${REF#v}"; exit 1; }
+                  done
 
             - name: Upload lmcache-cli release artifacts to GitHub release
               env:
