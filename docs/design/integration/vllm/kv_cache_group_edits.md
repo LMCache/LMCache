@@ -255,7 +255,10 @@ bijective block-id → bytes mapping. Consequences:
   layouts is left unchanged.
 - After edits, every registered tensor's block dim equals its group's
   `kv_cache_spec.block_size`, so the server derives `compress_ratio == 1` for
-  these groups.
+  these groups. Kernel-paged layouts no edit recognizes (vLLM-RBLN's 6-D HND)
+  stay raw; the server tells them from compression by page count
+  (`EngineGroupInfo.num_blocks`, see
+  [hybrid-kv-cache-groups.md](hybrid-kv-cache-groups.md#kernel-paged-groups-engine-driven)).
 
 ## Code map
 

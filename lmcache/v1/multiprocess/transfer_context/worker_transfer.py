@@ -196,6 +196,10 @@ class _GroupState:
         window_chunks: Trailing chunks this group needs for a cache hit
             (``-1`` = full attention). A retrieve returns only these chunks
             for the group, mirroring the server's prefetch window.
+        kernel_pages_per_block: Tensor pages one engine block ID covers (see
+            ``KernelGroupInfo.kernel_pages_per_block``). ``blocks_in_chunk``
+            and ``blocks_per_window`` count pages, and engine block IDs are
+            expanded to page IDs before gather / scatter.
     """
 
     layer_names: list[str]
@@ -204,6 +208,24 @@ class _GroupState:
     blocks_per_window: int
     layout_desc: MemoryLayoutDesc
     window_chunks: int = -1
+    kernel_pages_per_block: int = 1
+
+    @property
+    def engine_blocks_in_chunk(self) -> int:
+        """Engine block IDs per LMCache chunk (``blocks_in_chunk`` is pages)."""
+        return self.blocks_in_chunk // self.kernel_pages_per_block
+
+    def page_ids(self, block_ids: list[int]) -> list[int]:
+        """Expand engine block IDs into this group's tensor page IDs.
+
+        Engine block ``b`` covers pages ``b*k .. b*k+k-1``, the mapping vLLM's
+        block table applies for a kernel block size smaller than its block
+        size; ``k == 1`` returns the IDs unchanged.
+        """
+        k = self.kernel_pages_per_block
+        if k == 1:
+            return block_ids
+        return [b * k + i for b in block_ids for i in range(k)]
 
 
 # Allocates ``count`` CPU gather targets of one shape and dtype.
@@ -949,7 +971,7 @@ class EngineDrivenTransferContext(TransferContext):
                 # layout sized in tokens while gather produces fewer slots, so
                 # every store would fail on a shape mismatch. Refuse them here.
                 group_tokens = kernel_group.tokens_per_block
-                group_slots = kernel_group.slots_per_block
+                group_slots = kernel_group.slots_per_engine_block
                 if group_tokens > group_slots:
                     raise NotImplementedError(
                         f"KV group {gid} is compressed ({group_tokens} tokens per "
@@ -959,6 +981,10 @@ class EngineDrivenTransferContext(TransferContext):
                 tokens_per_block = (
                     kernel_group.tokens_per_block or kernel_group.slots_per_block
                 )
+                # Blocks move a tensor page at a time; with kernel paging a
+                # page is a fraction of an engine block.
+                pages_per_block = kernel_group.kernel_pages_per_block
+                page_tokens = tokens_per_block // pages_per_block
                 # Sliding-window groups store only the trailing window of each
                 # chunk; for full attention the window is the whole chunk and
                 # everything below collapses to full-coverage behaviour.
@@ -1003,12 +1029,13 @@ class EngineDrivenTransferContext(TransferContext):
                             layer_names[i] for i in kernel_group.layer_indices
                         ],
                         engine_kv_format=kernel_group.engine_kv_format,
-                        blocks_in_chunk=chunk_tokens // tokens_per_block,
-                        blocks_per_window=window_tokens // tokens_per_block,
+                        blocks_in_chunk=chunk_tokens // page_tokens,
+                        blocks_per_window=window_tokens // page_tokens,
                         layout_desc=MemoryLayoutDesc(
                             shapes=[group_shape], dtypes=[kernel_group.dtype]
                         ),
                         window_chunks=window_chunks,
+                        kernel_pages_per_block=pages_per_block,
                     )
                 )
             # Group 0's layout doubles as the legacy top-level layout so
@@ -1243,7 +1270,7 @@ class EngineDrivenTransferContext(TransferContext):
         null_id = self._null_block_id
         skipped: list[list[int]] = []
         for gid, state in enumerate(self._group_states):
-            bpc = state.blocks_in_chunk
+            bpc = state.engine_blocks_in_chunk
             ids = block_ids[gid]
             skipped.append(
                 [
@@ -1304,7 +1331,7 @@ class EngineDrivenTransferContext(TransferContext):
         plans = []
         for gid, state in enumerate(self._group_states):
             skip = set(skipped[gid])
-            num_chunks = len(block_ids[gid]) // state.blocks_in_chunk
+            num_chunks = len(block_ids[gid]) // state.engine_blocks_in_chunk
             indices = [c for c in range(num_chunks) if c not in skip]
             out = (
                 alloc(
@@ -1338,7 +1365,7 @@ class EngineDrivenTransferContext(TransferContext):
             gathered.append(
                 gather_paged_kv_to_cpu(
                     {name: kv_caches[name] for name in state.layer_names},
-                    block_ids[plan.gid],
+                    state.page_ids(block_ids[plan.gid]),
                     state.blocks_in_chunk,
                     layout_hints=self._layout_hints,
                     engine_kv_format=state.engine_kv_format,
@@ -1411,13 +1438,13 @@ class EngineDrivenTransferContext(TransferContext):
         """
         windows: list[tuple[int, int]] = []
         for gid, state in enumerate(self._group_states):
-            if len(block_ids[gid]) % state.blocks_in_chunk != 0:
+            if len(block_ids[gid]) % state.engine_blocks_in_chunk != 0:
                 raise ValueError(
                     "Engine block count must be divisible by blocks_in_chunk: "
                     f"group={gid}, blocks={len(block_ids[gid])}, "
-                    f"blocks_in_chunk={state.blocks_in_chunk}"
+                    f"blocks_in_chunk={state.engine_blocks_in_chunk}"
                 )
-            num_chunks = len(block_ids[gid]) // state.blocks_in_chunk
+            num_chunks = len(block_ids[gid]) // state.engine_blocks_in_chunk
             window = state.window_chunks
             first = 0 if window < 0 else max(0, num_chunks - window)
             windows.append((first, num_chunks))
@@ -1440,7 +1467,7 @@ class EngineDrivenTransferContext(TransferContext):
         state = self._group_states[gid]
         scatter_cpu_to_paged_kv(
             {name: kv_caches[name] for name in state.layer_names},
-            group_block_ids[first_chunk * state.blocks_in_chunk :],
+            state.page_ids(group_block_ids)[first_chunk * state.blocks_in_chunk :],
             chunks,
             state.blocks_in_chunk,
             skip_first_n_tokens=max(

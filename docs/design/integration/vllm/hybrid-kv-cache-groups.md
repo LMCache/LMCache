@@ -123,6 +123,39 @@ group's block IDs by `token_range / tokens_per_block_g`
 (`slice_block_ids_per_group`). The server counts
 `blocks_per_chunk = lmcache_tokens_per_chunk // tokens_per_block` per group.
 
+### Kernel-paged groups (engine-driven)
+
+A backend may page a group's tensor at a *kernel* block size smaller than
+`tokens_per_block` (vLLM `kernel_block_size`): block ID `b` then covers the
+`k` contiguous pages `b*k .. b*k+k-1` (`BlockTable.map_to_kernel_blocks`), so
+`slots_per_block` is a page, not a block. Read naively that looks exactly like
+compression. The sub-paged edits ([kv_cache_group_edits.md](kv_cache_group_edits.md))
+fix it on the connector side by re-viewing the tensor at the logical block
+size, but only for the layouts they recognize; vLLM-RBLN's 6-D HND caches
+(`[NB, 2, NH, 1, BS, HS]`, a sliding-window group paged as 128-token windows
+under 4096-token blocks) reach the server raw. An opaque re-view would also
+lose the semantic dims the RBLN transfer path transposes on.
+
+The server tells the two apart by page count. Every vLLM `EngineGroupInfo`
+carries `num_blocks` (`KVCacheConfig.num_blocks`); a tensor holding exactly
+`k > 1` times that many pages, with `slots_per_block * k == tokens_per_block`,
+is kernel-paged (`KernelGroupInfo.kernel_pages_per_block = k`). Compression
+keeps one page per block ID, and an unreported `num_blocks` (`0`) keeps the
+old reading.
+
+```
+SWA group, tokens_per_block 4096, 128-slot pages, k = 32
+block IDs [3, 7]  ->  pages [96..127, 224..255]  ->  window 128: keep 127, 255
+```
+
+The engine-driven worker then moves pages: `blocks_per_chunk` and
+`blocks_per_window` count pages (`tokens // (tokens_per_block / k)`), and
+block IDs are expanded to page IDs before gather/scatter. Bookkeeping that
+reads the raw block-id lists (all-null chunk skipping, per-group retrieve
+windows) still counts engine block IDs per chunk. A sub-chunk window
+need only cover whole pages, so a 128-token window is one page instead of
+being refused against the 4096-token block.
+
 ### Cross-layer KV sharing
 
 Some models (e.g. `google/gemma-4-E4B-it`) reuse one layer's KV cache for

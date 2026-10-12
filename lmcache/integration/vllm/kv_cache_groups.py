@@ -321,6 +321,11 @@ def create_engine_group_infos_from_vllm(
         if kv_cache_config is not None
         else ()
     )
+    # Every vLLM group shares one block-id space size; aux pools (below) keep
+    # their own and report none.
+    vllm_num_blocks = (
+        getattr(kv_cache_config, "num_blocks", 0) if kv_cache_config is not None else 0
+    )
 
     # Scratch groups skip format discovery: their layers are excluded below and
     # never transferred, so a layout the transfer kernels reject must not fail
@@ -412,6 +417,9 @@ def create_engine_group_infos_from_vllm(
             # --separate-object-groups, after the regular groups.
             extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
             recurrent_state=_merge_layer_recurrent(per_layer_recurrent, indices),
+            num_blocks=(
+                vllm_num_blocks if identity.engine_group_idx < len(vllm_groups) else 0
+            ),
         )
         for identity, indices in group_layers_by_identity(
             normalized_kv_caches,
