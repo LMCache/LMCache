@@ -38,13 +38,31 @@ class MemoryLayoutDesc(_message.Message):
     dtypes: _containers.RepeatedScalarFieldContainer[str]
     def __init__(self, shapes: _Optional[_Iterable[_Union[TensorShape, _Mapping]]] = ..., dtypes: _Optional[_Iterable[str]] = ...) -> None: ...
 
-class TransferChannelAddress(_message.Message):
-    __slots__ = ("offset", "size")
+class CxlArenaDescriptor(_message.Message):
+    __slots__ = ("pool_id", "offset", "size", "alignment", "session_id")
+    POOL_ID_FIELD_NUMBER: _ClassVar[int]
     OFFSET_FIELD_NUMBER: _ClassVar[int]
     SIZE_FIELD_NUMBER: _ClassVar[int]
+    ALIGNMENT_FIELD_NUMBER: _ClassVar[int]
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    pool_id: str
     offset: int
     size: int
-    def __init__(self, offset: _Optional[int] = ..., size: _Optional[int] = ...) -> None: ...
+    alignment: int
+    session_id: str
+    def __init__(self, pool_id: _Optional[str] = ..., offset: _Optional[int] = ..., size: _Optional[int] = ..., alignment: _Optional[int] = ..., session_id: _Optional[str] = ...) -> None: ...
+
+class TransferChannelAddress(_message.Message):
+    __slots__ = ("offset", "size", "cxl_arena", "cxl_ttl_seconds")
+    OFFSET_FIELD_NUMBER: _ClassVar[int]
+    SIZE_FIELD_NUMBER: _ClassVar[int]
+    CXL_ARENA_FIELD_NUMBER: _ClassVar[int]
+    CXL_TTL_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    offset: int
+    size: int
+    cxl_arena: CxlArenaDescriptor
+    cxl_ttl_seconds: int
+    def __init__(self, offset: _Optional[int] = ..., size: _Optional[int] = ..., cxl_arena: _Optional[_Union[CxlArenaDescriptor, _Mapping]] = ..., cxl_ttl_seconds: _Optional[int] = ...) -> None: ...
 
 class P2pLookupAndLockRequest(_message.Message):
     __slots__ = ("keys", "group_layout_descs")

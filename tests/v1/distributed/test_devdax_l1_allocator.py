@@ -38,6 +38,7 @@ from lmcache.v1.distributed.config import (
     requires_single_l1_memory_region,
 )
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
+from lmcache.v1.distributed.internal_api import CxlArenaDescriptor
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -59,6 +60,7 @@ from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+    CxlPeerMapping,
     DevDaxArenaState,
     DevDaxMemoryAllocator,
     DevDaxRemoveMode,
@@ -276,6 +278,61 @@ def test_devdax_allocator_uses_mmap_backing_file(tmp_path):
 
     with open(path, "rb") as f:
         assert f.read(4096) == bytes([0x5A]) * 4096
+
+
+@pytest.mark.parametrize("pool_offset", [0, 8192])
+def test_shared_devdax_allocator_preserves_bytes_outside_slab(
+    tmp_path: Path, pool_offset: int
+) -> None:
+    """A shared arena writes only its header and offset-relative payload."""
+    page = 4096
+    path = _make_mmap_file(tmp_path, size=page * 6)
+    allocator = DevDaxMemoryAllocator(
+        size=page,
+        device_path=path,
+        align_bytes=page,
+        pool_id="pool",
+        pool_offset=pool_offset,
+    )
+    arena = allocator.cxl_arena
+    assert arena is not None
+    try:
+        obj = allocator.allocate(torch.Size([page]), torch.uint8)
+        assert obj is not None
+        obj.raw_tensor.fill_(0x5A)
+        allocator.free(obj)
+        del obj
+    finally:
+        allocator.close()
+    data = Path(path).read_bytes()
+    assert data[:pool_offset] == bytes(pool_offset)
+    assert data[pool_offset : pool_offset + 32] == arena.fingerprint()
+    assert data[pool_offset + page : pool_offset + 2 * page] == bytes([0x5A]) * page
+    assert data[pool_offset + 2 * page :] == bytes(len(data) - pool_offset - 2 * page)
+
+
+@pytest.mark.parametrize("mapping_kind", ["local", "owner", "peer"])
+def test_devdax_mapping_rejects_range_beyond_capacity(
+    tmp_path: Path, mapping_kind: str
+) -> None:
+    """Local allocation and shared owner/peer mappings enforce device bounds."""
+    page = 4096
+    path = _make_mmap_file(tmp_path, size=page * 4)
+    with pytest.raises(RuntimeError, match="exceeds.*capacity"):
+        if mapping_kind == "peer":
+            CxlPeerMapping(
+                path, CxlArenaDescriptor("pool", 2 * page, 2 * page, page, "s")
+            )
+        elif mapping_kind == "owner":
+            DevDaxMemoryAllocator(
+                size=2 * page,
+                device_path=path,
+                align_bytes=page,
+                pool_id="pool",
+                pool_offset=2 * page,
+            )
+        else:
+            DevDaxMemoryAllocator(size=5 * page, device_path=path, align_bytes=page)
 
 
 def test_devdax_allocator_registers_cuda_host_mapping(tmp_path, monkeypatch):
@@ -1495,7 +1552,6 @@ def test_owns_device_uses_character_device_number(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_device: bool
 ) -> None:
     primary = _make_mmap_file(tmp_path, size=4096)
-    manager = _pure_devdax_manager(primary)
     original_stat, original_fstat = os.stat, os.fstat
     mapped = original_stat(primary)
 
@@ -1509,17 +1565,21 @@ def test_owns_device_uses_character_device_number(
     def device_fstat(fd: int) -> Any:
         info = original_fstat(fd)
         if (info.st_dev, info.st_ino) == (mapped.st_dev, mapped.st_ino):
-            return SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=123)
+            return SimpleNamespace(
+                st_mode=stat.S_IFCHR, st_rdev=123, st_size=info.st_size
+            )
         return info
 
-    try:
-        with monkeypatch.context() as patch:
-            patch.setattr(os, "stat", device_stat)
-            patch.setattr(os, "fstat", device_fstat)
+    with monkeypatch.context() as patch:
+        # The device identity is captured from the open fd at map time.
+        patch.setattr(os, "stat", device_stat)
+        patch.setattr(os, "fstat", device_fstat)
+        manager = _pure_devdax_manager(primary)
+        try:
             assert manager.owns_device("/dev/alias") is same_device
             assert not manager.owns_device(str(tmp_path / "missing.bin"))
-    finally:
-        manager.close()
+        finally:
+            manager.close()
 
 
 def test_add_device_validates_arguments(tmp_path):

@@ -139,6 +139,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 p2p_advertised_url=mp_config.p2p_config.advertise_url,
                 mq_port=mp_config.port if mp_config.p2p_config.enabled else 0,
                 on_registered=engine.storage_manager.publish_capacity,
+                metadata=(
+                    {"lmcache.cxl.arena": engine.storage_manager.cxl_arena.to_json()}
+                    if mp_config.p2p_config.transfer_engine == "cxl"
+                    and engine.storage_manager.cxl_arena is not None
+                    else None
+                ),
             )
         )
     # Optionally emit cache events: to the coordinator, to an events-level
@@ -220,7 +226,11 @@ def run_http_server(
                 "--coordinator-url (or LMCACHE_COORDINATOR_URL) when "
                 "--p2p-advertise-url is set."
             )
-        if not l1_exposes_single_memory_region(storage_manager_config):
+        if mp_config.p2p_config.transfer_engine == "cxl":
+            memory = storage_manager_config.l1_manager_config.memory_config
+            if not memory.cxl_pool_id or not memory.devdax_path:
+                raise ValueError("CXL P2P requires --cxl-pool-id and --l1-devdax-path")
+        elif not l1_exposes_single_memory_region(storage_manager_config):
             raise ValueError(
                 "P2P requires a single L1 memory region the transfer channel "
                 "can register; it is incompatible with GDS L1 (--gds-l1-path) "

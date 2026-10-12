@@ -20,7 +20,7 @@ from lmcache.v1.distributed.transfer_channel.abstract import (
     TransferChannelServer,
 )
 from lmcache.v1.distributed.transfer_channel.api import (
-    TransferChannelAddress,
+    MemoryRegionAddress,
     TransferChannelReadResult,
 )
 from lmcache.v1.distributed.transfer_channel.factory import (
@@ -104,8 +104,8 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
 
     def submit_read(
         self,
-        local_addresses: list[TransferChannelAddress],
-        remote_addresses: list[TransferChannelAddress],
+        local_addresses: list[MemoryRegionAddress],
+        remote_addresses: list[MemoryRegionAddress],
     ) -> int:
         """Submit a read transfer from the remote addresses to the local addresses.
 
@@ -384,17 +384,17 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
     def get_transfer_channel_address(
         self,
         lmcache_addresses: list[tuple[int, int]],
-    ) -> list[TransferChannelAddress]:
+    ) -> list[MemoryRegionAddress]:
         """
         Validate the given LMCache addresses (offset, size) against the
-        registered L1 memory region and convert it to TransferChannelAddress
+        registered L1 memory region and convert it to MemoryRegionAddress
 
         Args:
             lmcache_addresses: List of (offset, size) tuples representing the LMCache
                 addresses.
 
         Returns:
-            A list of TransferChannelAddress corresponding to the given LMCache
+            A list of MemoryRegionAddress corresponding to the given LMCache
             addresses.
         """
         size = self._l1_memory_desc.size
@@ -405,7 +405,7 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
                     f"Object [{offset:#x}, {offset + obj_size:#x}) is outside the "
                     f"registered L1 region [0x0, {size:#x})"
                 )
-            out.append(TransferChannelAddress(offset=offset, size=obj_size))
+            out.append(MemoryRegionAddress(offset=offset, size=obj_size))
         return out
 
     ############################################################
