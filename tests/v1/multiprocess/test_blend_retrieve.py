@@ -1530,6 +1530,30 @@ def test_handler_reads_each_window_under_its_own_locks(monkeypatch):
     assert storage.over_released == []
 
 
+def test_handler_windows_never_take_another_requests_lock(monkeypatch):
+    """Another request holds the same objects while this one is retrieved
+    window by window. Each window reads under this request's own locks, so
+    the other request's lock survives both calls. L1's read check only asks
+    whether *some* request holds a lock: a window that read without one of
+    its own would succeed on the other request's lock and then release it."""
+    blend, ctx, storage, key, matches, retrieve = _retrieve_rig(
+        monkeypatch, "req-h-shared"
+    )
+    m0, m1, m2, m3 = matches
+    session = ctx.session_manager.get("req-h-shared")
+    reservation = session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA]
+    others = [k for m in (m2, m3) for k in reservation.per_hash[m.hash]]
+    for k in others:  # the other request's lookup locked them too
+        storage.locks[k] += 1
+
+    assert retrieve([m0, m1], m1.cur_ed)[1] is True
+    assert retrieve([m2, m3], key.end)[1] is True
+
+    ctx.session_manager.remove("req-h-shared")
+    assert storage.over_released == []
+    assert storage.locks == dict.fromkeys(others, 1), "the other request's lock"
+
+
 def test_handler_refuses_a_match_the_lookup_did_not_reserve(monkeypatch):
     """A match outside the reservation (e.g. a segmented-prefix tail chunk,
     which the lookup does not reserve) reads nothing, and the request's
