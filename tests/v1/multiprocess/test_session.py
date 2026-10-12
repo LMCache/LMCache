@@ -12,6 +12,7 @@ import pytest
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import Session, SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
 
 @pytest.fixture
@@ -29,7 +30,7 @@ def session(hasher: TokenHasher) -> Session:
 @pytest.fixture
 def session_manager(hasher: TokenHasher) -> SessionManager:
     """A SessionManager with short TTL for testing expiry."""
-    return SessionManager(hasher, ttl=0.1)
+    return SessionManager(hasher, ttl=0.1, cleanup_interval=None)
 
 
 class TestSession:
@@ -145,6 +146,30 @@ class TestSessionManager:
         session_manager.get_or_create("req-1")
         removed = session_manager.cleanup_expired()
         assert removed == 0
+
+    def test_periodic_cleanup_removes_expired_sessions(
+        self, hasher: TokenHasher
+    ) -> None:
+        """Background cleanup should remove expired sessions automatically."""
+        PeriodicThreadRegistry.reset()
+        manager = SessionManager(hasher, ttl=0.05, cleanup_interval=0.01)
+        try:
+            manager.get_or_create("req-1")
+            manager.get_or_create("req-2")
+
+            threads = PeriodicThreadRegistry.get_instance().get_all()
+            assert len(threads) == 1
+            assert threads[0].is_running
+
+            deadline = time.time() + 1.0
+            while manager.active_count() != 0 and time.time() < deadline:
+                time.sleep(0.01)
+
+            assert manager.active_count() == 0
+        finally:
+            manager.close()
+            assert PeriodicThreadRegistry.get_instance().get_all() == []
+            PeriodicThreadRegistry.reset()
 
 
 class TestSessionThreadSafety:
@@ -301,7 +326,7 @@ class TestSessionManagerRemoveReturnsSession:
 
     def test_remove_returns_session_with_state(self, hasher: TokenHasher) -> None:
         """remove() should return the session with all accumulated state."""
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         session = mgr.get_or_create("req-1")
         session.set_tokens(list(range(8)))
         session.get_hashes(0, 8)
@@ -323,12 +348,12 @@ class TestSessionManagerRemoveReturnsSession:
 
     def test_remove_clears_from_manager(self, hasher: TokenHasher) -> None:
         """After remove(), the session should no longer be in the manager."""
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         mgr.get_or_create("req-1")
         mgr.remove("req-1")
         assert mgr.active_count() == 0
 
     def test_remove_nonexistent_returns_none(self, hasher: TokenHasher) -> None:
         """remove() on a non-existent request_id should return None."""
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         assert mgr.remove("no-such-id") is None

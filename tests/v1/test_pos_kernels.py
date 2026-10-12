@@ -19,8 +19,8 @@ except ImportError:
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non CUDA implementations for CUDA enhanced functions",
+    getattr(getattr(torch.ops, "_C", None), "rotary_embedding", None) is None,
+    reason="rotary_embedding custom op is unavailable",
 )
 def test_rope():
     head_dim = 128

@@ -1,10 +1,10 @@
 .. _recipe_glm5_2:
 
-GlmMoeDsaForCausalLM
-====================
+GLM 5.1/5.2
+===========
 
 A large Mixture-of-Experts model using **Dynamic Sparse Attention (DSA)**, shared
-by the **GLM-5.2** series. Like DeepSeek-V4-Flash, the sparse-attention path
+by the **GLM-5.1 / GLM-5.2** series. Like DeepSeek-V4-Flash, the sparse-attention path
 splits the model's layers into more than one KV cache group; the
 ``LMCacheMPConnector`` stores and retrieves each group in its own block size, so
 KV reuse works without extra flags.
@@ -95,6 +95,17 @@ Compression support
    * - :doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`
      - Not validated
      -
+
+MTP (speculative decoding) support
+----------------------------------
+
+GLM-5.2 ships a native multi-token-prediction head
+(``num_nextn_predict_layers: 1``), usable for speculative decoding via
+vLLM's ``--speculative-config '{"method":"mtp","num_speculative_tokens":1}'``.
+LMCache accounts for the MTP draft layer's KV cache automatically.
+
+**Status:** Not yet validated with LMCache (validation requires an
+8-GPU node).
 
 Caveats
 -------

@@ -1,9 +1,13 @@
+#!/usr/bin/env bash
 # Example script to build the LMCache integrated with vLLM container image
 
 # Update the following variables accordingly
 CUDA_VERSION=13.0
 DOCKERFILE_NAME='Dockerfile'
-VLLM_VERSION="nightly"
+# Set VLLM_VERSION to a specific version before running this script,
+# e.g.: VLLM_VERSION=0.9.1 ./example_build.sh
+# Defaults to "nightly" if not set.
+VLLM_VERSION="${VLLM_VERSION:-nightly}"
 DOCKER_BUILD_PATH='../' # This path should point to the LMCache root for access to 'requirements' directory
 UBUNTU_VERSION=24.04
 

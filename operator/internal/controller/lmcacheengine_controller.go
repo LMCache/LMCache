@@ -87,31 +87,31 @@ func (r *LMCacheEngineReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	// 6. Reconcile lookup Service (node-local discovery for vLLM)
+	// 7. Reconcile lookup Service (node-local discovery for vLLM)
 	if err := r.reconcileLookupService(ctx, engine); err != nil {
 		log.Error(err, "Failed to reconcile lookup Service")
 		return ctrl.Result{}, err
 	}
 
-	// 7. Reconcile metrics Service
+	// 8. Reconcile metrics Service
 	if err := r.reconcileMetricsService(ctx, engine); err != nil {
 		log.Error(err, "Failed to reconcile metrics Service")
 		return ctrl.Result{}, err
 	}
 
-	// 8. Reconcile ConfigMap
+	// 9. Reconcile ConfigMap
 	if err := r.reconcileConnectionConfigMap(ctx, engine); err != nil {
 		log.Error(err, "Failed to reconcile ConfigMap")
 		return ctrl.Result{}, err
 	}
 
-	// 9. Reconcile ServiceMonitor
+	// 10. Reconcile ServiceMonitor
 	if err := r.reconcileServiceMonitor(ctx, engine); err != nil {
 		log.Error(err, "Failed to reconcile ServiceMonitor")
 		return ctrl.Result{}, err
 	}
 
-	// 10. Update status
+	// 11. Update status
 	if err := r.updateStatus(ctx, engine); err != nil {
 		log.Error(err, "Failed to update status")
 		return ctrl.Result{}, err

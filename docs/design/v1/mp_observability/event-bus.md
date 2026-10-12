@@ -182,7 +182,22 @@ init is skipped and spans are silently dropped.
 
 `L1Manager` still uses its `L1ManagerListener` ABC for **business-logic
 consumers** (`StoreController`, `EvictionPolicy`).  These are not observability
-— they drive store scheduling and LRU eviction.
+— they drive store scheduling and LRU eviction, and must not be subject to the
+bus's bounded-queue drop semantics.
+
+The bus additionally carries the **cache-event stream** for the coordinator's
+key directory (`mp_coordinator/cache_events.py`): eventually-consistent
+placement hints that tolerate loss by design (a dropped event surfaces as a
+``seq`` gap and a replay flag), so bus semantics fit.  For that consumer the
+L1 store/evict events carry a ``meta`` list (``L1ObjectMeta``: per-object
+size and backing medium, parallel to ``keys``), ``touch_keys`` publishes
+``l1.keys.accessed`` with keys only, and the L2 base adapter's
+listener-notify funnel
+publishes ``l2.keys.stored`` / ``l2.keys.accessed`` / ``l2.keys.deleted``
+(``keys`` + ``backend`` [adapter type name] + ``sizes`` for stores).  The
+subscriber batches inside its event callbacks on the drain thread and
+self-paces flushing by its flush interval, plus a final flush from its
+shutdown hook.
 
 For observability, L1Manager publishes events **directly** to the EventBus
 alongside its existing listener iteration:

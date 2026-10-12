@@ -8,10 +8,13 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
+    GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
-    TrimPolicy,
+    PrefetchLockMode,
+    PrefetchTaskSpec,
 )
 from lmcache.v1.mp_observability.trace import codecs
 
@@ -84,19 +87,93 @@ class TestPrefetchHandle:
         h = PrefetchHandle(
             prefetch_request_id=7,
             external_request_id="req-1",
-            l1_found_indices=(0, 1, 2),
             total_requested_keys=10,
             submit_time=12345.6,
-            l2_orig_indices=(3, 4, 5),
+            sliding_windows=(-1, 2),
         )
         out = _roundtrip(h)
         assert out == h
 
+    def test_record_without_sliding_windows_decodes_to_empty(self):
+        """Handles recorded before windows were carried decode with none."""
+        encoded = codecs.encode_value(
+            PrefetchHandle(
+                prefetch_request_id=-1,
+                external_request_id="r",
+                total_requested_keys=3,
+                submit_time=0.0,
+            )
+        )
+        del encoded["v"]["sliding_windows"]
+        assert codecs.decode_value(encoded).sliding_windows == ()
 
-class TestTrimPolicy:
+
+def _grouped_object_keys(gid: int, window: int = -1) -> GroupedObjectKeys:
+    return GroupedObjectKeys(
+        keys=[
+            ObjectKey(
+                chunk_hash=bytes([i]), model_name="m", kv_rank=1, object_group_id=gid
+            )
+            for i in range(3)
+        ],
+        object_group_id=gid,
+        layout_desc=MemoryLayoutDesc(
+            shapes=[torch.Size([2, 3])], dtypes=[torch.float16]
+        ),
+        sliding_window_size=window,
+    )
+
+
+class TestPrefetchLockMode:
     def test_roundtrip(self):
-        for p in TrimPolicy:
-            assert _roundtrip(p) is p
+        for m in PrefetchLockMode:
+            assert _roundtrip(m) is m
+
+
+class TestGroupedObjectKeys:
+    def test_roundtrip(self):
+        g = _grouped_object_keys(2, window=4)
+        out = _roundtrip(g)
+        assert out == g
+        assert out.sliding_window_size == 4
+
+
+class TestPrefetchTaskSpec:
+    def test_roundtrip(self):
+        spec = PrefetchTaskSpec(
+            key_groups=[_grouped_object_keys(0), _grouped_object_keys(1, window=2)],
+            num_kv_readers=2,
+            fetching_policy="full",
+            lock_mode=PrefetchLockMode.NO_LOCK,
+        )
+        out = _roundtrip(spec)
+        assert out == spec
+        assert out.fetching_policy == "full"
+        assert out.lock_mode is PrefetchLockMode.NO_LOCK
+
+
+class TestAttnWindowDesc:
+    def test_full_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[-1]))
+        assert out.num_chunks_in_sw == [-1]
+        assert out.is_full_attention(0)
+
+    def test_mixed_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[-1, 4, 1]))
+        assert out.num_chunks_in_sw == [-1, 4, 1]
+        assert out.is_full_attention(0)
+        assert not out.is_full_attention(1)
+        assert out.num_object_groups == 3
+
+    def test_world_size_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[-1, 4], world_size=4))
+        assert out.num_chunks_in_sw == [-1, 4]
+        assert out.world_size == 4
+
+    def test_empty_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[]))
+        assert out.num_chunks_in_sw == []
+        assert out.num_object_groups == 0
 
 
 class TestSet:
@@ -140,12 +217,12 @@ class TestEncodeArgs:
         args = {
             "keys": [ObjectKey(chunk_hash=b"x", model_name="m", kv_rank=0)],
             "mode": "new",
-            "extra_count": 0,
+            "num_kv_readers": 1,
         }
         encoded = codecs.encode_args(args)
-        # mode and extra_count pass through; keys is wrapped.
+        # mode and num_kv_readers pass through; keys is wrapped.
         assert encoded["mode"] == "new"
-        assert encoded["extra_count"] == 0
+        assert encoded["num_kv_readers"] == 1
         assert isinstance(encoded["keys"], list)
         decoded = codecs.decode_args(encoded)
         assert decoded == args

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Base classes for the platform extension build pattern.
 
-Each hardware platform (CUDA, ROCm, SYCL, MUSA, ...) implements
+Each hardware platform (CUDA, ROCm, SYCL, MUSA, Ascend, ...) implements
 :class:`BuildProfile`.
 The :class:`BuildPolicy` orchestrates auto-detection, fallback, and building.
 """
@@ -35,6 +35,7 @@ class BuildProfile(ABC):
                                     common extensions defined in
                                     ``COMMON_EXTENSIONS``.
         requirements_file()        – core requirements file name.
+        extras_requirements()      – optional-extra requirements files.
     """
 
     name: str = ""
@@ -149,3 +150,14 @@ class BuildProfile(ABC):
         Return ``None`` when this profile has no extra deps.
         """
         return None
+
+    def extras_requirements(self) -> dict[str, str]:
+        """Optional-extra requirements files, relative to ``requirements/``.
+
+        Returns:
+            Mapping from pip extra name (e.g. ``"nixl"``, installed via
+            ``pip install lmcache[nixl]``) to the requirements file that
+            lists that extra's dependencies. Empty when this profile
+            exposes no optional extras.
+        """
+        return {}

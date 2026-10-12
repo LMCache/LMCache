@@ -3,6 +3,11 @@
 Metrics by vLLM API
 ==========================================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 LMCache provides detailed metrics via a Prometheus endpoint, allowing for in-depth monitoring of cache performance and behavior.
 This section outlines how to enable and configure observability from embedded vLLM ``/metrics`` API endpoint.
 

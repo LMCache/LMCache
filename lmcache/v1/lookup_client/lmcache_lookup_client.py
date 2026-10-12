@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 import json
 import threading
 
@@ -9,14 +9,17 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.cache_engine import LMCacheEngine
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
-from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.rpc.transport import (
-    RpcClientTransport,
-    RpcServerTransport,
-)
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.metadata import LMCacheMetadata
+    from lmcache.v1.rpc.transport import (
+        RpcClientTransport,
+        RpcServerTransport,
+    )
 
 logger = init_logger(__name__)
 
@@ -46,9 +49,9 @@ class LMCacheLookupClient(LookupClientInterface):
 
     def __init__(
         self,
-        config: LMCacheEngineConfig,
-        metadata: LMCacheMetadata,
-        transport: RpcClientTransport,
+        config: "LMCacheEngineConfig",
+        metadata: "LMCacheMetadata",
+        transport: "RpcClientTransport",
     ):
         self.config = config
         self.transport = transport
@@ -182,9 +185,9 @@ class LMCacheLookupServer:
 
     def __init__(
         self,
-        lmcache_engine: LMCacheEngine,
-        metadata: LMCacheMetadata,
-        transport: RpcServerTransport,
+        lmcache_engine: "LMCacheEngine",
+        metadata: "LMCacheMetadata",
+        transport: "RpcServerTransport",
     ):
         self.transport = transport
         self.lmcache_engine = lmcache_engine
@@ -258,11 +261,11 @@ class LMCacheLookupServer:
                     response = lookup_result.to_bytes(4, "big")
                     self.transport.send_response(identity, response)
                 except json.JSONDecodeError as e:
-                    logger.error(f"Error decoding JSON in lookup request: {e}")
+                    logger.error("Error decoding JSON in lookup request: %s", e)
                 except UnicodeDecodeError as e:
-                    logger.error(f"Error decoding UTF-8 in lookup request: {e}")
+                    logger.error("Error decoding UTF-8 in lookup request: %s", e)
                 except Exception as e:
-                    logger.error(f"Error processing lookup request: {e}")
+                    logger.error("Error processing lookup request: %s", e)
 
         logger.info("lmcache lookup server started")
         self.thread = threading.Thread(

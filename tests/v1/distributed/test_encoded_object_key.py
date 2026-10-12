@@ -3,7 +3,7 @@
 :class:`ObjectKey`.
 
 These tests stand alone from the heavier ``ObjectKey``-using machinery
-so they can run without ``lmcache.native_storage_ops`` being built.
+so they can run without ``lmcache.lmcache_native`` being built.
 """
 
 # Standard

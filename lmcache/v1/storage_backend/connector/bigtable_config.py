@@ -16,12 +16,13 @@ class BigtablePluginConfig:
     exists_cache_ttl_seconds: float = 30.0
     exists_cache_size: int = 10000
     thread_pool_size: int = 16
-    row_key_template: str = "hash#model"
+    row_key_template: str = "{hash}#{model}"
     credentials_path: Optional[str] = None
     max_retries: int = 3
     max_chunk_size_mb: float = 90.0
     family_name: str = "cf"
     column_name: str = "data"
+    layer_group_size: int = 10
 
     @classmethod
     def from_extra_config(
@@ -108,7 +109,7 @@ class BigtablePluginConfig:
                 "bigtable_row_key_template",
                 get_val(
                     "row_key_template",
-                    os.environ.get("BT_ROW_KEY_TEMPLATE", "hash#model"),
+                    os.environ.get("BT_ROW_KEY_TEMPLATE", "{hash}#{model}"),
                 ),
             ),
             credentials_path=get_val(
@@ -132,5 +133,14 @@ class BigtablePluginConfig:
             ),
             column_name=get_val(
                 "bigtable_column_name", os.environ.get("BT_COLUMN_NAME", "data")
+            ),
+            layer_group_size=int(
+                get_val(
+                    "bigtable_layer_group_size",
+                    get_val(
+                        "layer_group_size",
+                        os.environ.get("BT_LAYER_GROUP_SIZE", 10),
+                    ),
+                )
             ),
         )

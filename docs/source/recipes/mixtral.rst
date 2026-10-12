@@ -1,7 +1,7 @@
 .. _recipe_mixtral:
 
-MixtralForCausalLM
-====================
+Mixtral
+=======
 
 Validated models
 ----------------

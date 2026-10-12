@@ -58,6 +58,100 @@ serde factory.
      - ``fp8_dtype`` (default ``float8_e4m3fn``; also accepts
        ``float8_e5m2``), ``max_workers`` (thread pool size,
        default 1)
+   * - ``turboquant``
+     - Compress KV tensors with TurboQuant presets before L2 store and
+       reconstruct them on load.
+     - ``preset`` (default ``turboquant_k8v4``), ``head_dim`` (optional,
+       default 128), ``block_size`` (default 16), ``max_workers`` (thread
+       pool size, default 1)
+   * - ``aesgcm``
+     - AES-GCM authenticated encryption of KV bytes at rest in L2, keyed
+       per ``cache_salt``.
+     - ``key_provider`` (default ``hkdf``), ``master_key_path`` (required
+       for ``hkdf``), ``aes_bits`` (``128`` default, or ``256``),
+       ``max_workers`` (thread pool size, default 1)
+
+
+TurboQuant serde
+----------------
+
+TurboQuant serde can be enabled by setting ``"type": "turboquant"`` in the
+adapter serde config. If ``preset`` is omitted, TurboQuant serde defaults to
+``turboquant_k8v4``.
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 \
+        --eviction-policy LRU \
+        --l2-adapter '{
+            "type": "fs",
+            "base_path": "/data/lmcache/l2",
+            "serde": {
+                "type": "turboquant",
+                "preset": "turboquant_k8v4",
+                "block_size": 16
+            }
+        }'
+
+Supported presets:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 35 35
+
+   * - Preset
+     - Key path
+     - Value path
+   * - ``turboquant_k8v4``
+     - FP8 key
+     - 4-bit value quantization
+   * - ``turboquant_4bit_nc``
+     - 4-bit MSE key with norm correction
+     - 4-bit value quantization
+   * - ``turboquant_k3v4_nc``
+     - 3-bit MSE key with norm correction
+     - 4-bit value quantization
+   * - ``turboquant_3bit_nc``
+     - 3-bit MSE key with norm correction
+     - 3-bit value quantization
+
+
+Encryption serde
+----------------
+
+The ``aesgcm`` serde encrypts KV bytes with AES-GCM before they land in L2
+and decrypts them on load, so a party who can read the remote storage
+(bucket / disk / RESP) cannot recover cache contents. Each tenant's data is
+encrypted under a distinct key derived from its ``cache_salt``.
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 \
+        --eviction-policy LRU \
+        --l2-adapter '{
+            "type": "s3",
+            "bucket": "my-kv-cache",
+            "serde": {
+                "type": "aesgcm",
+                "key_provider": "hkdf",
+                "master_key_path": "/etc/lmcache/keys/master"
+            }
+        }'
+
+Provide the master key as a file (e.g. a mounted Kubernetes ``Secret``).
+The ``hkdf`` provider reads it once at startup and derives a per-``cache_salt``
+key via HKDF-SHA256; the master key is never written to L2. ``aes_bits``
+defaults to ``128`` (already unbreakable and slightly faster); set ``256`` if a
+compliance mandate requires it.
+
+.. warning::
+
+   The ``hkdf`` provider derives every tenant's key from one shared master
+   key, so any server holding the master can decrypt any tenant's data
+   ("fleet vs. outside" trust). It is not per-tenant access isolation.
+
 
 
 Writing a custom serde
@@ -77,8 +171,11 @@ transform logic, then register a factory keyed on a name you pick:
     )
 
     class MySerializer(Serializer):
-        def serialize(self, src, dst) -> int:
+        def serialize(self, src, dst, key) -> int:
             # Write serialized bytes into dst; return bytes written.
+            # ``key`` is the object's ObjectKey; ignore it unless your
+            # transform is keyed per object (e.g. encryption keyed on
+            # cache_salt).
             ...
 
         def estimate_serialized_size(self, layout_desc) -> int:
@@ -86,8 +183,9 @@ transform logic, then register a factory keyed on a name you pick:
             ...
 
     class MyDeserializer(Deserializer):
-        def deserialize(self, src, dst) -> None:
+        def deserialize(self, src, dst, key) -> None:
             # Read serialized bytes from src, write into dst (KV-shaped).
+            # ``key`` mirrors serialize; ignore it unless keyed per object.
             ...
 
     def _create_mine(config: dict):
@@ -109,6 +207,14 @@ Notes
   upper bound on the actual serialized output — include any safety
   margin directly in the estimate (e.g., the built-in fp8 serializer
   returns ``1.5 * num_elements``).
+- **Raw-byte output.** If your serde writes bytes directly (rather than
+  through ``MemoryObj.tensor`` like the quantizers), reach the buffer via
+  ``MemoryObj.byte_array`` and **cast it to the native format first**:
+  ``memoryview(dst.byte_array).cast("B")``. ``byte_array`` is a
+  ctypes-backed view with format ``"<B"``, and CPython does not support
+  slice assignment into a non-native format (``dst[i:j] = ...`` raises
+  ``NotImplementedError: memoryview: unsupported format <B``). The built-in
+  ``aesgcm`` serde is an example.
 - **Failure handling.** If any step fails (serialize, store, load, or
   deserialize), the whole submitted batch is reported as failed —
   partial success within one batch is not surfaced. Failed keys are

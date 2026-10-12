@@ -156,8 +156,11 @@ func TestBuildContainerArgs_CoordinatorURL(t *testing.T) {
 	if got := findArgValue(t, args, "--coordinator-heartbeat-interval"); got != "5" {
 		t.Errorf("--coordinator-heartbeat-interval = %q, want 5", got)
 	}
-	if !slices.Contains(args, "--coordinator-l2-event-reporting") {
-		t.Errorf("expected --coordinator-l2-event-reporting flag")
+	if !slices.Contains(args, "--coordinator-event-reporting") {
+		t.Errorf("expected --coordinator-event-reporting flag")
+	}
+	if got := findArgValue(t, args, "--coordinator-event-flush-interval"); got != "1" {
+		t.Errorf("--coordinator-event-flush-interval = %q, want 1", got)
 	}
 }
 

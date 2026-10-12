@@ -3,8 +3,8 @@
 
 mp servers register themselves, heartbeat, and deregister here; operators can
 list the fleet. Endpoints operate directly on the shared ``InstanceRegistry``
-reached via ``app.state.registry`` -- membership is thin enough to need no
-service layer.
+reached via the :class:`CoordinatorContext` -- membership is thin enough to need
+no service layer.
 """
 
 # Standard
@@ -18,35 +18,23 @@ from fastapi.responses import JSONResponse
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
+from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.schemas import (
     HeartbeatResponse,
     RegisterRequest,
     RegisterResponse,
 )
+from lmcache.v1.mp_coordinator.views.instance_registry import (
+    InstanceRegistry,
+    MPInstance,
+)
+from lmcache.v1.mp_coordinator.views.server_config import (
+    ServerConfigRegistry,
+)
 
 logger = init_logger(__name__)
 
 router = APIRouter()
-
-
-def _registry(request: Request) -> InstanceRegistry:
-    """Return the shared instance registry from app state.
-
-    Args:
-        request: The incoming request.
-
-    Returns:
-        The shared :class:`InstanceRegistry`.
-
-    Raises:
-        RuntimeError: If the registry is not initialized (wired by
-            ``create_app``, so this should not happen in practice).
-    """
-    registry = getattr(request.app.state, "registry", None)
-    if registry is None:
-        raise RuntimeError("instance registry not initialized")
-    return registry
 
 
 @router.post("/instances")
@@ -63,11 +51,14 @@ async def register_instance(
         A :class:`RegisterResponse` carrying the (possibly generated) id.
     """
     instance_id = body.instance_id or f"mp-{uuid.uuid4().hex}"
+    ctx = get_context(request)
+    # Capacity is not taken here: it arrives as a report on the cache-event
+    # stream, fenced by (incarnation, revision).
     # Wall-clock registration_time for display; monotonic last_heartbeat_time for
     # NTP-safe stale detection (see registry.stale). register() does the
     # exists-check and write under one lock, so the re_registered flag is correct
     # even under concurrent registrations of the same id.
-    re_registered = _registry(request).register(
+    re_registered = ctx.views.get(InstanceRegistry).register(
         MPInstance(
             instance_id=instance_id,
             ip=body.ip,
@@ -92,7 +83,11 @@ async def heartbeat(instance_id: str, request: Request) -> Any:
         instance is unknown (the caller should re-register via ``POST
         /instances``).
     """
-    if _registry(request).update_heartbeat(instance_id, time.monotonic()):
+    if (
+        get_context(request)
+        .views.get(InstanceRegistry)
+        .update_heartbeat(instance_id, time.monotonic())
+    ):
         return HeartbeatResponse(instance_id=instance_id)
     return JSONResponse(
         status_code=404,
@@ -109,10 +104,19 @@ async def deregister_instance(instance_id: str, request: Request) -> Response:
     Returns:
         An empty 204 response.
     """
-    if _registry(request).deregister(instance_id) is not None:
+    ctx = get_context(request)
+    if ctx.views.get(InstanceRegistry).deregister(instance_id) is not None:
         logger.info("Deregistered instance %s", instance_id)
     else:
         logger.info("Instance %s not registered, skipping deregistration", instance_id)
+    # A departing process takes its L1 pool with it, so its reported L1
+    # bytes are void. Only the stale-eviction loop fenced them before, and
+    # it never sees an instance that left cleanly -- deregistration already
+    # removed it from the registry, so its bytes lingered for good.
+    ctx.event_gate.drop_instance(instance_id)
+    # Dropped with the membership, or declarations grow without bound
+    # across a churning fleet. Surviving L2 bytes lose their ratio.
+    ctx.views.get(ServerConfigRegistry).forget(instance_id)
     return Response(status_code=204)
 
 
@@ -133,6 +137,6 @@ async def list_instances(request: Request) -> Any:
             "p2p_advertised_url": instance.p2p_advertised_url,
             "mq_port": instance.mq_port,
         }
-        for instance in _registry(request).all_instances()
+        for instance in get_context(request).views.get(InstanceRegistry).all_instances()
     ]
     return {"instances": instances}

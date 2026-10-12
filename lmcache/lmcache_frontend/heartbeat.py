@@ -3,6 +3,7 @@
 
 # Standard
 from datetime import datetime
+from typing import Optional
 import asyncio
 import json
 import os
@@ -23,6 +24,11 @@ class HeartbeatService:
         self.app_host = "0.0.0.0"
         self.app_port = 8000
         self.target_nodes = []
+        # When set, ``send_heartbeat`` reports this host verbatim instead
+        # of relying on ``get_local_ip()`` auto-detection. Useful when the
+        # detected IP is unreachable from the discovery service side
+        # (e.g. local dev on macOS with VPN, multi-NIC hosts, etc.).
+        self.report_host = None
 
     def get_local_ip(self) -> str:
         """Get the local IP address of the machine using multiple methods.
@@ -84,16 +90,34 @@ class HeartbeatService:
         print("Failed to get local IP address. Falling back to loopback address.")
         return "127.0.0.1"
 
-    def set_app_config(self, host: str, port: int, target_nodes: list):
-        """Set application configuration for heartbeat reporting"""
+    def set_app_config(
+        self,
+        host: str,
+        port: int,
+        target_nodes: list,
+        report_host: Optional[str] = None,
+    ):
+        """Set application configuration for heartbeat reporting.
+
+        Args:
+            host: Bind host of the local HTTP server (informational).
+            port: Bind port of the local HTTP server; used as the port
+                part of the reported ``api_address``.
+            target_nodes: Downstream node list used for version probing.
+            report_host: If provided (non-empty), used verbatim as the
+                host part of the reported ``api_address``, bypassing
+                the ``get_local_ip()`` auto-detection.
+        """
         self.app_host = host
         self.app_port = port
         self.target_nodes = target_nodes
+        self.report_host = report_host or None
 
     async def send_heartbeat(self, heartbeat_url: str):
         """Send heartbeat request"""
         try:
-            api_address = f"http://{self.get_local_ip()}:{self.app_port}"
+            host = self.report_host or self.get_local_ip()
+            api_address = f"http://{host}:{self.app_port}"
             version = await self._get_version_from_nodes()
             if version:
                 print(f"Got version from target nodes: {version}")
@@ -224,7 +248,7 @@ class HeartbeatService:
             Dict containing ``running`` (bool), ``local_ip``,
             ``startup_time`` and ``current_time`` (ISO-8601 strings).
         """
-        is_running = self.thread and self.thread.is_alive()
+        is_running = self.thread is not None and self.thread.is_alive()
         return {
             "running": is_running,
             "local_ip": self.get_local_ip(),

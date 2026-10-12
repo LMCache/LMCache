@@ -138,6 +138,43 @@ def test_send_heartbeat_uses_version_from_target_nodes(patched_httpx):
 def test_status_reports_running_flag():
     svc = HeartbeatService()
     status = svc.status()
-    assert status["running"] in (False, None)
+    assert status["running"] is False
     assert "startup_time" in status
     assert "current_time" in status
+
+
+def test_send_heartbeat_uses_report_host_when_set(patched_httpx, monkeypatch):
+    """Explicit report_host must bypass get_local_ip() auto-detection."""
+    # Poison get_local_ip so the test fails loudly if it is ever called.
+    monkeypatch.setattr(
+        HeartbeatService,
+        "get_local_ip",
+        lambda self: pytest.fail("get_local_ip() must not be called"),
+    )
+
+    svc = HeartbeatService()
+    svc.set_app_config(
+        host="0.0.0.0",
+        port=8085,
+        target_nodes=[],
+        report_host="127.0.0.1",
+    )
+
+    ok = asyncio.run(svc.send_heartbeat("http://disc.example/heartbeat"))
+    assert ok is True
+    assert patched_httpx.last_params["api_address"] == "http://127.0.0.1:8085"
+
+
+def test_empty_report_host_falls_back_to_auto_detect(patched_httpx):
+    """Empty string report_host is treated as unset and auto-detects."""
+    svc = HeartbeatService()
+    svc.set_app_config(
+        host="0.0.0.0",
+        port=8085,
+        target_nodes=[],
+        report_host="",
+    )
+
+    ok = asyncio.run(svc.send_heartbeat("http://disc.example/heartbeat"))
+    assert ok is True
+    assert patched_httpx.last_params["api_address"] == "http://10.0.0.42:8085"

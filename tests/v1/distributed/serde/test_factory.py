@@ -84,13 +84,13 @@ def test_register_serde_factory_dispatch() -> None:
         def get_deserialize_event_fd(self) -> int:
             return -1
 
-        def submit_serialize(self, src_objs, dst_objs):  # type: ignore[no-untyped-def]
+        def submit_serialize(self, src_objs, dst_objs, keys):  # type: ignore[no-untyped-def]
             return 0
 
         def query_serialize_result(self, task_id):  # type: ignore[no-untyped-def]
             return True
 
-        def submit_deserialize(self, src_objs, dst_objs):  # type: ignore[no-untyped-def]
+        def submit_deserialize(self, src_objs, dst_objs, keys):  # type: ignore[no-untyped-def]
             return 0
 
         def query_deserialize_result(self, task_id):  # type: ignore[no-untyped-def]

@@ -119,6 +119,23 @@ class TransferChannelContext(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @abc.abstractmethod
+    def remove_transfer_channel_client(self, peer_advertise_url: str) -> None:
+        """Discard the client for ``peer_advertise_url`` and free its resources.
+
+        Call this when reads from the peer are no longer needed (e.g. the
+        owning L2 adapter is being removed). Any task ids previously returned by
+        that client become invalid. A later ``get_transfer_channel_client`` for
+        the same peer returns a fresh client.
+
+        Calling this for a peer with no current client does nothing.
+
+        Args:
+            peer_advertise_url: The ``host:port`` of the peer, as passed to
+                ``get_transfer_channel_client``.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def get_transfer_channel_address(
         self,
         lmcache_addresses: list[tuple[int, int]],

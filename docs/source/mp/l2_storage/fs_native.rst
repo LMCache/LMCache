@@ -22,7 +22,8 @@ I/O queue depth on a single Python thread.
   ``O_DIRECT``.  Required to measure real disk bandwidth.  See alignment
   caveat below.
 - ``read_ahead_size`` (int, optional): Trigger filesystem readahead by
-  issuing a warm-up read of this many bytes at open time.
+  issuing a warm-up read of this many bytes at open time.  This is skipped
+  for reads that use ``O_DIRECT`` because direct I/O bypasses the page cache.
 - ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB
   for client-side usage tracking.  Default ``0`` disables tracking.
 
@@ -31,25 +32,24 @@ I/O queue depth on a single Python thread.
    ``O_DIRECT`` has two independent alignment requirements:
 
    1. **Length alignment.**  The transfer length must be a multiple of
-      the filesystem's block size.  The connector queries the disk block
-      size at construction time and, on each operation, checks
-      ``len % disk_block_size``.  If the length is **not** a multiple,
-      the connector silently falls back to a buffered open (no
-      ``O_DIRECT``) for that operation -- correctness is preserved but
-      you do not get true direct I/O.  To ensure ``O_DIRECT`` is
-      actually used, choose ``--chunk-size`` so that the resulting
-      per-chunk byte size is a multiple of the FS block size.  GPFS and
-      similar parallel filesystems often use large blocks (e.g. several
-      MiB).
+      the filesystem's block size.  With ``use_odirect: true`` the adapter
+      automatically transfers each object's full alignment-padded L1 slot
+      (logical bytes plus padding up to ``--l1-align-bytes``), so this
+      requirement holds even when KV chunk byte sizes are not multiples of
+      the block size; on-disk files are correspondingly padded, and loads
+      must run with the same ``use_odirect`` and ``--l1-align-bytes``
+      settings as the stores.  Raise ``--l1-align-bytes`` to match the
+      block size on filesystems with large blocks (GPFS and similar
+      parallel filesystems often use several MiB).
 
    2. **Memory-buffer alignment.**  The I/O buffer pointer itself must
       also be aligned (typically to 4096 bytes on local disks, or to the
       FS block size on parallel filesystems).  This is controlled by
       ``--l1-align-bytes`` (default ``4096``) -- raise it to match the
       FS block size when running on a filesystem with larger blocks.  If
-      the buffer is misaligned, the underlying ``read``/``write`` syscall
-      returns ``EINVAL`` (this is **not** caught by the length-fallback
-      path above and will surface as a runtime error).
+      the buffer is misaligned, the connector reports a runtime error instead
+      of silently falling back to buffered I/O.  This protects real-disk
+      benchmark runs from accidentally measuring the page cache.
 
    If unsure, start with ``use_odirect: false`` and confirm correctness
    before enabling ``O_DIRECT``.

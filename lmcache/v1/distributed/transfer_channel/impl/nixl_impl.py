@@ -27,6 +27,7 @@ from lmcache.v1.distributed.transfer_channel.api import (
 from lmcache.v1.distributed.transfer_channel.factory import (
     register_transfer_channel_factory,
 )
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 
 if TYPE_CHECKING:
     # Third Party
@@ -468,6 +469,31 @@ class NixlTransferChannelContext(TransferChannelContext):
             )
         return existing
 
+    def remove_transfer_channel_client(self, peer_advertise_url: str) -> None:
+        """Discard the client for ``peer_advertise_url`` and free its resources.
+
+        Call this when reads from the peer are no longer needed (e.g. the
+        owning L2 adapter is being removed). Any task ids previously returned by
+        that client become invalid. A later ``get_transfer_channel_client`` for
+        the same peer returns a fresh client. The peer is not notified.
+
+        Calling this for a peer with no current client does nothing.
+
+        Args:
+            peer_advertise_url: The ``host:port`` of the peer, as passed to
+                ``get_transfer_channel_client``.
+        """
+        with self._lock:
+            client = self._clients.pop(peer_advertise_url, None)
+        if client is None:
+            return
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            logger.exception(
+                "Error closing transfer channel client for %s", peer_advertise_url
+            )
+
     ############################################################
     # Cleanup
     ############################################################
@@ -511,7 +537,7 @@ class NixlTransferChannelContext(TransferChannelContext):
         try:
             return socket.recv()
         except zmq.Again as err:
-            raise TimeoutError(
+            raise LMCacheTimeoutError(
                 f"Timed out after {_HANDSHAKE_TIMEOUT_MS / 1000:.0f}s waiting for "
                 f"a transfer-channel handshake reply from {server_url!r}. Check "
                 f"that the peer is running and that the url/port is correct and "

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import abc
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.memory_management import MemoryObj
 
 SerdeTaskId = int
@@ -52,13 +52,15 @@ class Serializer(abc.ABC):
     """
 
     @abc.abstractmethod
-    def serialize(self, src: MemoryObj, dst: MemoryObj) -> int:
+    def serialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> int:
         """Serialize src KV data into dst byte buffer (in-place).
 
         Args:
             src: Source MemoryObj containing KV-shaped data (read-locked).
             dst: Destination MemoryObj byte buffer (write-locked).
                  Must have capacity >= estimate_serialized_size().
+            key: Object key for this src/dst pair. Content-agnostic
+                 serdes ignore it.
 
         Returns:
             The actual number of bytes written to dst.
@@ -90,12 +92,14 @@ class Deserializer(abc.ABC):
     """
 
     @abc.abstractmethod
-    def deserialize(self, src: MemoryObj, dst: MemoryObj) -> None:
+    def deserialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> None:
         """Deserialize src byte buffer into dst KV-shaped MemoryObj (in-place).
 
         Args:
             src: Source MemoryObj containing serialized bytes.
             dst: Destination MemoryObj with KV-shaped layout (write-locked).
+            key: Object key for this src/dst pair. Content-agnostic
+                 serdes ignore it.
         """
         raise NotImplementedError
 
@@ -147,12 +151,15 @@ class SerdeProcessor(abc.ABC):
         self,
         src_objs: list[MemoryObj],
         dst_objs: list[MemoryObj],
+        keys: list[ObjectKey],
     ) -> SerdeTaskId:
         """Submit a batch serialization task.
 
         Args:
             src_objs: Source KV-shaped MemoryObjs (read-locked).
             dst_objs: Destination byte-buffer MemoryObjs (write-locked).
+            keys: Object keys positionally aligned with src_objs/dst_objs.
+                Content-agnostic serdes ignore them.
 
         Returns:
             Task ID for querying completion.
@@ -175,12 +182,15 @@ class SerdeProcessor(abc.ABC):
         self,
         src_objs: list[MemoryObj],
         dst_objs: list[MemoryObj],
+        keys: list[ObjectKey],
     ) -> SerdeTaskId:
         """Submit a batch deserialization task.
 
         Args:
             src_objs: Source byte-buffer MemoryObjs (filled by L2 load).
             dst_objs: Destination KV-shaped MemoryObjs (write-locked).
+            keys: Object keys positionally aligned with src_objs/dst_objs.
+                Content-agnostic serdes ignore them.
 
         Returns:
             Task ID for querying completion.

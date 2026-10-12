@@ -16,12 +16,12 @@ from lmcache.v1.cache_controller.message import (
     FullSyncStatusMsg,
     FullSyncStatusRetMsg,
 )
-from lmcache.v1.config import LMCacheEngineConfig
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.cache_controller.worker import LMCacheWorker
     from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.v1.config import LMCacheEngineConfig
     from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
@@ -65,7 +65,7 @@ class FullSyncSender:
 
     def __init__(
         self,
-        config: LMCacheEngineConfig,
+        config: "LMCacheEngineConfig",
         worker: "LMCacheWorker",
         lmcache_engine: "LMCacheEngine",
         local_cpu_backend: "LocalCPUBackend",

@@ -35,8 +35,7 @@ msgid ""
 "After installing LMCache, the ``lmcache`` command is available globally. "
 "Run ``lmcache -h`` to see all commands, or ``lmcache <command> -h`` for a"
 " specific command."
-msgstr ""
-"安装 LMCache 后，\\ ``lmcache`` 命令可以全局使用。运行 ``lmcache -h`` 查看所有命令，或运行 ``lmcache <command> -h`` 查看特定命令的帮助。"
+msgstr "安装 LMCache 后，\\ ``lmcache`` 命令可以全局使用。运行 ``lmcache -h`` 查看所有命令，或运行 ``lmcache <command> -h`` 查看特定命令的帮助。"
 
 #: ../../source/cli/index.rst:17
 msgid "Installation"
@@ -70,8 +69,7 @@ msgstr "``pip install lmcache``"
 msgid ""
 "Full install: server, CLI, and CUDA extensions. Required for ``server``, "
 "``bench server``, ``bench l2``, and ``trace``. Linux + GPU."
-msgstr ""
-"完整安装：服务器、CLI 和 CUDA 扩展。\\ ``server``\\ 、\\ ``bench server``\\ 、\\ ``bench l2`` 和 ``trace`` 所需。Linux + GPU。"
+msgstr "完整安装：服务器、CLI 和 CUDA 扩展。\\ ``server``\\ 、\\ ``bench server``\\ 、\\ ``bench l2`` 和 ``trace`` 所需。Linux + GPU。"
 
 #: ../../source/cli/index.rst:33
 msgid "``lmcache-cli``"
@@ -85,8 +83,7 @@ msgstr "``pip install lmcache-cli``"
 msgid ""
 "CLI only: ``ping``, ``query``, ``describe``, ``kvcache``, ``quota``, "
 "``bench engine``. No GPU required, any OS."
-msgstr ""
-"仅限 CLI: ``ping``, ``query``, ``describe``, ``kvcache``, ``quota``, ``bench engine``\\ 。不需要 GPU，任何操作系统均可。"
+msgstr "仅限 CLI: ``ping``, ``query``, ``describe``, ``kvcache``, ``quota``, ``bench engine``\\ 。不需要 GPU，任何操作系统均可。"
 
 #: ../../source/cli/index.rst:40
 msgid ""
@@ -154,8 +151,7 @@ msgstr ":doc:`bench`"
 msgid ""
 "Run sustained benchmarks against an inference engine (``engine``), an "
 "LMCache MP server (``server``), or an L2 cache adapter (``l2``)."
-msgstr ""
-"对推理引擎（\\ ``engine``\\ ）、LMCache MP 服务器（\\ ``server``\\ ）或 L2 缓存适配器（\\ ``l2``\\ ）运行持续基准测试。"
+msgstr "对推理引擎（\\ ``engine``\\ ）、LMCache MP 服务器（\\ ``server``\\ ）或 L2 缓存适配器（\\ ``l2``\\ ）运行持续基准测试。"
 
 #: ../../source/cli/index.rst:66
 msgid ":doc:`kvcache`"
@@ -200,13 +196,11 @@ msgstr "产生指标的命令共享三个常见标志："
 #: ../../source/cli/index.rst:80
 #, python-brace-format
 msgid "``--format {terminal,json}`` — stdout format (default: ``terminal``)."
-msgstr ""
-"``--format {terminal,json}`` — 标准输出格式（默认：\\ ``terminal``\\ ）。"
+msgstr "``--format {terminal,json}`` — 标准输出格式（默认：\\ ``terminal``\\ ）。"
 
 #: ../../source/cli/index.rst:81
 msgid "``--output PATH`` — also write metrics to a file (uses ``--format``)."
-msgstr ""
-"``--output PATH`` — 还将指标写入文件（使用 ``--format``\\ ）。"
+msgstr "``--output PATH`` — 还将指标写入文件（使用 ``--format``\\ ）。"
 
 #: ../../source/cli/index.rst:82
 msgid "``-q`` / ``--quiet`` — suppress stdout; rely on the exit code."
@@ -217,8 +211,7 @@ msgid ""
 "The terminal output uses human-readable labels (e.g. ``\"Round trip time "
 "(ms)\"``), while JSON uses machine-readable keys (e.g. "
 "``\"round_trip_time_ms\"``)."
-msgstr ""
-"终端输出使用人类可读的标签（例如 ``\"Round trip time (ms)\"``\\ ），而 JSON 使用机器可读的键（例如 ``\"round_trip_time_ms\"``\\ ）。"
+msgstr "终端输出使用人类可读的标签（例如 ``\"Round trip time (ms)\"``\\ ），而 JSON 使用机器可读的键（例如 ``\"round_trip_time_ms\"``\\ ）。"
 
 #: ../../source/cli/index.rst:89
 msgid "Adding New Commands"

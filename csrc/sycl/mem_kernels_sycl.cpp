@@ -62,11 +62,6 @@ inline int round_up_to_sg(int n) {
 // ---------------------------------------------------------------------------
 namespace lmc {
 
-inline bool is_mla(const EngineKVFormat engine_kv_format) {
-  return engine_kv_format == EngineKVFormat::NL_X_NB_BS_HS ||   // vLLM MLA
-         engine_kv_format == EngineKVFormat::NL_X_NBBS_ONE_HS;  // SGLang MLA
-}
-
 template <EngineKVFormat format>
 inline int64_t page_buffer_offset(const int k_or_v, const int token_idx,
                                   const int scalar_offset,
@@ -402,7 +397,7 @@ void multi_layer_kv_transfer_templated(
   int elements_per_xword = sizeof(T) / key_value.element_size();
   int num_xwords = num_origin_elements / elements_per_xword;
 
-  int k_or_v_size = lmc::is_mla(engine_kv_format) ? 1 : 2;
+  int k_or_v_size = ::is_mla(engine_kv_format) ? 1 : 2;
 
   // Round up to a sub-group multiple so every sub-group is full.
   int wg_size = round_up_to_sg(std::min(num_xwords, MAX_WG_SIZE));
@@ -490,7 +485,7 @@ void multi_layer_kv_transfer(
     const EngineKVFormat engine_kv_format, const int block_size,
     const int head_size, const int skip_prefix_n_tokens) {
   // head_size is currently unused in the SYCL implementation; accepted to
-  // keep ABI parity with the CUDA c_ops binding so callers can pass the
+  // keep ABI parity with the CUDA cuda_ops binding so callers can pass the
   // same kwargs to either backend.
   (void)head_size;
   int num_origin_elements = key_value.size(3);
@@ -523,7 +518,7 @@ void multi_layer_kv_transfer_unilateral(
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
     const EngineKVFormat engine_kv_format) {
-  const bool use_mla = lmc::is_mla(engine_kv_format);
+  const bool use_mla = ::is_mla(engine_kv_format);
   // MLA case collapses back to multi_layer_kv_transfer
   if (use_mla) {
     return multi_layer_kv_transfer(key_value, key_value_ptrs, slot_mapping,
@@ -646,7 +641,7 @@ void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
   int head_size_in_64bit;
   int block_size;
 
-  const bool use_mla = lmc::is_mla(engine_kv_format);
+  const bool use_mla = ::is_mla(engine_kv_format);
 
   if (use_mla) {
     num_heads = 1;
@@ -1025,4 +1020,34 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
 
     offset += max_nbytes;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Pinned host allocation (SYCL/XPU analog of the CUDA cudaHostAlloc path in
+// csrc/cuda/mem_alloc.cpp). LMCache local_cpu backend expects a
+// device-accessible (USM host) buffer; without this the XPU build silently fell
+// back to pageable host memory, dropping D2H store throughput ~20x.
+// sycl::malloc_host bound to the current XPU device context gives true
+// USM-pinned host memory.
+//
+// IMPORTANT: We use device 0's context for both alloc and free to ensure
+// context consistency. USM host memory is accessible from all devices, but
+// sycl::free() requires the same context used during allocation. Using device
+// 0 consistently avoids context mismatch when the current device changes
+// between allocation and deallocation.
+// ---------------------------------------------------------------------------
+uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags) {
+  // Use device 0 context consistently for host memory allocation.
+  // DeviceGuard ensures we restore the original device after getting context.
+  const c10::DeviceGuard device_guard(c10::Device(c10::kXPU, 0));
+  void* ptr = sycl::malloc_host(size, c10::xpu::get_device_context());
+  TORCH_CHECK(ptr != nullptr, "sycl::malloc_host failed for ", size,
+              " bytes (XPU pinned host)");
+  return reinterpret_cast<uintptr_t>(ptr);
+}
+
+void free_pinned_ptr(uintptr_t ptr) {
+  // Use device 0 context consistently (must match alloc_pinned_ptr).
+  const c10::DeviceGuard device_guard(c10::Device(c10::kXPU, 0));
+  sycl::free(reinterpret_cast<void*>(ptr), c10::xpu::get_device_context());
 }

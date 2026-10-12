@@ -174,11 +174,13 @@ This pattern is identical to the one used by `MockL2Adapter` and
 ```python
 # my_plugin/adapter.py
 import asyncio, threading
-from lmcache.native_storage_ops import Bitmap
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.l2_adapters.base import (
-    L2AdapterInterface, L2TaskId,
+    L2AdapterInterface,
+    L2TaskId,
 )
 from lmcache.v1.platform import create_event_notifier
+
 
 class MyL2Adapter(L2AdapterInterface):
     def __init__(self, host="localhost", **_kw):
@@ -262,8 +264,12 @@ methods (identical to the pybind `LMCACHE_BIND_CONNECTOR_METHODS` contract):
 ```python
 class NativeConnectorProtocol:
     def event_fd(self) -> int: ...
-    def submit_batch_get(self, keys: list[str], memoryviews: list[memoryview]) -> int: ...
-    def submit_batch_set(self, keys: list[str], memoryviews: list[memoryview]) -> int: ...
+    def submit_batch_get(
+        self, keys: list[str], memoryviews: list[memoryview]
+    ) -> int: ...
+    def submit_batch_set(
+        self, keys: list[str], memoryviews: list[memoryview]
+    ) -> int: ...
     def submit_batch_exists(self, keys: list[str]) -> int: ...
     def drain_completions(self) -> list[tuple[int, bool, str, list[bool] | None]]: ...
     def close(self) -> None: ...

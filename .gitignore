@@ -113,11 +113,17 @@ lmcache/experimental/tests
 # PyCharm
 .idea/
 
+# JetBrains run configurations
+.run/
+
 # VSCode
 .vscode/
 
 # Setuptools scm version
 /lmcache/_version.py
+
+# Torch constraint generated inside the cibuildwheel container (before-all)
+/cibw-constraints.txt
 
 # Generated hip files
 /csrc_hip
@@ -151,3 +157,6 @@ operator/Dockerfile.cross
 
 # Compiled gettext catalogs (built from .po at HTML build time)
 docs/source/locale/**/*.mo
+
+# CodeBuddy
+.codebuddy

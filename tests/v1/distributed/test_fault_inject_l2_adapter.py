@@ -103,7 +103,7 @@ def _store_all(adapter, keys):
 def _lookup_bitmap(adapter, keys):
     """Run a lookup-and-lock for ``keys`` and return its result bitmap."""
     fd = adapter.get_lookup_and_lock_event_fd()
-    tid = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+    tid = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
     assert _wait_fd(fd)
     # query_*_result is non-idempotent (returns non-None once); poll briefly.
     for _ in range(50):

@@ -1,7 +1,7 @@
 .. _recipe_gpt_oss:
 
-GptOssForCausalLM
-==================
+gpt-oss
+=======
 
 Validated models
 ----------------

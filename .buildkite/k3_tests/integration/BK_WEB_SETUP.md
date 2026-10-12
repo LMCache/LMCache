@@ -7,6 +7,9 @@
 - Skip queued / cancel running branch builds: Yes
 
 Lightweight (1 GPU) — good candidate for a required GitHub status check.
+PRs labeled `"good first issue"` still trigger the upload step, but the repo
+wrapper exits green before uploading integration jobs. Add `force-ci` to run the
+full suite anyway.
 
 > Builds whose only changes are docs/`*.md`/`LICENSE`/`.github/**` auto-pass
 > via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).

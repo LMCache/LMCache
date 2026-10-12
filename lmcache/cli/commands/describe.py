@@ -7,15 +7,29 @@ Usage::
 """
 
 # Standard
+from typing import TYPE_CHECKING
 import argparse
-import json
 import sys
 import urllib.error
 import urllib.request
 
+# Third Party
+from prometheus_client.parser import text_string_to_metric_families
+
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.metrics import Metrics
+from lmcache.cli.http import (
+    DEFAULT_URLS,
+    CLIHTTPError,
+)
+from lmcache.cli.http import fetch_json as _fetch_json
+from lmcache.cli.http import (
+    normalize_url,
+)
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.cli.metrics import Metrics
 
 # -------------------------------------------------------------------
 # Shared helpers
@@ -26,36 +40,80 @@ class DescribeError(Exception):
     """Raised when the describe command cannot fetch or parse status data."""
 
 
-def normalize_url(url: str) -> str:
-    """Ensure *url* has an ``http://`` or ``https://`` scheme."""
-    if not url.startswith(("http://", "https://")):
-        url = f"http://{url}"
-    return url.rstrip("/")
-
-
 def fetch_json(url: str, timeout: int = 10) -> dict:
     """GET *url* and return the parsed JSON body.
 
     Raises:
         DescribeError: On network/HTTP errors.
     """
-    req = urllib.request.Request(url)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        if exc.code == 503:
-            body = exc.read().decode()
-            try:
-                detail = json.loads(body).get("error", body)
-            except (json.JSONDecodeError, AttributeError):
-                detail = body
-            raise DescribeError(f"Server unhealthy: {detail}") from exc
-        raise DescribeError(f"HTTP {exc.code} from {url}: {exc.reason}") from exc
-    except urllib.error.URLError as exc:
-        raise DescribeError(f"Cannot connect to {url}: {exc.reason}") from exc
-    except OSError as exc:
-        raise DescribeError(f"Cannot connect to {url}: {exc}") from exc
+        return _fetch_json(url, timeout=timeout)
+    except CLIHTTPError as exc:
+        raise DescribeError(str(exc)) from exc
+
+
+def fetch_health(url: str, timeout: int = 10) -> bool:
+    """Return whether *url* responds with HTTP 200.
+
+    A lightweight liveness probe for endpoints (e.g. the vLLM ``/health``
+    route) that return an empty body rather than JSON, so :func:`fetch_json`
+    cannot be used.
+
+    Args:
+        url: Full health-check URL to GET.
+        timeout: Socket timeout in seconds.
+
+    Returns:
+        ``True`` if the server responds with HTTP 200, ``False`` on any
+        non-200 status or connection error.
+    """
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(url), timeout=timeout
+        ) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def fetch_running_requests(url: str, timeout: int = 10) -> int | None:
+    """Return the number of in-flight requests from a vLLM ``/metrics`` page.
+
+    Parses the Prometheus ``vllm:num_requests_running`` gauge, summing the
+    value across all reported series (e.g. one per model). This is best
+    effort: the metric is informational, so any failure to fetch or parse
+    degrades to ``None`` (rendered as ``N/A``) rather than raising.
+
+    Args:
+        url: Full ``/metrics`` URL to GET.
+        timeout: Socket timeout in seconds.
+
+    Returns:
+        The total running-request count, or ``None`` if the endpoint is
+        unreachable or the metric is absent (e.g. metrics disabled or an
+        unsupported engine version).
+    """
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(url), timeout=timeout
+        ) as resp:
+            text = resp.read().decode()
+    except (urllib.error.URLError, OSError):
+        return None
+
+    total = 0.0
+    found = False
+    try:
+        for family in text_string_to_metric_families(text):
+            if family.name != "vllm:num_requests_running":
+                continue
+            for sample in family.samples:
+                total += sample.value
+                found = True
+    except ValueError:
+        # Malformed exposition text; treat as unavailable.
+        return None
+    return int(total) if found else None
 
 
 def fmt_bytes(n: int) -> str:
@@ -102,7 +160,7 @@ class KVCacheDescriber:
     about it.
     """
 
-    def __init__(self, metrics: Metrics, data: dict, base_url: str) -> None:
+    def __init__(self, metrics: "Metrics", data: dict, base_url: str) -> None:
         self.metrics = metrics
         self.data = data
         self.base_url = base_url
@@ -299,6 +357,56 @@ class KVCacheDescriber:
 
 
 # -------------------------------------------------------------------
+# Engine describer
+# -------------------------------------------------------------------
+
+
+class EngineDescriber:
+    """Builds the ``describe engine`` output from vLLM server responses.
+
+    Reads model identity and context window from the engine's
+    ``/v1/models`` response and combines them with a ``/health`` liveness
+    result to render a concise status view.
+    """
+
+    def __init__(
+        self,
+        metrics: "Metrics",
+        models_data: dict,
+        is_healthy: bool,
+        running_requests: int | None,
+        base_url: str,
+    ) -> None:
+        self.metrics = metrics
+        self.models_data = models_data
+        self.is_healthy = is_healthy
+        self.running_requests = running_requests
+        self.base_url = base_url
+
+    def describe(self) -> None:
+        """Run all section builders and emit."""
+        self.add_overview()
+        self.metrics.emit()
+
+    def add_overview(self) -> None:
+        """Model identity, context window, health status, and load."""
+        model = self._first_model()
+        self.metrics.add("model", "Model", model.get("id") if model else None)
+        self.metrics.add(
+            "max_context",
+            "Max context (tokens)",
+            model.get("max_model_len") if model else None,
+        )
+        self.metrics.add("status", "Status", fmt_health(self.is_healthy))
+        self.metrics.add("running_requests", "Running requests", self.running_requests)
+
+    def _first_model(self) -> dict | None:
+        """Return the first model entry from a ``/v1/models`` response."""
+        data = self.models_data.get("data") or []
+        return data[0] if data else None
+
+
+# -------------------------------------------------------------------
 # Command
 # -------------------------------------------------------------------
 
@@ -315,18 +423,25 @@ class DescribeCommand(BaseCommand):
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "target",
-            choices=["kvcache"],
+            choices=["kvcache", "engine"],
             help="What to describe.",
         )
         parser.add_argument(
             "--url",
-            help="LMCache HTTP server URL (default to http://localhost:8080).",
-            default="http://localhost:8080",
+            default=None,
+            help=(
+                "Server URL (default: http://localhost:8080 for kvcache, "
+                "http://localhost:8000 for engine)."
+            ),
         )
 
     def execute(self, args: argparse.Namespace) -> None:
+        if getattr(args, "url", None) is None:
+            args.url = DEFAULT_URLS[args.target]
         if args.target == "kvcache":
             self._describe_kvcache(args)
+        elif args.target == "engine":
+            self._describe_engine(args)
 
     def _describe_kvcache(self, args: argparse.Namespace) -> None:
         base_url = normalize_url(args.url)
@@ -338,3 +453,18 @@ class DescribeCommand(BaseCommand):
 
         metrics = self.create_metrics("LMCache KV Cache Service", args, width=50)
         KVCacheDescriber(metrics, data, base_url).describe()
+
+    def _describe_engine(self, args: argparse.Namespace) -> None:
+        base_url = normalize_url(args.url)
+        try:
+            models = fetch_json(f"{base_url}/v1/models")
+        except DescribeError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+
+        is_healthy = fetch_health(f"{base_url}/health")
+        running_requests = fetch_running_requests(f"{base_url}/metrics")
+        metrics = self.create_metrics("Inference Engine", args, width=50)
+        EngineDescriber(
+            metrics, models, is_healthy, running_requests, base_url
+        ).describe()

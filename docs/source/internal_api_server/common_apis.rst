@@ -3,6 +3,11 @@
 Common APIs
 ===========
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/http_api`.
+
+
 Common APIs are available across all components (scheduler, worker, controller).
 
 .. contents:: Endpoints
@@ -295,6 +300,17 @@ Quick health check for periodic threads. Returns healthy status if all
 
 ``POST /run_script`` — Run Script
 -----------------------------------
+
+.. danger::
+
+   This endpoint runs caller-supplied code in-process. The restricted
+   builtins are **not** a security sandbox — combined with the injected
+   ``app`` object and any allowed imports, treat it as full remote code
+   execution. It is therefore **disabled by default** (requests return
+   ``404``); enable it explicitly with ``run_script_api_enabled``
+   (``LMCACHE_RUN_SCRIPT_API_ENABLED=true``, or
+   ``--run-script-api-enabled`` on the standalone server) and only on a
+   trusted network.
 
 Upload and execute a Python script in a restricted sandbox environment.
 The script has access to ``app`` (the FastAPI application instance) and

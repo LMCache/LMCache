@@ -12,6 +12,7 @@ from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
 )
 from lmcache.v1.distributed.internal_api import EvictionDestination
+from lmcache.v1.mp_coordinator.utils.encoding import encode_key
 
 
 def _key(chunk_id: int, cache_salt: str = "") -> ObjectKey:
@@ -135,3 +136,62 @@ class TestEvictionAmount:
             key_eligible_filter=lambda k: k == k2,
         )
         assert actions[0].keys == [k2]
+
+
+class TestDurableState:
+    def test_the_restored_order_decides_who_is_evicted_first(self):
+        """A restore that reorders a bucket silently changes the victim,
+        which no other state would reveal."""
+        policy = IsolatedLRUEvictionPolicy()
+        # Created in reverse, so 3 sits at the LRU head; touching it sends
+        # it to the other end and leaves an order creation alone cannot.
+        policy.on_keys_created([_key(i) for i in (1, 2, 3)])
+        policy.on_keys_touched([_key(3)])
+
+        restored = IsolatedLRUEvictionPolicy()
+        restored.restore(policy.capture())
+
+        assert restored.capture()["buckets"][""] == [
+            encode_key(_key(2)),
+            encode_key(_key(1)),
+            encode_key(_key(3)),
+        ]
+        victims = restored.get_eviction_actions(expected_ratio=0.4, cache_salt="")
+        assert [key.chunk_hash for key in victims[0].keys] == [
+            ObjectKey.IntHash2Bytes(2)
+        ]
+
+
+class TestSectionName:
+    """The durable section an ordering writes to is its own, so a process
+    keeping one ordering per tier can checkpoint them side by side."""
+
+    def test_defaults_to_the_single_ordering_name(self):
+        assert IsolatedLRUEvictionPolicy().name == "lru_order"
+
+    def test_a_named_ordering_writes_its_own_section(self):
+        assert IsolatedLRUEvictionPolicy(section_name="l1_lru_order").name == (
+            "l1_lru_order"
+        )
+
+    def test_two_orderings_do_not_share_a_section(self):
+        """A checkpoint is keyed by section name, and refuses a duplicate."""
+        l1 = IsolatedLRUEvictionPolicy(section_name="l1_lru_order")
+        l2 = IsolatedLRUEvictionPolicy()
+        l1.on_keys_created([_key(1)])
+        l2.on_keys_created([_key(2)])
+
+        assert l1.name != l2.name
+        assert l1.capture()["buckets"][""] == [encode_key(_key(1))]
+        assert l2.capture()["buckets"][""] == [encode_key(_key(2))]
+
+    def test_the_section_name_does_not_change_ordering_behavior(self):
+        policy = IsolatedLRUEvictionPolicy(section_name="l1_lru_order")
+        policy.on_keys_created([_key(i) for i in (1, 2)])
+        policy.on_keys_touched([_key(1)])
+
+        victims = policy.get_eviction_actions(expected_ratio=0.5, cache_salt="")
+
+        assert [key.chunk_hash for key in victims[0].keys] == [
+            ObjectKey.IntHash2Bytes(2)
+        ]

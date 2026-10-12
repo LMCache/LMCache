@@ -13,9 +13,9 @@ Two modes are supported:
          connector: lmcache
 
 **Multi-process mode** (``lmcache-mp``)
-    The LMCache engine runs as a standalone ZMQ server, providing
+    The LMCache engine runs as a standalone request server, providing
     process isolation and shared KV caching across multiple TRT-LLM
-    instances on the same node.
+    instances on the same node. The endpoint scheme selects ZMQ or gRPC.
 
     1. Start the LMCache server::
 

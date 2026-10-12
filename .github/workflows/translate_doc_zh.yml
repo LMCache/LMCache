@@ -44,9 +44,20 @@ jobs:
           pip install -r requirements/docs.txt
 
       - name: Reuse translations from open PR
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if git fetch origin automation/update-chinese-docs 2>/dev/null; then
+          # Reuse the automation branch only while its PR is open; a closed PR's
+          # branch is stale and would overwrite human edits merged to dev.
+          open_prs=$(gh pr list --repo "$GITHUB_REPOSITORY" \
+            --head automation/update-chinese-docs --state open \
+            --json number --jq 'length' || echo 0)
+          if [ "${open_prs:-0}" -gt 0 ] && \
+             git fetch origin automation/update-chinese-docs 2>/dev/null; then
+            echo "Open translation PR found; reusing its translations."
             git checkout FETCH_HEAD -- docs/source/locale/zh_CN/LC_MESSAGES/ || true
+          else
+            echo "No open translation PR; using dev as the translation base."
           fi
 
       - name: Update gettext catalogs

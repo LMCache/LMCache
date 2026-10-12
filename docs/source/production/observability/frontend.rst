@@ -3,6 +3,11 @@
 LMCache Frontend
 ================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/frontend_dashboard`.
+
+
 LMCache Frontend is a monitoring and proxy service for LMCache clusters,
 providing a web interface for cluster management and HTTP request proxying
 to cluster nodes.
@@ -111,6 +116,9 @@ add the following to your ``lmcache.yaml``:
      plugin.frontend.port: 8080
    internal_api_server_enabled: True
    internal_api_server_port_start: 9090
+   # Needed only for the POST /run_script proxy example below. That endpoint
+   # executes caller-supplied code in-process and is off by default.
+   run_script_api_enabled: True
    plugin_locations: ["/scripts/scheduler_lmc_frontend_plugin.py"]
    internal_api_server_socket_path_prefix: "/tmp/lmcache_internal_api_server/socket"
 
@@ -134,6 +142,13 @@ Examples:
    # Proxy a POST request
    curl -X POST http://localhost:9090/proxy/localhost/8081/run_script \
        -F "script=@/root/scratch.py"
+
+.. note::
+
+   The ``POST /run_script`` example above requires the target node to opt in
+   with ``run_script_api_enabled: true`` (see the sample config above).
+   Without it the endpoint returns ``404`` — it executes caller-supplied code
+   in-process and is therefore disabled by default.
 
 
 Contributing

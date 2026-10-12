@@ -12,6 +12,28 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 check_gpu_health 80
 
+# The base image may have been built on a different GPU host.  Do not reuse
+# its TORCH_CUDA_ARCH_LIST when compiling LMCache in this pod: a H200-built
+# image (sm_90) cannot launch kernels on an A100 (sm_80), for example.
+if command -v nvidia-smi >/dev/null 2>&1; then
+    RUNTIME_CUDA_ARCHES="$({
+        nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+            | tr -d ' ' | sort -u | paste -sd ';' -
+    })"
+    if [[ -n "${RUNTIME_CUDA_ARCHES}" ]]; then
+        export TORCH_CUDA_ARCH_LIST="${RUNTIME_CUDA_ARCHES}"
+        echo "Using runtime GPU architectures: ${TORCH_CUDA_ARCH_LIST}"
+    fi
+fi
+
+merge_pr_base_branch
+
+# Resolve which vLLM nightly to install. Sets PINNED_VLLM_VERSION (empty
+# string means "use latest nightly", any other value means
+# "install vllm==<that exact version>"). See script header for the full
+# resolution order and override knobs.
+source "${REPO_ROOT}/.buildkite/k3_harness/resolve-pinned-vllm.sh"
+
 echo "--- :broom: Pre-install bytecode/cache eviction"
 # The CI base image pre-installs packages from requirements/*.txt at image
 # build time. We've observed k3 jobs (integration + correctness) fail with
@@ -48,12 +70,76 @@ echo "--- :python: Installing vLLM nightly (pinned to cu130 index)"
 # minimum set to put the full `vllm serve` import chain on a freshly
 # extracted wheel, which bypasses whatever filesystem-level mismatch in
 # the base image was causing the GenerationConfig ImportError.
-uv pip install -U "vllm[runai,tensorizer,flashinfer]" --pre \
+#
+# When PINNED_VLLM_VERSION is non-empty (resolved by resolve-pinned-vllm.sh
+# from the `buildkite_latest_tested_vllm` branch), pin to that exact wheel
+# so every CI job matches the version most recently verified by the
+# canary build. Empty falls back to "latest nightly".
+#
+# vLLM's nightly index (wheels.vllm.ai/nightly/<cuda>/) only keeps the
+# *latest* wheel; older versions get rolled off within a day or two and
+# pinning them there fails with "no version of vllm==X". Historical
+# wheels are still served at wheels.vllm.ai/<full-commit-sha>/<cuda>/,
+# which is a PEP 503 simple index. The canary records that archive URL
+# directly in the pin file, so the common path needs zero extra API
+# calls. As a fallback (e.g. an old-format pin file written before the
+# canary started recording metadata, or a manual override via
+# PINNED_VLLM_VERSION), we still expand the short SHA via the public
+# GitHub commits API; GITHUB_TOKEN is honoured (5000 req/h) but optional.
+PINNED_VLLM_INDEX_ARGS=()
+if [[ -n "${PINNED_VLLM_VERSION:-}" ]]; then
+    VLLM_INSTALL_SPEC="vllm[runai,tensorizer,flashinfer]==${PINNED_VLLM_VERSION}"
+    echo "Installing vLLM pinned: ${VLLM_INSTALL_SPEC}"
+    archive_url="${PINNED_VLLM_ARCHIVE_INDEX_URL:-}"
+    if [[ -z "${archive_url}" ]]; then
+        # Old-format pin file or per-build override: resolve on demand.
+        short_sha="${PINNED_VLLM_VERSION##*+g}"
+        if [[ "${short_sha}" != "${PINNED_VLLM_VERSION}" \
+                && "${short_sha}" =~ ^[0-9a-f]+$ ]]; then
+            gh_auth_args=()
+            if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+                gh_auth_args=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+            fi
+            full_sha=""
+            for attempt in 1 2 3; do
+                full_sha="$(curl -fsSL --connect-timeout 5 --max-time 10 \
+                    -H "Accept: application/vnd.github+json" \
+                    "${gh_auth_args[@]+"${gh_auth_args[@]}"}" \
+                    "https://api.github.com/repos/vllm-project/vllm/commits/${short_sha}" \
+                    2>/dev/null \
+                    | awk -F'"' '/"sha":/ {print $4; exit}')" || true
+                if [[ "${full_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+                    break
+                fi
+                echo "[INFO] GitHub commit lookup attempt ${attempt} for" \
+                     "${short_sha} returned no SHA; retrying..." >&2
+                sleep 2
+            done
+            if [[ "${full_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+                archive_url="https://wheels.vllm.ai/${full_sha}/cu130"
+            else
+                echo "[WARN] could not resolve full SHA for ${short_sha}; pip" \
+                     "may fail if the wheel has rolled off the nightly index" >&2
+            fi
+        fi
+    fi
+    if [[ -n "${archive_url}" ]]; then
+        echo "Adding commit-archived index: ${archive_url}"
+        PINNED_VLLM_INDEX_ARGS+=(--extra-index-url "${archive_url}")
+    fi
+else
+    # ">=0.0.0.dev0" explicitly limits vLLM to be the only pre-release
+    # package.
+    VLLM_INSTALL_SPEC="vllm[runai,tensorizer,flashinfer]>=0.0.0.dev0"
+    echo "Installing latest vLLM nightly (no pin)"
+fi
+uv pip install -U "${VLLM_INSTALL_SPEC}" \
     --reinstall-package transformers \
     --reinstall-package tokenizers \
     --reinstall-package huggingface-hub \
     --reinstall-package safetensors \
     --reinstall-package vllm \
+    "${PINNED_VLLM_INDEX_ARGS[@]+"${PINNED_VLLM_INDEX_ARGS[@]}"}" \
     --extra-index-url https://wheels.vllm.ai/nightly/cu130 \
     --extra-index-url https://download.pytorch.org/whl/cu130 \
     --index-strategy unsafe-best-match
@@ -192,6 +278,13 @@ echo "--- :python: Installing LMCache from source"
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 uv pip freeze | sort > /tmp/env-before-lmcache.txt
 uv pip install -e . --no-build-isolation
+
+# Editable installs do not run setuptools' build_py hook. Install the pinned
+# generator and create the ignored bindings required when server.py is imported.
+uv pip install -r requirements/proto.txt
+echo "--- :gear: Generating LMCache gRPC bindings"
+python "${REPO_ROOT}/lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py"
+
 uv pip freeze | sort > /tmp/env-after-lmcache.txt
 if ! diff -q /tmp/env-before-lmcache.txt /tmp/env-after-lmcache.txt >/dev/null; then
     echo "--- :warning: Packages changed during LMCache install"

@@ -48,7 +48,7 @@ class LMCacheServer:
                 if not header:
                     break
                 meta = ClientMetaMessage.deserialize(header)
-                logger.debug(f"Received command: {meta.command}")
+                logger.debug("Received command: %s", meta.command)
                 match meta.command:
                     case ClientCommand.PUT:
                         t0 = time.perf_counter()
@@ -57,8 +57,9 @@ class LMCacheServer:
                         self.data_store.put(meta, s)
                         t2 = time.perf_counter()
                         logger.debug(
-                            f"Time to receive data: {t1 - t0}, time to store "
-                            f"data: {t2 - t1}"
+                            "Time to receive data: %s, time to store data: %s",
+                            t1 - t0,
+                            t2 - t1,
                         )
 
                     case ClientCommand.GET:
@@ -79,8 +80,11 @@ class LMCacheServer:
                             client_socket.sendall(lms_memory_obj.data)
                             t3 = time.perf_counter()
                             logger.debug(
-                                f"Time to get data: {t1 - t0}, time to send "
-                                f"meta: {t2 - t1}, time to send data: {t3 - t2}"
+                                "Time to get data: %s, time to send meta: %s, "
+                                "time to send data: %s",
+                                t1 - t0,
+                                t2 - t1,
+                                t3 - t2,
                             )
                         else:
                             client_socket.sendall(
@@ -99,7 +103,7 @@ class LMCacheServer:
                             if self.data_store.contains(meta.key)
                             else ServerReturnCode.FAIL
                         )
-                        logger.debug(f"Key exists: {code}")
+                        logger.debug("Key exists: %s", code)
                         client_socket.sendall(
                             ServerMetaMessage(
                                 code,
@@ -135,11 +139,11 @@ class LMCacheServer:
             client_socket.close()
 
     def run(self):
-        logger.info(f"Server started at {self.host}:{self.port}")
+        logger.info("Server started at %s:%s", self.host, self.port)
         try:
             while True:
                 client_socket, addr = self.server_socket.accept()
-                logger.info(f"Connected by {addr}")
+                logger.info("Connected by %s", addr)
                 threading.Thread(
                     target=self.handle_client, args=(client_socket,)
                 ).start()
@@ -152,7 +156,7 @@ def main():
     import sys
 
     if len(sys.argv) not in [3, 4]:
-        logger.error(f"Usage: {sys.argv[0]} <host> <port> <storage>(default:cpu)")
+        logger.error("Usage: %s <host> <port> <storage>(default:cpu)", sys.argv[0])
         exit(1)
 
     host = sys.argv[1]

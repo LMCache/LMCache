@@ -53,6 +53,17 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     """Sliding window size in tokens for the layers of this group.
     ``-1`` means the layers are not sliding-window attention."""
 
+    extra_object_group_tag: int = 0
+    """Connector-private extra-group tag under ``--separate-object-groups``:
+    ``0`` = a regular group; ``> 0`` = an extra group (e.g. the CacheBlend
+    fused-aux pool) bucketed by tag, after the regular groups. Defaulted
+    field: wire-compatible with old payloads."""
+
+    recurrent_state: bool = False
+    """Pages hold recurrent state snapshots (Mamba/GDN) rather than attention
+    KV; the one-block window reflects restore semantics and blend full-window
+    forcing must not widen it. Defaulted field: wire-compatible."""
+
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).
@@ -103,6 +114,31 @@ def _engine_group_id_per_view(
     if not groups:
         return (0,)
     return tuple(group.engine_group_id for group in groups)
+
+
+def engine_group_layer_indices(
+    groups: Sequence[EngineGroupInfo],
+) -> list[list[int]]:
+    """Return each engine group's layer indices, ordered by engine group id.
+
+    Several ``EngineGroupInfo`` may share one ``engine_group_id``; their
+    ``layer_indices`` are unioned into that group's entry.
+
+    Args:
+        groups: The LMCache KV groups, in protocol order.
+
+    Returns:
+        One sorted ``list[int]`` of layer indices per engine group, indexed by
+        engine group id (dense from 0). Empty when ``groups`` is empty (a single
+        non-hybrid group with no per-group split).
+    """
+    if not groups:
+        return []
+    num_groups = max(group.engine_group_id for group in groups) + 1
+    per_group: list[list[int]] = [[] for _ in range(num_groups)]
+    for group in groups:
+        per_group[group.engine_group_id].extend(group.layer_indices)
+    return [sorted(indices) for indices in per_group]
 
 
 def expand_engine_block_ids(
@@ -160,8 +196,8 @@ def slice_block_ids_per_group(
         allocated_block_ids: Block IDs keyed by engine group id; a missing group
             yields an empty list.
         group_tokens_per_block: Each group's tokens-per-paged-chunk, in
-            engine-group order. Every value must be positive and divide both
-            range endpoints.
+            engine-group order. Every value must divide both range endpoints;
+            ``0`` marks a scratch group, which slices to an empty list.
         start_token_idx: Range start token index, inclusive.
         end_token_idx: Range end token index, exclusive.
 
@@ -173,6 +209,9 @@ def slice_block_ids_per_group(
     """
     sliced: list[list[int]] = []
     for engine_group_idx, tokens_per_block in enumerate(group_tokens_per_block):
+        if tokens_per_block == 0:
+            sliced.append([])
+            continue
         if start_token_idx % tokens_per_block != 0 or (
             end_token_idx % tokens_per_block != 0
         ):

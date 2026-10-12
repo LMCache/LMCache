@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional, Union
-
-# Third Party
-import torch
+from typing import TYPE_CHECKING, Optional, Union
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
+
+if TYPE_CHECKING:
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
@@ -22,7 +25,7 @@ HitLimitLookupClient now is used for test, when lookup is called, cal the cache 
 
 class HitLimitLookupClient(LookupClientInterface):
     def __init__(
-        self, actual_lookup_client: LookupClientInterface, config: LMCacheEngineConfig
+        self, actual_lookup_client: LookupClientInterface, config: "LMCacheEngineConfig"
     ):
         assert config.hit_miss_ratio is not None and 0 <= config.hit_miss_ratio <= 1
         self.actual_lookup_client = actual_lookup_client
@@ -39,7 +42,7 @@ class HitLimitLookupClient(LookupClientInterface):
 
     def lookup(
         self,
-        token_ids: Union[torch.Tensor, list[int]],
+        token_ids: Union["torch.Tensor", list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
@@ -69,10 +72,15 @@ class HitLimitLookupClient(LookupClientInterface):
                 # check again
                 result = min(result, new_result)
                 logger.debug(
-                    f"hit ratio upper: {hit_ratio_upper} is smaller than "
-                    f"the real hit ratio {current_hit_ratio}, "
-                    f"the origin result is {origin_result}, "
-                    f"the new result is {new_result}, the final result is {result}"
+                    "hit ratio upper: %s is smaller than "
+                    "the real hit ratio %s, "
+                    "the origin result is %s, "
+                    "the new result is %s, the final result is %s",
+                    hit_ratio_upper,
+                    current_hit_ratio,
+                    origin_result,
+                    new_result,
+                    result,
                 )
         return result
 
