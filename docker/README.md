@@ -157,14 +157,14 @@ docker run --runtime nvidia --gpus all \
 
 **Description**: The official SGLang release image (`lmsysorg/sglang`) with the matching LMCache wheel from PyPI installed. SGLang supports only LMCache MP mode, so this image runs SGLang with `--enable-lmcache` and connects to a separate LMCache server (for example `lmcache/standalone`).
 
-LMCache's compiled extensions only load against the torch they were built with, so `SGLANG_VERSION` (default in the Dockerfile) must be an SGLang release that ships the torch pinned in `pyproject.toml`. The build fails if the two disagree, if installing LMCache would change SGLang's torch/CUDA stack, or if LMCache's native extension or SGLang connector does not load.
+Release builds use the newest SGLang release: the workflow resolves the `vX.Y.Z` tag that `lmsysorg/sglang:latest` points to and passes it as `SGLANG_VERSION`, so the image label names the SGLang it contains. LMCache's compiled extensions only load against the torch they were built with, so that SGLang release must ship the torch pinned in `pyproject.toml`. The build fails if the two disagree, if installing LMCache would change SGLang's torch/CUDA stack, or if LMCache's native extension or SGLang connector does not load.
 
 **Build Arguments**:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `LMCACHE_VERSION` | (required) | LMCache release on PyPI, e.g. `v0.5.6` |
-| `SGLANG_VERSION` | see Dockerfile | `lmsysorg/sglang` release tag |
+| `SGLANG_VERSION` | `latest` | `lmsysorg/sglang` tag, e.g. `v0.5.21` |
 | `EXPECTED_TORCH` | (empty, check skipped) | torch version from `pyproject.toml`; the release workflow always sets it |
 
 **Usage**:
