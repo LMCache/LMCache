@@ -49,15 +49,6 @@ if TYPE_CHECKING:
     )
 
 
-# RblnDeviceOps moves only the layouts vLLM-RBLN allocates and refuses the rest
-# by design: other layouts on their layout facts, 5-D HND in its strict
-# singleton-axis squeeze.
-_UNSUPPORTED_ON_RBLN = pytest.mark.skipif(
-    torch_device_type == "rbln",
-    reason="RBLN refuses layouts vLLM-RBLN never allocates",
-)
-
-
 class ServerModuleFactory(Protocol):
     """Typed callable contract for creating patched server test modules.
 
@@ -786,7 +777,6 @@ def test_create_transfer_context_env_var_overrides_default(
             16,
             None,
             id="nhd",
-            marks=_UNSUPPORTED_ON_RBLN,
         ),
         pytest.param(
             lambda: _make_mla_kv_caches(
@@ -805,7 +795,6 @@ def test_create_transfer_context_env_var_overrides_default(
             32,
             {"kv_layout": "HND"},
             id="fused_hnd",
-            marks=_UNSUPPORTED_ON_RBLN,
         ),
         pytest.param(
             lambda: _make_fused_nhd_kv_caches(
@@ -815,7 +804,6 @@ def test_create_transfer_context_env_var_overrides_default(
             32,
             {"kv_layout": "NHD"},
             id="fused_nhd",
-            marks=_UNSUPPORTED_ON_RBLN,
         ),
     ],
 )
@@ -1028,16 +1016,8 @@ def test_engine_driven_context_unregister_lifecycle(
 @pytest.mark.parametrize(
     ("hnd_builder", "expected_format"),
     [
-        pytest.param(
-            _make_hnd_kv_caches,
-            "NL_X_TWO_NB_NH_BS_HS",
-            marks=_UNSUPPORTED_ON_RBLN,
-        ),
-        pytest.param(
-            _make_hnd_flashinfer_kv_caches,
-            "NL_X_NB_TWO_NH_BS_HS",
-            marks=_UNSUPPORTED_ON_RBLN,
-        ),
+        (_make_hnd_kv_caches, "NL_X_TWO_NB_NH_BS_HS"),
+        (_make_hnd_flashinfer_kv_caches, "NL_X_NB_TWO_NH_BS_HS"),
     ],
 )
 def test_gather_scatter_roundtrip_hnd_layout(
@@ -1124,7 +1104,6 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
             [0, 1],
             [2, 3],
             id="nhd-skip-two-blocks",
-            marks=_UNSUPPORTED_ON_RBLN,
         ),
         pytest.param(
             lambda: _make_mla_kv_caches(
@@ -1197,7 +1176,6 @@ def test_scatter_respects_skip_first_n_tokens(
             lambda: _make_hnd_kv_caches(num_layers=2, num_blocks=4, block_size=4),
             {"kv_layout": "HND"},
             id="hnd",
-            marks=_UNSUPPORTED_ON_RBLN,
         ),
         pytest.param(
             lambda: _make_mla_kv_caches(
@@ -1653,7 +1631,6 @@ def test_server_unregister_engine_driven_context_releases_pending_shm_locks(
     mock_storage.finish_read_prefetched.assert_called_once()
 
 
-@_UNSUPPORTED_ON_RBLN
 def test_gather_paged_kv_with_chunk_indices_subset() -> None:
     """gather_paged_kv_to_cpu with chunk_indices only gathers the specified chunks.
 
