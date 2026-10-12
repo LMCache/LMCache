@@ -1,0 +1,197 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/valkey.rst:2
+msgid "Valkey"
+msgstr "Valkey"
+
+#: ../../source/mp/l2_storage/valkey.rst:4
+msgid ""
+"An L2 adapter backed by the official ``valkey-glide`` **sync** Python "
+"client. Stores KV cache chunks in a Valkey (or Redis) server and supports"
+" both **standalone** (``GlideClient``) and **Valkey-Cluster** "
+"(``GlideClusterClient``) topologies, selected via ``cluster_mode``."
+msgstr "一个由官方 ``valkey-glide`` **同步** Python 客户端支持的 L2 适配器。将 KV Cache 块存储在 Valkey（或 Redis）服务器中，并支持 **独立**（``GlideClient``）和 **Valkey-Cluster**（``GlideClusterClient``）拓扑，通过 ``cluster_mode`` 进行选择。"
+
+#: ../../source/mp/l2_storage/valkey.rst:9
+msgid ""
+"I/O is dispatched through an internal ``ValkeyWorkerPool`` of worker "
+"threads; each worker holds its own glide client so a batch of keys "
+"parallelizes across threads and (in cluster mode) across primaries."
+msgstr "I/O 通过内部的 ``ValkeyWorkerPool`` 工作线程进行分发；每个工作线程持有自己的 glide 客户端，因此一批键可以在多个线程之间并行处理，并且（在集群模式下）在主节点之间并行处理。"
+
+#: ../../source/mp/l2_storage/valkey.rst:14
+msgid "Why the ``valkey`` adapter (vs. the RESP adapter)"
+msgstr "为什么选择 ``valkey`` 适配器（而不是 RESP 适配器）"
+
+#: ../../source/mp/l2_storage/valkey.rst:16
+msgid ""
+"The :doc:`RESP <resp>` adapter targets a single Redis/Valkey server over "
+"the native C++ RESP connector. The ``valkey`` adapter is a first-class "
+"Valkey backend: it speaks ``valkey-glide-sync`` directly, adds Valkey-"
+"Cluster support (slot routing, MOVED/ASK redirects, and topology "
+"discovery are handled inside ``GlideClusterClient``), and preserves copy-"
+"reduced SET/GET on multi-megabyte KV chunks (see the `Valkey L2 Adapter "
+"design doc "
+"<https://github.com/LMCache/LMCache/blob/dev/docs/design/v1/distributed/l2_adapters/valkey.md>`_"
+" for the full rationale, including why the sync -- not async -- glide "
+"client is used)."
+msgstr ":doc:`RESP <resp>` 适配器通过原生 C++ RESP 连接器针对单个 Redis/Valkey 服务器。``valkey`` 适配器是一个一流的 Valkey 后端：它直接使用 ``valkey-glide-sync``，增加了 Valkey-Cluster 支持（槽路由、MOVED/ASK 重定向和拓扑发现由 ``GlideClusterClient`` 处理），并在多兆字节 KV 块上保留了减少复制的 SET/GET（有关完整理由，请参见 `Valkey L2 Adapter design doc <https://github.com/LMCache/LMCache/blob/dev/docs/design/v1/distributed/l2_adapters/valkey.md>`_，包括为什么使用同步而非异步的 glide 客户端）。"
+
+#: ../../source/mp/l2_storage/valkey.rst:28
+msgid "Prerequisites -- installing the glide sync client"
+msgstr "先决条件 -- 安装 glide sync 客户端"
+
+#: ../../source/mp/l2_storage/valkey.rst:30
+msgid ""
+"The ``valkey`` adapter requires the ``valkey-glide-sync`` package "
+"(version ``>= 2.3.0``, the first release with both copy-reduced SET and "
+"buffer GET). It is lazy-imported the first time a Valkey worker starts:"
+msgstr "``valkey`` 适配器需要 ``valkey-glide-sync`` 包（版本 ``>= 2.3.0``，这是第一个同时支持复制减少的 SET 和缓冲 GET 的版本）。它在 Valkey 工作线程首次启动时懒加载："
+
+#: ../../source/mp/l2_storage/valkey.rst:39
+msgid ""
+"If the package is missing when a Valkey worker starts, adapter "
+"construction fails with::"
+msgstr "如果在 Valkey 工作进程启动时缺少该软件包，适配器构造将失败："
+
+#: ../../source/mp/l2_storage/valkey.rst:46
+msgid "**Required fields:**"
+msgstr "**必填字段：**"
+
+#: ../../source/mp/l2_storage/valkey.rst:48
+msgid ""
+"``startup_nodes``: A ``\"host:port[,host:port...]\"`` string of seed "
+"nodes."
+msgstr "``startup_nodes``: 一个 ``\"host:port[,host:port...]\"`` 格式的种子节点字符串。"
+
+#: ../../source/mp/l2_storage/valkey.rst:51
+msgid ""
+"In **standalone** mode (``cluster_mode: false``, the default) only the "
+"first entry is used; extras trigger a warning."
+msgstr "在 **独立** 模式 (``cluster_mode: false``, 默认值) 下，仅使用第一个条目；额外的条目会触发警告。"
+
+#: ../../source/mp/l2_storage/valkey.rst:53
+msgid ""
+"In **cluster** mode any reachable seed is enough -- glide auto- discovers"
+" the full topology."
+msgstr "在 **集群** 模式下，任何可达的种子都足够——glide 会自动发现完整的拓扑结构。"
+
+#: ../../source/mp/l2_storage/valkey.rst:56
+msgid "**Optional fields:**"
+msgstr "**可选字段：**"
+
+#: ../../source/mp/l2_storage/valkey.rst:58
+msgid ""
+"``cluster_mode`` (bool, default ``false``): When ``true`` use "
+"``GlideClusterClient``; otherwise use standalone ``GlideClient``."
+msgstr "``cluster_mode`` (bool, 默认 ``false``): 当 ``true`` 时使用 ``GlideClusterClient``；否则使用独立的 ``GlideClient``。"
+
+#: ../../source/mp/l2_storage/valkey.rst:60
+msgid "``username`` (str, default ``\"\"``): Optional auth username."
+msgstr "``username`` (str, default ``\"\"``): 可选的认证用户名。"
+
+#: ../../source/mp/l2_storage/valkey.rst:61
+msgid "``password`` (str, default ``\"\"``): Optional auth password."
+msgstr "``password`` (str, default ``\"\"``): 可选的认证密码。"
+
+#: ../../source/mp/l2_storage/valkey.rst:62
+msgid ""
+"``key_prefix`` (str, default ``\"\"``): Deployment-level key namespace, "
+"joined with the standard wire key by ``@``. **Must not contain** ``@``. "
+"Leave empty for a wire-format identical to the unprefixed layout."
+msgstr "``key_prefix`` (str, default ``\"\"``): 部署级别的键命名空间，通过 ``@`` 与标准线键连接。**不得包含** ``@``。若要获得与无前缀布局相同的线格式，请留空。"
+
+#: ../../source/mp/l2_storage/valkey.rst:66
+msgid ""
+"``num_workers`` (int, default ``8``, > 0): Size of the internal worker "
+"thread pool. Each worker holds its own glide client, so this is the real "
+"I/O concurrency knob -- raise it to push throughput on large batches / "
+"cluster deployments."
+msgstr "``num_workers`` (int, default ``8``, > 0): 内部工作线程池的大小。每个工作线程持有自己的 glide 客户端，因此这是实际的 I/O 并发控制参数——增加它以提高大批量/集群部署的吞吐量。"
+
+#: ../../source/mp/l2_storage/valkey.rst:70
+msgid ""
+"``tls_enable`` (bool, default ``false``): Enable TLS. Required for "
+"managed Valkey services such as ElastiCache Serverless."
+msgstr "``tls_enable`` (bool, default ``false``): 启用 TLS。对于托管的 Valkey 服务，如 ElastiCache Serverless，这是必需的。"
+
+#: ../../source/mp/l2_storage/valkey.rst:72
+msgid ""
+"``database_id`` (int, optional): Logical database id for **standalone** "
+"mode. Ignored (with a warning) when ``cluster_mode: true``."
+msgstr "``database_id`` (int, optional): **独立** 模式下的逻辑数据库 ID。当 ``cluster_mode: true`` 时会被忽略（并发出警告）。"
+
+#: ../../source/mp/l2_storage/valkey.rst:75
+msgid ""
+"``request_timeout`` (float, default ``5.0``, > 0): Per-request timeout, "
+"in seconds."
+msgstr "``request_timeout`` (float, default ``5.0``, > 0): 每个请求的超时时间，以秒为单位。"
+
+#: ../../source/mp/l2_storage/valkey.rst:77
+msgid ""
+"``connection_timeout`` (float, default ``10.0``, > 0): Initial connection"
+" timeout, in seconds."
+msgstr "``connection_timeout`` (float, default ``10.0``, > 0): 初始连接超时，单位为秒。"
+
+#: ../../source/mp/l2_storage/valkey.rst:79
+msgid ""
+"``max_capacity_gb`` (float, default ``0``, >= 0): Declared aggregate "
+"capacity in GB used to drive **LMCache-side** eviction. ``0`` (the "
+"default and the recommended setting) disables global LMCache eviction and"
+" defers to the Valkey server's own ``maxmemory`` / eviction policy; "
+"per-``cache_salt`` quotas configured on the coordinator still operate "
+"either way. Set ``> 0`` (together with an ``eviction`` block) only when a"
+" single LMCache writer privately owns the cluster -- do **not** combine "
+"``> 0`` with server-side eviction or a TTL, both of which drift LMCache's"
+" byte accounting."
+msgstr "``max_capacity_gb`` (float, default ``0``, >= 0): 声明的总容量（以 GB 为单位），用于驱动 **LMCache-side** 逐出。``0``（默认值和推荐设置）禁用全局 LMCache 逐出，并推迟到 Valkey 服务器自己的 ``maxmemory`` / 逐出策略；在协调器上配置的每个 ``cache_salt`` 配额仍然以任何方式操作。仅在单个 LMCache 写入者私有拥有集群时设置 ``> 0``（与 ``eviction`` 块一起），切勿将 ``> 0`` 与服务器端逐出或 TTL 结合使用，这两者都会影响 LMCache 的字节计数。"
+
+#: ../../source/mp/l2_storage/valkey.rst:88
+msgid ""
+"``ttl_seconds`` (int, optional): Opt-in per-key TTL in seconds; must be a"
+" positive integer when set. Omit (default) to write keys with no expiry. "
+"Enables server-side time-based expiry, required by any ``volatile-*`` "
+"eviction policy configured on the Valkey server. Do **not** combine with "
+"``max_capacity_gb > 0`` (a warning is logged; server-side expiry is not "
+"reported back to LMCache's byte accounting)."
+msgstr "``ttl_seconds`` (int, 可选): 每个键的可选 TTL（生存时间），单位为秒；设置时必须为正整数。省略（默认）以写入没有过期的键。启用服务器端基于时间的过期，这对于在 Valkey 服务器上配置的任何 ``volatile-*`` 逐出策略是必需的。请 **勿** 与 ``max_capacity_gb > 0`` 结合使用（会记录警告；服务器端过期不会反馈到 LMCache 的字节计数中）。"
+
+#: ../../source/mp/l2_storage/valkey.rst:95
+msgid "**Configuration examples:**"
+msgstr "**配置示例：**"
+
+#: ../../source/mp/l2_storage/valkey.rst:130
+msgid "Wire key layout"
+msgstr "线缆密钥布局"
+
+#: ../../source/mp/l2_storage/valkey.rst:132
+msgid "Each stored value is keyed by::"
+msgstr "每个存储的值由以下内容作为键："
+
+#: ../../source/mp/l2_storage/valkey.rst:136
+#, python-brace-format
+msgid ""
+"The ``chunk_hash_hex`` component is a uniform content hash and the wire "
+"key contains no Redis hashtag (``{...}``), so keys distribute evenly "
+"across the 16384 cluster slots -- no manual key sharding is required."
+msgstr "``chunk_hash_hex`` 组件是一个统一的内容哈希，且 wire key 不包含 Redis 哈希标签 (``{...}``)，因此键在 16384 个集群槽中均匀分布 -- 不需要手动进行键分片。"
+

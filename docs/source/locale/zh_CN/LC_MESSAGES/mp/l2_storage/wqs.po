@@ -1,0 +1,52 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-28 09:40+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/wqs.rst:2
+msgid "WQS"
+msgstr "WQS"
+
+#: ../../source/mp/l2_storage/wqs.rst:4
+msgid ""
+"An L2 adapter backed by `WQS <https://www.expontech.com/en/pages/product-"
+"display/wqs>`_ -- a high-performance distributed KV cache storage system "
+"from ExponTech. WQS combines RDMA networking, SPDK-managed NVMe storage, "
+"and hugepage shared-memory segments to store KV cache chunks at high "
+"throughput and low latency, and allows a cluster of vLLM/LMCache "
+"instances to share a single L2 cache pool."
+msgstr "一个由 `WQS <https://www.expontech.com/en/pages/product-display/wqs>`_ 支持的 L2 适配器——来自 ExponTech 的高性能分布式 KV Cache 存储系统。WQS 结合了 RDMA 网络、SPDK 管理的 NVMe 存储和大页共享内存段，以高吞吐量和低延迟存储 KV Cache 块，并允许一组 vLLM/LMCache 实例共享一个 L2 缓存池。"
+
+#: ../../source/mp/l2_storage/wqs.rst:13
+msgid ""
+"The ``wqs_store`` adapter is developed and maintained by ExponTech and "
+"ships in their LMCache builds; it is not part of the open-source LMCache "
+"source tree."
+msgstr "``wqs_store`` 适配器由 ExponTech 开发和维护，并随他们的 LMCache 构建一起发布；它不是开源 LMCache 源代码树的一部分。"
+
+#: ../../source/mp/l2_storage/wqs.rst:17
+msgid ""
+"For installation instructions, LMCache configuration guides, and "
+"benchmark results, see the product page:"
+msgstr "有关安装说明、LMCache 配置指南和基准测试结果，请参阅产品页面："
+
+#: ../../source/mp/l2_storage/wqs.rst:20
+msgid "https://www.expontech.com/en/pages/product-display/wqs"
+msgstr "https://www.expontech.com/en/pages/product-display/wqs"
+

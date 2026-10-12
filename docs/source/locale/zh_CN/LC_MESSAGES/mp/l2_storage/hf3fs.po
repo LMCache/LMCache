@@ -1,0 +1,232 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-12 09:51+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:2
+msgid "Hf3fs"
+msgstr "Hf3fs"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:4
+msgid ""
+"An L2 adapter backed by the native C++ 3FS connector. Uses the 3FS Usrbio"
+" API for high-performance distributed KV cache storage."
+msgstr "一个由原生 C++ 3FS 连接器支持的 L2 适配器。使用 3FS Usrbio API 进行高性能分布式 KV Cache 存储。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:7
+msgid "**Prerequisites**"
+msgstr "**先决条件**"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:9
+msgid ""
+"**3FS Usrbio** 3FS Usrbio header (``hf3fs_usrbio.h``) and lib "
+"(``libhf3fs_api_shared.so``) are required when compiling the LMCache "
+"hf3fs extension.  We recommend installing them from source:"
+msgstr "**3FS Usrbio** 编译 LMCache hf3fs 扩展时需要 3FS Usrbio 头文件 (``hf3fs_usrbio.h``) 和库 (``libhf3fs_api_shared.so``)。我们建议从源代码安装它们："
+
+#: ../../source/mp/l2_storage/hf3fs.rst:24
+msgid ""
+"See `3FS Build <https://github.com/deepseek-ai/3FS/blob/main/README.md"
+"#build-3fs>`_ for the full build instructions."
+msgstr "请参阅 `3FS Build <https://github.com/deepseek-ai/3FS/blob/main/README.md#build-3fs>`_ 获取完整的构建说明。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:27
+msgid ""
+"If 3FS Usrbio header or lib are not installed in the system path (e.g., "
+"``/usr/local/include``, ``/usr/local/lib``), you must set "
+"``HF3FS_INCLUDE_DIR`` and ``HF3FS_LIB_DIR`` to point to them explicitly:"
+msgstr "如果 3FS Usrbio 头文件或库未安装在系统路径中（例如，``/usr/local/include``，``/usr/local/lib``），您必须将 ``HF3FS_INCLUDE_DIR`` 和 ``HF3FS_LIB_DIR`` 显式设置为指向它们："
+
+#: ../../source/mp/l2_storage/hf3fs.rst:36
+msgid "**libabsl-dev**"
+msgstr "**libabsl-dev**"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:38
+msgid ""
+"The connector uses Abseil containers (``sharded_flat_hash_map``, "
+"``flat_hash_map``) from the system library.  On Debian/Ubuntu:"
+msgstr "连接器使用系统库中的 Abseil 容器（``sharded_flat_hash_map``、``flat_hash_map``）。在 Debian/Ubuntu 上："
+
+#: ../../source/mp/l2_storage/hf3fs.rst:46
+msgid "**Build**"
+msgstr "**构建**"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:48
+msgid ""
+"The LMCache 3FS extension is **not** built by default.  You must "
+"explicitly enable it:"
+msgstr "LMCache 3FS 扩展默认**未**构建。您必须显式启用它："
+
+#: ../../source/mp/l2_storage/hf3fs.rst:55
+msgid "The **BUILD_HF3FS** environment variable controls compilation:"
+msgstr "**BUILD_HF3FS** 环境变量控制编译："
+
+#: ../../source/mp/l2_storage/hf3fs.rst:57
+msgid "``BUILD_HF3FS=1``: Enable build 3FS C++ extension."
+msgstr "``BUILD_HF3FS=1``: 启用构建 3FS C++ 扩展。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:58
+msgid ""
+"``BUILD_HF3FS=0``: Force disable (highest priority), even if "
+"``HF3FS_INCLUDE_DIR`` is set."
+msgstr "``BUILD_HF3FS=0``: 强制禁用（优先级最高），即使 ``HF3FS_INCLUDE_DIR`` 已设置。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:60
+msgid ""
+"**Not set**: Falls back to checking ``HF3FS_INCLUDE_DIR``. If "
+"``HF3FS_INCLUDE_DIR`` is also unset, the 3FS extension is skipped."
+msgstr "**未设置**：回退到检查 ``HF3FS_INCLUDE_DIR``。如果 ``HF3FS_INCLUDE_DIR`` 也未设置，则跳过 3FS 扩展。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:63
+msgid "**LMCache-Specific Fields**"
+msgstr "**LMCache 特定字段**"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:65
+msgid "``num_workers`` (int, default ``4``): C++ worker threads for I/O."
+msgstr "``num_workers`` (int, 默认 ``4``): 用于 I/O 的 C++ 工作线程。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:66
+msgid ""
+"``per_op_workers`` (``dict[str, int]``, optional): A dict mapping lane "
+"keys to dedicated worker thread counts.  Supported keys:"
+msgstr "``per_op_workers`` (``dict[str, int]``, 可选): 一个字典，将车道键映射到专用工作线程计数。 支持的键："
+
+#: ../../source/mp/l2_storage/hf3fs.rst:69
+msgid "``\"lookup\"`` — threads for ``EXISTS`` operations."
+msgstr "``\"lookup\"`` — 用于 ``EXISTS`` 操作的线程。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:70
+msgid "``\"retrieve\"`` — threads for ``GET``/load operations."
+msgstr "``\"retrieve\"`` — 处理 ``GET``/加载操作的线程。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:71
+msgid "``\"store\"`` — threads for ``SET``/put operations."
+msgstr "``\"store\"`` — 用于 ``SET``/放置操作的线程。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:72
+msgid "``\"delete\"`` — threads for ``DELETE`` operations."
+msgstr "``\"delete\"`` — 用于 ``DELETE`` 操作的线程。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:74
+msgid ""
+"Operations whose lane key is **not** present in the dict use the shared "
+"``num_workers`` pool.  There is no requirement to set all keys — you can "
+"configure only the lanes that need dedicated pools."
+msgstr "不在字典中的操作通道键使用共享的 ``num_workers`` 池。没有必要设置所有键 — 您可以仅配置需要专用池的通道。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:78
+msgid "**HF3FS Fields**"
+msgstr "**HF3FS 字段**"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:80
+msgid "``mount_point`` (str, required): 3FS mount point directory."
+msgstr "``mount_point``（字符串，必需）：3FS 挂载点目录。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:81
+msgid ""
+"``base_paths`` (str, required): Comma-separated subdirectories under "
+"``mount_point``."
+msgstr "``base_paths`` (str, required): 以逗号分隔的 ``mount_point`` 下的子目录。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:83
+msgid ""
+"``ior_entries`` (int, default ``256``, range ``[128, 1024]``): Max "
+"concurrent requests per Ior."
+msgstr "``ior_entries`` (int, 默认 ``256``, 范围 ``[128, 1024]``): 每个 Ior 的最大并发请求数。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:85
+msgid ""
+"``io_depth`` (int, default ``0``, range ``[-128, 128]``): Batch control "
+"parameter."
+msgstr "``io_depth`` (int, default ``0``, range ``[-128, 128]``): 批量控制参数。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:87
+msgid "``numa_id`` (int, default ``-1``): NUMA node ID (``-1`` = current node)."
+msgstr "``numa_id`` (int, default ``-1``): NUMA 节点 ID (``-1`` = 当前节点)。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:88
+msgid ""
+"``iov_size`` (int, default ``209715200`` (200 MB), range ``[104857600, "
+"2147483648]``): Per-thread I/O buffer in bytes."
+msgstr "``iov_size`` (int, default ``209715200`` (200 MB), range ``[104857600, 2147483648]``): 每个线程的 I/O 缓冲区大小（以字节为单位）。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:90
+msgid ""
+"``enable_key_buffer`` (bool, default ``True``): Enable the in-memory key "
+"buffer for accelerated exists lookups.  When enabled, exist lookups "
+"respond from a hash set instead of issuing remote 3FS metadata calls. "
+"This dramatically reduces lookup latency."
+msgstr "``enable_key_buffer`` (bool, default ``True``): 启用内存中的键缓冲区以加速存在查找。当启用时，存在查找将从哈希集合中响应，而不是发出远程 3FS 元数据调用。这大大减少了查找延迟。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:95
+msgid "**Configuration Example**"
+msgstr "**配置示例**"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:117
+msgid "**In-Memory Key Buffer**"
+msgstr "**内存键缓冲区**"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:119
+msgid ""
+"When ``enable_key_buffer`` is ``True`` (the default), the connector "
+"maintains an in-memory cache of all key filenames. Lookup operations "
+"respond from the cache instead of issuing remote 3FS metadata calls. This"
+" dramatically reduces lookup latency."
+msgstr "当 ``enable_key_buffer`` 为 ``True``（默认值）时，连接器会维护一个所有键文件名的内存缓存。查找操作会从缓存中响应，而不是发出远程 3FS 元数据调用。这大大减少了查找延迟。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:123
+msgid "**Trade-offs**"
+msgstr "**权衡**"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:124
+msgid ""
+"**Enable** for workloads with many concurrent lookups (prefetch,batch "
+"exists)."
+msgstr "**启用** 以支持具有多个并发查找的工作负载（预取，批量存在）。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:125
+msgid "The latency savings outweigh the memory cost."
+msgstr "延迟节省超过了内存成本。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:126
+msgid "**Disable**  when memory is constrained."
+msgstr "**禁用** 当内存受限时。"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:128
+msgid "To disable the buffer cache:"
+msgstr "要禁用缓冲区缓存："
+
+#: ../../source/mp/l2_storage/hf3fs.rst:144
+msgid "**Unit Tests**"
+msgstr "**单元测试**"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:146
+msgid ""
+"The hf3fs tests are gated on 3FS extension availability and 3FS storage "
+"cluster accessibility: - 3FS C++ extension missing → config tests only - "
+"3FS C++ extension present and 3FS storage cluster available → full test "
+"suite"
+msgstr "hf3fs 测试依赖于 3FS 扩展的可用性和 3FS 存储集群的可访问性：- 3FS C++ 扩展缺失 → 仅配置测试 - 3FS C++ 扩展存在且 3FS 存储集群可用 → 完整测试套件"
+
+#: ../../source/mp/l2_storage/hf3fs.rst:151
+msgid ""
+"To run the full test suite, set the **HF3FS_MOUNT_POINT** environment "
+"variable to the mount point directory of a real 3FS storage cluster:"
+msgstr "要运行完整的测试套件，请将 **HF3FS_MOUNT_POINT** 环境变量设置为真实 3FS 存储集群的挂载点目录："
+

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-20 10:08+0000\n"
+"POT-Creation-Date: 2026-09-14 09:27+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -27,7 +27,9 @@ msgstr "SageMaker HyperPod"
 msgid ""
 "An L2 adapter backed by the **ai-toolkit** daemon of Amazon SageMaker "
 "HyperPod, which provides shared memory access for LMCache."
-msgstr "一个由 Amazon SageMaker HyperPod 的 **ai-toolkit** 守护进程支持的 L2 适配器，提供 LMCache 的共享内存访问。"
+msgstr ""
+"一个由 Amazon SageMaker HyperPod 的 **ai-toolkit** 守护进程支持的 L2 适配器，提供 LMCache "
+"的共享内存访问。"
 
 #: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:7
 msgid "**Required fields:**"
@@ -49,7 +51,9 @@ msgstr "``bucket`` (字符串，默认 ``\"lmcache\"``)：ai-toolkit 缓存命�
 msgid ""
 "``shared_memory_name`` (string, default ``\"shared_memory\"``): Name of "
 "shared memory segment."
-msgstr "``shared_memory_name`` (string, default ``\\\"shared_memory\\\"``): 共享内存段的名称。"
+msgstr ""
+"``shared_memory_name`` (string, default ``\\\"shared_memory\\\"``): "
+"共享内存段的名称。"
 
 #: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:16
 msgid ""
@@ -128,6 +132,43 @@ msgstr "/dev/shm 卷配置"
 #: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:64
 msgid ""
 "SageMaker Hyperpod requires /dev/shm for high-performance shared memory "
-"operations:"
-msgstr "SageMaker Hyperpod 需要 /dev/shm 以进行高性能共享内存操作："
+"operations. The right configuration depends on whether the LMCache server"
+" runs in the same pod as the inference engine or in a separate pod."
+msgstr "SageMaker Hyperpod 需要 /dev/shm 进行高性能共享内存操作。正确的配置取决于 LMCache 服务器是否与推理引擎在同一个 pod 中运行，或者在一个单独的 pod 中运行。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:68
+msgid "**Separate pods (Recommended) — LMCache server in its own pod**"
+msgstr "**单独的 Pod（推荐）— LMCache 服务器在其自己的 Pod 中**"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:70
+msgid ""
+"GPU IPC between the inference engine and the LMCache server requires a "
+"shared IPC namespace; across pods this is only possible through the host."
+" Set ``hostIPC: true`` on **both** pods:"
+msgstr "推理引擎与 LMCache 服务器之间的 GPU IPC 需要一个共享的 IPC 命名空间；在不同的 pod 之间，这只有通过主机才能实现。请在 **两个** pod 上设置 ``hostIPC: true``："
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:79
+msgid ""
+"With ``hostIPC: true`` the pod's ``/dev/shm`` *is* the host's, so the "
+"daemon's segment is already visible — do not add the ``subPath`` mount in"
+" this case (the host IPC namespace shadows it)."
+msgstr "使用 ``hostIPC: true`` 时，pod 的 ``/dev/shm`` *就是* 主机的，因此守护进程的段已经可见——在这种情况下不要添加 ``subPath`` 挂载（主机 IPC 命名空间会遮蔽它）。"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:83
+msgid ""
+"**Same pod (LMCache server and inference engine as containers in one "
+"pod)**"
+msgstr "**同一 Pod (LMCache 服务器和推理引擎作为一个 Pod 中的容器)**"
+
+#: ../../source/mp/l2_storage/sagemaker_hyperpod.rst:85
+msgid ""
+"The pod-shared IPC namespace already covers the GPU IPC between the "
+"engine and the LMCache server, so only the daemon's shared-memory segment"
+" needs to be exposed. Mount it from the host with ``subPath``:"
+msgstr "该共享 pod 的 IPC 命名空间已经涵盖了引擎与 LMCache 服务器之间的 GPU IPC，因此只需要暴露守护进程的共享内存段。从主机使用 ``subPath`` 挂载它："
+
+#~ msgid ""
+#~ "SageMaker Hyperpod requires /dev/shm for "
+#~ "high-performance shared memory operations:"
+#~ msgstr "SageMaker Hyperpod 需要 /dev/shm 以进行高性能共享内存操作："
 

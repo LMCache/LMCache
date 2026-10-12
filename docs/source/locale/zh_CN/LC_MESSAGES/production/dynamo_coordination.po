@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-10-12 09:51+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -23,9 +23,194 @@ msgstr ""
 msgid "Dynamo Integration"
 msgstr "Dynamo 集成"
 
-#: ../../source/production/dynamo_coordination.rst:6
+#: ../../source/production/dynamo_coordination.rst:4
 msgid ""
-"Integration with `NVIDIA Dynamo <https://github.com/ai-dynamo/dynamo>`_ "
-"is **coming soon**."
-msgstr "与 `NVIDIA Dynamo <https://github.com/ai-dynamo/dynamo>`_ 的集成\\ **即将推出**\\ 。"
+"`NVIDIA Dynamo <https://github.com/ai-dynamo/dynamo>`_ is an open-source,"
+" datacenter-scale inference stack. It orchestrates inference engines such"
+" as vLLM, SGLang, and TensorRT-LLM across multiple nodes. LMCache "
+"provides a KV cache layer that stores cache beyond GPU memory for reuse "
+"across requests."
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:11
+msgid "Local"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:14
+msgid "Start NATS and etcd"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:16
+msgid ""
+"If you are deploying Dynamo locally, start NATS and etcd first. On the "
+"host, run the included Compose file from the root of the LMCache "
+"repository:"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:25
+msgid "Start the Dynamo container"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:27
+msgid ""
+"This demo serves ``Qwen/Qwen3-0.6B`` on a single GPU, with 16 GiB of CPU "
+"memory for LMCache. The ``nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2`` "
+"image includes LMCache 0.5.2. You can find the latest image tags on "
+"`NVIDIA NGC <https://catalog.ngc.nvidia.com/orgs/nvidia/ai-"
+"dynamo/containers/vllm-runtime/-/tags>`_."
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:32
+msgid "From the same directory, start the Dynamo container:"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:40
+msgid ""
+"This opens a shell in the container, where LMCache is already installed. "
+"Open two more terminals on the host and enter the same container in each:"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:48
+msgid "Start LMCache and Dynamo"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:50
+msgid "In the three container shells, start one process in each:"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:74
+msgid ""
+"The frontend accepts requests on port 8000. The vLLM worker uses "
+"``LMCacheMPConnector`` to store and retrieve KV cache through the server "
+"on port 5555."
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:79
+msgid "Run with a script"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:81
+msgid ""
+"You can also start the whole demo with a `script "
+"<https://github.com/LMCache/LMCache/blob/dev/examples/dynamo_integration/local/launch_lmcache_mp.sh>`_."
+" On the host, run one of these commands from the root of the LMCache "
+"repository:"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:94
+msgid "Kubernetes"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:97
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:99
+msgid ""
+"Install the :doc:`LMCache Operator </mp/operator>`. It deploys and "
+"manages LMCache servers and creates the connection configuration used by "
+"the workers."
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:102
+msgid ""
+"Install `Dynamo "
+"<https://docs.nvidia.com/dynamo/dev/kubernetes/installation/install-"
+"dynamo#install-the-dynamo-platform>`_. Its Kubernetes operator manages "
+"the frontend and inference workers defined in a ``DynamoGraphDeployment``"
+" resource."
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:108
+msgid "Deploy the LMCache server"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:110
+msgid ""
+"``lmcache_engine.yaml`` defines an ``LMCacheEngine`` custom resource with"
+" 16 GiB of CPU cache per server. The operator creates:"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:113
+msgid "A DaemonSet that runs one LMCache server on each eligible node."
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:114
+msgid ""
+"The ``lmcache-mp`` Service, which routes workers to the server on their "
+"own node."
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:116
+msgid ""
+"The ``lmcache-mp-connection`` ConfigMap. Its ``kv-transfer-config.json`` "
+"entry contains the ``LMCacheMPConnector`` settings, including the Service"
+" address and server port."
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:120
+msgid "lmcache_engine.yaml"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:124
+msgid "Apply the resource:"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:131
+msgid "Aggregated serving"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:133
+msgid ""
+"`agg_lmcache_mp.yaml "
+"<https://github.com/LMCache/LMCache/blob/dev/examples/dynamo_integration/kubernetes/agg_lmcache_mp.yaml>`_"
+" defines a ``DynamoGraphDeployment`` with a frontend and one vLLM worker."
+" The worker serves ``Qwen/Qwen3-0.6B`` on one GPU and handles both "
+"prefill and decode."
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:139
+msgid ""
+"The worker mounts ``lmcache-mp-connection`` at ``/etc/lmcache``, making "
+"the configuration available as ``/etc/lmcache/kv-transfer-config.json``. "
+"At startup, it passes the file's JSON contents to ``--kv-transfer-"
+"config`` to connect to the LMCache server on its node."
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:144
+msgid "agg_lmcache_mp.yaml"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:148
+msgid "Apply the aggregated deployment:"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:155
+msgid "Disaggregated serving"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:157
+msgid ""
+"`disagg_lmcache_mp.yaml "
+"<https://github.com/LMCache/LMCache/blob/dev/examples/dynamo_integration/kubernetes/disagg_lmcache_mp.yaml>`_"
+" starts a frontend and separate prefill and decode workers. Use a cluster"
+" with one GPU node and at least two GPUs. Each worker uses one GPU and "
+"connects to the same LMCache server."
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:163
+msgid "disagg_lmcache_mp.yaml"
+msgstr ""
+
+#: ../../source/production/dynamo_coordination.rst:167
+msgid "Apply the disaggregated deployment:"
+msgstr ""
+
+#~ msgid ""
+#~ "Integration with `NVIDIA Dynamo "
+#~ "<https://github.com/ai-dynamo/dynamo>`_ is **coming"
+#~ " soon**."
+#~ msgstr ""
+#~ "与 `NVIDIA Dynamo <https://github.com/ai-"
+#~ "dynamo/dynamo>`_ 的集成\\ **即将推出**\\ 。"
 
