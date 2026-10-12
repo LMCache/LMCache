@@ -44,6 +44,24 @@ T = TypeVar("T")
 RequestUID = int
 
 
+_REMOTE_ERROR_MARKER = b"lmcache.remote-error.v1"
+_MAX_REMOTE_ERROR_MESSAGE_CHARS = 4096
+
+
+class RemoteHandlerError(RuntimeError):
+    """A server handler failed before producing its declared response."""
+
+
+def _remote_error_frames(
+    prefix_frames: list[bytes], exception: BaseException
+) -> list[bytes]:
+    """Build a bounded, traceback-free error response."""
+    error_type = type(exception).__name__
+    message = str(exception)[:_MAX_REMOTE_ERROR_MESSAGE_CHARS]
+    payload = msgspec.msgpack.encode((error_type, message))
+    return prefix_frames + [_REMOTE_ERROR_MARKER, payload]
+
+
 # Helper functions
 def encode_request_uid(uid: RequestUID) -> bytes:
     return msgspec.msgpack.encode(uid)
@@ -380,7 +398,17 @@ class MessageQueueClient:
                     )
                 )
                 return
-            if b_response:
+            if b_response and b_response[0] == _REMOTE_ERROR_MARKER:
+                if len(b_response) != 2:
+                    future.set_exception(ValueError("Malformed remote error response"))
+                    return
+                error_type, message = msgspec_decode(b_response[1], cls=tuple[str, str])
+                future.set_exception(
+                    RemoteHandlerError(
+                        f"Remote {operation} handler failed with {error_type}: {message}"
+                    )
+                )
+            elif b_response:
                 response = msgspec_decode(b_response[0], cls=rpc_spec.response_type)
                 future.set_result(response)
             else:
@@ -603,8 +631,10 @@ class MessageQueueServer(RequestServer):
                 self.output_queue.put(frames_to_send)
                 self._output_efd.notify()
 
-            except Exception:
+            except Exception as exc:
                 logger.exception("Error in blocking handler")
+                self.output_queue.put(_remote_error_frames(prefix_frames, exc))
+                self._output_efd.notify()
 
         future.add_done_callback(_notify_response)
 
@@ -648,18 +678,30 @@ class MessageQueueServer(RequestServer):
                     logger.exception("Invalid ZMQ operation identifier")
                     continue
 
+                prefix_frames = [identity, b_request_uid, b_operation]
                 if handler_entry := self.handlers.get(operation):
                     try:
                         self._call_handler(
                             handler_entry=handler_entry,
                             payloads=payloads,
-                            prefix_frames=[identity, b_request_uid, b_operation],
+                            prefix_frames=prefix_frames,
                         )
-                    except Exception:
+                    except Exception as exc:
                         logger.exception("Error handling operation %s", operation)
+                        self.socket.send_multipart(
+                            _remote_error_frames(prefix_frames, exc)
+                        )
                 else:
                     logger.error("No handler registered for operation %s", operation)
                     logger.error("Available handlers: %s", list(self.handlers.keys()))
+                    self.socket.send_multipart(
+                        _remote_error_frames(
+                            prefix_frames,
+                            LookupError(
+                                f"No handler registered for operation {operation}"
+                            ),
+                        )
+                    )
 
             # Send the responses
             if outbound_state and outbound_state & zmq.POLLIN:
