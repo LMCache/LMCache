@@ -9,7 +9,9 @@ See ``docs/design/v1/mp_coordinator/ingest.md``.
 """
 
 # Standard
+from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
+import time
 
 # First Party
 from lmcache.logging import init_logger
@@ -47,16 +49,36 @@ class CacheEventConsumer(Protocol):
         ...
 
 
+@dataclass
+class ConsumerStats:
+    """What one consumer has done with the batches handed to it since this
+    process started.
+
+    Attributes:
+        batches_delivered: Batches handed to its ``consume``, failed or not.
+        apply_seconds: Total time spent in those ``consume`` calls.
+        consume_failures: ``consume`` calls that raised; each leaves this
+            consumer disagreeing with the others.
+        fence_failures: ``fence_instance`` calls that raised.
+    """
+
+    batches_delivered: int = 0
+    apply_seconds: float = 0.0
+    consume_failures: int = 0
+    fence_failures: int = 0
+
+
 class CacheEventBroadcaster:
     """Fans one gate-admitted cache-event batch out to every consumer.
 
-    A consumer that raises is logged, and the rest still run,
-    so only that consumer misses the batch. Keeps no locks: fan-out is
-    thread-safe as long as each consumer is.
+    A consumer that raises is logged and counted, and the rest still run,
+    so only that consumer misses the batch -- which leaves it disagreeing
+    with the others. Keeps no locks: fan-out is thread-safe as long as each
+    consumer is.
     """
 
     def __init__(self) -> None:
-        self._consumers: list[CacheEventConsumer] = []
+        self._consumers: list[tuple[CacheEventConsumer, ConsumerStats]] = []
 
     def register_consumer(self, consumer: CacheEventConsumer) -> None:
         """Register a consumer for all subsequently broadcast batches.
@@ -68,7 +90,7 @@ class CacheEventBroadcaster:
         Args:
             consumer: The consumer to fan batches out to.
         """
-        self._consumers.append(consumer)
+        self._consumers.append((consumer, ConsumerStats()))
 
     def broadcast(self, batch: CacheEventBatch) -> None:
         """Deliver one gate-admitted batch to every consumer.
@@ -76,10 +98,13 @@ class CacheEventBroadcaster:
         Args:
             batch: The admitted batch.
         """
-        for consumer in self._consumers:
+        for consumer, stats in self._consumers:
+            started = time.perf_counter()
+            failed = False
             try:
                 consumer.consume(batch)
             except Exception:
+                failed = True
                 logger.exception(
                     "Cache-event consumer %s failed on batch %s/%d/%d",
                     type(consumer).__name__,
@@ -87,6 +112,10 @@ class CacheEventBroadcaster:
                     batch.incarnation,
                     batch.seq,
                 )
+            stats.batches_delivered += 1
+            stats.apply_seconds += time.perf_counter() - started
+            if failed:
+                stats.consume_failures += 1
 
     def fence_instance(self, instance_id: str) -> None:
         """Tell every consumer that ``instance_id``'s L1 state is void.
@@ -94,12 +123,26 @@ class CacheEventBroadcaster:
         Args:
             instance_id: The restarted or departed instance.
         """
-        for consumer in self._consumers:
+        for consumer, stats in self._consumers:
             try:
                 consumer.fence_instance(instance_id)
             except Exception:
+                stats.fence_failures += 1
                 logger.exception(
                     "Cache-event consumer %s failed to fence %s",
                     type(consumer).__name__,
                     instance_id,
                 )
+
+    def stats(self) -> dict[str, ConsumerStats]:
+        """Return a copy of each consumer's stats since this process started.
+
+        Returns:
+            :class:`ConsumerStats` keyed by the consumer's class name.
+            Discovery builds one instance per class, so the names are
+            unique.
+        """
+        return {
+            type(consumer).__name__: replace(stats)
+            for consumer, stats in self._consumers
+        }
