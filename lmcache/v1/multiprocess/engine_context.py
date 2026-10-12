@@ -2,7 +2,7 @@
 """Shared context and layout descriptor registry for engine modules."""
 
 # Standard
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TypedDict
 import threading
 
@@ -43,6 +43,11 @@ class _LayoutDescEntry:
     order. Defaults to a single full-attention group."""
     group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
     """Per-group layout descriptors, or ``None`` if all share ``layout_desc``."""
+    worker_group_layout_descs: dict[int, dict[int, MemoryLayoutDesc]] = field(
+        default_factory=dict
+    )
+    """Per-group layouts of each worker id that registered with one. Dropped
+    with the pair's entry."""
 
 
 class LayoutDescRegistry:
@@ -53,6 +58,10 @@ class LayoutDescRegistry:
     for prefetch tasks. Multiple worker instances can share the same
     ``(model_name, world_size)`` entry, so the registry keeps the descriptor
     until the last matching registration is unregistered.
+
+    Pipeline-parallel stages hold different numbers of layers, so a
+    registration that names its worker id also keeps that worker's layouts;
+    other workers use the pair-wide descriptor.
     """
 
     def __init__(self) -> None:
@@ -67,11 +76,13 @@ class LayoutDescRegistry:
         layout_desc: MemoryLayoutDesc,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
+        worker_id: int | None = None,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
         Re-registering the same pair increments the active registration
-        count. The latest descriptor is retained for lookups.
+        count. The latest descriptor is retained for lookups, both pair-wide
+        and for ``worker_id``.
 
         Args:
             model_name: The model name.
@@ -83,6 +94,8 @@ class LayoutDescRegistry:
                 (each group is a separate keyed allocation); ``None`` derives
                 one entry per object group in ``attn_desc``, all sharing
                 ``layout_desc``.
+            worker_id: The registering worker's ``IPCCacheServerKey.worker_id``,
+                or ``None`` if not reported.
         """
         key = (model_name, world_size)
         attn_desc = replace(attn_desc, world_size=world_size)
@@ -93,18 +106,21 @@ class LayoutDescRegistry:
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:
-                self._registry[key] = _LayoutDescEntry(
+                entry = _LayoutDescEntry(
                     layout_desc=layout_desc,
                     ref_count=1,
                     attn_desc=attn_desc,
                     group_layout_descs=group_layout_descs,
                 )
-                return
+                self._registry[key] = entry
+            else:
+                entry.layout_desc = layout_desc
+                entry.attn_desc = attn_desc
+                entry.group_layout_descs = group_layout_descs
+                entry.ref_count += 1
 
-            entry.layout_desc = layout_desc
-            entry.attn_desc = attn_desc
-            entry.group_layout_descs = group_layout_descs
-            entry.ref_count += 1
+            if worker_id is not None:
+                entry.worker_group_layout_descs[worker_id] = group_layout_descs
 
     def unregister(self, model_name: str, world_size: int) -> None:
         """Unregister one layout descriptor registration for a pair.
@@ -153,6 +169,17 @@ class LayoutDescRegistry:
             if entry is None:
                 return None
             return entry.group_layout_descs
+
+    def find_worker_group_layout_descs(
+        self, model_name: str, world_size: int
+    ) -> dict[int, dict[int, MemoryLayoutDesc]]:
+        """Look up the per-group layouts of each worker that registered with
+        its id, or ``{}`` if none did or the pair is not registered."""
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                return {}
+            return dict(entry.worker_group_layout_descs)
 
     def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
         """Look up the attention-window descriptor for a pair.

@@ -167,6 +167,8 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         num_physical_slots: Number of physical KV slots gathered into one
             LMCache chunk. ``None`` accepts the legacy protocol, where the
             server assumed one physical slot per logical token.
+        kv_worker_id: This worker's ``IPCCacheServerKey.worker_id``, used to
+            keep each pipeline stage's layout apart; ``None`` if not sent.
     """
 
     instance_id: int
@@ -178,6 +180,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     dtype_str: str
     use_mla: bool
     num_physical_slots: int | None = None
+    kv_worker_id: int | None = None
 
 
 @dataclass

@@ -1424,6 +1424,23 @@ def test_server_register_uses_worker_physical_slots(
     assert layout.shapes[0] == torch.Size([2, 2, 128, 16])
 
 
+def test_server_register_keeps_layout_under_kv_worker_id(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """The registered layout is also kept under the payload's ``kv_worker_id``."""
+    module, _, _, ctx = server_module_factory(chunk_size=256)
+    payload = _default_register_payload(instance_id=11)
+    payload.kv_worker_id = 0
+
+    module.register_kv_cache_engine_driven_context(payload)
+
+    registry = ctx.layout_desc_registry
+    assert registry.find_worker_group_layout_descs("m", 1) == {
+        0: {0: registry.find("m", 1)}
+    }
+
+
 def test_server_store_and_retrieve_cpu_chunks(
     stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,

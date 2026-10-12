@@ -157,6 +157,23 @@ class TestIpcKeyToGroupedObjectKeys:
         )
         assert len(rows) == 1
 
+    def test_worker_layouts_size_that_workers_rows(self):
+        """A worker's own layouts apply to its rows only; other workers and
+        groups keep the pair-wide layout."""
+        stage0 = MemoryLayoutDesc(shapes=[torch.Size([4, 3])], dtypes=[torch.float16])
+        attn = AttnWindowDesc(num_chunks_in_sw=[-1, -1], world_size=3)
+        rows = ipc_key_to_grouped_object_keys(
+            _ipc_key(3),
+            [b"c0"],
+            [0, 1],
+            {0: LAYOUT, 1: LAYOUT},
+            attn,
+            worker_group_layout_descs={0: {0: stage0}},
+        )
+
+        # Group-major / rank-minor: (g0, w0), (g0, w1), (g0, w2), (g1, w0), ...
+        assert [r.layout_desc for r in rows] == [stage0] + [LAYOUT] * 5
+
     def test_missing_layout_raises(self):
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, -1])
         with pytest.raises(ValueError):

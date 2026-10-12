@@ -229,3 +229,74 @@ def test_registry_windows_updated_on_reregister() -> None:
     )
 
     assert registry.find_attn_desc("m", 1).num_chunks_in_sw == [-1, 4]
+
+
+def _stage_layout(num_layers: int) -> Any:
+    """A layout whose size grows with a pipeline stage's layer count."""
+    # First Party
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+
+    return MemoryLayoutDesc(
+        shapes=[torch.Size([2, num_layers, 16, 8])], dtypes=[torch.float16]
+    )
+
+
+def test_registry_keeps_each_workers_layouts() -> None:
+    """Workers that register with their id keep their own layouts until the
+    pair is unregistered; the pair-wide layout is the latest registration's."""
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    registry.register("m", 2, _stage_layout(1))
+    assert registry.find_worker_group_layout_descs("m", 2) == {}
+
+    registry.register("m", 2, _stage_layout(4), worker_id=0)
+    registry.register("m", 2, _stage_layout(2), worker_id=1)
+    assert registry.find_worker_group_layout_descs("m", 2) == {
+        0: {0: _stage_layout(4)},
+        1: {0: _stage_layout(2)},
+    }
+    assert registry.find_group_layout_descs("m", 2) == {0: _stage_layout(2)}
+
+    for _ in range(3):
+        registry.unregister("m", 2)
+    assert registry.find_worker_group_layout_descs("m", 2) == {}
+
+
+def test_register_kv_cache_keys_layouts_by_kv_worker_id_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``kv_worker_id`` layout hint keys the instance's layouts."""
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+    from lmcache.v1.multiprocess.modules import (
+        lmcache_driven_transfer as lmcache_driven_transfer_mod,
+    )
+
+    ctx = MagicMock()
+    ctx.chunk_size = 16
+    ctx.layout_desc_registry = LayoutDescRegistry()
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod,
+        "DeviceHostFuncDispatcher",
+        _FakeDeviceHostFuncDispatcher,
+    )
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod,
+        "create_cache_context",
+        lambda *args, **kwargs: _FakeGPUContext(),
+    )
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod,
+        "get_layout_desc",
+        lambda *args, **kwargs: _stage_layout(2),
+    )
+
+    module = lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
+    module.register_kv_cache(1, [], "m", 2, EngineType.VLLM, {"kv_worker_id": 1}, [])
+
+    assert ctx.layout_desc_registry.find_worker_group_layout_descs("m", 2) == {
+        1: {0: _stage_layout(2)}
+    }

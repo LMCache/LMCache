@@ -262,7 +262,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             payload: Struct containing all registration fields
                 (instance_id, model_name, world_size, block_size,
                 num_layers, hidden_dim_size, dtype_str, use_mla,
-                num_physical_slots).
+                num_physical_slots, kv_worker_id).
 
         Raises:
             ValueError: If ``payload.dtype_str`` is not a valid torch dtype name.
@@ -348,7 +348,10 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         )
 
         self._ctx.layout_desc_registry.register(
-            payload.model_name, payload.world_size, layout_desc
+            payload.model_name,
+            payload.world_size,
+            layout_desc,
+            worker_id=payload.kv_worker_id,
         )
         return RegisterEngineDrivenContextResponse(
             shm_name=shm_name, pool_size=pool_size

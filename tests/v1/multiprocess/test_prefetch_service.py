@@ -50,13 +50,19 @@ class _StorageManager:
 class _Registry:
     """The node's per-(model, world size) layouts and windows."""
 
-    def __init__(self, layouts, windows, attn_raises: bool = False) -> None:
+    def __init__(
+        self, layouts, windows, attn_raises: bool = False, worker_layouts=None
+    ) -> None:
         self._layouts = layouts
         self._windows = windows
         self._attn_raises = attn_raises
+        self._worker_layouts = worker_layouts or {}
 
     def find_group_layout_descs(self, model_name, world_size):
         return self._layouts
+
+    def find_worker_group_layout_descs(self, model_name, world_size):
+        return self._worker_layouts
 
     def find_attn_desc(self, model_name, world_size):
         if self._attn_raises:
@@ -110,6 +116,26 @@ def test_a_prefetch_warms_every_object_group():
         assert len(row.keys) == CHUNKS
     total = sum(len(row.keys) for row in storage.rows)
     assert total == CHUNKS * 2 * len(layouts)  # chunks * ranks * groups
+
+
+def test_a_prefetch_sizes_each_rank_from_its_own_layout():
+    """Each rank's rows carry its own layout, or the pair-wide one."""
+    layouts = {0: _layout(8), 1: _layout(16)}
+    rank1_layouts = {0: _layout(4), 1: _layout(6)}
+    windows = AttnWindowDesc(num_chunks_in_sw=[-1, 2], world_size=2)
+    service, storage = _service(
+        _Registry(layouts, windows, worker_layouts={1: rank1_layouts})
+    )
+
+    _submit(service)
+
+    # Rows are group-major / rank-minor: (g0, r0), (g0, r1), (g1, r0), (g1, r1).
+    assert [row.layout_desc for row in storage.rows] == [
+        layouts[0],
+        rank1_layouts[0],
+        layouts[1],
+        rank1_layouts[1],
+    ]
 
 
 def test_a_model_without_separate_groups_still_warms_its_one_group():
