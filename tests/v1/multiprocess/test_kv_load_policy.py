@@ -40,7 +40,6 @@ def _ctx(
         model_name="m",
         chunk_size=256,
         num_lookup_tokens=num_lookup_tokens,
-        engine_computed_tokens=None,
         request_configs=request_configs,
     )
 

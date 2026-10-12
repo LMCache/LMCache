@@ -27,18 +27,6 @@ from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
-#: Built-in policy name used when no policy is configured.
-DEFAULT_POLICY_NAME = "DEFAULT"
-
-#: Request-config key (``kv_transfer_params``) asking the default policy to
-#: recompute this request instead of loading it from LMCache.
-SKIP_LOAD_REQUEST_KEY = "lmcache.skip_load"
-
-#: Request-config key the engine connector sets to the number of prompt
-#: tokens the engine already holds in its own prefix cache. Absent when the
-#: connector does not know it yet (e.g. eager prefetch at enqueue time).
-ENGINE_COMPUTED_TOKENS_HINT_KEY = "lmcache.hint.engine_computed_tokens"
-
 
 @dataclass(frozen=True)
 class KVLoadContext:
@@ -50,18 +38,16 @@ class KVLoadContext:
         chunk_size: Tokens per LMCache chunk.
         num_lookup_tokens: Chunk-aligned tokens the lookup covers, counted
             from token zero. This is an upper bound on the hit, not the hit.
-        engine_computed_tokens: Tokens the engine already holds in its own
-            prefix cache, from ``ENGINE_COMPUTED_TOKENS_HINT_KEY``; None when
-            the connector did not send it.
-        request_configs: The request's ``lmcache.*`` entries, hints included,
-            or None when it carries none.
+        request_configs: The request's ``lmcache.*`` entries as the engine
+            sent them, or None when it carries none. The vLLM connector adds
+            ``lmcache.hint.engine_computed_tokens`` (vLLM's own prefix-cache
+            hit) on its scheduler-time lookups.
     """
 
     request_id: str
     model_name: str
     chunk_size: int
     num_lookup_tokens: int
-    engine_computed_tokens: int | None
     request_configs: Mapping[str, Any] | None
 
 
@@ -114,11 +100,11 @@ class DefaultKVLoadPolicy(KVLoadPolicy):
         Returns:
             Whether the request did not set ``lmcache.skip_load``.
         """
-        return not (ctx.request_configs or {}).get(SKIP_LOAD_REQUEST_KEY, False)
+        return not (ctx.request_configs or {}).get("lmcache.skip_load", False)
 
 
 _BUILTIN_POLICIES: dict[str, type[KVLoadPolicy]] = {
-    DEFAULT_POLICY_NAME: DefaultKVLoadPolicy,
+    "DEFAULT": DefaultKVLoadPolicy,
 }
 
 

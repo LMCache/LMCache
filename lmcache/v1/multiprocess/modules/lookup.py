@@ -24,7 +24,6 @@ from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.kv_load_policy import (
-    ENGINE_COMPUTED_TOKENS_HINT_KEY,
     DefaultKVLoadPolicy,
     KVLoadContext,
     KVLoadPolicy,
@@ -306,16 +305,12 @@ class LookupModule:
             )
             return
 
-        request_configs = key.request_configs or {}
         if not self._load_policy.should_load(
             KVLoadContext(
                 request_id=key.request_id,
                 model_name=model_name,
                 chunk_size=self._ctx.chunk_size,
                 num_lookup_tokens=requested_tokens,
-                engine_computed_tokens=request_configs.get(
-                    ENGINE_COMPUTED_TOKENS_HINT_KEY
-                ),
                 request_configs=key.request_configs,
             )
         ):

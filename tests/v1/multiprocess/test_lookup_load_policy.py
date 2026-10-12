@@ -17,11 +17,7 @@ import pytest
 from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.kv_load_policy import (
-    ENGINE_COMPUTED_TOKENS_HINT_KEY,
-    KVLoadContext,
-    KVLoadPolicy,
-)
+from lmcache.v1.multiprocess.kv_load_policy import KVLoadContext, KVLoadPolicy
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
 CHUNK_SIZE = 256
@@ -90,7 +86,7 @@ def test_declined_lookup_reports_miss_without_prefetch() -> None:
     policy = _RecordingPolicy(answer=False)
     module = LookupModule(ctx, policy)
 
-    module.lookup(_key({ENGINE_COMPUTED_TOKENS_HINT_KEY: 300}), tp_size=1)
+    module.lookup(_key({"lmcache.hint.engine_computed_tokens": 300}), tp_size=1)
 
     ctx.storage_manager.submit_prefetch_task.assert_not_called()
     assert module.query_prefetch_status("req-1") == 0
@@ -101,12 +97,13 @@ def test_declined_lookup_reports_miss_without_prefetch() -> None:
     assert metadata["hit_tokens"] == 0
 
 
-def test_policy_sees_lookup_and_engine_hint() -> None:
-    """The policy receives the lookup length and the connector's hint."""
+def test_policy_sees_lookup_and_request_configs() -> None:
+    """The policy receives the lookup length and the request configs as sent,
+    engine hints included."""
     ctx = _ctx()
     policy = _RecordingPolicy(answer=True)
     module = LookupModule(ctx, policy)
-    configs = {ENGINE_COMPUTED_TOKENS_HINT_KEY: 300, "lmcache.skip_save": True}
+    configs = {"lmcache.hint.engine_computed_tokens": 300, "lmcache.skip_save": True}
 
     module.lookup(_key(configs), tp_size=1)
 
@@ -117,7 +114,6 @@ def test_policy_sees_lookup_and_engine_hint() -> None:
             model_name="m",
             chunk_size=CHUNK_SIZE,
             num_lookup_tokens=len(CHUNK_HASHES) * CHUNK_SIZE,
-            engine_computed_tokens=300,
             request_configs=configs,
         )
     ]

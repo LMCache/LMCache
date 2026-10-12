@@ -63,8 +63,7 @@ class KVLoadPolicy(ABC):
 |---|---|
 | `request_id`, `model_name`, `chunk_size` | identify the lookup |
 | `num_lookup_tokens` | chunk-aligned tokens the lookup covers (upper bound on the hit) |
-| `engine_computed_tokens` | vLLM's own prefix-cache hit from the connector hint; `None` when unknown |
-| `request_configs` | the request's `lmcache.*` entries, hint included |
+| `request_configs` | the request's `lmcache.*` entries as sent, engine hints included |
 
 Policies are pure (no I/O) and run on the lookup handler thread. Each lookup
 is decided once; the connector re-polls the result, not the policy. With
@@ -78,12 +77,13 @@ the existing tail-lock release covers the others.
 `request_configs` of its scheduler-time LOOKUP (`num_computed_tokens` from
 `get_num_new_matched_tokens`). `request_configs` is IPC metadata, not cache
 identity (`IPCCacheServerKey.request_configs` has `compare=False`), so the
-hint does not change which chunks match. With `lmcache.mp.eager_prefetch` the
-LOOKUP is sent when the request is enqueued, before vLLM checks its prefix
-cache, so the hint is absent. On vLLM-connector lookups the connector owns
-the key: it overwrites or drops a client-supplied value. The SGLang and
-TensorRT-LLM adapters do not set the hint and forward client values as-is, so
-a policy must not trust it for anything beyond the decision itself.
+hint does not change which chunks match. The server does not interpret the
+key; it passes `request_configs` through to the policy, which reads whatever
+hints it needs. With `lmcache.mp.eager_prefetch` the LOOKUP is sent when the
+request is enqueued, before vLLM checks its prefix cache, so the connector
+adds no hint. A client can put any `lmcache.*` key in `kv_transfer_params`,
+and the SGLang and TensorRT-LLM adapters add no hints, so a policy must treat
+hints as advisory.
 
 ## Configuration
 

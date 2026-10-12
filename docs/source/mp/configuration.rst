@@ -49,11 +49,10 @@ request metadata throughout the request lifecycle.
 
 The MP server's default ``--kv-load-policy`` acts on ``lmcache.skip_load``: a
 request that sets it to ``true`` gets a lookup miss and is recomputed by the
-engine.  ``LMCacheMPConnector`` (vLLM) also sets
-``lmcache.hint.engine_computed_tokens`` on its lookups to vLLM's own
-prefix-cache hit, for load policies to read; on those lookups a
-client-supplied value under that key is replaced or dropped.  Other engine
-adapters do not set the hint and forward any client value unchanged.
+engine.  Load policies receive the request configs as sent.
+``LMCacheMPConnector`` (vLLM) adds ``lmcache.hint.engine_computed_tokens``,
+vLLM's own prefix-cache hit, to its scheduler-time lookups (not to eager
+prefetch lookups, which run before vLLM checks its prefix cache).
 
 MP Server
 ---------
