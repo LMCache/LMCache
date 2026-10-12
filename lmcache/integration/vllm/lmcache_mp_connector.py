@@ -53,6 +53,7 @@ import zmq
 # First Party
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.experimental import dispatch
+from lmcache.integration.vllm.experimental.token_drop_worker import TokenDropWorker
 from lmcache.integration.vllm.kv_cache_group_edits import (
     apply_kv_cache_group_edits,
     validate_kv_cache_groups,
@@ -759,6 +760,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
                 enable_kv_events=self._enable_kv_events,
             )
+            self._token_drop_worker = TokenDropWorker()
             if self.transfer_intermediate_tensors:
                 # First Party
                 from lmcache.integration.vllm.experimental import (
@@ -873,6 +875,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             engine_group_infos=engine_group_infos,
             layout_hints=layout_hints,
         )
+        self._token_drop_worker.register_kv_caches(kv_caches)
         if self.dispatcher is not None:
             dispatch(
                 self.dispatcher,
@@ -900,6 +903,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        self._token_drop_worker.prepare_forward(
+            forward_context, metadata.token_drop_requests
+        )
 
         request_ids = []
         ops = []
@@ -980,6 +986,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        self._token_drop_worker.compact()  # Forward-end Q delivery; no KV mutation yet.
 
         request_ids = []
         ops = []
@@ -1032,6 +1039,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             and kv_connector_metadata.need_flush_before_forward
         )
         worker_adapter.handle_preemptions(need_flush_before_forward)
+        if isinstance(kv_connector_metadata, LMCacheMPConnectorMetadata):
+            self._token_drop_worker.drop_requests(
+                kv_connector_metadata.token_drop_reset_ids
+            )
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -1049,6 +1060,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
+        self._token_drop_worker.drop_requests(finished_req_ids)
         if self.lazy_offload:
             val = self.worker_adapter.get_finished_with_lazy_offload()
         else:

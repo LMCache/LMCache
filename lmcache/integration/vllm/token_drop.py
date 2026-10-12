@@ -4,6 +4,7 @@
 # Standard
 from collections.abc import Mapping
 from dataclasses import dataclass
+from importlib.metadata import entry_points
 from typing import Any
 
 
@@ -35,3 +36,16 @@ def parse_token_drop_config(
         raise ValueError("lmcache.token_drop.config must be a mapping")
 
     return TokenDropSpec(algorithm=algorithm, config=dict(config))
+
+
+def build_token_drop_algorithm(spec: TokenDropSpec) -> Any:
+    """Create a request-local algorithm from its registered factory."""
+    plugins = entry_points(group="lmcache.token_drop_algorithms").select(
+        name=spec.algorithm
+    )
+    if len(plugins) != 1:
+        raise ValueError(
+            f"Expected one plugin for {spec.algorithm!r}, found {len(plugins)}"
+        )
+    factory = plugins[0].load()
+    return factory(dict(spec.config))
