@@ -103,7 +103,7 @@ func BuildCoordinatorArgs(spec *lmcachev1alpha1.LMCacheCoordinatorSpec) []string
 		"--trigger-watermark", formatFloat(derefFloat64(spec.TriggerWatermark, 1.0)),
 	)
 	if spec.BlendChunkSize != nil {
-		args = append(args, "--blend-chunk-size", fmt.Sprintf("%d", *spec.BlendChunkSize))
+		args = append(args, "--chunk-size", fmt.Sprintf("%d", *spec.BlendChunkSize))
 	}
 	if spec.BlendProbeStride != nil {
 		args = append(args, "--blend-probe-stride", fmt.Sprintf("%d", *spec.BlendProbeStride))

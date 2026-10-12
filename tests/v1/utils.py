@@ -229,7 +229,10 @@ def get_available_port(host: str = "127.0.0.1") -> int:
 
 def get_available_ports(count: int, host: str = "127.0.0.1") -> list[int]:
     """
-    Get multiple available ports dynamically.
+    Get multiple distinct available ports dynamically.
+
+    Binds sockets to port 0 and keeps them open until all ports are
+    selected, preventing the OS from reusing a freed port (issue #5648).
 
     Args:
         count: Number of ports to get.
@@ -238,9 +241,19 @@ def get_available_ports(count: int, host: str = "127.0.0.1") -> list[int]:
     Returns:
         A list of available port numbers.
     """
+    sockets = []
     ports = []
-    for _ in range(count):
-        ports.append(get_available_port(host))
+    try:
+        for _ in range(count):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, 0))
+            s.listen(1)
+            sockets.append(s)
+            ports.append(s.getsockname()[1])
+    finally:
+        for s in sockets:
+            s.close()
     return ports
 
 

@@ -1544,14 +1544,61 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
 
+        # A request aborted between LOOKUP and RETRIEVE leaves its hit
+        # chunks read-locked: END_SESSION drops the session without
+        # releasing them, so they stay locked until the read-lock TTL
+        # (300 s default), exactly when the engine is overloaded and L1
+        # is under pressure (issue #5656). FREE_LOOKUP_LOCKS must be sent
+        # before END_SESSION, while the server session still carries the
+        # lookup result the release is derived from.
+        #
+        # Free exactly the range still locked: update_state_after_alloc
+        # already freed the vLLM-covered prefix when it moved to
+        # WAITING_FOR_LOAD, and READY means the retrieve was submitted
+        # (it releases its own locks), so only PREFETCHING (lookup hit
+        # consumed, no allocation yet) and WAITING_FOR_LOAD (retrieve not
+        # yet submitted) still hold locks here.
+        tracker = self.request_trackers.get(request.request_id)
+        if (
+            tracker is not None
+            and tracker.num_lmcache_hit_tokens > 0
+            and tracker.state
+            in (
+                LMCacheMPRequestState.PREFETCHING,
+                LMCacheMPRequestState.WAITING_FOR_LOAD,
+            )
+        ):
+            free_start = (
+                tracker.num_vllm_hit_tokens
+                if tracker.state == LMCacheMPRequestState.WAITING_FOR_LOAD
+                else 0
+            )
+            if free_start < tracker.num_lmcache_hit_tokens:
+                self.scheduler_adapter.free_lookup_locks(
+                    token_ids=tracker.get_token_ids(),
+                    start=free_start,
+                    end=tracker.num_lmcache_hit_tokens,
+                    request_id=request.request_id,
+                    cache_salt=tracker.cache_salt,
+                    request_configs=tracker.request_configs,
+                )
+                logger.debug(
+                    "Free locks of tokens %d-%d for request %s ending before "
+                    "its retrieve.",
+                    free_start,
+                    tracker.num_lmcache_hit_tokens,
+                    request.request_id,
+                )
+
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 
-        # Drop lookup state for a request aborted before its lookup was
-        # consumed (update_state_after_alloc never ran for it). Both the eager
-        # and the lazy path need this, so it runs before they diverge.
-        self.scheduler_adapter.cleanup_lookup_result(request.request_id)
-
+        # Notify LMCache to end the session for this request BEFORE
+        # cleaning up lookup state. end_session() waits for any pending
+        # LOOKUP ack; if cleanup_lookup_result() runs first it clears
+        # the unacked lookups and end_session() returns immediately,
+        # allowing the server to handle END_SESSION before LOOKUP
+        # (issue #5578).
         if self.lazy_offload:
             # Blocks return to the free queue (False) and remain observable;
             # the manager ends the LMCache session after all deferred stores
@@ -1559,10 +1606,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             actions = self._lazy_offload_manager.on_request_finished(request.request_id)
             for request_id in actions.sessions_to_end:
                 self.scheduler_adapter.end_session(request_id)
+        else:
+            self.scheduler_adapter.end_session(request.request_id)
+
+        # Drop lookup state for a request aborted before its lookup was
+        # consumed (update_state_after_alloc never ran for it).
+        self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+
+        if self.lazy_offload:
             return False, (return_params or None)
 
-        # Notify LMCache to end the session for this request
-        self.scheduler_adapter.end_session(request.request_id)
         return self._can_store, (return_params or None)
 
     def request_finished_all_groups(

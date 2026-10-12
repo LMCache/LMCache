@@ -612,6 +612,10 @@ def _strip_warmup(result: "BenchResult", warmup: int) -> "BenchResult":
     total_rounds = max(1, len(result.round_durations))
     scaled_expected_hit = int(result.expected_hit_count * kept_rounds / total_rounds)
 
+    # Preserve timed_out_rounds (rounds that hit the wait timeout and have
+    # no duration). Without this, timed_out_rounds defaults to 0 and
+    # attempted_rounds = len(round_durations) is undercounted, causing
+    # total_keys and hit-rate to be wrong.
     return BenchResult(
         operation=result.operation,
         in_flight=result.in_flight,
@@ -619,6 +623,7 @@ def _strip_warmup(result: "BenchResult", warmup: int) -> "BenchResult":
         data_size_bytes=result.data_size_bytes,
         round_durations=result.round_durations[warmup:],
         success_counts=result.success_counts[warmup:],
+        timed_out_rounds=result.timed_out_rounds,
         expected_max_hit_rate=result.expected_max_hit_rate,
         expected_hit_count=scaled_expected_hit,
     )

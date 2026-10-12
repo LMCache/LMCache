@@ -33,11 +33,34 @@ class Fp8QuantizationSerializer(Serializer):
 
     def serialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> int:
         """Cast src tensor to fp8 and copy bytes into dst buffer (key unused)."""
-        src_tensor = src.tensor
-        dst_tensor = dst.tensor
-        if src_tensor is None or dst_tensor is None:
+        if src.tensor is None or dst.tensor is None:
             raise ValueError("Fp8 serde requires src and dst to have tensors")
 
+        # Check if using separate-object-groups layout (has per-group shapes/dtypes)
+        if src.meta.shapes is not None and src.meta.dtypes is not None:
+            # Iterate over groups when using separate-object-groups layout
+            n_bytes = 0
+            for i in range(len(src.meta.shapes)):
+                group_tensor = src.get_tensor(i)
+                if group_tensor is None:
+                    continue
+                # Cast to fp8 (1 byte per element)
+                fp8_tensor = group_tensor.to(self._fp8_dtype).contiguous()
+                n_bytes += fp8_tensor.numel()
+
+                # Reinterpret fp8 bytes as uint8 and copy into dst byte buffer
+                fp8_as_bytes = fp8_tensor.view(torch.uint8).flatten()
+                # Compute dst offset for this group
+                dst_group_tensor = dst.get_tensor(i)
+                if dst_group_tensor is not None:
+                    dst_group_tensor.flatten()[: fp8_tensor.numel()].copy_(
+                        fp8_as_bytes[: fp8_tensor.numel()]
+                    )
+            return n_bytes
+
+        # Legacy single-group path (fallback for backward compatibility)
+        src_tensor = src.tensor
+        dst_tensor = dst.tensor
         # Cast to fp8 (1 byte per element)
         fp8_tensor = src_tensor.to(self._fp8_dtype).contiguous()
         n_bytes = fp8_tensor.numel()
@@ -73,17 +96,43 @@ class Fp8QuantizationDeserializer(Deserializer):
 
     def deserialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> None:
         """Read fp8 bytes from src, cast to dst's dtype, copy into dst (key unused)."""
-        src_tensor = src.tensor
-        dst_tensor = dst.tensor
-        if src_tensor is None or dst_tensor is None:
+        if src.tensor is None or dst.tensor is None:
             raise ValueError("Fp8 serde requires src and dst to have tensors")
 
-        n_elements = dst_tensor.numel()
+        # Check if using separate-object-groups layout (has per-group shapes/dtypes)
+        if (
+            src.meta.shapes is not None
+            and src.meta.dtypes is not None
+            and dst.meta.shapes is not None
+            and dst.meta.dtypes is not None
+        ):
+            # Iterate over groups when using separate-object-groups layout
+            for i in range(len(dst.meta.shapes)):
+                dst_group_tensor = dst.get_tensor(i)
+                if dst_group_tensor is None:
+                    continue
+                n_elements = dst_group_tensor.numel()
 
-        # Read n_elements bytes from src, reinterpret as fp8, reshape, cast back
-        fp8_bytes = src_tensor.flatten()[:n_elements]
-        fp8_tensor = fp8_bytes.view(self._fp8_dtype).reshape(dst_tensor.shape)
-        dst_tensor.copy_(fp8_tensor.to(dst_tensor.dtype))
+                # Read n_elements bytes from src for this group, reinterpret as fp8,
+                # reshape, cast back, and copy into dst group
+                src_group_tensor = src.get_tensor(i)
+                if src_group_tensor is None:
+                    continue
+                fp8_bytes = src_group_tensor.flatten()[:n_elements]
+                fp8_tensor = fp8_bytes.view(self._fp8_dtype).reshape(
+                    dst_group_tensor.shape
+                )
+                dst_group_tensor.copy_(fp8_tensor.to(dst_group_tensor.dtype))
+        else:
+            # Legacy single-group path (fallback for backward compatibility)
+            src_tensor = src.tensor
+            dst_tensor = dst.tensor
+            n_elements = dst_tensor.numel()
+
+            # Read n_elements bytes from src, reinterpret as fp8, reshape, cast back
+            fp8_bytes = src_tensor.flatten()[:n_elements]
+            fp8_tensor = fp8_bytes.view(self._fp8_dtype).reshape(dst_tensor.shape)
+            dst_tensor.copy_(fp8_tensor.to(dst_tensor.dtype))
 
 
 def _create_fp8_serde(kwargs: dict[str, object]) -> SerdeProcessor:

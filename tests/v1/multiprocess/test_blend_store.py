@@ -584,6 +584,7 @@ def _store_hook_engine(stored_mask):
         b"evt",
         True,
         stored_mask,
+        [list(stored_mask)],
     )
     eng._transfer_module.get_and_touch_context_entry.return_value = None
     eng._ctx = MagicMock()

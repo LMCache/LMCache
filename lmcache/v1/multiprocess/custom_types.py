@@ -69,6 +69,16 @@ class IPCCacheServerKey:
     # lookups reject it.
     num_kv_readers: int = field(default=0, compare=False)
 
+    # === KV cache dtype (part of cache identity) ===
+    # Different dtypes produce different cache keys so that instances
+    # sharing an L2 backend (e.g. Mooncake) do not collide on
+    # incompatible cache objects.
+    #
+    # Must stay LAST: the gRPC structural codec (proto_codec.py) matches
+    # dataclass fields to IpcCacheServerKey proto fields by position, so
+    # this field has to line up with proto field 11.
+    dtype: str = ""
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")

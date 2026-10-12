@@ -114,14 +114,18 @@ def all_null_chunk_masks(
     for group in object_groups:
         chunk_null: list[bool] = []
         for i in range(num_chunks):
-            is_null = True
+            # A chunk is null when ANY kernel group has only null blocks.
+            # For Mamba hybrids, the recurrent-state kernel group may be
+            # null while the attention kernel group has real data. In that
+            # case the chunk must not be stored (issue #5600).
+            is_null = False
             for kg in group.kernel_group_indices:
                 bpc = blocks_per_chunk[kg]
-                if any(
-                    block != null_block_id
+                if all(
+                    block == null_block_id
                     for block in block_ids[kg][i * bpc : (i + 1) * bpc]
                 ):
-                    is_null = False
+                    is_null = True
                     break
             chunk_null.append(is_null)
         masks.append(chunk_null)
@@ -565,7 +569,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
         """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask."""
-        handle, ok, _ = self.store_with_chunk_mask(
+        handle, ok, _, _ = self.store_with_chunk_mask(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
         return handle, ok
@@ -576,7 +580,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
-    ) -> tuple[bytes, bool, list[bool]]:
+    ) -> tuple[bytes, bool, list[bool], list[list[bool]]]:
         """Store the GPU KV cache blocks to CPU.
 
         Args:
@@ -594,7 +598,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             fatal error (not whether every requested chunk was stored; see
             Notes). The event handle is empty when no device work was submitted.
             The third element marks per chunk whether every object group
-            committed it.
+            committed it. The fourth element is per object group: group
+            masks ``group_masks[g][i]`` is True iff group ``g`` committed
+            chunk ``i`` (issue #5601).
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -624,7 +630,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 "Rejecting STORE for unregistered GPU instance ID %d",
                 instance_id,
             )
-            return b"", False, []
+            return b"", False, [], []
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
@@ -678,6 +684,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 return (
                     event_backend.export_event(event, cache_context.device),
                     False,
+                    [],
                     [],
                 )
 
@@ -842,10 +849,19 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             and all(keys[i] in all_dict for keys in obj_keys_per_obj_group)
             for i in range(num_chunks)
         ]
+        # Per-group commit masks: group_masks[g][i] is True iff object
+        # group g committed chunk i. Used by CacheBlend to register
+        # fingerprints when every blend-read group committed, even if
+        # the recurrent-state group did not (issue #5601).
+        group_masks = [
+            [store_succeeded and keys[i] in all_dict for i in range(num_chunks)]
+            for keys in obj_keys_per_obj_group
+        ]
         return (
             event_backend.export_event(event, cache_context.device),
             store_succeeded,
             stored_mask,
+            group_masks,
         )
 
     @request_handler(

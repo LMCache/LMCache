@@ -465,6 +465,11 @@ class LookupModule:
         Args:
             request_id: The request ID whose session should be removed.
         """
+        # Reclaim any prefetch job still tracked for this request so
+        # abandoned requests do not leak memory (issue #5339).
+        with self._prefetch_job_lock:
+            self._prefetch_jobs.pop(request_id, None)
+
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_VLLM_END_SESSION,
@@ -521,7 +526,18 @@ class LookupModule:
         num_groups = self._ctx.layout_desc_registry.find_attn_desc(
             key.model_name, key.world_size
         ).num_object_groups
-        per_group = ipc_key_to_object_keys(key, chunk_hashes, list(range(num_groups)))
+        # Derive dtype string from the memory-layout descriptor so that
+        # different KV encodings (e.g. FP8 vs BF16) produce different cache
+        # keys and do not collide when sharing an L2 backend (issue #5616).
+        dtype_str = ""
+        layout_desc = self._ctx.layout_desc_registry.find(
+            key.model_name, key.world_size
+        )
+        if layout_desc is not None and layout_desc.dtypes:
+            dtype_str = str(layout_desc.dtypes[0]).replace("torch.", "")
+        per_group = ipc_key_to_object_keys(
+            key, chunk_hashes, list(range(num_groups)), dtype=dtype_str
+        )
         return [obj_key for group_keys in per_group for obj_key in group_keys]
 
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:

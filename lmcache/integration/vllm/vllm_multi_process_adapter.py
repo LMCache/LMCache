@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
 import math
@@ -608,6 +608,13 @@ class LoadStoreOp:
     skip_first_n_tokens: int = 0
     """Number of tokens to skip writing at the beginning of the retrieve
     range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
+
+    skip_first_n_blocks: list[int] = field(default_factory=list)
+    """Per-engine-group leading block counts covered by
+    ``skip_first_n_tokens`` (``skip_first_n_tokens // tokens_per_block``
+    per group). Set alongside ``skip_first_n_tokens`` so failed-retrieve
+    load-error reports can exclude the APC-shared blocks the retrieve
+    never writes (issue #5653)."""
 
     @property
     def flat_block_ids(self) -> list[int]:
@@ -1812,6 +1819,34 @@ class LMCacheMPWorkerAdapter:
                 self._build_store_kv_events(key)
             )
 
+    def _retrievable_block_ids(self, op: LoadStoreOp) -> list[int]:
+        """Block IDs a retrieve would actually write.
+
+        Excludes the leading blocks covered by ``skip_first_n_tokens``:
+        the server never writes them (vLLM's APC already owns them), so a
+        failed retrieve must not report them as load errors — those
+        blocks are typically shared with other running requests on the
+        same prefix, and reporting them fails or recomputes requests
+        that never touched LMCache (issue #5653).
+
+        Falls back to every block when the per-group skip counts are
+        unavailable (ops built without them).
+        """
+        if op.skip_first_n_tokens <= 0 or not op.block_ids:
+            return op.flat_block_ids
+        # Defend against IPC serialization flattening [[20, 21, ...]] ->
+        # [20, 21, ...] (same defense as flat_block_ids).
+        groups: list[list[int]]
+        if isinstance(op.block_ids[0], int):
+            groups = [list(op.block_ids)]
+        else:
+            groups = [list(g) for g in op.block_ids]
+        out: list[int] = []
+        for g, group_blocks in enumerate(groups):
+            skip_n = op.skip_first_n_blocks[g] if g < len(op.skip_first_n_blocks) else 0
+            out.extend(group_blocks[skip_n:])
+        return out
+
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
         self,
@@ -1840,7 +1875,7 @@ class LMCacheMPWorkerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
-            self.error_block_ids.update(op.flat_block_ids)
+            self.error_block_ids.update(self._retrievable_block_ids(op))
             self._failed_request_ids.add(request_id)
             self._dropped_retrieves.add(request_id)
             return
@@ -1868,7 +1903,10 @@ class LMCacheMPWorkerAdapter:
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
-        self.retrieve_futures[request_id] = (future, op.flat_block_ids)
+        self.retrieve_futures[request_id] = (
+            future,
+            self._retrievable_block_ids(op),
+        )
         if event is not None:
             self.retrieve_events[request_id] = event
 
