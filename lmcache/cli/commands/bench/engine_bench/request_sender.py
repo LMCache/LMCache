@@ -83,6 +83,8 @@ class RequestSender:
     ) -> None:
         """Initialize the sender and its OpenAI client.
 
+        SDK retries are disabled so each scheduled request has one attempt.
+
         Args:
             engine_url: Base URL of the inference engine.
             model: Model name sent with every request.
@@ -124,6 +126,8 @@ class RequestSender:
             base_url=base_url,
             api_key=api_key,
             timeout=None,
+            # Retries change the offered load and hide engine failures.
+            max_retries=0,
         )
 
     def add_on_finished_callback(self, callback: OnFinishedCallback) -> None:
