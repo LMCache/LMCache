@@ -1540,9 +1540,7 @@ def test_handler_windows_never_take_another_requests_lock(monkeypatch):
         monkeypatch, "req-h-shared"
     )
     m0, m1, m2, m3 = matches
-    session = ctx.session_manager.get("req-h-shared")
-    reservation = session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA]
-    others = [k for m in (m2, m3) for k in reservation.per_hash[m.hash]]
+    others = [k for k in storage.locks if k.chunk_hash in (m2.hash, m3.hash)]
     for k in others:  # the other request's lookup locked them too
         storage.locks[k] += 1
 
@@ -1673,8 +1671,7 @@ def test_handler_raise_releasing_swept_matches_strands_no_claim(monkeypatch):
         monkeypatch, "req-h-sweep-raise"
     )
     m0, m1, m2, m3 = matches
-    session = ctx.session_manager.get("req-h-sweep-raise")
-    swept = set(session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA].per_hash[m2.hash])
+    swept = {k for k in storage.locks if k.chunk_hash == m2.hash}
     release = storage.finish_read_prefetched
 
     def finish_read_prefetched(keys, read_locks: int = 1, l1_owners=None) -> None:
