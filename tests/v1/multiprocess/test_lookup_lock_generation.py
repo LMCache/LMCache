@@ -4,6 +4,7 @@
 # Standard
 from collections.abc import Iterator
 from dataclasses import replace
+from threading import Event
 from unittest.mock import MagicMock, patch
 import time
 
@@ -22,9 +23,26 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.mp_observability.event import Event as CacheEvent
+from lmcache.v1.mp_observability.event import EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import SessionManager
+
+
+def finish_write_and_wait_for_store(sm: StorageManager, key: ObjectKey) -> None:
+    """Commit a chunk and wait until its L2 store has released its read lock."""
+    completed = Event()
+
+    def on_event(event: CacheEvent) -> None:
+        if event.event_type == EventType.L2_STORE_COMPLETED:
+            completed.set()
+
+    with patch.object(get_event_bus(), "publish", side_effect=on_event):
+        sm.finish_write([key])
+        if sm.l2_adapters():
+            assert completed.wait(5), "L2 store did not complete"
 
 
 @pytest.fixture(params=["L1", "L2"])
@@ -77,16 +95,8 @@ def lookup(
         )
         obj_key = ObjectKey(b"chunk", "model", ObjectKey.ComputeKVRank(1, 0, 1, 0))
         assert obj_key in sm.reserve_write([obj_key], layout)
-        sm.finish_write([obj_key])
+        finish_write_and_wait_for_store(sm, obj_key)
         if request.param == "L2":
-            adapter = sm.l2_adapters()[0][1]
-            deadline = time.monotonic() + 5
-            while (
-                adapter.report_status()["stored_object_count"] != 1
-                or sm.report_status()["store_controller"]["in_flight_task_count"]
-            ):
-                assert time.monotonic() < deadline, "L2 store did not complete"
-                time.sleep(0.01)
             sm.clear()
             assert sm.get_l1_usage()[0] == 0  # Next lookup must reload from L2.
         try:
@@ -112,7 +122,7 @@ def test_expired_lookup_cannot_release_new_reader(lookup, recreate: bool) -> Non
         sm.clear()
         layout = MemoryLayoutDesc([torch.Size([4])], [torch.float32])
         assert obj_key in sm.reserve_write([obj_key], layout)
-        sm.finish_write([obj_key])
+        finish_write_and_wait_for_store(sm, obj_key)
     new = replace(old, request_id="B")
     start_lookup(module, new)
     with patch("lmcache.v1.distributed.storage_manager.publish_call_event") as trace:

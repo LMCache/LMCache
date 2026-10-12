@@ -77,6 +77,7 @@ class _ReadLock:
     def is_locked(self) -> bool:
         return self._count > 0 and monotonic() < self._expires_at
 
+
 # Upper bound for the count parameter in reserve_read / finish_read
 # to prevent a single call from holding the global lock for too long.
 MAX_READ_LOCK_COUNT = 128
