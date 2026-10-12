@@ -311,7 +311,7 @@ class TransferContext(ABC):
             kv_caches: Worker KV cache tensors keyed by layer name.
             model_name: Model name used by cache keys.
             world_size: KV world size.
-            blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+            blocks_in_chunk: Number of engine blocks per LMCache chunk.
             mq_timeout: Timeout in seconds for synchronous request wait.
             layout_hints: Optional inference-engine-provided layout hints.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
@@ -439,10 +439,10 @@ class TransferContext(ABC):
             request_id: External request identifier.
             key: LMCache key object for the store range.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to store, indexed by LMCache KV group id.
+            block_ids: Engine block IDs to store, indexed by LMCache KV group id.
             event: Synchronization event object, or ``None`` when the concrete
                 context does not require one.
-            blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+            blocks_in_chunk: Number of engine blocks per LMCache chunk.
 
         Returns:
             A future compatible with adapter-side ``query()``/``result()`` flow.
@@ -468,11 +468,11 @@ class TransferContext(ABC):
             request_id: External request identifier.
             key: LMCache key object for the retrieve range.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to retrieve into, indexed by LMCache KV
+            block_ids: Engine block IDs to retrieve into, indexed by LMCache KV
                 group id.
             event: Synchronization event object, or ``None`` when the concrete
                 context does not require one.
-            blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+            blocks_in_chunk: Number of engine blocks per LMCache chunk.
             skip_first_n_tokens: Number of initial tokens to skip when writing.
 
         Returns:
@@ -797,7 +797,7 @@ class LMCacheDrivenTransferContext(TransferContext):
 
 
 class EngineDrivenTransferContext(TransferContext):
-    """Engine-driven transfer context for non-CUDA workers.
+    """Transfer context for worker-managed KV copies.
 
     In this mode the engine (worker side) owns the data movement: the
     worker adapter gathers/packs KV into CPU buffers, commits via
@@ -815,6 +815,7 @@ class EngineDrivenTransferContext(TransferContext):
         self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
+        self._engine_type = EngineType.VLLM
 
     @property
     def engine_driven_context(self) -> EngineDrivenContext:
@@ -841,15 +842,22 @@ class EngineDrivenTransferContext(TransferContext):
         engine_type: EngineType = EngineType.VLLM,
         wait_for_pinned: bool = False,
     ) -> None:
-        """Register KV caches with the non-GPU context server.
+        """Register KV caches with the engine-driven context server.
 
-        ``engine_group_infos`` and ``engine_type`` are accepted to satisfy
-        the base interface but are currently a no-op: the non-GPU transfer
-        path does not support hybrid KV cache groups and rejects multi-
-        group transfers at store / retrieve time (see
-        ``_single_group_block_ids``).
+        ``engine_type`` selects the KV layout normalization used during
+        registration and subsequent gather/scatter operations.
+        Engine-driven transfer currently supports exactly one physical KV
+        transfer group.
+
+        Raises:
+            ValueError: If more than one physical KV transfer group is
+                registered.
         """
-        del engine_type  # unused on the engine-driven path
+        if len(engine_group_infos) > 1:
+            raise ValueError(
+                "engine-driven transfer does not support multiple KV "
+                "transfer groups now"
+            )
         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
         # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
         # on the CUDA path. The non-CUDA path is yet to be implemented.
@@ -860,9 +868,14 @@ class EngineDrivenTransferContext(TransferContext):
             dtype_str,
             engine_kv_format,
             kv_size,
-        ) = compute_kv_layout(kv_caches, layout_hints=layout_hints)
+        ) = compute_kv_layout(
+            kv_caches,
+            layout_hints=layout_hints,
+            engine_type=engine_type,
+        )
         self._layout_hints = layout_hints
         self._engine_kv_format = engine_kv_format
+        self._engine_type = engine_type
 
         # The wire field is named use_mla but only drives the object plane
         # count: single-plane (kv_size == 1) covers MLA and fused-K/V formats.
@@ -917,7 +930,7 @@ class EngineDrivenTransferContext(TransferContext):
         )
         supported_transfer_mode = "SHM" if shm_name and pool_size > 0 else "pickle"
         logger.info(
-            "Worker non-GPU transfer context registered (instance_id=%d, mode=%s)",
+            "Worker engine-driven context registered (instance_id=%d, mode=%s)",
             self._instance_id,
             supported_transfer_mode,
         )
@@ -984,6 +997,7 @@ class EngineDrivenTransferContext(TransferContext):
             engine_kv_format=self._engine_kv_format,
             out=out_buffers,
             chunk_indices=chunk_indices,
+            engine_type=self._engine_type,
         )
         # Gather issues async device->CPU copies on BOTH transports: into the
         # SHM slots when out_buffers is given, otherwise into fresh buffers that
@@ -1005,7 +1019,7 @@ class EngineDrivenTransferContext(TransferContext):
         key: Any,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        _event: IPCEvent | None,
+        event: IPCEvent | None,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:
@@ -1022,6 +1036,8 @@ class EngineDrivenTransferContext(TransferContext):
         ok = src_buffers is not None
         if src_buffers is not None:
             try:
+                if event is not None:
+                    event.wait()
                 scatter_cpu_to_paged_kv(
                     kv_caches,
                     _single_group_block_ids(block_ids),
@@ -1030,6 +1046,7 @@ class EngineDrivenTransferContext(TransferContext):
                     skip_first_n_tokens=skip_first_n_tokens,
                     layout_hints=self._layout_hints,
                     engine_kv_format=self._engine_kv_format,
+                    engine_type=self._engine_type,
                 )
             except (RuntimeError, ValueError, TypeError, IndexError):
                 logger.exception("Failed to scatter retrieved CPU context chunks")

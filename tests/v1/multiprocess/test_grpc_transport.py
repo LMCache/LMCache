@@ -35,6 +35,7 @@ from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
+from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -68,7 +69,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
     build_grpc_request_server,
 )
-from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
 
 
 @dataclass
@@ -76,22 +77,6 @@ class _Calls:
     lookup: tuple[IPCCacheServerKey, int] | None = None
     allocation: tuple[int, str, list[BlockAllocationRecord]] | None = None
     clear_force: bool | None = None
-
-
-class _TestDeviceIPCWrapper(DeviceIPCWrapper):
-    """Pickle-safe test wrapper for the shared custom codec."""
-
-    def __init__(self) -> None:
-        self.handle = b"handle"
-        self.dtype = torch.float16
-        self.shape = (2, 4)
-        self.stride = (4, 1)
-        self.storage_offset = 0
-        self.device_uuid = "test-device"
-
-    def to_tensor(self) -> torch.Tensor:
-        """The codec test does not reconstruct a device tensor."""
-        raise NotImplementedError
 
 
 @pytest.fixture
@@ -321,6 +306,7 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
     module_types = (
         LookupModule,
         ManagementModule,
+        KVEventModule,
         P2PController,
         LMCacheDrivenTransferModule,
         EngineDrivenTransferModule,
@@ -504,13 +490,15 @@ def test_service_message_codec_registry_round_trips_custom_types() -> None:
         "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.p2p_service_pb2"
     )
 
-    wrapper = _TestDeviceIPCWrapper()
+    wrapper = CpuShmTensorWrapper(
+        torch.empty((2, 4), dtype=torch.float16), "/lmcache_codec_test"
+    )
     wrapper_message = common_pb2.DeviceIpcWrapper()
     wrapper_codec = registry.find(wrapper_message.DESCRIPTOR, type(wrapper))
     assert wrapper_codec is not None
     wrapper_codec.writer(wrapper_message, wrapper)
     decoded_wrapper = wrapper_codec.reader(wrapper_message)
-    assert type(decoded_wrapper) is _TestDeviceIPCWrapper
+    assert type(decoded_wrapper) is CpuShmTensorWrapper
     assert decoded_wrapper == wrapper
 
     shape = torch.Size([2, 4])
