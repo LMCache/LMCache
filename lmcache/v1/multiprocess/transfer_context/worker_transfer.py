@@ -952,7 +952,7 @@ class EngineDrivenTransferContext(TransferContext):
         key: Any,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
-        _event: IPCEvent | None,
+        event: IPCEvent | None,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:
@@ -969,6 +969,8 @@ class EngineDrivenTransferContext(TransferContext):
         ok = src_buffers is not None
         if src_buffers is not None:
             try:
+                if event is not None:
+                    event.wait()
                 scatter_cpu_to_paged_kv(
                     kv_caches,
                     _single_group_block_ids(block_ids),
