@@ -156,7 +156,7 @@ class MPServerConfig:
     different sentinel, for example ``-1``."""
 
     server_modules: list[ExtServerModuleSpec] = field(default_factory=list)
-    """Out-of-tree server-module factories to load after built-in modules."""
+    """Out-of-tree ``DiscoverableModule`` classes to import explicitly."""
 
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
@@ -585,10 +585,9 @@ def add_mp_server_args(
         "--server-module",
         action="append",
         default=[],
-        help="JSON object describing an out-of-tree server-module factory. "
-        "Repeat to load multiple modules. Example: "
+        help="JSON object describing an out-of-tree server module. "
+        "Repeat to load multiple Python modules. Example: "
         '\'{"module_path":"my_pkg.server_module",'
-        '"factory_name":"build_server_modules",'
         '"config":{"name":"demo"}}\'.',
     )
     return parser

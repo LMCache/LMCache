@@ -6,7 +6,6 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock
 import importlib
 import subprocess
 import sys
@@ -431,11 +430,9 @@ def test_build_grpc_request_server_uses_configured_server_workers(
                 grpc_server_workers,
             )
             self.modules: Any = None
-            self.service_registrars: Any = None
 
-        def add_modules(self, modules: Any, *, service_registrars: Any = ()) -> None:
+        def add_modules(self, modules: Any) -> None:
             self.modules = modules
-            self.service_registrars = service_registrars
 
     monkeypatch.setattr(
         grpc_server_module,
@@ -451,26 +448,18 @@ def test_build_grpc_request_server_uses_configured_server_workers(
         grpc_server_workers=7,
     )
 
-    service_registrars = (MagicMock(name="grpc_service_registrar"),)
-
     server = cast(
         Any,
-        build_grpc_request_server(
-            modules,
-            config,
-            service_registrars=service_registrars,
-        ),
+        build_grpc_request_server(modules, config),
     )
 
     assert server.args == ("grpc://127.0.0.1:6000", 2, 3, 7)
     assert server.modules is modules
-    assert server.service_registrars is service_registrars
 
 
 def test_grpc_server_registers_out_of_tree_services() -> None:
     """Server modules may attach package-owned gRPC services before start."""
     registered_servers: list[Any] = []
-    explicit_registrar = MagicMock(name="explicit_registrar")
 
     class ServiceModule:
         def register_grpc_services(self, server: Any) -> None:
@@ -483,15 +472,11 @@ def test_grpc_server_registers_out_of_tree_services() -> None:
         grpc_server_workers=1,
     )
     try:
-        server.add_modules(
-            [cast(Any, ServiceModule())],
-            service_registrars=[explicit_registrar],
-        )
+        server.add_modules([cast(Any, ServiceModule())])
     finally:
         server.close()
 
     assert len(registered_servers) == 1
-    explicit_registrar.assert_called_once()
 
 
 def test_service_message_codec_registry_round_trips_custom_types() -> None:
