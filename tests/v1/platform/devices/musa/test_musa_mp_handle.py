@@ -262,7 +262,7 @@ def test_musa_platform_discovers_factory_and_registers_capability_predicate() ->
 
     device_spec = get_device_spec("musa")
     assert device_spec is not None
-    assert device_spec.is_handle_transfer_available() is False
+    assert device_spec.is_lmcache_driven_available() is False
     assert callable(factory)
     with pytest.raises(ValueError, match="expected a MUSA tensor"):
         factory(torch.empty(1))
@@ -312,7 +312,7 @@ def test_create_transfer_context_musa_handle_allowed_when_available(
     assert musa_spec is not None
     # Force the transport-capability gate open without touching
     # ``ipc_wrapper_cls`` -- the real MusaIPCWrapper already binds it.
-    monkeypatch.setattr(musa_spec, "is_handle_transfer_available", lambda: True)
+    monkeypatch.setattr(musa_spec, "is_lmcache_driven_available", lambda: True)
 
     context = create_transfer_context(
         _fake_musa_kv_caches(),

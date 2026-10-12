@@ -26,6 +26,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (  # no
     MultiConnector,
 )
 from vllm.v1.core.sched.output import SchedulerOutput  # noqa: E402
+from vllm.v1.kv_cache_interface import (  # noqa: E402
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.outputs import KVConnectorOutput  # noqa: E402
 from vllm.v1.request import Request, RequestStatus  # noqa: E402
 
@@ -38,6 +43,7 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
 )
+from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -64,6 +70,7 @@ def _request(request_id: str = "request") -> Request:
             request_id=request_id,
             cache_salt="",
             all_token_ids=list(range(12)),
+            num_prompt_tokens=12,
             status=RequestStatus.WAITING,
             num_computed_tokens=0,
             kv_transfer_params=None,
@@ -172,6 +179,61 @@ def connectors(
     finally:
         worker.shutdown()
         scheduler.shutdown()
+
+
+@pytest.mark.parametrize("save_decode_cache", [None, False, True])
+@pytest.mark.parametrize("lazy", [False, True])
+def test_decode_store_policy_through_scheduler(
+    mock_io: SimpleNamespace, save_decode_cache: bool | None, lazy: bool
+) -> None:
+    """The configured write policy applies before immediate or lazy storage."""
+    options = {"lmcache.mp.lazy_offload": lazy}
+    if save_decode_cache is not None:
+        options["lmcache.mp.save_decode_cache"] = save_decode_cache
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config=options,
+        )
+    )
+    connector = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    connector.bind_gpu_block_pool(mock_io.pool)
+    request = _request()
+    request.num_prompt_tokens = 6
+    try:
+        assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+        connector.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([0, 1, 2],)), 0
+        )
+        connector.build_connector_meta(_schedule(num_tokens=6, new=True))
+        # Decode finishes the partial prompt chunk and one all-output chunk.
+        metadata = connector.build_connector_meta(_schedule(num_tokens=6))
+        tracker = connector.request_trackers[request.request_id]
+        assert tracker.num_stored_tokens == (12 if save_decode_cache else 4)
+        if not lazy:
+            if save_decode_cache:
+                assert [(m.op.start, m.op.end) for m in metadata.requests] == [(4, 12)]
+            else:
+                assert metadata.requests == []
+    finally:
+        connector.shutdown()
+
+
+@pytest.mark.parametrize("value", ["false", "true", 0, 1, None])
+def test_decode_store_policy_rejects_non_boolean(
+    mock_io: SimpleNamespace, value: object
+) -> None:
+    """A string 'false' must never silently enable decode storage."""
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"lmcache.mp.save_decode_cache": value},
+        )
+    )
+    with pytest.raises(ValueError, match="save_decode_cache must be a boolean"):
+        LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
 
 
 def test_chunked_prefill_stores_and_completion(
@@ -337,6 +399,84 @@ def test_lookup_retrieve_and_cleanup(
     sending, receiving = worker.get_finished({"request"})
     assert (sending or set()) == ({"request"} if delay_free else set())
     assert not receiving
+
+
+@pytest.mark.parametrize("num_groups,legacy_api", [(1, False), (2, False), (2, True)])
+@pytest.mark.parametrize("retrieve_success", [False, True])
+def test_receive_failure_reporting(
+    mock_io: SimpleNamespace,
+    lazy_offload: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    num_groups: int,
+    legacy_api: bool,
+    retrieve_success: bool,
+) -> None:
+    """Hybrid failures use request IDs; single-group and old engines keep blocks."""
+    if legacy_api:
+        monkeypatch.setattr(
+            connector_mod, "KVConnectorTransferResults", None, raising=False
+        )
+    elif not hasattr(KVConnectorBase_V1, "get_transfer_results"):
+        pytest.skip("vLLM does not expose request-level transfer results")
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_consumer",
+            kv_connector_extra_config={"lmcache.mp.lazy_offload": lazy_offload},
+        )
+    )
+    spec = FullAttentionSpec(
+        block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32
+    )
+    cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer{i}"], spec) for i in range(num_groups)
+        ],
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER, cache_config)
+    try:
+        worker.register_kv_caches(
+            {f"layer{i}": mock_io.kv_caches["layer"].clone() for i in range(num_groups)}
+        )
+        future = mock_io.transfer.submit_retrieve.return_value
+        future.query.return_value = False
+        future.result.return_value = retrieve_success
+        worker.worker_adapter.submit_retrieve_request(
+            "request",
+            LoadStoreOp(
+                token_ids=[1, 2, 3, 4], block_ids=[[2]] * num_groups, start=0, end=4
+            ),
+            None,
+        )
+        assert not any(worker.get_finished(set()))
+        future.query.return_value = True
+        if legacy_api:
+            sending, receiving = worker.get_finished(set())
+        else:
+            result = worker.get_transfer_results(set())
+            sending, receiving = result.finished_sending, result.finished_recving
+            assert result.failed_recving == (
+                {"request"} if num_groups > 1 and not retrieve_success else set()
+            )
+        assert not sending
+        assert receiving == {"request"}
+        assert worker.get_block_ids_with_load_errors() == (
+            {2} if not retrieve_success and (legacy_api or num_groups == 1) else set()
+        )
+        if legacy_api:
+            assert not any(worker.get_finished(set()))
+        else:
+            result = worker.get_transfer_results(set())
+            assert not (
+                result.finished_sending
+                or result.finished_recving
+                or result.failed_recving
+            )
+        assert worker.get_block_ids_with_load_errors() == set()
+    finally:
+        worker.shutdown()
 
 
 @pytest.mark.parametrize("mp_role", ["kv_both", "kv_consumer"])

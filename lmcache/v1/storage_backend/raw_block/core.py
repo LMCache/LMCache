@@ -45,6 +45,7 @@ _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
 _MAX_PUT_MANY_IO_URING_BATCH_KEYS = 64
+_MAX_FIXED_BUFFER_REGION_BYTES = 1 << 30
 _MAX_FDP_PLACEMENT_ID = 0xFFFF
 
 # FDP placement ID semantics are shared by design across raw-block write paths.
@@ -590,6 +591,50 @@ class RawBlockCore:
             len(buffers),
         )
 
+    def register_fixed_buffer_range(self, ptr: int, size: int) -> None:
+        """Register one stable memory range for io_uring fixed-buffer I/O.
+
+        Args:
+            ptr: Base address of the stable memory range.
+            size: Size of the stable memory range in bytes.
+
+        Raises:
+            ValueError: If ``ptr`` or ``size`` is not positive.
+            Exception: Propagates errors from the Rust registration API.
+
+        Notes:
+            The range is divided into regions no larger than 1 GiB, which is
+            the maximum size supported for one io_uring registered buffer.
+        """
+        if self.io_engine != "io_uring":
+            return
+
+        ptr = int(ptr)
+        size = int(size)
+        if ptr <= 0:
+            raise ValueError("fixed-buffer range pointer must be > 0")
+        if size <= 0:
+            raise ValueError("fixed-buffer range size must be > 0")
+
+        buffer_ptrs: list[int] = []
+        buffer_sizes: list[int] = []
+        next_ptr = ptr
+        remaining = size
+        while remaining > 0:
+            region_size = min(remaining, _MAX_FIXED_BUFFER_REGION_BYTES)
+            buffer_ptrs.append(next_ptr)
+            buffer_sizes.append(region_size)
+            next_ptr += region_size
+            remaining -= region_size
+
+        self._rawdev().register_fixed_buffers(buffer_ptrs, buffer_sizes)
+        logger.info(
+            "RawBlockCore: registered %d regions covering %d bytes for "
+            "io_uring fixed I/O",
+            len(buffer_ptrs),
+            size,
+        )
+
     def contains_key(self, encoded_key: str, *, lock: bool = False) -> bool:
         """Return whether one encoded key is present in the raw-block index.
 
@@ -1070,15 +1115,22 @@ class RawBlockCore:
             raise RuntimeError(worker_error)
 
     def report_status(self) -> dict:
-        """Return health, terminal worker error, layout, and in-flight counters.
+        """Return health, registration, layout, and in-flight status.
 
         Returns:
             Status dictionary with ``is_healthy=False`` after close or terminal
             worker failure, and the failure reason in ``worker_error`` when
-            available. Inspecting status never opens a new native device.
+            available. Fixed-buffer fields describe successful kernel
+            registration. Inspecting status never opens a new native device.
         """
         with self._lock:
             worker_error = self._worker_error()
+            raw_device = self._raw
+            fixed_buffers_registered, fixed_buffer_registered_bytes = (
+                raw_device.fixed_buffer_status()
+                if raw_device is not None
+                else (False, 0)
+            )
             return {
                 "is_healthy": not self._closed and worker_error is None,
                 "worker_error": worker_error,
@@ -1104,6 +1156,8 @@ class RawBlockCore:
                 "inflight_io_count": self._inflight_io_count,
                 "use_odirect": self.use_odirect,
                 "enable_zero_copy": self.enable_zero_copy,
+                "fixed_buffers_registered": fixed_buffers_registered,
+                "fixed_buffer_registered_bytes": fixed_buffer_registered_bytes,
                 "io_engine": self.io_engine,
                 "iouring_queue_depth": self.iouring_queue_depth,
                 "use_uring_cmd": self.use_uring_cmd,
@@ -2559,7 +2613,7 @@ class RawBlockCore:
         n = len(offsets)
         if self.io_engine == "posix" and self._recovery_read_threads > 1 and n > 1:
             return self._read_slot_headers_posix_parallel(offsets)
-        if self.io_engine == "io_uring" and not self.use_uring_cmd and n > 1:
+        if self.io_engine == "io_uring" and n > 1:
             return self._read_slot_headers_batched(offsets)
         return [self._read_slot_header(off) for off in offsets]
 
@@ -2626,9 +2680,8 @@ class RawBlockCore:
 
         Allocates a single contiguous pointer-aligned buffer for the batch,
         issues one ``batched_read`` + ``wait_iouring``, and decodes each header
-        independently. Used for the regular io_uring (block) path; NVMe
-        passthrough (``use_uring_cmd``) recovery uses the serial path until its
-        passthrough read is validated separately.
+        independently. Used for both regular io_uring block I/O and NVMe
+        passthrough (``use_uring_cmd``).
 
         Args:
             offsets: Device byte offsets for this batch (non-empty).

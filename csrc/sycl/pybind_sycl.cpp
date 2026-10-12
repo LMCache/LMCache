@@ -21,6 +21,19 @@ namespace py = pybind11;
 // Same convention as csrc/cuda/pybind.cpp (cuda_ops).
 PYBIND11_MODULE(xpu_ops, m) {
   m.def(
+      "multi_layer_block_kv_transfer",
+      [](const torch::Tensor& paged_buffer_ptrs_tensor,
+         const std::vector<uintptr_t>& lmcache_objects_ptrs,
+         const torch::Tensor& block_ids, const torch::Device& device,
+         int direction, PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
+         int engine_kv_format, int skip_prefix_n_blocks) {
+        multi_layer_block_kv_transfer(
+            paged_buffer_ptrs_tensor, lmcache_objects_ptrs, block_ids, device,
+            static_cast<TransferDirection>(direction), shape_desc,
+            lmcache_chunk_size, static_cast<EngineKVFormat>(engine_kv_format),
+            skip_prefix_n_blocks);
+      });
+  m.def(
       "multi_layer_kv_transfer",
       [](torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
          const torch::Tensor& slot_mapping,

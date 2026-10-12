@@ -380,9 +380,10 @@ tiers selected at startup (all satisfy ``L1ManagerProtocol``):
   buffer and the slab, driven by the process-global ``GDSContext``
   (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The DMA
   backend is selected by platform via ``gpu_connector/_gds_backends.py`` --
-  cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on AMD
-  ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the
-  vendor-specific requirements. The CPU tier is disabled in this mode.
+  cuFile (``libcufile.so``) on NVIDIA, hipFile (``libhipfile.so``) on AMD
+  ROCm, and muFile (``libmufile.so``) on MUSA; see the *GDS L1 Tier* section
+  of :doc:`configuration` for the vendor-specific requirements. The CPU tier
+  is disabled in this mode.
 
 L2 Adapters
 ~~~~~~~~~~~
@@ -493,7 +494,8 @@ and are grouped by concern: ``metrics/`` (OTel counters and lifecycle
 histograms), ``logging/`` (Python logging handlers, lookup-hash JSONL),
 and ``tracing/`` (OTel spans built from START/END event pairs).
 ``init_observability()`` registers the set selected by CLI flags
-(``--disable-metrics``, ``--disable-logging``, ``--enable-tracing``).
+(``--disable-metrics``, ``--disable-grpc-metrics``,
+``--disable-logging``, ``--enable-tracing``).
 
 **OTel providers** are set up via ``otel_init.py`` before subscribers
 are constructed, so module-level ``get_meter()`` / ``get_tracer()``
