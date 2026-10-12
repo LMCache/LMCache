@@ -794,10 +794,18 @@ class EngineDrivenTransferContext(TransferContext):
 
         ``engine_type`` selects the KV layout normalization used during
         registration and subsequent gather/scatter operations.
-        ``engine_group_infos`` is currently unused because this path rejects
-        multi-group transfers at store/retrieve time (see
-        ``_single_group_block_ids``).
+        Engine-driven transfer currently supports exactly one physical KV
+        transfer group.
+
+        Raises:
+            ValueError: If more than one physical KV transfer group is
+                registered.
         """
+        if len(engine_group_infos) > 1:
+            raise ValueError(
+                "engine-driven transfer does not support multiple KV "
+                "transfer groups now"
+            )
         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
         # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
         # on the CUDA path. The non-CUDA path is yet to be implemented.
