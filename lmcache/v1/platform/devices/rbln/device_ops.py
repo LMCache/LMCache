@@ -47,7 +47,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.devices.rbln.kv_layout import (
-    hnd_layer_views,
+    squeeze_singleton_axis,
     validate_mla_layers,
 )
 from lmcache.v1.platform.devices.rbln.kv_ops import (
@@ -80,9 +80,9 @@ class RblnDeviceOps(DeviceOps):
         """Move whole paged blocks between RBLN KV and token-major chunks.
 
         Args:
-            paged_buffer_ptrs_tensor: Per-layer KV tensors --
-                ``[2, NB, NH, 1, BS, HS]`` (native vLLM-RBLN HND) or
-                ``[2, NB, NH, BS, HS]`` (HND) or ``[NB, BS, HS]`` (MLA).
+            paged_buffer_ptrs_tensor: Native per-layer KV tensors --
+                ``[2, NB, NH, 1, BS, HS]`` (HND attention) or
+                ``[NB, BS, HS]`` (MLA).
             lmcache_objects_ptrs: Staging chunks in the canonical token-major
                 layout -- ``[2, L, T, H*D]`` (HND) or ``[L, T, HS]`` (MLA).
             block_ids: Flat paged-block IDs in chunk-token order.
@@ -144,12 +144,13 @@ class RblnDeviceOps(DeviceOps):
             )
 
         # Per-format addressing only; the chunk/block bookkeeping below is
-        # shared. HND drops the singleton axis the RBLN attention backend
-        # adds, where the bytes are actually addressed. MLA has nothing to
-        # squeeze; its rank is pinned instead.
+        # shared. HND keeps the singleton axis the RBLN attention backend
+        # requires -- drop it here, where the bytes are actually addressed.
+        # The squeeze is strict, so an HND layout without that axis fails
+        # here. MLA has nothing to squeeze; its rank is pinned instead.
         layers = cast("list[torch.Tensor]", list(paged_buffer_ptrs_tensor))
         paged_layers = (
-            validate_mla_layers(layers) if is_mla else hnd_layer_views(layers)
+            validate_mla_layers(layers) if is_mla else squeeze_singleton_axis(layers)
         )
         chunks = cast("list[torch.Tensor]", list(lmcache_objects_ptrs))
         flat_blocks = (

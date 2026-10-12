@@ -82,11 +82,13 @@ Consequences of the format being first-class:
   value: a per-layer two-major HND layout (`is_layer_list`, `is_hnd`,
   `is_two_major`, not `is_fused_packed`) takes the HND sequence, and a
   per-layer `[NB, BS, HS]` MLA layout (`is_layer_list`, `is_mla`, not
-  `is_pbs_fused` / `is_kv_second_tuple`) takes the MLA one (below). Format 15
-  and `NL_X_TWO_NB_NH_BS_HS` (6) share those facts -- the singleton axis is
-  the only difference -- so `hnd_layer_views` squeezes a 6-D tensor and
-  passes a 5-D one through, and `kv_ops.py` keeps indexing a 5-D tensor.
-  Either rank is still checked strictly; anything else fails loudly.
+  `is_pbs_fused` / `is_kv_second_tuple`) takes the MLA one (below). The HND
+  side applies `squeeze_singleton_axis` at entry, so `kv_ops.py` keeps
+  indexing a 5-D tensor. `kv_layout.py` therefore exports the strict squeeze
+  plus the `is_rbln_kv_layout` predicate -- no tolerant pass-through variant.
+  `NL_X_TWO_NB_NH_BS_HS` (6) shares format 15's layout facts (the singleton
+  axis is the only difference), but vLLM-RBLN never allocates it, so a 5-D
+  cache fails loudly in the squeeze rather than being accepted.
 
   ```python
   spec = get_spec_class(engine_kv_format)
@@ -148,7 +150,7 @@ How the two layouts relate inside the backend:
   boundary once. The paged layers must be contiguous for those whole-block
   copies to be direct; `validate_mla_layers` pins that too.
 - **Nothing to squeeze, so the rank is pinned instead.**
-  `validate_mla_layers` in `kv_layout.py` mirrors `hnd_layer_views`'
+  `validate_mla_layers` in `kv_layout.py` mirrors `squeeze_singleton_axis`'s
   strictness -- the detected format has already established what the caller
   holds, so any non-3-D tensor is a layout drift and fails loudly at the
   transfer boundary -- but returns the tensors unchanged.

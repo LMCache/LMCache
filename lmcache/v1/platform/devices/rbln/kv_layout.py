@@ -18,7 +18,7 @@ at the transfer boundary instead of mis-addressing bytes.
 Detection does not squeeze: the layout is registered as its own
 ``EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS``, so the vLLM detector classifies
 what vLLM-RBLN actually allocated and holds no RBLN knowledge beyond that
-shape signature. :func:`hnd_layer_views` squeezes it one layer lower, in
+shape signature. :func:`squeeze_singleton_axis` is applied one layer lower, by
 :class:`~lmcache.v1.platform.devices.rbln.device_ops.RblnDeviceOps`, where the paged
 tensors are indexed to move bytes.
 """
@@ -34,9 +34,6 @@ import torch
 
 #: Rank of the native RBLN per-layer KV tensor.
 RBLN_KV_NDIM = 6
-
-#: Rank of a plain per-layer two-major HND KV tensor (``[2, NB, NH, BS, HS]``).
-HND_KV_NDIM = 5
 
 #: Rank of the native RBLN per-layer MLA KV tensor (``[NB, BS, HS]``).
 RBLN_MLA_KV_NDIM = 3
@@ -92,47 +89,14 @@ def squeeze_singleton_axis(
     return views
 
 
-def hnd_layer_views(
-    kv_caches: Sequence[torch.Tensor],
-) -> list[torch.Tensor]:
-    """Return 5-D HND views of per-layer two-major HND KV tensors.
-
-    The native vLLM-RBLN layout and the plain HND layout differ only by the
-    singleton axis, so both share one byte layout and one RBLN op sequence.
-    Native 6-D tensors are squeezed with :func:`squeeze_singleton_axis`;
-    5-D tensors are already in the addressed shape and pass through.
-
-    Args:
-        kv_caches: Per-layer tensors shaped ``[2, NB, NH, 1, BS, HS]`` or
-            ``[2, NB, NH, BS, HS]``.
-
-    Returns:
-        list[torch.Tensor]: Views shaped ``[2, NB, NH, BS, HS]``, sharing
-        storage with the inputs.
-
-    Raises:
-        ValueError: If a tensor is neither layout.
-    """
-    if all(tensor.ndim == RBLN_KV_NDIM for tensor in kv_caches):
-        return squeeze_singleton_axis(kv_caches)
-    for tensor in kv_caches:
-        if tensor.ndim != HND_KV_NDIM or tensor.shape[0] != 2:
-            raise ValueError(
-                "RBLN HND KV caches must be [2, NB, NH, 1, BS, HS] or "
-                "[2, NB, NH, BS, HS]; got " + str(tuple(tensor.shape))
-            )
-    return list(kv_caches)
-
-
 def validate_mla_layers(
     kv_caches: Sequence[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Return MLA per-layer KV tensors after pinning their rank.
 
-    Mirrors :func:`hnd_layer_views`' strictness for the MLA layout: the
-    caller has already established the detected format is a per-layer
-    ``[NB, BS, HS]`` MLA layout, so any other rank is a layout drift and fails
-    loudly.
+    Mirrors :func:`squeeze_singleton_axis`'s strictness for the MLA layout:
+    the caller has already established the detected format is
+    ``NL_X_NB_BS_HS``, so any other rank is a layout drift and fails loudly.
     Unlike the HND path there is no axis to squeeze -- the tensors are
     returned unchanged.
 

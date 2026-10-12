@@ -146,36 +146,6 @@ def test_chunk_matches_the_canonical_torch_path() -> None:
         assert torch.equal(got, expected)
 
 
-def test_plain_hnd_layout_shares_the_native_chunk_bytes() -> None:
-    """The 5-D HND format has the native one's layout facts, so it is moved.
-
-    The singleton axis is the only difference, so the same cache handed over
-    as squeezed views must produce byte-identical chunks and round-trip.
-    """
-    native = _paged_layers()
-    ours = _chunks()
-    theirs = _chunks()
-    _transfer(native, ours, TransferDirection.D2H)
-    _transfer(
-        squeeze_singleton_axis(native),
-        theirs,
-        TransferDirection.D2H,
-        engine_kv_format=EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
-    )
-    for got, expected in zip(theirs, ours, strict=True):
-        assert torch.equal(got, expected)
-
-    restored = squeeze_singleton_axis(_paged_layers(fill_random=False))
-    _transfer(
-        restored,
-        theirs,
-        TransferDirection.H2D,
-        engine_kv_format=EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
-    )
-    for got, expected in zip(restored, squeeze_singleton_axis(native), strict=True):
-        assert torch.equal(got, expected)
-
-
 def test_round_trip_restores_the_paged_cache() -> None:
     """Gather then scatter reproduces the source exactly."""
     src = _paged_layers()
@@ -256,12 +226,11 @@ def test_unsupported_layouts_are_refused(engine_kv_format: EngineKVFormat) -> No
         )
 
 
-def test_hnd_rejects_a_foreign_rank() -> None:
-    """A tensor of neither HND rank under an HND format fails loudly."""
-    with pytest.raises(ValueError, match=r"\[2, NB, NH, BS, HS\]"):
+def test_hnd_without_the_singleton_axis_is_refused() -> None:
+    """A 5-D HND cache passes the layout check but fails the strict squeeze."""
+    with pytest.raises(ValueError, match=r"\[2, NB, NH, 1, BS, HS\]"):
         _transfer(
-            [torch.zeros(2, NUM_BLOCKS, NUM_HEADS * BLOCK_SIZE, HEAD_SIZE)]
-            * NUM_LAYERS,
+            squeeze_singleton_axis(_paged_layers()),
             _chunks(),
             TransferDirection.D2H,
             engine_kv_format=EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
