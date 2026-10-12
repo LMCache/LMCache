@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package lmcache.mp;
+
+import "lmcache_driven_service.proto";
+
+message ChunkCompletion {
+  bytes event_ipc_handle = 1;
+  int64 start = 2;
+  int64 end = 3;
+}
+
+message ChunkStoreResponse {
+  bytes terminal_event_ipc_handle = 1;
+  repeated ChunkCompletion chunk_events = 2;
+  bool success = 3;
+}
+
+service ChunkStoreService {
+  rpc StoreWithChunkEvents(StoreRequest) returns (ChunkStoreResponse);
+}
