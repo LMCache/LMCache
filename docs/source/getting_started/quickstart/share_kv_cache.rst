@@ -124,6 +124,10 @@ Configure LMCache instances
 
 Create two configuration files for the P2P sharing setup. The values that differ between the files are the ``lmcache_instance_id`` and the P2P/controller port assignments.
 
+The old ``extra_config.lookup_backoff_time`` option is deprecated and ignored.
+Async lookup no longer adds a delay per request; the serving engine controls
+idle polling backoff. See :ref:`p2p_sharing` for compatibility notes.
+
 Instance 1 configuration (``p2p_example1.yaml``):
 
 .. code-block:: yaml
@@ -147,9 +151,6 @@ Instance 1 configuration (``p2p_example1.yaml``):
     controller_reply_url: "localhost:8400"
     lmcache_worker_ports: 8500
 
-    extra_config:
-      lookup_backoff_time: 0.001
-
 Instance 2 configuration (``p2p_example2.yaml``):
 
 .. code-block:: yaml
@@ -172,9 +173,6 @@ Instance 2 configuration (``p2p_example2.yaml``):
     controller_pull_url: "localhost:8300"
     controller_reply_url: "localhost:8400"
     lmcache_worker_ports: 8501
-
-    extra_config:
-      lookup_backoff_time: 0.001
 
 Save both files in the directory that you will mount into the container (referenced later as ``$YAML_FILES``).
 
