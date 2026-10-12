@@ -146,6 +146,36 @@ def test_chunk_matches_the_canonical_torch_path() -> None:
         assert torch.equal(got, expected)
 
 
+def test_plain_hnd_layout_shares_the_native_chunk_bytes() -> None:
+    """The 5-D HND format has the native one's layout facts, so it is moved.
+
+    The singleton axis is the only difference, so the same cache handed over
+    as squeezed views must produce byte-identical chunks and round-trip.
+    """
+    native = _paged_layers()
+    ours = _chunks()
+    theirs = _chunks()
+    _transfer(native, ours, TransferDirection.D2H)
+    _transfer(
+        squeeze_singleton_axis(native),
+        theirs,
+        TransferDirection.D2H,
+        engine_kv_format=EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+    )
+    for got, expected in zip(theirs, ours, strict=True):
+        assert torch.equal(got, expected)
+
+    restored = squeeze_singleton_axis(_paged_layers(fill_random=False))
+    _transfer(
+        restored,
+        theirs,
+        TransferDirection.H2D,
+        engine_kv_format=EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+    )
+    for got, expected in zip(restored, squeeze_singleton_axis(native), strict=True):
+        assert torch.equal(got, expected)
+
+
 def test_round_trip_restores_the_paged_cache() -> None:
     """Gather then scatter reproduces the source exactly."""
     src = _paged_layers()
@@ -203,14 +233,38 @@ def test_trailing_partial_chunk_is_handled() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_unsupported_format_is_refused() -> None:
-    """Only the HND layout the detector produces is validated."""
-    with pytest.raises(ValueError, match="NL_X_TWO_NB_NH_ONE_BS_HS"):
+@pytest.mark.parametrize(
+    "engine_kv_format",
+    [
+        EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # NHD
+        EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,  # HND, K/V axis after blocks
+        EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,  # HND, K/V packed in content
+        EngineKVFormat.NB_NL_TWO_NH_BS_HS,  # cross-layer HND
+        EngineKVFormat.NL_X_NBBS_ONE_HS,  # MLA, blocks fused with tokens
+        EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,  # MLA plane tuples
+    ],
+    ids=lambda fmt: fmt.name,
+)
+def test_unsupported_layouts_are_refused(engine_kv_format: EngineKVFormat) -> None:
+    """A layout the op sequences cannot address fails on its layout facts."""
+    with pytest.raises(ValueError, match="supports only per-layer"):
         _transfer(
             _paged_layers(),
             _chunks(),
             TransferDirection.D2H,
-            engine_kv_format=EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            engine_kv_format=engine_kv_format,
+        )
+
+
+def test_hnd_rejects_a_foreign_rank() -> None:
+    """A tensor of neither HND rank under an HND format fails loudly."""
+    with pytest.raises(ValueError, match=r"\[2, NB, NH, BS, HS\]"):
+        _transfer(
+            [torch.zeros(2, NUM_BLOCKS, NUM_HEADS * BLOCK_SIZE, HEAD_SIZE)]
+            * NUM_LAYERS,
+            _chunks(),
+            TransferDirection.D2H,
+            engine_kv_format=EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
         )
 
 

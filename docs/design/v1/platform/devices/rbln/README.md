@@ -78,11 +78,20 @@ Consequences of the format being first-class:
   but that table no longer has an `rbln` entry.
 
 - **The squeeze happens where bytes move.** `RblnDeviceOps.multi_layer_block_kv_transfer`
-  accepts only format 15 and the MLA layout (below) and applies
-  `squeeze_singleton_axis` at entry on the HND side, so `kv_ops.py` keeps
-  indexing a 5-D tensor. `kv_layout.py` therefore exports the strict squeeze
-  plus the `is_rbln_kv_layout` predicate -- no tolerant pass-through variant,
-  since the detected format has already established what the caller holds.
+  classifies the format by its `KVFormatSpec` layout facts, not its enum
+  value: a per-layer two-major HND layout (`is_layer_list`, `is_hnd`,
+  `is_two_major`, not `is_fused_packed`) takes the HND sequence, and a
+  per-layer `[NB, BS, HS]` MLA layout (`is_layer_list`, `is_mla`, not
+  `is_pbs_fused` / `is_kv_second_tuple`) takes the MLA one (below). Format 15
+  and `NL_X_TWO_NB_NH_BS_HS` (6) share those facts -- the singleton axis is
+  the only difference -- so `hnd_layer_views` squeezes a 6-D tensor and
+  passes a 5-D one through, and `kv_ops.py` keeps indexing a 5-D tensor.
+  Either rank is still checked strictly; anything else fails loudly.
+
+  ```python
+  spec = get_spec_class(engine_kv_format)
+  is_hnd = spec.is_layer_list and spec.is_hnd and spec.is_two_major and not spec.is_fused_packed
+  ```
 
 - **No transfer kernel handles format 15.** RBLN has no compiled
   block-transfer extension in tree, and the CUDA / SYCL kernels never see an
@@ -139,13 +148,13 @@ How the two layouts relate inside the backend:
   boundary once. The paged layers must be contiguous for those whole-block
   copies to be direct; `validate_mla_layers` pins that too.
 - **Nothing to squeeze, so the rank is pinned instead.**
-  `validate_mla_layers` in `kv_layout.py` mirrors `squeeze_singleton_axis`'s
+  `validate_mla_layers` in `kv_layout.py` mirrors `hnd_layer_views`'
   strictness -- the detected format has already established what the caller
   holds, so any non-3-D tensor is a layout drift and fails loudly at the
   transfer boundary -- but returns the tensors unchanged.
 - **Per-format addressing, shared bookkeeping.**
-  `RblnDeviceOps.multi_layer_block_kv_transfer` dispatches with
-  `lmcache_native.is_mla(engine_kv_format)`; the chunk/block bookkeeping
+  `RblnDeviceOps.multi_layer_block_kv_transfer` dispatches on the format
+  spec's layout facts (see above); the chunk/block bookkeeping
   (blocks-per-chunk split, global prefix skip translated to a per-chunk
   offset, direction handling) is shared between the layouts. The `kv_ops`
   names carry the split: `gather_blocks_to_chunk_hnd` / `_mla` and
