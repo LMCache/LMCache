@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """In-memory stand-ins for the confluent-kafka surface LMCache uses.
 
-Modelled: ``Producer.produce`` / ``flush`` with delivery callbacks, and a
-single-reader ``Consumer`` (``subscribe`` / ``poll`` / ``store_offsets`` /
-``close``) over one logical partition per topic. Consumer groups, retention,
-and rebalancing are out of scope. :func:`install_fake_confluent_kafka` swaps
-the stand-ins in for the real module, so tests run without ``confluent-kafka``
-installed.
+Modelled: ``Producer.produce`` / ``poll`` / ``flush`` with delivery callbacks, and a
+single-reader ``Consumer`` (``subscribe`` / ``assign`` / ``poll`` /
+``close``) over one logical partition per topic. Consumer groups,
+retention, and rebalancing are out of scope; the single partition is
+assigned once, synchronously, in :meth:`FakeKafkaConsumer.subscribe`.
+Offset commits are not modelled at all -- the coordinator does not
+commit, because its checkpoint is its cursor. :func:`install_fake_confluent_kafka`
+swaps the stand-ins in for the real module, so tests run without
+``confluent-kafka`` installed.
 """
 
 # Standard
@@ -19,9 +22,30 @@ import types
 # Third Party
 import pytest
 
-DeliveryCallback = Callable[[object | None, "FakeKafkaRecord"], None]
+DeliveryCallback = Callable[[object | None, "FakeKafkaMessage"], None]
 ProducerFactory = Callable[[dict[str, str | int | bool]], "FakeKafkaProducer"]
 ConsumerFactory = Callable[[dict[str, str | int | bool]], "FakeKafkaConsumer"]
+AssignCallback = Callable[[object, list["FakeTopicPartition"]], None]
+
+OFFSET_INVALID = -1001
+"""Stands in for ``confluent_kafka.OFFSET_INVALID``."""
+
+
+@dataclass
+class FakeTopicPartition:
+    """Stands in for ``confluent_kafka.TopicPartition``.
+
+    Attributes:
+        topic: The partition's topic.
+        partition: The partition number (always ``0``: one logical
+            partition per topic).
+        offset: Where to resume the partition from, as
+            :meth:`FakeKafkaConsumer.assign` reads it.
+    """
+
+    topic: str
+    partition: int = 0
+    offset: int = OFFSET_INVALID
 
 
 class FakeKafkaException(Exception):
@@ -84,15 +108,17 @@ class FakeKafkaBroker:
 class FakeKafkaProducer:
     """Producer double backed by :class:`FakeKafkaBroker`.
 
-    Records queue on :meth:`produce` and are delivered on :meth:`flush`, when
-    every queued delivery callback fires, mirroring the real producer.
+    Records queue on :meth:`produce` and are delivered, callbacks fired, on
+    :meth:`poll` or :meth:`flush`. While :attr:`reachable` is false they stay
+    queued.
 
     Args:
         broker: Broker retaining produced records.
         config: Producer configuration, exposed for assertions.
         delivery_error: Error passed to every delivery callback.
-        remaining_after_flush: Undelivered count :meth:`flush` reports.
         produce_error: Error :meth:`produce` raises instead of queueing.
+        max_queued: Buffer size in records past which :meth:`produce` raises
+            ``BufferError``; ``None`` is unbounded.
     """
 
     def __init__(
@@ -100,14 +126,15 @@ class FakeKafkaProducer:
         broker: FakeKafkaBroker,
         config: dict[str, str | int | bool],
         delivery_error: object | None = None,
-        remaining_after_flush: int = 0,
         produce_error: Exception | None = None,
+        max_queued: int | None = None,
     ) -> None:
         self._broker = broker
+        self._max_queued = max_queued
         self._config = dict(config)
         self._delivery_error = delivery_error
-        self._remaining_after_flush = remaining_after_flush
         self._produce_error = produce_error
+        self.reachable = True
         self._pending: list[
             tuple[str, bytes | None, bytes | None, DeliveryCallback | None]
         ] = []
@@ -124,20 +151,40 @@ class FakeKafkaProducer:
         key: bytes | None = None,
         on_delivery: DeliveryCallback | None = None,
     ) -> None:
-        """Queue a record for delivery during :meth:`flush`.
+        """Queue a record for delivery during :meth:`poll` or :meth:`flush`.
 
         Args:
             topic: Destination topic.
             value: Record value.
             key: Record key.
-            on_delivery: Callback notified during :meth:`flush`.
+            on_delivery: Callback notified when the record is delivered.
 
         Raises:
             Exception: The configured ``produce_error``, when set.
+            BufferError: The buffer already holds ``max_queued`` records.
         """
         if self._produce_error is not None:
             raise self._produce_error
+        if self._max_queued is not None and len(self._pending) >= self._max_queued:
+            raise BufferError("Local: Queue full")
         self._pending.append((topic, key, value, on_delivery))
+
+    @property
+    def queued(self) -> int:
+        """Return how many records wait for delivery."""
+        return len(self._pending)
+
+    def poll(self, timeout: float | None = None) -> int:
+        """Deliver every queued record and fire its callback.
+
+        Args:
+            timeout: Accepted for producer API compatibility.
+
+        Returns:
+            The number of callbacks fired.
+        """
+        del timeout
+        return self._deliver()
 
     def flush(self, timeout: float | None = None) -> int:
         """Deliver every queued record and fire its callback.
@@ -146,12 +193,20 @@ class FakeKafkaProducer:
             timeout: Accepted for producer API compatibility.
 
         Returns:
-            The configured ``remaining_after_flush``; when it is non-zero the
-            queue is left untouched, as a timed-out real flush would.
+            How many records are still queued.
         """
         del timeout
-        if self._remaining_after_flush:
-            return self._remaining_after_flush
+        self._deliver()
+        return len(self._pending)
+
+    def _deliver(self) -> int:
+        """Deliver the queue in order while the broker is reachable.
+
+        Returns:
+            The number of callbacks fired.
+        """
+        if not self.reachable:
+            return 0
         pending, self._pending = self._pending, []
         for topic, key, value, callback in pending:
             if self._delivery_error is None:
@@ -159,8 +214,8 @@ class FakeKafkaProducer:
             else:
                 record = FakeKafkaRecord(topic=topic, key=key, value=value, offset=-1)
             if callback is not None:
-                callback(self._delivery_error, record)
-        return 0
+                callback(self._delivery_error, FakeKafkaMessage(record))
+        return len(pending)
 
 
 class FakeKafkaMessage:
@@ -222,7 +277,6 @@ class FakeKafkaConsumer:
         self._topics: list[str] = []
         self._positions: dict[str, int] = {}
         self._errors: list[object] = []
-        self._stored_offsets: list[int] = []
         self._closed = False
 
     @property
@@ -234,11 +288,6 @@ class FakeKafkaConsumer:
     def subscribed(self) -> tuple[str, ...]:
         """Return the topics passed to :meth:`subscribe`."""
         return tuple(self._topics)
-
-    @property
-    def stored_offsets(self) -> tuple[int, ...]:
-        """Return the offsets passed to :meth:`store_offsets`, in call order."""
-        return tuple(self._stored_offsets)
 
     @property
     def closed(self) -> bool:
@@ -253,13 +302,36 @@ class FakeKafkaConsumer:
         """
         self._errors.append(error)
 
-    def subscribe(self, topics: list[str]) -> None:
+    def subscribe(
+        self, topics: list[str], on_assign: "AssignCallback | None" = None
+    ) -> None:
         """Subscribe to ``topics``, polled in list order.
 
         Args:
             topics: Topics to read from their first record.
+            on_assign: If given, called once, synchronously, with the
+                single partition assigned for each topic -- this fake
+                never rebalances, so there is only ever one assignment,
+                and it never happens later on ``poll()`` the way a real
+                consumer's does.
         """
         self._topics = list(topics)
+        if on_assign is not None:
+            partitions = [
+                FakeTopicPartition(topic, offset=self._positions.get(topic, 0))
+                for topic in self._topics
+            ]
+            on_assign(self, partitions)
+
+    def assign(self, partitions: list[FakeTopicPartition]) -> None:
+        """Seek each partition to the offset given, as a real consumer's
+        ``assign`` does when called from an ``on_assign`` callback.
+
+        Args:
+            partitions: Partitions with the position to resume each from.
+        """
+        for partition in partitions:
+            self._positions[partition.topic] = partition.offset
 
     def poll(self, timeout: float | None = None) -> FakeKafkaMessage | None:
         """Return the next error or unread record, or ``None`` when caught up.
@@ -282,14 +354,6 @@ class FakeKafkaConsumer:
                 return FakeKafkaMessage(records[position])
         time.sleep(min(timeout or 0.0, 0.005))
         return None
-
-    def store_offsets(self, message: FakeKafkaMessage) -> None:
-        """Record ``message``'s offset as stored for the next commit.
-
-        Args:
-            message: The message whose offset the caller has finished with.
-        """
-        self._stored_offsets.append(message.offset())
 
     def close(self) -> None:
         """Mark the consumer closed."""

@@ -10,6 +10,7 @@ import time
 # Third Party
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
+    BlockRemoved,
     BlockStored,
     KVCacheEvent,
     KVConnectorKVEvents,
@@ -20,6 +21,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
+
+try:
+    # Third Party
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorTransferResults,
+    )
+except ImportError:
+    # Older engines consume get_finished() and block-level errors instead.
+    KVConnectorTransferResults = None  # type: ignore[assignment,misc]
 
 try:
     # Third Party
@@ -72,6 +82,7 @@ from lmcache.integration.vllm.utils import (
     mla_only,
     vllm_layout_hints,
 )
+from lmcache.utils import CacheRemoveEvent
 from lmcache.utils import init_logger as lmcache_init_logger
 
 try:
@@ -137,16 +148,23 @@ class LMCacheMPKVEvents(KVConnectorKVEvents):
 
     def __init__(self, num_workers: int) -> None:
         self._aggregator = KVEventAggregator(num_workers)
+        self._batches: list[list[KVCacheEvent]] = []
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
         """Add events from one worker."""
         self._aggregator.add_events(events)
+        self._batches.append(list(events))
 
     def aggregate(self) -> "LMCacheMPKVEvents":
-        """Retain only events seen from every contributing worker."""
-        common_events = self._aggregator.get_common_events()
+        """Keep all pollers' events, preserving transitions within each batch."""
+        remaining = set(self._aggregator.get_all_events())
+        merged: list[KVCacheEvent] = []
+        for events in self._batches:
+            merged.extend(event for event in events if event in remaining)
+            remaining.difference_update(events)
+        self._batches = [merged] if merged else []
         self._aggregator.clear_events()
-        self._aggregator.add_events(common_events)
+        self._aggregator.add_events(merged)
         self._aggregator.reset_workers()
         return self
 
@@ -155,8 +173,8 @@ class LMCacheMPKVEvents(KVConnectorKVEvents):
         self._aggregator.increment_workers(count)
 
     def get_all_events(self) -> list[KVCacheEvent]:
-        """Return all buffered events."""
-        return self._aggregator.get_all_events()
+        """Return all buffered events in worker order."""
+        return [event for batch in self._batches for event in batch]
 
     def get_number_of_workers(self) -> int:
         """Return the number of contributing workers."""
@@ -166,6 +184,7 @@ class LMCacheMPKVEvents(KVConnectorKVEvents):
         """Clear buffered events and reset the worker count."""
         self._aggregator.clear_events()
         self._aggregator.reset_workers()
+        self._batches.clear()
 
 
 # Helper functions
@@ -532,6 +551,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
       enters vLLM's waiting queue. Disabled by default.
+    - lmcache.mp.save_decode_cache: also store chunks containing generated
+      tokens. Defaults to False; only complete prompt chunks are stored.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -565,6 +586,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config = getattr(self, "_kv_cache_config", None)
         validate_mamba_step_alignment(vllm_config, kv_cache_config)
         validate_kv_cache_groups(kv_cache_config)
+        # Flat block errors cannot describe multi-group failures on new vLLM.
+        # Keep single-group reporting so valid partial prefixes remain reusable.
+        self._report_request_errors = (
+            KVConnectorTransferResults is not None
+            and kv_cache_config is not None
+            and len(kv_cache_config.kv_cache_groups) > 1
+        )
 
         group_tokens_per_block = get_group_tokens_per_block(
             vllm_config, kv_cache_config
@@ -578,6 +606,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
+        self._save_decode_cache = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.save_decode_cache", False
+        )
+        if not isinstance(self._save_decode_cache, bool):
+            raise ValueError("lmcache.mp.save_decode_cache must be a boolean")
 
         self._enable_kv_events = bool(
             getattr(vllm_config, "kv_events_config", None) is not None
@@ -704,7 +737,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
-            self._kv_cache_events: LMCacheMPKVEvents | None = None
+            # Worker events aggregated per step, awaiting take_events().
+            self._kv_cache_events: list[KVCacheEvent] = []
 
             # Align-mode Mamba keeps one speculative block per draft token at
             # the tail of a request's block list.
@@ -1036,6 +1070,32 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> "KVConnectorTransferResults":
+        """Poll completed transfers and report multi-group failures by request.
+
+        Args:
+            finished_req_ids: Requests whose generation has finished in vLLM.
+
+        Returns:
+            Completed sends and receives, with failed multi-group receives also
+            in ``failed_recving``. vLLM aggregates all workers' completions
+            before recovering the request. Single-group errors remain available
+            through ``get_block_ids_with_load_errors``.
+        """
+        assert KVConnectorTransferResults is not None
+        sending, receiving = self.get_finished(finished_req_ids)
+        return KVConnectorTransferResults(
+            finished_sending=set(sending or ()),
+            finished_recving=set(receiving or ()),
+            failed_recving=(
+                self.worker_adapter.get_failed_request_ids()
+                if self._report_request_errors
+                else set()
+            ),
+        )
+
     def build_connector_worker_meta(self):
         if not self.lazy_offload:
             return None
@@ -1051,11 +1111,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
-        Get the set of block IDs that failed to load.
+        Get failed block IDs for single-group or legacy vLLM recovery.
 
         Returns:
             Set of block IDs that encountered load errors.
-            Empty set if no load errors occurred.
+            Empty if no load errors occurred or failures are reported by request.
 
         Notes:
             - Applies to both sync- and async-loading requests.
@@ -1067,14 +1127,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             - Sync loading: failed blocks should be reported in the forward
               pass in which they are detected.
         """
+        if self._report_request_errors:
+            return set()
         return self.worker_adapter.get_block_ids_with_load_errors()
 
     def get_kv_connector_kv_cache_events(self) -> LMCacheMPKVEvents | None:
         """Return worker-side KV cache events collected since the last step.
 
         Returns:
-            A vLLM KV event container with completed LMCache store events, or
-            None when disabled or when no store completed.
+            A vLLM KV event container with ``BlockStored`` events for LMCache
+            stores (own completed stores and stores learned from the MP
+            server) and ``BlockRemoved`` events for CPU evictions, or None
+            when disabled or when nothing happened.
         """
         if not self._enable_kv_events:
             return None
@@ -1082,21 +1146,27 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if not events:
             return None
 
-        blocks = [
-            BlockStored(
-                block_hashes=[
-                    _convert_kv_event_hash(block_hash)
-                    for block_hash in event.block_hashes
-                ],
-                parent_block_hash=_convert_kv_event_hash(event.parent_block_hash),
-                token_ids=event.token_ids,
-                lora_id=event.lora_id,
-                block_size=event.block_size,
-                medium=event.medium,
-                lora_name=event.lora_name,
+        blocks: list[KVCacheEvent] = []
+        for event in events:
+            block_hashes = [
+                _convert_kv_event_hash(block_hash) for block_hash in event.block_hashes
+            ]
+            if isinstance(event, CacheRemoveEvent):
+                blocks.append(
+                    BlockRemoved(block_hashes=block_hashes, medium=event.medium)
+                )
+                continue
+            blocks.append(
+                BlockStored(
+                    block_hashes=block_hashes,
+                    parent_block_hash=_convert_kv_event_hash(event.parent_block_hash),
+                    token_ids=event.token_ids,
+                    lora_id=event.lora_id,
+                    block_size=event.block_size,
+                    medium=event.medium,
+                    lora_name=event.lora_name,
+                )
             )
-            for event in events
-        ]
         kv_events = LMCacheMPKVEvents(num_workers=1)
         kv_events.add_events(blocks)
         return kv_events
@@ -1436,13 +1506,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         kv_cache_events = connector_output.kv_cache_events
         if kv_cache_events and isinstance(kv_cache_events, LMCacheMPKVEvents):
-            if self._kv_cache_events is None:
-                self._kv_cache_events = kv_cache_events
-            else:
-                self._kv_cache_events.add_events(kv_cache_events.get_all_events())
-                self._kv_cache_events.increment_workers(
-                    kv_cache_events.get_number_of_workers()
-                )
+            # One aggregated batch per step keeps the workers' event order.
+            self._kv_cache_events.extend(kv_cache_events.aggregate().get_all_events())
 
         if not self.lazy_offload:
             return
@@ -1526,14 +1591,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         Take the KV cache events from the connector.
 
-        Yields:
-            New KV cache events since the last call.
+        Returns:
+            The KV cache events collected since the last call, in the order
+            the workers reported them. The buffer is cleared.
         """
-        if self._kv_cache_events is not None:
-            self._kv_cache_events.aggregate()
-            yield from self._kv_cache_events.get_all_events()
-            self._kv_cache_events.clear_events()
-            self._kv_cache_events = None
+        events = self._kv_cache_events
+        self._kv_cache_events = []
+        return events
 
     def has_pending_push_work(self) -> bool:
         """Return whether vLLM should keep stepping for pending push work.
@@ -1643,6 +1707,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
+                save_decode_cache=self._save_decode_cache,
             )
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
@@ -1681,6 +1746,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
+                save_decode_cache=self._save_decode_cache,
             )
 
             if r_meta is not None:

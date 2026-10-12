@@ -304,13 +304,19 @@ class TestIrrecoverableException:
         thread = monitor.start()
         assert thread is not None
 
-        # Wait for the loop to encounter the exception and exit
-        time.sleep(0.2)
+        # Wait for the exception path to finish: bounded join instead of a
+        # fixed sleep (CI showed ~249ms shutdown vs 200ms assumed here).
+        # stop() runs only after verification, so a broken
+        # exception-driven termination cannot be masked.
+        try:
+            thread.join(timeout=10.0)
 
-        # The thread should have stopped due to the exception
-        assert not thread.is_alive()
-        # System should be marked unhealthy
-        assert monitor.is_healthy() is False
+            # The thread should have stopped due to the exception
+            assert not thread.is_alive()
+            # System should be marked unhealthy
+            assert monitor.is_healthy() is False
+        finally:
+            monitor.stop()
 
     def test_run_loop_stops_immediately_on_irrecoverable(self, monitor):
         """Test that the monitor stops checking after IrrecoverableException."""
