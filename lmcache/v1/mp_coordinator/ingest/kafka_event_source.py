@@ -29,7 +29,6 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 import asyncio
 import threading
-import time
 
 # Third Party
 from pydantic import ValidationError
@@ -124,11 +123,11 @@ class KafkaCacheEventSource(CacheEventSource):
         self._topic = config.topic
         self._position = position
         self._kafka_exception: type[Exception] = KafkaException
-        # Written by the poll thread, read by metrics scrapes.
+        # Counts written by the poll thread; unread_records is computed when
+        # stats() is read.
         self._stats = KafkaSourceStats()
-        # Poll thread only.
+        # Replaced whole by each assignment, never changed in place.
         self._assigned: list["TopicPartition"] = []
-        self._next_unread_refresh = 0.0
         self._consumer = Consumer(
             {
                 "bootstrap.servers": config.bootstrap_servers,
@@ -181,8 +180,14 @@ class KafkaCacheEventSource(CacheEventSource):
 
     def stats(self) -> KafkaSourceStats:
         """Return a copy of what the source has read; see
-        :class:`KafkaSourceStats`."""
-        return replace(self._stats, unread_records=dict(self._stats.unread_records))
+        :class:`KafkaSourceStats`.
+
+        ``unread_records`` is computed here, on the caller's thread, from
+        each assigned partition's high watermark in the consumer's cache
+        (updated by every fetch, no broker round trip). A failure there
+        reaches only the caller, never the poll thread doing the ingest.
+        """
+        return replace(self._stats, unread_records=self._unread_records())
 
     # -- Poll thread -----------------------------------------------------------
 
@@ -212,7 +217,6 @@ class KafkaCacheEventSource(CacheEventSource):
         consumer.assign(partitions)
         self._assigned = list(partitions)
         self._stats.partitions_assigned = len(partitions)
-        self._stats.unread_records = {}
         logger.info(
             "Kafka ingest assigned %d partition(s): %s",
             len(partitions),
@@ -223,7 +227,6 @@ class KafkaCacheEventSource(CacheEventSource):
     def _consume_until_stopped(self) -> None:
         """Poll until :meth:`stop`, offering every record to the gate in order."""
         while not self._stop.is_set():
-            self._refresh_unread_records()
             message = self._consumer.poll(_POLL_TIMEOUT_SECONDS)
             if message is None:
                 continue
@@ -276,18 +279,9 @@ class KafkaCacheEventSource(CacheEventSource):
             summary.stale,
         )
 
-    def _refresh_unread_records(self) -> None:
-        """Recompute :attr:`KafkaSourceStats.unread_records`, at most once a
-        second.
-
-        Reads each assigned partition's high watermark from the consumer's
-        cache (updated by every fetch, no broker round trip), so it runs on
-        the poll thread with the consumer's other calls.
-        """
-        now = time.monotonic()
-        if now < self._next_unread_refresh:
-            return
-        self._next_unread_refresh = now + 1.0
+    def _unread_records(self) -> dict[int, int]:
+        """Return the records not yet read, per assigned partition whose
+        high watermark and next offset are both known."""
         unread_records: dict[int, int] = {}
         for partition in self._assigned:
             try:
@@ -309,4 +303,4 @@ class KafkaCacheEventSource(CacheEventSource):
                 unread_records[partition.partition] = max(
                     0, high_watermark - next_offset
                 )
-        self._stats.unread_records = unread_records
+        return unread_records

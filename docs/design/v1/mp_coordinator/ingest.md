@@ -120,8 +120,8 @@ state does not contain them. One cursor, moved only by a checkpoint, has
 no such gap. The cost: `kafka-consumer-groups --describe` shows this
 group no progress, so the source reports its own lag instead:
 `lmcache_coordinator.kafka.unread_records` per partition (the high
-watermark, read from the consumer's fetch cache on the poll thread, minus
-the next offset to read), plus `kafka.partitions_assigned` and
+watermark from the consumer's fetch cache, minus the next offset to read,
+computed when metrics are read so it can never stall ingest), plus `kafka.partitions_assigned` and
 `kafka.records_read`.
 
 Because the restored view and the resume point cannot disagree, nothing

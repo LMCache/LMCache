@@ -392,6 +392,24 @@ def test_kafka_source_reports_no_unread_records_once_caught_up(
     )
 
 
+def test_ingest_never_depends_on_the_watermark_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lag metric reads watermarks only when stats() is asked for, so a
+    consumer that cannot report them still has every record ingested."""
+    broker = FakeKafkaBroker()
+    for seq in (1, 2, 3):
+        _record(broker, _batch(seq))
+    source, kafka_consumer, recording = _source(monkeypatch, broker)
+
+    def _no_watermarks(*args: object, **kwargs: object) -> tuple[int, int]:
+        raise AttributeError("get_watermark_offsets")
+
+    monkeypatch.setattr(kafka_consumer, "get_watermark_offsets", _no_watermarks)
+
+    assert asyncio.run(_run_until(source, lambda: len(recording.batches) == 3))
+
+
 def test_kafka_source_reports_seekable_status(monkeypatch: pytest.MonkeyPatch) -> None:
     source, _, _ = _source(monkeypatch, FakeKafkaBroker())
 
