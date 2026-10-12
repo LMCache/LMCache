@@ -100,6 +100,7 @@ def _schedule(
             ),
             num_scheduled_tokens={request_id: num_tokens} if num_tokens else {},
             total_num_scheduled_tokens=num_tokens,
+            preempted_req_ids=set(),
         ),
     )
 
