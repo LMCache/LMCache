@@ -660,7 +660,8 @@ class LookupMixin:
                 l1_owners=job.l1_owners,
             )
             # Overlap dedup over the retrievable candidates; dropped
-            # candidates' keys are released by the retrieve's orphan sweep.
+            # candidates stay reserved until a retrieve's sweep or session
+            # end releases them.
             found = self._non_overlapping_after_prefix(
                 fetched, prefix_chunks * chunk_size
             )

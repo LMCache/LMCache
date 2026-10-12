@@ -1638,3 +1638,33 @@ def test_handler_raise_releases_each_claimed_lock_exactly_once(monkeypatch, inje
     ctx.session_manager.remove("req-h-raise")
     assert storage.over_released == []
     assert storage.outstanding() == 0, "a claimed lock was stranded"
+
+
+def test_handler_raise_releasing_swept_matches_strands_no_claim(monkeypatch):
+    """The sweep's release runs before the claim. If it raises, this call
+    has claimed nothing, so the reservation still holds the sent matches'
+    locks and session end frees them; only the swept key whose release
+    raised is left to the L1 read TTL."""
+    blend, ctx, storage, key, matches, retrieve = _retrieve_rig(
+        monkeypatch, "req-h-sweep-raise"
+    )
+    m0, m1, m2, m3 = matches
+    session = ctx.session_manager.get("req-h-sweep-raise")
+    swept = set(session.extras[BlendModule.UNRETRIEVED_KEYS_EXTRA].per_hash[m2.hash])
+    release = storage.finish_read_prefetched
+
+    def finish_read_prefetched(keys, read_locks: int = 1, l1_owners=None) -> None:
+        if swept & set(keys):
+            raise _InjectedError("release of a swept match")
+        release(keys, read_locks, l1_owners)
+
+    storage.finish_read_prefetched = finish_read_prefetched
+
+    # The engine recomputes m2, so the single-shot call sweeps it.
+    with pytest.raises(_InjectedError):
+        retrieve([m0, m1, m3], key.end)
+    assert storage.reads == []
+
+    ctx.session_manager.remove("req-h-sweep-raise")
+    assert storage.over_released == []
+    assert set(storage.locks) == swept, "a claimed lock was stranded"

@@ -165,14 +165,14 @@ locks the request still holds per key, and every lock leaves it exactly once:
 - **Claim.** A retrieve claims one lock on each key it will read, all or
   nothing, and then owns that lock's release: stream-ordered after the
   scatter, or by the storage read context when the read fails or raises.
-  The claim is the last step before the read: the configuration checks and
-  the import of the client's event, which can raise, run before it. A call
-  that cannot claim every key reads nothing and returns
-  `read_locks_not_held`: L1's read check only sees that *some* request holds
-  a lock, so reading a key this request no longer holds could take another
-  request's lock. Only the sparse leg's matches are reserved; a match outside
-  the reservation (such as a segmented-prefix tail chunk) is refused the same
-  way.
+  The claim is the last step before the read: the configuration checks, the
+  import of the client's event and the sweep's release below, which can
+  raise, run before it. A call that cannot claim every key reads nothing and
+  returns `read_locks_not_held`: L1's read check only sees that *some*
+  request holds a lock, so reading a key this request no longer holds could
+  take another request's lock. Only the sparse leg's matches are reserved; a
+  match outside the reservation (such as a segmented-prefix tail chunk) is
+  refused the same way.
 - **Sweep.** A request can be retrieved over several calls, one per engine
   prefill chunk. The client sends each match at most once, in the call whose
   allocated window holds it whole, and calls arrive in increasing window

@@ -593,7 +593,7 @@ class RetrieveMixin:
         chunk, each sent only the matches that lie whole inside that chunk's
         window, in increasing window order. Each call reads under the read
         locks the lookup reserved for the request; see
-        :meth:`_claim_read_locks` for the contract. A call whose keys the
+        :meth:`_sweep_read_locks` for the contract. A call whose keys the
         request no longer holds fails with scatter_ran=False.
 
         Args:
@@ -1141,22 +1141,16 @@ class RetrieveMixin:
         blend_gids: tuple[int, ...],
         slot_bound: int | None,
     ) -> tuple[list[ObjectKey], dict[ObjectKey, int] | None] | None:
-        """Claim this retrieve's read locks and release the unreachable ones.
+        """Release the unreachable read locks, then claim this retrieve's.
 
         TP ranks retrieve the same request concurrently (one handler thread
         per client), and session end or a repeat lookup may race a retrieve,
         so the reservation is only touched under ``_cb_retain_lock``.
 
-        Window contract: a client sends each match at most once, in the call
-        whose allocated window holds it whole, and calls for one request in
-        increasing window order (the CacheBlend vLLM connector does, under
-        chunked prefill). Every TP rank's retrieve for an engine step finishes
-        before any rank's retrieve for the next step. A match this call was
-        not sent is therefore released once it ends at or before the last
-        match this call was sent, and every unsent match is released on the
-        call that sees the whole prompt allocated (``slot_bound >= key.end``),
-        which is the only call of a single-shot request. With ``slot_bound``
-        unknown nothing is released here; session end does it.
+        The release (:meth:`_sweep_read_locks`) runs first, so the claim is
+        the caller's last step before its storage read context: nothing that
+        can raise runs between them and strands the claimed locks. With
+        ``slot_bound`` unknown nothing is swept; session end releases it.
 
         :param session: The request's session.
         :param cb_match_result: The matches this retrieve consumes.
@@ -1169,22 +1163,51 @@ class RetrieveMixin:
             ``len(blend_gids)`` per match, each with one claimed lock this
             call must release, and the L1 owners.
         """
-        n_read = len(blend_gids)
-        to_release: dict[int, list[ObjectKey]] = {}
+        if slot_bound is not None and cb_match_result:
+            self._sweep_read_locks(session, cb_match_result, key, slot_bound)
         with self._cb_retain_lock:
             reservation = session.extras.get(self.UNRETRIEVED_KEYS_EXTRA)
             if reservation is None:
                 return None
             # A match the lookup did not reserve fails the call outright.
-            claimed = reservation.rank_keys(cb_match_result, key, n_read)
-            if claimed is not None and not reservation.claim(claimed):
-                claimed = None
-            if slot_bound is not None and cb_match_result:
-                to_release = reservation.sweep(
-                    {r.hash for r in cb_match_result},
-                    upto=max(r.cur_ed for r in cb_match_result),
-                    final=slot_bound >= key.end,
-                )
+            claimed = reservation.rank_keys(cb_match_result, key, len(blend_gids))
+            if claimed is None or not reservation.claim(claimed):
+                return None
+            return claimed, reservation.l1_owners
+
+    def _sweep_read_locks(
+        self,
+        session: "Session",
+        cb_match_result: list[CBMatchResult],
+        key: IPCCacheServerKey,
+        slot_bound: int,
+    ) -> None:
+        """Release the reserved matches no later retrieve can send.
+
+        Window contract: a client sends each match at most once, in the call
+        whose allocated window holds it whole, and calls for one request in
+        increasing window order (the CacheBlend vLLM connector does, under
+        chunked prefill). Every TP rank's retrieve for an engine step finishes
+        before any rank's retrieve for the next step. A match this call was
+        not sent is therefore released once it ends at or before the last
+        match this call was sent, and every unsent match is released on the
+        call that sees the whole prompt allocated (``slot_bound >= key.end``),
+        which is the only call of a single-shot request.
+
+        :param session: The request's session.
+        :param cb_match_result: The matches this retrieve was sent (non-empty).
+        :param key: This retrieve's cache key.
+        :param slot_bound: Tokens the engine has allocated for the request.
+        """
+        with self._cb_retain_lock:
+            reservation = session.extras.get(self.UNRETRIEVED_KEYS_EXTRA)
+            if reservation is None:
+                return
+            to_release = reservation.sweep(
+                {r.hash for r in cb_match_result},
+                upto=max(r.cur_ed for r in cb_match_result),
+                final=slot_bound >= key.end,
+            )
             l1_owners = reservation.l1_owners
         for n, keys in to_release.items():
             # Nothing will read these keys: release every lock still held.
@@ -1197,4 +1220,3 @@ class RetrieveMixin:
                 sum(len(keys) for keys in to_release.values()),
                 key.request_id,
             )
-        return None if claimed is None else (claimed, l1_owners)
