@@ -649,6 +649,11 @@ jobs:
               run: |
                 echo "LATEST_TAG=${{ github.ref_name }}" >> "$GITHUB_ENV"
 
+            - name: Wait for the release to be installable from PyPI
+              uses: ./.github/actions/wait-for-pypi
+              with:
+                version: ${{ env.LATEST_TAG }}
+
             - name: Build lmcache/vllm-openai container image (cu13)
               run: |
                 docker buildx build --load \
@@ -999,6 +1004,11 @@ jobs:
                   exit 1
                 fi
                 echo "LATEST_RC_TAG=$REF" >> "$GITHUB_ENV"
+
+            - name: Wait for the RC to be installable from PyPI
+              uses: ./.github/actions/wait-for-pypi
+              with:
+                version: ${{ env.LATEST_RC_TAG }}
 
             - name: Build lmcache/vllm-openai container image (cu13)
               run: |

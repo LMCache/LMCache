@@ -95,6 +95,11 @@ jobs:
             - name: Set up Docker Buildx
               uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
+            - name: Wait for the release to be installable from PyPI
+              uses: ./.github/actions/wait-for-pypi
+              with:
+                version: ${{ inputs.lmcache_version }}
+
             - name: Read the torch pin
               run: |
                 TORCH=$(python3 -c 'import re, tomllib; reqs = tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"]; print(next(re.sub(r"^torch\s*==\s*", "", r) for r in reqs if re.match(r"^torch\s*==", r)))')

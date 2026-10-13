@@ -1,0 +1,32 @@
+name: 'Wait for PyPI'
+description: 'Block until a just-published release is listed on the PyPI simple index'
+inputs:
+  package:
+    description: 'Project name on PyPI.'
+    required: false
+    default: 'lmcache'
+  version:
+    description: 'Release version to wait for. A leading "v" is stripped.'
+    required: true
+  timeout:
+    description: 'Give up after this many seconds and fail the step.'
+    required: false
+    default: '600'
+runs:
+  using: "composite"
+  steps:
+    # Guards the gap between publish-pypi finishing and the index serving the
+    # new files. Jobs that install the release this run just published start
+    # seconds after the upload and pin an exact version, so resolving early is
+    # a hard failure rather than something the installer can retry around.
+    - name: Wait for the release to appear on PyPI
+      # GITHUB_ACTION_PATH is this directory, so the checkout's .github/scripts
+      # is two levels up -- found without assuming where the repo was checked out.
+      run: |
+        python3 "${GITHUB_ACTION_PATH}/../../scripts/wait_for_pypi.py" \
+          "${PACKAGE}" "${VERSION}" --timeout "${TIMEOUT}"
+      env:
+        PACKAGE: ${{ inputs.package }}
+        VERSION: ${{ inputs.version }}
+        TIMEOUT: ${{ inputs.timeout }}
+      shell: bash
