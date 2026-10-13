@@ -747,17 +747,11 @@ data parallelism (``dp_size > 1``) are rejected with a clear error.
 KV dtype isolation
 ~~~~~~~~~~~~~~~~~~
 
-The vLLM MP connector projects model, attention KV, skipped-layer and Mamba
-state dtypes into LMCache's engine-neutral ``KVCacheFormat`` schema. LMCache
-hashes its canonical JSON with BLAKE3 to produce ``cache_format``, isolating
-incompatible caches without changing model names. Skipped-layer order and
-duplicates do not affect the identifier.
+The vLLM MP connector uses ``cache_format`` to separate caches with different
+KV precision settings, preventing incompatible reuse such as BF16 and FP8.
 
-Upgrade clients and servers together; formatted keys miss legacy objects.
-Raw-block readers accept older four-field and salted five-field keys as
-``cache_format=""``; six-field keys retain the supplied format. These legacy
-entries cannot match a non-empty format. Clients using the earlier vLLM hash
-also miss entries generated with the LMCache hash.
+Upgrade clients and servers together. Existing cached entries will miss and
+be regenerated.
 
 Decode context parallelism (DCP)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

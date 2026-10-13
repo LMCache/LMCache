@@ -11,11 +11,7 @@ import blake3
 
 @dataclass(frozen=True)
 class KVCacheFormat:
-    """Raw precision settings that determine an opaque KV cache namespace.
-
-    Engine adapters supply dtype names as strings. Raw settings stay distinct
-    even when they resolve to equivalent encodings, such as auto and bfloat16.
-    This schema covers precision, not layout, weight revisions or scale values.
+    """KV precision settings used to isolate incompatible caches.
 
     Attributes:
         model_dtype: Model computation dtype name.
