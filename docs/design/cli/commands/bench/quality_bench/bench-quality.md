@@ -1,0 +1,513 @@
+# `lmcache bench quality` — Design
+
+**Status:** Prototype  |  **Date:** 2026-10-12
+
+## Overview
+
+`lmcache bench quality` answers one question: **does CacheBlend change the
+answers?** It sends the same QA prompts to a full-recompute reference engine
+and to a CacheBlend engine, scores both against gold answers, and prints one
+verdict — `PASS`, `FAIL`, `UNDERPOWERED`, or `INVALID` — that CI can gate on.
+
+`bench engine --workload rag-qa-quality` already scores one stack's answers.
+`bench quality` adds what a comparison needs on top of that: a plan shared by
+every arm, an explicit description of how the passages got into the cache
+(the *reuse manifest*), a noise floor from repeated reference runs, a check
+that blending actually happened, and a statistical verdict.
+
+```bash
+lmcache bench quality \
+    --reference-url http://localhost:8000 \
+    --blend-url     http://localhost:8001 \
+    --blend-metrics-url http://localhost:9090/metrics \
+    --model Qwen/Qwen3-8B \
+    --dataset hotpotqa --limit 200 \
+    --scenario independent \
+    --chunk-size 256 \
+    --judge-url http://judge-host:8000 --judge-model openai/gpt-oss-120b
+```
+
+Exit status is `1` on `FAIL` or `INVALID`, `0` otherwise.
+
+### Scope
+
+| In scope | Not yet |
+|---|---|
+| Two reuse scenarios: `independent`, `reordered` | Other placements (shared prefix, worst-case position) |
+| QA datasets: HotpotQA, MuSiQue, FinanceBench, any local QA file | Non-QA task categories (next step) |
+| LLM judge (RAGAS `AnswerAccuracy`) as the reference metric (Section 5); judge-free `match` and token F1 as a screen | Judge-derived loss tags for non-QA tasks |
+| Existing endpoints: the user launches each engine | Launching and restarting engines |
+
+Any file in a supported QA schema loads with `--dataset <path>`.
+
+---
+
+## 1. Arms
+
+| Role | Flag | Engine | Stores passages first? |
+|---|---|---|---|
+| `reference` | `--reference-url` (required) | vLLM, prefix caching **off** | No |
+| `apc` | `--apc-url` (optional) | vLLM, prefix caching on, no LMCache | Yes |
+| `blend` | `--blend-url` (required) | vLLM + CBKVConnector + blend server | Yes |
+
+The reference runs `--reference-repeats` times (default 2). Its disagreement
+with itself is the **flip rate**, the noise floor below which no arm can be
+told apart. The optional `apc` arm should match the reference exactly, since
+prefix caching reuses KV only at its original positions. A gap there points
+at the harness or the engine, not at CacheBlend.
+
+Arms run one after another (all reference passes, then `apc`, then `blend`)
+and questions run sequentially, so per-question counter deltas belong to that
+question. **Each caching arm must start from an empty cache**: restart its
+engine and the blend server before the run. The command does not do this for
+you yet.
+
+## 2. Plan and reuse scenarios
+
+`build_plan` turns the dataset into a `QualityPlan`:
+
+* **store requests** sent to caching arms before measuring (`max_tokens=1`),
+* **one measured prompt per question**, byte-identical across arms,
+* **per-passage provenance** — the reuse manifest.
+
+Prompts are built by the shared `quality/prompts.py` and padded by
+`quality/alignment.py` (see Section 4) so that each passage starts on a chunk
+boundary and fills whole chunks.
+
+| Scenario | Stored as | Measured as | What it tests |
+|---|---|---|---|
+| `independent` | each distinct passage alone, once | the sample's passages in dataset order | the basic RAG case: passages cached separately, combined at query time |
+| `reordered` | each sample's passages together, in dataset order | the same passages in a seeded permutation (never the identity) | reuse at a different position *and* with different neighbors |
+
+Every passage a question uses is stored before the first question is
+measured, so `--limit` (measuring a prefix of the dataset) never changes what
+a measured question can reuse.
+
+### Reuse manifest (`manifest.jsonl`)
+
+One record per question: the prompt hash, scenario, chunk size, and per
+passage: `passage_id` (content hash), `origin` (`alone` or
+`with_sample_passages`), the store request id, `stored_position`,
+`measured_position`, `is_evidence`, and `measured_earlier_in` (see below).
+
+Evidence comes from the dataset when it marks it (MuSiQue `is_supporting`,
+HotpotQA `supporting_facts`, `context_metadata[].gold`), otherwise from
+whether the passage contains a gold answer string. `evidence_source` records
+which (`dataset`, `answer_string`, `none`), so loss can later be split by
+"was the moved passage the one that mattered".
+
+### Reuse from earlier measured questions
+
+The store request is not always where the blend arm's KV for a passage comes
+from. The blend arm caches every measured prompt too, and the blend server
+registers each stored chunk in a fingerprint index keyed by the chunk's
+**content** (`BlendTokenRangeMatcher` in
+`lmcache/v1/multiprocess/modules/blend/matcher.py`). Chunk alignment makes a
+passage hash the same in every prompt, so when a passage recurs in a later
+question, which copy is reused depends on the server's registration policy:
+
+| Blend server | Policy | Copy reused by a later question |
+|---|---|---|
+| default (`enable_dedup_content=False`) | newest registration overwrites the content's table slot | the **latest earlier measured prompt** holding the passage |
+| `--enable-dedup-content` | content already indexed is skipped | the **first** copy, i.e. the store request, as the manifest assumes |
+
+Under the default, the reused copy is itself a blend product (KV reused and
+partly recomputed in another question's context), so a later question can
+measure blending of already-blended KV rather than the configured scenario,
+and its `store_request_id` is not where its KV came from.
+
+How often this can happen is a property of the dataset, known before any
+request: per passage, `measured_earlier_in` lists the earlier measured
+questions that also held it, and `summary.json` reports
+`measured_earlier_share`, the share of measured passages with any. Datasets
+whose questions draw on their own paragraph sets (HotpotQA, MuSiQue) recur
+rarely. Those retrieved from a shared corpus (FinanceBench, RAGAS hand-offs
+from a real retriever) recur often.
+
+**Potential fix:** run the blend server with `--enable-dedup-content` for
+this bench. Every store request runs before the first question, so the store
+copy is then the first registration of each passage, and stays the source
+until it is evicted (which `stale_chunks` reports). The bench cannot detect
+the flag, so this would be a documented requirement.
+
+**Open question:** is dedup mode representative of production serving? If
+production runs newest-wins, that is also how production reuses recurring
+documents, and requiring dedup mode would measure a configuration nobody
+serves.
+
+## 3. Engagement
+
+A blend arm that silently fell back to recompute would score like the
+reference and `PASS`. When `--blend-metrics-url` is given, the runner reads
+the blend server's Prometheus counters before and after each measured
+question:
+
+| Counter | Meaning |
+|---|---|
+| `lmcache_blend_lookup_requested_tokens_total` | prompt tokens looked up |
+| `lmcache_blend_lookup_prefix_hit_tokens_total` | served as an exact prefix |
+| `lmcache_blend_lookup_non_prefix_hit_tokens_total` | served by blending at a new position |
+| `lmcache_blend_lookup_segmented_prefix_hit_tokens_total` | prefix chunks past an L2 load gap, loaded at their original positions (`--enable-segmented-prefix` only) |
+| `lmcache_blend_lookup_stale_chunks_total` | fingerprint matched, KV gone |
+| `lmcache_blend_fingerprints_registered_total` | chunks indexed (cap 2^20 per server lifetime) |
+
+**Blend share** = non-prefix hit tokens / requested tokens. The verdict is
+`INVALID` if the run-wide share, or the share in any window of 10 consecutive
+questions, is below `--min-blend-share` (default 0.3). The windowed check
+catches a run that blended early and then stopped (e.g. the fingerprint table
+filled). Without a metrics URL, engagement is reported as unmeasured and
+cannot make the verdict `INVALID`.
+
+Segmented-prefix tokens stay outside the share's numerator: they are reused
+at their original positions, not blended. They still count in the
+denominator, so L2 load failures lower the share. Reported separately (and
+named in the `INVALID` reason when present), they distinguish "storage lost
+part of the prefix" from "blending did not fire". A passage that moves back
+to its stored position in `reordered` is unaffected: it follows different
+content than when stored, so it is found by the fingerprint index and counts
+as a non-prefix (blended) hit.
+
+The server may publish a lookup slightly after its response completes, so
+the pass's opening and closing reads each wait a short settle delay. The
+opening wait keeps late store-phase lookups, mostly misses, from diluting the
+measured share. Per-row shares are read without waiting and can lag by one
+question.
+
+A failed counter read aborts the run, and answers are written only after
+every arm has run, so the reads are guarded twice. The endpoint is read once
+before the arms run: otherwise a bad `--blend-metrics-url` would surface only
+when the blend pass starts, after every reference pass. Each read also retries
+a failed fetch (3 attempts, 1 s apart), so one flaky scrape does not discard
+an hours-long run.
+
+## 4. Shared modules
+
+`bench quality` builds on the answer-quality helpers in
+`engine_bench/quality/`, which it shares with `bench engine --workload
+rag-qa-quality`. Sharing them means both benchmarks build byte-identical
+prompts and score answers the same way, so their results are comparable:
+
+* `alignment.py` — `ChunkAligner`: pads the system block so chat-template
+  prefix + system block is a whole number of chunks, and pads each passage to
+  whole chunks with seeded single-token filler.
+* `prompts.py` — the QA system prompt, question template, and message
+  composition for measured and store requests.
+* `dataset.py` — `load_samples` and the hub dataset registry. A `Sample`
+  carries the dataset's evidence markers (`evidence_indices`), and the
+  RAGAS hand-off shape (`user_input`, `retrieved_contexts`, `reference`)
+  loads directly.
+* `scoring.py` — answer extraction, `answer_match`, `is_abstention` and
+  token F1 (Section 5).
+
+## 5. Scoring and verdict
+
+**Metrics.** Two kinds, for different jobs.
+
+**The reference metric is an LLM judge**: `--judge-url <endpoint>
+--judge-model <name>`, scoring each extracted answer with RAGAS
+`AnswerAccuracy` (0–1 in steps of 0.25). It is the default whenever a judge
+endpoint is given. Its scores are the numbers to report, because the
+lexical scorers understate the size of a loss (below).
+
+`judge.py` reimplements the metric instead of depending on ragas, which
+would pull in langchain, `datasets` and a dozen other packages. The pieces
+are copied directly from ragas 0.4.3 (`ragas/metrics/_nv_metrics.py`, Apache-2.0):
+
+- **Two prompts.** The answer is rated against the reference, then with the
+  roles swapped, each on a 0/2/4 scale. A test pins both templates to
+  ragas's by SHA-256.
+- **Combining.** The score is the mean of the two ratings divided by 4. If
+  one prompt never yields a rating, the other is used alone.
+- **Parsing.** The smallest digit 0–4 anywhere in the reply wins.
+- **Calls.** Temperature is 0.10 on every call, whatever the judge client
+  says. Each prompt is retried up to 5 times while the reply has no rating.
+
+**Operating rules:**
+
+- **Endpoint.** The judge should be a separate deployment from the arms
+  under test.
+- **Judge sanity check.** Before the arms run, the judge rates a right and a
+  wrong answer to a sanity-check question on both prompts and must give 4 and 0.
+  Reachability alone is not enough: under the ragas parser, a thinking model
+  served without a reasoning parser has digits from its reasoning read as
+  the rating, almost always 0. That zeroes every arm alike, Δ vanishes, and
+  the verdict is a silent `PASS`. The sanity check goes through the same retries
+  and parser as real answers and is never cached, so every run re-checks.
+- **Request failures.** Transient errors (connection, 408/409/429, 5xx) are
+  retried by the OpenAI client, 5 times with backoff, with a 120 s
+  per-request timeout. They do not consume the 5 rating retries, which are
+  resamples, not recovery. A request that still fails aborts scoring: the
+  judge is down, and marking answers unrated would only shrink the
+  comparison. The manifest and answers are written before scoring so the
+  arm runs survive, and the judge cache keeps finished judgments.
+- **What is judged.** The reference is the question's first gold answer.
+  Unparsed answers score 0 without a judge call.
+- **Caching.** Identical (question, answer, reference) triples are judged
+  once, and judgments are cached in `judge_cache.jsonl` for later runs.
+- **Unrated questions.** A question any arm has no rating for is left out
+  of the comparison and counted as `unscored_questions`. Dropping it from
+  every arm alike costs only power while the gaps are random. Above 5%
+  (`MAX_UNSCORED_SHARE`) the judge is malfunctioning, and the gaps are likely
+  to track the answers (e.g. long blend answers failing to parse), so the
+  verdict is `INVALID`.
+- **Fingerprint.** The judge model and the metric go into the run
+  fingerprint, so results from different judges are never compared.
+
+**Parity with ragas.** The port was checked against ragas 0.4.3 itself by
+judging the same answers with both, against the same judge endpoint:
+
+- **Port and ragas are interchangeable.** They send byte-identical requests
+  (checked offline against a recording server), so their scores are draws
+  from the same distribution, and where they differ neither one is the odd
+  one out more often than chance predicts.
+- **The judge is the noise, not the port.** At temperature 0.10 a judge
+  disagrees with itself on a few percent of answers, almost always by one
+  0.25 step. Port-vs-ragas disagreement is at that same level.
+- **Comparisons carry over.** Arm-vs-arm score differences computed with
+  the port match those computed with ragas to within that judge noise.
+
+The check needs a GPU judge endpoint, so it is not part of the unit tests.
+
+**Without a judge, the lexical scorers are a screen.** Use them for CI and
+quick checks, not for reported numbers.
+
+`--verdict-metric match` (default without a judge): the answer states a gold
+answer — normalized phrase match, or every gold number appears in the answer
+within 0.5%, also under a unit rescale (a power of 1000) when either side
+names a scale ("million", "5B"). So `$11,588 million` and `$11.588 billion`
+match `$11588.00`, while a count of `3` does not match `3,000`. Bare years
+are context and never count as figures, digits inside words are not
+numbers, and typographic punctuation (curly quotes, non-breaking hyphens) is
+folded to ASCII first. An answer that abstains never matches unless the gold
+is itself a negative ("There are none"). `--verdict-metric f1`: SQuAD token
+F1, kept for continuity with `rag-qa-quality`.
+
+Compared with LLM-judge scores on the same answers, `match` agrees with the
+judge on most answers and tends to reach the same PASS/FAIL. But it
+understates the size of a loss, and misses many correct answers whose gold
+is a sentence rather than a name or figure. Token F1 is weaker still: it can
+pass a clear regression outright. Quote magnitudes from the judge.
+
+**Verdict.** Δ = mean(blend) − mean(reference), where the reference is the
+first reference run. SE is the standard error of the paired per-question
+differences.
+
+| Verdict | Condition |
+|---|---|
+| `INVALID` | engagement measured and below `--min-blend-share` (overall or any window) / an arm run with no successful request / a failed store request / more than 5% of questions unscored. `invalid_reasons` lists which |
+| `PASS` | \|Δ\| ≤ `--tolerance` (default 0.05) |
+| `FAIL` | \|Δ\| > tolerance **and** \|Δ\| > 2·SE |
+| `UNDERPOWERED` | otherwise. Reports `samples_needed` = ⌈(2·sd/\|Δ\|)²⌉ |
+
+The comparison is two-sided. Reusing KV should not improve answers, so a
+blend arm far above the reference points at the setup (e.g. a reference
+that is not really recomputing) as much as a loss does, and fails the same
+way.
+
+`INVALID` checks run before the scores are compared because `RequestSender`
+turns a failed request into an empty answer scored `0`: with both arms
+unreachable, every score is `0`, Δ is `0`, and the run would otherwise
+`PASS`. A failed store request means the arm did not cache what the
+scenario says, so its answers do not measure that scenario.
+
+Later reference runs and the `apc` arm, if present, are compared with the
+first reference the same way and reported alongside. They do not set the
+verdict. The flip rate is the share of questions whose score differs between
+the first two reference runs.
+
+**Loss tags.** Each question where blend scores below the reference is tagged
+`abstention` (the model said the passages lack the answer), `empty` (no
+parsed answer), `wrong_value` (it answered with a string that appears in the
+prompt, i.e. read the wrong passage), or `wording` (anything else).
+`blend_higher` and `none` cover the other rows.
+
+## 6. Outputs (`--output-dir`, default `quality_results/`)
+
+Each run writes into `<output-dir>/<YYYYmmdd-HHMMSS>/`, named for its start
+(`-2`, `-3`, ... on a same-second collision -- `os.mkdir` claims the name
+atomically). A shared directory would let runs mix: a rerun without
+`--apc-url`, or with fewer `--reference-repeats`, would leave the earlier
+run's `answers_*.jsonl` behind, and a run that aborts while judging (answers
+are written before scoring) would leave its answers next to the earlier
+run's `summary.json`. Only `judge_cache.jsonl` sits at the top level, so
+reruns still share judgments.
+
+| File | Contents |
+|---|---|
+| `manifest.jsonl` | reuse manifest (Section 2) |
+| `answers_<label>.jsonl` | per question per arm run: response, parsed answer, TTFT, output tokens, counter delta |
+| `rows.jsonl` | per question: gold, score per arm, answers, loss tag, reference flipped, blend share, evidence; with the judge, also each arm's `match` score as a cross-check |
+| `summary.json` | verdict and `invalid_reasons`, metric, tolerance, Δ, SE, flip rate, engagement, per-arm counts, evidence sources (`dataset` / `answer_string` / `none`), `measured_earlier_share`, judge model and unscored questions, `run_fingerprint` |
+| `judge_cache.jsonl` | top level, not per run: judge ratings by (judge model, question, answer, reference), reused by every later run into the same `--output-dir`. An unparsable line (a partial append from a killed run) is skipped and re-judged, and terminated so the next append starts a fresh line. The key trusts the judge model name; change what serves it and the cache must be deleted |
+
+`run_fingerprint` covers model, dataset, task type, `--limit`, scenario,
+chunk size, output budget, template kwargs, seed, verdict metric, the judge
+model when judging, and a digest of every measured prompt. Two summaries are
+comparable only when it matches.
+
+## 7. Module layout
+
+```text
+lmcache/cli/commands/bench/
+├── engine_bench/quality/     # shared with rag-qa-quality (Section 4)
+│   ├── alignment.py        # ChunkAligner: chunk-aligned padding
+│   ├── prompts.py          # QA prompt text and composition
+│   ├── dataset.py          # load_samples, Sample (with evidence_indices)
+│   └── scoring.py          # answer extraction, answer_match, is_abstention, F1
+└── quality_bench/
+    ├── __init__.py         # QualityBenchCommand ("lmcache bench quality")
+    ├── command.py          # arguments, config_from_args, orchestration
+    ├── config.py           # ArmRole, ReuseScenario, TaskType, VerdictMetric, JudgeSettings, QualityBenchConfig
+    ├── task.py             # check_task: refuse datasets that are not short-answer QA
+    ├── plan.py             # build_plan, SamplePlan, reuse manifest, evidence coverage
+    ├── blend_counters.py   # Prometheus counter parsing and sources
+    ├── runner.py           # ArmRunner: store, measure, per-question counters
+    ├── judge.py            # AnswerAccuracyJudge: RAGAS AnswerAccuracy port, cache
+    ├── verdict.py          # score tables, engagement, decide, rows, loss tags
+    └── report.py           # results files and terminal summary
+```
+
+## 8. Tests
+
+`tests/cli/commands/bench/quality_bench/` runs without a GPU or network:
+`FakeSender` stands in for `RequestSender`, `SteppingCounters` for the
+Prometheus source, and the fake tokenizer from `engine_bench` for the model's.
+`FakeJudgeClient` stands in for the judge endpoint.
+- `test_command.py` drives `run_quality_bench` end to end for `PASS`,
+  `FAIL` and `INVALID`, with and without the judge, covers the task guard,
+  and checks that reruns get their own directory and share the judge cache.
+- `test_judge.py` pins the prompts to ragas's by hash, and covers ragas's
+  parsing quirks, retries, the sanity check, caching (including a truncated cache
+  file) and deduplication.
+- `test_report.py` covers run-directory naming and same-second collisions.
+
+## 9. Extending beyond QA
+
+**Status:** design direction. Implemented so far: the task type with its
+refusal (Section 9.2, item 1), the judge scorer (Section 5), and evidence coverage in the
+summary (Section 9.4). Everything else here is planned.
+
+The prototype measures QA only. The next step is other task categories
+(summarization, code, long-form), and datasets that carry no evidence
+markers. Most of the pipeline already doesn't depend on the task. The parts
+that do are listed here, with how each should generalize.
+
+### 9.1 What depends on the task
+
+| Piece | Today | Task-specific? |
+|---|---|---|
+| Dataset loading (`load_samples`) | Any record with passages, a prompt and a reference | No. MultiNews loads unchanged. |
+| Alignment, reuse scenarios, reuse manifest | Operate on passages | No |
+| Runner, engagement counters | Operate on requests | No |
+| Verdict statistics (paired Δ, SE, PASS/FAIL/UNDERPOWERED) | Operate on a per-question score in [0, 1] | No |
+| Prompt (`QA_SYSTEM_PROMPT`, question template) | "Answer the question", `<final_answer>` tags | **Yes** |
+| Answer extraction (`extract_final_answer`) | Last `<final_answer>` region | **Yes** |
+| Scorer (`answer_match`, token F1) | Short-answer matching | **Yes** |
+| Loss tags (`abstention`, `wrong_value`) | Short-answer heuristics | **Yes** |
+| Evidence fallback (gold string in a passage) | Short golds only | **Yes** |
+
+Without a guard, a summarization file would load, be sent the QA prompt,
+and be scored with `match` against a multi-paragraph gold that no answer
+ever contains. Every arm would score ~0 and the verdict would be a
+meaningless PASS. `task.check_task` now refuses such a dataset before any
+request is sent (Section 9.2).
+
+### 9.2 Task as an explicit unit
+
+1. **Every run declares a task type** *(implemented)*. `--task` takes
+   `qa`, the only type so far. `check_task` refuses a QA run whose
+   reference answers have a median of more than 50 words.
+   - Measured medians: 2 words for HotpotQA, 2Wiki and MuSiQue, 9 for
+     FinanceBench, 200 for MultiNews.
+   - So a summarization file fails with an error instead of producing a
+     meaningless PASS.
+   - When a second task type is added, hub registry entries can declare
+     their type and the flag can default to it.
+2. **One task object owns the task-specific pieces.** It holds the prompt
+   builder, answer extraction, scorer, loss classifier and evidence locator.
+   The rest of the pipeline sees only a score in [0, 1] and a tag per
+   question. The verdict already works on continuous scores, so judge
+   scores, ROUGE-L or pass@1 all fit unchanged.
+3. **QA stays the reference implementation.** Today's functions become the
+   QA task's members. Abstention and `wrong_value` tags stay inside it.
+   `is_abstention` is calibrated on short answers and flags normal news
+   summaries as abstentions.
+
+### 9.3 Scoring non-QA tasks needs a judge
+
+Lexical scores don't see regressions on long outputs. On multi-document
+summarization (e.g. MultiNews), a judge can register a clear loss of
+accuracy and groundedness while token F1 and ROUGE-L stay flat: a long
+summary shares most of its tokens with the reference whether or not it is
+faithful to the passages.
+
+Non-QA tasks therefore need an LLM-judge scorer from the start. The QA
+judge (Section 5) already covers most of what that needs:
+
+- **A fixed judge** *(implemented)*. The model is recorded in the run
+  fingerprint.
+- **Cached judgments** *(implemented)*. Re-scoring or adding an arm doesn't
+  re-judge unchanged answers.
+- **A judge noise estimate** *(planned)*. This is the analog of the
+  reference flip rate: re-judge a subset, or compare with a second judge
+  from a different model family.
+
+A summarization task would add a groundedness-style judge prompt and
+judge-derived loss tags: omission (accuracy drops with groundedness intact)
+and unsupported content (groundedness drops).
+
+`match` remains useful as a cheap, deterministic QA gate (Section 5).
+
+### 9.4 Datasets without evidence markers
+
+Evidence markers are the exception. Of the common multi-passage datasets
+below, only HotpotQA ships them. The hub copy of MuSiQue (`--dataset
+musique`) also has them, but the LongBench copy does not. The plan records
+each question's `evidence_source` (`dataset`, `answer_string` or `none`), so
+missing markers never break a run. But the evidence split quietly covers
+fewer questions. Measured on samples of the public datasets (sample size in
+parentheses):
+
+| Dataset | Dataset markers | Gold string found in a passage | No evidence |
+|---|---|---|---|
+| HotpotQA (100) | 100 | – | 0 |
+| FinanceBench (150) | 0 | 6 | 144 |
+| 2WikiMultihopQA (200) | 0 | 178 | 22 |
+| MuSiQue, LongBench copy (200) | 0 | 181 | 19 |
+| MultiNews (200) | 0 | 0 | 200 |
+
+- **Coverage is reported** *(implemented)*. `summary.json` and the terminal
+  summary show the question count per `evidence_source`. An analysis built
+  on 6 of 150 questions then says so, rather than reading as "no losses on
+  evidence passages".
+
+**Planned:**
+
+- **Let the task locate evidence.**
+  - *QA:* use number-aware matching. Using `answer_match`'s number rules,
+    without its abstention check, which misreads passages, finds evidence
+    for 62 of 150 FinanceBench questions instead of 6. On HotpotQA, the
+    passages it finds overlap the dataset's markers on 94 of 100 questions.
+  - *Summarization:* every passage is evidence, so the useful split is by
+    how a passage was reused (blended or freshly computed), which the
+    manifest already records.
+- **Never require markers.** A task without an evidence locator reports
+  `none` and skips the split.
+
+### 9.5 Invariants
+
+Arms, reuse scenarios, engagement checks and the verdict rule carry over
+unchanged. Multi-document summarization maps directly onto `independent`
+(each article cached alone) and `reordered`. A new task adds a task object
+and a dataset entry. It doesn't touch the plan, runner or report.
+
+## 10. Next steps
+
+1. Summarization as the second task type, scored by the judge (Section 9.2, Section 9.3).
+2. Number-aware evidence location for QA (Section 9.4).
+3. More placements: shared prefix + reused passages, worst-case position.
+4. Engine lifecycle: clear or restart caches between arms
+   (`lmcache kvcache clear`) so a run needs no manual restart.
+5. Sweep mode: `recomp_ratio` / `check_layer` grid with one verdict per point.
+6. Reuse from earlier measured questions (Section 2): settle the open question of
+   whether to require `--enable-dedup-content` on the blend server.
