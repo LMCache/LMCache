@@ -2,6 +2,7 @@
 """gRPC request server construction for multiprocess requests."""
 
 # Standard
+from functools import partial
 from typing import Any, Callable
 import threading
 
@@ -10,6 +11,7 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.mp_observability.propagation import run_with_trace_context
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
@@ -106,17 +108,24 @@ class _GeneratedServicer:
                 )
                 raise RuntimeError("gRPC context abort unexpectedly returned")
             payloads = registered.request_decoder(request)
+            carrier = {
+                key: value
+                for key, value in context.invocation_metadata()
+                if key in ("traceparent", "tracestate") and isinstance(value, str)
+            }
+            invoke = partial(
+                run_with_trace_context, carrier, registered.handler, *payloads
+            )
             if registered.handler_type is HandlerType.SERIALIZED:
                 with self._serialized_handler_lock:
-                    result = registered.handler(*payloads)
+                    result = invoke()
             elif registered.handler_type is HandlerType.BLOCKING and (
                 registered.requires_client_affinity
             ):
                 affinity_key = client_affinity_key(context)
                 with self._affinity_submit_lock:
                     future = self._affinity_pool.submit(
-                        registered.handler,
-                        *payloads,
+                        invoke,
                         affinity_key=affinity_key,
                     )
                 result = future.result()
@@ -124,7 +133,7 @@ class _GeneratedServicer:
                 # gRPC already runs this call on a worker. Bound handler
                 # concurrency without a second executor submission and wait.
                 with self._normal_slots:
-                    result = registered.handler(*payloads)
+                    result = invoke()
             else:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"

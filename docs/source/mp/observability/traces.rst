@@ -48,8 +48,7 @@ without headers still decode; older map decoders ignore the extra field.
 
 The shared key's optional protobuf field is kept aligned with its Python
 dataclass. This keeps the existing gRPC structural codec usable even when
-propagation is off. The baseline transport still requires the separate gRPC
-metadata propagation change to forward a caller's parent through gRPC.
+propagation is off. gRPC uses per-call metadata as described below.
 
 Events capture the parent before the EventBus drain thread or an asynchronous
 GPU callback runs. The standard MP subscriber's existing ``request`` span uses this
@@ -62,8 +61,21 @@ carried by this feature.
 The propagation switch is off by default. Without the OpenTelemetry API,
 request handlers use their original path. This boundary covers keyed ZMQ
 requests, CPU event submission, and CacheBlend roots created from event
-snapshots. It does not cover gRPC, keyless control calls, L2 scheduling
-queues, or native storage backends.
+snapshots. Keyless ZMQ calls, L2 scheduling queues, and native storage
+backends are outside this transport boundary.
+
+W3C context over gRPC
+~~~~~~~~~~~~~~~~~~~~~
+
+With ``LMCACHE_MP_TRACE_CONTEXT=1`` in both processes, the gRPC client sends
+``traceparent`` and ``tracestate`` as per-call metadata. This supports keyed
+requests and keyless session controls. The server attaches the caller context
+in the executing sync, normal-pool, or affinity-pool worker and restores the
+previous context even if the handler raises. Existing client affinity metadata
+is preserved. No provider or exporter is installed by the transport.
+
+For streaming calls, this covers subscription setup only. The background
+response-forwarding thread does not inherit the caller context.
 
 Per-Request Hit-Rate Attributes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

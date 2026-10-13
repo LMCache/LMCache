@@ -4,6 +4,7 @@
 # Standard
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any, Callable
 import asyncio
 import threading
@@ -13,6 +14,7 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.mp_observability.propagation import run_with_trace_context
 from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBinding
@@ -141,10 +143,14 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
         loop = asyncio.get_running_loop()
         try:
             payloads = registered.request_decoder(request)
+            carrier = {
+                key: value
+                for key, value in context.invocation_metadata()
+                if key in ("traceparent", "tracestate") and isinstance(value, str)
+            }
+            invoke = partial(run_with_trace_context, carrier, handler, *payloads)
             if registered.handler_type is HandlerType.SERIALIZED:
-                result = await loop.run_in_executor(
-                    self._serialized_pool, handler, *payloads
-                )
+                result = await loop.run_in_executor(self._serialized_pool, invoke)
             elif registered.handler_type is not HandlerType.BLOCKING:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"
@@ -152,15 +158,12 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
             elif registered.requires_client_affinity:
                 # Only the loop thread submits, so this needs no submit lock.
                 future = self._affinity_pool.submit(
-                    handler,
-                    *payloads,
+                    invoke,
                     affinity_key=client_affinity_key(context),
                 )
                 result = await asyncio.wrap_future(future)
             else:
-                result = await loop.run_in_executor(
-                    self._normal_pool, handler, *payloads
-                )
+                result = await loop.run_in_executor(self._normal_pool, invoke)
         except NotImplementedError as exc:
             await context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
             raise RuntimeError("gRPC context abort unexpectedly returned") from exc

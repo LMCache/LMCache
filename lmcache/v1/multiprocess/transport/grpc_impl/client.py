@@ -15,6 +15,7 @@ import uuid
 import grpc
 
 # First Party
+from lmcache.v1.mp_observability.propagation import capture_trace_context
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
@@ -151,10 +152,9 @@ class GrpcMultiprocessClient(RequestClient):
         kwargs: dict[str, Any],
     ) -> MessagingFuture[Any] | MessagingStream[Any]:
         request = rpc.codec.request_encoder(args, kwargs)
+        metadata = self._metadata + tuple(capture_trace_context().items())
         if isinstance(rpc.stub_method, grpc.UnaryStreamMultiCallable):
-            call = rpc.stub_method(
-                request, metadata=self._metadata, wait_for_ready=True
-            )
+            call = rpc.stub_method(request, metadata=metadata, wait_for_ready=True)
 
             def read(closed: threading.Event) -> Any:
                 try:
@@ -171,7 +171,7 @@ class GrpcMultiprocessClient(RequestClient):
         future: MessagingFuture[Any] = MessagingFuture()
         call = rpc.stub_method.future(
             request,
-            metadata=self._metadata,
+            metadata=metadata,
             wait_for_ready=True,
         )
 

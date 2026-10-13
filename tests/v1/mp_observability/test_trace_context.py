@@ -43,6 +43,8 @@ from lmcache.v1.multiprocess.transport.grpc_impl.proto_codec import (
     compile_request_codec_for_types,
 )
 from tests.v1.multiprocess.transport_test_utils import (
+    REQUEST_TRANSPORTS,
+    RequestTransport,
     request_server_url,
     start_lookup_request_server,
 )
@@ -210,7 +212,9 @@ def test_exception_and_cancellation_restore_context(error: type[BaseException]) 
     ids=["serialized", "pool", "affinity"],
 )
 @pytest.mark.parametrize("sampled", [True, False])
+@pytest.mark.parametrize("transport", REQUEST_TRANSPORTS)
 def test_real_handlers_and_concurrent_worker_isolation(
+    transport: RequestTransport,
     handler_type: HandlerType,
     requires_client_affinity: bool,
     sampled: bool,
@@ -228,8 +232,8 @@ def test_real_handlers_and_concurrent_worker_isolation(
             parent = trace.get_current_span().get_span_context()
             observed.put((parent.trace_id, parent.trace_flags.sampled))
 
-    endpoint = request_server_url("zmq", unused_tcp_port)
-    server = start_lookup_request_server("zmq", endpoint, Module())
+    endpoint = request_server_url(transport, unused_tcp_port)
+    server = start_lookup_request_server(transport, endpoint, Module())
     client = RequestClientFactory.create(endpoint)
     try:
         futures = []
