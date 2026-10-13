@@ -1116,7 +1116,7 @@ class EngineDrivenTransferContext(TransferContext):
             )
         if self._group_states:
             return self._submit_retrieve_multigroup(
-                key, kv_caches, block_ids, skip_first_n_tokens
+                key, kv_caches, block_ids, event, skip_first_n_tokens
             )
 
         device = _get_kv_device(kv_caches)
@@ -1181,7 +1181,8 @@ class EngineDrivenTransferContext(TransferContext):
             )
         if isinstance(ctx, EngineDrivenContextPickle):
             return self._submit_store_multigroup_pickle(ctx, key, kv_caches, block_ids)
-        torch_dev.synchronize()
+        device = _get_kv_device(kv_caches)
+        synchronize_device(device)
         result = ctx.prepare_store_grouped(key, self._instance_id)
         if result is None:
             future.set_result(False)
@@ -1203,9 +1204,10 @@ class EngineDrivenTransferContext(TransferContext):
                 out=out_g,
                 chunk_indices=chunks_g,
                 blocks_per_window=state.blocks_per_window,
+                engine_type=self._engine_type,
             )
         # SHM writes are async device->CPU copies; complete them before commit.
-        torch_dev.synchronize()
+        synchronize_device(device)
         ok = ctx.commit_store(key, self._instance_id, [])
         future.set_result(ok)
         return future
@@ -1224,7 +1226,8 @@ class EngineDrivenTransferContext(TransferContext):
         ``chunks[group][chunk]`` list is pickled in one COMMIT_STORE payload.
         """
         future: MessagingFuture[bool] = MessagingFuture()
-        torch_dev.synchronize()
+        device = _get_kv_device(kv_caches)
+        synchronize_device(device)
         # Handshake only: the pickle strategy reserves nothing at prepare.
         ctx.prepare_store(key, self._instance_id)
         group_chunks: list[list[torch.Tensor]] = []
@@ -1237,11 +1240,12 @@ class EngineDrivenTransferContext(TransferContext):
                     layout_hints=self._layout_hints,
                     engine_kv_format=state.engine_kv_format,
                     blocks_per_window=state.blocks_per_window,
+                    engine_type=self._engine_type,
                 )
             )
         # Gather issues async device->CPU copies; commit_store serializes the
         # buffers immediately, so the copies must be complete first.
-        torch_dev.synchronize()
+        synchronize_device(device)
         ok = ctx.commit_store(key, self._instance_id, group_chunks)
         future.set_result(ok)
         return future
@@ -1252,10 +1256,12 @@ class EngineDrivenTransferContext(TransferContext):
         key: Any,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
+        event: IPCEvent | None,
         skip_first_n_tokens: int,
     ) -> MessagingFuture:
         """Uniform-coverage retrieve over pickle: scatter a group-major payload."""
         future: MessagingFuture[bool] = MessagingFuture()
+        device = _get_kv_device(kv_caches)
         group_chunks = ctx.prepare_retrieve_multigroup(key, self._instance_id)
         if group_chunks is not None and len(group_chunks) != len(self._group_states):
             logger.error(
@@ -1267,6 +1273,8 @@ class EngineDrivenTransferContext(TransferContext):
         ok = group_chunks is not None
         if group_chunks is not None:
             try:
+                if event is not None:
+                    event.wait()
                 for gid, state in enumerate(self._group_states):
                     scatter_cpu_to_paged_kv(
                         {name: kv_caches[name] for name in state.layer_names},
@@ -1277,11 +1285,12 @@ class EngineDrivenTransferContext(TransferContext):
                         layout_hints=self._layout_hints,
                         engine_kv_format=state.engine_kv_format,
                         blocks_per_window=state.blocks_per_window,
+                        engine_type=self._engine_type,
                     )
             except (RuntimeError, ValueError, TypeError, IndexError):
                 logger.exception("Failed to scatter retrieved CPU context chunks")
                 ok = False
-            torch_dev.synchronize()
+            synchronize_device(device)
         ctx.commit_retrieve(key, self._instance_id)
         future.set_result(ok)
         return future
@@ -1291,6 +1300,7 @@ class EngineDrivenTransferContext(TransferContext):
         key: Any,
         kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
+        event: IPCEvent | None,
         skip_first_n_tokens: int,
     ) -> MessagingFuture:
         """Uniform-coverage retrieve: scatter every group's chunks from its slots."""
@@ -1304,13 +1314,16 @@ class EngineDrivenTransferContext(TransferContext):
             )
         if isinstance(ctx, EngineDrivenContextPickle):
             return self._submit_retrieve_multigroup_pickle(
-                ctx, key, kv_caches, block_ids, skip_first_n_tokens
+                ctx, key, kv_caches, block_ids, event, skip_first_n_tokens
             )
+        device = _get_kv_device(kv_caches)
         result = ctx.prepare_retrieve_grouped(key, self._instance_id)
         ok = result is not None
         if result is not None:
             tensors, group_ids = result
             try:
+                if event is not None:
+                    event.wait()
                 for gid, state in enumerate(self._group_states):
                     src_g, _ = self._group_slots(tensors, group_ids, gid)
                     scatter_cpu_to_paged_kv(
@@ -1322,12 +1335,13 @@ class EngineDrivenTransferContext(TransferContext):
                         layout_hints=self._layout_hints,
                         engine_kv_format=state.engine_kv_format,
                         blocks_per_window=state.blocks_per_window,
+                        engine_type=self._engine_type,
                     )
             except (RuntimeError, ValueError, TypeError, IndexError):
                 logger.exception("Failed to scatter retrieved CPU context chunks")
                 ok = False
             # Complete device writes before the server may reuse the slots.
-            torch_dev.synchronize()
+            synchronize_device(device)
         ctx.commit_retrieve(key, self._instance_id)
         future.set_result(ok)
         return future

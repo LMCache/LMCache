@@ -967,32 +967,6 @@ def test_engine_driven_register_sends_num_physical_slots(
     req_client.unregister_kv_cache_engine_driven_context.assert_called_once_with(1)
 
 
-def test_engine_driven_register_rejects_multiple_transfer_groups() -> None:
-    """Engine-driven registration fails before any server RPC for multiple groups."""
-    # First Party
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-    from lmcache.v1.multiprocess.transfer_context import EngineDrivenTransferContext
-
-    req_client = MagicMock()
-    context = EngineDrivenTransferContext(1, req_client)
-    groups = [
-        EngineGroupInfo(engine_group_id=0, layer_indices=(0,)),
-        EngineGroupInfo(engine_group_id=1, layer_indices=(1,)),
-    ]
-
-    with pytest.raises(ValueError, match="does not support multiple KV transfer"):
-        context.register(
-            kv_caches=_make_kv_caches(),
-            model_name="m",
-            world_size=1,
-            blocks_in_chunk=2,
-            mq_timeout=1.0,
-            engine_group_infos=groups,
-        )
-
-    req_client.register_kv_cache_engine_driven_context.assert_not_called()
-
-
 def test_engine_driven_context_unregister_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

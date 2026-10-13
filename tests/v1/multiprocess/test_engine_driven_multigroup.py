@@ -370,7 +370,7 @@ def test_submit_store_multigroup_pickle_sends_group_major_payload(
 
     monkeypatch.setattr(worker_transfer, "gather_paged_kv_to_cpu", _fake_gather)
     monkeypatch.setattr(
-        worker_transfer.torch_dev, "synchronize", lambda: events.append("sync")
+        worker_transfer, "synchronize_device", lambda _d: events.append("sync")
     )
     monkeypatch.setattr(pctx, "prepare_store", lambda _k, _i: None)
     committed: dict[str, Any] = {}
@@ -403,24 +403,37 @@ def test_submit_retrieve_multigroup_pickle_scatters_group_major(
     monkeypatch,
 ) -> None:
     ctx, pctx, _ = _pickle_worker_ctx(monkeypatch)
+    ctx._engine_type = "sentinel-engine"
     payload = [[torch.ones(1)], [torch.ones(1) * 2]]
     monkeypatch.setattr(pctx, "prepare_retrieve_multigroup", lambda _k, _i: payload)
+    order: list[str] = []
     scattered: list[dict] = []
-    monkeypatch.setattr(
-        worker_transfer,
-        "scatter_cpu_to_paged_kv",
-        lambda kv_caches, block_ids, chunks, *a, **k: scattered.append(
-            {"layers": sorted(kv_caches), "chunks": chunks}
-        ),
-    )
+
+    def _fake_scatter(kv_caches, block_ids, chunks, *a, **k):
+        order.append("scatter")
+        scattered.append(
+            {
+                "layers": sorted(kv_caches),
+                "chunks": chunks,
+                "engine_type": k.get("engine_type"),
+            }
+        )
+
+    monkeypatch.setattr(worker_transfer, "scatter_cpu_to_paged_kv", _fake_scatter)
+    event = MagicMock()
+    event.wait.side_effect = lambda: order.append("wait")
 
     kv = {name: torch.zeros(1) for name in ("layer_0", "layer_1", "layer_2")}
-    future = ctx.submit_retrieve("req", MagicMock(), kv, [[1, 2], [3]], MagicMock(), 2)
+    future = ctx.submit_retrieve("req", MagicMock(), kv, [[1, 2], [3]], event, 2)
 
     assert future.result(timeout=1) is True
     assert [s["layers"] for s in scattered] == [["layer_0", "layer_1"], ["layer_2"]]
     assert scattered[0]["chunks"] is payload[0]
     assert scattered[1]["chunks"] is payload[1]
+    # The engine's event gates every group's scatter, as on the single-group
+    # path, and each group is scattered with the registered engine type.
+    assert order == ["wait", "scatter", "scatter"]
+    assert all(s["engine_type"] == "sentinel-engine" for s in scattered)
 
 
 def test_submit_retrieve_multigroup_pickle_group_count_mismatch(
@@ -437,30 +450,52 @@ def test_submit_retrieve_multigroup_pickle_group_count_mismatch(
 
 
 class _FakeMemoryObj:
-    def __init__(self, shape):
+    def __init__(self, shape, l1_manager_id: int = 0):
         self.tensor = torch.zeros(shape)
+        self._l1_manager_id = l1_manager_id
+
+    def get_l1_manager(self) -> int:
+        return self._l1_manager_id
 
 
 class _FakeStorageManager:
-    """In-memory reserve/read double for the pickle strategy."""
+    """In-memory reserve/read double for the pickle strategy.
+
+    Each object group is placed in its own L1 manager, so writes must be
+    completed by owner: ``finish_write(keys)`` refuses a multi-L1 setup.
+    """
 
     def __init__(self, shapes_by_group: dict[int, tuple[int, ...]]):
         self._shapes = shapes_by_group
         self.objs: dict[ObjectKey, _FakeMemoryObj] = {}
         self.finished_writes: list[ObjectKey] = []
+        self.finished_owners: set[int] = set()
         self.finished_reads: list[ObjectKey] = []
+        self.read_owners: list[Any] = []
         self.deleted: list[ObjectKey] = []
 
     def reserve_write(self, obj_keys, _layout):
         reserved = {}
         for obj_key in obj_keys:
-            obj = _FakeMemoryObj(self._shapes[obj_key.object_group_id])
+            gid = obj_key.object_group_id
+            obj = _FakeMemoryObj(self._shapes[gid], l1_manager_id=gid)
             self.objs[obj_key] = obj
             reserved[obj_key] = obj
         return reserved
 
     def finish_write(self, keys):
-        self.finished_writes.extend(keys)
+        raise ValueError("multiple L1 managers: complete writes by owner")
+
+    def prepare_write_completion(self, objects):
+        groups: dict[int, list[ObjectKey]] = {}
+        for key, obj in objects.items():
+            groups.setdefault(obj.get_l1_manager(), []).append(key)
+        return list(groups.items())
+
+    def finish_write_by_owner(self, completion):
+        for owner, keys in completion:
+            self.finished_owners.add(owner)
+            self.finished_writes.extend(keys)
 
     def delete_l1_keys(self, keys, force=False):
         self.deleted.extend(keys)
@@ -469,20 +504,27 @@ class _FakeStorageManager:
         return len(keys), 0
 
     @contextmanager
-    def read_prefetched_results(self, obj_keys):
+    def read_prefetched_results(self, obj_keys, l1_owners=None):
+        self.read_owners.append(l1_owners)
         objs = [self.objs[k] for k in obj_keys if k in self.objs]
         yield objs if len(objs) == len(obj_keys) else []
 
-    def finish_read_prefetched(self, keys):
+    def finish_read_prefetched(self, keys, l1_owners=None):
         self.finished_reads.extend(keys)
 
 
 def test_pickle_strategy_multigroup_store_retrieve_roundtrip() -> None:
     """Group-major pickle commit writes each group against its own layout;
-    retrieve returns a group-major payload and is all-or-nothing."""
+    retrieve returns a group-major payload and is all-or-nothing. With the
+    groups in different L1 managers, writes complete by owner and reads carry
+    the request's L1 owners."""
     shapes: dict[int, tuple[int, ...]] = {0: (2, 2, 8, 16), 1: (2, 1, 8, 4)}
     sm = _FakeStorageManager(shapes)
-    strategy = PickleTransferStrategy(sm)  # type: ignore[arg-type]
+    owners = {_obj_key(1, 0): 0, _obj_key(1, 1): 1}
+    strategy = PickleTransferStrategy(
+        sm,  # type: ignore[arg-type]
+        read_owner_resolver=lambda _request_id: owners,
+    )
     metadata = _group_metadata()
     key = IPCCacheServerKey.from_token_ids(
         "m", 1, 0, [1] * 16, start=0, end=16, request_id="req-pkl"
@@ -508,6 +550,7 @@ def test_pickle_strategy_multigroup_store_retrieve_roundtrip() -> None:
         is True
     )
     assert len(sm.finished_writes) == 4
+    assert sm.finished_owners == {0, 1}
     assert torch.equal(sm.objs[_obj_key(2, 1)].tensor, payload[1][1])
 
     ret = strategy.prepare_retrieve(
@@ -521,6 +564,7 @@ def test_pickle_strategy_multigroup_store_retrieve_roundtrip() -> None:
     assert len(retrieved) == 2
     assert torch.equal(retrieved[0][1], payload[0][1])
     assert len(sm.finished_reads) == 4
+    assert sm.read_owners == [owners, owners]
 
     # A group with a missing chunk makes the whole retrieve a miss.
     partial_keys = [group_keys[0], [_obj_key(1, 1), _obj_key(9, 1)]]
