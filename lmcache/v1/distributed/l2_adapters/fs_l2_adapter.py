@@ -11,9 +11,15 @@ name encodes all key fields so it can be reversed on startup.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 import asyncio
+import ctypes
+import errno
+import math
+import mmap
 import os
 import threading
 
@@ -47,6 +53,36 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
+
+
+@contextmanager
+def _aligned_staging_view(size: int, alignment: int) -> Iterator[memoryview]:
+    """Yield aligned ordinary memory and release it in the calling worker.
+
+    Args:
+        size: Number of bytes exposed by the view; must be positive.
+        alignment: Required address multiple in bytes; must be positive.
+
+    Yields:
+        A writable byte view whose lifetime is limited to this context.
+
+    Raises:
+        ValueError: If size or alignment is not positive.
+
+    The worker must finish all I/O and release derived views before exiting
+    the context. The staging allocation never owns or references a MemoryObj.
+    """
+    if size <= 0 or alignment <= 0:
+        raise ValueError("Invalid staging size or alignment")
+    owner = mmap.mmap(-1, size + alignment - 1)
+    try:
+        base = ctypes.addressof(ctypes.c_char.from_buffer(owner))
+        start = (-base) % alignment
+        with memoryview(owner)[start : start + size] as view:
+            yield view
+    finally:
+        owner.close()
+
 
 _KEY_SEP = "@"
 # ``@`` in both ``model_name`` and ``cache_salt`` is rejected by
@@ -572,19 +608,39 @@ class FSL2Adapter(L2AdapterInterface):
                 except OSError:
                     pass
 
-    def _write_with_odirect(self, file_path: Path, buf: bytes) -> None:
-        """Synchronous O_DIRECT write of *buf*.
+    def _io_staging_alignment(self) -> int:
+        """Preserve the existing block-size assumption for ordinary staging."""
+        # Deployment precondition: this multiple covers the actual file's
+        # DIO memory alignment. statvfs alone does not establish that fact.
+        return math.lcm(mmap.PAGESIZE, max(1, self._os_disk_bs))
 
-        Runs in an executor (not on the event loop).
-        """
+    def _read_owned_with_odirect(
+        self, file_path: Path, expected: int
+    ) -> tuple[int, bytes | None]:
+        """Return an owned payload only after a complete worker-local read."""
+        # Entire mmap lifetime stays in this synchronous executor worker.
+        # The coroutine never closes a buffer still used by this worker.
+        with _aligned_staging_view(expected, self._io_staging_alignment()) as staging:
+            num_read = self._read_with_odirect(file_path, staging)
+            payload = bytes(staging) if num_read == expected else None
+        return num_read, payload
+
+    def _write_with_odirect(self, file_path: Path, buf: bytes) -> None:
+        """Write a snapshot through aligned worker-owned ordinary memory."""
         fd = -1
         try:
-            fd = os.open(
-                str(file_path),
-                os.O_CREAT | os.O_WRONLY | getattr(os, "O_DIRECT", 0),
-                0o644,
-            )
-            os.write(fd, buf)
+            with _aligned_staging_view(
+                len(buf), self._io_staging_alignment()
+            ) as staging:
+                staging[:] = buf
+                fd = os.open(
+                    str(file_path),
+                    os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_DIRECT", 0),
+                    0o644,
+                )
+                written = os.write(fd, staging)
+                if written != len(buf):
+                    raise OSError(errno.EIO, f"Short write: {written}/{len(buf)}")
         except Exception:
             logger.exception("Failed to O_DIRECT write %s", file_path)
             raise
@@ -638,7 +694,7 @@ class FSL2Adapter(L2AdapterInterface):
                             None,
                             self._write_with_odirect,
                             tmp_path,
-                            buf,
+                            bytes(buf),  # Snapshot while source reservation is held.
                         )
                     else:
                         async with aiofiles.open(tmp_path, "wb") as f:
@@ -708,28 +764,42 @@ class FSL2Adapter(L2AdapterInterface):
                 expected = len(dst_buf)
                 num_read: Optional[int] = None
 
-                # O_DIRECT path (sync, via executor)
+                # O_DIRECT path: worker owns staging; copy back only on success.
                 if self._use_odirect:
-                    num_read = await self._loop.run_in_executor(
-                        None,
-                        self._read_with_odirect,
-                        file_path,
-                        dst_buf,
-                    )
-                    if num_read != expected:
-                        logger.warning(
-                            "Incomplete O_DIRECT read for %s: expected %d, got %d",
-                            file_path.name,
-                            expected,
-                            num_read or 0,
-                        )
-                    else:
-                        bitmap.set(i)
-                        logger.debug(
-                            "FSL2Adapter loaded key %s (%d bytes, O_DIRECT)",
-                            file_path.name,
-                            num_read,
-                        )
+                    with memoryview(dst_buf) as raw_dst:
+                        if raw_dst.readonly or not raw_dst.c_contiguous:
+                            raise ValueError(
+                                "Load destination must be writable/contiguous"
+                            )
+                        with raw_dst.cast("B") as dst_bytes:
+                            if dst_bytes.nbytes != expected:
+                                raise ValueError("Unexpected destination byte size")
+                            num_read, payload = await self._loop.run_in_executor(
+                                None,
+                                self._read_owned_with_odirect,
+                                file_path,
+                                expected,
+                            )
+                            try:
+                                if num_read != expected or payload is None:
+                                    logger.warning(
+                                        "Incomplete O_DIRECT read for %s: "
+                                        "expected %d, got %d",
+                                        file_path.name,
+                                        expected,
+                                        num_read or 0,
+                                    )
+                                else:
+                                    dst_bytes[:] = payload
+                                    bitmap.set(i)
+                                    logger.debug(
+                                        "FSL2Adapter loaded key %s "
+                                        "(%d bytes, O_DIRECT)",
+                                        file_path.name,
+                                        num_read,
+                                    )
+                            finally:
+                                del payload
                     continue
 
                 # Standard async path with optional
