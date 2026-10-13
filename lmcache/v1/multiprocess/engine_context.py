@@ -18,10 +18,6 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.object_group_classifier import ObjectGroupClassifier
 from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.v1.gpu_connector.gds_context import (
-    get_gds_context,
-    initialize_gds_context,
-)
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.commit_policy import (
     DEFAULT_COMMIT_CONFIG,
@@ -284,6 +280,7 @@ class MPCacheServerContext:
             group per sliding-window size at KV-cache registration. Default
             False.
         null_block_id: Engine block ID that denotes absent KV data.
+        session_ttl_seconds: Idle seconds before a request session is reaped.
         commit_config: How the ``END_SESSION`` handler decides whether a
             finished request's final window is copied to L2 right away.
             Defaults to ``turn_end`` accepting any stop token. A model
@@ -299,6 +296,7 @@ class MPCacheServerContext:
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
         null_block_id: int = 0,
+        session_ttl_seconds: float = SessionManager.DEFAULT_SESSION_TTL,
         commit_config: CommitPolicyConfig = DEFAULT_COMMIT_CONFIG,
     ) -> None:
         self._chunk_size = chunk_size
@@ -308,10 +306,6 @@ class MPCacheServerContext:
         self._commit_config = commit_config
         self._commit_policy = create_commit_policy(commit_config)
 
-        # Initialize the process-global GDS context.
-        # No-op when GDS L1 is disabled (config is None).
-        initialize_gds_context(storage_manager_config.l1_manager_config.gds_l1_config)
-
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
         )
@@ -319,7 +313,9 @@ class MPCacheServerContext:
         self._token_hasher = TokenHasher(
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
         )
-        self._session_manager = SessionManager(self._token_hasher)
+        self._session_manager = SessionManager(
+            self._token_hasher, ttl=session_ttl_seconds
+        )
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry(
             self._storage_manager.object_group_classifier
@@ -327,13 +323,10 @@ class MPCacheServerContext:
 
     def close(self) -> None:
         """
-        Tear down the session manager, storage manager, and the process-global
-        GDS context.
+        Tear down sessions and every storage manager, including its GDS context.
         """
         self._session_manager.close()
         self._storage_manager.close()
-        # Tear down the GDS cuFile context (the shared slab + its handle).
-        get_gds_context().close()
 
     @property
     def chunk_size(self) -> int:
@@ -369,6 +362,22 @@ class MPCacheServerContext:
     def storage_manager(self) -> StorageManager:
         """The storage manager instance."""
         return self._storage_manager
+
+    def get_read_owners(self, request_id: str) -> dict[ObjectKey, int] | None:
+        """Get the exact prefetch owners for a request, or None for legacy single L1.
+
+        Args:
+            request_id: Request whose lookup acquired the read locks.
+
+        Raises:
+            ValueError: A multi-L1 retrieve has no live lookup session.
+        """
+        if not self._storage_manager.is_multi_l1:
+            return None
+        session = self._session_manager.get(request_id)
+        if session is None:
+            raise ValueError("Multi-L1 retrieve requires a live prefetch session")
+        return session.get_prefetch_owners()
 
     @property
     def token_hasher(self) -> TokenHasher:
@@ -431,6 +440,8 @@ class MPCacheServerContext:
         empty or lazy memory mode is enabled. Otherwise strips any leading ``/``
         and ensures the name starts with ``lmcache_l1_pool_``.
         """
+        if len(storage_manager_config.l1_manager_configs) != 1:
+            return {"shm_name": "", "pool_size": 0}
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
         shm_name = mem_cfg.shm_name or ""
         if not shm_name or mem_cfg.use_lazy or mem_cfg.devdax_path:

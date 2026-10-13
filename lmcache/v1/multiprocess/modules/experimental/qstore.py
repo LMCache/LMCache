@@ -492,6 +492,9 @@ class QStoreModule(InstanceLivenessTarget):
                         transfer_key=transfer_key,
                     )
 
+                completion = self._ctx.storage_manager.prepare_write_completion(
+                    all_dict
+                )
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store Q keys due to exception")
@@ -503,8 +506,8 @@ class QStoreModule(InstanceLivenessTarget):
                 if stored_count:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
-                        "finish_write",
-                        list(all_dict.keys()),
+                        "finish_write_by_owner",
+                        completion,
                     )
                 else:
                     total_bytes = 0

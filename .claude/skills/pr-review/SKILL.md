@@ -18,7 +18,7 @@ Review a pull request against the LMCache coding standards defined in `docs/codi
 ### Step 0 -- Load the standards
 
 Read `docs/coding_standards.md` at the repo root. This is the authoritative reference for
-all quality checks. Also read `AGENTS.md` for the quick-reference checklist.
+all quality checks.
 
 ### Step 1 -- Understand the PR
 
@@ -91,8 +91,14 @@ Review the diff against these standards (from `docs/coding_standards.md`):
 **Resource Management (Section 7.5-7.6)**:
 - Error paths release locks, free pool entries, close file descriptors.
 - No unbounded collection growth (sets/dicts cleaned up when resources freed).
-- No unnecessary memory copies in hot paths.
+- No unnecessary memory copies or implicit GPU sync (`.item()`, `.cpu()`, `.tolist()`) in hot paths.
 - CUDA/GPU resources properly managed.
+
+**AI-Assisted Coding (Sections 9.5 and 10)**:
+- No defensive handling for failures that cannot occur (speculative `None` checks, fallback defaults).
+- `try/except` regions are narrow and catch specific types; `except Exception` only at thread/RPC/background-loop boundaries; `logger.exception` used inside `except` blocks (not `logger.error`, unless re-raising).
+- Comments explain why and do not narrate the change; no boilerplate docstrings restating signatures; no invented TODOs (TODOs carry a GitHub handle).
+- Code matches the module's existing conventions. If several vibe-coding signals appear together (boilerplate style, over-protection, mixed conventions), flag it directly and ask the author to explain the design.
 
 ### Step 4 -- Caller Impact Analysis (Section 6.2)
 
@@ -169,12 +175,15 @@ Group issues by severity, following the calibration from `docs/coding_standards.
 - Missing SPDX header, missing type hints, missing docstrings on public functions,
   new feature with zero tests, bug fix with no regression test, cross-class private
   member access, poor architectural decision, ambiguous return values, `assert` for
-  runtime validation, docstring that misrepresents behavior.
+  runtime validation, docstring that misrepresents behavior, broad `except` that
+  swallows errors on a data path, defensive branch that masks real failures.
 
 **warning** (should fix):
 - Docstring could be more detailed, tests that test implementation details, naming
   could be clearer, code could be more modular, missing `strict=True` on `zip` of
-  parallel lists, log level too high for operational messages.
+  parallel lists, log level too high for operational messages, boilerplate
+  docstrings, redundant guards, comments narrating the change, style inconsistent
+  with the surrounding module.
 
 **info** (suggestion, non-blocking):
 - Optional naming improvement, minor refactor for readability, style preference.

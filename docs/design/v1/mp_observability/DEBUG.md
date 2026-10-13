@@ -25,19 +25,7 @@ lmcache_mp_lookup_hit_tokens_total / lmcache_mp_lookup_requested_tokens_total
 Fraction of chunk-aligned tokens that came back from cache anywhere.
 Reported per `(model_name, cache_salt)`.
 
-## L2-only hit rate
-
-L2's prefetch lookups carry per-key counts, not per-token:
-
-```
-L2_hit_tokens_total = increase(lmcache_mp_l2_prefetch_hit_chunks_total) * chunk_size
-L2_hit_rate         = L2_hit_tokens_total
-                    / increase(lmcache_mp_lookup_requested_tokens_total)
-```
-
-The keys-to-tokens conversion is exact — every L2 hit is a full chunk.
-
-## L1-only / L2-only hit rate (direct)
+## L1-only / L2-only hit rate
 
 `MP_LOOKUP_PREFETCH_END` attributes each lookup's hit prefix by tier
 (`l1_hit_tokens + l2_hit_tokens == hit_tokens`, following each object
@@ -54,10 +42,6 @@ On hybrid models the token split can credit L2 with a whole prefix whose
 full-attention keys all came from L1 (L2 served only the sliding-window
 keys). `lmcache_mp_lookup_hit_{l1,l2}_keys_total` count hit keys per tier
 and show that case directly.
-
-The older recipe `lookup_hit - l2_prefetch_hit_chunks * chunk_size` counts
-keys found in L2 rather than the window-rule remainder, so the two differ
-on hybrid-attention or TP>1 deployments; prefer the direct counters.
 
 ## Blend total hit rate
 

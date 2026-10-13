@@ -36,11 +36,6 @@ from lmcache.v1.distributed.api import (
     PrefetchLockMode,
     PrefetchTaskSpec,
 )
-from lmcache.v1.distributed.internal_api import (
-    PrefetchMode,
-    PrefetchRequestSpec,
-    TrimPolicy,
-)
 
 
 @dataclass(frozen=True)
@@ -240,22 +235,6 @@ def _dec_torch_dtype(name: str) -> torch.dtype:
     return _resolve_dtype(name)
 
 
-def _enc_trim_policy(p: TrimPolicy) -> str:
-    return p.name
-
-
-def _dec_trim_policy(name: str) -> TrimPolicy:
-    return TrimPolicy[name]
-
-
-def _enc_prefetch_mode(m: PrefetchMode) -> str:
-    return m.name
-
-
-def _dec_prefetch_mode(name: str) -> PrefetchMode:
-    return PrefetchMode[name]
-
-
 def _enc_attn_window(d: AttnWindowDesc) -> dict[str, object]:
     return {
         "num_chunks_in_sw": list(d.num_chunks_in_sw),
@@ -269,47 +248,6 @@ def _dec_attn_window(raw: dict[str, Any] | list[int]) -> AttnWindowDesc:
     return AttnWindowDesc(
         num_chunks_in_sw=list(raw["num_chunks_in_sw"]),
         world_size=raw.get("world_size", 1),
-    )
-
-
-def _enc_prefetch_request_spec(s: PrefetchRequestSpec) -> dict[str, Any]:
-    # Delegate each field to its registered codec so the struct survives
-    # component-type changes (keys/layout/policy/attn/mode all have codecs).
-    return {
-        "keys": [encode_value(k) for k in s.keys],
-        "num_kv_readers": s.num_kv_readers,
-        "policy": encode_value(s.policy),
-        "attn_desc": encode_value(s.attn_desc),
-        "group_layout_descs": {
-            str(gid): encode_value(ld) for gid, ld in s.group_layout_descs.items()
-        },
-        "mode": encode_value(s.mode),
-    }
-
-
-def _readers_from_trace(d: dict[str, Any]) -> int:
-    """Reader count of a trace record; pre-rename traces carry extra_count
-    (readers - 1)."""
-    if "num_kv_readers" in d:
-        return d["num_kv_readers"]
-    return d.get("extra_count", 0) + 1
-
-
-def _dec_prefetch_request_spec(d: dict[str, Any]) -> PrefetchRequestSpec:
-    group_layout_descs = {
-        int(gid): decode_value(ld)
-        for gid, ld in d.get("group_layout_descs", {}).items()
-    }
-    # Traces recorded before group_layout_descs carry a single layout_desc.
-    if not group_layout_descs and "layout_desc" in d:
-        group_layout_descs = {0: decode_value(d["layout_desc"])}
-    return PrefetchRequestSpec(
-        keys=[decode_value(k) for k in d["keys"]],
-        group_layout_descs=group_layout_descs,
-        num_kv_readers=_readers_from_trace(d),
-        policy=decode_value(d["policy"]),
-        attn_desc=decode_value(d["attn_desc"]),
-        mode=decode_value(d["mode"]),
     )
 
 
@@ -398,22 +336,6 @@ register_codec(
 register_codec(
     AttnWindowDesc,
     TypeCodec(tag="AttnWindowDesc", encode=_enc_attn_window, decode=_dec_attn_window),
-)
-register_codec(
-    TrimPolicy,
-    TypeCodec(tag="TrimPolicy", encode=_enc_trim_policy, decode=_dec_trim_policy),
-)
-register_codec(
-    PrefetchMode,
-    TypeCodec(tag="PrefetchMode", encode=_enc_prefetch_mode, decode=_dec_prefetch_mode),
-)
-register_codec(
-    PrefetchRequestSpec,
-    TypeCodec(
-        tag="PrefetchRequestSpec",
-        encode=_enc_prefetch_request_spec,
-        decode=_dec_prefetch_request_spec,
-    ),
 )
 register_codec(
     PrefetchLockMode,
