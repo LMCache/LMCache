@@ -121,7 +121,7 @@ in-memory cache of all key filenames. Lookup operations respond from the cache i
 of issuing remote 3FS metadata calls. This dramatically reduces lookup latency.
 
 - **Trade-offs**
-   - **Enable** for workloads with many concurrent lookups (prefetch,batch exists).
+   - **Enable** for workloads with many concurrent lookups (prefetch,batch exists). 
   The latency savings outweigh the memory cost.
    - **Disable**  when memory is constrained.
 
