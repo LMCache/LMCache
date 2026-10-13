@@ -25,7 +25,9 @@ def buildkite_request(
         Parsed Buildkite response.
 
     Raises:
-        RuntimeError: If the API request or response is invalid.
+        RuntimeError: If the API request or response is invalid, or a transient
+            GET failure persists after three attempts. POSTs are not retried
+            because the build may have been created despite a lost response.
     """
     data = json.dumps(payload).encode() if payload is not None else None
     request = Request(
@@ -37,20 +39,38 @@ def buildkite_request(
             "Content-Type": "application/json",
         },
     )
-    try:
-        with urlopen(request, timeout=30) as response:
-            result = json.load(response)
-    except HTTPError as exc:
-        details = exc.read(4096).decode("utf-8", errors="replace")
-        details = details.replace(token, "[redacted]")
-        raise RuntimeError(
-            f"Buildkite API request failed for {path}: HTTP {exc.code}: {details}"
-        ) from exc
-    except (URLError, TimeoutError) as exc:
-        raise RuntimeError(f"Buildkite API request failed for {path}: {exc}") from exc
-    if not isinstance(result, dict):
-        raise RuntimeError(f"Invalid Buildkite API response for {path}")
-    return result
+    attempts = 3 if payload is None else 1
+    attempt = 0
+    while True:
+        try:
+            with urlopen(request, timeout=30) as response:
+                result = json.load(response)
+        except HTTPError as exc:
+            if (
+                payload is None
+                and (exc.code == 429 or 500 <= exc.code < 600)
+                and attempt < attempts - 1
+            ):
+                exc.close()
+                time.sleep(2**attempt)
+                attempt += 1
+                continue
+            details = exc.read(4096).decode("utf-8", errors="replace")
+            details = details.replace(token, "[redacted]")
+            raise RuntimeError(
+                f"Buildkite API request failed for {path}: HTTP {exc.code}: {details}"
+            ) from exc
+        except (URLError, TimeoutError) as exc:
+            if payload is None and attempt < attempts - 1:
+                time.sleep(2**attempt)
+                attempt += 1
+                continue
+            raise RuntimeError(
+                f"Buildkite API request failed for {path}: {exc}"
+            ) from exc
+        if not isinstance(result, dict):
+            raise RuntimeError(f"Invalid Buildkite API response for {path}")
+        return result
 
 
 def require_string(record: dict[str, object], key: str) -> str:
