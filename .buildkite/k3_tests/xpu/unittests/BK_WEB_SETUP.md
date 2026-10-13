@@ -36,9 +36,21 @@ in noninteractive Bash jobs (including those launched by Buildkite); a
 non-Bash command must source `/opt/intel/oneapi/setvars.sh` separately if it
 needs the compiler environment.
 
-The verifier triggers the existing `unit-tests-xpu` and `xpu-mp-test` Buildkite
-pipelines. Configure `BUILD_KITE_API_TOKEN` as a secret with `read_builds` and
-`write_builds` scopes. The existing
+The verifier triggers the dedicated `nightly-unit-tests-xpu` and
+`nightly-xpu-mp-test` Buildkite pipelines. Before enabling the nightly workflow,
+create these two pipelines in the `lmcache` Buildkite organization. Copy the
+repository, Steps editor content, agent queue, and required credentials from
+`unit-tests-xpu` and `xpu-mp-test`, respectively. Disable automatic GitHub
+build triggers and **skip queued / cancel running branch builds** on the two
+nightly pipelines; keep these settings unchanged on the ordinary pipelines.
+The verifier creates builds through the Buildkite API with `branch: dev` and
+the GitHub Actions source commit. The XPU harness rejects a checkout whose
+SHA differs from the wheel's source commit, so a later merge into `dev` cannot
+silently change the revision under test.
+
+Configure `BUILD_KITE_API_TOKEN` as a secret with `read_builds` and
+`write_builds` scopes and permission to create builds in both nightly pipelines.
+The existing
 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` must be able to push to the public
 `lmcache/vllm-openai-xpu-ci` repository; XPU nodes must be able to pull it.
 The `buildkite-git-creds` Kubernetes secret on the XPU queue must contain

@@ -118,7 +118,10 @@ def main() -> None:
     wheel_digest = f"sha256:{wheel_digest}"
 
     builds: dict[str, tuple[str, str, int]] = {}
-    for name, slug in (("unit", "unit-tests-xpu"), ("multiprocess", "xpu-mp-test")):
+    for name, slug in (
+        ("unit", "nightly-unit-tests-xpu"),
+        ("multiprocess", "nightly-xpu-mp-test"),
+    ):
         path = f"organizations/lmcache/pipelines/{quote(slug, safe='')}/builds"
         result = buildkite_request(
             path,
