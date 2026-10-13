@@ -54,6 +54,7 @@ import zmq
 # First Party
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.experimental import dispatch
+from lmcache.integration.vllm.experimental.token_drop_worker import TokenDropWorker
 from lmcache.integration.vllm.kv_cache_group_edits import (
     apply_kv_cache_group_edits,
     validate_kv_cache_groups,
@@ -79,6 +80,7 @@ from lmcache.integration.vllm.mp_server_launcher import (
     is_mp_server_autostart_enabled,
 )
 from lmcache.integration.vllm.utils import (
+    extract_request_configs_from_request,
     mla_only,
     vllm_layout_hints,
 )
@@ -769,6 +771,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
                 enable_kv_events=self._enable_kv_events,
             )
+            self._token_drop_worker = TokenDropWorker()
             if self.transfer_intermediate_tensors:
                 # First Party
                 from lmcache.integration.vllm.experimental import (
@@ -883,6 +886,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             engine_group_infos=engine_group_infos,
             layout_hints=layout_hints,
         )
+        self._token_drop_worker.register_kv_caches(kv_caches)
         if self.dispatcher is not None:
             dispatch(
                 self.dispatcher,
@@ -910,6 +914,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        self._token_drop_worker.prepare_forward(
+            forward_context, metadata.token_drop_requests
+        )
 
         request_ids = []
         ops = []
@@ -990,6 +997,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        self._token_drop_worker.compact()  # Forward-end Q delivery; no KV mutation yet.
 
         request_ids = []
         ops = []
@@ -1042,6 +1050,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             and kv_connector_metadata.need_flush_before_forward
         )
         worker_adapter.handle_preemptions(need_flush_before_forward)
+        if isinstance(kv_connector_metadata, LMCacheMPConnectorMetadata):
+            self._token_drop_worker.drop_requests(
+                kv_connector_metadata.token_drop_reset_ids
+            )
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -1059,6 +1071,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
+        self._token_drop_worker.drop_requests(finished_req_ids)
         if self.lazy_offload:
             val = self.worker_adapter.get_finished_with_lazy_offload()
         else:
@@ -1221,6 +1234,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._gpu_block_pool = gpu_block_pool
             if self.lazy_offload:
                 self._lazy_offload_manager.bind_block_pool(gpu_block_pool)
+
+    def _commit_token_drop_resident_updates(self, updates: dict[str, int]) -> None:
+        """After the worker output barrier, commit new P and reclaim private blocks."""
+        raise NotImplementedError
 
     def get_num_new_matched_tokens(
         self,
@@ -1828,6 +1845,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     def _get_or_create_request_tracker(
         self, request: "Request"
     ) -> LMCacheMPRequestTracker:
+        # Reject token-drop requests before LMCache lookup or offload starts.
+        if "lmcache.token_drop" in (
+            extract_request_configs_from_request(request) or {}
+        ):
+            raise NotImplementedError("GPU-native token dropping is not enabled yet")
+
         request_id = request.request_id
         # Remove the old trackers that is created before the preemption
         if (
