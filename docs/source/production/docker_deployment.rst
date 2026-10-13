@@ -23,13 +23,18 @@ Running the container
         --env "LMCACHE_CHUNK_SIZE=256" \
         --env "LMCACHE_LOCAL_CPU=True" \
         --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
-        --volume ~/.cache/huggingface:/root/.cache/huggingface \
+        --volume hf-cache:/home/lmcache/.cache/huggingface \
         --network host \
         $IMAGE \
         meta-llama/Llama-3.1-8B-Instruct --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 
 See the `docker run example <https://github.com/LMCache/LMCache/tree/dev/docker>`_ for more details.
+
+The official CUDA vLLM and standalone images run as ``lmcache`` (uid 1000).
+A new empty named volume inherits the pre-created HF cache directory's ownership.
+Existing volumes and bind mounts must be writable by uid 1000. To reuse an old
+``/root`` cache, use ``--user 0`` and retain its original mount path.
 
 ROCm (AMD)
 ----------

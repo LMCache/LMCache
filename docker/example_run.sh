@@ -14,7 +14,7 @@ docker run --runtime $RUNTIME --gpus all \
     --env "LMCACHE_CHUNK_SIZE=256" \
     --env "LMCACHE_LOCAL_CPU=True" \
     --env "LMCACHE_MAX_LOCAL_CPU_SIZE=5" \
-    --volume ~/.cache/huggingface:/root/.cache/huggingface \
+    --volume hf-cache:/home/lmcache/.cache/huggingface \
     --network host \
     $IMAGE \
     $HF_MODEL_NAME --kv-transfer-config \

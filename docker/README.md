@@ -71,8 +71,9 @@ default, so Hugging Face caches under the user's home directory
 (`/home/lmcache/.cache/huggingface`).
 
 - Use a **named volume** (as above) for the HF cache: Docker initializes
-  it with the image's ownership, so `lmcache` can write to it without
-  extra setup.
+  a new empty volume with the pre-created cache directory's ownership,
+  so `lmcache` can write to it without extra setup. An existing volume
+  retains its permissions and must also be writable by uid 1000.
 - If you prefer a bind mount (`-v ~/.cache/huggingface:/home/lmcache/.cache/huggingface`),
   the host directory must be writable by uid 1000 (e.g.
   `chown -R 1000:1000 ~/.cache/huggingface`), otherwise model downloads
@@ -310,3 +311,15 @@ docker pull --platform linux/arm64 lmcache/standalone:latest
 - [vLLM Documentation](https://docs.vllm.ai/)
 - [Installation Guide](https://docs.lmcache.ai/getting_started/installation.html)
 - [Docker Deployment Guide](https://docs.lmcache.ai/production/docker_deployment.html)
+
+### Non-root image smoke test
+
+After building either the vLLM or standalone image, check the default user
+and write access to runtime caches, including a fresh named HF volume:
+
+```bash
+bash docker/tests/test_nonroot.sh <image>:<tag>
+```
+
+The test requires a running Docker daemon; it does not require a GPU or
+download a model. GPU inference must be validated separately.

@@ -39,11 +39,12 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 WORKDIR /workspace
 
-# Create a dedicated non-root user. Final images run as this user by default
-# so that a container compromise does not grant root privileges on the host
-# (see CVE-2026-105192).
-RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin lmcache \
-    && chown -R lmcache:lmcache /workspace
+# The NGC Ubuntu base reserves uid 1000 for its default ubuntu account.
+# Replace that account with a dedicated user to reduce container privileges.
+RUN if [ "$(getent passwd 1000 | cut -d: -f1)" = "ubuntu" ]; then userdel ubuntu; fi \
+    && useradd --create-home --uid 1000 --shell /usr/sbin/nologin lmcache \
+    && mkdir -p /home/lmcache/.cache/huggingface \
+    && chown -R lmcache:lmcache /workspace /home/lmcache/.cache
 
 # CUDA arch list used by torch
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
