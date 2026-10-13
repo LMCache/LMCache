@@ -957,9 +957,12 @@ class PrefetchController(StorageControllerInterface):
                 )
 
     def _adapter_in_use(self, adapter_id: int) -> bool:
-        """True if any in-flight request still references ``adapter_id``.
+        """True if the adapter has live borrowed views or queued unlocks, or
+        any in-flight request still references ``adapter_id``.
 
         Note:
+            A borrowing adapter (CXL) stays attached until its shadows and
+            queued unlocks drain, so removal never unmaps a slab in use.
             Membership in ``l2_locked_keys`` keeps an adapter attached until
             the request has returned its L2 read locks; the entry is removed
             when the adapter's load result is admitted.

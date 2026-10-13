@@ -393,9 +393,7 @@ class CxlPeerL2Adapter(PeerL2AdapterBase):
                 return
             super().submit_unlock(keys, wait=True)
         except Exception:
-            logger.warning(
-                "CXL peer unlock failed; reservation follows owner TTL", exc_info=True
-            )
+            logger.exception("CXL peer unlock failed; reservation follows owner TTL")
         finally:
             with self._borrow_lock:
                 self._active_borrows -= 1
