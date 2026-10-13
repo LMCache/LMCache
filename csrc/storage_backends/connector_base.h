@@ -353,6 +353,110 @@ class ConnectorBase : public IStorageConnector {
 
   bool is_stopping() const { return stop_.load(std::memory_order_acquire); }
 
+  // Worker-loop extension point: the default is the serial
+  // dequeue/execute/complete loop. A derived connector may override this to
+  // change only its own worker behavior.
+  virtual void worker_main(std::mutex& req_mu, std::condition_variable& req_cv,
+                           std::queue<Request>& requests) {
+    try {
+      ConnectionType conn = create_connection();
+
+      for (;;) {
+        Request req;
+
+        {
+          std::unique_lock<std::mutex> lk(req_mu);
+          req_cv.wait(lk, [&] {
+            return stop_.load(std::memory_order_acquire) || !requests.empty();
+          });
+          if (stop_.load(std::memory_order_acquire) && requests.empty()) {
+            break;
+          }
+          req = std::move(requests.front());
+          requests.pop();
+        }
+
+        Completion comp;
+        comp.future_id = req.future_id;
+
+        try {
+          switch (req.op) {
+            case Op::BATCH_TILE_GET:
+              do_batch_get(conn, req);
+              comp.ok = true;
+              break;
+
+            case Op::BATCH_TILE_SET:
+              do_batch_set(conn, req);
+              comp.ok = true;
+              break;
+
+            case Op::BATCH_TILE_EXISTS:
+              do_batch_exists(conn, req);
+              comp.ok = true;
+              break;
+
+            case Op::BATCH_TILE_DELETE:
+              do_batch_delete(conn, req);
+              comp.ok = true;
+              break;
+          }
+        } catch (const std::exception& e) {
+          comp.ok = false;
+          comp.error = e.what();
+          if (stop_.load(std::memory_order_acquire)) {
+            break;  // exit without pushing completion
+          }
+        }
+
+        handle_tile_completion(req, comp);
+      }
+    } catch (const std::exception& e) {
+      fprintf(stderr, "[LMCache Connector Worker Error] %s\n", e.what());
+    } catch (...) {
+      fprintf(stderr, "[LMCache Connector Worker Error] Unknown exception\n");
+    }
+  }
+
+  // Update shared batch state for one finished tile and emit the batch
+  // completion when its last tile arrives.
+  void handle_tile_completion(const Request& req, const Completion& comp) {
+    if (!comp.ok) {
+      req.batch->any_failed.store(true, std::memory_order_relaxed);
+      std::lock_guard<std::mutex> lk(req.batch->err_mu);
+      if (req.batch->first_error.empty()) {
+        req.batch->first_error = comp.error;
+      }
+    }
+
+    uint32_t tiles_left =
+        req.batch->remaining_tiles.fetch_sub(1, std::memory_order_relaxed) - 1;
+
+    if (tiles_left == 0) {
+      Completion batch_comp;
+      batch_comp.future_id = req.future_id;
+      batch_comp.ok = !req.batch->any_failed.load(std::memory_order_relaxed);
+      if (!batch_comp.ok) {
+        std::lock_guard<std::mutex> lk(req.batch->err_mu);
+        batch_comp.error = req.batch->first_error;
+      }
+      if (req.batch->batch_op == Op::BATCH_TILE_EXISTS ||
+          req.batch->batch_op == Op::BATCH_TILE_GET ||
+          req.batch->batch_op == Op::BATCH_TILE_DELETE) {
+        batch_comp.result_bytes = std::move(req.batch->per_key_results);
+      }
+      push_completion(std::move(batch_comp));
+    }
+  }
+
+  void push_completion(Completion&& c) {
+    {
+      std::lock_guard<std::mutex> lk(comp_mu_);
+      completions_.push(std::move(c));
+    }
+    signal_eventfd_();
+  }
+
   int worker_count_for_op(Op op) const {
     const std::string& key = lane_key_for_op(op);
     auto it = worker_pool_config_.per_op_workers.find(key);
@@ -461,13 +565,7 @@ class ConnectorBase : public IStorageConnector {
     req_cv_.notify_one();
   }
 
-  void push_completion(Completion&& c) {
-    {
-      std::lock_guard<std::mutex> lk(comp_mu_);
-      completions_.push(std::move(c));
-    }
-    signal_eventfd_();
-  }
+  void worker_loop() { worker_main(req_mu_, req_cv_, requests_); }
 
   void drain_eventfd_() { notifier_->consume(); }
 
@@ -511,8 +609,7 @@ class ConnectorBase : public IStorageConnector {
     WorkerLane* lane_ptr = &lane;
     for (int i = 0; i < num_workers; i++) {
       lane.workers.emplace_back([this, lane_ptr]() {
-        this->worker_loop_for_queue(lane_ptr->mu, lane_ptr->cv,
-                                    lane_ptr->requests);
+        this->worker_main(lane_ptr->mu, lane_ptr->cv, lane_ptr->requests);
       });
     }
   }
@@ -529,109 +626,6 @@ class ConnectorBase : public IStorageConnector {
     std::lock_guard<std::mutex> lk(lane.mu);
     while (!lane.requests.empty()) {
       lane.requests.pop();
-    }
-  }
-
-  void worker_loop() { worker_loop_for_queue(req_mu_, req_cv_, requests_); }
-
-  void worker_loop_for_queue(std::mutex& req_mu,
-                             std::condition_variable& req_cv,
-                             std::queue<Request>& requests) {
-    try {
-      // create connection (derived class specific)
-      ConnectionType conn = create_connection();
-
-      for (;;) {
-        Request req;
-
-        // 1. grab a request from the submission queue
-        {
-          std::unique_lock<std::mutex> lk(req_mu);
-          req_cv.wait(lk, [&] {
-            return stop_.load(std::memory_order_acquire) || !requests.empty();
-          });
-          if (stop_.load(std::memory_order_acquire) && requests.empty()) {
-            break;  // exit loop
-          }
-          req = std::move(requests.front());
-          requests.pop();
-        }
-
-        Completion comp;
-        comp.future_id = req.future_id;
-
-        // 2. execute the requested operation
-        try {
-          switch (req.op) {
-            case Op::BATCH_TILE_GET:
-              do_batch_get(conn, req);
-              comp.ok = true;
-              break;
-
-            case Op::BATCH_TILE_SET:
-              do_batch_set(conn, req);
-              comp.ok = true;
-              break;
-
-            case Op::BATCH_TILE_EXISTS:
-              do_batch_exists(conn, req);
-              comp.ok = true;
-              break;
-
-            case Op::BATCH_TILE_DELETE:
-              do_batch_delete(conn, req);
-              comp.ok = true;
-              break;
-          }
-        } catch (const std::exception& e) {
-          comp.ok = false;
-          comp.error = e.what();
-          // if shutting down, errors are expected
-          if (stop_.load(std::memory_order_acquire)) {
-            break;  // exit without pushing completion
-          }
-        }
-
-        // 3. update shared batch state and push completion when done
-        handle_tile_completion(req, comp);
-      }
-    } catch (const std::exception& e) {
-      fprintf(stderr, "[LMCache Connector Worker Error] %s\n", e.what());
-    } catch (...) {
-      fprintf(stderr, "[LMCache Connector Worker Error] Unknown exception\n");
-    }
-  }
-
-  void handle_tile_completion(const Request& req, const Completion& comp) {
-    // record failure if any
-    if (!comp.ok) {
-      req.batch->any_failed.store(true, std::memory_order_relaxed);
-      std::lock_guard<std::mutex> lk(req.batch->err_mu);
-      if (req.batch->first_error.empty()) {
-        req.batch->first_error = comp.error;
-      }
-    }
-
-    // check if this is the last tile to complete
-    uint32_t tiles_left =
-        req.batch->remaining_tiles.fetch_sub(1, std::memory_order_relaxed) - 1;
-
-    if (tiles_left == 0) {
-      // last tile to finish - emit single completion for entire batch
-      Completion batch_comp;
-      batch_comp.future_id = req.future_id;
-      batch_comp.ok = !req.batch->any_failed.load(std::memory_order_relaxed);
-      if (!batch_comp.ok) {
-        std::lock_guard<std::mutex> lk(req.batch->err_mu);
-        batch_comp.error = req.batch->first_error;
-      }
-      // for batch exists and batch get, move per-key results
-      if (req.batch->batch_op == Op::BATCH_TILE_EXISTS ||
-          req.batch->batch_op == Op::BATCH_TILE_GET ||
-          req.batch->batch_op == Op::BATCH_TILE_DELETE) {
-        batch_comp.result_bytes = std::move(req.batch->per_key_results);
-      }
-      push_completion(std::move(batch_comp));
     }
   }
 
