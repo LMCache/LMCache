@@ -80,7 +80,7 @@ them. No Python packages need installing on the host.
 ```bash
 git clone --branch test/nonroot-image-ci \
   https://github.com/maobaolong/LMCache.git LMCache-image-tests
-git -C LMCache-image-tests checkout --detach f829152bcc956047178ec364538dbf7be42f2b5b
+git -C LMCache-image-tests checkout --detach 4bc72686925d562e12839ac73d24ffc588168f86
 cd LMCache-image-tests
 
 docker run --name pr5685-standalone-check --gpus device=0 --shm-size=2g \
