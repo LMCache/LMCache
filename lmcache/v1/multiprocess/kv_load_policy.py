@@ -39,9 +39,9 @@ class KVLoadContext:
         num_lookup_tokens: Chunk-aligned tokens the lookup covers, counted
             from token zero. This is an upper bound on the hit, not the hit.
         request_configs: The request's ``lmcache.*`` entries as the engine
-            sent them, or None when it carries none. The vLLM connector adds
-            ``lmcache.hint.engine_computed_tokens`` (vLLM's own prefix-cache
-            hit) on its scheduler-time lookups.
+            sent them, or None when it carries none. Engine integrations may
+            add ``lmcache.hint.engine_computed_tokens``, the tokens the engine
+            already holds in its own prefix cache.
     """
 
     request_id: str
@@ -86,9 +86,8 @@ class KVLoadPolicy(ABC):
 class DefaultKVLoadPolicy(KVLoadPolicy):
     """Serves every lookup unless the request sets ``lmcache.skip_load``.
 
-    Example request body (OpenAI-compatible vLLM server)::
-
-        {"kv_transfer_params": {"lmcache.skip_load": true}, ...}
+    The engine integration forwards the flag from the client request, e.g.
+    ``{"lmcache.skip_load": true}`` in the request's transfer params.
     """
 
     def should_load(self, ctx: KVLoadContext) -> bool:

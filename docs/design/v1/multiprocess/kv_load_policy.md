@@ -11,14 +11,13 @@ keeps today's behaviour (serve every lookup).
 
 A LOOKUP is a prefetch: `LookupModule.lookup` submits a task that pulls the
 hit chunks from L2 into L1 and read-locks them, and the connector only sees
-the hit count after that finishes. A decision made later (e.g. in the vLLM
+the hit count after that finishes. A decision made later (e.g. in the engine
 connector) can only skip the L1→GPU copy, the cheap part. Deciding in
 `lookup()` before `submit_prefetch_task` skips the L2 fetch, the L1 space and
 the locks.
 
 ```
-connector                                  server: LookupModule.lookup
-get_num_new_matched_tokens
+engine connector                           server: LookupModule.lookup
   └─ LOOKUP(token_ids, request_configs ─────►  hash chunks, begin session
             + engine_computed_tokens hint)     policy.should_load(ctx)?
                                                  yes → submit_prefetch_task  (unchanged)
@@ -26,7 +25,7 @@ get_num_new_matched_tokens
                                                        early_exit_reason=
                                                        "load_policy_recompute"
   ◄── QUERY_PREFETCH_STATUS → hit chunks ──────  0 when declined
-  └─ 0 hits → (0, False): vLLM prefills
+  └─ 0 hits → engine prefills the prompt
 ```
 
 The trade-off: before the prefetch the server does not know the hit length.
@@ -73,17 +72,23 @@ the existing tail-lock release covers the others.
 
 ## The engine hint
 
-`LMCacheMPConnector` adds `lmcache.hint.engine_computed_tokens` to the
-`request_configs` of its scheduler-time LOOKUP (`num_computed_tokens` from
-`get_num_new_matched_tokens`). `request_configs` is IPC metadata, not cache
+An engine integration may add `lmcache.hint.engine_computed_tokens`, the
+tokens the engine already holds in its own prefix cache, to the
+`request_configs` of a LOOKUP. `request_configs` is IPC metadata, not cache
 identity (`IPCCacheServerKey.request_configs` has `compare=False`), so the
 hint does not change which chunks match. The server does not interpret the
 key; it passes `request_configs` through to the policy, which reads whatever
-hints it needs. With `lmcache.mp.eager_prefetch` the LOOKUP is sent when the
-request is enqueued, before vLLM checks its prefix cache, so the connector
-adds no hint. A client can put any `lmcache.*` key in `kv_transfer_params`,
-and the SGLang and TensorRT-LLM adapters add no hints, so a policy must treat
-hints as advisory.
+hints it needs.
+
+| Integration | Sets the hint |
+|---|---|
+| `integration/vllm/lmcache_mp_connector.py` | scheduler-time lookups; not eager-prefetch lookups, which run before the engine checks its prefix cache |
+| `integration/sglang/unified_lmcache_mp_connector.py` | every lookup (`local_hit_tokens`) |
+| `integration/tensorrt_llm/tensorrt_mp_adapter.py` | every lookup (`num_computed_tokens`) |
+| `integration/sglang/multi_process_adapter.py` | no (local hit not known at lookup) |
+
+Clients can also send `lmcache.*` keys, so a policy must treat hints as
+advisory.
 
 ## Configuration
 
@@ -91,7 +96,7 @@ hints as advisory.
 |---|---|---|
 | `lmcache server` | `--kv-load-policy` | `DEFAULT` (built-in) or `package.module:ClassName` |
 | `lmcache server` | `--runtime-plugin-config` | JSON passed to the policy constructor |
-| request `kv_transfer_params` | `lmcache.skip_load` | `true` → `DEFAULT` declines this request |
+| request config (forwarded by the engine) | `lmcache.skip_load` | `true` → `DEFAULT` declines this request |
 
 ```bash
 lmcache server --kv-load-policy my_pkg.policies:ShortPromptsRecompute \
@@ -105,8 +110,8 @@ the full extra config and decides itself whether to honour
 ## Non-scope
 
 - The CacheBlend lookup (`CB_UNIFIED_LOOKUP`) does not consult the policy.
-- The in-process connector (`vllm_v1_adapter.py`) keeps its
-  `min_retrieve_tokens` threshold.
+- The in-process (non-MP) engine connectors keep their own retrieve
+  thresholds (e.g. `min_retrieve_tokens`).
 - The reply stays a hit count. A `(hit, served)` reply would let the connector
   skip re-storing declined chunks and keep cache-hit stats exact; add it if the
   re-store cost shows up.
