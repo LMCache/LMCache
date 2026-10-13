@@ -118,10 +118,14 @@ checkpoint -- resuming from it would skip the records in between
 permanently, since the broker considers them delivered and the restored
 state does not contain them. One cursor, moved only by a checkpoint, has
 no such gap. The cost: `kafka-consumer-groups --describe` shows this
-group no progress.
+group no progress, so the source reports its own lag instead:
+`lmcache_coordinator.kafka.unread_records` per partition (the high
+watermark from the consumer's fetch cache, minus the next offset to read,
+computed when metrics are read so it can never stall ingest), plus `kafka.partitions_assigned` and
+`kafka.records_read`.
 
 Because the restored view and the resume point cannot disagree, nothing
-here measures lag or gates startup on catching up. A partition
+gates startup on catching up. A partition
 `StreamPosition` has never seen -- a first start, one added since, or
 any start with no checkpoint path configured -- falls back to
 `auto.offset.reset` (`earliest`).
@@ -188,8 +192,7 @@ coordinator keeps measuring against the last report. See
 
 - **Gap visibility over HTTP**: `gap_detected` is a metric but still has
   no HTTP endpoint (the planned `GET /status`, see
-  [observability.md](observability.md)). Consumer lag is not exposed
-  yet either; it is part of the same plan.
+  [observability.md](observability.md)).
 - **Operator-driven replay from an arbitrary point**: a restart already
   resumes correctly on its own. Replaying from further back --
   reprocessing retained history the checkpoint has already moved past --

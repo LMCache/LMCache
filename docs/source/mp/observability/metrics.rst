@@ -951,3 +951,34 @@ server, and cover that server's current run.
      - Time each view or controller spent applying those batches.  Divide its
        rate by the rate of ``batches_delivered`` for the average apply time
        per batch.
+
+The freshness metrics say how old the coordinator's view is.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.ingest.server_seconds_since_last_event``
+     - ObservableGauge (attr: ``instance_id``)
+     - Seconds since this server's last batch was applied.  High while the
+       server still heartbeats means it has stopped sending events.
+   * - ``lmcache_coordinator.ingest.server_event_delivery_delay_seconds``
+     - ObservableGauge (attr: ``instance_id``)
+     - For this server's last applied batch, time from the server sending it
+       to the coordinator applying it.  Measured across the two hosts' clocks,
+       so clock skew shows up here.
+   * - ``lmcache_coordinator.kafka.records_read``
+     - ObservableCounter (attr: ``result``)
+     - Records read from the Kafka topic: ``applied``, ``undecodable`` or
+       ``failed``.  Only with ``--event-transport kafka``.
+   * - ``lmcache_coordinator.kafka.partitions_assigned``
+     - ObservableGauge
+     - Topic partitions this coordinator holds.  Fewer than the topic has
+       means another member of the consumer group holds the rest.
+   * - ``lmcache_coordinator.kafka.unread_records``
+     - ObservableGauge (attr: ``partition``)
+     - Records not yet read per partition.  Kafka's own lag tools cannot report
+       this, because the coordinator never commits offsets.
