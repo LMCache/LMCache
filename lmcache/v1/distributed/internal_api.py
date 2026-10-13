@@ -15,6 +15,9 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.memory_management import MemoryObj
 
 if TYPE_CHECKING:
+    # Third Party
+    import torch
+
     # First Party
     from lmcache.v1.distributed.config import L1ManagerConfig
     from lmcache.v1.memory_allocators.devdax_memory_allocator import (
@@ -344,6 +347,14 @@ class L1ManagerInterface(Protocol):
 
     def get_l1_memory_desc(self) -> L1MemoryDesc | None:
         """Describe a registerable L1 buffer, or None when there is none."""
+        ...
+
+    def warm_up(self, device: "int | torch.device") -> None:
+        """Begin deferred L1 memory initialization under ``device``."""
+        ...
+
+    def pin_status(self) -> tuple[int, int]:
+        """Return ``(pinned, total)`` bytes of deferred host pinning."""
         ...
 
     def get_devdax_arena_statuses(self) -> list["DevDaxArenaStatus"]:
