@@ -110,6 +110,10 @@ configuration. Examples:
 Just point vLLM at the LMCache server as usual (see :doc:`/getting_started/quickstart`); LMCache
 detects the model's KV cache groups automatically at registration time.
 
+Per-request scratch groups are excluded from caching, including on older vLLM
+forks that mark them with ``participates_in_prefix_caching=False`` instead of
+``prefix_cacheable=False``.
+
 .. note::
 
    Because ``LMCacheMPConnector`` advertises hybrid support to vLLM, vLLM keeps
