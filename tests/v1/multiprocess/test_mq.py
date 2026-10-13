@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from multiprocessing.synchronize import Event as EventClass
-from typing import Any, Callable
+from typing import Any, Callable, cast
+from unittest.mock import MagicMock
 import multiprocessing as mp
+import socket
 import sys
 import threading
 import time
@@ -16,12 +18,15 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.request_handler import HandlerType
+from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     CONNECT_TIMEOUT_MS,
     RECONNECT_IVL_MAX_MS,
@@ -29,7 +34,11 @@ from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     MessageQueueClient,
     MessageQueueServer,
 )
-from lmcache.v1.multiprocess.transport.zmq_impl.server import add_handler_helper
+from lmcache.v1.multiprocess.transport.zmq_impl.server import (
+    add_handler_helper,
+    build_zmq_request_server,
+    get_zmq_handler_specs,
+)
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -54,6 +63,71 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheServerKey:
         end=chunk_size,
         request_id=f"test_request_{index}",
     )
+
+
+def _unused_tcp_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
+    """ZMQ discovers the same transport-neutral P2P annotations as gRPC."""
+
+    class P2PHandlers:
+        @request_handler(
+            HandlerType.BLOCKING,
+            operation="p2p_lookup_and_lock",
+        )
+        def lookup(
+            self,
+            keys: list[ObjectKey],
+            group_layout_descs: dict[int, MemoryLayoutDesc],
+        ) -> int:
+            return 0
+
+        @request_handler(
+            HandlerType.BLOCKING,
+            operation="p2p_query_lookup_results",
+        )
+        def query(self, task_id: int) -> list[TransferChannelAddress] | None:
+            return None
+
+        @request_handler(
+            HandlerType.BLOCKING,
+            operation="p2p_unlock_objects",
+        )
+        def unlock(self, keys: list[ObjectKey]) -> None:
+            return None
+
+    operations = {spec.operation for spec in get_zmq_handler_specs(P2PHandlers())}
+
+    assert operations == {
+        "p2p_lookup_and_lock",
+        "p2p_query_lookup_results",
+        "p2p_unlock_objects",
+    }
+
+
+def test_zmq_server_registers_out_of_tree_services() -> None:
+    """Server modules may attach package-owned ZMQ services before start."""
+    registered_servers: list[MessageQueueServer] = []
+    explicit_registrar = MagicMock(name="explicit_registrar")
+
+    class ServiceModule:
+        def register_zmq_services(self, server: MessageQueueServer) -> None:
+            registered_servers.append(server)
+
+    server = build_zmq_request_server(
+        [cast(Any, ServiceModule())],
+        MPServerConfig(port=_unused_tcp_port()),
+        service_registrars=[explicit_registrar],
+    )
+    try:
+        assert registered_servers == [server]
+        explicit_registrar.assert_called_once_with(server)
+    finally:
+        server.close()
 
 
 def _server_process(
@@ -126,11 +200,14 @@ def _run_client_test(
     successful = True
 
     try:
-        futures = []
+        futures: list[MessagingFuture[Any]] = []
         # Submit requests
         for _ in range(num_requests):
-            future = client.submit_request(operation, payloads)  # type: ignore
-            futures.append(future)
+            submitted: MessagingFuture[Any] | MessagingStream[Any] = (
+                client.submit_request(operation, payloads)
+            )
+            assert isinstance(submitted, MessagingFuture)
+            futures.append(submitted)
 
         # Validate responses
         for i, future in enumerate(futures):
@@ -662,8 +739,10 @@ def test_shared_loop_dispatch():
 
         # All futures should resolve with the correct response
         for future in futures_a:
+            assert isinstance(future, MessagingFuture)
             assert future.result(timeout=5) == "NOOP_OK"
         for future in futures_b:
+            assert isinstance(future, MessagingFuture)
             assert future.result(timeout=5) == "NOOP_OK"
 
         client_a.close()
@@ -683,8 +762,14 @@ def test_invalid_outbound_request_does_not_block_later_requests() -> None:
 
     client = MessageQueueClient(server_url, context)
     try:
-        invalid: MessagingFuture[int] = client.submit_request("get_chunk_size", [123])
-        healthy: MessagingFuture[str] = client.submit_request("noop", [])
+        invalid: MessagingFuture[int] | MessagingStream[int] = client.submit_request(
+            "get_chunk_size", [123]
+        )
+        healthy: MessagingFuture[str] | MessagingStream[str] = client.submit_request(
+            "noop", []
+        )
+        assert isinstance(invalid, MessagingFuture)
+        assert isinstance(healthy, MessagingFuture)
 
         with pytest.raises(ValueError, match="Payload count mismatch"):
             invalid.result(timeout=5)
@@ -734,13 +819,19 @@ def test_client_survives_undecodable_response() -> None:
         # The poisoned request cannot be resolved: without a decodable
         # operation there is no way to match it to its future, so it times
         # out. That much is expected -- what matters is what happens after.
-        poisoned: MessagingFuture[int] = client.submit_request("get_chunk_size", [])
+        poisoned: MessagingFuture[int] | MessagingStream[int] = client.submit_request(
+            "get_chunk_size", []
+        )
+        assert isinstance(poisoned, MessagingFuture)
         with pytest.raises(TimeoutError):
             poisoned.result(timeout=1)
 
         # A later, well-formed request must still be served. If the bad
         # response tore down the shared polling loop, this times out too.
-        healthy: MessagingFuture[int] = client.submit_request("get_chunk_size", [])
+        healthy: MessagingFuture[int] | MessagingStream[int] = client.submit_request(
+            "get_chunk_size", []
+        )
+        assert isinstance(healthy, MessagingFuture)
         assert healthy.result(timeout=5) == chunk_size
 
         client.close()
