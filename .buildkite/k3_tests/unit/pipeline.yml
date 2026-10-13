@@ -42,3 +42,29 @@ steps:
       - "durations/test.html"
       - "coverage-test.xml"
       - "coverage-test/**/*"
+
+  # Temporary image validation for PR #5685; do not merge this experiment.
+  - label: ":docker: PR5685 standalone non-root image"
+    command: bash .buildkite/k3_tests/unit/run-nonroot-image.sh
+    timeout_in_minutes: 30
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            securityContext:
+              fsGroup: 1000
+            containers:
+              - name: container-0
+                image: maobaolong/lmcache-nonroot@sha256:7bf268a0ec9a68498245440fab65b2a603c8c0c5b1ede0075232b3efa51309df
+                imagePullPolicy: Always
+                env:
+                  - { name: HOME, value: /home/lmcache }
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - { name: dshm, mountPath: /dev/shm }
+            volumes:
+              - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 2Gi } }
+    artifact_paths:
+      - "/workspace/build/nonroot-standalone*.log"

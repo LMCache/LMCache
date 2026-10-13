@@ -25,3 +25,29 @@ steps:
               - { name: datasets, hostPath: { path: /data/datasets, type: DirectoryOrCreate } }
     artifact_paths:
       - "build_*.log"
+
+  # Temporary image validation for PR #5685; do not merge this experiment.
+  - label: ":docker: PR5685 vLLM non-root image E2E"
+    command: bash .buildkite/k3_tests/correctness/run-nonroot-image.sh
+    timeout_in_minutes: 40
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            securityContext:
+              fsGroup: 1000
+            containers:
+              - name: container-0
+                image: maobaolong/lmcache-nonroot@sha256:110ed03488f7688f4552f7c61ae0ff41814c8b013c17b711c27cded862f02174
+                imagePullPolicy: Always
+                env:
+                  - { name: HOME, value: /home/lmcache }
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                volumeMounts:
+                  - { name: dshm, mountPath: /dev/shm }
+            volumes:
+              - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 2Gi } }
+    artifact_paths:
+      - "/workspace/build/nonroot-vllm*.log"
