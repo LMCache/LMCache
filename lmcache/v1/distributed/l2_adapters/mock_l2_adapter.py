@@ -314,6 +314,24 @@ class MockL2Adapter(L2AdapterInterface):
         with self._lock:
             return len(self._locked_keys)
 
+    def wait_for_pending_callbacks(self, timeout: float) -> bool:
+        """Wait until callbacks already scheduled on the adapter loop have run.
+
+        ``submit_unlock`` runs asynchronously on the adapter's event loop. A
+        caller that needs to observe its effect can queue a barrier after the
+        submission and wait for it to run, rather than sleeping for a fixed
+        duration.
+
+        Args:
+            timeout: Maximum number of seconds to wait.
+
+        Returns:
+            True if the barrier ran before the timeout, False otherwise.
+        """
+        done = threading.Event()
+        self._loop.call_soon_threadsafe(done.set)
+        return done.wait(timeout)
+
     def debug_has_key(self, key: ObjectKey) -> bool:
         """
         Check whether a specific key is stored in the mock adapter.

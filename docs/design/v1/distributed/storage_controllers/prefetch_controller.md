@@ -203,3 +203,16 @@ with a real `L1Manager` and `MockL2Adapter`:
 
 `tests/v1/distributed/test_prefetch_policy.py` tests the policies black-box
 against their docstrings.
+
+## Optional W3C request context
+
+With `LMCACHE_MP_TRACE_CONTEXT=1`, submission captures only `traceparent` and
+`tracestate`. Both the submission queue and pending queue carry this snapshot.
+The poll thread attaches it while starting lookup and advancing lookup/load
+completion, then restores its previous context in `finally`. Each in-flight
+request retains its own snapshot, including unsampled parents. Existing
+per-request exception handling still aborts failed requests and releases locks.
+
+This covers synchronous controller scheduling and adapter submission. It does
+not propagate context into adapter I/O threads or establish GPU/RDMA spans.
+No SDK, exporter, or second tracer provider is configured.
