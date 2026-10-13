@@ -785,6 +785,64 @@ For the full design rationale and the in-process accessors that back
 each metric see ``docs/design/v1/mp_observability/METRICS.md`` and
 ``docs/design/v1/mp_observability/event-bus.md`` in the source tree.
 
+gRPC Runtime Metrics
+~~~~~~~~~~~~~~~~~~~~
+
+When metrics are enabled and the MP request transport is gRPC, LMCache also
+registers gRPC Python's OpenTelemetry observability plugin against the same
+OTel ``MeterProvider``. ZMQ mode does not register this plugin, so the
+existing LMCache EventBus metrics remain unchanged. The plugin is provided by
+``grpcio-observability`` and is installed only on Linux, which is the platform
+currently supported by that upstream package. On non-Linux developer hosts the
+integration is skipped unless the package is available locally. Use
+``--disable-grpc-metrics`` to suppress the integration explicitly while
+keeping LMCache's EventBus metrics enabled.
+
+These metrics describe the gRPC transport itself, not cache hit/miss behavior.
+They use the upstream ``grpc.*`` namespace. On Prometheus, ``.`` is converted
+to ``_`` and counters get a ``_total`` suffix.
+
+.. list-table:: gRPC Runtime Metrics
+   :header-rows: 1
+   :widths: 34 34 16 16
+
+   * - OTel metric name
+     - Prometheus name
+     - Type
+     - Unit
+   * - ``grpc.client.attempt.started``
+     - ``grpc_client_attempt_started_total``
+     - Counter
+     - ``{attempt}``
+   * - ``grpc.client.attempt.duration``
+     - ``grpc_client_attempt_duration_seconds``
+     - Histogram
+     - seconds
+   * - ``grpc.client.attempt.sent_total_compressed_message_size``
+     - ``grpc_client_attempt_sent_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+   * - ``grpc.client.attempt.rcvd_total_compressed_message_size``
+     - ``grpc_client_attempt_rcvd_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+   * - ``grpc.server.call.started``
+     - ``grpc_server_call_started_total``
+     - Counter
+     - ``{call}``
+   * - ``grpc.server.call.duration``
+     - ``grpc_server_call_duration_seconds``
+     - Histogram
+     - seconds
+   * - ``grpc.server.call.sent_total_compressed_message_size``
+     - ``grpc_server_call_sent_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+   * - ``grpc.server.call.rcvd_total_compressed_message_size``
+     - ``grpc_server_call_rcvd_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+
 Prometheus Scrape Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -842,3 +900,54 @@ The same two gauges are also emitted under their previous names,
 ``lmcache_mp.key_directory_placement_size_bytes``, for one release so
 dashboards can migrate.  The previous names will be removed in the next
 release.
+
+The ingest metrics say whether the coordinator's view of the fleet is
+complete.  Two kinds of loss are counted separately: batches that never
+arrived (a skipped ``seq``), and events an MP server reports it dropped
+before sending (each batch carries the server's running count in
+``dropped_events``).  The first batch of a stream the coordinator was not
+already tracking counts no missing batches: earlier batches were sent before
+it was listening.  Fleet-wide counters drive alerts; the per-server gauges,
+one series per ``instance_id`` the coordinator currently tracks, show which
+server, and cover that server's current run.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.ingest.event_batches_received``
+     - ObservableCounter (attr: ``result``)
+     - Cache-event batches received from MP servers: ``applied``,
+       ``duplicate`` (seq already seen) or ``stale`` (older incarnation).
+   * - ``lmcache_coordinator.ingest.event_batches_missing``
+     - ObservableCounter
+     - Batches that never arrived: skipped ``seq`` values.
+   * - ``lmcache_coordinator.ingest.events_dropped_by_servers``
+     - ObservableCounter
+     - Cache events the MP servers reported dropping before they reached the
+       coordinator.
+   * - ``lmcache_coordinator.ingest.server_event_batches_missing``
+     - ObservableGauge (attr: ``instance_id``)
+     - Missing batches for one server's current run.
+   * - ``lmcache_coordinator.ingest.server_events_dropped``
+     - ObservableGauge (attr: ``instance_id``)
+     - Dropped events for one server's current run.
+   * - ``lmcache_coordinator.ingest.server_view_incomplete``
+     - ObservableGauge (attr: ``instance_id``)
+     - ``1`` while the coordinator knows it is missing part of this server's
+       cache.  Clears when the server restarts or leaves.
+   * - ``lmcache_coordinator.ingest.batch_apply_failures``
+     - ObservableCounter (attrs: ``consumer``, ``op``)
+     - A view or controller failed to apply a batch (``op="consume"``) or a
+       fence (``op="fence"``); it now disagrees with the others.
+   * - ``lmcache_coordinator.ingest.batches_delivered``
+     - ObservableCounter (attr: ``consumer``)
+     - Admitted batches handed to each view or controller.
+   * - ``lmcache_coordinator.ingest.batch_apply_time_seconds``
+     - ObservableCounter (attr: ``consumer``)
+     - Time each view or controller spent applying those batches.  Divide its
+       rate by the rate of ``batches_delivered`` for the average apply time
+       per batch.
