@@ -35,20 +35,9 @@ def device_sync(device: str) -> None:
     Args:
         device: Device string ("cuda", "xpu", or "cpu")
 
-    This function synchronizes operations for GPU devices:
-    - For CUDA devices, calls torch.cuda.synchronize()
-    - For XPU devices, calls torch.xpu.synchronize()
-    - For CPU, no synchronization is needed (returns immediately)
+    CPU requires no synchronization.
     """
-    if device == "cuda":
-        torch.cuda.synchronize()
-    elif device == "xpu":
-        if hasattr(torch, "xpu") and torch.xpu.is_available():
-            torch.xpu.synchronize()
-    else:
-        # TODO: add more device here
-        pass
-    # CPU requires no synchronization
+    platform_pkg.synchronize_device(torch.device(device))
 
 
 # ==========================================
@@ -67,7 +56,8 @@ def _build_backend_params() -> list:
     - xpu_py_ops: uses lmcache.v1.platform.torch_ops with XPU visible
     """
     params = []
-    cuda_available = torch.cuda.is_available()
+    cuda_spec = platform_pkg.get_device_spec("cuda")
+    cuda_available = cuda_spec is not None and cuda_spec.is_available()
 
     params.append(pytest.param(("cpu_py_ops", _py_ops, "cpu"), id="cpu_py_ops"))
 
@@ -90,7 +80,8 @@ def _build_backend_params() -> list:
                 pytest.param(("cuda_py_ops", _py_ops, "cpu"), id="cuda_cpu_py_ops")
             )
 
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
+    xpu_spec = platform_pkg.get_device_spec("xpu")
+    if xpu_spec is not None and xpu_spec.is_available():
         try:
             params.append(
                 pytest.param(
@@ -114,12 +105,18 @@ _results: dict[tuple[str, str], dict[str, Any]] = {}
 def backend(request: pytest.FixtureRequest) -> Any:
     """Yield (backend_id, ops_module, device) for each backend config.
 
-    For the cpu_py_ops variant, torch.cuda.is_available is patched to
+    For the cpu_py_ops variant, CUDA availability is patched to
     return False so the scenario code behaves as if no GPU is present.
     """
     backend_id, ops, device = request.param
     if backend_id == "cpu_py_ops":
-        with unittest.mock.patch("torch.cuda.is_available", return_value=False):
+        cuda_spec = platform_pkg.get_device_spec("cuda")
+        assert cuda_spec is not None
+        with unittest.mock.patch.object(
+            getattr(torch, cuda_spec.torch_module_name),
+            "is_available",
+            return_value=False,
+        ):
             yield backend_id, ops, device
     else:
         yield backend_id, ops, device
@@ -136,7 +133,8 @@ def scenario_get_gpu_pci_bus_id(ops: Any, device: str) -> dict[str, torch.Tensor
 
     is_valid = isinstance(res, str) and len(res) > 0
 
-    if torch.cuda.is_available() is False:
+    cuda_spec = platform_pkg.get_device_spec("cuda")
+    if cuda_spec is None or not cuda_spec.is_available():
         # for non cuda device, not expecting a valid return
         # but crash should not happen
         # and we mock a valid return here

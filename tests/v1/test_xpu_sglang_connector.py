@@ -36,7 +36,7 @@ pytestmark = [
 
 
 def _current_xpu_device() -> torch.device:
-    return torch.device(torch_device_type, torch.xpu.current_device())
+    return torch.device(torch_device_type, torch_dev.current_device())
 
 
 def _make_unique_slot_mapping(
