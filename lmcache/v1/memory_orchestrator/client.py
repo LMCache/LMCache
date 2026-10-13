@@ -198,6 +198,8 @@ class MemoryOrchestratorClient:
         """Reserve extents for new objects, all or nothing per RPC for absent keys.
 
         A failed split batch first aborts, best effort, its earlier RPCs' grants.
+        Reservations expire after the orchestrator's write TTL; replaying a
+        cached grant does not renew it.
 
         Args:
             entries: Objects to reserve; distinct keys.
@@ -231,7 +233,8 @@ class MemoryOrchestratorClient:
             tokens: Write tokens from ``reserve_write``.
 
         Returns:
-            One status per token, in request order; a retried token gets ``OK``.
+            One status per token, in request order; a committed token gets
+            ``OK`` again, and an expired write token gets ``STALE_TOKEN``.
 
         Raises:
             OrchestratorError: See the class docstring.

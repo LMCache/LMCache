@@ -10,8 +10,8 @@ file several servers on one host map. Its clients are L1 bindings inside MP
 servers that map the region on their own host.
 
 Limits of this milestone: one region per orchestrator, monotonic allocation
-(no extent reuse), state in memory. Not here: reclamation or eviction, lease
-TTL and client fencing, HA or durability.
+(no extent reuse), state in memory. Not here: reclamation or eviction, read
+lease TTL and client fencing, HA or durability.
 
 ## Why a separate owner
 
@@ -57,8 +57,8 @@ earlier parts were granted.
 (no object) ---------------> WRITING -----------------> VALID (terminal here:
                                 |                       no eviction or reuse)
                                 |
-                                |  AbortWrite, CloseClient, or the writer
-                                |  registering again (new incarnation)
+                                |  Write expiry, AbortWrite, CloseClient, or
+                                |  the writer registering again (new incarnation)
                                 v
                             CONSUMED
             record dropped, extent never reused; a later store
@@ -67,9 +67,11 @@ earlier parts were granted.
 
 A client sends `FinishWrite` only once its copies into the extent are complete
 and visible to other hosts; reads are granted on `VALID` only, and `VALID` is
-terminal here. A writer that vanished stays `WRITING` until its client
-registers again under the same `client_id` or the region is reset; others see
-`BUSY_WRITING` and recompute.
+terminal here. A write reservation expires after `--write-ttl-seconds`
+(default 600). Key and write-token access lazily consume expired reservations
+under the state lock. Their tokens become stale and a later store gets a fresh
+extent. Usage counters reflect expiry once processed; idle records are not
+swept. Committed objects and read leases do not expire.
 
 ## Failure semantics
 
@@ -78,16 +80,19 @@ reader.
 
 | Failure | Behaviour |
 | --- | --- |
-| Client dies mid-write or holding leases | Its writes stay `WRITING` and its leases stay counted until it re-registers under its `client_id` or a reset |
+| `ReserveWrite` reply lost | Same-request retries replay the cached grant without renewing its deadline. If retries fail or the reply leaves the replay window, lazy write expiry unblocks the key |
+| Client dies mid-write or holding leases | Its writes expire lazily; its read leases stay counted until it re-registers under its `client_id` or a reset |
 | `FinishWrite` reply lost | The client reports its store failed; if the commit landed, a later `ReserveWrite` sees `EXISTS_VALID` |
 | Orchestrator restarts | The startup marker survives, so it comes up `RESET_REQUIRED` with a new epoch and refuses every request but `DescribeRegion` (which reports it) until an offline reset |
 | Second orchestrator for a region | Refused while the marker names a live process |
 | Layout, size or visibility mismatch | `RegisterClient` fails |
 
-No lease TTL, automatic abort or client fencing yet: an expired token cannot
-prove a remote DMA stopped, so expiry-driven reuse would reintroduce the
-corruption the orchestrator exists to prevent. Reset is offline: stop every
-client, stop the orchestrator, remove `<state-dir>/<region-id>.marker`, start
+Write expiry does not prove a remote DMA stopped: the old extent remains
+consumed, and late completion or client cleanup cannot affect a replacement
+reservation. Set the TTL above the expected transfer and RPC duration; slow
+writes may expire too. Read lease TTL and client fencing are deferred.
+Reset is offline: stop every client, stop the orchestrator, remove
+`<state-dir>/<region-id>.marker`, start
 both again. A clean stop with no clients deletes the marker itself.
 
 ```bash
@@ -118,7 +123,7 @@ flow, replay, startup marker, batch splitting and rollback).
 
 ## Follow-ups
 
-Lease TTL and client fencing (`Renew`, quarantine of orphaned extents);
+Read lease TTL and client fencing (`Renew`, quarantine of orphaned extents);
 reclamation and eviction (`RequestEvict`, `VALID -> EVICTING -> FREE`,
 generation bump on reuse); several regions per orchestrator (a region table,
 no wire change); region-scoped fleet cache events.

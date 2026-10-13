@@ -24,7 +24,7 @@ class WriteStatus(enum.Enum):
     """Per-entry outcome of a write reservation."""
 
     WRITE_GRANTED = enum.auto()
-    """A new extent was allocated; the caller owns it until finish or abort."""
+    """A new extent was allocated; owned until finish, abort, or write expiry."""
 
     EXISTS_VALID = enum.auto()
     """The object is already committed; nothing was allocated."""
@@ -56,7 +56,7 @@ class TokenStatus(enum.Enum):
     """The transition happened now or on an earlier call with the same token."""
 
     STALE_TOKEN = enum.auto()
-    """The token is unknown, foreign, retired, or used with the wrong call."""
+    """The token is unknown, foreign, expired, retired, or used with the wrong call."""
 
 
 @dataclass(frozen=True)

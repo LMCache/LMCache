@@ -134,6 +134,7 @@ class OrchestratorConfig:
     listen: str
     state_dir: Path
     max_workers: int
+    write_ttl_seconds: float = 600.0
 
 
 @dataclass(frozen=True)
@@ -324,6 +325,13 @@ def add_orchestrator_args(parser: argparse.ArgumentParser) -> None:
         help="Most entries or tokens one request may carry. Default is %(default)s.",
     )
     group.add_argument(
+        "--write-ttl-seconds",
+        type=_positive_float,
+        default=600.0,
+        help="Write reservation lifetime; checked on key/token access. Expired "
+        "extents stay consumed. Default is %(default)s seconds.",
+    )
+    group.add_argument(
         "--listen",
         type=_listen_address,
         default="0.0.0.0:7700",
@@ -376,6 +384,7 @@ def parse_args_to_orchestrator_config(args: argparse.Namespace) -> OrchestratorC
         listen=args.listen,
         state_dir=args.state_dir,
         max_workers=args.max_workers,
+        write_ttl_seconds=args.write_ttl_seconds,
     )
 
 
@@ -436,6 +445,7 @@ def serve(config: OrchestratorConfig) -> int:
         config.max_batch_entries,
         region_epoch=secrets.randbelow(MAX_UINT64) + 1,
         reset_required=mode is _StartMode.RESET_REQUIRED,
+        write_ttl_seconds=config.write_ttl_seconds,
     )
     executor = ThreadPoolExecutor(
         max_workers=config.max_workers, thread_name_prefix="memory-orchestrator"

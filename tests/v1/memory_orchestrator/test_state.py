@@ -5,6 +5,7 @@
 from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
+from unittest.mock import Mock
 
 # Third Party
 import pytest
@@ -125,6 +126,10 @@ class TestConstruction:
             {"visibility_mode": "eventual"},
             {"max_batch_entries": 0},
             {"region_epoch": 0},
+            {"write_ttl_seconds": 0},
+            {"write_ttl_seconds": -1},
+            {"write_ttl_seconds": float("nan")},
+            {"write_ttl_seconds": float("inf")},
         ],
     )
     def test_invalid_arguments_raise(self, overrides):
@@ -210,6 +215,104 @@ class TestWrites:
         assert_refused("RESOURCE_EXHAUSTED", state.reserve_write, env, entries)
         assert_refused("RESOURCE_EXHAUSTED", state.finish_write, env, tokens)
         assert state.usage().allocated_bytes == 0
+
+
+class TestWriteExpiry:
+    @pytest.fixture
+    def clock(self, monkeypatch: pytest.MonkeyPatch) -> Mock:
+        clock = Mock(return_value=100.0)
+        monkeypatch.setattr("lmcache.v1.memory_orchestrator.state.monotonic", clock)
+        return clock
+
+    @pytest.mark.parametrize("cleanup", ["close", "register"])
+    def test_replacement_survives_old_token_and_client_cleanup(
+        self, state: RegionState, env: Envelope, clock: Mock, cleanup: str
+    ) -> None:
+        old = state.reserve_write(env, [write("k")])[0]
+        other = register(state, "b")
+        clock.return_value = 699.0
+        assert (
+            state.reserve_write(other, [write("k")])[0].status
+            is WriteStatus.BUSY_WRITING
+        )
+        clock.return_value = 700.0
+        new = state.reserve_write(other, [write("k")])[0]
+        assert new.status is WriteStatus.WRITE_GRANTED
+        assert old.handle is not None and new.handle is not None
+        assert new.handle.offset >= old.handle.offset + old.handle.length
+        assert old.token is not None and new.token is not None
+        assert new.token != old.token
+        assert state.finish_write(env, [old.token]) == [TokenStatus.STALE_TOKEN]
+        assert state.abort_write(env, [old.token]) == [TokenStatus.STALE_TOKEN]
+        if cleanup == "close":
+            assert state.close_client(env) == CloseResult(0, 0)
+        else:
+            assert state.register_client(
+                replace(env, client_incarnation=2), FINGERPRINT, CAPACITY, MODE
+            ) == RegisterResult(EPOCH, 0, 0)
+        assert state.finish_write(other, [new.token]) == [TokenStatus.OK]
+        clock.return_value = 1400.0
+        assert state.finish_write(other, [new.token]) == [TokenStatus.OK]
+        assert state.reserve_read(other, [read("k")])[0].handle == new.handle
+        usage = state.usage()
+        assert (usage.allocated_bytes, usage.valid_bytes) == (2 * ALIGN, ALIGN)
+        assert (usage.writing, usage.valid, usage.consumed) == (0, 1, 1)
+
+    @pytest.mark.parametrize("operation", ["read", "finish", "abort"])
+    def test_expiry_on_read_or_completion(
+        self, state: RegionState, env: Envelope, clock: Mock, operation: str
+    ) -> None:
+        grant = state.reserve_write(env, [write("k")])[0]
+        assert grant.token is not None
+        clock.return_value = 700.0
+        if operation == "read":
+            assert state.reserve_read(env, [read("k")])[0].status is ReadStatus.MISS
+        elif operation == "finish":
+            assert state.finish_write(env, [grant.token]) == [TokenStatus.STALE_TOKEN]
+        else:
+            assert state.abort_write(env, [grant.token]) == [TokenStatus.STALE_TOKEN]
+        usage = state.usage()
+        assert (usage.allocated_bytes, usage.writing, usage.consumed) == (ALIGN, 0, 1)
+        assert (
+            state.reserve_write(env, [write("k")])[0].status
+            is WriteStatus.WRITE_GRANTED
+        )
+
+    def test_expiry_does_not_reclaim_capacity(
+        self, state: RegionState, env: Envelope, clock: Mock
+    ) -> None:
+        state.reserve_write(env, [write("k", CAPACITY)])
+        clock.return_value = 700.0
+        assert (
+            state.reserve_write(env, [write("k")])[0].status is WriteStatus.OUT_OF_SPACE
+        )
+        usage = state.usage()
+        assert (usage.allocated_bytes, usage.writing, usage.consumed) == (
+            CAPACITY,
+            0,
+            1,
+        )
+
+    def test_rejected_batches_do_not_expire_writes(
+        self, state: RegionState, env: Envelope, clock: Mock
+    ) -> None:
+        grant = state.reserve_write(env, [write("k")])[0]
+        assert grant.token is not None
+        before = state.usage()
+        clock.return_value = 700.0
+        assert_refused(
+            "INVALID_ARGUMENT", state.reserve_write, env, [write("k"), write("bad", 0)]
+        )
+        assert_refused(
+            "INVALID_ARGUMENT", state.reserve_read, env, [read("k"), read("bad", 0)]
+        )
+        assert_refused(
+            "RESOURCE_EXHAUSTED",
+            state.finish_write,
+            env,
+            [grant.token] * (MAX_BATCH + 1),
+        )
+        assert state.usage() == before
 
 
 class TestReads:

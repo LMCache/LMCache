@@ -8,7 +8,9 @@ only converts messages and maps errors.
 # Standard
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from time import monotonic
 import enum
+import math
 import secrets
 import threading
 
@@ -88,6 +90,9 @@ class _ObjectRecord:
     handle: Handle
     payload_bytes: int
     layout: WireLayout
+    writer_id: str
+    write_token: bytes
+    write_deadline: float  # Monotonic deadline; ignored once VALID.
 
 
 @dataclass
@@ -127,6 +132,9 @@ class RegionState:
         region_epoch: Nonzero 64-bit epoch clients present after registering.
         reset_required: Whether the orchestrator restarted uncleanly and must
             refuse every client call.
+        write_ttl_seconds: Positive, finite lifetime of a write reservation.
+            Expiry is checked on key and write-token access; expired tokens
+            become stale and their extents remain consumed.
 
     Raises:
         ValueError: An argument violates the constraints above.
@@ -143,6 +151,7 @@ class RegionState:
         *,
         region_epoch: int,
         reset_required: bool,
+        write_ttl_seconds: float = 600.0,
     ) -> None:
         if alignment_bytes <= 0 or alignment_bytes & (alignment_bytes - 1):
             raise ValueError(
@@ -159,6 +168,8 @@ class RegionState:
             raise ValueError(f"max_batch_entries must be >= 1: {max_batch_entries}")
         if not 0 < region_epoch <= MAX_UINT64:
             raise ValueError(f"region_epoch must be a nonzero uint64: {region_epoch}")
+        if not (write_ttl_seconds > 0 and math.isfinite(write_ttl_seconds)):
+            raise ValueError("write_ttl_seconds must be positive and finite")
         self._contract = RegionContract(
             region_id=region_id,
             region_epoch=region_epoch,
@@ -170,6 +181,7 @@ class RegionState:
             reset_required=reset_required,
         )
         self._lock = threading.Lock()
+        self._write_ttl_seconds = write_ttl_seconds
         # Guarded by self._lock: WRITING and VALID objects (a CONSUMED object
         # leaves the index), client_id -> registered incarnation, the bump
         # pointer that never decreases, the VALID bytes and CONSUMED count.
@@ -184,7 +196,7 @@ class RegionState:
         return self._contract
 
     def usage(self) -> RegionUsage:
-        """Return a consistent snapshot of the region's counters."""
+        """Return counters, including pending writes until lazy expiry consumes them."""
         with self._lock:
             clients = self._clients.values()
             writing = sum(len(client.writes) for client in clients)
@@ -301,6 +313,8 @@ class RegionState:
         sizes do not all fit, every absent entry gets ``OUT_OF_SPACE`` and
         nothing is allocated. Otherwise each is ``WRITE_GRANTED`` with a fresh
         token and becomes a WRITING object owned by this client incarnation.
+        An expired WRITING record is consumed before checking the key; a new
+        reservation always uses a fresh extent and does not renew the old token.
 
         Args:
             env: Envelope of a registered client incarnation.
@@ -337,7 +351,7 @@ class RegionState:
             absent: list[int] = []
             needed_bytes = 0
             for index, entry in enumerate(entries):
-                record = self._objects.get(entry.key)
+                record = self._get_object(entry.key)
                 if record is None:
                     absent.append(index)
                     needed_bytes += _round_up(entry.payload_bytes, alignment)
@@ -347,6 +361,7 @@ class RegionState:
                     grants[index] = WriteGrantResult(WriteStatus.BUSY_WRITING)
             if self._allocated_bytes + needed_bytes > self._contract.capacity_bytes:
                 return grants  # every absent entry keeps OUT_OF_SPACE
+            write_deadline = monotonic() + self._write_ttl_seconds
             for index in absent:
                 entry = entries[index]
                 handle = Handle(
@@ -357,7 +372,13 @@ class RegionState:
                 token = secrets.token_bytes(_TOKEN_BYTES)
                 self._allocated_bytes += handle.length
                 self._objects[entry.key] = _ObjectRecord(
-                    _ObjectState.WRITING, handle, entry.payload_bytes, entry.layout
+                    _ObjectState.WRITING,
+                    handle,
+                    entry.payload_bytes,
+                    entry.layout,
+                    env.client_id,
+                    token,
+                    write_deadline,
                 )
                 client.writes[token] = entry.key
                 grants[index] = WriteGrantResult(
@@ -370,7 +391,7 @@ class RegionState:
 
         A live write token of this client incarnation commits its object and
         yields ``OK``; a token this incarnation already finished yields ``OK``
-        again. Anything else (unknown, another client's, aborted or retired
+        again. Anything else (unknown, another client's, expired, aborted or retired
         tokens, or a token used with another call) yields ``STALE_TOKEN``.
 
         Args:
@@ -415,6 +436,7 @@ class RegionState:
         size and ``reader_count`` fresh leases; a WRITING object yields
         ``BUSY_WRITING`` and an unknown key ``MISS``. The batch is partial by
         design: a miss never rolls back the leases granted beside it.
+        Expired WRITING records are consumed and yield ``MISS``.
 
         Args:
             env: Envelope of a registered client incarnation.
@@ -440,7 +462,7 @@ class RegionState:
                     )
             grants: list[ReadGrantResult] = []
             for entry in entries:
-                record = self._objects.get(entry.key)
+                record = self._get_object(entry.key)
                 if record is None:
                     grants.append(ReadGrantResult(ReadStatus.MISS))
                 elif record.state is _ObjectState.WRITING:
@@ -510,6 +532,20 @@ class RegionState:
             )
             return CloseResult(aborted_writes, released_leases)
 
+    def _get_object(self, key: WireObjectKey) -> _ObjectRecord | None:
+        """Get an object, consuming an expired write; caller holds ``self._lock``."""
+        record = self._objects.get(key)
+        if (
+            record is not None
+            and record.state is _ObjectState.WRITING
+            and monotonic() >= record.write_deadline
+        ):
+            del self._clients[record.writer_id].writes[record.write_token]
+            del self._objects[key]
+            self._consumed_count += 1
+            return None
+        return record
+
     def _complete_tokens(
         self, env: Envelope, tokens: list[bytes], op: _TokenOp
     ) -> list[TokenStatus]:
@@ -520,6 +556,8 @@ class RegionState:
             live = client.leases if op is _TokenOp.FINISH_READ else client.writes
             statuses: list[TokenStatus] = []
             for token in tokens:
+                if op is not _TokenOp.FINISH_READ and token in client.writes:
+                    self._get_object(client.writes[token])
                 key = live.pop(token, None)
                 if key is None:
                     # Completed by this same call before: OK again, else stale.

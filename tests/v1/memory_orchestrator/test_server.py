@@ -3,7 +3,9 @@
 
 # Standard
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import Mock
 
 # Third Party
 import grpc
@@ -13,6 +15,7 @@ import pytest
 from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
 from lmcache.v1.memory_orchestrator._proto_gen.memory_orchestrator_pb2_grpc import (
     MemoryOrchestratorStub,
+    add_MemoryOrchestratorServicer_to_server,
 )
 from lmcache.v1.memory_orchestrator.api import (
     DEFAULT_LAYOUT_FINGERPRINT,
@@ -32,6 +35,8 @@ from lmcache.v1.memory_orchestrator.api import (
 )
 from lmcache.v1.memory_orchestrator.client import MemoryOrchestratorClient
 from lmcache.v1.memory_orchestrator.server import OrchestratorConfig, parse_args
+from lmcache.v1.memory_orchestrator.service import OrchestratorServicer
+from lmcache.v1.memory_orchestrator.state import RegionState
 from tests.v1.memory_orchestrator.harness import (
     REGION_ID,
     STARTUP_TIMEOUT_S,
@@ -220,6 +225,85 @@ def test_repeated_request_id_replays_or_rejects(shared, clients):
     assert client.finish_write([g.token for g in second.grants]) == [TokenStatus.OK] * 2
 
 
+@pytest.mark.parametrize("lost_replies", [1, 3])
+def test_write_reply_loss_and_expiry(
+    monkeypatch: pytest.MonkeyPatch, lost_replies: int
+) -> None:
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr("lmcache.v1.memory_orchestrator.state.monotonic", clock)
+    state = RegionState(
+        REGION_ID,
+        CAPACITY,
+        ALIGN,
+        DEFAULT_LAYOUT_FINGERPRINT,
+        MODE,
+        MAX_BATCH,
+        region_epoch=1,
+        reset_required=False,
+        write_ttl_seconds=1.0,
+    )
+    requests: list[pb2.ReserveWriteRequest] = []
+
+    class LosingReplyServicer(OrchestratorServicer):
+        def ReserveWrite(
+            self, request: pb2.ReserveWriteRequest, context: grpc.ServicerContext
+        ) -> pb2.ReserveWriteReply:
+            """Drop replies after the production handler records the reservation."""
+            reply = super().ReserveWrite(request, context)
+            if request.env.client_id == "writer":
+                requests.append(request)
+                if len(requests) <= lost_replies:
+                    context.abort(grpc.StatusCode.UNAVAILABLE, "injected reply loss")
+            return reply
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        server = grpc.server(executor)
+        add_MemoryOrchestratorServicer_to_server(LosingReplyServicer(state), server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        writer = MemoryOrchestratorClient(f"127.0.0.1:{port}", REGION_ID, "writer")
+        peer = MemoryOrchestratorClient(f"127.0.0.1:{port}", REGION_ID, "peer")
+        try:
+            register(writer)
+            register(peer)
+            if lost_replies == 3:
+                with pytest.raises(OrchestratorUnavailableError):
+                    writer.reserve_write([write("lost")])
+            else:
+                assert (
+                    writer.reserve_write([write("lost")])[0].status
+                    is WriteStatus.WRITE_GRANTED
+                )
+            assert len(requests) == min(lost_replies + 1, 3)
+            assert len({r.env.request_id for r in requests}) == 1
+            assert peer.usage().allocated_bytes == ALIGN
+            assert (
+                peer.reserve_write([write("lost")])[0].status
+                is WriteStatus.BUSY_WRITING
+            )
+            clock.return_value = 101.0
+            new = peer.reserve_write([write("lost")])[0]
+            assert new.status is WriteStatus.WRITE_GRANTED
+            assert new.handle is not None and new.handle.offset == ALIGN
+            # Replaying an expired grant must not let it commit a replacement.
+            with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+                old = MemoryOrchestratorStub(channel).ReserveWrite(
+                    requests[0], timeout=5
+                )
+            assert old.grants[0].handle.offset == 0
+            assert writer.finish_write([old.grants[0].token]) == [
+                TokenStatus.STALE_TOKEN
+            ]
+            assert writer.close() == CloseResult(0, 0)
+            assert new.token is not None
+            assert peer.finish_write([new.token]) == [TokenStatus.OK]
+            assert peer.usage().consumed == 1
+        finally:
+            writer.close()
+            peer.close()
+            server.stop(0).wait()
+
+
 def test_failed_split_batch_rolls_back_the_earlier_rpcs(clients):
     client = clients("mp-partial")
     names = [f"partial-{i}" for i in range(MAX_BATCH)]
@@ -381,17 +465,19 @@ def test_parse_args_defaults_and_capacity_rounding(tmp_path):
         listen="0.0.0.0:7700",
         state_dir=tmp_path,
         max_workers=16,
+        write_ttl_seconds=600.0,
     )
     config = parse_args(
         [*required, "--capacity-bytes", str(10 * ALIGN + 5), "--alignment", "4k"]
         + ["--layout-fingerprint", "custom", "--visibility-mode", "coherent"]
-        + ["--listen", "[::]:0"]
+        + ["--listen", "[::]:0", "--write-ttl-seconds", "12.5"]
     )
     assert config.capacity_bytes == 10 * ALIGN
     assert config.alignment_bytes == ALIGN
     assert config.layout_fingerprint == b"custom"
     assert config.visibility_mode == "coherent"
     assert config.listen == "[::]:0"
+    assert config.write_ttl_seconds == 12.5
 
 
 @pytest.mark.parametrize(
@@ -404,6 +490,10 @@ def test_parse_args_defaults_and_capacity_rounding(tmp_path):
         ["--listen", "7700"],  # no host
         ["--region-id", "../escape"],  # would leave the state dir
         ["--max-batch-entries", "0"],  # not positive
+        ["--write-ttl-seconds", "0"],
+        ["--write-ttl-seconds", "-1"],
+        ["--write-ttl-seconds", "nan"],
+        ["--write-ttl-seconds", "inf"],
     ],
 )
 def test_parse_args_rejects_invalid_flags(tmp_path, extra):

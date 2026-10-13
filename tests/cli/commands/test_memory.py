@@ -17,6 +17,7 @@ def test_memory_command_serves_the_parsed_config(
 ) -> None:
     argv = ["--region-id", "r", "--capacity-bytes", str(1 << 20)]
     argv += ["--alignment", "4K", "--state-dir", str(tmp_path)]
+    argv += ["--write-ttl-seconds", "12.5"]
     parser = argparse.ArgumentParser()
     command = MemoryCommand()
     command.register(parser.add_subparsers())
@@ -32,3 +33,4 @@ def test_memory_command_serves_the_parsed_config(
         args.func(args)
     assert excinfo.value.code == 2
     assert served == [parse_args(argv)]
+    assert served[0].write_ttl_seconds == 12.5
