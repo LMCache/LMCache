@@ -145,6 +145,10 @@ class _P2PLookupJob:
     """ The same keys as submitted to the storage manager, one row per
     object group; the status result is one bitmap per row """
 
+    submitted_at: float
+    """ ``time.monotonic()`` when the lookup was submitted; a job older than
+    the lookup timeout is treated as abandoned by its requester """
+
 
 class P2PController:
     """Serves lookup requests from peers and maintains one L2 adapter per peer.
@@ -279,6 +283,7 @@ class P2PController:
         Returns:
             A unique task id (int) for querying the lookup status later
         """
+        self._drop_abandoned_jobs()
         with self._job_lock:
             task_id = self._next_task_id
             self._next_task_id += 1
@@ -303,7 +308,10 @@ class P2PController:
 
         with self._job_lock:
             self._jobs[task_id] = _P2PLookupJob(
-                handle=handle, keys=keys, key_groups=key_groups
+                handle=handle,
+                keys=keys,
+                key_groups=key_groups,
+                submitted_at=time.monotonic(),
             )
 
         logger.debug(
@@ -374,6 +382,45 @@ class P2PController:
     # -----------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------
+
+    def _drop_abandoned_jobs(self) -> None:
+        """Forget lookups whose requester stopped polling for the result.
+
+        A peer stops querying a lookup once its own lookup timeout passes, or
+        when it crashes or loses the RPC. Its job, and the finished prefetch
+        result the storage manager keeps until queried, would otherwise stay
+        forever. A job older than ``P2PConfig.lookup_timeout`` is dropped
+        once its prefetch has finished; an unfinished one is retried on the
+        next call.
+
+        Note:
+            The job's read locks are not released here. They expire through
+            the L1 read TTL, and an unlock issued after that expiry could
+            consume a lock that a later reader of the same key now holds.
+            A requester that queries after its job was dropped sees an
+            unknown task and treats the lookup as a miss.
+        """
+        cutoff = time.monotonic() - self._p2p_config.lookup_timeout
+        with self._job_lock:
+            stale = [
+                task_id
+                for task_id, job in self._jobs.items()
+                if job.submitted_at < cutoff
+            ]
+            jobs = [(task_id, self._jobs.pop(task_id)) for task_id in stale]
+        unfinished: list[tuple[int, _P2PLookupJob]] = []
+        for task_id, job in jobs:
+            if self._ctx.storage_manager.query_prefetch_status(job.handle) is None:
+                unfinished.append((task_id, job))
+        if jobs:
+            logger.debug(
+                "Dropped %d abandoned P2P lookup jobs (%d still running)",
+                len(jobs) - len(unfinished),
+                len(unfinished),
+            )
+        if unfinished:
+            with self._job_lock:
+                self._jobs.update(unfinished)
 
     def _build_addresses(
         self,
