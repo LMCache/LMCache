@@ -244,7 +244,7 @@ jobs:
     name: Verify XPU wheel and promote image pin
     needs: [build-xpu-ci-candidate, nightly-xpu-wheel]
     if: >-
-      always() &&
+      !cancelled() &&
       needs.build-xpu-ci-candidate.result == 'success' &&
       needs.nightly-xpu-wheel.result == 'success'
     runs-on: ubuntu-latest
