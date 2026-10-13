@@ -162,6 +162,16 @@ For the full event-to-span mapping and the registry pattern that links
 child spans back to the root see
 ``docs/design/observability/request-event-span.md`` in the source tree.
 
+W3C context in the prefetch queue
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Set ``LMCACHE_MP_TRACE_CONTEXT=1`` in the process that runs the distributed
+controllers. ``submit_prefetch_request`` captures the active caller context
+before queueing. The poll thread restores that context for lookup and load
+submission and restores its previous context after each request, including
+failed submissions. Sampled and unsampled requests keep their own parents.
+This does not extend context into adapter I/O threads or trace GPU/RDMA work.
+
 .. _trace-recording:
 
 Trace Recording
