@@ -49,6 +49,14 @@ requires_nixl_object_integration = pytest.mark.skipif(
     os.environ.get("LMCACHE_NIXL_OBJECT_INTEGRATION") != "1",
     reason="set LMCACHE_NIXL_OBJECT_INTEGRATION=1 to run NIXL OBJ tests",
 )
+requires_nixl_rados_integration = pytest.mark.skipif(
+    os.environ.get("LMCACHE_NIXL_RADOS_INTEGRATION") != "1",
+    reason="set LMCACHE_NIXL_RADOS_INTEGRATION=1 to run native NIXL RADOS tests",
+)
+requires_nixl_redis_integration = pytest.mark.skipif(
+    os.environ.get("LMCACHE_NIXL_REDIS_INTEGRATION") != "1",
+    reason="set LMCACHE_NIXL_REDIS_INTEGRATION=1 to run native NIXL REDIS tests",
+)
 
 
 def _aligned_arena(size: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -170,6 +178,16 @@ def _client_key(index: int) -> str:
     return f"model@00000000@0@{index:08x}"
 
 
+def _live_object_salt() -> str:
+    """Return a per-test UUID salt isolating live object keys between runs."""
+    return uuid.uuid4().hex
+
+
+def _salted_client_key(salt: str, index: int) -> str:
+    """Build one wire-format key namespaced by a per-test UUID model salt."""
+    return f"model-{salt}@00000000@0@{index:08x}"
+
+
 def _arena_view(arena: torch.Tensor, offset: int, length: int) -> memoryview:
     """Expose a zero-copy byte memoryview over one arena subrange."""
     address = arena.data_ptr() + offset
@@ -183,6 +201,7 @@ def _make_posix_client(
     *,
     use_direct_io: bool = True,
     l1_alignment: int = _ALIGNMENT,
+    enable_reactor: bool = False,
 ) -> Any:
     """Create a public native NIXL client over one registered L1 arena."""
     # First Party
@@ -198,6 +217,7 @@ def _make_posix_client(
         l1_base=arena.data_ptr(),
         l1_size=arena.numel(),
         l1_alignment=l1_alignment,
+        enable_reactor=enable_reactor,
     )
 
 
@@ -217,21 +237,201 @@ def _drain_client_completion(
                 return ok, error, results
 
 
+def _client_store(
+    client: Any, keys: list[str], views: list[memoryview], timeout: float = 10.0
+) -> None:
+    """Store views through the public client API."""
+    future = client.submit_batch_set(keys, views)
+    ok, error, _ = _drain_client_completion(client, future, timeout)
+    assert ok, f"native NIXL store failed: {error}"
+
+
+def _client_load(
+    client: Any, keys: list[str], views: list[memoryview], timeout: float = 10.0
+) -> None:
+    """Load views through the public client API and assert every key hit."""
+    future = client.submit_batch_get(keys, views)
+    ok, error, results = _drain_client_completion(client, future, timeout)
+    assert ok, f"native NIXL load failed: {error}"
+    assert results is not None
+    assert list(results) == [True] * len(keys)
+
+
 def _client_round_trip(
     client: Any,
     keys: list[str],
     source_views: list[memoryview],
     destination_views: list[memoryview],
+    timeout: float = 10.0,
 ) -> None:
     """Store then load the same keys through the public client API."""
-    store_future = client.submit_batch_set(keys, source_views)
-    ok, error, _ = _drain_client_completion(client, store_future)
-    assert ok, f"native NIXL store failed: {error}"
-    load_future = client.submit_batch_get(keys, destination_views)
-    ok, error, results = _drain_client_completion(client, load_future)
-    assert ok, f"native NIXL load failed: {error}"
-    assert results is not None
-    assert list(results) == [True] * len(keys)
+    _client_store(client, keys, source_views, timeout)
+    _client_load(client, keys, destination_views, timeout)
+
+
+def _drain_client_completions(
+    client: Any,
+    future_ids: list[int],
+    timeout: float = 10.0,
+) -> dict[int, tuple[bool, str, list[bool] | None]]:
+    """Collect each requested future's tuple, retaining coalesced drains."""
+    deadline = time.monotonic() + timeout
+    collected: dict[int, tuple[bool, str, list[bool] | None]] = {}
+    outstanding = set(future_ids)
+    while outstanding:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "timed out waiting for native NIXL completions"
+        readable, _, _ = select.select([client.event_fd()], [], [], remaining)
+        assert readable, "timed out waiting for native NIXL completions"
+        for completed_id, ok, error, results in client.drain_completions():
+            if completed_id in outstanding:
+                collected[completed_id] = (ok, error, results)
+        outstanding -= collected.keys()
+    return collected
+
+
+def _client_overlap_store(
+    client: Any, keys: list[str], views: list[memoryview], timeout: float = 10.0
+) -> None:
+    """Store each key as its own batch before draining any completion."""
+    future_ids = [
+        client.submit_batch_set([key], [view])
+        for key, view in zip(keys, views, strict=True)
+    ]
+    assert len(set(future_ids)) == len(future_ids)
+    completions = _drain_client_completions(client, future_ids, timeout)
+    for future_id in future_ids:
+        ok, error, _ = completions[future_id]
+        assert ok, f"native NIXL overlapped store failed: {error}"
+
+
+def _client_overlap_load(
+    client: Any, keys: list[str], views: list[memoryview], timeout: float = 10.0
+) -> None:
+    """Load each key as its own batch before draining any completion."""
+    future_ids = [
+        client.submit_batch_get([key], [view])
+        for key, view in zip(keys, views, strict=True)
+    ]
+    assert len(set(future_ids)) == len(future_ids)
+    completions = _drain_client_completions(client, future_ids, timeout)
+    for future_id in future_ids:
+        ok, error, results = completions[future_id]
+        assert ok, f"native NIXL overlapped load failed: {error}"
+        assert results == [True]
+
+
+def _make_reactor_backend_client(
+    backend: str,
+    backend_params: dict[str, str],
+    arena: torch.Tensor,
+    *,
+    enable_reactor: bool,
+) -> Any:
+    """Create a public client for one reactor-allowlisted object backend."""
+    # First Party
+    from lmcache.lmcache_nixl import LMCacheNixlClient
+
+    return LMCacheNixlClient(
+        backend=backend,
+        backend_params=backend_params,
+        num_workers=1,
+        l1_base=arena.data_ptr(),
+        l1_size=arena.numel(),
+        l1_alignment=_ALIGNMENT,
+        enable_reactor=enable_reactor,
+    )
+
+
+def _require_live_extension_support(opt_in_flag: str) -> None:
+    """Fail, never skip, when an opted-in live backend lacks the extension."""
+    if importlib.util.find_spec("lmcache.lmcache_nixl") is None:
+        pytest.fail(
+            f"{opt_in_flag}=1 is set but the lmcache_nixl extension is not "
+            "built; rebuild LMCache with the NIXL storage backend extension "
+            "(setup_extensions/storage_backend_profiles/nixl.py) and rerun"
+        )
+
+
+def _rados_backend_params() -> dict[str, str]:
+    """Build RADOS parameters, failing when the opted-in config is incomplete."""
+    _require_live_extension_support("LMCACHE_NIXL_RADOS_INTEGRATION")
+    required_env = (
+        "LMCACHE_NIXL_RADOS_CONF",
+        "LMCACHE_NIXL_RADOS_NAME",
+        "LMCACHE_NIXL_RADOS_POOL",
+    )
+    missing = [name for name in required_env if not os.environ.get(name)]
+    if missing:
+        pytest.fail(
+            "LMCACHE_NIXL_RADOS_INTEGRATION=1 is set but these required "
+            f"environment values are unset: {', '.join(missing)}"
+        )
+    conf = os.environ["LMCACHE_NIXL_RADOS_CONF"]
+    if not Path(conf).is_file():
+        pytest.fail(f"LMCACHE_NIXL_RADOS_CONF={conf} is not a readable file")
+    params = {
+        "conf": conf,
+        "name": os.environ["LMCACHE_NIXL_RADOS_NAME"],
+        "pool": os.environ["LMCACHE_NIXL_RADOS_POOL"],
+    }
+    namespace = os.environ.get("LMCACHE_NIXL_RADOS_NAMESPACE", "")
+    if namespace:
+        params["namespace"] = namespace
+    return params
+
+
+def _redis_backend_params() -> dict[str, str]:
+    """Build REDIS parameters, failing when the opted-in config is incomplete."""
+    _require_live_extension_support("LMCACHE_NIXL_REDIS_INTEGRATION")
+    host = os.environ.get("LMCACHE_NIXL_REDIS_HOST", "")
+    port = os.environ.get("LMCACHE_NIXL_REDIS_PORT", "")
+    if not host or not port:
+        missing = [
+            name
+            for name in ("LMCACHE_NIXL_REDIS_HOST", "LMCACHE_NIXL_REDIS_PORT")
+            if not os.environ.get(name)
+        ]
+        pytest.fail(
+            "LMCACHE_NIXL_REDIS_INTEGRATION=1 is set but these required "
+            f"environment values are unset: {', '.join(missing)}"
+        )
+    if not port.isdigit() or not 0 < int(port) < 65536:
+        pytest.fail("LMCACHE_NIXL_REDIS_PORT must be a numeric TCP port")
+    params = {"host": host, "port": port}
+    db = os.environ.get("LMCACHE_NIXL_REDIS_DB", "")
+    if db:
+        if not db.isdigit():
+            pytest.fail("LMCACHE_NIXL_REDIS_DB must be numeric")
+        params["db"] = db
+    for env_name, param in (
+        ("LMCACHE_NIXL_REDIS_USERNAME", "username"),
+        ("LMCACHE_NIXL_REDIS_PASSWORD", "password"),
+    ):
+        value = os.environ.get(env_name, "")
+        if value:
+            params[param] = value
+    return params
+
+
+def _object_round_trip_views(
+    arena: torch.Tensor, num_keys: int, chunk_size: int, salt: str
+) -> tuple[list[str], list[memoryview], list[memoryview], list[bytes]]:
+    """Fill one half of the arena and return paired salted store/load views."""
+    keys = [_salted_client_key(salt, index) for index in range(1, num_keys + 1)]
+    source_views = [
+        _arena_view(arena, index * chunk_size, chunk_size) for index in range(num_keys)
+    ]
+    destination_views = [
+        _arena_view(arena, (num_keys + index) * chunk_size, chunk_size)
+        for index in range(num_keys)
+    ]
+    for index in range(num_keys):
+        arena[index * chunk_size : (index + 1) * chunk_size].fill_(101 + index)
+        arena[
+            (num_keys + index) * chunk_size : (num_keys + index + 1) * chunk_size
+        ].zero_()
+    return keys, source_views, destination_views, [bytes(v) for v in source_views]
 
 
 @requires_nixl_integration
@@ -848,3 +1048,91 @@ def test_object_public_round_trip_and_capabilities() -> None:
         adapter.submit_unlock(keys)
     finally:
         adapter.close()
+
+
+@requires_nixl_rados_integration
+def test_rados_reactor_multi_key_round_trip() -> None:
+    """Overlap salted RADOS stores and loads on one worker, then verify all."""
+    params = _rados_backend_params()
+    salt = _live_object_salt()
+    _, arena = _aligned_arena(8 * _CHUNK_SIZE)
+    keys, sources, destinations, expected = _object_round_trip_views(
+        arena, 4, _CHUNK_SIZE, salt
+    )
+    client = _make_reactor_backend_client("RADOS", params, arena, enable_reactor=True)
+    try:
+        _client_overlap_store(client, keys, sources, timeout=30.0)
+        _client_overlap_load(client, keys, destinations, timeout=30.0)
+    finally:
+        client.close()
+    assert [bytes(view) for view in destinations] == expected
+
+
+@requires_nixl_rados_integration
+def test_rados_reactor_enable_disable_parity() -> None:
+    """Reactor-on and serial RADOS clients read each other's salted bytes."""
+    params = _rados_backend_params()
+    salt = _live_object_salt()
+    _, arena = _aligned_arena(4 * _CHUNK_SIZE)
+    keys, sources, destinations, expected = _object_round_trip_views(
+        arena, 2, _CHUNK_SIZE, salt
+    )
+    serial = _make_reactor_backend_client("RADOS", params, arena, enable_reactor=False)
+    reactor = _make_reactor_backend_client("RADOS", params, arena, enable_reactor=True)
+    try:
+        _client_overlap_store(reactor, keys, sources, timeout=30.0)
+        _client_load(serial, keys, destinations, timeout=30.0)
+        assert [bytes(view) for view in destinations] == expected
+        for index in range(len(sources)):
+            arena[index * _CHUNK_SIZE : (index + 1) * _CHUNK_SIZE].fill_(199 + index)
+        second_payload = [bytes(view) for view in sources]
+        _client_store(serial, keys, sources, timeout=30.0)
+        _client_overlap_load(reactor, keys, destinations, timeout=30.0)
+        assert [bytes(view) for view in destinations] == second_payload
+    finally:
+        reactor.close()
+        serial.close()
+
+
+@requires_nixl_redis_integration
+def test_redis_reactor_multi_key_round_trip() -> None:
+    """Overlap salted REDIS stores and loads on one worker, then verify all."""
+    params = _redis_backend_params()
+    salt = _live_object_salt()
+    _, arena = _aligned_arena(8 * _CHUNK_SIZE)
+    keys, sources, destinations, expected = _object_round_trip_views(
+        arena, 4, _CHUNK_SIZE, salt
+    )
+    client = _make_reactor_backend_client("REDIS", params, arena, enable_reactor=True)
+    try:
+        _client_overlap_store(client, keys, sources, timeout=30.0)
+        _client_overlap_load(client, keys, destinations, timeout=30.0)
+    finally:
+        client.close()
+    assert [bytes(view) for view in destinations] == expected
+
+
+@requires_nixl_redis_integration
+def test_redis_reactor_enable_disable_parity() -> None:
+    """Reactor-on and serial REDIS clients read each other's salted bytes."""
+    params = _redis_backend_params()
+    salt = _live_object_salt()
+    _, arena = _aligned_arena(4 * _CHUNK_SIZE)
+    keys, sources, destinations, expected = _object_round_trip_views(
+        arena, 2, _CHUNK_SIZE, salt
+    )
+    serial = _make_reactor_backend_client("REDIS", params, arena, enable_reactor=False)
+    reactor = _make_reactor_backend_client("REDIS", params, arena, enable_reactor=True)
+    try:
+        _client_overlap_store(reactor, keys, sources, timeout=30.0)
+        _client_load(serial, keys, destinations, timeout=30.0)
+        assert [bytes(view) for view in destinations] == expected
+        for index in range(len(sources)):
+            arena[index * _CHUNK_SIZE : (index + 1) * _CHUNK_SIZE].fill_(199 + index)
+        second_payload = [bytes(view) for view in sources]
+        _client_store(serial, keys, sources, timeout=30.0)
+        _client_overlap_load(reactor, keys, destinations, timeout=30.0)
+        assert [bytes(view) for view in destinations] == second_payload
+    finally:
+        reactor.close()
+        serial.close()
