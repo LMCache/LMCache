@@ -42,7 +42,7 @@ from lmcache.v1.distributed.bitmap_ops.fold import (
     fold_unfold_grouped,
 )
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
@@ -220,7 +220,7 @@ def _scatter_bitmaps_full_global(
 
 
 def _reserve_l1_cells(
-    l1_manager: L1Manager,
+    l1_manager: L1ManagerInterface,
     key_groups: list[GroupedObjectKeys],
     cells: Bitmap2D,
     retain: dict[ObjectKey, bool],
@@ -306,7 +306,7 @@ def _build_request(
     spec: PrefetchTaskSpec,
     deadline_at: float | None = None,
 ) -> "InFlightPrefetchRequest":
-    """Create a lookup request with an optional absolute monotonic deadline."""
+    """Create the in-flight request for ``spec`` in the lookup phase."""
     return InFlightPrefetchRequest(
         request_id=request_id,
         key_groups=spec.key_groups,
@@ -385,17 +385,15 @@ class InFlightPrefetchRequest:
     # Entries are removed as load results arrive.
     load_bytes_by_adapter: dict[int, int] = field(default_factory=dict)
 
-    # Completed L2 loads, empty until the first result is admitted.
+    # Cells loaded from L2 so far, one row per key group; empty until the
+    # first load result is admitted.
     l2_loaded_cells: Bitmap2D = field(default_factory=lambda: Bitmap2D([]))
 
     caller_state: CallerState = CallerState.ACTIVE
-    """The caller-facing result lifecycle."""
-
     resource_state: ResourceState = ResourceState.ACTIVE
-    """The lock and buffer lifecycle."""
 
+    # Absolute monotonic deadline, or None when unarmed.
     deadline_at: float | None = None
-    """Absolute monotonic deadline, or ``None`` when unarmed."""
 
     # private fields
     _flattened_keys: list[ObjectKey] = field(init=False, repr=False)
@@ -472,7 +470,7 @@ class PrefetchController(StorageControllerInterface):
 
     def __init__(
         self,
-        l1_managers: list[L1Manager],
+        l1_managers: list[L1ManagerInterface],
         l1_manager_descriptors: list[L1ManagerDescriptor],
         l2_adapters: list[L2AdapterInterface],
         adapter_descriptors: list[L2AdapterDescriptor],
@@ -481,7 +479,7 @@ class PrefetchController(StorageControllerInterface):
         l2_load_timeout: float | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._l1_managers: dict[int, L1Manager] = {
+        self._l1_managers: dict[int, L1ManagerInterface] = {
             desc.index: mgr
             for desc, mgr in zip(l1_manager_descriptors, l1_managers, strict=True)
         }
@@ -1002,7 +1000,7 @@ class PrefetchController(StorageControllerInterface):
         # whether the plan was empty or every adapter has been admitted.
         if request.phase == PrefetchPhase.PLAN_AND_LOAD and request.all_loads_done():
             self._finish_request(request)
-            self._retire_request_once(request)
+            self._retire_request(request)
 
     # =========================================================================
     # Dynamic adapter add/remove ops
@@ -1123,14 +1121,7 @@ class PrefetchController(StorageControllerInterface):
         spec: PrefetchTaskSpec,
         deadline_at: float | None = None,
     ) -> None:
-        """Create an in-flight request and start its L2 lookup phase.
-
-        Args:
-            request_id: The controller-assigned request id.
-            spec: The prefetch request inputs.
-            deadline_at: Absolute monotonic deadline stamped at submission, or
-                ``None`` when deadlines are disabled or this is ``NO_LOCK``.
-        """
+        """Create an in-flight request and start its L2 lookup phase."""
         request = _build_request(request_id, spec, deadline_at)
         self._in_flight_requests[request_id] = request
         if deadline_at is not None:
@@ -1163,7 +1154,7 @@ class PrefetchController(StorageControllerInterface):
         if not active_adapters:
             self._plan_load(request, {})
             self._finish_request(request)
-            self._retire_request_once(request)
+            self._retire_request(request)
             return
 
         self._event_bus.publish(
@@ -1513,11 +1504,6 @@ class PrefetchController(StorageControllerInterface):
         """Query pending load results from signaled adapters and admit each
         finished adapter's load into L1.
 
-        For an active request, successfully loaded objects become read-locked.
-        For a timed-out request that is draining, they become resident but
-        unlocked because its caller has already received a result. Failed
-        objects have their staging buffers deleted in either case.
-
         Args:
             request: The in-flight prefetch request to poll.
             signaled_adapters: Set of adapter indices that have signaled
@@ -1619,7 +1605,7 @@ class PrefetchController(StorageControllerInterface):
     ) -> int:
         """Publish usable hits once, release excluded locks, and refresh LRU.
 
-        Returns the common prefix length for metrics. Pending I/O stays owned
+        Returns the retained chunk count for metrics. Pending I/O stays owned
         by the drain when timed_out is true.
         """
         if request.caller_state is not CallerState.ACTIVE:
@@ -1639,6 +1625,7 @@ class PrefetchController(StorageControllerInterface):
         elif request.fetching_policy == "full":
             # A split column is not a hit; the release below returns its rows.
             hit_cells = Bitmap2D(all_grouped(found.to_list()))
+            hit_length = hit_cells[0].popcount()
         else:
             hit_cells = found
 
@@ -1667,6 +1654,7 @@ class PrefetchController(StorageControllerInterface):
         else:
             l2_hit_cells = hit_cells.zeros_like()
         l1_hit_cells = hit_cells - l2_hit_cells
+
         # Whole-column callers only: landed-in-L1 union pinned-in-L2.
         found_cells = None
         if request.fetching_policy == "full":
@@ -1674,7 +1662,7 @@ class PrefetchController(StorageControllerInterface):
             if request.l2_found_cells is not None:
                 found_cells = found_cells + request.l2_found_cells
 
-        self._publish_result_once(
+        self._publish_result(
             request,
             PrefetchResult(
                 hit_cells=hit_cells.to_list(),
@@ -1701,7 +1689,7 @@ class PrefetchController(StorageControllerInterface):
         )
         return hit_length
 
-    def _publish_result_once(
+    def _publish_result(
         self,
         request: InFlightPrefetchRequest,
         result: PrefetchResult,
@@ -1730,7 +1718,7 @@ class PrefetchController(StorageControllerInterface):
             ),
         )
         empty = Bitmap2D.zeros(len(request.key_groups), len(request.key_groups[0].keys))
-        self._publish_result_once(
+        self._publish_result(
             request,
             PrefetchResult(
                 hit_cells=empty.to_list(),
@@ -1739,9 +1727,9 @@ class PrefetchController(StorageControllerInterface):
             ),
             timed_out=False,
         )
-        self._retire_request_once(request)
+        self._retire_request(request)
 
-    def _retire_request_once(self, request: InFlightPrefetchRequest) -> None:
+    def _retire_request(self, request: InFlightPrefetchRequest) -> None:
         """Remove a finished request from in-flight tracking once."""
         if request.resource_state is ResourceState.RETIRED:
             return
@@ -1776,9 +1764,7 @@ class PrefetchController(StorageControllerInterface):
                     self._l1_managers[l1_idx].finish_read(
                         keys, read_locks=request.num_kv_readers
                     )
-        states.l2_locked_keys = MapState()
-        states.l1_reserved_keys = MapState()
-        states.l1_locked_keys = MapState()
+        request.key_states = PrefetchKeyState()
 
     def _next_poll_timeout_ms(self) -> int:
         """Return the poll interval bounded by the nearest armed deadline.
@@ -1935,9 +1921,7 @@ class PrefetchController(StorageControllerInterface):
             return
         if request.inflight_lookup_tasks or request.inflight_load_tasks:
             return
-        self._retire_request_once(request)
-
-        request.key_states = PrefetchKeyState()
+        self._retire_request(request)
 
     def _cleanup_in_flight_requests(self) -> None:
         """Release resources for any in-flight requests during shutdown."""
@@ -1953,5 +1937,5 @@ class PrefetchController(StorageControllerInterface):
                     request.resource_state is not ResourceState.DRAINING
                 ),
             )
-            self._retire_request_once(request)
+            self._retire_request(request)
         self._armed.clear()

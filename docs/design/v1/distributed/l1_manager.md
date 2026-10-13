@@ -45,11 +45,9 @@ staging object `(key, tag)`:
   up holding what readers see.
 - `finish_write_and_delete` never admits; it frees the staging object.
 
-`finish_prefetch` admits a completed load without acquiring read locks. It
-notifies `on_l1_keys_prefetch_finished`, whose default uses the existing
-prefetch callback. Retained keys are tracked by eviction and counted as L1
-writes, but do not enter the StoreController queue. Ordinary `finish_write`
-continues to notify the store pipeline.
+`finish_prefetch` admits a completed load without read locks. It uses the
+existing prefetch callback, updating eviction and L1 write accounting without
+entering the StoreController queue.
 
 **Expiry and eviction.** A staging object keeps its write TTL lock. Once the
 lock expires the reservation is abandoned:

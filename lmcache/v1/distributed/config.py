@@ -982,10 +982,8 @@ def add_storage_manager_args(
         "--l2-prefetch-load-timeout",
         type=float,
         default=None,
-        help="Read-locked L2 prefetch budget in seconds, including queueing "
-        "and lookup. On expiry, return usable hits for recompute fallback. "
-        "NO_LOCK prefetches are exempt. Default: disabled. "
-        "Independent of lmcache.mp.mq_timeout.",
+        help="L2 prefetch budget in seconds before falling back to recompute. "
+        "Default: disabled.",
     )
     policy_group.add_argument(
         "--periodic-notifier-interval-ms",

@@ -127,7 +127,7 @@ class L2MetricsSubscriber(EventSubscriber):
         )
         self._prefetch_deadline_retained = meter.create_counter(
             "lmcache_mp.l2_prefetch_deadline_retained",
-            description="Prefix chunks served from the deadline fallback subset",
+            description="Chunks served from the deadline fallback subset",
             unit="chunks",
         )
         self._prefetch_deadline_missed = meter.create_counter(
