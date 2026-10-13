@@ -8,6 +8,15 @@ these events see [METRICS.md](METRICS.md).
 
 ---
 
+## Common request parent field
+
+`Event.trace_context: dict[str, str]` is a separate, optional W3C parent
+snapshot. It is not part of the metadata contracts below. With
+`LMCACHE_MP_TRACE_CONTEXT=1`, it contains only `traceparent` and `tracestate`
+from the event construction context; otherwise it is empty. Subscribers must
+not export these headers as span attributes. The existing request spans use
+the snapshot before dispatching asynchronous callbacks.
+
 ## L1Manager Events
 
 | EventType | Metadata keys | Types |
