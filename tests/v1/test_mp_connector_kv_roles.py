@@ -736,11 +736,11 @@ def test_kv_events_standalone_use_hook_only(
 def test_kv_events_worker_reports_merge_across_ranks(
     mock_io: SimpleNamespace, kv_events_queue: list[list[CacheStoreEvent]]
 ) -> None:
-    """TP ranks' worker-metadata events merge and publish common events once.
+    """TP ranks' worker-metadata events are aggregated and each published once.
 
     The workers never see the vLLM hook here, as under MultiConnector, so their
-    events ride in worker metadata. Only event 11 is reported by both ranks, so
-    only it is published, exactly once.
+    events ride in worker metadata. Both ranks report 11 and only rank 0 reports
+    12; the scheduler publishes every reported event exactly once.
     """
     config = _config(
         KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
@@ -760,7 +760,7 @@ def test_kv_events_worker_reports_merge_across_ranks(
         scheduler.update_connector_output(
             KVConnectorOutput(kv_connector_worker_meta=merged)
         )
-        assert _stored_hashes(scheduler) == [11]
+        assert _stored_hashes(scheduler) == [11, 12]
         assert _stored_hashes(scheduler) == []
     finally:
         worker.shutdown()
