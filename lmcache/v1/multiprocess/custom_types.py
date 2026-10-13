@@ -78,16 +78,17 @@ class IPCCacheServerKey:
     _SALT_MAX_LEN = 128
 
     def __post_init__(self) -> None:
-        bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
-        if bad:
-            raise ValueError(
-                f"cache_salt must not contain {bad!r} (got {self.cache_salt!r})"
-            )
-        if len(self.cache_salt) > self._SALT_MAX_LEN:
-            raise ValueError(
-                f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
-                f"(got {len(self.cache_salt)})"
-            )
+        for name, value in (
+            ("cache_salt", self.cache_salt),
+            ("cache_format", self.cache_format),
+        ):
+            bad = self._SALT_FORBIDDEN_CHARS & set(value)
+            if bad:
+                raise ValueError(f"{name} must not contain {bad!r} (got {value!r})")
+            if len(value) > self._SALT_MAX_LEN:
+                raise ValueError(
+                    f"{name} exceeds max length {self._SALT_MAX_LEN} (got {len(value)})"
+                )
 
     # Helper function for unit tests only
     @classmethod

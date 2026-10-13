@@ -697,11 +697,9 @@ data parallelism (``dp_size > 1``) are rejected with a clear error.
 KV dtype isolation
 ~~~~~~~~~~~~~~~~~~
 
-The vLLM MP connector uses ``cache_format`` to separate caches with different
-KV precision settings, preventing incompatible reuse such as BF16 and FP8.
-
-Upgrade clients and servers together. Existing cached entries will miss and
-be regenerated.
+Set ``"lmcache.mp.enable_kv_dtype_isolation": true`` in ``kv_connector_extra_config``
+on all instances sharing a cache to isolate KV formats such as BF16 and FP8.
+Disabled by default; enabling it causes existing cache entries to miss.
 
 Decode context parallelism (DCP)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -793,6 +791,9 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.save_decode_cache``
      - ``false``
      - Cache generated tokens in addition to prompt tokens.
+   * - ``lmcache.mp.enable_kv_dtype_isolation``
+     - ``false``
+     - Separate cache keys by KV precision settings.
    * - ``lmcache.mp.server_urls``
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of
