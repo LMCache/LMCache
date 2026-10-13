@@ -199,6 +199,9 @@ class AsyncRecorder:
         while not self.async_shutdown:
             try:
                 item = self.async_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
                 if item is None:
                     break
                 data, lookup_id = item
@@ -207,16 +210,18 @@ class AsyncRecorder:
                 else:
                     preprocessed_data = self.strategy.preprocess(data)
                 self.strategy.record(preprocessed_data, lookup_id)
-                self.async_queue.task_done()
-            except queue.Empty:
-                continue
             except Exception as e:
                 logger.error("Async worker error: %s", e, exc_info=True)
+            finally:
+                self.async_queue.task_done()
 
         # Process remaining items
         while not self.async_queue.empty():
             try:
                 item = self.async_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
                 if item is not None:
                     data, lookup_id = item
                     if self.preprocess_in_caller:
@@ -224,9 +229,10 @@ class AsyncRecorder:
                     else:
                         preprocessed_data = self.strategy.preprocess(data)
                     self.strategy.record(preprocessed_data, lookup_id)
-                self.async_queue.task_done()
-            except (queue.Empty, Exception):
+            except Exception:
                 break
+            finally:
+                self.async_queue.task_done()
 
     def record_async(
         self, token_ids: Union[torch.Tensor, list[int]], lookup_id: str
@@ -278,22 +284,23 @@ class AsyncRecorder:
         return stats
 
     def wait_for_completion(self, timeout: float = 5.0) -> bool:
-        """Wait for async queue to be processed.
+        """Wait for queued and in-flight work to finish processing.
 
         Args:
             timeout: Maximum time to wait in seconds
 
         Returns:
-            True if queue is empty, False if timeout occurred
+            True if all queued work has been acknowledged, False on timeout.
+            Acknowledgment includes handled errors, not just successful writes.
         """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            if self.async_queue.empty():
-                time.sleep(0.01)
-                if self.async_queue.empty():
-                    return True
-            time.sleep(0.01)
-        return self.async_queue.empty()
+        deadline = time.monotonic() + timeout
+        with self.async_queue.all_tasks_done:
+            while self.async_queue.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self.async_queue.all_tasks_done.wait(remaining)
+            return True
 
     def reset(self) -> None:
         """Reset strategy and clear async queue."""
@@ -311,6 +318,8 @@ class AsyncRecorder:
                 self.async_queue.get_nowait()
             except queue.Empty:
                 break
+            else:
+                self.async_queue.task_done()
 
     def close(self) -> None:
         """Shutdown async worker and clean up resources."""
