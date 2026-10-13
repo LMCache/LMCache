@@ -80,6 +80,42 @@ PR on GitHub. Buildkite picks up PR labels automatically; when the filter
 sees `force-ci` it runs the full pipeline regardless of which files changed.
 
 
+### Select in-process or MP coverage
+
+Add **`ci-inprocess`** or **`ci-mp`** to a PR to select its runtime-specific
+Buildkite suites. With neither label (or both), both modes remain eligible.
+For a manual build, set **`LMCACHE_CI_MODE=inprocess`**, **`mp`**, or **`all`**
+in the New Build environment settings. A nonempty setting overrides the labels;
+`all` restores the existing path-based selection. Unknown values log a warning
+and keep both modes eligible. `force-ci` and scheduled builds bypass mode
+selection.
+
+| Coverage | In-process selection | MP selection |
+| --- | --- | --- |
+| K3 integration, correctness, comprehensive | Eligible | Skipped before upload |
+| K3 multiprocess, SGLang MP, CacheBlend plugin, XPU multiprocess | Skipped before upload | Eligible |
+| Older comprehensive, vLLM integration, correctness/MMLU pipelines | Eligible | Skipped before setup |
+| Older multiprocessing pipeline and AMD MP benchmark step | Skipped before setup | Eligible |
+| Unit tests, shared/mixed suites, and unclassified pipelines | Existing selection | Existing selection |
+
+The AMD unit step stays enabled when its MP benchmark step is skipped. MUSA
+hardware smoke, MetaX, and GitHub Actions keep their existing selection.
+This selector controls audited runtime-specific Buildkite jobs; it does not
+filter individual pytest cases, change runtime
+configuration, or depend on the allocator-fixture isolation PR.
+
+The older correctness and multiprocessing bootstraps still merge the PR base
+before uploading their `*.steps.yml` files. Mode guards live in those step files,
+so the upstream bootstrap order is preserved. Eligible jobs still use their
+existing path/`full` triggers and `good first issue` skip policy. Labels
+cannot create a build rejected by the pipeline's GitHub trigger settings.
+Enable label-change events in Buildkite if changing a label should launch a new
+build. A rebuild reuses the original labels and environment; create a new build
+to use updated labels. See [Buildkite's rebuild behavior](https://buildkite.com/docs/pipelines/dashboard-walkthrough#rebuilding-a-build).
+
+Run the selector regressions without GPU or LMCache setup:
+`python tests/test_ci_mode.py`.
+
 ### Trigger strategy
 
 Not all tests should run on every push. The general pattern:
