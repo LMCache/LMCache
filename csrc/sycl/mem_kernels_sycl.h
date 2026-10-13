@@ -7,6 +7,7 @@
 #include <c10/util/Exception.h>
 #include "../kv_transfer_types.h"
 #include "../kv_transfer_plan_types.h"
+#include "transfer_plan_types_sycl.h"
 
 /**
  * Enqueue block gather/scatter on the current XPU stream for device.
@@ -31,6 +32,32 @@ void multi_layer_block_kv_transfer(
     TransferDirection direction, PageBufferShapeDesc shape_desc,
     int lmcache_chunk_size, EngineKVFormat engine_kv_format,
     int skip_prefix_n_blocks);
+
+/**
+ * Execute one object group's transfer plan on the current XPU stream.
+ *
+ * Enqueues every staging copy (lmcache_memcpy_async) and block transfer
+ * described by batch_steps in order, so the caller releases the GIL once
+ * for the whole object group instead of once per copy and launch. For H2D a
+ * step's staging copies precede its launches, for D2H they follow them,
+ * because the temp buffers are reused across steps.
+ *
+ * Every kernel group is validated once per call (geometry, USM pointer
+ * kinds); each launch is bounds-checked against its group's block_ids
+ * capacity and temp-buffer count before anything touches device memory.
+ *
+ * @param direction             H2D (retrieve) or D2H (store), for all ops
+ * @param device                XPU device of the transfer
+ * @param host_buffer_alignment Host pin-chunk size the staging copies are
+ *                              split at (power of two)
+ * @param kernel_group_specs    Per-kernel-group invariants
+ * @param batch_steps           Ordered per-batch staging + launch work
+ */
+void execute_object_group_transfer(
+    TransferDirection direction, const torch::Device& device,
+    size_t host_buffer_alignment,
+    const std::vector<KernelGroupSpec>& kernel_group_specs,
+    const std::vector<BatchStep>& batch_steps);
 
 void multi_layer_kv_transfer(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
