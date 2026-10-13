@@ -12,10 +12,10 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.stats import RequestResult
+from lmcache.cli.commands.bench.engine_bench.workloads import kv_tier_pressure as ktp
 from lmcache.cli.commands.bench.engine_bench.workloads import (
     long_doc_permutator as ldp_mod,
 )
-from lmcache.cli.commands.bench.engine_bench.workloads import kv_tier_pressure as ktp
 from lmcache.cli.commands.bench.engine_bench.workloads.kv_tier_pressure import (
     KVTierPressureConfig,
     KVTierPressureWorkload,

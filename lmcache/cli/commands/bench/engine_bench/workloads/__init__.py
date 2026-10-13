@@ -23,14 +23,13 @@ from lmcache.cli.commands.bench.engine_bench.request_sender import (
 )
 from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
 from lmcache.cli.commands.bench.engine_bench.workloads.base import BaseWorkload
-from lmcache.logging import init_logger
-from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_permutator import (
-    LongDocPermutatorConfig,
-    LongDocPermutatorWorkload,
-)
 from lmcache.cli.commands.bench.engine_bench.workloads.kv_tier_pressure import (
     KVTierPressureConfig,
     KVTierPressureWorkload,
+)
+from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_permutator import (
+    LongDocPermutatorConfig,
+    LongDocPermutatorWorkload,
 )
 from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_qa import (
     LongDocQAConfig,
@@ -54,6 +53,7 @@ from lmcache.cli.commands.bench.engine_bench.workloads.random_prefill import (
     RandomPrefillConfig,
     RandomPrefillWorkload,
 )
+from lmcache.logging import init_logger
 
 __all__ = [
     "DEFAULT_DOC_ALIGN_TOKENS",
