@@ -347,31 +347,17 @@ single-L1 interface.
        size.
    * - ``--l2-prefetch-load-timeout``
      - *(not set)*
-     - Optional monotonic deadline, in seconds, for a read-locked L2 prefetch,
-       covering the time from when the request enters the prefetch controller
-       through queueing, L2 lookup, and L2 load. When it expires the caller
-       receives the subset already usable under the request's fetching policy
-       and the rest is reported as a cache miss to recompute, rather than
-       waiting for a slow L2. ``NO_LOCK`` warm prefetches are not armed.
-       Not set (the default) disables the deadline and preserves existing
-       behavior; a value that is not a finite positive number (including
-       ``nan`` and ``inf``) is rejected at startup.
+     - Read-locked L2 prefetch budget in seconds, including queueing and lookup.
+       On expiry, return usable hits for recompute fallback. ``NO_LOCK``
+       prefetches are exempt. Must be finite and positive; unset disables it.
 
 L2 Prefetch Load Deadline vs. ``mq_timeout``
 --------------------------------------------
 
-``--l2-prefetch-load-timeout`` is a **server-side cache policy**: on expiry it
-defines a *result* — the usable cache subset now, with the remainder recomputed.
-``lmcache.mp.mq_timeout`` (above) is a **client-side transport bound**: it caps
-how long a blocking message-queue request waits before the connector raises a
-connection error. The two are independent layers and should not be conflated:
-
-- Set ``mq_timeout`` comfortably larger than ``--l2-prefetch-load-timeout`` so
-  the deadline's fallback result returns over a healthy RPC. If ``mq_timeout``
-  were the smaller of the two, the transport could time out first and surface a
-  connection error instead of the intended recompute fallback.
-- When the load deadline fires, the request still returns a normal completion
-  status (the retained-chunk count), not a timeout error.
+The prefetch deadline returns a retained-chunk count for recompute fallback.
+``lmcache.mp.mq_timeout`` bounds the client-side RPC wait and raises a transport
+error on expiry. Set it larger than the prefetch deadline so the fallback can
+return before the RPC times out.
 
 GDS L1 Tier
 -----------

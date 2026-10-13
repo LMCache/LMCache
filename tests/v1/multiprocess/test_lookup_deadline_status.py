@@ -1,17 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MP LookupModule integration for the L2 load-deadline fallback.
-
-The deadline fallback reaches this layer as an ordinary non-``None`` result
-bitmap, so ``query_prefetch_status`` / ``wait_prefetch_status`` must return a
-normal final chunk count and remove the ``_PrefetchJob`` exactly once — the same
-contract as a normal completion, distinct from the caller-side wait timeout
-(which returns ``None`` and keeps the job). The storage manager is mocked, so no
-GPU or native bitmap allocation is needed.
-"""
+"""Lookup status reports deadline fallback hits as a final chunk count."""
 
 # Standard
 from unittest import mock
 import threading
+
+# Third Party
+import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -65,43 +60,16 @@ def _register(module, handle, world_size=2):
     )
 
 
-def test_deadline_fallback_returns_partial_count_and_removes_job():
-    # 8 keys = 4 chunks (world_size=2, 1 group). A deadline fallback that
-    # retained only the first 2 chunks sets the leading 4 bits.
-    num_keys = 8
-    found = [Bitmap(4, 2) for _ in range(2)]
-    ctx = _make_ctx(wait_result=True, found=found)
+@pytest.mark.parametrize("via_wait, retained", [(False, 2), (True, 2), (False, 0)])
+def test_deadline_fallback_returns_count_and_removes_job(via_wait, retained):
+    ctx = _make_ctx(found=[Bitmap(4, retained) for _ in range(2)])
     module = _make_module(ctx)
-    _register(module, _handle(num_keys))
+    _register(module, _handle(8))
 
-    # Query returns the retained chunk count (2), not None, and pops the job.
-    assert module.query_prefetch_status("req") == 2
+    if via_wait:
+        assert module.wait_prefetch_status("req", timeout=1.0) == retained
+        ctx.storage_manager.wait_prefetch_status.assert_called_once()
+    else:
+        assert module.query_prefetch_status("req") == retained
     assert "req" not in module._prefetch_jobs
-    ctx.event_bus.publish.assert_called()  # MP_LOOKUP_PREFETCH_END emitted
-
-
-def test_deadline_fallback_via_wait_returns_count_and_removes_job():
-    num_keys = 8
-    found = [Bitmap(4, 2) for _ in range(2)]
-    ctx = _make_ctx(wait_result=True, found=found)
-    module = _make_module(ctx)
-    _register(module, _handle(num_keys))
-
-    # wait_prefetch_status sees the published fallback (storage wait True) and
-    # resolves to the normal chunk count, removing the job exactly once.
-    assert module.wait_prefetch_status("req", timeout=1.0) == 2
-    ctx.storage_manager.wait_prefetch_status.assert_called_once()
-    assert "req" not in module._prefetch_jobs
-
-
-def test_zero_retained_fallback_returns_zero_and_removes_job():
-    # A deadline that retained nothing (e.g. timeout in lookup with no L1 hit)
-    # still resolves to a normal final status of 0 chunks and removes the job,
-    # so the engine recomputes everything -- it does not hang.
-    num_keys = 8
-    ctx = _make_ctx(wait_result=True, found=[Bitmap(4), Bitmap(4)])
-    module = _make_module(ctx)
-    _register(module, _handle(num_keys))
-
-    assert module.query_prefetch_status("req") == 0
-    assert "req" not in module._prefetch_jobs
+    ctx.event_bus.publish.assert_called()

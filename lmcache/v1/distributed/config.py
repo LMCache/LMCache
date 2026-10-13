@@ -642,12 +642,7 @@ class StorageManagerConfig:
     """ Maximum number of concurrent prefetch requests. """
 
     prefetch_load_timeout: float | None = None
-    """ Optional monotonic deadline, in seconds, covering a read-locked L2
-    prefetch from the moment it enters the controller (queueing + L2 lookup +
-    load). ``None`` (default) disables it and preserves existing behavior; on
-    expiry the caller receives the subset already usable under its fetching
-    policy and recomputes the rest. ``NO_LOCK`` warm prefetches are unarmed.
-    Distinct from the connector-side ``lmcache.mp.mq_timeout``. """
+    """L2 prefetch budget (seconds), including queueing and lookup; None disables."""
 
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
@@ -720,9 +715,6 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     if config.prefetch_load_timeout is not None and not (
         math.isfinite(config.prefetch_load_timeout) and config.prefetch_load_timeout > 0
     ):
-        # NaN compares false under every ordering and ``inf > 0`` is true, so
-        # the check is written as "must be finite and positive" rather than
-        # "must not be <= 0".
         raise ValueError(
             "prefetch_load_timeout must be a finite positive number of seconds "
             f"or None to disable (got {config.prefetch_load_timeout})"
@@ -990,10 +982,9 @@ def add_storage_manager_args(
         "--l2-prefetch-load-timeout",
         type=float,
         default=None,
-        help="Optional monotonic deadline (seconds) covering a read-locked L2 "
-        "prefetch's queueing, lookup, and load. On expiry the caller gets the "
-        "subset already usable under its fetching policy and recomputes the rest. "
-        "NO_LOCK warm prefetches are unarmed. Default is None (disabled). "
+        help="Read-locked L2 prefetch budget in seconds, including queueing "
+        "and lookup. On expiry, return usable hits for recompute fallback. "
+        "NO_LOCK prefetches are exempt. Default: disabled. "
         "Independent of lmcache.mp.mq_timeout.",
     )
     policy_group.add_argument(

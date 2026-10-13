@@ -306,16 +306,7 @@ def _build_request(
     spec: PrefetchTaskSpec,
     deadline_at: float | None = None,
 ) -> "InFlightPrefetchRequest":
-    """Create the in-flight request for ``spec`` in the lookup phase.
-
-    Args:
-        request_id: The controller-assigned request id.
-        spec: The request inputs.
-        deadline_at: Absolute monotonic deadline, or ``None`` when unarmed.
-
-    Returns:
-        The initialized in-flight request.
-    """
+    """Create a lookup request with an optional absolute monotonic deadline."""
     return InFlightPrefetchRequest(
         request_id=request_id,
         key_groups=spec.key_groups,
@@ -394,8 +385,7 @@ class InFlightPrefetchRequest:
     # Entries are removed as load results arrive.
     load_bytes_by_adapter: dict[int, int] = field(default_factory=dict)
 
-    # Cells loaded from L2 so far, one row per key group; empty until the
-    # first load result is admitted.
+    # Completed L2 loads, empty until the first result is admitted.
     l2_loaded_cells: Bitmap2D = field(default_factory=lambda: Bitmap2D([]))
 
     caller_state: CallerState = CallerState.ACTIVE
@@ -468,10 +458,8 @@ class PrefetchController(StorageControllerInterface):
         adapter_descriptors: Descriptors for each L2 adapter (same order).
         policy: The prefetch policy for load plan and retention decisions.
         max_in_flight: Maximum number of concurrent prefetch requests.
-        l2_load_timeout: Optional monotonic deadline, in seconds, for a
-            read-locked L2 prefetch. The budget covers queueing, L2 lookup,
-            and L2 load. ``None`` disables the deadline. ``NO_LOCK`` warm
-            prefetches are never armed.
+        l2_load_timeout: Read-locked prefetch budget in seconds, including
+            queueing and lookup. None disables it; NO_LOCK is exempt.
         clock: Monotonic clock used for deadlines; injectable for tests.
     """
 
@@ -955,9 +943,7 @@ class PrefetchController(StorageControllerInterface):
                         )
                         self._abort_request(request)
 
-            # Process every completion signaled in this wake before expiring
-            # requests. A completed operation therefore wins the exact-boundary
-            # race; only work still outstanding enters drain-only mode.
+            # Signaled completions take precedence over deadline expiry.
             try:
                 if self._l2_load_timeout is not None:
                     self._expire_due_requests(self._clock())
@@ -985,6 +971,7 @@ class PrefetchController(StorageControllerInterface):
         """State-transition dispatcher by phase: poll signaled adapters for
         the request's current phase via the per-phase helper, then trigger
         the phase transition when done."""
+        # Consuming the last lookup changes the derived phase.
         phase = request.phase
         phase_adapters = signaled_adapters[phase]
         if not phase_adapters:
@@ -1000,7 +987,7 @@ class PrefetchController(StorageControllerInterface):
                 if request.deadline_at is not None:
                     now = self._clock()
                     if request.deadline_at <= now:
-                        self._enter_drain_only(request, now)
+                        self._enter_drain_only(request, now, phase)
                         self._finish_drain(request)
                         return
                 self._transition_to_load_phase(request)
@@ -1108,9 +1095,7 @@ class PrefetchController(StorageControllerInterface):
     def _start_pending_requests(self) -> None:
         """Start pending requests up to the max in-flight limit.
 
-        A request may cross its deadline after the expiry sweep but before it
-        reaches the head of the queue. Re-check at admission so expired work
-        takes the L1-only fallback without starting new L2 I/O.
+        Recheck deadlines at admission to avoid starting expired L2 work.
         """
         # TODO: implement the dynamic in flight request admission
         while (
@@ -1301,9 +1286,7 @@ class PrefetchController(StorageControllerInterface):
             # lookup.
             l2_found_bitmap = _scatter_bitmaps_full_global(result, num_rows, num_cols)
             if request.resource_state is ResourceState.DRAINING:
-                # The caller has already received its L1-only fallback. Return
-                # every late lookup lock as soon as that adapter reports; no new
-                # load may start for a timed-out request.
+                # Late lookup must release locks without starting a load.
                 keys = _gather_keys(request.key_groups, l2_found_bitmap)
                 if keys:
                     self._l2_adapters[adapter_idx].submit_unlock(keys)
@@ -1561,9 +1544,7 @@ class PrefetchController(StorageControllerInterface):
             loaded_keys = _gather_keys(request.key_groups, loaded)
             failed_keys = _gather_keys(request.key_groups, failed)
 
-            # Update L1 key status. A late load must keep its staging buffers
-            # until this result arrives, but it must not acquire caller-owned
-            # read locks after the timeout result was published.
+            # Late loads must not acquire read locks after caller publication.
             if loaded_keys:
                 if request.resource_state is ResourceState.DRAINING:
                     l1_manager.finish_prefetch(loaded_keys, tag=tag)
@@ -1636,24 +1617,10 @@ class PrefetchController(StorageControllerInterface):
     def _finish_request(
         self, request: InFlightPrefetchRequest, *, timed_out: bool = False
     ) -> int:
-        """Settle the currently usable L1 locks and publish one result.
+        """Publish usable hits once, release excluded locks, and refresh LRU.
 
-        For `prefix` loading, it will do fold-unfold. It will also touch the
-        L1 keys so that the eviction module can be updated.
-
-        Args:
-            request: The request whose currently read-locked cells are usable.
-                On normal completion no L2 work remains. On timeout, pending
-                L2 work remains owned by the drain.
-            timed_out: Whether this is a deadline fallback publication.
-
-        Returns:
-            The common prefix hit length reported for observability.
-
-        Note:
-            The method is idempotent with respect to publication. If the
-            caller lifecycle is already terminal, it returns without touching
-            locks.
+        Returns the common prefix length for metrics. Pending I/O stays owned
+        by the drain when timed_out is true.
         """
         if request.caller_state is not CallerState.ACTIVE:
             return 0
@@ -1741,13 +1708,7 @@ class PrefetchController(StorageControllerInterface):
         *,
         timed_out: bool,
     ) -> None:
-        """Store a request result exactly once and wake every waiter.
-
-        Args:
-            request: The request whose caller lifecycle is completed.
-            result: The immutable caller-facing result.
-            timed_out: Whether the terminal transition is a deadline fallback.
-        """
+        """Store one result, disarm its deadline, and wake waiters."""
         if request.caller_state is not CallerState.ACTIVE:
             return
         request.caller_state = (
@@ -1781,12 +1742,7 @@ class PrefetchController(StorageControllerInterface):
         self._retire_request_once(request)
 
     def _retire_request_once(self, request: InFlightPrefetchRequest) -> None:
-        """Remove a request from in-flight tracking exactly once.
-
-        Args:
-            request: The request whose adapter work and controller-owned
-                resources are finished.
-        """
+        """Remove a finished request from in-flight tracking once."""
         if request.resource_state is ResourceState.RETIRED:
             return
         request.resource_state = ResourceState.RETIRED
@@ -1799,16 +1755,9 @@ class PrefetchController(StorageControllerInterface):
         *,
         release_l1_read_locks: bool = True,
     ) -> None:
-        """Return every lock and buffer the request's key states record.
+        """Release tracked locks and staging buffers without cancelling I/O.
 
-        L2 read locks are returned, reserved L1 staging buffers are deleted,
-        and, by default, L1 read locks are released. Outstanding adapter tasks
-        are left to complete on their own.
-
-        Args:
-            request: The request whose tracked resources are released.
-            release_l1_read_locks: False when the caller already owns the
-                published locks of a draining request.
+        Set release_l1_read_locks=False to preserve published caller locks.
         """
         states = request.key_states
         tag = _get_prefetch_write_tag(request.request_id)
@@ -1834,9 +1783,7 @@ class PrefetchController(StorageControllerInterface):
     def _next_poll_timeout_ms(self) -> int:
         """Return the poll interval bounded by the nearest armed deadline.
 
-        The disabled path does not read the clock. Unarmed ``NO_LOCK`` entries
-        may be interleaved in the pending queue, so the scan continues to the
-        first armed entry.
+        Skip unarmed queued entries. The disabled path never reads the clock.
         """
         if self._l2_load_timeout is None:
             return PREFETCH_LOOP_POLL_TIMEOUT_MS
@@ -1857,15 +1804,7 @@ class PrefetchController(StorageControllerInterface):
         return math.ceil(min(float(PREFETCH_LOOP_POLL_TIMEOUT_MS), remaining_ms))
 
     def _expire_due_requests(self, now: float) -> None:
-        """Publish fallbacks for every request due at ``now``.
-
-        In-flight requests keep outstanding adapter-owned resources and enter
-        drain-only mode. Queued requests have no L2 resources and complete from
-        L1 immediately.
-
-        Args:
-            now: Current monotonic time.
-        """
+        """Publish due fallbacks, retaining resources still owned by L2 I/O."""
         if self._l2_load_timeout is None:
             return
 
@@ -1876,13 +1815,11 @@ class PrefetchController(StorageControllerInterface):
             if request is None or request.caller_state is not CallerState.ACTIVE:
                 self._armed.pop(request_id, None)
                 continue
-            self._enter_drain_only(request, now)
+            self._enter_drain_only(request, now, request.phase)
             if not request.inflight_lookup_tasks and not request.inflight_load_tasks:
                 self._finish_drain(request)
 
-        # Armed deadlines are monotonic in submission order. Keep unarmed
-        # NO_LOCK entries, expire due armed entries, and stop at the first
-        # future armed entry.
+        # Armed deadlines follow submission order; NO_LOCK entries are exempt.
         kept: deque[tuple[PrefetchRequestId, PrefetchTaskSpec, float | None]] = deque()
         expired: list[tuple[PrefetchRequestId, PrefetchTaskSpec, float]] = []
         while self._pending_queue:
@@ -1907,13 +1844,7 @@ class PrefetchController(StorageControllerInterface):
         spec: PrefetchTaskSpec,
         deadline_at: float,
     ) -> None:
-        """Publish the fetching-policy L1 subset for a queued timeout.
-
-        Args:
-            request_id: The controller-assigned request id.
-            spec: The queued prefetch request.
-            deadline_at: Its absolute monotonic deadline.
-        """
+        """Publish an expired queued request's L1 hits without starting L2 I/O."""
         flattened_keys = list(
             itertools.chain.from_iterable(group.keys for group in spec.key_groups)
         )
@@ -1945,14 +1876,7 @@ class PrefetchController(StorageControllerInterface):
         retained_chunks: int,
         now: float,
     ) -> None:
-        """Publish one low-cardinality deadline event.
-
-        Args:
-            phase: ``queued``, ``lookup``, or ``load``.
-            request: The request that reached its deadline.
-            retained_chunks: Common prefix chunks usable by the caller.
-            now: Current monotonic time.
-        """
+        """Report deadline phase, elapsed time, and retained/missed chunks."""
         budget = self._l2_load_timeout
         elapsed = (
             now - (request.deadline_at - budget)
@@ -1974,17 +1898,13 @@ class PrefetchController(StorageControllerInterface):
             )
         )
 
-    def _enter_drain_only(self, request: InFlightPrefetchRequest, now: float) -> None:
+    def _enter_drain_only(
+        self, request: InFlightPrefetchRequest, now: float, phase: PrefetchPhase
+    ) -> None:
         """Publish a timeout fallback while preserving outstanding I/O.
 
-        Completed loads are already admitted and therefore participate in the
-        fetching-policy result. Pending load tasks keep their L1 staging
-        buffers and L2 locks. During lookup, completed L2 locks are returned
-        immediately and late lookup locks are returned as their tasks report.
-
-        Args:
-            request: The request whose caller budget elapsed.
-            now: Current monotonic time.
+        Pending loads keep staging buffers and L2 locks until completion.
+        Lookup locks are released as each result arrives.
         """
         if (
             request.caller_state is not CallerState.ACTIVE
@@ -1992,7 +1912,6 @@ class PrefetchController(StorageControllerInterface):
         ):
             return
 
-        phase = request.phase
         if phase is PrefetchPhase.LOOKUP:
             for adapter_idx, cells in request.key_states.l2_locked_keys.items():
                 keys = _gather_keys(request.key_groups, cells)
@@ -2011,12 +1930,7 @@ class PrefetchController(StorageControllerInterface):
         )
 
     def _finish_drain(self, request: InFlightPrefetchRequest) -> None:
-        """Retire a timed-out request after every adapter task has reported.
-
-        Args:
-            request: The draining request. Its published L1 locks belong to the
-                caller and are deliberately left untouched.
-        """
+        """Retire completed drain work without releasing caller-owned locks."""
         if request.resource_state is not ResourceState.DRAINING:
             return
         if request.inflight_lookup_tasks or request.inflight_load_tasks:

@@ -163,8 +163,7 @@ def test_partial_deadline_keeps_affinity_and_drains_without_store(
         assert managers[1].report_status()["read_locked_count"] == len(kept)
         assert all(managers[0].get_object_state(keys[index]) is None for index in kept)
 
-        # A second caller holds one of the same keys while the timed-out
-        # request drains. Drain cleanup must not consume either caller's lock.
+        # Drain cleanup must preserve both callers' read locks.
         managers[1].reserve_read([keys[0]])
         slow.release_loads()
         assert wait_until(lambda: in_flight_count(controller) == 0)
@@ -196,7 +195,7 @@ def test_partial_deadline_keeps_affinity_and_drains_without_store(
 
 
 def test_queued_deadline_reports_owners_from_both_l1s(
-    managers: list[L1Manager],
+    managers: list[L1Manager], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = MockL2AdapterConfig(0.05, 10.0)
     adapter = GatedLoadMockAdapter(config)
@@ -221,6 +220,9 @@ def test_queued_deadline_reports_owners_from_both_l1s(
         for manager, key in zip(managers, keys, strict=True):
             manager.reserve_write([key], [False], layout)
             manager.finish_write([key])
+        touches = [Mock(wraps=manager.touch_keys) for manager in managers]
+        for manager, touch in zip(managers, touches, strict=True):
+            monkeypatch.setattr(manager, "touch_keys", touch)
         busy_key = make_object_key(100)
         store_keys_in_l2(adapter, [busy_key], layout)
         busy_request = submit(controller, [busy_key], layout)
@@ -236,6 +238,8 @@ def test_queued_deadline_reports_owners_from_both_l1s(
             key: manager.l1_manager_id
             for manager, key in zip(managers, keys, strict=True)
         }
+        for touch, key in zip(touches, keys, strict=True):
+            touch.assert_called_once_with([key])
         assert all(
             manager.report_status()["read_locked_count"] == 1 for manager in managers
         )

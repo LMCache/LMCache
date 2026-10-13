@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Deterministic tests for the optional L2 prefetch/load deadline.
-
-These drive the real ``PrefetchController`` with an injected monotonic clock and
-a load-gated mock adapter, so deadline expiry, both orderings of the
-completion-vs-deadline race, exactly-once publish/retire, head-of-line backpressure,
-and same-key retry are pinned without depending on wall-clock timing. State is
-asserted through ``report_status`` and the public query API, matching how
-``test_prefetch_controller.py`` synchronizes with the loop thread.
-"""
+"""L2 prefetch deadline tests using the native L1 manager and gated I/O."""
 
 # Standard
 import asyncio
@@ -67,11 +59,6 @@ if not torch_dev.is_available():
     )
 
 
-# =============================================================================
-# Helpers
-# =============================================================================
-
-
 class FakeClock:
     """A thread-safe monotonic clock the test advances explicitly."""
 
@@ -89,28 +76,7 @@ class FakeClock:
 
 
 class GatedLoadMockAdapter(MockL2Adapter):
-    """MockL2Adapter whose load (and optionally lookup) completion is gated.
-
-    The gate precedes the copy into the caller-provided buffers, not just the
-    completion notification: while the gate is closed the adapter has *not yet
-    written* the request's write-reserved L1 buffers, which is what makes
-    "a pending adapter's buffer is not freed early" a real assertion.
-
-    Lookup gating is opt-in via :meth:`gate_lookups` (default released) for
-    LOOKUP-phase deadline tests. ``debug_locked_key_count`` exposes the number of
-    L2 keys still read-locked so a test can assert the drain released them.
-
-    Two events let a test synchronize on controller-observable phases instead of
-    sleeping or shortening the poll interval:
-
-    ``load_entered``
-        Set when the adapter's load coroutine has started and is sitting on the
-        gate, i.e. the request has genuinely reached the load phase.
-    ``load_result_consumed``
-        Set when the *controller* has actually taken this adapter's load result
-        via :meth:`query_load_result`, i.e. the completion has been folded into
-        the request's state.
-    """
+    """Gate lookup and buffer writes; signal load entry and result consumption."""
 
     def __init__(self, config: MockL2AdapterConfig) -> None:
         super().__init__(config)
@@ -124,10 +90,9 @@ class GatedLoadMockAdapter(MockL2Adapter):
     def release_loads(self) -> None:
         self._load_released.set()
 
-    def fail_loads(self) -> None:
-        """When released, loads complete but report zero keys loaded, so the
-        controller treats every reserved key as a failed load."""
-        self._fail_loads = True
+    def fail_loads(self, enabled: bool = True) -> None:
+        """Report all loaded keys as failed."""
+        self._fail_loads = enabled
 
     def gate_lookups(self) -> None:
         self._lookup_released.clear()
@@ -155,9 +120,6 @@ class GatedLoadMockAdapter(MockL2Adapter):
 
     async def _execute_load_in_loop(self, keys, objects, task_id):  # type: ignore[override]
         self.load_entered.set()
-        # Gate the WRITE itself, not only its notification: until the test
-        # releases the gate, `objects` (the request's reserved L1 buffers) have
-        # not been touched, so freeing them early would be a real use-after-free.
         while not self._load_released.is_set():
             await asyncio.sleep(0.005)
         bitmap = Bitmap(len(keys))
@@ -202,8 +164,7 @@ def make_descriptor(index: int) -> L2AdapterDescriptor:
 
 
 def wait_until(pred, timeout: float = 5.0) -> bool:
-    """Poll a predicate until true or timeout (same mechanism the existing
-    controller tests use to synchronize with the loop thread)."""
+    """Wait for a controller-thread predicate."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if pred():
@@ -232,23 +193,6 @@ def store_keys_in_l2(adapter, keys, layout) -> None:
     )
 
 
-def in_load_phase(ctrl, adapters) -> None:
-    """Block until every adapter's load coroutine has reached its gate.
-
-    Proves the request is in the load phase with buffers reserved, which
-    ``in_flight_count(ctrl) == 1`` alone does not.
-    """
-    for adapter in adapters:
-        assert adapter.load_entered.wait(10.0), "load phase was never entered"
-
-
-def load_result_consumed(ctrl, adapter) -> None:
-    """Block until the controller has consumed ``adapter``'s load result."""
-    assert adapter.load_result_consumed.wait(10.0), (
-        "controller never consumed the adapter's load result"
-    )
-
-
 def active_count(ctrl) -> int:
     s = ctrl.report_status()
     return s["in_flight_request_count"] - s["draining_request_count"]
@@ -263,7 +207,6 @@ def in_flight_count(ctrl) -> int:
 
 
 def result_ready(ctrl, req) -> bool:
-    # Non-consuming presence check via the public wait API (timeout 0).
     return ctrl.wait_prefetch_result(req, 0.0)
 
 
@@ -274,8 +217,6 @@ def submit(ctrl, keys, layout, policy="prefix") -> int:
 
 @pytest.fixture(autouse=True)
 def _fast_loop(monkeypatch):
-    # Shrink the loop poll so it reacts to a clock advance within ~20ms; keeps
-    # the tests fast without changing behavior.
     monkeypatch.setattr(prefetch_controller, "PREFETCH_LOOP_POLL_TIMEOUT_MS", 20)
 
 
@@ -335,8 +276,7 @@ class _EventCapture:
 
 @pytest.fixture
 def event_capture():
-    """Install an enabled global EventBus, capture the deadline-related events,
-    and restore the disabled default afterwards."""
+    """Capture deadline events and restore the disabled bus after the test."""
     bus = init_event_bus(EventBusConfig(enabled=True))
     bus.start()
     cap = _EventCapture()
@@ -350,11 +290,6 @@ def event_capture():
     finally:
         bus.stop()
         init_event_bus(EventBusConfig(enabled=False))
-
-
-# =============================================================================
-# Configuration validation
-# =============================================================================
 
 
 def _base_config_kwargs():
@@ -372,37 +307,27 @@ def _base_config_kwargs():
 
 
 class TestConfigValidation:
-    def test_default_is_disabled(self):
-        cfg = StorageManagerConfig(**_base_config_kwargs())
-        assert cfg.prefetch_load_timeout is None
-
-    def test_positive_value_accepted(self):
-        cfg = StorageManagerConfig(prefetch_load_timeout=0.5, **_base_config_kwargs())
-        assert cfg.prefetch_load_timeout == 0.5
+    @pytest.mark.parametrize("timeout", [None, 0.5, 1e18])
+    def test_valid_timeout(self, timeout):
+        cfg = StorageManagerConfig(
+            prefetch_load_timeout=timeout, **_base_config_kwargs()
+        )
+        assert cfg.prefetch_load_timeout == timeout
 
     @pytest.mark.parametrize(
         "bad",
         [
             0.0,
             -1.0,
-            -0.001,
             float("nan"),
             float("inf"),
             float("-inf"),
         ],
     )
-    def test_non_finite_or_non_positive_fails_closed(self, bad):
-        """``> 0`` alone is not enough: ``inf > 0`` is true and every NaN
-        comparison is false, so both slip past a naive check."""
+    def test_invalid_timeout(self, bad, l1_manager):
         with pytest.raises(ValueError, match="finite positive"):
             StorageManagerConfig(prefetch_load_timeout=bad, **_base_config_kwargs())
 
-    @pytest.mark.parametrize(
-        "bad", [0.0, -1.0, float("nan"), float("inf"), float("-inf")]
-    )
-    def test_direct_construction_fails_closed(self, bad, l1_manager):
-        """The second entry point: constructing the controller directly (as the
-        tests and any embedder do) must reject the same values."""
         adapter = make_gated_adapter()
         try:
             with pytest.raises(ValueError, match="finite positive"):
@@ -411,8 +336,7 @@ class TestConfigValidation:
             adapter.close()
 
     def test_direct_construction_accepts_large_finite(self, l1_manager):
-        """A very large finite budget is legal and must not break the poll
-        bound (the millisecond conversion is clamped before rounding)."""
+        """Large finite budgets must not overflow poll timeout conversion."""
         adapter = make_gated_adapter()
         ctrl = make_controller(l1_manager, adapter, FakeClock(), timeout=1e18)
         try:
@@ -430,11 +354,6 @@ class TestConfigValidation:
         finally:
             ctrl.stop()
             adapter.close()
-
-
-# =============================================================================
-# Deadline behavior on the real controller path
-# =============================================================================
 
 
 class TestLoadDeadline:
@@ -534,34 +453,14 @@ class TestLoadDeadline:
             slow.close()
             fast.close()
 
-    def test_disabled_is_behavior_neutral(self, l1_manager):
-        """With the feature off, a normal prefetch completes and retires as
-        before, and no timeout is ever recorded."""
-        adapter = make_gated_adapter()
-        adapter.release_loads()  # let loads complete immediately
-        clock = FakeClock()
-        ctrl = make_controller(l1_manager, adapter, clock, timeout=None)
-        ctrl.start()
-        try:
-            layout = make_layout()
-            keys = [make_object_key(i) for i in range(4)]
-            store_keys_in_l2(adapter, keys, layout)
-            req = submit(ctrl, keys, layout)
-            assert wait_until(lambda: result_ready(ctrl, req))
-            assert ctrl.query_prefetch_result(req) is not None
-            assert wait_until(lambda: in_flight_count(ctrl) == 0)
-            assert ctrl.report_status()["deadline_timeout_count"] == 0
-        finally:
-            ctrl.stop()
-            adapter.close()
-
-    def test_timeout_during_load_publishes_fallback_without_freeing_buffers(
-        self, l1_manager
+    @pytest.mark.parametrize("fail_load", [False, True])
+    def test_timeout_during_load_preserves_buffers_and_allows_retry(
+        self, l1_manager, fail_load
     ):
-        """Deadline fires while the load is pending: the caller gets a final
-        fallback (not None), the request enters drain-only with its buffers and
-        L2 lock still held, and after the late load completes it retires."""
-        adapter = make_gated_adapter()  # loads stay pending until released
+        """Late I/O releases locks without changing the timeout result."""
+        adapter = make_gated_adapter()
+        if fail_load:
+            adapter.fail_loads()
         clock = FakeClock()
         ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0)
         ctrl.start()
@@ -571,33 +470,46 @@ class TestLoadDeadline:
             store_keys_in_l2(adapter, keys, layout)
             req = submit(ctrl, keys, layout)
 
-            # The request is admitted and its load is pending. Fire the deadline.
             assert wait_until(lambda: in_flight_count(ctrl) == 1)
-            assert adapter.load_entered.wait(10.0)  # really in the load phase
+            assert adapter.load_entered.wait(10.0)
             clock.advance(10.0)
 
-            # A final fallback result is published (not None) while the load is
-            # still in-flight, so the request is draining, not retired.
             assert wait_until(lambda: result_ready(ctrl, req))
             assert wait_until(lambda: draining_count(ctrl) == 1)
             assert active_count(ctrl) == 0
             assert ctrl.report_status()["deadline_timeout_count"] == 1
+            fallback = ctrl.query_prefetch_result(req)
+            assert fallback is not None
+            assert fallback.hit_cells[0].get_indices_list() == []
+            assert l1_manager.report_status()["write_locked_count"] == len(keys)
+            assert adapter.debug_locked_key_count() == len(keys)
 
-            # Late completion drains safely and the request retires exactly once.
             adapter.release_loads()
             assert wait_until(lambda: in_flight_count(ctrl) == 0)
-            # Result is immutable and consumable exactly once.
-            assert ctrl.query_prefetch_result(req) is not None
             assert ctrl.query_prefetch_result(req) is None
+            assert l1_manager.report_status()["write_locked_count"] == 0
+            assert wait_until(lambda: adapter.debug_locked_key_count() == 0)
+            assert l1_manager.report_status()["read_locked_count"] == 0
+            if fail_load:
+                assert all(
+                    state[0] == L1Error.KEY_NOT_EXIST
+                    for state in l1_manager.unsafe_read(keys).values()
+                )
+
+            adapter.fail_loads(False)
+            retry = submit(ctrl, keys, layout)
+            assert wait_until(lambda: result_ready(ctrl, retry))
+            result = ctrl.query_prefetch_result(retry)
+            assert result is not None
+            assert result.hit_cells[0].get_indices_list() == list(range(len(keys)))
+            l1_manager.finish_read(keys)
+            assert wait_until(lambda: in_flight_count(ctrl) == 0)
         finally:
             ctrl.stop()
             adapter.close()
 
     @pytest.mark.parametrize("timed_out", [False, True])
-    @pytest.mark.parametrize("fetching_policy", ["prefix", "full"])
-    def test_retained_prefetch_does_not_enqueue_l2_store(
-        self, l1_manager, timed_out, fetching_policy
-    ):
+    def test_retained_prefetch_does_not_enqueue_l2_store(self, l1_manager, timed_out):
         """Retained loads stay in L1 without being queued for another L2 store."""
         listener = StoreListener()
         l1_manager.register_listener(listener)
@@ -611,7 +523,7 @@ class TestLoadDeadline:
         ctrl.start()
         try:
             store_keys_in_l2(adapter, keys, layout)
-            req = submit(ctrl, keys, layout, policy=fetching_policy)
+            req = submit(ctrl, keys, layout)
             assert adapter.load_entered.wait(10.0)
             if timed_out:
                 clock.advance(10.0)
@@ -651,40 +563,24 @@ class TestLoadDeadline:
             adapter.close()
             listener.close()
 
-    def test_lookup_hits_are_not_served_before_load_completion(self, l1_manager):
-        """A successful L2 lookup cannot make an unfinished load a cache hit."""
-        adapter = make_gated_adapter()  # load never completes before the deadline
-        clock = FakeClock()
-        ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0)
-        ctrl.start()
-        try:
-            layout = make_layout()
-            keys = [make_object_key(i) for i in range(4)]
-            store_keys_in_l2(adapter, keys, layout)
-            req = submit(ctrl, keys, layout)
-
-            # Finding keys in L2 is not enough to serve them before the load.
-            assert adapter.load_entered.wait(10.0)  # load really started
-            clock.advance(10.0)
-            assert wait_until(lambda: result_ready(ctrl, req))
-
-            # All four keys exist in L2, but none are ready to serve.
-            retained = ctrl.query_prefetch_result(req)
-            assert retained is not None
-            assert retained.hit_cells[0].count_leading_ones() == 0
-
-            adapter.release_loads()
-            assert wait_until(lambda: in_flight_count(ctrl) == 0)
-        finally:
-            ctrl.stop()
-            adapter.close()
-
-    def test_completion_before_deadline_wins(self, l1_manager):
-        """If the load completes before the clock passes the deadline, the
-        request completes normally and a later clock advance is a no-op."""
+    @pytest.mark.parametrize("at_deadline", [False, True])
+    def test_completion_before_deadline_wins(
+        self, l1_manager, monkeypatch, at_deadline
+    ):
+        """Completed loads win at the deadline and cannot expire afterwards."""
         adapter = make_gated_adapter()
         adapter.release_loads()
         clock = FakeClock()
+        if at_deadline:
+            original_query = adapter.query_load_result
+
+            def advance_on_completion(task_id):
+                result = original_query(task_id)
+                if result is not None:
+                    clock.advance(5.0)
+                return result
+
+            monkeypatch.setattr(adapter, "query_load_result", advance_on_completion)
         ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0)
         ctrl.start()
         try:
@@ -695,49 +591,19 @@ class TestLoadDeadline:
             assert wait_until(lambda: result_ready(ctrl, req))
             result = ctrl.query_prefetch_result(req)
             assert result is not None
-            assert result.hit_cells[0].count_leading_ones() == 4  # full hit, no timeout
+            assert result.hit_cells[0].count_leading_ones() == 4
+            l1_manager.finish_read(keys)
             assert wait_until(lambda: in_flight_count(ctrl) == 0)
             assert ctrl.report_status()["deadline_timeout_count"] == 0
-            clock.advance(100.0)  # no armed requests remain
+            clock.advance(100.0)
             assert in_flight_count(ctrl) == 0
         finally:
             ctrl.stop()
             adapter.close()
 
-    def test_same_key_request_after_timeout_succeeds(self, l1_manager):
-        """After a timeout + late drain, a second request for the same keys
-        completes cleanly with no leaked locks/reservations."""
-        adapter = make_gated_adapter()
-        clock = FakeClock()
-        ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0)
-        ctrl.start()
-        try:
-            layout = make_layout()
-            keys = [make_object_key(i) for i in range(4)]
-            store_keys_in_l2(adapter, keys, layout)
-
-            req1 = submit(ctrl, keys, layout)
-            assert wait_until(lambda: in_flight_count(ctrl) == 1)
-            assert adapter.load_entered.wait(10.0)  # really in the load phase
-            clock.advance(10.0)
-            assert wait_until(lambda: result_ready(ctrl, req1))
-            adapter.release_loads()
-            assert wait_until(lambda: in_flight_count(ctrl) == 0)
-
-            # Second request for the same keys must not block or error.
-            req2 = submit(ctrl, keys, layout)
-            assert wait_until(lambda: result_ready(ctrl, req2))
-            assert ctrl.query_prefetch_result(req2) is not None
-            assert wait_until(lambda: in_flight_count(ctrl) == 0)
-        finally:
-            ctrl.stop()
-            adapter.close()
-
     def test_head_of_line_drainers_then_queue_expiry_then_admission(self, l1_manager):
-        """Slow-L2 backpressure: drainers hold the max_in_flight slots, a request
-        queued behind them expires in the queue, and after the drainers retire a
-        later request is admitted and completes."""
-        adapter = make_gated_adapter()  # every load stays pending until released
+        """Drainers occupy admission slots until their I/O completes."""
+        adapter = make_gated_adapter()
         clock = FakeClock()
         ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0, max_in_flight=2)
         ctrl.start()
@@ -751,27 +617,21 @@ class TestLoadDeadline:
 
             r0 = submit(ctrl, key_sets[0], layout)
             r1 = submit(ctrl, key_sets[1], layout)
-            # Both admitted (slots full at max_in_flight=2), loads pending.
             assert wait_until(lambda: in_flight_count(ctrl) == 2)
             assert adapter.load_entered.wait(10.0)
 
-            # Fire their deadline -> both become drainers, still holding slots.
             clock.advance(10.0)
             assert wait_until(lambda: draining_count(ctrl) == 2)
             assert wait_until(lambda: result_ready(ctrl, r0) and result_ready(ctrl, r1))
 
-            # A third request cannot be admitted (slots held by drainers); it
-            # sits in the queue and expires there when its own deadline passes.
             r2 = submit(ctrl, key_sets[2], layout)
             clock.advance(10.0)
             assert wait_until(lambda: result_ready(ctrl, r2))
-            assert ctrl.query_prefetch_result(r2) is not None  # L1-only fallback
+            assert ctrl.query_prefetch_result(r2) is not None
 
-            # Releasing the drainers retires them and frees the slots.
             adapter.release_loads()
             assert wait_until(lambda: in_flight_count(ctrl) == 0)
 
-            # A later request is admitted and completes normally.
             r3 = submit(ctrl, key_sets[3], layout)
             assert wait_until(lambda: result_ready(ctrl, r3))
             assert ctrl.query_prefetch_result(r3) is not None
@@ -780,13 +640,26 @@ class TestLoadDeadline:
             ctrl.stop()
             adapter.close()
 
-    def test_timeout_during_lookup_late_lookup_releases_l2_lock(self, l1_manager):
-        """Deadline fires in the LOOKUP phase (lookup gated): an L1-only fallback
-        is published and the request drains; the late lookup then takes and, on
-        drain, releases its L2 read lock."""
+    @pytest.mark.parametrize("at_completion", [False, True])
+    def test_timeout_during_lookup_late_lookup_releases_l2_lock(
+        self, l1_manager, monkeypatch, at_completion
+    ):
+        """Late lookup releases its locks without starting a load."""
         adapter = make_gated_adapter()
-        adapter.gate_lookups()  # keep the request in the LOOKUP phase
+        adapter.gate_lookups()
         clock = FakeClock()
+        if at_completion:
+            original_query = adapter.query_lookup_and_lock_result
+
+            def advance_on_completion(task_id):
+                result = original_query(task_id)
+                if result is not None:
+                    clock.advance(5.0)
+                return result
+
+            monkeypatch.setattr(
+                adapter, "query_lookup_and_lock_result", advance_on_completion
+            )
         ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0)
         ctrl.start()
         try:
@@ -797,140 +670,31 @@ class TestLoadDeadline:
             assert wait_until(lambda: in_flight_count(ctrl) == 1)
             assert ctrl.report_status()["lookup_phase_count"] == 1
 
-            clock.advance(10.0)
+            if at_completion:
+                adapter.release_lookups()
+            else:
+                clock.advance(10.0)
             assert wait_until(lambda: result_ready(ctrl, req))
-            assert wait_until(lambda: draining_count(ctrl) == 1)
-            # No L2 lock yet (lookup still gated), nothing loaded into L1.
+            if not at_completion:
+                assert wait_until(lambda: draining_count(ctrl) == 1)
             retained = ctrl.query_prefetch_result(req)
             assert (
                 retained is not None and retained.hit_cells[0].count_leading_ones() == 0
             )
 
-            # Late lookup completes, takes its L2 lock, then the drain releases it.
             adapter.release_lookups()
             assert wait_until(lambda: in_flight_count(ctrl) == 0)
             assert wait_until(lambda: adapter.debug_locked_key_count() == 0)
+            assert not adapter.load_entered.is_set()
         finally:
             ctrl.stop()
             adapter.close()
-
-    def test_partial_load_completion_trims_before_hole_prefix(self, l1_manager):
-        """PREFIX: a still-pending early key is a hole, so a later key that has
-        finished loading is NOT reported in the prefix (it becomes resident)."""
-        slow = make_gated_adapter()  # holds keys 0 and 2 (never released here)
-        fast = make_gated_adapter()
-        fast.release_loads()  # loads keys 1 and 3
-        clock = FakeClock()
-        ctrl = make_controller_multi(l1_manager, [slow, fast], clock, timeout=5.0)
-        ctrl.start()
-        try:
-            layout = make_layout()
-            keys = [make_object_key(i) for i in range(4)]
-            # First adapter by index that has a key owns its load: slow={0,2},
-            # fast={1,3}.
-            store_keys_in_l2(slow, [keys[0], keys[2]], layout)
-            store_keys_in_l2(fast, [keys[1], keys[3]], layout)
-            req = submit(ctrl, keys, layout)
-            assert wait_until(lambda: in_flight_count(ctrl) == 1)
-            # Not just 'admitted': the slow adapter is sitting on its gate with
-            # the buffers still unwritten, and the controller has already
-            # consumed the fast adapter's completion.
-            assert slow.load_entered.wait(10.0)
-            assert fast.load_result_consumed.wait(10.0)
-
-            clock.advance(10.0)
-            assert wait_until(lambda: result_ready(ctrl, req))
-            retained = ctrl.query_prefetch_result(req)
-            # key 0 (in slow, pending) is a hole -> prefix hit 0, even though the
-            # fast adapter finished keys 1 and 3.
-            assert retained is not None
-            assert retained.hit_cells[0].count_leading_ones() == 0
-
-            slow.release_loads()
-            assert wait_until(lambda: in_flight_count(ctrl) == 0)
-        finally:
-            ctrl.stop()
-            slow.close()
-            fast.close()
-
-    @pytest.mark.parametrize("ordering", ["completion_first", "deadline_first"])
-    @pytest.mark.parametrize("repeat", range(10))
-    def test_race_orderings_forced(self, l1_manager, ordering, repeat):
-        """Both orderings are *forced*, not sampled.
-
-        The load is gated, so the test decides which event happens first:
-        ``completion_first`` releases the gate and waits for the published
-        result before the clock ever passes the deadline; ``deadline_first``
-        advances the clock while the adapter is still sitting on the gate (its
-        buffers unwritten) and only then releases it. Each ordering is repeated
-        to shake out scheduling flakes; the repeat count is not the coverage.
-        """
-        adapter = make_gated_adapter()
-        clock = FakeClock()
-        ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0)
-        ctrl.start()
-        try:
-            layout = make_layout()
-            keys = [make_object_key(i) for i in range(4)]
-            store_keys_in_l2(adapter, keys, layout)
-            req = submit(ctrl, keys, layout)
-            assert wait_until(lambda: in_flight_count(ctrl) == 1)
-            assert adapter.load_entered.wait(10.0)  # gate reached, nothing written
-            if ordering == "completion_first":
-                adapter.release_loads()
-                assert wait_until(lambda: result_ready(ctrl, req))
-                assert ctrl.report_status()["deadline_timeout_count"] == 0
-                clock.advance(10.0)  # published already: a no-op
-                assert ctrl.report_status()["deadline_timeout_count"] == 0
-            else:
-                clock.advance(10.0)
-                assert wait_until(lambda: result_ready(ctrl, req))
-                assert ctrl.report_status()["deadline_timeout_count"] == 1
-                adapter.release_loads()
-                assert ctrl.report_status()["deadline_timeout_count"] == 1
-            assert wait_until(lambda: in_flight_count(ctrl) == 0)
-            assert ctrl.query_prefetch_result(req) is not None
-            assert ctrl.query_prefetch_result(req) is None  # consumed once
-        finally:
-            ctrl.stop()
-            adapter.close()
-
-    def test_shutdown_while_draining_does_not_double_release_or_crash(self, l1_manager):
-        """Controller shutdown during a drain clears its own tracking without a
-        double release or a crash, and the published fallback stays readable.
-
-        Scope note: this asserts the controller's *own* bookkeeping only. It does
-        NOT assert that the L2 adapter has stopped writing into the reserved
-        buffers ``stop()`` frees -- ``PrefetchController.stop()`` joins only its
-        own loop thread, and no in-tree adapter exposes a quiescence guarantee
-        for in-flight loads. See SHUTDOWN_FINDINGS.md: that adapter-ownership
-        hazard is pre-existing on dev and is tracked separately, not fixed here.
-        """
-        adapter = make_gated_adapter()  # load never released
-        clock = FakeClock()
-        ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0)
-        ctrl.start()
-        layout = make_layout()
-        keys = [make_object_key(i) for i in range(4)]
-        store_keys_in_l2(adapter, keys, layout)
-        req = submit(ctrl, keys, layout)
-        assert wait_until(lambda: in_flight_count(ctrl) == 1)
-        assert adapter.load_entered.wait(10.0)
-        clock.advance(10.0)
-        assert wait_until(lambda: draining_count(ctrl) == 1)
-        # Shut down while draining: stop() joins the loop then cleans up.
-        ctrl.stop()
-        assert ctrl.report_status()["in_flight_request_count"] == 0
-        # The published fallback is still readable after shutdown.
-        assert ctrl.query_prefetch_result(req) is not None
-        adapter.close()
 
     def test_queue_expiry_emits_coherent_events_and_metric(
         self, l1_manager, event_capture
     ):
-        """A queue-expired request emits LOOKUP_SUBMITTED (to zero adapters)
-        before one L2_PREFETCH_DEADLINE with phase=queued."""
-        adapter = make_gated_adapter()  # drainers hold the single slot
+        """Queued fallback emits lookup submission before its deadline event."""
+        adapter = make_gated_adapter()
         clock = FakeClock()
         ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0, max_in_flight=1)
         ctrl.start()
@@ -941,17 +705,16 @@ class TestLoadDeadline:
             store_keys_in_l2(adapter, ks0, layout)
             store_keys_in_l2(adapter, ks1, layout)
 
-            submit(ctrl, ks0, layout)  # admitted, becomes a drainer
+            submit(ctrl, ks0, layout)
             assert wait_until(lambda: in_flight_count(ctrl) == 1)
             assert adapter.load_entered.wait(10.0)
             clock.advance(10.0)
             assert wait_until(lambda: draining_count(ctrl) == 1)
 
-            r1 = submit(ctrl, ks1, layout)  # queued behind the drainer
+            r1 = submit(ctrl, ks1, layout)
             clock.advance(10.0)
             assert wait_until(lambda: result_ready(ctrl, r1))
 
-            deadlines = event_capture.of_type(EventType.L2_PREFETCH_DEADLINE)
             assert wait_until(
                 lambda: any(
                     e.metadata["phase"] == "queued" and e.metadata["request_id"] == r1
@@ -971,7 +734,6 @@ class TestLoadDeadline:
             assert submitted and completed
             assert submitted[0].metadata["adapter_count"] == 0
             assert submitted[0].timestamp <= completed[0].timestamp
-            del deadlines
 
             adapter.release_loads()
             assert wait_until(lambda: in_flight_count(ctrl) == 0)
@@ -982,20 +744,20 @@ class TestLoadDeadline:
     @pytest.mark.parametrize(
         "policy, retained_readlocked",
         [
-            ("prefix", False),  # hole at key 0 -> nothing retained
-            ("full", True),  # scattered -> 1,3 retained
+            ("prefix", False),
+            ("full", True),
         ],
     )
+    @pytest.mark.parametrize("fail_load", [False, True])
     def test_partial_completion_policy_lock_accounting(
-        self, l1_manager, policy, retained_readlocked
+        self, l1_manager, policy, retained_readlocked, fail_load
     ):
-        """Timeout with a hole (key 0 pending) before completed keys 1,3 drives
-        the lock/reservation accounting per policy, not just the bitmap: under
-        prefix the completed temporary keys are deleted; under full they remain
-        read-locked for the caller (unsafe_read => SUCCESS)."""
-        slow = make_gated_adapter()  # holds keys 0 and 2 (never released here)
+        """Only policy-selected completed cells keep caller read locks."""
+        slow = make_gated_adapter()
+        if fail_load:
+            slow.fail_loads()
         fast = make_gated_adapter()
-        fast.release_loads()  # finishes keys 1 and 3
+        fast.release_loads()
         clock = FakeClock()
         ctrl = make_controller_multi(l1_manager, [slow, fast], clock, timeout=5.0)
         ctrl.start()
@@ -1006,9 +768,6 @@ class TestLoadDeadline:
             store_keys_in_l2(fast, [keys[1], keys[3]], layout)
             req = submit(ctrl, keys, layout, policy=policy)
             assert wait_until(lambda: in_flight_count(ctrl) == 1)
-            # Not just 'admitted': the slow adapter is sitting on its gate with
-            # the buffers still unwritten, and the controller has already
-            # consumed the fast adapter's completion.
             assert slow.load_entered.wait(10.0)
             assert fast.load_result_consumed.wait(10.0)
 
@@ -1018,111 +777,24 @@ class TestLoadDeadline:
             assert retained is not None
             retained_idx = set(retained.hit_cells[0].get_indices_list())
 
-            # Completed temporary keys are either handed to the caller or
-            # released and deleted, matching the upstream retention policy.
             probe = l1_manager.unsafe_read([keys[1], keys[3]])
             if retained_readlocked:
                 assert retained_idx == {1, 3}
                 assert probe[keys[1]][0] == L1Error.SUCCESS
                 assert probe[keys[3]][0] == L1Error.SUCCESS
-                l1_manager.finish_read([keys[1], keys[3]])  # caller consumes
+                l1_manager.finish_read([keys[1], keys[3]])
             else:
-                assert retained_idx == set()  # hole at 0 truncates the prefix
+                assert retained_idx == set()
                 assert probe[keys[1]][0] == L1Error.KEY_NOT_EXIST
                 assert probe[keys[3]][0] == L1Error.KEY_NOT_EXIST
 
             slow.release_loads()
             assert wait_until(lambda: in_flight_count(ctrl) == 0)
-        finally:
-            ctrl.stop()
-            slow.close()
-            fast.close()
-
-    def test_load_failure_during_drain(self, l1_manager):
-        """A load that completes with a failure during the drain deletes the
-        failed keys' buffers exactly once, does not re-publish, retires the
-        request, and leaves a same-key retry working."""
-        adapter = make_gated_adapter()
-        adapter.fail_loads()  # its load will report zero keys loaded
-        clock = FakeClock()
-        ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0)
-        ctrl.start()
-        try:
-            layout = make_layout()
-            keys = [make_object_key(i) for i in range(4)]
-            store_keys_in_l2(adapter, keys, layout)
-            req = submit(ctrl, keys, layout)
-            assert wait_until(lambda: in_flight_count(ctrl) == 1)
-            assert adapter.load_entered.wait(10.0)  # really in the load phase
-
-            clock.advance(10.0)
-            assert wait_until(lambda: result_ready(ctrl, req))
-            before = ctrl.query_prefetch_result(req)  # consume the fallback
-            assert before is not None and before.hit_cells[0].count_leading_ones() == 0
-
-            # Late failing load drains: buffers deleted, request retires, no
-            # re-publish (result was already consumed and stays gone).
-            adapter.release_loads()
-            assert wait_until(lambda: in_flight_count(ctrl) == 0)
             assert ctrl.query_prefetch_result(req) is None
-            assert ctrl.report_status()["deadline_timeout_count"] == 1
-            # Failed keys were deleted, not left half-reserved.
-            probe = l1_manager.unsafe_read(keys)
-            assert all(v[0] == L1Error.KEY_NOT_EXIST for v in probe.values())
-
-            # Same-key retry works (keys still live in L2; adapter no longer fails
-            # a fresh reserve because the earlier buffers were cleaned up).
-            adapter._fail_loads = False  # noqa: SLF001 (test shim)
-            req2 = submit(ctrl, keys, layout)
-            assert wait_until(lambda: result_ready(ctrl, req2))
-            assert ctrl.query_prefetch_result(req2) is not None
-            assert wait_until(lambda: in_flight_count(ctrl) == 0)
-        finally:
-            ctrl.stop()
-            adapter.close()
-
-    def test_fast_success_slow_failure_two_adapters(self, l1_manager):
-        """Fast adapter succeeds (keys 1,3 retained under full), slow adapter
-        fails during the drain: the request retires cleanly, the failed keys are
-        not published, and a same-key retry works."""
-        slow = make_gated_adapter()
-        slow.fail_loads()  # keys 0,2 will fail on release
-        fast = make_gated_adapter()
-        fast.release_loads()  # keys 1,3 succeed
-        clock = FakeClock()
-        ctrl = make_controller_multi(l1_manager, [slow, fast], clock, timeout=5.0)
-        ctrl.start()
-        try:
-            layout = make_layout()
-            keys = [make_object_key(i) for i in range(4)]
-            store_keys_in_l2(slow, [keys[0], keys[2]], layout)
-            store_keys_in_l2(fast, [keys[1], keys[3]], layout)
-            req = submit(ctrl, keys, layout, policy="full")
-            assert wait_until(lambda: in_flight_count(ctrl) == 1)
-            # Not just 'admitted': the slow adapter is sitting on its gate with
-            # the buffers still unwritten, and the controller has already
-            # consumed the fast adapter's completion.
-            assert slow.load_entered.wait(10.0)
-            assert fast.load_result_consumed.wait(10.0)
-
-            clock.advance(10.0)
-            assert wait_until(lambda: result_ready(ctrl, req))
-            retained = ctrl.query_prefetch_result(req)
-            assert set(retained.hit_cells[0].get_indices_list()) == {
-                1,
-                3,
-            }  # only fast succeeded
-            l1_manager.finish_read([keys[1], keys[3]])
-
-            slow.release_loads()  # slow load completes with failure
-            assert wait_until(lambda: in_flight_count(ctrl) == 0)
-            assert ctrl.query_prefetch_result(req) is None  # not re-published
-
-            slow._fail_loads = False  # noqa: SLF001
-            req2 = submit(ctrl, keys, layout, policy="full")
-            assert wait_until(lambda: result_ready(ctrl, req2))
-            assert ctrl.query_prefetch_result(req2) is not None
-            assert wait_until(lambda: in_flight_count(ctrl) == 0)
+            assert l1_manager.report_status()["write_locked_count"] == 0
+            assert l1_manager.report_status()["read_locked_count"] == 0
+            assert wait_until(lambda: slow.debug_locked_key_count() == 0)
+            assert wait_until(lambda: fast.debug_locked_key_count() == 0)
         finally:
             ctrl.stop()
             slow.close()

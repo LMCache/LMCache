@@ -119,8 +119,7 @@ class L2MetricsSubscriber(EventSubscriber):
             unit="chunks",
         )
 
-        # Prefetch deadline (recompute fallback) counters, labeled by phase
-        # (queued/lookup/load).
+        # Deadline fallback counters by phase (queued/lookup/load).
         self._prefetch_deadline = meter.create_counter(
             "lmcache_mp.l2_prefetch_deadline",
             description="Total L2 prefetch requests that hit their load deadline",

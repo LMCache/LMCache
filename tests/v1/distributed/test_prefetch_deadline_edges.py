@@ -1,27 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Edge-case regressions for the optional L2 prefetch/load deadline.
-
-Deliberately a separate module from ``test_prefetch_deadline.py``: that file
-installs an autouse fixture shrinking ``PREFETCH_LOOP_POLL_TIMEOUT_MS`` to 20 ms,
-which would hide exactly the bug :class:`TestPollBound` pins. Everything here
-runs with the production 500 ms poll interval.
-
-Each test in this module corresponds to a concrete defect found by review of
-the original change:
-
-* ``TestDisabledNeverReadsTheClock`` -- the loop read the clock on every
-  iteration even with the feature off.
-* ``TestPollBound`` -- the poll bound only inspected the pending queue's *head*,
-  so an unarmed WARM entry there hid an armed request behind it and the loop
-  slept the full default poll past that request's deadline.
-* ``TestAdmissionAfterDeadline`` -- a request could be pulled off the pending
-  queue and started on L2 after its deadline had already passed.
-* ``TestCompletedTaskBuffers`` -- a *failed* key belonging to an adapter task
-  that had already returned stayed write-reserved until the slowest adapter in
-  the same request finished.
-* ``TestQueuedFallbackTouchesRetained`` -- the queued-timeout fallback did not
-  refresh LRU recency for the keys it published, unlike normal completion.
-"""
+"""Deadline regressions at the production poll interval (no fast-loop fixture)."""
 
 # Standard
 import threading
@@ -51,8 +29,6 @@ from tests.v1.distributed.test_prefetch_deadline import (
 )
 from tests.v1.distributed.utils import single_row_spec
 
-# ``l1_manager`` is a pytest fixture defined in the sibling module and reused
-# here; pytest resolves it by name, so the import is not "unused".
 __all__ = ["l1_manager"]
 
 if not torch_dev.is_available():
@@ -63,11 +39,7 @@ if not torch_dev.is_available():
 
 
 class ExplodingClock:
-    """A clock that records every read and refuses to be read.
-
-    Used to prove the disabled path never touches the clock: a call count of
-    zero is the assertion, the exception only makes an accidental call loud.
-    """
+    """Record and reject clock reads on the disabled path."""
 
     def __init__(self) -> None:
         self.calls = 0
@@ -88,10 +60,7 @@ def submit_mode(ctrl, keys, layout, mode, policy="prefix") -> int:
 
 class TestDisabledNeverReadsTheClock:
     def test_disabled_loop_does_not_call_the_clock(self, l1_manager):  # noqa: F811
-        """With ``l2_load_timeout=None`` the loop must not evaluate the clock on
-        any iteration -- not even as the argument of a call that immediately
-        returns. The clock here raises, so a single read both trips the count
-        assertion and surfaces in the loop's exception log."""
+        """Disabled prefetches never consult the deadline clock."""
         adapter = make_gated_adapter()
         adapter.release_loads()
         clock = ExplodingClock()
@@ -105,7 +74,6 @@ class TestDisabledNeverReadsTheClock:
             assert wait_until(lambda: result_ready(ctrl, req))
             assert ctrl.query_prefetch_result(req) is not None
             assert wait_until(lambda: in_flight_count(ctrl) == 0)
-            # Let the loop spin through several more idle iterations.
             time.sleep(1.2)
             assert clock.calls == 0, (
                 f"the disabled prefetch loop read the clock {clock.calls} times"
@@ -117,19 +85,12 @@ class TestDisabledNeverReadsTheClock:
 
 class TestPollBound:
     def test_warm_head_does_not_hide_a_queued_lookup_deadline(self, l1_manager):  # noqa: F811
-        """An unarmed WARM entry at the head of the pending queue must not hide
-        the deadline of an armed LOOKUP request queued behind it.
-
-        Runs at the production 500 ms poll with the real monotonic clock and no
-        other source of wakeups, so the measured fallback latency is exactly the
-        poll bound under test: ~125 ms when the scan finds the armed entry,
-        ~500 ms (the next default tick) when it only looks at the head.
-        """
+        """Queued NO_LOCK work must not hide an armed request's deadline."""
         assert prefetch_controller.PREFETCH_LOOP_POLL_TIMEOUT_MS == 500, (
             "this regression only means anything at the production poll interval"
         )
         budget = 0.125
-        adapter = make_gated_adapter()  # loads never complete: no load wakeups
+        adapter = make_gated_adapter()
         ctrl = make_controller(
             l1_manager, adapter, time.monotonic, timeout=budget, max_in_flight=1
         )
@@ -142,18 +103,15 @@ class TestPollBound:
             for ks in (occupant, warm, armed):
                 store_keys_in_l2(adapter, ks, layout)
 
-            # WARM takes the single slot and is never armed, so _armed stays
-            # empty and only the pending queue can bound the poll.
             submit_mode(ctrl, occupant, layout, PrefetchLockMode.NO_LOCK)
             assert adapter.load_entered.wait(10.0)
             assert wait_until(lambda: in_flight_count(ctrl) == 1)
-            # A second WARM request parks unarmed at the head of the queue.
             submit_mode(ctrl, warm, layout, PrefetchLockMode.NO_LOCK)
             assert wait_until(lambda: ctrl.report_status()["pending_queue_size"] == 1)
             assert ctrl._armed == {}  # noqa: SLF001 (white-box precondition)
 
             started = time.monotonic()
-            req = submit(ctrl, armed, layout)  # LOOKUP: armed, queued behind WARM
+            req = submit(ctrl, armed, layout)
             assert wait_until(lambda: result_ready(ctrl, req), timeout=3.0)
             elapsed = time.monotonic() - started
 
@@ -174,14 +132,7 @@ class TestAdmissionAfterDeadline:
         self,
         l1_manager,  # noqa: F811
     ):
-        """Time passes between the expiry sweep and admission, so a request can
-        be popped off the queue after its deadline. It must take the queued
-        fallback path, not start fresh L2 work whose result can never be
-        published.
-
-        Driven directly on the loop thread's own helper with the controller
-        stopped, so the window is exercised deterministically rather than raced.
-        """
+        """Expired requests must not start L2 I/O at admission."""
         adapter = make_gated_adapter()
         clock = FakeClock()
         ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0)
@@ -193,7 +144,6 @@ class TestAdmissionAfterDeadline:
             ctrl._start_lookup_phase = (  # noqa: SLF001 (test shim)
                 lambda rid, sp, dl: started.append(rid)
             )
-            # Queued with a deadline that has already passed when admission runs.
             deadline_at = clock() - 0.001
             ctrl._pending_queue.append((7, spec, deadline_at))  # noqa: SLF001
 
@@ -204,7 +154,7 @@ class TestAdmissionAfterDeadline:
             status = ctrl.report_status()
             assert status["deadline_timeout_count"] == 1
             assert status["pending_queue_size"] == 0
-            assert ctrl.query_prefetch_result(7) is not None  # fallback published
+            assert ctrl.query_prefetch_result(7) is not None
         finally:
             adapter.close()
 
@@ -214,18 +164,10 @@ class TestCompletedTaskBuffers:
         self,
         l1_manager,  # noqa: F811
     ):
-        """A key that an adapter reported as *not loaded* must have its buffer
-        released as soon as that adapter's task returns -- it cannot still be
-        written. Holding it until the slowest adapter in the request finishes
-        pins an L1 write reservation for the whole drain.
-
-        ``fast`` returns immediately reporting zero keys loaded; ``slow`` sits on
-        its gate. At the deadline the fast adapter's keys must be gone from L1
-        (deleted), while the slow adapter's keys stay write-reserved.
-        """
-        slow = make_gated_adapter()  # owns keys 0, 2; never released here
+        """Completed failed buffers are freed while pending buffers stay reserved."""
+        slow = make_gated_adapter()
         fast = make_gated_adapter()
-        fast.fail_loads()  # its task completes reporting zero keys loaded
+        fast.fail_loads()
         fast.release_loads()
         clock = FakeClock()
         ctrl = make_controller_multi(l1_manager, [slow, fast], clock, timeout=5.0)
@@ -244,16 +186,11 @@ class TestCompletedTaskBuffers:
             assert wait_until(lambda: result_ready(ctrl, req))
             retained = ctrl.query_prefetch_result(req)
             assert retained is not None
-            assert (
-                set(retained.hit_cells[0].get_indices_list()) == set()
-            )  # nothing loaded
+            assert set(retained.hit_cells[0].get_indices_list()) == set()
 
             probe = l1_manager.unsafe_read(keys)
-            # Fast adapter has returned: its failed buffers are released now.
             assert probe[keys[1]][0] == L1Error.KEY_NOT_EXIST
             assert probe[keys[3]][0] == L1Error.KEY_NOT_EXIST
-            # Staging is invisible to readers in controller v2. The two slow
-            # buffers must nevertheless stay allocated and write-locked.
             assert probe[keys[0]][0] == L1Error.KEY_NOT_EXIST
             assert probe[keys[2]][0] == L1Error.KEY_NOT_EXIST
             status = l1_manager.report_status()
@@ -267,70 +204,3 @@ class TestCompletedTaskBuffers:
             ctrl.stop()
             slow.close()
             fast.close()
-
-
-class TestQueuedFallbackTouchesRetained:
-    def test_queued_fallback_touches_the_keys_it_publishes(self, l1_manager):  # noqa: F811
-        """LRU parity with normal completion: the keys a queued-timeout fallback
-        publishes are the ones it serves, and locking never refreshes recency,
-        so they must be touched.
-
-        A first, ordinary prefetch loads the keys into L1 and read-locks them for
-        its caller, so the queued fallback below has a non-empty L1 hit to
-        publish and touch. The read lock is kept for the duration: under the
-        default prefetch policy these objects are temporary, and releasing the
-        last read lock deletes them.
-        """
-        adapter = make_gated_adapter()
-        adapter.release_loads()
-        clock = FakeClock()
-        ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0)
-        ctrl.start()
-        try:
-            layout = make_layout()
-            keys = [make_object_key(850 + i) for i in range(2)]
-            store_keys_in_l2(adapter, keys, layout)
-            warm = submit(ctrl, keys, layout)
-            assert wait_until(lambda: result_ready(ctrl, warm))
-            first = ctrl.query_prefetch_result(warm)
-            assert first is not None and first.hit_cells[0].popcount() == len(keys)
-            assert wait_until(lambda: in_flight_count(ctrl) == 0)
-            probe = l1_manager.unsafe_read(keys)
-            assert all(v[0] == L1Error.SUCCESS for v in probe.values())
-        finally:
-            # Join the loop thread so the helper below runs without racing it.
-            ctrl.stop()
-
-        try:
-            touched: list[list] = []
-            ctrl._l1_managers[0] = _TouchRecorder(l1_manager, touched)  # noqa: SLF001
-            spec = single_row_spec(keys, layout, num_kv_readers=1)
-            ctrl._expire_queued_request(9, spec, clock() - 0.001)  # noqa: SLF001
-            published = ctrl.query_prefetch_result(9)
-            assert published is not None
-            assert published.hit_cells[0].popcount() == len(
-                keys
-            )  # L1 hit is not discarded
-            assert touched == [keys], (
-                "queued fallback published keys without refreshing LRU recency"
-            )
-            # Release both read locks: the first prefetch's and the fallback's.
-            l1_manager.finish_read(keys)
-            l1_manager.finish_read(keys)
-        finally:
-            adapter.close()
-
-
-class _TouchRecorder:
-    """Delegating proxy that records ``touch_keys`` calls."""
-
-    def __init__(self, inner, sink: list) -> None:
-        self._inner = inner
-        self._sink = sink
-
-    def touch_keys(self, keys):
-        self._sink.append(list(keys))
-        return self._inner.touch_keys(keys)
-
-    def __getattr__(self, name):
-        return getattr(self._inner, name)

@@ -614,16 +614,14 @@ class L1Manager:
     ) -> dict[ObjectKey, L1Error]:
         """Admit prefetched staging objects without taking read locks.
 
-        Retained objects become evictable residents. Their creation is reported
-        to prefetch listeners so it does not enqueue another L2 store.
+        Retained objects become evictable without triggering an L2 store.
 
         Args:
             keys: Keys whose loads have completed.
             tag: The writer's tag passed to ``reserve_write``.
 
         Returns:
-            Per-key status, with the same admission and error semantics as
-            :meth:`finish_write`. An existing resident object is preserved.
+            Per-key status as in :meth:`finish_write`; existing residents stay.
         """
         return self._finish_write(keys, tag, prefetched=True)
 
