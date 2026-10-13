@@ -66,9 +66,9 @@ class TestLRUCacheFast:
         assert cache.contains("b")
         assert cache.eviction_count == 1
 
-    def test_invalid_capacity_raises(self):
+    def test_invalid_capacity_raises(self) -> None:
         with pytest.raises(ValueError):
-            LRUCacheFast(0)
+            LRUCacheFast(-1)
 
 
 # ---------------------------------------------------------------------------
@@ -111,9 +111,53 @@ class TestLRUCache:
         assert cache.position("c") == 1
         assert cache.position("b") == 2
 
-    def test_invalid_capacity_raises(self):
+    def test_invalid_capacity_raises(self) -> None:
         with pytest.raises(ValueError):
-            LRUCache(0)
+            LRUCache(-1)
+
+
+@pytest.mark.parametrize("cache_cls", [LRUCacheFast, LRUCache])
+def test_zero_capacity_cache_stays_empty(
+    cache_cls: type[LRUCacheFast | LRUCache],
+) -> None:
+    """A cache with no slots must never admit or evict an entry."""
+    cache = cache_cls(0)
+    for key in ["a", "b", "a"]:
+        cache.insert(key)
+        assert not cache.contains(key)
+        assert len(cache) == 0
+    assert cache.eviction_count == 0
+
+
+@pytest.mark.parametrize("fast", [False, True])
+def test_simulation_rejects_negative_capacity(fast: bool) -> None:
+    """A negative byte budget cannot describe a cache."""
+    with pytest.raises(ValueError, match="capacity must be >= 0"):
+        simulate([], cache_capacity_bytes=-1, kv_bytes_per_chunk=1024, fast=fast)
+
+
+@pytest.mark.parametrize("fast", [False, True])
+@pytest.mark.parametrize("capacity_bytes", [0, 1, 1023, 1024])
+def test_simulation_capacity_respects_chunk_footprint(
+    fast: bool, capacity_bytes: int
+) -> None:
+    """Repeated lookups can hit only if the budget fits a complete chunk."""
+    event = {"chunk_hashes": ["0xaa"], "seq_len": 256, "chunk_size": 256}
+    result = simulate(
+        [event, event], capacity_bytes, kv_bytes_per_chunk=1024, fast=fast
+    )
+    slots = capacity_bytes // 1024
+    assert result["cache_capacity_chunks"] == slots
+    assert result["cache_size_at_end_chunks"] == slots
+    assert result["total_requests"] == 2
+    assert result["total_tokens"] == 512
+    assert result["total_hit_tokens"] == slots * 256
+    assert result["total_miss_tokens"] == 512 - slots * 256
+    assert result["token_hit_rate"] == slots * 0.5
+    assert result["eviction_count"] == 0
+    if not fast:
+        assert result["per_request_token_hit_rates"] == [0.0, float(slots)]
+        assert result["hit_prefix_lengths"] == [0, slots]
 
 
 # ---------------------------------------------------------------------------
