@@ -27,6 +27,19 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _synchronize_all_xpu_devices() -> None:
+    """Wait for all queued work on every XPU device.
+
+    torch cannot rebuild a stream from a raw ``sycl::queue`` pointer, so
+    the Python fallback recorders cannot wait on one queue only.
+    """
+    # Third Party
+    import torch
+
+    for device_index in range(torch.xpu.device_count()):
+        torch.xpu.synchronize(device_index)
+
+
 class XpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "xpu"
 
@@ -44,6 +57,53 @@ class XpuDeviceOps(DeviceOps):
         only run on XPU once those pointers can be turned back into tensors.
         """
         return construct_xpu_tensor_from_data_pointer(ptr, shape, dtype, device)
+
+    def record_completion_on_stream(
+        self,
+        stream_ptr: int,
+        kind: str,
+        payload: bytes,
+    ) -> None:
+        """Publish a completion only after prior XPU work finishes.
+
+        Fallback for builds without ``lmcache.xpu_ops``. The native
+        recorder replaces this through :meth:`bind_native` and orders the
+        record with a SYCL queue barrier instead of blocking the caller.
+
+        Args:
+            stream_ptr: ``sycl::queue *`` of the stream the work was
+                submitted to; the fallback waits on every device instead.
+            kind: Completion handler key.
+            payload: Encoded completion payload.
+        """
+        _synchronize_all_xpu_devices()
+        super().record_completion_on_stream(stream_ptr, kind, payload)
+
+    def record_event_on_stream(
+        self,
+        stream_ptr: int,
+        event_type_name: str,
+        session_id: str,
+        str_metadata: dict[str, str],
+        int_metadata: dict[str, int],
+    ) -> None:
+        """Record an event only after prior XPU work finishes.
+
+        Fallback for builds without ``lmcache.xpu_ops``; see
+        :meth:`record_completion_on_stream`.
+
+        Args:
+            stream_ptr: ``sycl::queue *`` of the stream the work was
+                submitted to; the fallback waits on every device instead.
+            event_type_name: Serialized event type.
+            session_id: Session associated with the event.
+            str_metadata: String-valued event metadata.
+            int_metadata: Integer-valued event metadata.
+        """
+        _synchronize_all_xpu_devices()
+        super().record_event_on_stream(
+            stream_ptr, event_type_name, session_id, str_metadata, int_metadata
+        )
 
     def ensure_native(self) -> None:
         if self._native_bound:
