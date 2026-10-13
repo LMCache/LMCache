@@ -52,18 +52,18 @@ echo "============================================"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 GPU_DEVICE="${GPU_FOR_VLLM:-0}"
 
-# Kill existing LMCache + vLLM (keep baseline on line 3)
+# The launcher is a separate shell, so these PIDs are not our children.
+# Poll their termination rather than using shell wait before reusing ports.
+OLD_PIDS=()
 if [ -f "$PID_FILE" ]; then
-    OLD_LMCACHE_PID=$(sed -n '1p' "$PID_FILE")
-    OLD_VLLM_PID=$(sed -n '2p' "$PID_FILE")
-    for pid in $OLD_LMCACHE_PID $OLD_VLLM_PID; do
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            echo "Killing PID $pid"
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-        fi
-    done
-    sleep 2
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] && OLD_PIDS+=("$pid")
+    done < <(head -n 2 "$PID_FILE")
+fi
+if ! python3 "${SCRIPT_DIR}/../../stop-processes.py" "${OLD_PIDS[@]}" \
+    --ports "$LMCACHE_PORT" 8080 "$VLLM_PORT"; then
+    echo "FAIL: Previous LMCache + vLLM processes did not release their ports"
+    exit 1
 fi
 
 # Launch LMCache with L1 config

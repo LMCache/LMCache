@@ -146,10 +146,7 @@ class RocmProfile(BuildProfile):
                 "lmcache.cuda_ops",
                 sources=hip_sources,
                 extra_compile_args={
-                    "cxx": [
-                        "-O3",
-                        "-std=c++17",
-                    ],
+                    "cxx": ["-O3"],
                 },
                 include_dirs=[
                     CSRC_DIR,

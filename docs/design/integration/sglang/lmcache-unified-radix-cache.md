@@ -29,10 +29,10 @@ The design has the following goals:
 2. Connect to an independent LMCache MP server without creating an in-process
    LMCache engine.
 3. Keep LMCache-managed CPU and remote memory outside SGLang.
-4. Register GPU KV tensors once at startup. Runtime operations send only token
-   IDs, block IDs, and CUDA event handles.
-5. Keep lookup, prefetch, retrieve, and store asynchronous without synchronizing
-   CUDA work on the CPU.
+4. Register GPU KV tensors once at startup and route runtime transfers through
+   the same LMCache-driven or engine-driven contexts used by vLLM.
+5. Keep lookup and prefetch asynchronous. Preserve asynchronous device ordering
+   where the selected transfer context supports it.
 6. Make every scheduler rank reach the same admission or fallback decision when
    any TP or PP rank fails.
 7. Confine layout adaptation to `LMCacheUnifiedRadixCache` and
@@ -57,7 +57,7 @@ non-GPU state lives:
 | --- | --- | --- | --- | --- |
 | `RadixCache` | GPU prefix tree | None | None | Data is already resident |
 | HiCache / `UnifiedRadixCache` | GPU and host metadata | SGLang host pool | Optional L3 | L2 to L1, with per-layer overlap |
-| `LMCacheUnifiedRadixCache` | SGLang GPU-resident data only | None | LMCache-managed CPU or remote tiers | LMCache MP writes directly to SGLang GPU tensors |
+| `LMCacheUnifiedRadixCache` | SGLang GPU-resident data only | None | LMCache-managed CPU or remote tiers | LMCache MP writes through the selected transfer context |
 
 For `LMCacheUnifiedRadixCache`, every LMCache tier is external to SGLang's
 tree. SGLang treats retrieved data as locally available only after the transfer
@@ -92,9 +92,11 @@ and node locks. It does not initialize a HiCache host pool.
 
 | Area | File |
 | --- | --- |
-| SGLang group mapping, MP RPC, event IPC, and rank synchronization | `lmcache/integration/sglang/unified_lmcache_mp_connector.py` |
+| SGLang group mapping, MP RPC, transfer events, and rank synchronization | `lmcache/integration/sglang/unified_lmcache_mp_connector.py` |
 | Server lookup and prefetch | `lmcache/v1/multiprocess/modules/lookup.py` |
-| Registration, store, and retrieve | `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py` |
+| LMCache-driven registration, store, and retrieve | `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py` |
+| Engine-driven registration, store, and retrieve | `lmcache/v1/multiprocess/modules/engine_driven_transfer.py` |
+| Worker-side transfer selection and gather/scatter | `lmcache/v1/multiprocess/transfer_context/` |
 | Engine-group registration contract | `lmcache/v1/multiprocess/group_view.py` |
 | Server-side transfer grouping | `lmcache/v1/kv_layer_groups.py` |
 
@@ -109,7 +111,24 @@ SGLang enables the integration with:
 
 The integration supports only MP mode and requires a standalone LMCache
 server. `--enable-lmcache` selects `LMCacheUnifiedRadixCache`; the configuration
-file supplies the MP server address. LMCache is incompatible with
+file supplies the MP server address through LMCache's native top-level
+`mp_host` and `mp_port` fields. The transfer mode can use the same
+`lmcache.mp.mp_transfer_mode` name as vLLM. For example:
+
+```yaml
+mp_host: 127.0.0.1
+mp_port: 5555
+extra_config:
+  lmcache.mp.mp_transfer_mode: engine_driven
+```
+
+When `lmcache.mp.mp_transfer_mode` is absent, the transfer-context factory may
+still use `LMCACHE_MP_TRANSFER_MODE`; otherwise CUDA defaults to the existing
+LMCache-driven handle path. The MP server must enable a compatible mode; for
+the example above, start it with `--supported-transfer-mode engine_driven` (or
+`auto`). The shared engine-driven context currently supports only one transfer
+group, matching the vLLM connector limitation, so hybrid FULL/SWA/MAMBA layouts
+must use `auto` or `lmcache_driven`. LMCache is incompatible with
 `--enable-hierarchical-cache` and
 `--enable-unified-cache-external-linker`, and requires radix caching to remain
 enabled.
@@ -130,8 +149,8 @@ sequenceDiagram
     C->>M: Pass GPU tensors and group metadata
     M->>S: GET_CHUNK_SIZE
     M->>M: Validate chunk and block geometry
-    M->>S: REGISTER_KV_CACHE
-    S-->>M: Establish CUDA IPC cache context
+    M->>S: Register selected transfer context
+    S-->>M: Establish handle or worker-driven context
     Note over M: Registration does not start heartbeat
     M->>M: Start heartbeat lazily on first LOOKUP/RETRIEVE/STORE
 ```
@@ -182,13 +201,13 @@ collapsed into full-attention semantics.
 
 ### One-time GPU tensor registration
 
-At startup, the connector sends tensor CUDA IPC handles, group metadata, and
-layout information to the MP server. Runtime operations do not resend tensor
-addresses:
+At startup, the connector registers layout and group information through the
+selected transfer context. LMCache-driven mode exports tensor handles; the
+engine-driven mode registers worker-side gather/scatter geometry:
 
 ```text
-REGISTER: tensor handles + group metadata
-REQUEST:  token IDs + list[list[block_id]] + CUDA event handle
+LMCache-driven: tensor handles + group metadata; requests carry IPC events
+Engine-driven: gather/scatter geometry; requests carry worker-owned buffers
 ```
 
 Each outer block-ID list represents one FULL, SWA, or MAMBA address space. The
@@ -227,14 +246,14 @@ There is no LMCache host radix tree inside SGLang. The implementation exposes a
 completed external hit temporarily as `host_hit_length` so that the scheduler
 can reuse its existing GPU-memory admission logic.
 
-### Asynchronous retrieve
+### Retrieve ordering
 
 During admission, the cache locks the local prefix anchor, allocates destination
 GPU slots, and calls `submit_load()`. Allocation or submission failure can still
 clear the external hit and fall back to ordinary prefill.
 
-LMCache performs H2D on its CUDA stream. The SGLang forward stream waits on the
-completion event without blocking the CPU:
+In LMCache-driven mode, LMCache performs H2D on its CUDA stream. The SGLang
+forward stream waits on the completion event without blocking the CPU:
 
 ```text
 SGLang stream: record producer event ----------------> wait completion -> forward
@@ -245,6 +264,11 @@ LMCache stream:         `-> wait -> H2D all groups -> record --'
 Multiple retrieves in one batch each enqueue their own event dependency; model
 forward begins after all required data is ready. This integration does not yet
 overlap individual layer H2D copies with layer execution.
+
+In engine-driven mode, the worker prepares CPU buffers, scatters them into the
+SGLang KV tensors, and returns an already-resolved plain future after device
+completion. The connector uses the same `wait_on_stream()` call for both future
+types; the plain future has no additional device event to enqueue.
 
 `check_prefetch_progress()` handles lookup and prefetch only. Retrieve and store
 futures are finalized by `check_hicache_events()`. CUDA events enforce the data
