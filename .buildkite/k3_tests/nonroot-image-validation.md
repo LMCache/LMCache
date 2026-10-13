@@ -1,21 +1,24 @@
 # Temporary PR #5685 image validation
 
-This draft-only experiment adds two image steps to the existing K3 unit pipeline. Close it after collecting the results; it is not intended for merging.
+This draft-only experiment adds two image steps to the existing K3 unit pipeline.
+Close it after collecting the results; it is not intended for merging.
 
 Both images come from the unmodified Dockerfiles at
 [PR #5685 commit 1541a889](https://github.com/LMCache/LMCache/commit/1541a8898702ec5160bb1c4d36db3f3bd7e852b0).
-They target Linux amd64, CUDA 13, and NVIDIA SM80/SM90 (A100/H200). The pipeline
-references must use the published immutable digests.
+They target Linux amd64 and CUDA 13, using the Dockerfiles' default CUDA
+architecture list: `7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX`. This includes the SM120
+Blackwell GPUs in the K3 queue. The pipeline references use immutable digests.
 
 The added steps leave the container UID to the image's `USER lmcache`; they do
 not set `runAsUser`. Kubernetes supplies `HOME=/home/lmcache` and shared-memory
 storage. The scripts run from that writable home directory, outside the checkout,
 with `PYTHONPATH` unset and Python safe-path mode enabled. They check the installed
-package path and generated source revision before running any GPU tests. They do not source
-the normal per-job install scripts or reinstall LMCache, Torch, or vLLM.
+package path and generated source revision before running any GPU tests. They do
+not source the normal per-job install scripts or reinstall LMCache, Torch, or vLLM.
 
-- Standalone image step: default user, cache/shared-memory writes, native extension import,
-  pinned host memory, LMCache CUDA IPC data round trip, and standalone server RPC.
+- Standalone image step: default user, cache/shared-memory writes, native extension
+  import, pinned host memory, native LMCache KV-transfer and CUDA IPC data round
+  trips, and standalone server RPC.
 - vLLM image step: the same GPU probe, followed by two identical requests to
   Qwen/Qwen2.5-0.5B-Instruct with vLLM prefix caching disabled. Both answers must be
   `42`; LMCache cached tokens must be zero cold and positive warm. Local disk cache
@@ -51,17 +54,15 @@ docker buildx inspect --bootstrap
 
 docker buildx build --push --platform linux/amd64 \
   --target image-build --file docker/Dockerfile \
-  --build-arg 'torch_cuda_arch_list=8.0 9.0' \
   --build-arg max_jobs=1 --build-arg nvcc_threads=1 \
   --build-arg LMCACHE_COMMIT_ID=1541a8898702ec5160bb1c4d36db3f3bd7e852b0 \
-  --tag maobaolong/lmcache-nonroot:vllm-1541a889-cu130-sm80-sm90 .
+  --tag maobaolong/lmcache-nonroot:vllm-1541a889-cu130-ci-v2 .
 
 docker buildx build --push --platform linux/amd64 \
   --target lmcache-final --file docker/Dockerfile.standalone \
-  --build-arg 'torch_cuda_arch_list=8.0 9.0' \
   --build-arg max_jobs=1 --build-arg nvcc_threads=1 \
   --build-arg LMCACHE_COMMIT_ID=1541a8898702ec5160bb1c4d36db3f3bd7e852b0 \
-  --tag maobaolong/lmcache-nonroot:standalone-1541a889-cu130-sm80-sm90 .
+  --tag maobaolong/lmcache-nonroot:standalone-1541a889-cu130-ci-v2 .
 ```
 
 Choose tags in your own registry namespace when reproducing the build. A dedicated
@@ -72,8 +73,7 @@ builder volume filesystem and free space before building on a shared machine.
 ## Run the published checks outside CI
 
 Use a Linux amd64 GPU host with Docker, NVIDIA Container Toolkit, and a CUDA 13
-compatible NVIDIA driver. Choose an
-idle supported GPU in place of `device=0`. Fetch this draft's test scripts into a
+compatible NVIDIA driver. Choose an idle supported GPU in place of `device=0`. Fetch this draft's test scripts into a
 separate checkout; the source revision used to build the images does not contain
 them. No Python packages need installing on the host.
 
@@ -85,14 +85,14 @@ cd LMCache-image-tests
 
 docker run --name pr5685-standalone-check --gpus device=0 --shm-size=2g \
   --entrypoint bash -v "$PWD":/tests:ro \
-  maobaolong/lmcache-nonroot@sha256:7bf268a0ec9a68498245440fab65b2a603c8c0c5b1ede0075232b3efa51309df \
+  maobaolong/lmcache-nonroot@sha256:fb51f6d384ef5f3ee49ef365101b3535ddde18d68f3bed2554dcb285b17f4164 \
   /tests/.buildkite/k3_tests/unit/run-nonroot-image.sh
 docker cp pr5685-standalone-check:/workspace/build ./standalone-logs
 docker rm pr5685-standalone-check
 
 docker run --name pr5685-vllm-check --gpus device=0 --shm-size=2g \
   --entrypoint bash -v "$PWD":/tests:ro \
-  maobaolong/lmcache-nonroot@sha256:110ed03488f7688f4552f7c61ae0ff41814c8b013c17b711c27cded862f02174 \
+  maobaolong/lmcache-nonroot@sha256:bf8b9e72bed42b8830e987420e4169ac32081433eccabc96b785475998951695 \
   /tests/.buildkite/k3_tests/correctness/run-nonroot-image.sh
 docker cp pr5685-vllm-check:/workspace/build ./vllm-logs
 docker rm pr5685-vllm-check

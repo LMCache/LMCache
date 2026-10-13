@@ -55,7 +55,7 @@ steps:
               fsGroup: 1000
             containers:
               - name: container-0
-                image: maobaolong/lmcache-nonroot@sha256:7bf268a0ec9a68498245440fab65b2a603c8c0c5b1ede0075232b3efa51309df
+                image: maobaolong/lmcache-nonroot@sha256:fb51f6d384ef5f3ee49ef365101b3535ddde18d68f3bed2554dcb285b17f4164
                 imagePullPolicy: Always
                 env:
                   - { name: HOME, value: /home/lmcache }
@@ -81,7 +81,7 @@ steps:
               fsGroup: 1000
             containers:
               - name: container-0
-                image: maobaolong/lmcache-nonroot@sha256:110ed03488f7688f4552f7c61ae0ff41814c8b013c17b711c27cded862f02174
+                image: maobaolong/lmcache-nonroot@sha256:bf8b9e72bed42b8830e987420e4169ac32081433eccabc96b785475998951695
                 imagePullPolicy: Always
                 env:
                   - { name: HOME, value: /home/lmcache }

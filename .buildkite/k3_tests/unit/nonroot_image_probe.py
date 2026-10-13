@@ -8,8 +8,8 @@ from __future__ import annotations
 from multiprocessing.queues import Queue
 from pathlib import Path
 import gc
+import importlib
 import importlib.metadata
-import importlib.util
 import json
 import os
 
@@ -18,11 +18,11 @@ import torch
 import torch.multiprocessing as mp
 
 # First Party
-from lmcache import _version
+from lmcache import _version, lmcache_native
 from lmcache.v1.platform.base.ipc_wire import WireIPCData
 from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
 import lmcache
-import lmcache.cuda_ops  # noqa: F401
+import lmcache.cuda_ops
 
 
 def read_shared_tensor(descriptor: WireIPCData, output: Queue[float]) -> None:
@@ -49,7 +49,12 @@ if __name__ == "__main__":
     version = importlib.metadata.version("lmcache")
     if _version.commit_id != "g1541a889":
         raise RuntimeError(f"Unexpected image source revision: {_version.commit_id}")
-    if importlib.util.find_spec("lmcache.c_ops") is not None:
+    try:
+        importlib.import_module("lmcache.c_ops")
+    except ModuleNotFoundError as error:
+        if error.name != "lmcache.c_ops":
+            raise
+    else:
         raise RuntimeError("The obsolete lmcache.c_ops extension is present")
     print(
         json.dumps(
@@ -77,6 +82,36 @@ if __name__ == "__main__":
         probe.unlink()
     if not torch.empty(1024, pin_memory=True).is_pinned():
         raise RuntimeError("Pinned host memory allocation failed")
+    # Torch/driver IPC does not launch LMCache's compiled CUDA kernels.
+    gpu_cache = torch.arange(32, dtype=torch.float32, device="cuda").reshape(2, 2, 8)
+    expected = gpu_cache.cpu()
+    host_cache = torch.empty((2, 1, 2, 8), dtype=torch.float32, pin_memory=True)
+    pointers = torch.tensor([gpu_cache.data_ptr()], dtype=torch.uint64, device="cuda")
+    slots = torch.arange(2, dtype=torch.int64, device="cuda")
+    for direction in (
+        lmcache_native.TransferDirection.D2H,
+        lmcache_native.TransferDirection.H2D,
+    ):
+        if direction == lmcache_native.TransferDirection.H2D:
+            gpu_cache.zero_()
+        lmcache.cuda_ops.multi_layer_kv_transfer(
+            host_cache,
+            pointers,
+            slots,
+            torch.device("cuda"),
+            2,
+            direction,
+            lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            1,
+        )
+        torch.cuda.synchronize()
+        actual = (
+            host_cache[:, 0]
+            if direction == lmcache_native.TransferDirection.D2H
+            else gpu_cache.cpu()
+        )
+        torch.testing.assert_close(actual, expected)
+    print("NONROOT_NATIVE_KV_TRANSFER_ROUNDTRIP_PASS", flush=True)
     tensor = torch.arange(1024, dtype=torch.float32, device="cuda")
     descriptor = CudaIPCWrapper.wrap(tensor).to_wire()
     context = mp.get_context("spawn")
