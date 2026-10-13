@@ -7,9 +7,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rop
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import device_ops, torch_device_type
 from lmcache.logging import init_logger
-import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -65,7 +64,7 @@ class FusedRope:
     def fused_encode(self, old_positions, new_positions, k):
         num_tokens = k.shape[0]
         k = k.view(num_tokens, -1, self.head_size)
-        lmc_ops.rotary_embedding_k_fused(
+        device_ops.rotary_embedding_k_fused(
             old_positions,
             new_positions,
             k,
@@ -127,8 +126,8 @@ def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> b
     max_q_error = (dumb_q - q1).abs().max()
     max_k_error = (dumb_k - k1).abs().max()
 
-    logger.info(f"Max Q error: {max_q_error.item()}")
-    logger.info(f"Max K error: {max_k_error.item()}")
+    logger.info("Max Q error: %s", max_q_error.item())
+    logger.info("Max K error: %s", max_k_error.item())
 
     q_no_pos = dumb_q.clone()
     k_no_pos = dumb_k.clone()
@@ -141,7 +140,7 @@ def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> b
 
     max_k_error_fused = (k_pos2 - k_pos2_fused).abs().max()
 
-    logger.info(f"Max K error (fused): {max_k_error.item()}")
+    logger.info("Max K error (fused): %s", max_k_error_fused.item())
 
     return max_q_error < 0.1 and max_k_error < 0.1 and max_k_error_fused < 0.1
 

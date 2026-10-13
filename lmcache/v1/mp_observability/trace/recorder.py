@@ -67,9 +67,21 @@ class TraceRecorder(EventSubscriber, ABC):
     Subclasses implement :meth:`get_subscriptions`.
     """
 
-    def __init__(self, output_path: str, level: str) -> None:
+    #: Whether this recorder consumes ``TRACE_CALL`` events.  When ``True``
+    #: (the storage level) construction flips the ``@enable_tracing`` gate on
+    #: so decorated calls start publishing; a level fed by another producer
+    #: leaves the gate alone so no call events are built for nobody.
+    captures_calls: bool = True
+
+    def __init__(
+        self,
+        output_path: str,
+        level: str,
+        level_meta: dict[str, Any] | None = None,
+    ) -> None:
         self._output_path = output_path
         self._level = level
+        self._level_meta = dict(level_meta or {})
         self._fd = open(output_path, "wb", buffering=0)
         self._lock = threading.Lock()
         self._closed = False
@@ -85,7 +97,8 @@ class TraceRecorder(EventSubscriber, ABC):
         # header and the final header have different byte lengths.
         # Flip the trace gate AFTER the file is open so a racing publish
         # cannot land on a half-initialized recorder.
-        set_tracing_enabled(True)
+        if self.captures_calls:
+            set_tracing_enabled(True)
         logger.info("trace recorder writing to %s (level=%s)", output_path, level)
 
     # ---- subclass extension points ------------------------------------
@@ -144,7 +157,8 @@ class TraceRecorder(EventSubscriber, ABC):
             if self._closed:
                 return
             self._closed = True
-            set_tracing_enabled(False)
+            if self.captures_calls:
+                set_tracing_enabled(False)
             try:
                 if not self._header_written:
                     self._write_header(sm_config_json="", sm_config_digest="")
@@ -174,6 +188,7 @@ class TraceRecorder(EventSubscriber, ABC):
             t_wall_start=self._t_wall_start,
             sm_config_json=sm_config_json,
             sm_config_digest=sm_config_digest,
+            level_meta=self._level_meta,
         )
         self._write_frame(encode_header(header))
 
@@ -185,39 +200,63 @@ class TraceRecorder(EventSubscriber, ABC):
         # in __init__ before the gate flips on).
         self._fd.write(_LEN_STRUCT.pack(len(frame)) + frame)
 
-    def _on_trace_call(self, event: Event) -> None:
-        """Encode and append one TRACE_CALL event.
+    def write_record(
+        self, qualname: str, args: dict[str, Any], t_wall: float, t_mono: float
+    ) -> None:
+        """Encode and append one record.
 
-        Errors are logged at WARNING and counted, but do not propagate
-        — losing a record is preferable to taking down the EventBus
-        drain thread.
+        Errors are logged at WARNING and counted, but do not propagate:
+        losing a record is preferable to taking down the caller, which
+        is the EventBus drain thread for every producer today.
+
+        Args:
+            qualname: The record's discriminator, e.g. a traced call's
+                fully-qualified name or an ``events.*`` kind.
+            args: Raw argument values; codec-encoded here.
+            t_wall: Wall-clock ``time.time()`` when the event happened.
+            t_mono: ``time.monotonic()`` when the event happened; stored
+                relative to the recorder's start.
         """
         try:
-            qualname = event.metadata["qualname"]
-            args = event.metadata["args"]
-            # ``t_mono`` is stamped in the metadata at publish time
-            # (see ``publish_call_event``) so the recorded value is
-            # co-temporal with ``event.timestamp`` (wall-clock) instead
-            # of picking up the drain-thread delay.
-            publish_t_mono = event.metadata["t_mono"]
-            encoded_args = codecs.encode_args(args)
-            t_mono = max(0.0, publish_t_mono - self._t_mono_start)
             record = Record(
-                t_mono=t_mono,
-                t_wall=event.timestamp,
+                t_mono=max(0.0, t_mono - self._t_mono_start),
+                t_wall=t_wall,
                 qualname=qualname,
-                args=encoded_args,
+                args=codecs.encode_args(args),
             )
             frame = encode_record(record)
         except Exception:
             self._dropped_count += 1
             logger.warning(
-                "trace recorder: failed to encode TRACE_CALL event "
-                "(qualname=%s); dropping",
-                event.metadata.get("qualname", "<unknown>"),
+                "trace recorder: failed to encode record (qualname=%s); dropping",
+                qualname,
                 exc_info=True,
             )
             return
+        self._append(frame)
+
+    def _on_trace_call(self, event: Event) -> None:
+        """Append one TRACE_CALL event.
+
+        ``t_mono`` is stamped in the metadata at publish time (see
+        ``publish_call_event``) so the recorded value is co-temporal with
+        ``event.timestamp`` instead of picking up the drain-thread delay.
+        """
+        try:
+            qualname = event.metadata["qualname"]
+            args = event.metadata["args"]
+            publish_t_mono = event.metadata["t_mono"]
+        except KeyError:
+            self._dropped_count += 1
+            logger.warning(
+                "trace recorder: TRACE_CALL event missing metadata; dropping",
+                exc_info=True,
+            )
+            return
+        self.write_record(qualname, args, t_wall=event.timestamp, t_mono=publish_t_mono)
+
+    def _append(self, frame: bytes) -> None:
+        """Write one encoded record frame, writing the header first if needed."""
 
         with self._lock:
             if self._closed:
@@ -298,3 +337,29 @@ class StorageTraceRecorder(TraceRecorder):
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {EventType.TRACE_CALL: self._on_trace_call}
+
+
+class EventsTraceRecorder(TraceRecorder):
+    """Records the cache-event stream into an ``"events"``-level file.
+
+    Nothing on the bus feeds this recorder directly: the
+    ``CacheEventSubscriber`` builds the batches and a
+    ``TraceCacheEventSink`` hands each one to :meth:`write_record` in the
+    exact wire form ``POST /events`` would carry.  Registering on the bus
+    still ties :meth:`close` to bus shutdown, and the ``@enable_tracing``
+    gate is left off because no ``TRACE_CALL`` event is wanted.
+
+    Args:
+        output_path: Where to write the file.
+        level_meta: Header metadata for the level: the emitting server's
+            ``instance_id``, the ``cache_event_schema_version`` of the
+            records, and the ``lmcache_version`` that wrote them.
+    """
+
+    captures_calls = False
+
+    def __init__(self, output_path: str, level_meta: dict[str, Any]) -> None:
+        super().__init__(output_path=output_path, level="events", level_meta=level_meta)
+
+    def get_subscriptions(self) -> dict[EventType, EventCallback]:
+        return {}

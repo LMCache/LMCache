@@ -481,8 +481,9 @@ class RedisSentinelConnector(RemoteConnector):
         match os.environ.get(self.ENV_REDIS_SERVICE_NAME):
             case None:
                 logger.warning(
-                    f"Environment variable {self.ENV_REDIS_SERVICE_NAME} is "
-                    f"not found, using default value 'redismaster'"
+                    "Environment variable %s is "
+                    "not found, using default value 'redismaster'",
+                    self.ENV_REDIS_SERVICE_NAME,
                 )
                 service_name = "redismaster"
             case value:
@@ -497,7 +498,7 @@ class RedisSentinelConnector(RemoteConnector):
             case value:
                 timeout = float(value)
 
-        logger.info(f"Host and ports: {hosts_and_ports}")
+        logger.info("Host and ports: %s", hosts_and_ports)
         self.sentinel = redis.Sentinel(hosts_and_ports, socket_timeout=timeout)
         self.master = self.sentinel.master_for(
             service_name, socket_timeout=timeout, username=username, password=password

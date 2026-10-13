@@ -17,9 +17,11 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.custom_types import KV_EVENT_CAPABILITY
 from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
+from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import ContextEntry
 
 REGISTER_ARGS = ("model##query", 2)
@@ -43,8 +45,12 @@ def _stub_registration(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Creates a stub for the create_cache_context call to test
     register_q_cache()."""
     create = MagicMock(return_value=MagicMock(num_layers=2))
+    event_backend = MagicMock(name="event_backend")
     monkeypatch.setattr(qstore_mod, "create_cache_context", create)
     monkeypatch.setattr(qstore_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
+    monkeypatch.setattr(
+        qstore_mod, "get_event_ipc_backend", lambda device: event_backend
+    )
     return create
 
 
@@ -158,7 +164,7 @@ class _FakeEvent:
         self.records = 0
         _FakeEvent.created.append(self)
 
-    def record(self) -> None:
+    def record(self, stream=None) -> None:
         self.records += 1
 
     def ipc_handle(self) -> bytes:
@@ -172,6 +178,31 @@ class _FakeEvent:
         return cls()
 
 
+class _FakeEventBackend:
+    def __init__(self) -> None:
+        self.created: list[_FakeEvent] = []
+
+    def create_event(self, device) -> _FakeEvent:
+        event = _FakeEvent()
+        self.created.append(event)
+        return event
+
+    def check_event_support(self, device) -> None:
+        return None
+
+    def record_event(self, event: _FakeEvent, stream=None) -> None:
+        event.record(stream)
+
+    def export_event(self, event: _FakeEvent, device) -> bytes:
+        return event.ipc_handle()
+
+    def import_event(self, handle: bytes, device) -> _FakeEvent:
+        return _FakeEvent.from_ipc_handle(device, handle)
+
+    def wait_event(self, event: _FakeEvent, stream=None) -> None:
+        event.wait(stream)
+
+
 @pytest.fixture
 def stub_device(monkeypatch):
     """Replace the device module so store_q runs on CPU."""
@@ -181,13 +212,14 @@ def stub_device(monkeypatch):
         yield
 
     _FakeEvent.created.clear()
+    backend = _FakeEventBackend()
     monkeypatch.setattr(
         qstore_mod,
         "torch_dev",
         SimpleNamespace(device=_null, stream=_null, Event=_FakeEvent),
     )
-    monkeypatch.setattr(qstore_mod, "check_interprocess_event_support", lambda: None)
-    return _FakeEvent.created
+    monkeypatch.setattr(qstore_mod, "get_event_ipc_backend", lambda device: backend)
+    return backend
 
 
 def test_store_q_unregistered_instance_raises() -> None:
@@ -208,14 +240,17 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
     cache_context.kv_layer_groups_manager.num_kernel_groups = 1
     cache_context.calculate_num_blocks.return_value = 2  # 2 chunks * 2 = 4 needed
     module._q_contexts[1] = ContextEntry(
-        cache_context, *REGISTER_ARGS, time.monotonic()
+        cache_context,
+        *REGISTER_ARGS,
+        time.monotonic(),
+        event_backend=stub_device,
     )
 
     handle, ok = module.store_q(MagicMock(), 1, [[0, 1, 2]], b"peer-handle")
 
     assert ok is False
     assert handle == b"event-handle"
-    assert stub_device[0].records == 1
+    assert stub_device.created[0].records == 1
     cast(MagicMock, ctx.storage_manager.reserve_write).assert_not_called()
     cast(MagicMock, ctx.event_bus.publish).assert_not_called()
 
@@ -251,6 +286,7 @@ def stub_server_modules(monkeypatch):
 
 
 def _build(stub_server_modules, **config) -> list:
+    config.setdefault("kv_event_log_size", 0)
     return server_mod._build_modules(
         MagicMock(name="ctx"), MPServerConfig(**config), MagicMock(url="")
     )
@@ -297,3 +333,16 @@ def test_server_builds_nothing_when_no_feature_is_enabled(
 
     assert not any(isinstance(m, _FakeQStore) for m in modules)
     assert stub_server_modules.call_args.kwargs["experimental_transfer"] == []
+
+
+@pytest.mark.parametrize("log_size", [0, 3])
+def test_server_wires_event_module_liveness_capability_and_close_order(
+    stub_server_modules: MagicMock,
+    log_size: int,
+) -> None:
+    modules = _build(stub_server_modules, kv_event_log_size=log_size)
+    events = next(module for module in modules if isinstance(module, KVEventModule))
+    kwargs = stub_server_modules.call_args.kwargs
+    assert events in kwargs["liveness_targets"]
+    assert (KV_EVENT_CAPABILITY in kwargs["experimental_transfer"]) == (log_size > 0)
+    assert modules.index(stub_server_modules.return_value) < modules.index(events)

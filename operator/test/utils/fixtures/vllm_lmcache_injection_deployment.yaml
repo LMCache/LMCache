@@ -3,7 +3,7 @@
 # Unlike vllm_deployment.yaml (the e2e_gpu round-trip, which mounts the
 # connection ConfigMap and uses a `sh -c` wrapper), this pod OPTS IN to
 # LMCacheEngine dependency injection via the mutating webhook. The webhook
-# appends --kv-transfer-config <inline JSON>, sets hostIPC=true, and adds
+# appends --kv-transfer-config <inline JSON>, mounts the host's /dev/shm, and adds
 # PYTHONHASHSEED=0.
 #
 # The spec asserts the admission mutation directly off the pod object, so the
@@ -11,7 +11,7 @@
 # avoids a multi-GB vLLM image pull on the Kind worker.
 #
 # Placeholders substituted by the spec:
-#   __NAMESPACE__    — engine namespace (PSS-privileged; webhook injects hostIPC)
+#   __NAMESPACE__    — engine namespace (PSS-privileged; webhook injects a hostPath volume)
 #   __ENGINE_NAME__  — LMCacheEngine metadata.name (bound via annotation)
 #
 # CRITICAL: launch args-only (no `command:` override) or the webhook SKIPs with

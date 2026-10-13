@@ -109,7 +109,7 @@ class TestServerCommandArguments:
         )
         assert args.host == "localhost"
         assert args.port == 5555
-        assert args.http_host == "0.0.0.0"
+        assert args.http_host == "127.0.0.1"
         assert args.http_port == 8080
 
 

@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the GDS cuFile context (``GDSContext``).
+"""Unit tests for the GDS L1 context (``GDSContext``).
 
-Most tests are pure (no cuFile): they exercise the public interface
-(singleton/no-op semantics, the <=16 MiB region split observed at the ``ca``
-cuFile seam, and the registered-region mapping driven through
-:meth:`GDSContext.transfer_async`). The ``test_gds_*_roundtrip`` tests
-exercise the real GDS DMA path (cuFile on NVIDIA, hipFile on AMD ROCm) and are
-skipped unless that stack is present (see :func:`_gds_available`).
+Most tests are pure (no GPU storage library): they exercise the public interface
+(singleton/no-op semantics, the <=16 MiB region split through the backend object,
+and the registered-region mapping driven through
+:meth:`GDSContext.transfer_async`). Round-trip tests cover cuFile on NVIDIA,
+hipFile on AMD ROCm, or an explicitly configured uGDS device, and are skipped
+unless the corresponding stack is available.
 """
 
 # Standard
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 import os
 import tempfile
 
@@ -21,12 +22,14 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_dev
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.memory_manager import GDSL1MemoryManager
-from lmcache.v1.gpu_connector import _gds_async as ca
+from lmcache.v1.gpu_connector import gds_context
+from lmcache.v1.gpu_connector._gds_backends import create_backend
+from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend
 from lmcache.v1.gpu_connector.gds_context import (
     GDSContext,
     SlabDirection,
@@ -37,8 +40,22 @@ from lmcache.v1.memory_management import GDSMemoryObject
 
 
 def _fake_stream(handle: int):
-    """A stand-in for ``torch_dev.current_stream()`` (no CUDA needed)."""
-    return SimpleNamespace(cuda_stream=handle, synchronize=lambda: None)
+    """A stand-in for a platform stream (no accelerator needed)."""
+    return SimpleNamespace(raw_handle=handle, synchronize=lambda: None)
+
+
+def _use_fake_stream(monkeypatch: pytest.MonkeyPatch, handle: int) -> None:
+    """Route GDSContext's platform stream operations to a fake stream."""
+    monkeypatch.setattr(
+        gds_context.platform_stream,
+        "current_stream",
+        lambda device: _fake_stream(handle),
+    )
+    monkeypatch.setattr(
+        gds_context.platform_stream,
+        "stream_handle",
+        lambda device, stream: stream.raw_handle,
+    )
 
 
 def _gds_available() -> bool:
@@ -50,7 +67,7 @@ def _gds_available() -> bool:
     correctly via its host-bounce fallback, so library loadability is a
     sufficient gate for the correctness checks below.
     """
-    if not torch.cuda.is_available():
+    if torch_device_type != "cuda" or not torch_dev.is_available():
         return False
     if torch.version.hip is not None:
         # Standard
@@ -64,9 +81,40 @@ def _gds_available() -> bool:
     return os.path.exists("/proc/driver/nvidia-fs/stats")
 
 
+def _ugds_device() -> str:
+    """Return the opt-in uGDS test device, or an empty string when unset.
+
+    These tests write to the raw device, destroying whatever occupies the slab
+    range. They are therefore opt-in via ``UGDS_TEST_DEVICE`` rather than
+    probing for any ``/dev/ugds_drv*``: on a host with several bound devices,
+    probing could overwrite one the caller did not intend to sacrifice.
+    """
+    device = os.environ.get("UGDS_TEST_DEVICE", "")
+    if not device or not os.path.exists(device):
+        return ""
+    if not torch.cuda.is_available():
+        return ""
+    # Standard
+    import ctypes
+
+    try:
+        ctypes.CDLL("libugds.so")
+    except OSError:
+        return ""
+    return device
+
+
 requires_gds = pytest.mark.skipif(
     not _gds_available(),
     reason="needs CUDA + nvidia-fs or ROCm + libhipfile.so (real GPUDirect Storage)",
+)
+requires_ugds = pytest.mark.skipif(
+    not _ugds_device(),
+    reason=(
+        "set UGDS_TEST_DEVICE to a scratch uGDS device (e.g. /dev/ugds_drv0); "
+        "also needs CUDA or ROCm and a matching libugds.so. These tests "
+        "overwrite the device."
+    ),
 )
 
 
@@ -84,27 +132,22 @@ def _skip_unless_gds_registrable(directory: Path) -> None:
         directory: The directory in which the roundtrip test would place the
             GDS slab file.
     """
-    probe_path = directory / ".gds_registration_probe"
     try:
-        fd = os.open(probe_path, os.O_CREAT | os.O_RDWR, 0o644)
-        try:
-            os.posix_fallocate(fd, 0, 4096)
-        finally:
-            os.close(fd)
-        fd = os.open(probe_path, os.O_RDWR | os.O_DIRECT)
-        try:
-            handle = ca.register_handle(fd)
-            ca.deregister_handle(handle)
-        finally:
-            os.close(fd)
+        with tempfile.TemporaryDirectory(
+            dir=directory, prefix=".gds_registration_probe_"
+        ) as probe_dir:
+            backend = create_backend("auto")
+            try:
+                with backend.open_slab(probe_dir, 4096, direct_io=True):
+                    pass
+            finally:
+                backend.close_driver()
     except (OSError, RuntimeError) as exc:
         # OSError: open/fallocate; RuntimeError: cufile/hipfile registration.
         pytest.skip(
             f"GDS driver cannot register files under {directory} ({exc}); "
             "point LMCACHE_GDS_TEST_DIR at a GDS-capable filesystem"
         )
-    finally:
-        probe_path.unlink(missing_ok=True)
 
 
 @pytest.fixture
@@ -167,27 +210,32 @@ class TestSingleton:
         assert ctx.initialized is False
 
 
+@pytest.fixture
+def backend() -> Mock:
+    return Mock(spec=GDSBackend)
+
+
 class TestRegisterGpuBuffer:
-    def test_noop_when_uninitialized(self, monkeypatch):
-        ctx = GDSContext()
+    def test_noop_when_uninitialized(self, monkeypatch, backend):
+        ctx = GDSContext(backend)
         registered = []
-        monkeypatch.setattr(ca, "register_buffer", registered.append)
+        monkeypatch.setattr(backend, "register_buffer", registered.append)
         # GDS off -> registers nothing, makes no cuFile calls.
         ctx.register_gpu_buffer(torch.empty(4096, dtype=torch.uint8))
         assert registered == []
 
-    def test_splits_buffer_into_regions(self, monkeypatch):
-        ctx = GDSContext()
+    def test_splits_buffer_into_regions(self, monkeypatch, backend):
+        ctx = GDSContext(backend)
         ctx.initialized = True
-        # Record each cuFile registration's byte size at the ca seam.
+        # Record each cuFile registration's byte size through the backend.
         sizes = []
         monkeypatch.setattr(
-            ca,
+            backend,
             "register_buffer",
             lambda buf: sizes.append(buf.numel() * buf.element_size()),
         )
-        monkeypatch.setattr(ca, "register_stream", lambda raw: None)
-        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(0))
+        monkeypatch.setattr(backend, "register_stream", lambda raw: None)
+        _use_fake_stream(monkeypatch, 0)
 
         # The whole buffer is registered in <=16 MiB regions, irrespective of
         # any chunk/slot layout. A 40 MiB buffer -> 16 + 16 + 8 MiB.
@@ -197,33 +245,77 @@ class TestRegisterGpuBuffer:
 
         assert sizes == [16 << 20, 16 << 20, 8 << 20]
 
+    def test_rolls_back_regions_when_registration_fails(self, monkeypatch):
+        backend = Mock(spec=GDSBackend)
+        ctx = GDSContext(backend)
+        ctx.initialized = True
+        registered_sizes: list[int] = []
+        deregistered_sizes: list[int] = []
+        stream_registrations: list[int] = []
+        stream_deregistrations: list[int] = []
+
+        def register_buffer(region):
+            registered_sizes.append(region.numel() * region.element_size())
+            if len(registered_sizes) == 2:
+                raise RuntimeError("registration failed")
+
+        monkeypatch.setattr(backend, "register_buffer", register_buffer)
+        monkeypatch.setattr(
+            backend,
+            "deregister_buffer",
+            lambda region: deregistered_sizes.append(
+                region.numel() * region.element_size()
+            ),
+        )
+        monkeypatch.setattr(backend, "register_stream", stream_registrations.append)
+        monkeypatch.setattr(backend, "deregister_stream", stream_deregistrations.append)
+        _use_fake_stream(monkeypatch, 7)
+
+        with pytest.raises(RuntimeError, match="registration failed"):
+            ctx.register_gpu_buffer(torch.empty(40 << 20, dtype=torch.uint8))
+
+        assert registered_sizes == [16 << 20, 16 << 20]
+        assert deregistered_sizes == [16 << 20]
+        assert stream_registrations == [7]
+        assert stream_deregistrations == [7]
+        assert ctx._base_ptrs == []
+
 
 class TestResolveBuffer:
     """Region mapping: a buffer slice resolves to ``(region base, offset)``,
     exercised through the public ``transfer_async`` path."""
 
-    def _registered_ctx(self, monkeypatch, buf: torch.Tensor):
+    def _registered_ctx(self, monkeypatch, buf: torch.Tensor, backend):
         """Register ``buf``; capture the ``(base, offset)`` that
         ``transfer_async`` resolves a slice to before handing it to the slab."""
-        ctx = GDSContext()
+        ctx = GDSContext(backend)
         ctx.initialized = True
-        monkeypatch.setattr(ca, "register_buffer", lambda b: None)
-        monkeypatch.setattr(ca, "register_stream", lambda raw: None)
-        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(0))
+        monkeypatch.setattr(backend, "register_buffer", lambda b: None)
+        monkeypatch.setattr(backend, "register_stream", lambda raw: None)
+        _use_fake_stream(monkeypatch, 0)
         ctx.register_gpu_buffer(buf)
         resolved: list[tuple[int, int]] = []
+
+        def record_resolved(
+            slab_offset: int,
+            size: int,
+            dev_offset: int,
+            buf_base: int,
+            stream_handle: int,
+        ) -> object:
+            resolved.append((buf_base, dev_offset))
+            return object()
+
         monkeypatch.setattr(
             ctx,
             "_slab_write",
-            lambda slab_offset, size, dev_offset, buf_base: resolved.append(
-                (buf_base, dev_offset)
-            ),
+            record_resolved,
         )
         return ctx, resolved
 
-    def test_maps_slice_to_base_and_offset(self, monkeypatch):
+    def test_maps_slice_to_base_and_offset(self, monkeypatch, backend):
         buf = torch.empty(8192, dtype=torch.uint8)
-        ctx, resolved = self._registered_ctx(monkeypatch, buf)
+        ctx, resolved = self._registered_ctx(monkeypatch, buf, backend)
         mem_obj = SimpleNamespace(get_size=lambda: 4096, slab_offset=0)
         # A slice 4 KiB into the region must map to (region base, offset 4096).
         ctx.transfer_async(mem_obj, buf[4096:], SlabDirection.WRITE)
@@ -232,25 +324,23 @@ class TestResolveBuffer:
 
 class TestPerStreamRegistration:
     """Each distinct stream is cuFile-registered once and deregistered once its
-    last region is gone -- observed at the ``ca`` seam (no private state)."""
+    last region is gone -- observed at the backend interface (no private state)."""
 
-    def test_register_and_deregister_per_stream(self, monkeypatch):
-        ctx = GDSContext()
+    def test_register_and_deregister_per_stream(self, monkeypatch, backend):
+        ctx = GDSContext(backend)
         ctx.initialized = True
         reg_str: list[int] = []
         dereg_str: list[int] = []
         dereg_buf: list[int] = []
-        monkeypatch.setattr(ca, "register_buffer", lambda b: None)
+        monkeypatch.setattr(backend, "register_buffer", lambda b: None)
         monkeypatch.setattr(
-            ca, "deregister_buffer", lambda b: dereg_buf.append(b.data_ptr())
+            backend, "deregister_buffer", lambda b: dereg_buf.append(b.data_ptr())
         )
-        monkeypatch.setattr(ca, "register_stream", reg_str.append)
-        monkeypatch.setattr(ca, "deregister_stream", dereg_str.append)
+        monkeypatch.setattr(backend, "register_stream", reg_str.append)
+        monkeypatch.setattr(backend, "deregister_stream", dereg_str.append)
 
         def use_stream(handle: int):
-            monkeypatch.setattr(
-                torch_dev, "current_stream", lambda: _fake_stream(handle)
-            )
+            _use_fake_stream(monkeypatch, handle)
 
         buf_a = torch.empty(24 << 20, dtype=torch.uint8)  # 2 regions on stream 11
         buf_b = torch.empty(4096, dtype=torch.uint8)  # 1 region on stream 22
@@ -272,10 +362,50 @@ class TestPerStreamRegistration:
         assert len(dereg_buf) == 3  # all three slots deregistered
 
 
+@requires_ugds
+def test_ugds_context_roundtrip():
+    """Round-trip a multi-region chunk through the LMCache uGDS L1 path."""
+    cfg = GdsL1Config(
+        file_location=_ugds_device(),
+        size_in_bytes=64 << 20,
+        backend="ugds",
+    )
+    chunk_bytes = 24 << 20
+    ctx = GDSContext()
+    ctx.initialize(cfg)
+    try:
+        buffer = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda")
+        ctx.register_gpu_buffer(buffer)
+        manager = GDSL1MemoryManager(cfg)
+        error, objects = manager.allocate(
+            MemoryLayoutDesc(
+                shapes=[torch.Size([chunk_bytes])],
+                dtypes=[torch.uint8],
+            ),
+            1,
+        )
+        assert error == L1Error.SUCCESS
+
+        expected = (torch.arange(chunk_bytes, dtype=torch.int64) % 251).to(torch.uint8)
+        buffer.copy_(expected.cuda())
+        torch.cuda.synchronize()
+        ctx.transfer_async(objects[0], buffer, SlabDirection.WRITE)
+        torch.cuda.synchronize()
+
+        buffer.zero_()
+        torch.cuda.synchronize()
+        ctx.transfer_async(objects[0], buffer, SlabDirection.READ)
+        torch.cuda.synchronize()
+
+        assert torch.equal(buffer.cpu(), expected)
+        ctx.deregister_gpu_buffer(buffer)
+    finally:
+        ctx.close()
+
+
 @requires_gds
 def test_gds_two_stream_write_read(gds_slab_dir: Path):
-    """Two CUDA streams each register their own buffer and round-trip a chunk
-    through real cuFile DMA; verify the data stays isolated per stream."""
+    """Verify independent chunk writes and reads on two GPU streams."""
     cfg = GdsL1Config(file_location=str(gds_slab_dir), size_in_bytes=64 << 20)
     chunk_bytes = 8 << 20
     ctx = GDSContext()
@@ -284,8 +414,8 @@ def test_gds_two_stream_write_read(gds_slab_dir: Path):
 
     def register_and_write(stream, pattern):
         """Register a buffer on ``stream`` and write ``pattern`` to a chunk."""
-        with torch.cuda.stream(stream):
-            buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda")
+        with torch_dev.stream(stream):
+            buf = torch.empty(chunk_bytes, dtype=torch.uint8, device=torch_device_type)
             ctx.register_gpu_buffer(buf)
             err, objs = mgr.allocate(
                 MemoryLayoutDesc(
@@ -295,13 +425,13 @@ def test_gds_two_stream_write_read(gds_slab_dir: Path):
             )
             assert err == L1Error.SUCCESS
             buf.fill_(pattern)
-            torch.cuda.synchronize()
+            torch_dev.synchronize()
             ctx.transfer_async(objs[0], buf, SlabDirection.WRITE)
-            torch.cuda.synchronize()
+            torch_dev.synchronize()
         return buf, objs[0]
 
-    stream_a = torch.cuda.Stream()
-    stream_b = torch.cuda.Stream()
+    stream_a = torch_dev.Stream()
+    stream_b = torch_dev.Stream()
     try:
         buf_a, mem_a = register_and_write(stream_a, 0xA1)
         buf_b, mem_b = register_and_write(stream_b, 0xB2)
@@ -312,17 +442,17 @@ def test_gds_two_stream_write_read(gds_slab_dir: Path):
             (stream_a, buf_a, mem_a, 0xA1),
             (stream_b, buf_b, mem_b, 0xB2),
         ):
-            with torch.cuda.stream(stream):
+            with torch_dev.stream(stream):
                 buf.zero_()
-                torch.cuda.synchronize()
+                torch_dev.synchronize()
                 ctx.transfer_async(mem, buf, SlabDirection.READ)
-                torch.cuda.synchronize()
+                torch_dev.synchronize()
                 expected = torch.full((chunk_bytes,), pattern, dtype=torch.uint8)
                 assert torch.equal(buf.cpu(), expected)
 
         # Deregister each buffer on its own stream.
         for stream, buf in ((stream_a, buf_a), (stream_b, buf_b)):
-            with torch.cuda.stream(stream):
+            with torch_dev.stream(stream):
                 ctx.deregister_gpu_buffer(buf)
     finally:
         ctx.close()
@@ -336,7 +466,7 @@ def test_gds_write_read_roundtrip(gds_slab_dir: Path):
     ctx.initialize(cfg)
     try:
         chunk_bytes = 8 << 20
-        buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda")
+        buf = torch.empty(chunk_bytes, dtype=torch.uint8, device=torch_device_type)
         ctx.register_gpu_buffer(buf)
 
         mgr = GDSL1MemoryManager(cfg)
@@ -349,13 +479,13 @@ def test_gds_write_read_roundtrip(gds_slab_dir: Path):
         assert isinstance(mem_obj, GDSMemoryObject)
 
         buf.fill_(0xAB)
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
         ctx.transfer_async(mem_obj, buf, SlabDirection.WRITE)
 
         buf.zero_()
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
         ctx.transfer_async(mem_obj, buf, SlabDirection.READ)
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
 
         expected = torch.full((chunk_bytes,), 0xAB, dtype=torch.uint8)
         assert torch.equal(buf.cpu(), expected)
@@ -375,7 +505,7 @@ def test_gds_chunk_larger_than_region_roundtrip(gds_slab_dir: Path):
     ctx.initialize(cfg)
     try:
         chunk_bytes = 24 << 20  # > 16 MiB -> two registered regions / two DMAs
-        buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda")
+        buf = torch.empty(chunk_bytes, dtype=torch.uint8, device=torch_device_type)
         ctx.register_gpu_buffer(buf)
 
         mgr = GDSL1MemoryManager(cfg)
@@ -391,15 +521,49 @@ def test_gds_chunk_larger_than_region_roundtrip(gds_slab_dir: Path):
         # second segment using the wrong slab offset) would corrupt the bytes
         # around the 16 MiB boundary, which a uniform fill would not catch.
         pattern = (torch.arange(chunk_bytes, dtype=torch.int64) % 251).to(torch.uint8)
-        buf.copy_(pattern.cuda())
-        torch.cuda.synchronize()
+        buf.copy_(pattern.to(torch_device_type))
+        torch_dev.synchronize()
         ctx.transfer_async(mem_obj, buf, SlabDirection.WRITE)
 
         buf.zero_()
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
         ctx.transfer_async(mem_obj, buf, SlabDirection.READ)
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
 
         assert torch.equal(buf.cpu(), pattern)
     finally:
         ctx.close()
+
+
+def test_l1_context_routes_by_owner_and_limits_process_slabs(monkeypatch, backend):
+    """Owner routing must reject a second slab before native registration."""
+    monkeypatch.setattr(gds_context, "create_backend", lambda name: backend)
+    backend.name = "test"
+    backend.open_slab.return_value.path = "/test/slab"
+    config = GdsL1Config("/test", 4096)
+    owner = 9001
+    gds_context.initialize_l1_gds_context(owner, config)
+    try:
+        context = gds_context.get_l1_gds_context(owner)
+        register = Mock()
+        deregister = Mock()
+        monkeypatch.setattr(context, "register_gpu_buffer", register)
+        monkeypatch.setattr(context, "deregister_gpu_buffer", deregister)
+        tensor = torch.empty(4096, dtype=torch.uint8)
+        gds_context.register_gds_gpu_buffer(tensor)
+        gds_context.deregister_gds_gpu_buffer(tensor)
+        register.assert_called_once_with(tensor)
+        deregister.assert_called_once_with(tensor)
+        with pytest.raises(ValueError, match="one GDS"):
+            gds_context.initialize_l1_gds_context(owner + 1, config)
+        with pytest.raises(ValueError, match="one GDS"):
+            initialize_gds_context(config)
+        with pytest.raises(ValueError, match="Unknown GDS L1 owner"):
+            gds_context.get_l1_gds_context(owner + 1)
+    finally:
+        gds_context.close_l1_gds_context(owner)
+    backend.close_driver.assert_called_once()
+    with pytest.raises(ValueError, match="Unknown GDS L1 owner"):
+        gds_context.get_l1_gds_context(owner)
+    gds_context.initialize_l1_gds_context(owner + 1, config)
+    gds_context.close_l1_gds_context(owner + 1)

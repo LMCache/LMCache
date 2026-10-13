@@ -15,12 +15,12 @@ import pkgutil
 # First Party
 from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-import lmcache.c_ops as lmc_ops
+import lmcache.lmcache_native as lmcache_native
 
 
-def _discover_specs() -> dict["lmc_ops.EngineKVFormat", type[KVFormatSpec]]:
+def _discover_specs() -> dict["lmcache_native.EngineKVFormat", type[KVFormatSpec]]:
     """Import every spec module in this folder and index it by its format."""
-    specs: dict["lmc_ops.EngineKVFormat", type[KVFormatSpec]] = {}
+    specs: dict["lmcache_native.EngineKVFormat", type[KVFormatSpec]] = {}
     for module in pkgutil.iter_modules([str(Path(__file__).parent)]):
         if module.name in ("base", "registry"):
             continue
@@ -43,7 +43,7 @@ SPECS = _discover_specs()
 _SPECS_BY_VALUE = {int(fmt): spec for fmt, spec in SPECS.items()}
 
 
-def get_spec_class(fmt: "lmc_ops.EngineKVFormat") -> type[KVFormatSpec]:
+def get_spec_class(fmt: "lmcache_native.EngineKVFormat") -> type[KVFormatSpec]:
     """Return the spec class for *fmt* -- the owner of its static facts.
 
     Args:
@@ -64,7 +64,7 @@ def get_spec_class(fmt: "lmc_ops.EngineKVFormat") -> type[KVFormatSpec]:
 
 
 def get_spec(
-    kv_caches: DiscoverableKVCache, fmt: "lmc_ops.EngineKVFormat"
+    kv_caches: DiscoverableKVCache, fmt: "lmcache_native.EngineKVFormat"
 ) -> KVFormatSpec:
     """Return a spec instance wrapping *kv_caches* of *fmt*."""
     return get_spec_class(fmt)(kv_caches)

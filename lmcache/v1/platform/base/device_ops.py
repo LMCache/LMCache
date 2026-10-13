@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The unified per-device ops abstraction (the ``lmcache.c_ops`` surface).
+"""The unified per-device operations abstraction.
 
-:class:`DeviceOps` is a strategy base class whose every op is an instance
-method delegating to :mod:`lmcache.v1.platform.torch_ops`.  Accelerator
-subclasses override individual methods with native kernels via normal OO
-polymorphism, or bulk-rebind via :meth:`DeviceOps.bind_native`.
+:class:`DeviceOps` is a strategy base class whose portable ops delegate to
+:mod:`lmcache.v1.platform.torch_ops`. Accelerator subclasses override
+device-specific capabilities via normal OO polymorphism, or bulk-rebind native
+kernels via :meth:`DeviceOps.bind_native`.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     # Third Party
@@ -20,12 +20,8 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.platform import ops_types, torch_ops
-from lmcache.v1.platform.ops_types import (
-    EngineKVFormat,
-    PageBufferShapeDesc,
-    TransferDirection,
-    set_shape_desc_dtype,
-)
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
@@ -33,29 +29,54 @@ logger = init_logger(__name__)
 class DeviceOps:
     """Strategy base: per-device ops resolved via normal instance MRO.
 
-    Every op is an instance method delegating to the torch baseline in
-    :mod:`~lmcache.v1.platform.torch_ops`.  Accelerator subclasses either:
+    Every op is an instance method. Portable ops delegate to the torch baseline
+    in :mod:`~lmcache.v1.platform.torch_ops`; capabilities that cannot have a
+    safe generic implementation fail in the base class. Accelerator subclasses
+    either:
 
     - Override individual methods (e.g. MUSA overrides
       :meth:`multi_layer_block_kv_transfer`).
     - Call :meth:`bind_native` in :meth:`ensure_native` to bulk-rebind
       all ops the compiled extension exports.
 
-    The ``lmcache.c_ops`` shim forwards attribute access to a resolved
-    singleton instance so module-level call sites keep working.
+    The package-level :data:`lmcache.device_ops` attribute references a
+    resolved singleton instance for module-level call sites.
     """
 
     device_type: ClassVar[str] = ""  # base is unregistered
 
     # ── Shared types (explicit for static analysis) ────────────────────
-    TransferDirection = TransferDirection
-    EngineKVFormat = EngineKVFormat
-    GPUKVFormat = EngineKVFormat  # back-compat alias
     PageBufferShapeDesc = PageBufferShapeDesc
-    set_shape_desc_dtype = staticmethod(set_shape_desc_dtype)
+    StagingCopy = ops_types.StagingCopy
+    LaunchVar = ops_types.LaunchVar
+    BatchStep = ops_types.BatchStep
+    KernelGroupSpec = ops_types.KernelGroupSpec
+
+    # Bound from the native module by bind_native (declared for static analysis).
+    TransferDirection: type[lmcache_native.TransferDirection]
+    EngineKVFormat: type[lmcache_native.EngineKVFormat]
+    GPUKVFormat: type[lmcache_native.EngineKVFormat]
 
     def __init__(self) -> None:
         self._native_bound: bool = False
+
+    def __getattr__(self, name: str) -> Any:
+        """Report an unavailable optional native symbol.
+
+        Native extensions may add platform-specific symbols at runtime through
+        :meth:`bind_native`. Returning ``Any`` to static analysis reflects that
+        dynamic surface, while raising ``AttributeError`` preserves normal
+        ``hasattr`` feature detection when a backend does not provide a symbol.
+
+        Args:
+            name: Attribute requested by the caller.
+
+        Raises:
+            AttributeError: If the active backend did not bind the symbol.
+        """
+        raise AttributeError(
+            f"{type(self).__name__!s} has no device operation {name!r}"
+        )
 
     # ── Lazy native binding ───────────────────────────────────────────
 
@@ -141,16 +162,46 @@ class DeviceOps:
 
     # ── Ops: KV transfer ─────────────────────────────────────────────
 
+    def tensor_from_ptr(
+        self,
+        ptr: int,
+        shape: tuple[int, ...],
+        dtype: "torch.dtype",
+        device: "torch.device",
+    ) -> "torch.Tensor":
+        """Create a tensor from a raw pointer owned by this backend.
+
+        Accelerator subclasses must override this method when their transfer
+        path accepts raw pointers.
+
+        Args:
+            ptr: Non-zero pointer in the current process.
+            shape: Logical dense tensor shape.
+            dtype: Element dtype of the pointed-to storage.
+            device: Device that owns the pointer.
+
+        Returns:
+            A tensor produced by the device-specific implementation.
+
+        Raises:
+            ValueError: If this backend does not support raw-pointer tensor
+                construction.
+        """
+        raise ValueError(
+            f"Device backend {self.device_type!r} does not support "
+            "tensor construction from raw pointers."
+        )
+
     def multi_layer_block_kv_transfer(
         self,
         paged_buffer_ptrs_tensor: "torch.Tensor | list",
         lmcache_objects_ptrs: "list[int] | list[torch.Tensor]",
         block_ids: "torch.Tensor | list[int]",
         device: "torch.device | str",
-        direction: ops_types.TransferDirection,
+        direction: lmcache_native.TransferDirection,
         shape_desc: ops_types.PageBufferShapeDesc,
         lmcache_chunk_size: int,
-        engine_kv_format: ops_types.EngineKVFormat,
+        engine_kv_format: lmcache_native.EngineKVFormat,
         skip_prefix_n_blocks: int,
     ) -> None:
         return torch_ops.multi_layer_block_kv_transfer(
@@ -199,20 +250,6 @@ class DeviceOps:
     def encode_fast_new(self, cdf, input_sym, output_buffer, output_lengths):
         return torch_ops.encode_fast_new(cdf, input_sym, output_buffer, output_lengths)
 
-    # ── Ops: format query ────────────────────────────────────────────
-
-    def is_cross_layer(self, engine_kv_format):
-        return torch_ops.is_cross_layer(engine_kv_format)
-
-    def is_kv_list(self, engine_kv_format):
-        return torch_ops.is_kv_list(engine_kv_format)
-
-    def is_layer_list(self, engine_kv_format):
-        return torch_ops.is_layer_list(engine_kv_format)
-
-    def is_mla(self, engine_kv_format):
-        return torch_ops.is_mla(engine_kv_format)
-
     # ── Ops: async / event recording ─────────────────────────────────
 
     def drain_recorded_completions(self):
@@ -240,3 +277,6 @@ class DeviceOps:
 
     def rotary_embedding_k_fused(self, *args, **kwargs):
         return torch_ops.rotary_embedding_k_fused(*args, **kwargs)
+
+    def rotary_embedding_k_fused_strided(self, *args, **kwargs):
+        return torch_ops.rotary_embedding_k_fused_strided(*args, **kwargs)

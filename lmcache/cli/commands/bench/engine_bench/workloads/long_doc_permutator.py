@@ -15,6 +15,10 @@ Stress axes (controlled by config):
     4. Prefix Domination           -> system_prompt_length
     5. Concurrency                 -> num_inflight_requests
 
+``max_output_length`` sets how much decode follows each prefill: 1 makes the
+run a pure prefill/TTFT measurement, while larger values also exercise the
+decode phase (combine with ``--ignore-eos`` to make its length reproducible).
+
 Context and system-prompt lengths are exact token counts, not estimates:
 all synthetic text is built from words that encode to exactly one token
 under the model's own tokenizer (see
@@ -54,6 +58,7 @@ class LongDocPermutatorConfig:
     num_permutations: int = 10
     vocab_size: int = 8000
     num_inflight_requests: int = 1
+    max_output_length: int = 128
 
     def __post_init__(self) -> None:
         if self.num_contexts < 1:
@@ -72,6 +77,10 @@ class LongDocPermutatorConfig:
             raise ValueError(
                 f"num_inflight_requests must be >= 1, got {self.num_inflight_requests}"
             )
+        if self.max_output_length < 1:
+            raise ValueError(
+                f"max_output_length must be >= 1, got {self.max_output_length}"
+            )
 
     @classmethod
     def resolve(
@@ -82,6 +91,7 @@ class LongDocPermutatorConfig:
         num_permutations: int = 10,
         vocab_size: int = 8000,
         num_inflight_requests: int = 1,
+        max_output_length: int = 128,
     ) -> "LongDocPermutatorConfig":
         """Create a config directly from the provided parameters.
 
@@ -96,6 +106,9 @@ class LongDocPermutatorConfig:
                 context content from.  Smaller values increase chunk hash
                 collision risk.
             num_inflight_requests: Max concurrent in-flight requests.
+            max_output_length: Max tokens to generate per benchmark request.
+                Use 1 to measure prefill alone; combine larger values with
+                ``--ignore-eos`` for a reproducible decode phase.
 
         Returns:
             A fully-resolved LongDocPermutatorConfig.
@@ -107,6 +120,7 @@ class LongDocPermutatorConfig:
             num_permutations=num_permutations,
             vocab_size=vocab_size,
             num_inflight_requests=num_inflight_requests,
+            max_output_length=max_output_length,
         )
 
 
@@ -294,6 +308,7 @@ class LongDocPermutatorWorkload(BaseWorkload):
             f"  Tokens per request:  {Y}{self._tokens_per_request}{R} (measured)\n"
             f"  Vocab size:          {Y}{c.vocab_size}{R}\n"
             f"  Max inflight:        {Y}{c.num_inflight_requests}{R}\n"
+            f"  Max output length:   {Y}{c.max_output_length}{R} tokens\n"
             f"{B}{'═' * 50}{R}"
         )
 
@@ -390,7 +405,11 @@ class LongDocPermutatorWorkload(BaseWorkload):
         self._progress_monitor.on_request_sent(request_id)
         self._progress_monitor.log_message(f"Dispatched permutation {perm_idx}")
         try:
-            await self._request_sender.send_request(request_id, messages)
+            await self._request_sender.send_request(
+                request_id,
+                messages,
+                max_tokens=self._config.max_output_length,
+            )
         finally:
             self._semaphore.release()
 

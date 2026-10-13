@@ -93,7 +93,7 @@ def test_odirect_read_does_not_split_for_read_ahead(tmp_path) -> None:
         pytest.skip("filesystem block size is unavailable")
 
     size = block_size * 2
-    key = "test_model@00000000@0123456789abcdef"
+    key = "test_model@00000000@0@0123456789abcdef"
     _source_raw, source = _aligned_memoryview(size, block_size)
     _dest_raw, dest = _aligned_memoryview(size, block_size)
     _fill(source)
@@ -119,7 +119,7 @@ def test_odirect_fails_for_misaligned_buffer(tmp_path) -> None:
         pytest.skip("filesystem block size is unavailable")
 
     size = block_size * 2
-    key = "test_model@00000000@fedcba9876543210"
+    key = "test_model@00000000@0@fedcba9876543210"
     _source_raw, source = _misaligned_memoryview(size, block_size)
     _fill(source)
 

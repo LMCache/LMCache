@@ -208,8 +208,12 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			resp := injector.Handle(ctx, makeRequest(pod))
 			out := applyResponse(pod, resp)
 
-			By("M0: hostIPC")
-			Expect(out.Spec.HostIPC).To(BeTrue())
+			By("M0: /dev/shm hostPath sharing (no hostIPC by default)")
+			Expect(out.Spec.HostIPC).To(BeFalse())
+			shmVol := findVolume(out, testDevShmVolumeName)
+			Expect(shmVol).NotTo(BeNil())
+			Expect(shmVol.HostPath).NotTo(BeNil())
+			Expect(shmVol.HostPath.Path).To(Equal("/dev/shm"))
 
 			By("M1: cb-plugin emptyDir volume")
 			var vol *corev1.Volume
@@ -251,16 +255,10 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(envValue(c, pythonPathEnvName)).To(Equal(cbPluginMountPath))
 
 			By("M5: required vLLM args asserted individually")
-			Expect(argsHasFlagValue(c.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue(),
-				"--attention-backend=CUSTOM")
 			Expect(argsHasFlag(c.Args, cbFlagNoChunkedPrefill)).To(BeTrue(),
 				"--no-enable-chunked-prefill")
-			Expect(argsHasFlagValue(c.Args, cbFlagBlockSize, cbValBlockSize)).To(BeTrue(),
-				"--block-size=64")
-			Expect(argsHasFlagValue(c.Args, cbFlagPipelineParallelSize, cbValPipelineParallelSize)).To(BeTrue(),
+			Expect(argsFlagValue(c.Args, cbFlagPipelineParallelSize)).To(Equal(cbValPipelineParallelSize),
 				"--pipeline-parallel-size=1")
-			Expect(argsHasFlag(c.Args, cbFlagNoAsyncScheduling)).To(BeTrue(),
-				"--no-async-scheduling")
 			Expect(argsHasFlag(c.Args, cbFlagEnforceEager)).To(BeTrue(),
 				"default cudagraph eager -> --enforce-eager")
 
@@ -276,6 +274,147 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			By("M6: idempotency annotation stamped")
 			Expect(out.Annotations[AnnotationInjected]).To(Equal(valueTrue))
 			Expect(out.Annotations).NotTo(HaveKey(AnnotationSkipReason))
+		})
+	})
+
+	Describe("PD disaggregation", func() {
+		pdEngine := func() *lmcachev1alpha1.CacheBlendEngine {
+			sideChannelPort := int32(5557)
+			return newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
+				e.Spec.PD = &lmcachev1alpha1.PDSpec{
+					NixlSideChannelPort: &sideChannelPort,
+				}
+			})
+		}
+
+		expectPDEnv := func(c *corev1.Container) {
+			var host, port *corev1.EnvVar
+			for i := range c.Env {
+				switch c.Env[i].Name {
+				case nixlSideChannelHostEnv:
+					host = &c.Env[i]
+				case nixlSideChannelPortEnv:
+					port = &c.Env[i]
+				}
+			}
+			Expect(host).NotTo(BeNil(), nixlSideChannelHostEnv)
+			Expect(host.ValueFrom).NotTo(BeNil())
+			Expect(host.ValueFrom.FieldRef.FieldPath).To(Equal("status.podIP"))
+			Expect(port).NotTo(BeNil(), nixlSideChannelPortEnv)
+			Expect(port.Value).To(Equal("5557"))
+		}
+
+		It("injects the prefiller MultiConnector config and NIXL env vars", func() {
+			engine := pdEngine()
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Annotations[PDRoleAnnotationKey] = lmcachev1alpha1.PDRolePrefiller
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+			Expect(c).NotTo(BeNil())
+
+			kv := argsFlagValue(c.Args, cbFlagKVTransferConfig)
+			Expect(kv).To(ContainSubstring("MultiConnector"))
+			Expect(kv).To(ContainSubstring("NixlConnector"))
+			Expect(kv).To(ContainSubstring("CBKVConnector"))
+			Expect(kv).To(ContainSubstring("kv_producer"))
+			expectPDEnv(c)
+		})
+
+		It("injects only the bare NixlConnector config and NIXL env vars for the decoder role", func() {
+			engine := pdEngine()
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Annotations[PDRoleAnnotationKey] = lmcachev1alpha1.PDRoleDecoder
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+			Expect(c).NotTo(BeNil())
+
+			By("the decoder does not blend: no MultiConnector, no CBKVConnector")
+			kv := argsFlagValue(c.Args, cbFlagKVTransferConfig)
+			Expect(kv).To(ContainSubstring("NixlConnector"))
+			Expect(kv).To(ContainSubstring("kv_consumer"))
+			Expect(kv).NotTo(ContainSubstring("MultiConnector"))
+			Expect(kv).NotTo(ContainSubstring("CBKVConnector"))
+			expectPDEnv(c)
+
+			By("no CacheBlend vLLM flags — --enforce-eager would disable CUDA graphs on the decode role")
+			Expect(argsHasFlag(c.Args, cbFlagNoChunkedPrefill)).To(BeFalse())
+			Expect(argsHasFlag(c.Args, cbFlagEnforceEager)).To(BeFalse())
+			Expect(argsHasFlag(c.Args, cbFlagPipelineParallelSize)).To(BeFalse())
+
+			By("no payload staging (M1–M4) or payload pull secrets (M7)")
+			Expect(out.Spec.InitContainers).To(BeEmpty())
+			Expect(findVolume(out, cbPluginVolumeName)).To(BeNil())
+			Expect(envValue(c, pythonPathEnvName)).To(BeEmpty())
+			Expect(pullSecretNames(out)).NotTo(ContainElement("cb-payload-pull"))
+
+			By("no engine /dev/shm wiring (M0) — the decoder has no CUDA IPC connection to the engine")
+			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
+
+			By("idempotency annotation stamped")
+			Expect(out.Annotations[AnnotationInjected]).To(Equal(valueTrue))
+		})
+
+		It("injects a decoder pod even when the payload image is unset", func() {
+			// A decoder never loads the CacheBlend plugin, so decoder-only
+			// engines need no payloadImage; the M2 fail-open gate must not
+			// apply to the decoder path.
+			engine := pdEngine()
+			engine.Spec.Injection.PayloadImage = nil
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Annotations[PDRoleAnnotationKey] = lmcachev1alpha1.PDRoleDecoder
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+			Expect(c).NotTo(BeNil())
+
+			Expect(argsFlagValue(c.Args, cbFlagKVTransferConfig)).To(ContainSubstring("kv_consumer"))
+			Expect(out.Annotations[AnnotationInjected]).To(Equal(valueTrue))
+			Expect(out.Annotations).NotTo(HaveKey(AnnotationSkipReason))
+		})
+
+		It("skips + stamps unknown-pd-role for an unrecognized annotation value", func() {
+			engine := pdEngine()
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Annotations[PDRoleAnnotationKey] = "prefill" // typo
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			c := findContainer(out, "vllm")
+			Expect(c).NotTo(BeNil())
+			Expect(argsHasFlag(c.Args, cbFlagKVTransferConfig)).To(BeFalse(),
+				"no config may be injected for an unknown role")
+			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonUnknownPDRole))
+		})
+
+		It("falls back to the bare CBKVConnector config without a pd-role annotation", func() {
+			engine := pdEngine()
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(nil)
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, "vllm")
+			Expect(c).NotTo(BeNil())
+
+			kv := argsFlagValue(c.Args, cbFlagKVTransferConfig)
+			Expect(kv).To(ContainSubstring("CBKVConnector"))
+			Expect(kv).NotTo(ContainSubstring("MultiConnector"))
+			Expect(kv).NotTo(ContainSubstring("NixlConnector"))
 		})
 	})
 
@@ -333,6 +472,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonEngineNotFound))
 			Expect(out.Annotations).NotTo(HaveKey(AnnotationInjected))
 			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 			Expect(out.Spec.InitContainers).To(BeEmpty())
 		})
 
@@ -349,6 +489,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 
 			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonEngineNotFound))
 			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 		})
 
 		It("allows an already-injected pod as a no-op", func() {
@@ -376,41 +517,45 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonCommandOverride))
 			Expect(out.Annotations).NotTo(HaveKey(AnnotationInjected))
 			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 			Expect(out.Spec.InitContainers).To(BeEmpty())
 		})
 	})
 
 	Describe("append-or-replace arg semantics", func() {
-		It("replaces a pre-existing --attention-backend value", func() {
+		It("replaces a pre-existing injected flag rather than duplicating it", func() {
 			engine := newTestEngine(nil)
 			injector := newPodInjector(engine, true)
 			pod := vllmPod(func(p *corev1.Pod) {
-				p.Spec.Containers[0].Args = []string{"--attention-backend", "FLASH_ATTN", "--model", "m"}
+				p.Spec.Containers[0].Args = []string{
+					cbFlagPipelineParallelSize, "4", "--model", "m",
+				}
 			})
 
 			resp := injector.Handle(ctx, makeRequest(pod))
 			out := applyResponse(pod, resp)
 			c := findContainer(out, "vllm")
 
-			Expect(argsHasFlagValue(c.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue())
-			Expect(argsHasFlagValue(c.Args, cbFlagAttentionBackend, "FLASH_ATTN")).To(BeFalse())
-			// Not duplicated.
-			Expect(countFlag(c.Args, cbFlagAttentionBackend)).To(Equal(1))
+			Expect(argsFlagValue(c.Args, cbFlagPipelineParallelSize)).To(Equal(cbValPipelineParallelSize))
+			Expect(countFlag(c.Args, cbFlagPipelineParallelSize)).To(Equal(1))
 		})
 
-		It("replaces a pre-existing --attention-backend=value (single-token form)", func() {
+		It("replaces the single-token --flag=value form in place", func() {
 			engine := newTestEngine(nil)
 			injector := newPodInjector(engine, true)
 			pod := vllmPod(func(p *corev1.Pod) {
-				p.Spec.Containers[0].Args = []string{"--attention-backend=FLASH_ATTN", "--model", "m"}
+				p.Spec.Containers[0].Args = []string{
+					cbFlagPipelineParallelSize + "=4", "--model", "m",
+				}
 			})
 
 			resp := injector.Handle(ctx, makeRequest(pod))
 			out := applyResponse(pod, resp)
 			c := findContainer(out, "vllm")
 
-			Expect(c.Args).To(ContainElement("--attention-backend=CUSTOM"))
-			Expect(c.Args).NotTo(ContainElement("--attention-backend=FLASH_ATTN"))
+			Expect(c.Args).To(ContainElement(cbFlagPipelineParallelSize + "=" + cbValPipelineParallelSize))
+			Expect(c.Args).NotTo(ContainElement(cbFlagPipelineParallelSize + "=4"))
+			Expect(countFlag(c.Args, cbFlagPipelineParallelSize)).To(Equal(1))
 		})
 
 		It("skips + stamps when the user already supplies --kv-transfer-config", func() {
@@ -431,8 +576,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			By("the skip reason is stamped but the rest of the injection still applies")
 			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonKVTransferConfigPresent))
 			Expect(out.Annotations[AnnotationInjected]).To(Equal(valueTrue))
-			Expect(out.Spec.HostIPC).To(BeTrue())
-			Expect(argsHasFlagValue(c.Args, cbFlagBlockSize, cbValBlockSize)).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).NotTo(BeNil())
 		})
 
 		It("prepends to a pre-existing PYTHONPATH", func() {
@@ -470,7 +614,6 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			By("the vLLM container is mutated")
 			vllm := findContainer(out, "vllm")
 			Expect(envValue(vllm, pythonPathEnvName)).To(Equal(cbPluginMountPath))
-			Expect(argsHasFlagValue(vllm.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue())
 
 			By("the sidecar container is untouched")
 			sidecar := findContainer(out, "sidecar")
@@ -495,8 +638,8 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			out := applyResponse(pod, resp)
 
 			vllm := findContainer(out, "vllm")
-			Expect(argsHasFlagValue(vllm.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue())
 			sidecar := findContainer(out, "sidecar")
+			Expect(argsHasFlag(vllm.Args, cbFlagKVTransferConfig)).To(BeTrue())
 			Expect(sidecar.Args).To(Equal([]string{"sleep"}))
 		})
 
@@ -513,10 +656,45 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonTargetContainerNotFound))
 			Expect(out.Annotations).NotTo(HaveKey(AnnotationInjected))
 			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 			Expect(out.Spec.InitContainers).To(BeEmpty())
 			By("the original vLLM container is left untouched")
 			vllm := findContainer(out, "vllm")
 			Expect(envValue(vllm, pythonPathEnvName)).To(BeEmpty())
+		})
+	})
+
+	Describe("hostIPC opt-in", func() {
+		It("mirrors the engine's hostIPC opt-in instead of mounting /dev/shm", func() {
+			hostIPC := true
+			engine := newTestEngine(func(e *lmcachev1alpha1.CacheBlendEngine) {
+				e.Spec.HostIPC = &hostIPC
+			})
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(nil)
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
+		})
+
+		It("preserves the pod's hostIPC opt-in without mounting /dev/shm", func() {
+			engine := newTestEngine(nil)
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Spec.HostIPC = true
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
+			vllm := findContainer(out, "vllm")
+			Expect(findVolumeMount(vllm, testDevShmVolumeName)).To(BeNil())
+			Expect(out.Annotations[AnnotationInjected]).To(Equal(valueTrue))
 		})
 	})
 
@@ -540,12 +718,6 @@ var _ = Describe("CacheBlendPodInjector", func() {
 })
 
 // --- test arg helpers (mirror the package's two-token / =-token recognition) ---
-
-// argsHasFlagValue reports whether args carries flag with the given value in
-// either the two-token or single-token form.
-func argsHasFlagValue(args []string, flag, value string) bool {
-	return argsFlagValue(args, flag) == value
-}
 
 // argsFlagValue returns the value bound to flag in args (two-token or
 // single-token form), or "" if the flag is absent.

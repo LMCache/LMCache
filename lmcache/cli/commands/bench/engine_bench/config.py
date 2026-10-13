@@ -3,14 +3,20 @@
 
 # Standard
 from dataclasses import dataclass
+from enum import Enum
 import argparse
 import json
 import os
 import urllib.error
 import urllib.request
 
-# Third Party
-from openai import OpenAI
+try:
+    # Third Party
+    from openai import OpenAI
+except ModuleNotFoundError as exc:
+    if exc.name != "openai":
+        raise
+    OpenAI = None  # type: ignore[assignment]
 
 # First Party
 from lmcache.logging import init_logger
@@ -18,6 +24,23 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 _GB = 1024**3
+
+
+class WarmupPolicy(str, Enum):
+    """Whether the workload runs its warmup phase before the measured run.
+
+    Subclasses ``str`` so the value lands in the JSON summary
+    (``bench_summary.json``) as a plain ``"run"`` / ``"skip"`` string.
+
+    Attributes:
+        RUN: Run warmup, then discard its stats and start the benchmark.
+        SKIP: Go straight to the benchmark, leaving the engine and the KV
+            cache in whatever state the run starts in.  The first requests
+            then pay any first-request cost and see a cold cache.
+    """
+
+    RUN = "run"
+    SKIP = "skip"
 
 
 @dataclass
@@ -40,6 +63,7 @@ class EngineBenchConfig:
     export_json: bool
     quiet: bool
     ignore_eos: bool = False
+    warmup_policy: WarmupPolicy = WarmupPolicy.RUN
 
     def __post_init__(self) -> None:
         if not self.engine_url:
@@ -66,7 +90,8 @@ def auto_detect_model(engine_url: str) -> str:
         The model ID string.
 
     Raises:
-        RuntimeError: If the engine is unreachable or returns no models.
+        RuntimeError: If the optional OpenAI dependency is unavailable, the
+            engine is unreachable, or the engine returns no models.
     """
     base_url = engine_url.rstrip("/")
     if not base_url.startswith(("http://", "https://")):
@@ -76,6 +101,12 @@ def auto_detect_model(engine_url: str) -> str:
 
     api_key = os.getenv("OPENAI_API_KEY", "sk-dummy")
     logger.debug("Auto-detecting model from %s/models", base_url)
+
+    if OpenAI is None:
+        raise RuntimeError(
+            "lmcache bench engine requires the optional 'openai' package. "
+            "Install it with `pip install openai`."
+        )
 
     try:
         client = OpenAI(base_url=base_url, api_key=api_key)
@@ -248,4 +279,7 @@ def parse_args_to_config(args: argparse.Namespace) -> EngineBenchConfig:
         export_json=args.json,
         quiet=args.quiet,
         ignore_eos=args.ignore_eos,
+        warmup_policy=(
+            WarmupPolicy.SKIP if getattr(args, "no_warmup", False) else WarmupPolicy.RUN
+        ),
     )

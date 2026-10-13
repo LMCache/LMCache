@@ -36,9 +36,10 @@ import threading
 
 # Third Party
 import msgspec
-import torch  # noqa: F401 — must be imported before lmcache.c_ops
+import torch  # noqa: F401 — must be imported before native extensions
 
 # First Party
+from lmcache import device_ops as _device_ops
 from lmcache.logging import init_logger
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
@@ -46,7 +47,6 @@ from lmcache.v1.periodic_thread import (
     ThreadLevel,
     ThreadRunSummary,
 )
-import lmcache.c_ops as _lmc_ops
 
 logger = init_logger(__name__)
 
@@ -114,7 +114,7 @@ class DeviceHostFuncDispatcher(PeriodicThread):
     def _drain_once(self) -> None:
         # Broad except keeps the drain thread alive across native/handler errors.
         try:
-            completions = _lmc_ops.drain_recorded_completions()
+            completions = _device_ops.drain_recorded_completions()
         except Exception:
             logger.exception("DeviceHostFuncDispatcher: drain failed")
             return
@@ -150,4 +150,4 @@ def submit_callback_to_stream(stream: Any, kind: str, payload: Any) -> None:
     GIL on the driver thread. ``payload`` is delivered to the handler as a
     single argument."""
     encoded = msgspec.msgpack.encode(payload)
-    _lmc_ops.record_completion_on_stream(stream.ptr, kind, encoded)
+    _device_ops.record_completion_on_stream(stream.ptr, kind, encoded)

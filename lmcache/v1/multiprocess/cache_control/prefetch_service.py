@@ -18,7 +18,9 @@ from lmcache.v1.multiprocess.cache_control.errors import (
     NotFound,
     Unavailable,
 )
-from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
+from lmcache.v1.multiprocess.cache_control.key_resolver import (
+    resolve_grouped_object_keys,
+)
 from lmcache.v1.multiprocess.warm_prefetch import (
     COMPLETED,
     UNKNOWN,
@@ -68,24 +70,40 @@ class PrefetchService:
                 f"{_TARGET_TIER.value!r}"
             )
         ctx = self._engine.context
-        layout_desc = ctx.layout_desc_registry.find(model_name, world_size)
-        if layout_desc is None:
-            raise Unavailable(
-                f"no layout registered for model_name={model_name!r} "
-                f"world_size={world_size}; the model has not allocated "
-                f"KV cache on this node yet"
-            )
+        registry = ctx.layout_desc_registry
+        # Every object group the model registered, each with its own layout
+        # and attention window -- the same rows the lookup path submits. One
+        # layout for group 0 would warm a fraction of each chunk under
+        # --separate-object-groups and report success.
+        unregistered = Unavailable(
+            f"no layout registered for model_name={model_name!r} "
+            f"world_size={world_size}; the model has not allocated "
+            f"KV cache on this node yet"
+        )
+        group_layout_descs = registry.find_group_layout_descs(model_name, world_size)
+        if not group_layout_descs:
+            raise unregistered
         try:
-            obj_keys, chunks = resolve_object_keys(
-                ctx.token_hasher, model_name, world_size, token_ids, cache_salt
+            attn_desc = registry.find_attn_desc(model_name, world_size)
+        except ValueError:
+            # Unregistered between the two reads: the same answer, not a
+            # malformed request.
+            raise unregistered from None
+        try:
+            key_groups, chunks = resolve_grouped_object_keys(
+                ctx.token_hasher,
+                model_name,
+                world_size,
+                token_ids,
+                cache_salt,
+                group_layout_descs,
+                attn_desc,
             )
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None
         if not chunks:
             return {"chunks": 0, "status": "noop"}
-        request_id = self._jobs.submit(
-            self._engine.storage_manager, obj_keys, layout_desc
-        )
+        request_id = self._jobs.submit(self._engine.storage_manager, key_groups)
         return {"request_id": request_id, "chunks": chunks, "status": "submitted"}
 
     def status(self, request_id: str) -> dict[str, object]:

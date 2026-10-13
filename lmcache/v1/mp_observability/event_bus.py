@@ -21,12 +21,12 @@ from lmcache.v1.mp_observability.otel_init import register_gauge
 
 try:
     # Third Party
-    import torch  # noqa: F401 — must be imported before lmcache.c_ops
+    import torch  # noqa: F401 — must be imported before native extensions
 
     # First Party
-    import lmcache.c_ops as _lmc_ops
+    from lmcache import device_ops as _device_ops
 
-    _has_native_recorder = hasattr(_lmc_ops, "record_event_on_stream")
+    _has_native_recorder = hasattr(_device_ops, "record_event_on_stream")
 except ImportError:
     _has_native_recorder = False
 
@@ -116,6 +116,8 @@ class EventBus:
         self._thread: threading.Thread | None = None
         self._registered_subscribers: list[EventSubscriber] = []
         self._discard_count: int = 0
+        self._notified_discard_count = 0
+        self._drop_callbacks: list[Callable[[], None]] = []
         self._last_discard_warning: float = 0.0
         self._subscriber_exception_counts: dict[str, int] = {}
 
@@ -142,6 +144,12 @@ class EventBus:
 
     # -- Public API --------------------------------------------------------
 
+    @property
+    def enabled(self) -> bool:
+        """Whether ``publish()`` enqueues events (``False`` for the disabled
+        default bus, where nothing ever reaches a subscriber)."""
+        return self._config.enabled
+
     def subscribe(self, event_type: EventType, callback: EventCallback) -> None:
         """Register a callback for a specific event type (thread-safe)."""
         with self._lock:
@@ -152,6 +160,15 @@ class EventBus:
         subscriber.register(self)
         with self._lock:
             self._registered_subscribers.append(subscriber)
+
+    def subscribe_drops(self, callback: Callable[[], None]) -> None:
+        """Notify callback on the drain thread when events were discarded.
+
+        Callbacks may read dropped_events_count(). Notifications are coalesced;
+        they also run when no subsequent event is published.
+        """
+        with self._lock:
+            self._drop_callbacks.append(callback)
 
     def has_subscribers(self, event_type: EventType) -> bool:
         """Return True if at least one callback is registered for *event_type*.
@@ -183,7 +200,7 @@ class EventBus:
                     int_metadata[k] = v
                 else:
                     str_metadata[k] = str(v)
-            _lmc_ops.record_event_on_stream(
+            _device_ops.record_event_on_stream(
                 stream.ptr,
                 event.event_type.value,
                 event.session_id,
@@ -205,6 +222,7 @@ class EventBus:
 
         if len(self._queue) >= self._config.max_queue_size:
             self._discard_count += 1
+            self._wake.set()
             now = time.monotonic()
             if now - self._last_discard_warning >= 1.0:
                 logger.warning(
@@ -239,7 +257,13 @@ class EventBus:
 
     def stop(self) -> None:
         """Stop the drain thread, flush remaining events, and shut down
-        all registered subscribers.  Safe to call when not started."""
+        all registered subscribers.  Safe to call when not started.
+
+        Subscribers shut down in reverse registration order.  A subscriber
+        registered later may write into one registered earlier (a sink into
+        a recorder, for example), so the writer must shut down first or its
+        final output lands on a closed target.
+        """
         self._stop_flag.set()
         self._wake.set()
         if self._thread is not None and self._thread.is_alive():
@@ -248,10 +272,10 @@ class EventBus:
         # Final drain
         self._drain_all()
 
-        # Shutdown subscribers
+        # Shutdown subscribers, last registered first
         with self._lock:
             snapshot = list(self._registered_subscribers)
-        for sub in snapshot:
+        for sub in reversed(snapshot):
             try:
                 sub.shutdown()
             except Exception:
@@ -313,7 +337,8 @@ class EventBus:
         """Pop all queued events and dispatch to subscribers."""
         # Drain events buffered on the C++ side (from CUDA host callbacks)
         if _has_native_recorder:
-            for name, sid, ts, str_meta, int_meta in _lmc_ops.drain_recorded_events():
+            native_events = _device_ops.drain_recorded_events()
+            for name, sid, ts, str_meta, int_meta in native_events:
                 metadata: dict[str, Any] = dict(str_meta)
                 metadata.update(int_meta)
                 self._queue.append(
@@ -352,6 +377,16 @@ class EventBus:
                         name,
                         event.event_type.value,
                     )
+
+        if self._discard_count != self._notified_discard_count:
+            self._notified_discard_count = self._discard_count
+            with self._lock:
+                callbacks = list(self._drop_callbacks)
+            for callback in callbacks:
+                try:
+                    callback()
+                except Exception:
+                    logger.exception("EventBus: error in drop notification")
 
 
 # ---------------------------------------------------------------------------

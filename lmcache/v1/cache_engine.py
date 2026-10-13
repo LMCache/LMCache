@@ -490,6 +490,17 @@ class LMCacheEngine:
                 request_configs=request_configs,
             ):
                 assert isinstance(key, CacheEngineKey)
+                # A degenerate range carries no tokens (for example a separator
+                # at the very end of a blend input). Skip it: a zero-byte
+                # allocation is invalid, and the allocation stack reacts to a
+                # rejected request by evicting cached objects or spinning in a
+                # busy loop.
+                if end <= start:
+                    logger.debug(
+                        "Skipping empty token range [%d, %d) during store", start, end
+                    )
+                    continue
+
                 # Allocate the memory object
                 num_tokens = end - start
                 kv_shapes = self.metadata.get_shapes(num_tokens)
@@ -671,6 +682,16 @@ class LMCacheEngine:
         ):
             assert isinstance(key, CacheEngineKey)
 
+            # See the comment in ``store``: a degenerate range carries no tokens
+            # and must not reach the allocator.
+            if end <= start:
+                logger.debug(
+                    "Skipping empty token range [%d, %d) during store_layer",
+                    start,
+                    end,
+                )
+                continue
+
             keys_multi_layer = key.split_layers(self.num_layers)
             # Only check the first layer
             if self.storage_manager.contains(
@@ -803,6 +824,10 @@ class LMCacheEngine:
 
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
+
+        Active synchronous retrieval does not release lookup pins. After
+        retrieval, the caller must release its pins with ``lookup_unpin(lookup_id)``
+        before issuing further blocking retrievals that may need cache space.
         """
         # Health check: block operation if LMCache is unhealthy
         if not self.is_healthy():
@@ -932,7 +957,9 @@ class LMCacheEngine:
                 if self._is_sync_pd_backend():
                     memory_obj.ref_count_down()
             else:
-                if memory_obj.is_pinned:
+                # Blocking gets acquire references, not ownership of lookup pins.
+                # The lookup owner releases those pins through lookup_unpin().
+                if (self.async_loading or self._is_passive()) and memory_obj.is_pinned:
                     memory_obj.unpin()
                 memory_obj.ref_count_down()
 
@@ -1283,7 +1310,9 @@ class LMCacheEngine:
         )
         assert None not in memory_objs, "Failed to get memory objects to move"
         logger.debug(
-            f"Trying to send {len(memory_objs)} memory objects to {new_position}"
+            "Trying to send %d memory objects to %s",
+            len(memory_objs),
+            new_position,
         )
 
         # TODO: reduce loops
@@ -1620,7 +1649,7 @@ class LMCacheEngine:
                 logger.info("Closing hidden_state_store...")
                 self.hidden_state_store.close()
             except Exception as e:
-                logger.error(f"Error closing hidden_state_store: {e}")
+                logger.error("Error closing hidden_state_store: %s", e)
 
         if self.lmcache_worker is not None:
             try:
