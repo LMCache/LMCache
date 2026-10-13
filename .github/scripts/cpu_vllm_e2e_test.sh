@@ -9,15 +9,17 @@
 #   SKIP_INSTALL=1              (install done by CI workflow steps)
 #
 # Transport mode is selected via LMCACHE_TRANSPORT_MODE:
-#   engine_driven -> LMCACHE_MP_TRANSFER_MODE=engine_driven (server-side copy)
-#   lmcache_driven -> LMCACHE_DATA_MODE selects shm (default) or pickle
+#   engine_driven -> LMCACHE_MP_TRANSFER_MODE=engine_driven; LMCACHE_DATA_MODE
+#                    selects shm (default) or inline
+#   lmcache_driven -> LMCACHE_MP_TRANSFER_MODE=lmcache_driven (IPC handle path)
 #
 # Environment variables (all optional, defaults shown):
 #   LMCACHE_REQUEST_TRANSPORT Request RPC transport: zmq|grpc (default: zmq)
 #   LMCACHE_REQUEST_PORT      Request RPC port (default: 5555)
 #   LMCACHE_TRANSPORT_MODE   Transport: engine_driven|lmcache_driven
 #                             (default: engine_driven)
-#   LMCACHE_DATA_MODE        Data transfer mode: shm|pickle (default: shm)
+#   LMCACHE_DATA_MODE        Data transfer mode: shm|pickle (default: shm).
+#                            "pickle" is a legacy alias for safe inline transfer.
 #   LMCACHE_HTTP_PORT        HTTP port for LMCache server  (default: 8080)
 #   VLLM_PORT                HTTP port for vLLM server     (default: 8000)
 #   LMCACHE_L1_SIZE_GB       LMCache L1 cache size in GB   (default: 2)
@@ -46,7 +48,7 @@ fi
 LMCACHE_TRANSPORT_MODE="${LMCACHE_TRANSPORT_MODE:-engine_driven}"
 
 # When LMCACHE_TRANSPORT_MODE=engine_driven, LMCACHE_DATA_MODE selects the
-# specific data transfer mechanism: shm (default) or pickle.
+# specific data transfer mechanism: shm (default) or safe inline transfer.
 LMCACHE_DATA_MODE="${LMCACHE_DATA_MODE:-shm}"
 
 # Map LMCACHE_TRANSPORT_MODE to the vars expected by the shared script.

@@ -102,7 +102,8 @@ class MPServerConfig:
 
     shm_name: str | None = ""
     """SHM segment name for engine-driven KV transfer.
-    "" (default): force pickle. None: auto-allocate. Other: use that name."""
+    "" (default): force safe inline transfer. None: auto-allocate. Other: use
+    that name."""
 
     script_allowed_imports: list[str] = field(default_factory=list)
     """Modules that /run_script endpoint is allowed to import."""

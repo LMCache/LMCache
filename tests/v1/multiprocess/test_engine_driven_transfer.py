@@ -3,6 +3,7 @@
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
 import os
@@ -10,6 +11,7 @@ import pickle
 import sys
 
 # Third Party
+import msgspec
 import pytest
 import torch
 
@@ -34,6 +36,10 @@ from lmcache.v1.multiprocess.transfer_context.base import (
 )
 from lmcache.v1.multiprocess.transfer_context.pickle import EngineDrivenContextPickle
 from lmcache.v1.multiprocess.transfer_context.shm import EngineDrivenContextShm
+from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
+    decode_tensors,
+    encode_tensors,
+)
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -48,6 +54,19 @@ if TYPE_CHECKING:
     from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
         EngineDrivenTransferModule,
     )
+
+
+def _write_execution_marker(path: str) -> None:
+    """Write a marker if a hostile pickle reducer is ever invoked."""
+    Path(path).write_text("executed", encoding="utf-8")
+
+
+class _ExecutionMarker:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def __reduce__(self) -> tuple[Callable[[str], None], tuple[str]]:
+        return (_write_execution_marker, (str(self.path),))
 
 
 class ServerModuleFactory(Protocol):
@@ -680,7 +699,10 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
     )
 
     class _FakeEngineDrivenContext:
-        def prepare_retrieve(self, *_args: Any, **_kwargs: Any) -> list[torch.Tensor]:
+        def prepare_retrieve(
+            self, _key: Any, _instance_id: int, expected_count: int
+        ) -> list[torch.Tensor]:
+            captured_kwargs["expected_count"] = expected_count
             return [torch.zeros(2, 2, 8, 16)]
 
         def commit_retrieve(self, *_args: Any, **_kwargs: Any) -> bool:
@@ -736,6 +758,7 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
 
     assert result is True
     assert "prefer_musa_native" not in captured_kwargs
+    assert captured_kwargs["expected_count"] == 1
 
 
 def test_create_transfer_context_env_var_overrides_default(
@@ -1534,7 +1557,7 @@ def test_server_store_and_retrieve_cpu_chunks(
     )
     payload = torch.ones(2, 2, 8, 16)
     key = _default_key()
-    store_ok = module.commit_store(key, 2, pickle.dumps([payload]))
+    store_ok = module.commit_store(key, 2, encode_tensors([payload]))
     response = module.prepare_retrieve(key, 2)
     success = response.success
     cpu_data = response.data
@@ -1543,9 +1566,40 @@ def test_server_store_and_retrieve_cpu_chunks(
     assert torch.allclose(mock_memory_obj.tensor, payload)
 
     assert success is True
-    recovered_chunks: list[torch.Tensor] = pickle.loads(cpu_data)
+    recovered_chunks = decode_tensors(
+        cpu_data,
+        expected_shape=payload.shape,
+        expected_dtype=payload.dtype,
+        expected_count=1,
+    )
     assert len(recovered_chunks) == 1
     assert torch.allclose(recovered_chunks[0], payload)
+
+
+def test_server_commit_store_rejects_pickle_without_executing_reducer(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+    tmp_path: Path,
+) -> None:
+    """A network-controlled legacy pickle must fail before storage is touched."""
+    mock_storage = MagicMock()
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h"]
+    module, _, _, _ = server_module_factory(
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=2)
+    )
+    marker = tmp_path / "pickle-executed"
+    hostile_payload = pickle.dumps([_ExecutionMarker(marker)])
+
+    with pytest.raises(msgspec.DecodeError):
+        module.commit_store(_default_key(), 2, hostile_payload)
+
+    assert not marker.exists()
+    mock_storage.reserve_write.assert_not_called()
 
 
 def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
@@ -1829,6 +1883,70 @@ def _create_shm_segment(shm_name: str, size: int) -> int:
     return shm_create_readwrite(shm_name, size)
 
 
+def test_engine_driven_inline_context_uses_typed_tensor_wire_format() -> None:
+    """Worker-side inline store and retrieve use the validated tensor codec."""
+    req_client = MagicMock()
+    req_client.commit_store.return_value = _CompletedFuture(True)
+    chunks = [torch.arange(4, dtype=torch.float32).reshape(2, 2) for _ in range(2)]
+    req_client.prepare_retrieve.return_value = _CompletedFuture(
+        PrepareRetrieveResponse(
+            success=True,
+            data=encode_tensors(chunks),
+            context={},
+        )
+    )
+    context = EngineDrivenContextPickle(
+        metadata=EngineDrivenContextMetadata(
+            layout_desc=MemoryLayoutDesc(
+                shapes=[torch.Size([2, 2])],
+                dtypes=[torch.float32],
+            ),
+            block_size=4,
+            use_mla=False,
+        ),
+        req_client=req_client,
+        mq_timeout=1.0,
+    )
+    key = _default_key(tokens=8)
+
+    assert context.commit_store(key, 1, chunks)
+    encoded = req_client.commit_store.call_args.args[2]
+    decoded_store = decode_tensors(
+        encoded,
+        expected_shape=torch.Size([2, 2]),
+        expected_dtype=torch.float32,
+        expected_count=2,
+    )
+    assert all(
+        torch.equal(actual, expected)
+        for actual, expected in zip(decoded_store, chunks, strict=True)
+    )
+    decoded_retrieve = context.prepare_retrieve(key, 1, expected_count=2)
+    assert decoded_retrieve is not None
+    assert all(
+        torch.equal(actual, expected)
+        for actual, expected in zip(decoded_retrieve, chunks, strict=True)
+    )
+
+
+def test_contiguous_wrapper_derives_expected_retrieve_chunk_count() -> None:
+    """SDK retrieval validates frames using LMCache chunk geometry."""
+    # First Party
+    from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
+
+    context = MagicMock()
+    chunks = [torch.zeros(2, 1, 4, 2) for _ in range(2)]
+    context.prepare_retrieve.return_value = chunks
+    wrapper = ContiguousTransferWrapper(context, chunk_size=4)
+    key = _default_key(tokens=8)
+
+    result = wrapper.retrieve(key, instance_id=7)
+
+    assert result is not None
+    assert result.shape == (2, 1, 8, 2)
+    context.prepare_retrieve.assert_called_once_with(key, 7, 2)
+
+
 def test_engine_driven_context_shm_tensor_view_from_buffer() -> None:
     shm_name = f"lmcache_test_view_{os.getpid()}"
     addr = _create_shm_segment(shm_name, 4096)
@@ -1917,7 +2035,9 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
         assert context.commit_store(key, 1, store_views)
         req_client.commit_store.assert_called_once_with(key, 1, b"")
 
-        retrieve_views = context.prepare_retrieve(key=key, instance_id=1)
+        retrieve_views = context.prepare_retrieve(
+            key=key, instance_id=1, expected_count=1
+        )
         assert retrieve_views is not None
         assert torch.equal(
             retrieve_views[0],

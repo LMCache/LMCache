@@ -4,8 +4,8 @@
 This module provides:
 - ``EngineDrivenContextMetadata``: layout metadata dataclass for non-CUDA workers.
 - ``EngineDrivenContext``: abstract base class with a two-phase prepare/commit
-  interface for CPU-side KV data transfer. Concrete implementations (e.g.
-  ``EngineDrivenContextPickle``) each decide *how* data is serialised and transported.
+  interface for CPU-side KV data transfer. Concrete implementations each decide
+  *how* data is serialised and transported.
 - ``create_engine_driven_context()``: factory that returns the appropriate
   ``EngineDrivenContext`` subclass.
 - ``compute_kv_layout``, ``gather_paged_kv_to_cpu``, ``scatter_cpu_to_paged_kv``:
@@ -121,7 +121,7 @@ class EngineDrivenContext(ABC):
         """Prepare SHM buffers for a store operation.
 
         Returns:
-            None: pickle mode — no pre-allocated buffers. Caller gathers all
+            None: inline mode — no pre-allocated buffers. Caller gathers all
                 chunks to CPU itself and sends the serialized data via
                 commit_store.
             ([], []): SHM mode but all chunks already cached. Caller should
@@ -140,19 +140,28 @@ class EngineDrivenContext(ABC):
     def commit_store(
         self, key: IPCCacheServerKey, instance_id: int, chunks: list[torch.Tensor]
     ) -> bool:
-        """Commit store. Pickle: serialize and send. Shm: notify server."""
+        """Commit store. Inline: serialize and send. Shm: notify server."""
         ...
 
     @abstractmethod
     def prepare_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int, expected_count: int
     ) -> list[torch.Tensor] | None:
-        """Prepare retrieve. Returns chunks or shm views, or None on miss."""
+        """Prepare retrieve for exactly ``expected_count`` chunks.
+
+        Args:
+            key: Cache key to retrieve.
+            instance_id: Worker instance identifier.
+            expected_count: Required number of LMCache chunks.
+
+        Returns:
+            Chunks or SHM views on a hit, or ``None`` on a miss.
+        """
         ...
 
     @abstractmethod
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
-        """Commit retrieve. Pickle: no-op. Shm: release read locks."""
+        """Commit retrieve. Inline: no-op. Shm: release read locks."""
         ...
 
     @abstractmethod
@@ -173,19 +182,19 @@ def create_engine_driven_context(
     """Factory that returns the appropriate :class:`EngineDrivenContext` implementation.
 
     Returns SHM-based implementation when shared-memory pool information is
-    available; otherwise falls back to the pickle-based implementation.
+    available; otherwise falls back to the safe inline implementation.
     If SHM initialization fails for any reason (e.g. segment not found,
-    permission error), gracefully falls back to pickle transport.
+    permission error), gracefully falls back to inline transport.
 
     Args:
         metadata: Layout metadata for the non-GPU context.
         req_client: Transport-neutral client used for server requests.
         mq_timeout: Timeout in seconds for blocking MQ requests.
-        shm_name: Shared-memory segment name. Empty values force pickle mode.
+        shm_name: Shared-memory segment name. Empty values force inline mode.
         pool_size: Shared-memory pool size in bytes. Non-positive values force
-            pickle mode.
-        use_pickle: Explicitly use pickle transport even when SHM info is
-            available.
+            inline mode.
+        use_pickle: Legacy flag that explicitly uses inline transport even when
+            SHM info is available.
 
     Returns:
         A concrete :class:`EngineDrivenContext` instance.
@@ -209,7 +218,7 @@ def create_engine_driven_context(
         except Exception:
             logger.warning(
                 "Failed to initialize SHM context (shm_name=%s), "
-                "falling back to pickle transport",
+                "falling back to inline tensor transport",
                 shm_name,
                 exc_info=True,
             )
@@ -217,7 +226,7 @@ def create_engine_driven_context(
     # Local
     from .pickle import EngineDrivenContextPickle
 
-    logger.info("Creating EngineDrivenContextPickle (pickle transport)")
+    logger.info("Creating EngineDrivenContextPickle (safe inline transport)")
     return EngineDrivenContextPickle(metadata, req_client, mq_timeout)
 
 

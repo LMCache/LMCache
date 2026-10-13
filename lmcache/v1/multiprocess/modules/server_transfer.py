@@ -6,7 +6,6 @@ from _thread import LockType
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 import abc
-import pickle
 
 # Third Party
 import torch
@@ -21,6 +20,10 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
+from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
+    decode_tensors,
+    encode_tensors,
+)
 
 if TYPE_CHECKING:
     # First Party
@@ -61,7 +64,7 @@ def create_transfer_strategy(
 
     Returns:
         ``ShmTransferStrategy`` when SHM is configured with a non-empty pool name and
-        positive pool size, otherwise ``PickleTransferStrategy``.
+        positive pool size, otherwise the safe inline strategy.
     """
     if shm_name and pool_size > 0:
         logger.info("Using shm non-GPU transfer strategy")
@@ -76,7 +79,7 @@ def create_transfer_strategy(
             ),
         )
 
-    logger.info("Using pickle non-GPU transfer strategy")
+    logger.info("Using safe inline non-GPU transfer strategy")
     return PickleTransferStrategy(storage_manager, read_owner_resolver)
 
 
@@ -84,7 +87,7 @@ class TransferStrategy(abc.ABC):
     """Contract for non-GPU transport backends used by the server.
 
     Implementations encapsulate the transport-specific prepare/commit lifecycle for
-    store and retrieve operations, allowing the server to use either pickle-based or
+    store and retrieve operations, allowing the server to use either inline or
     shared-memory-based transfers behind a common interface.
     """
 
@@ -166,12 +169,12 @@ class TransferStrategy(abc.ABC):
 
 
 class PickleTransferStrategy(TransferStrategy):
-    """Pickle-based transport for non-GPU transfer requests.
+    """Safe inline transport for non-GPU transfer requests.
 
     This is the default transport when SHM is unavailable, and it is also used as a
     fallback by the SHM strategy when the worker sends an inline serialized payload.
-    ``prepare_store`` returns an empty context, while ``commit_store`` deserializes
-    the pickle payload and writes the resulting tensors into reserved objects.
+    ``prepare_store`` returns an empty context, while ``commit_store`` validates a
+    typed tensor envelope and writes the resulting tensors into reserved objects.
     """
 
     def __init__(
@@ -179,7 +182,7 @@ class PickleTransferStrategy(TransferStrategy):
         storage_manager: "StorageManager",
         read_owner_resolver: Callable[[str], dict[ObjectKey, int] | None] | None = None,
     ) -> None:
-        """Initialize pickle transfer strategy.
+        """Initialize the safe inline transfer strategy.
 
         Args:
             storage_manager: Storage manager used for reserve/read/finish calls.
@@ -194,9 +197,9 @@ class PickleTransferStrategy(TransferStrategy):
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> PrepareStoreResponse:
-        """Return empty store context for pickle mode.
+        """Return empty store context for inline mode.
 
-        Pickle transport does not pre-allocate SHM slots during prepare.
+        Inline transport does not pre-allocate SHM slots during prepare.
         """
         return PrepareStoreResponse(context={})
 
@@ -208,13 +211,18 @@ class PickleTransferStrategy(TransferStrategy):
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> bool:
-        """Deserialize and write pickled chunks into reserved objects.
+        """Deserialize and write validated inline chunks into reserved objects.
 
         Returns:
             ``True`` when every reserved object is written successfully.
         """
         obj_keys = resolve_obj_keys(key)
-        chunks: list[torch.Tensor] = pickle.loads(cpu_data)
+        chunks = decode_tensors(
+            cpu_data,
+            expected_shape=context.layout_desc.shapes[0],
+            expected_dtype=context.layout_desc.dtypes[0],
+            expected_count=len(obj_keys),
+        )
         reserved_dict = self._storage_manager.reserve_write(
             obj_keys, context.layout_desc
         )
@@ -225,7 +233,7 @@ class PickleTransferStrategy(TransferStrategy):
                     continue
                 if idx >= len(chunks):
                     logger.error(
-                        "Engine-driven pickle store is missing chunk %d "
+                        "Engine-driven inline store is missing chunk %d "
                         "(instance_id=%d, object_keys=%d, chunks=%d)",
                         idx,
                         instance_id,
@@ -236,7 +244,7 @@ class PickleTransferStrategy(TransferStrategy):
                 memory_obj = reserved_dict[obj_key]
                 if memory_obj.tensor is None:
                     logger.error(
-                        "Engine-driven pickle store reserved an object without "
+                        "Engine-driven inline store reserved an object without "
                         "a tensor (instance_id=%d, chunk_index=%d)",
                         instance_id,
                         idx,
@@ -245,7 +253,7 @@ class PickleTransferStrategy(TransferStrategy):
                 chunk_cpu = chunks[idx]
                 if chunk_cpu.shape != memory_obj.tensor.shape:
                     logger.error(
-                        "Engine-driven pickle store chunk shape mismatch "
+                        "Engine-driven inline store chunk shape mismatch "
                         "(instance_id=%d, chunk_index=%d, chunk_shape=%s, "
                         "object_shape=%s)",
                         instance_id,
@@ -267,7 +275,7 @@ class PickleTransferStrategy(TransferStrategy):
         success = len(written_keys) == len(reserved_dict)
         if not success:
             logger.error(
-                "Engine-driven pickle store incomplete (instance_id=%d, "
+                "Engine-driven inline store incomplete (instance_id=%d, "
                 "object_keys=%d, reserved=%d, chunks=%d, written=%d)",
                 instance_id,
                 len(obj_keys),
@@ -283,7 +291,7 @@ class PickleTransferStrategy(TransferStrategy):
         instance_id: int,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> PrepareRetrieveResponse:
-        """Read prefetched objects and return serialized pickle payload."""
+        """Read prefetched objects and return a typed inline tensor payload."""
         obj_keys = resolve_obj_keys(key)
         prefetched_keys: list[ObjectKey] = []
         owners = (
@@ -307,7 +315,7 @@ class PickleTransferStrategy(TransferStrategy):
                         )
                     chunks.append(memory_obj.tensor.cpu().clone())
                 return PrepareRetrieveResponse(
-                    success=True, data=pickle.dumps(chunks), context={}
+                    success=True, data=encode_tensors(chunks), context={}
                 )
         finally:
             if prefetched_keys:
@@ -320,7 +328,7 @@ class PickleTransferStrategy(TransferStrategy):
         key: IPCCacheServerKey,
         instance_id: int,
     ) -> bool:
-        """No-op for pickle mode; data was already copied during prepare."""
+        """No-op for inline mode; data was already copied during prepare."""
         return True
 
 
@@ -330,7 +338,7 @@ class ShmTransferStrategy(TransferStrategy):
     This strategy exposes SHM slot descriptors during ``prepare_store`` and
     ``prepare_retrieve`` so workers can access storage buffers directly. It tracks
     pending SHM reservations until the matching commit step releases them, and it
-    falls back to pickle-based commit handling when ``cpu_data`` is non-empty.
+    falls back to typed inline commit handling when ``cpu_data`` is non-empty.
     """
 
     def __init__(
@@ -352,7 +360,8 @@ class ShmTransferStrategy(TransferStrategy):
             pending_reads: Shared pending SHM read reservations map.
             pending_lock: Lock guarding shared pending SHM maps.
             transfer_key_factory: Factory to build `(instance_id, key)` transfer keys.
-            fallback_strategy: Pickle fallback for non-empty ``cpu_data`` payloads.
+            fallback_strategy: Safe inline fallback for non-empty ``cpu_data``
+                payloads.
         """
         self._storage_manager = storage_manager
         self._pending_writes = pending_writes
@@ -417,7 +426,7 @@ class ShmTransferStrategy(TransferStrategy):
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> bool:
-        """Finalize SHM store write locks or fallback to pickle commit.
+        """Finalize SHM store write locks or use the safe inline fallback.
 
         Returns:
             ``True`` when pending SHM reservation is committed successfully.

@@ -448,7 +448,7 @@ def run_cache_server(
                 if free_bytes < mem_cfg.size_in_bytes:
                     logger.warning(
                         "Insufficient /dev/shm capacity: need %d bytes, have %d bytes. "
-                        "Disabling SHM, falling back to pickle.",
+                        "Disabling SHM, falling back to safe inline transfer.",
                         mem_cfg.size_in_bytes,
                         free_bytes,
                     )
