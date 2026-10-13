@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock
+import logging
 import threading
 
 # Third Party
@@ -170,6 +171,9 @@ def test_deferred_io_failure_prevents_publication_or_retrieve_hit(
         end=256,
         request_id="request",
     )
+    # LMCache loggers do not propagate to pytest's root capture handler.
+    caplog.set_level(logging.ERROR, logger=module_impl.logger.name)
+    module_impl.logger.addHandler(caplog.handler)
     try:
         if method == "store":
             event, success, mask = module.store_with_chunk_mask(
@@ -216,6 +220,7 @@ def test_deferred_io_failure_prevents_publication_or_retrieve_hit(
         assert end.metadata[count_name] == 0
         assert end.metadata["num_tokens"] == 0
     finally:
+        module_impl.logger.removeHandler(caplog.handler)
         context.close()
 
 
