@@ -122,7 +122,8 @@ def try_get_vllm_kv_cache_layout(
     # Legacy vLLM could report NHD on CPU even though the CPU attention backend
     # physically allocated [B, H, N, C] (HND). Post-vllm#51718 layouts are
     # returned from CacheConfig above, so normalize only this legacy fallback.
-    if torch_device_type == "cpu" and kv_layout in ("NHD", "HND"):
+    # vllm-neuron likewise reports NHD but allocates [2, NB, NH, BS, HS].
+    if torch_device_type in ("cpu", "neuron") and kv_layout in ("NHD", "HND"):
         return "HND"
     return kv_layout
 

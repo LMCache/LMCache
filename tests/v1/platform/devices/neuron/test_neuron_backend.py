@@ -8,16 +8,48 @@ is skipped when torch_neuronx is not installed.
 """
 
 # Standard
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
+import sys
 
 # Third Party
 import pytest
 
 # First Party
 from lmcache.v1.platform import resolve_device_ops
-from lmcache.v1.platform.base.device_ops import DeviceOps
-from lmcache.v1.platform.devices.neuron import NeuronDeviceSpec
+from lmcache.v1.platform._device_detect import _detect_device, get_device_spec
+from lmcache.v1.platform.devices.neuron import (
+    NeuronDeviceSpec,
+    _install_device_module_shims,
+    _neuron_device_count,
+    _neuron_set_device,
+    _neuron_synchronize,
+)
+from lmcache.v1.platform.devices.neuron.device_ops import NeuronDeviceOps
 import lmcache.v1.platform as platform_pkg
+
+
+class _StubTorch:
+    """Minimal ``torch`` stand-in exposing only what detection reads."""
+
+    def __init__(self, neuron: object = None) -> None:
+        self.cuda = SimpleNamespace(is_available=lambda: False)
+        if neuron is not None:
+            self.neuron = neuron
+
+
+def _raise_runtime_error() -> bool:
+    """Stand in for a ``torch.neuron.is_available()`` that cannot claim a core."""
+    raise RuntimeError("NRT init failed: all NeuronCores are in use")
+
+
+def _is_available_with(neuron: object, *, torch_neuronx: object) -> bool:
+    """Run ``is_available`` with stubbed modules; ``None`` means not installed."""
+    with patch.dict(
+        "sys.modules", {"torch": _StubTorch(neuron), "torch_neuronx": torch_neuronx}
+    ):
+        return NeuronDeviceSpec().is_available()
 
 
 @pytest.fixture
@@ -43,7 +75,7 @@ def test_neuron_spec_properties(neuron_spec: NeuronDeviceSpec) -> None:
     """NeuronDeviceSpec exposes the correct device identity."""
     assert neuron_spec.device_type == "neuron"
     assert neuron_spec.torch_module_name == "neuron"
-    assert neuron_spec.ops_cls is DeviceOps
+    assert neuron_spec.ops_cls is NeuronDeviceOps
 
 
 # -- Registry integration --------------------------------------------------
@@ -58,17 +90,120 @@ def test_neuron_registry_integration(
         "_DEVICE_REGISTRY",
         {**isolated_registry, "neuron": NeuronDeviceSpec()},
     )
-    assert type(resolve_device_ops("neuron")) is DeviceOps
+    assert type(resolve_device_ops("neuron")) is NeuronDeviceOps
+
+
+# -- Device count ----------------------------------------------------------
+
+# torch.neuron exposes only current_device and is_available, so the base
+# DeviceSpec.device_count() (which defers to torch_dev.device_count()) raises
+# AttributeError on Neuron.  These pin the override's precedence order.
+
+
+def test_device_count_prefers_visible_cores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``NEURON_RT_VISIBLE_CORES`` wins, counting ids and ranges."""
+    monkeypatch.setenv("NEURON_RT_VISIBLE_CORES", "0,2,4-7")
+    monkeypatch.setenv("NEURON_RT_NUM_CORES", "64")
+    # 0 and 2 are one core each, 4-7 is four: six total.
+    assert _neuron_device_count() == 6
+
+
+def test_device_count_falls_back_to_num_cores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``NEURON_RT_NUM_CORES`` is used when no visible-core list is set."""
+    monkeypatch.delenv("NEURON_RT_VISIBLE_CORES", raising=False)
+    monkeypatch.setenv("NEURON_RT_NUM_CORES", "32")
+    assert _neuron_device_count() == 32
+
+
+def test_device_count_falls_back_to_driver_devices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no env override, count the devices the driver exposes."""
+    monkeypatch.delenv("NEURON_RT_VISIBLE_CORES", raising=False)
+    monkeypatch.delenv("NEURON_RT_NUM_CORES", raising=False)
+    monkeypatch.setattr("glob.glob", lambda pattern: ["/dev/neuron0", "/dev/neuron1"])
+    assert _neuron_device_count() == 2
+
+
+def test_device_count_never_reports_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A count of zero would make callers treat this as a multi-node case."""
+    monkeypatch.delenv("NEURON_RT_VISIBLE_CORES", raising=False)
+    monkeypatch.delenv("NEURON_RT_NUM_CORES", raising=False)
+    monkeypatch.setattr("glob.glob", lambda pattern: [])
+    assert _neuron_device_count() == 1
+
+
+# -- Synchronize -----------------------------------------------------------
+
+# libtorch_neuronx_lite registers torch.neuron as a bare ModuleType with only
+# is_available and current_device, so LMCache's generic torch_dev.synchronize()
+# would raise AttributeError. The shims fill that in.
+
+
+def test_synchronize_steps_torch_xla_when_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A loaded torch-xla is stepped, flushing the lazy backend."""
+    calls: list[str] = []
+    monkeypatch.setitem(
+        sys.modules, "torch_xla", SimpleNamespace(sync=lambda: calls.append("xla"))
+    )
+    _neuron_synchronize()
+    assert calls == ["xla"]
+
+
+def test_synchronize_is_a_noop_without_xla(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Native backend has no queue to drain, so this must not raise."""
+    monkeypatch.delitem(sys.modules, "torch_xla", raising=False)
+    _neuron_synchronize()
+
+
+def test_synchronize_survives_a_failing_xla_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken step barrier must not take down the transfer path."""
+
+    def _boom() -> None:
+        raise RuntimeError("no XLA devices")
+
+    monkeypatch.setitem(sys.modules, "torch_xla", SimpleNamespace(sync=_boom))
+    _neuron_synchronize()
+
+
+# -- Device-module shims ---------------------------------------------------
+
+
+def test_shims_fill_in_the_missing_methods() -> None:
+    """The stub module gains what LMCache's torch_dev call sites expect."""
+    stub = SimpleNamespace(is_available=lambda: True, current_device=lambda: 0)
+    _install_device_module_shims(stub)
+    for name in ("synchronize", "device_count", "set_device"):
+        assert callable(getattr(stub, name)), name
+
+
+def test_shims_never_shadow_a_real_sdk_implementation() -> None:
+    """If a future SDK ships synchronize, that one must win."""
+    sentinel = lambda: "sdk"  # noqa: E731
+    stub = SimpleNamespace(synchronize=sentinel)
+    _install_device_module_shims(stub)
+    assert stub.synchronize is sentinel
+
+
+def test_shims_are_idempotent() -> None:
+    """Detection may run more than once; installing twice must be stable."""
+    stub = SimpleNamespace()
+    _install_device_module_shims(stub)
+    first = stub.synchronize
+    _install_device_module_shims(stub)
+    assert stub.synchronize is first
+
+
+def test_set_device_accepts_and_ignores_a_core_index() -> None:
+    """Cores are bound at process start, so there is nothing to switch."""
+    _neuron_set_device(3)
 
 
 # -- Availability guards ---------------------------------------------------
-
-
-def test_neuron_not_available_without_sdk(
-    neuron_spec: NeuronDeviceSpec,
-) -> None:
-    """is_available() returns False when torch_neuronx is not installed."""
-    assert neuron_spec.is_available() is False
 
 
 def test_neuron_no_handle_transfer(
@@ -125,3 +260,53 @@ def test_neuron_device_type_matches_torch_neuronx() -> None:
         f"NeuronDeviceSpec assumes device_type='neuron' but "
         f"torch_neuronx reports '{actual}'. Update NeuronDeviceSpec."
     )
+
+
+# -- Init flow: discovery -> availability -> detection ---------------------
+
+
+def test_spec_is_discovered_by_the_registry() -> None:
+    """Defining the subclass is enough -- no manual registration needed."""
+    assert isinstance(get_device_spec("neuron"), NeuronDeviceSpec)
+
+
+def test_available_when_torch_neuron_registered_without_torch_neuronx() -> None:
+    """vllm-neuron registers ``torch.neuron`` without ``torch_neuronx``."""
+    neuron = SimpleNamespace(is_available=lambda: True)
+    assert _is_available_with(neuron, torch_neuronx=None) is True
+
+
+def test_available_with_torch_neuronx_installed() -> None:
+    """A host with ``torch_neuronx`` and a usable device is available."""
+    neuron = SimpleNamespace(is_available=lambda: True)
+    assert _is_available_with(neuron, torch_neuronx=SimpleNamespace()) is True
+
+
+def test_unavailable_without_the_torch_neuron_backend() -> None:
+    """No ``torch.neuron`` and no ``torch_neuronx`` means not available."""
+    assert _is_available_with(None, torch_neuronx=None) is False
+
+
+def test_unavailable_when_torch_neuron_reports_no_device() -> None:
+    """``torch.neuron.is_available() is False`` makes the spec unavailable."""
+    neuron = SimpleNamespace(is_available=lambda: False)
+    assert _is_available_with(neuron, torch_neuronx=None) is False
+
+
+def test_unavailable_instead_of_raising_when_cores_are_claimed() -> None:
+    """A raising ``torch.neuron.is_available()`` degrades to "unavailable"."""
+    neuron = SimpleNamespace(is_available=_raise_runtime_error)
+    assert _is_available_with(neuron, torch_neuronx=None) is False
+
+
+def test_detect_device_selects_registered_torch_neuron_when_forced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``DEVICE_TYPE=neuron`` routes detection to the registered ``torch.neuron``."""
+    monkeypatch.setenv("DEVICE_TYPE", "neuron")
+    stub = _StubTorch(SimpleNamespace(is_available=lambda: True))
+    with patch.dict("sys.modules", {"torch": stub, "torch_neuronx": None}):
+        torch_dev, device_type, backend_name = _detect_device()
+    assert device_type == "neuron"
+    assert backend_name == "neuron"
+    assert torch_dev is stub.neuron
