@@ -63,7 +63,7 @@ lmcache/cli/commands/bench/
     │   ├── alignment.py           # ChunkAligner: pad blocks to whole chunks
     │   ├── dataset.py             # Sample, hub registry, schema adapters
     │   ├── prompts.py             # QA prompt text and message composition
-    │   └── scoring.py             # F1, answer extraction, QualityAggregator
+    │   └── scoring.py             # F1, answer match, QualityAggregator
     └── workloads/
         ├── __init__.py            # create_workload() factory
         ├── base.py                # BaseWorkload (ABC + run loop), MetricSection
@@ -494,11 +494,19 @@ use and cache under `HF_HOME`; any other value is a local path.
 | `musique` | `dgslibisey/MuSiQue` | JSONL, 20 passages/question, ~2.1k tokens |
 | `hotpotqa` | `hotpotqa/hotpot_qa` | Parquet (distractor/validation), needs `pyarrow` |
 
-`load_samples` recognizes four record schemas, so most QA files on disk load
-unchanged: `ctxs[].{title,text}`, MuSiQue's `paragraphs[].paragraph_text`, and
+`load_samples` recognizes five record schemas, so most QA files on disk load
+unchanged: `ctxs[].{title,text}`, MuSiQue's `paragraphs[].paragraph_text`,
 HotpotQA's `context` as either a `{title, sentences}` struct or
-`[[title, [sentence, …]], …]` pairs. Records missing passages, a question, or
-gold answers are skipped.
+`[[title, [sentence, …]], …]` pairs, and the RAGAS hand-off shape
+(`retrieved_contexts`, `user_input`, `reference`, with alternate answers in
+`extra.answer_aliases`). Records missing passages, a question, or gold answers
+are skipped.
+
+Where a dataset marks which passages support the answer — MuSiQue
+`is_supporting`, HotpotQA `supporting_facts`, or `context_metadata[].gold` —
+their indices are kept on `Sample.evidence_indices`, remapped past any empty
+passages that were dropped. The workload does not use them yet; they let a
+quality comparison tell whether a lost answer depended on a moved passage.
 
 **Document alignment.** Each document is padded to a multiple of
 `--rag-doc-align-tokens`, and the system prompt is padded so the

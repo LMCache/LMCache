@@ -16,7 +16,9 @@ without changes on the caller side.
   `memory_region_count`, `memcheck`, `close`. An implementation that cannot
   honour a call answers with the documented `L1Error` codes instead of
   raising, so the callers keep one code path.
-- It is `runtime_checkable`; `L1Manager` satisfies it unchanged.
+- It is `runtime_checkable`; `L1Manager` declares it explicitly
+  (`class L1Manager(L1ManagerInterface)`) so the contract is visible at the
+  implementation site, not only at the call sites.
 - `next_l1_manager_id()` and `validate_read_locks()` in `l1_manager.py` are
   public so every implementation draws from one id counter (the id is the
   owner tag stamped on memory objects) and clamps read-lock counts the same

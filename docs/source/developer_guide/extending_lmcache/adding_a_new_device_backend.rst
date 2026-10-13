@@ -327,9 +327,12 @@ when exactly one reports available. If multiple backends report available, set
 
 .. note::
 
-   The default transfer mode is ``auto`` (CUDA → LMCache-driven, other
-   devices → engine-driven).  The example above explicitly sets
-   ``engine_driven`` so that a new non-CUDA device works without
+   The default transfer mode is ``auto``, which resolves to the device
+   spec's declared default
+   (:meth:`~lmcache.v1.platform.base.device_spec.DeviceSpec.default_mp_transfer_mode`):
+   devices with a complete LMCache-driven stack (CUDA, NPU) get
+   LMCache-driven, everything else engine-driven.  The example above
+   explicitly sets ``engine_driven`` so that a new device works without
    additional capability checks.  For the ``lmcache_driven`` mode
    (IPC zero-copy), see :ref:`Advanced transfer mode <part-2-performance>`.
 
@@ -437,11 +440,16 @@ For concrete reference implementations, see:
 Advanced transfer mode
 ~~~~~~~~~~~~~~~~~~~~~~
 
-By default, the transfer mode is **AUTO**: the router dispatches
-strictly by ``device_type`` — ``device_type == "cuda"`` goes to
-``LMCacheDrivenTransferContext`` (IPC zero-copy), everything else to
-``EngineDrivenTransferContext``.  A non-CUDA device that supports IPC
-handle transfer can still opt into LMCache-driven explicitly (below).
+By default, the transfer mode is **AUTO**: ``auto`` resolves to the
+device spec's declared default
+(:meth:`~lmcache.v1.platform.base.device_spec.DeviceSpec.default_mp_transfer_mode`).
+The base implementation derives that default from
+:meth:`~lmcache.v1.platform.base.device_spec.DeviceSpec.is_lmcache_driven_available`:
+devices with a complete LMCache-driven stack (CUDA, NPU) default to
+``LMCacheDrivenTransferContext`` (IPC zero-copy), everything else —
+including opt-in-only stacks such as CPU SHM and MUSA handles — to
+``EngineDrivenTransferContext``.  A device whose LMCache-driven stack is
+available but not the default can still opt in explicitly (below).
 
 .. note::
 
@@ -461,9 +469,9 @@ checks — both must succeed, otherwise the factory raises
    :attr:`~lmcache.v1.platform.base.device_spec.DeviceSpec.ipc_wrapper_cls`.
    :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
    binding off the registered spec — no separate registry / auto-scan.
-2. ``DeviceSpec.is_handle_transfer_available()`` must return ``True``
-   (the base-class default; override to ``False`` only if your device
-   lacks IPC handle transfer).
+2. ``DeviceSpec.is_lmcache_driven_available()`` must return ``True``
+   (the base-class default is ``False``; a device with the complete
+   handle-transfer stack overrides it to ``True``).
 
 Separately, the LMCache-driven server module also requires a
 ``BaseCacheContext`` subclass next to the backend (for example,
@@ -573,9 +581,9 @@ Override these methods in your ``DeviceSpec``:
 
             return FooIPCWrapper
 
-        def is_handle_transfer_available(self) -> bool:
-            """Return True if your device supports IPC handle transfer."""
-            return True  # base-class default; override to False if unsupported
+        def is_lmcache_driven_available(self) -> bool:
+            """Return True when the device can serve the LMCache-driven path."""
+            return True  # base default is False; required to enable lmcache_driven
 
         @property
         def pin_memory_backend(self):
