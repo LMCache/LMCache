@@ -74,6 +74,11 @@ class MPServerConfig:
     content is already indexed, so the same text stored behind two prefixes is
     indexed once. No effect for other engines."""
 
+    enable_blend_reorder: bool = False
+    """engine_type='blend' only: record stored prompts' token ids and answer
+    the ``cb_reorder_plan`` RPC, which orders a prompt so it starts with an
+    exact copy of a cached prompt. No effect for other engines."""
+
     supported_transfer_mode: Literal["lmcache_driven", "engine_driven", "auto"] = (
         "lmcache_driven"
     )
@@ -134,6 +139,9 @@ class MPServerConfig:
     enable: list[str] = field(default_factory=list)
     """List of experimental transfer modules to enable. Options: transfer_query
     (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
+
+    kv_event_log_size: int = 32768
+    """CPU store/eviction records retained for KV-event subscribers; 0 disables it."""
 
     null_block_id: int = 0
     """Engine block ID that denotes absent KV data. The default ``0`` keeps
@@ -536,6 +544,12 @@ def add_mp_server_args(
         "behind different prefixes is indexed once. No effect otherwise.",
     )
     mp_group.add_argument(
+        "--enable-blend-reorder",
+        action="store_true",
+        help="--engine-type blend only: answer the cb_reorder_plan RPC, which "
+        "orders a prompt so it starts with an exact copy of a cached prompt.",
+    )
+    mp_group.add_argument(
         "--enable",
         type=str,
         nargs="*",
@@ -543,6 +557,13 @@ def add_mp_server_args(
         help="List of experimental transfer modules to enable. "
         "Options: transfer_query (see lmcache.v1.multiprocess.modules."
         "experimental.__init___.py).",
+    )
+    mp_group.add_argument(
+        "--kv-event-log-size",
+        type=int,
+        default=MPServerConfig.kv_event_log_size,
+        help="CPU store/eviction records retained for KV-event subscribers. "
+        "0 disables the channel. Default is %(default)s.",
     )
     mp_group.add_argument(
         "--server-module",
@@ -592,6 +613,7 @@ def parse_args_to_mp_server_config(
         separate_object_groups=args.separate_object_groups,
         enable_segmented_prefix=args.enable_segmented_prefix,
         enable_dedup_content=args.enable_dedup_content,
+        enable_blend_reorder=args.enable_blend_reorder,
         supported_transfer_mode=args.supported_transfer_mode,
         isolated_ipc=args.isolated_ipc,
         runtime_plugin_config=RuntimePluginConfig(
@@ -606,6 +628,7 @@ def parse_args_to_mp_server_config(
         session_ttl_seconds=args.session_ttl_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
         enable=args.enable or [],
+        kv_event_log_size=args.kv_event_log_size,
         server_modules=parse_server_module_specs(args.server_module or []),
     )
 

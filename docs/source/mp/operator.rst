@@ -794,7 +794,11 @@ Overrides & Extras
      - Extra pod annotations.
    * - ``podLabels``
      - --
-     - Extra pod labels.
+     - Extra pod labels. Selector labels (``app.kubernetes.io/name``,
+       ``app.kubernetes.io/instance``, and ``app.kubernetes.io/managed-by``)
+       take precedence over conflicting entries. This also applies to
+       CacheBlendEngine and LMCacheCoordinator pods. On updates, existing
+       workload selector labels retain their values.
    * - ``serviceAccountName``
      - --
      - ServiceAccount for pods.
