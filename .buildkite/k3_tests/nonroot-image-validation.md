@@ -1,7 +1,6 @@
 # Temporary PR #5685 image validation
 
-This draft-only experiment adds two steps to the existing K3 unit and correctness
-pipelines. Close it after collecting the results; it is not intended for merging.
+This draft-only experiment adds two image steps to the existing K3 unit pipeline. Close it after collecting the results; it is not intended for merging.
 
 Both images come from the unmodified Dockerfiles at
 [PR #5685 commit 1541a889](https://github.com/LMCache/LMCache/commit/1541a8898702ec5160bb1c4d36db3f3bd7e852b0).
@@ -15,16 +14,19 @@ with `PYTHONPATH` unset and Python safe-path mode enabled. They check the instal
 package path and generated source revision before running any GPU tests. They do not source
 the normal per-job install scripts or reinstall LMCache, Torch, or vLLM.
 
-- Unit pipeline: default user, cache/shared-memory writes, native extension import,
+- Standalone image step: default user, cache/shared-memory writes, native extension import,
   pinned host memory, LMCache CUDA IPC data round trip, and standalone server RPC.
-- Correctness pipeline: the same GPU probe, followed by two identical requests to
+- vLLM image step: the same GPU probe, followed by two identical requests to
   Qwen/Qwen2.5-0.5B-Instruct with vLLM prefix caching disabled. Both answers must be
   `42`; LMCache cached tokens must be zero cold and positive warm. Local disk cache
   files must also exist. This is a focused image smoke test, not the complete
   ShareGPT correctness suite.
 
-The original unit and correctness jobs still run independently with their usual
-CI base image. Only the added steps provide evidence about these published images.
+The original unit job still runs independently with its usual CI base image.
+Only the added image steps provide evidence about these published images. The
+Buildkite correctness pipeline currently has a server-side skip for vLLM
+`BATCH_INVARIANT`; it does not upload its repository pipeline definition. Both
+image checks therefore live in the active unit pipeline.
 The IPC check verifies transferred data; it does not assert allocator lifecycle
 behavior. Server, request, package-version, and UID logs are uploaded as artifacts.
 
@@ -69,7 +71,8 @@ builder volume filesystem and free space before building on a shared machine.
 
 ## Run the published checks outside CI
 
-Use a Linux amd64 GPU host with Docker and NVIDIA Container Toolkit. Choose an
+Use a Linux amd64 GPU host with Docker, NVIDIA Container Toolkit, and a CUDA 13
+compatible NVIDIA driver. Choose an
 idle supported GPU in place of `device=0`. Fetch this draft's test scripts into a
 separate checkout; the source revision used to build the images does not contain
 them. No Python packages need installing on the host.
@@ -77,6 +80,7 @@ them. No Python packages need installing on the host.
 ```bash
 git clone --branch test/nonroot-image-ci \
   https://github.com/maobaolong/LMCache.git LMCache-image-tests
+git -C LMCache-image-tests checkout --detach f829152bcc956047178ec364538dbf7be42f2b5b
 cd LMCache-image-tests
 
 docker run --name pr5685-standalone-check --gpus device=0 --shm-size=2g \
