@@ -559,6 +559,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # appends. The scheduler role sets it from the vLLM config.
     _mamba_relocation_window: int = 0
 
+    # Worker adapter implementation; subclasses override to swap transports.
+    # ``None`` selects the module-level default, resolved at call time so a
+    # test that patches ``LMCacheMPWorkerAdapter`` on this module still takes
+    # effect; binding the real class here would capture it at import time.
+    _worker_adapter_cls: type[LMCacheMPWorkerAdapter] | None = None
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -761,7 +767,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             local_server_url = server_urls[
                 parallel_strategy.vllm_worker_id // ranks_per_node
             ]
-            self.worker_adapter = LMCacheMPWorkerAdapter(
+            worker_adapter_cls = self._worker_adapter_cls or LMCacheMPWorkerAdapter
+            self.worker_adapter = worker_adapter_cls(
                 server_url=local_server_url,
                 context=zmq_context,
                 model_name=cache_model_name,
