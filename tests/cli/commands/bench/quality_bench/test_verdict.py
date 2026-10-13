@@ -105,6 +105,7 @@ def _with_losses(samples: list[Sample], lost: int) -> list[ArmAnswer]:
 def plan(aligner):
     return build_plan(_samples(), aligner, ReuseScenario.INDEPENDENT, CHUNK, 1)
 
+
 def _decide(plan, blend_answers, measured=True, tolerance=0.05, references=2):
     samples = [s.sample for s in plan.samples]
     runs = [
