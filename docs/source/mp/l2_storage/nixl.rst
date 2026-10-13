@@ -34,12 +34,13 @@ initialization.
 **Required fields:**
 
 - ``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``,
-  ``HF3FS``, ``OBJ``, ``AZURE_BLOB``.
+  ``HF3FS``, ``IBM_SCALE``, ``OBJ``, ``AZURE_BLOB``.
 - ``pool_size``: Number of storage descriptors to pre-allocate (must be > 0).
 
 **Backend-specific parameters (``backend_params``):**
 
-File-based backends (``GDS``, ``GDS_MT``, ``POSIX``, ``HF3FS``) require:
+File-based backends (``GDS``, ``GDS_MT``, ``POSIX``, ``HF3FS``,
+``IBM_SCALE``) require:
 
 - ``file_path``: Directory path for storing L2 data.
 - ``use_direct_io``: ``"true"`` or ``"false"`` -- whether to use direct I/O.
@@ -63,6 +64,11 @@ The ``OBJ`` and ``AZURE_BLOB`` backends (object stores) do not require ``file_pa
      - Multi-threaded variant of GDS for higher throughput.
    * - ``HF3FS``
      - Shared file system backend (e.g., for distributed/networked storage).
+   * - ``IBM_SCALE``
+     - IBM Storage Scale (GPFS) backend via NIXL's io_uring-backed plugin.
+       Opens store files with ``O_WRONLY`` and load files with ``O_RDONLY``
+       so the plugin's ``scale_infer_is_write()`` fires the matching
+       ``ACCESS_RANGE`` prefetch hint at ``registerMem`` time.
    * - ``OBJ``
      - Object store backend.  No local file path required.
    * - ``AZURE_BLOB``
@@ -84,6 +90,9 @@ The ``OBJ`` and ``AZURE_BLOB`` backends (object stores) do not require ``file_pa
     # HF3FS backend
     --l2-adapter '{"type": "nixl_store", "backend": "HF3FS", "backend_params": {"file_path": "/mnt/hf3fs/lmcache", "use_direct_io": "false"}, "pool_size": 64}'
 
+    # IBM_SCALE backend (IBM Storage Scale / GPFS via io_uring)
+    --l2-adapter '{"type": "nixl_store", "backend": "IBM_SCALE", "backend_params": {"file_path": "/gpfs/lmcache", "use_direct_io": "true"}, "pool_size": 128}'
+
     # OBJ backend
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
 
@@ -103,12 +112,13 @@ per-operation instead of pre-allocating them at init. This enables:
 .. note::
 
    Only file-based backends are supported (``POSIX``, ``GDS``, ``GDS_MT``,
-   ``HF3FS``). The ``OBJ`` and ``AZURE_BLOB`` backends are not supported yet.
+   ``HF3FS``, ``IBM_SCALE``). The ``OBJ`` and ``AZURE_BLOB`` backends are
+   not supported yet.
 
 **Required fields:**
 
 - ``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``,
-  ``HF3FS``.
+  ``HF3FS``, ``IBM_SCALE``.
 
 **Backend-specific parameters (``backend_params``):**
 
