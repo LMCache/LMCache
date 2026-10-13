@@ -317,3 +317,22 @@ For the full design rationale see
    :maxdepth: 1
 
    /mp/tracing_and_debugging
+
+Shared L2 store scheduling
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+With ``LMCACHE_MP_TRACE_CONTEXT=1``, L1 reservation callbacks capture writer
+contexts. The store loop creates an independent ``mp.l2.store.schedule`` span
+and links it to observed contributors instead of selecting one parent.
+The span covers policy selection and adapter submission, not asynchronous
+I/O completion or GPU/RDMA execution. Caught adapter submission failures mark
+it ERROR without recording exception text.
+
+Links are bounded to 8 per key and 128 per batch, with at most 10,000 tracked
+keys. Sampling summaries include contributors beyond the link limits. Known
+unsampled-only batches stay unsampled; mixed or incomplete attribution uses
+the existing root sampler. After a key eviction, newly created summaries stay
+incomplete until listener close, including when an evicted key is reused.
+Missing attribution never borrows the completion thread's parent. Links
+describe observed reservation contributors, not an exact record of admitted
+writers. The feature is off by default.
