@@ -59,7 +59,11 @@ def decode_object_key(encoded: str) -> ObjectKey:
         encoded: Encoded key string produced by ``object_key_to_string``.
 
     Returns:
-        The reconstructed ``ObjectKey``.
+        The reconstructed ``ObjectKey``. Legacy four-field (unsalted) and
+        five-field (salted) encodings have ``cache_format=""``. Six-field
+        encodings preserve both salt and format, including an empty salt.
+        Legacy keys remain in their own namespace and cannot match keys
+        with a non-empty format.
 
     Raises:
         ValueError: If the encoded string has an unexpected shape or invalid

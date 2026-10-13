@@ -119,9 +119,13 @@ class TestStoreControllerMultimodel:
             ret_a = sm.reserve_write(keys_a, layout_a)
             ret_b = sm.reserve_write(keys_b, layout_b)
             for i, k in enumerate(keys_a):
-                ret_a[k].tensor.fill_(float(i + 1))
+                tensor = ret_a[k].tensor
+                assert tensor is not None
+                tensor.fill_(float(i + 1))
             for i, k in enumerate(keys_b):
-                ret_b[k].tensor.fill_(float(100 + i))
+                tensor = ret_b[k].tensor
+                assert tensor is not None
+                tensor.fill_(float(100 + i))
 
             # Single finish_write forces a mixed-model batch in the listener.
             sm.finish_write(keys_a + keys_b)
