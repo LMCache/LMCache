@@ -31,9 +31,6 @@ case "${PIPELINE_FILE}" in
     *k3_tests/multiprocess/pipeline.yml)
         good_first_issue_pipeline="multiprocess"
         ;;
-    *k3_tests/sglang/pipeline.yml)
-        good_first_issue_pipeline="sglang"
-        ;;
     *)
         good_first_issue_pipeline=""
         ;;

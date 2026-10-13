@@ -71,6 +71,40 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server import (
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
 
+_GRPC_MODULE_TYPES = (
+    LookupModule,
+    ManagementModule,
+    KVEventModule,
+    P2PController,
+    LMCacheDrivenTransferModule,
+    EngineDrivenTransferModule,
+    QStoreModule,
+    BlendModule,
+    ExtServerModuleRouter,
+)
+
+_GRPC_SERVICE_NAME_OVERRIDES = {
+    EngineDrivenTransferModule: "EngineDrivenService",
+    LMCacheDrivenTransferModule: "LMCacheDrivenService",
+    P2PController: "P2PService",
+    ExtServerModuleRouter: "ExtensionService",
+}
+
+
+def _expected_grpc_service_name(module_type: type[Any]) -> str:
+    """Derive the gRPC service name owned by a server module.
+
+    Args:
+        module_type: Server module class whose service name is required.
+
+    Returns:
+        The conventional service name or its established abbreviated form.
+    """
+    return _GRPC_SERVICE_NAME_OVERRIDES.get(
+        module_type,
+        module_type.__name__.removesuffix("Module") + "Service",
+    )
+
 
 @dataclass
 class _Calls:
@@ -224,19 +258,10 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
 def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     """Every generated RPC has one codec derived from its gRPC service."""
     bindings = get_service_bindings()
-    assert {
-        "LMCacheDrivenService",
-        "EngineDrivenService",
-        "LookupService",
-        "QStoreService",
-    }.issubset(bindings)
-    assert "EngineService" not in bindings
-    assert {method.name for _, method in iter_methods()} >= {
-        "Store",
-        "PrepareStore",
-        "Lookup",
-        "StoreQ",
+    assert set(bindings) == {
+        _expected_grpc_service_name(module_type) for module_type in _GRPC_MODULE_TYPES
     }
+
     registry = get_method_codec_registry()
     generated_methods = {method.full_name for _, method in iter_methods()}
     assert set(registry.by_full_name) == generated_methods
@@ -255,7 +280,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     )
     assert store_codec.response_type == tuple[bytes, bool]
 
-    clear_codec = registry.by_full_name["lmcache.mp.ControllerService.Clear"]
+    clear_codec = registry.by_full_name["lmcache.mp.ManagementService.Clear"]
     assert clear_codec.operation == "clear"
     assert clear_codec.payload_types == (bool,)
     assert clear_codec.request_decoder(clear_codec.request_encoder((), {})) == (False,)
@@ -294,7 +319,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
         ),
     )
     server_module_codec = registry.by_full_name[
-        "lmcache.mp.ControllerService.ServerModuleCall"
+        "lmcache.mp.ExtensionService.ServerModuleCall"
     ]
     assert server_module_codec.operation == "server_module_call"
     assert server_module_codec.payload_types == (ServerModuleCallRequest,)
@@ -303,20 +328,9 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
 
 def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
     """Every generated RPC resolves to one compatible module annotation."""
-    module_types = (
-        LookupModule,
-        ManagementModule,
-        KVEventModule,
-        P2PController,
-        LMCacheDrivenTransferModule,
-        EngineDrivenTransferModule,
-        QStoreModule,
-        BlendModule,
-        ExtServerModuleRouter,
-    )
     handlers = {
         registered.operation: registered.handler
-        for module_type in module_types
+        for module_type in _GRPC_MODULE_TYPES
         for registered in iter_request_handlers(module_type)
     }
     registry = get_method_codec_registry()

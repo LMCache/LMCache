@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Per-job env setup for the SGLang + LMCache MP integration tests.
+# Per-job environment setup for SGLang tests in the multiprocess suite.
 # CI callers may override SGLANG_INSTALL_SPEC with a branch, wheel, or
 # commit-pinned git URL. Otherwise the latest Buildkite-verified nightly is
 # resolved to its source commit.
