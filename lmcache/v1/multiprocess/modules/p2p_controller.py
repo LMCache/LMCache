@@ -384,21 +384,11 @@ class P2PController:
     # -----------------------------------------------------------------
 
     def _drop_abandoned_jobs(self) -> None:
-        """Forget lookups whose requester stopped polling for the result.
-
-        A peer stops querying a lookup once its own lookup timeout passes, or
-        when it crashes or loses the RPC. Its job, and the finished prefetch
-        result the storage manager keeps until queried, would otherwise stay
-        forever. A job older than ``P2PConfig.lookup_timeout`` is dropped
-        once its prefetch has finished; an unfinished one is retried on the
-        next call.
+        """Drop finished jobs older than the lookup timeout, draining results.
 
         Note:
-            The job's read locks are not released here. They expire through
-            the L1 read TTL, and an unlock issued after that expiry could
-            consume a lock that a later reader of the same key now holds.
-            A requester that queries after its job was dropped sees an
-            unknown task and treats the lookup as a miss.
+            Read locks are left to the L1 read TTL; unlocking after expiry
+            could release a later reader's lock.
         """
         cutoff = time.monotonic() - self._p2p_config.lookup_timeout
         with self._job_lock:

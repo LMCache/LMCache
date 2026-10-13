@@ -70,14 +70,9 @@ all-zero `Bitmap` (treated as a miss); a load past its deadline returns an
 all-zero `Bitmap` (treated as a failure). The prefetch controller then trims
 those keys as if the peer never had them.
 
-The owning peer bounds abandoned lookups too. A requester that times out,
-crashes, or loses the RPC never queries its lookup, so the owner's
-`P2PController` would otherwise keep that job and its finished prefetch result
-forever. On each new `P2P_LOOKUP_AND_LOCK`, the owner drops jobs older than its
-own `--p2p-lookup-timeout` once their prefetch has finished. Their read locks
-are left to the L1 read TTL rather than unlocked, because an unlock after the
-TTL expired could release a lock a later reader of the same key holds. A
-requester that queries a dropped job gets `None` and times out as a miss.
+On the owner, each new `P2P_LOOKUP_AND_LOCK` drops finished lookups older than
+`--p2p-lookup-timeout` that the requester never queried. Their read locks are
+left to expire by TTL; a late query gets `None` and counts as a miss.
 
 ## No store / no eviction
 
