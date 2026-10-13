@@ -9,11 +9,18 @@ wrappers' ``to_tensor()`` output and delegates to the matching
 ``create_cache_context`` hook. These tests exercise that dispatch
 without touching CUDA or the real ``GPUCacheContext`` /
 ``CPUCacheContext`` constructors -- they ``monkeypatch`` the hook on
-the registered ``DeviceSpec`` so the test stays platform-agnostic.
+the registered ``DeviceSpec`` so the test stays platform-agnostic. A separate
+CPU-only regression exercises the CUDA context's public GDS lease and event
+reuse with device calls mocked.
 """
 
 # Standard
+from concurrent.futures import ThreadPoolExecutor
+from types import ModuleType, SimpleNamespace
 from typing import Any, List
+from unittest.mock import MagicMock
+import sys
+import threading
 
 # Third Party
 import pytest
@@ -24,6 +31,7 @@ from lmcache import torch_dev, torch_device_type
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.cache_context import create_cache_context
+import lmcache.v1.platform.devices.cuda.cache_context as cuda_cache_context
 
 
 class _FakeWrapper:
@@ -204,3 +212,87 @@ def test_unregistered_device_type_raises() -> None:
     wrappers = [_FakeWrapper("fakedev")]
     with pytest.raises(ValueError, match="No cache-context class"):
         create_cache_context(wrappers)  # type: ignore[arg-type]
+
+
+def test_gds_context_event_reuse_and_close_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Close cannot unmap leased buffers; each transfer re-records one input event."""
+    runtime, stream, ready, wrapper = (MagicMock() for _ in range(4))
+    stream.cuda_stream = 0
+    runtime.Stream.return_value = stream
+    cupy = ModuleType("cupy")
+    monkeypatch.setattr(
+        cupy,
+        "cuda",
+        SimpleNamespace(ExternalStream=lambda *_: MagicMock()),
+        raising=False,
+    )
+    monkeypatch.setitem(sys.modules, "cupy", cupy)
+    monkeypatch.setattr(cuda_cache_context, "torch_dev", runtime)
+    event_factory = MagicMock(return_value=ready)
+    monkeypatch.setattr(cuda_cache_context.torch.cuda, "Event", event_factory)
+    slot_streams = [MagicMock() for _ in range(4)]
+    monkeypatch.setattr(
+        cuda_cache_context.torch.cuda, "Stream", MagicMock(side_effect=slot_streams)
+    )
+    register = MagicMock()
+    monkeypatch.setattr(cuda_cache_context, "register_gds_gpu_buffer", register)
+    teardown: list[str] = []
+
+    def drain_stream(device: object, slot_stream: MagicMock) -> None:
+        slot_stream.synchronize()
+        teardown.append("stream")
+
+    deregister_stream = MagicMock(side_effect=drain_stream)
+    monkeypatch.setattr(cuda_cache_context, "deregister_gds_stream", deregister_stream)
+    deregister = MagicMock(
+        side_effect=lambda _, slot_bytes=None: teardown.append("buffer")
+    )
+    monkeypatch.setattr(cuda_cache_context, "deregister_gds_gpu_buffer", deregister)
+    wrapper.close.side_effect = lambda: teardown.append("wrapper")
+    wrapper.to_tensor.return_value = torch.zeros((2, 4, 2, 1, 2), dtype=torch.float16)
+    context = cuda_cache_context.GPUCacheContext(
+        [wrapper], lmcache_tokens_per_chunk=4, layout_hints={"kv_layout": "NHD"}
+    )
+    for _ in range(2):
+        with context.gds_transfer_scope():
+            assert context.record_gds_transfer_ready() is ready
+            ready.synchronize()
+            for index, slot_stream in enumerate(slot_streams):
+                assert context.get_gds_transfer_stream(index) is slot_stream
+    event_factory.assert_called_once()
+    assert ready.record.call_count == 2
+    leased, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with context.gds_transfer_scope():
+            leased.set()
+            assert release.wait(5)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        worker = executor.submit(hold)
+        assert leased.wait(5)
+        closer = executor.submit(context.close)
+        try:
+            with pytest.raises(TimeoutError):
+                closer.result(timeout=0.05)
+            deregister.assert_not_called()
+            wrapper.close.assert_not_called()
+        finally:
+            release.set()
+        worker.result(timeout=5)
+        closer.result(timeout=5)
+    deregister.assert_called_once()
+    assert (
+        register.call_args.kwargs["slot_bytes"]
+        == deregister.call_args.kwargs["slot_bytes"]
+    )
+    assert deregister_stream.call_count == 4
+    for slot_stream in slot_streams:
+        slot_stream.synchronize.assert_called_once()
+    assert teardown == ["stream"] * 4 + ["buffer", "wrapper"]
+    wrapper.close.assert_called_once()
+    with pytest.raises(RuntimeError, match="closed"):
+        with context.gds_transfer_scope():
+            pytest.fail("Closed context admitted worker work")
