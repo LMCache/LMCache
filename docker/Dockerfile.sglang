@@ -4,9 +4,10 @@
 #
 # Please update any changes made here to docker/README.md
 #
-# LMCache's compiled extensions are tied to the torch they were built against
-# (the torch pin in pyproject.toml), so SGLANG_VERSION must be an SGLang
-# release whose image ships that same torch. The build fails, instead of
+# The release workflow builds on the newest SGLang release, passing the tag
+# lmsysorg/sglang:latest points to as SGLANG_VERSION. LMCache's compiled
+# extensions are tied to the torch they were built against (the torch pin in
+# pyproject.toml), so that SGLang release must ship the same torch. The build fails, instead of
 # shipping an image that silently falls back to slow paths, if:
 #   - SGLang's torch differs from EXPECTED_TORCH,
 #   - installing lmcache would change SGLang's torch/CUDA stack,
@@ -19,7 +20,7 @@
 #     --build-arg EXPECTED_TORCH=2.13.0 \
 #     -t lmcache/sglang:v0.5.6 .
 
-ARG SGLANG_VERSION=v0.5.21
+ARG SGLANG_VERSION=latest
 FROM lmsysorg/sglang:${SGLANG_VERSION}
 
 ARG SGLANG_VERSION
