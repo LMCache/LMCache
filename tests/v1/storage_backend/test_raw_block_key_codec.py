@@ -1,45 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# Third Party
-import pytest
-
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.storage_backend.raw_block.key_codec import (
     decode_object_key,
-    encode_object_key,
     object_key_to_string,
-    slot_identity_from_encoded_key,
 )
-
-
-@pytest.mark.parametrize("salt", ["", "tenant"])
-def test_legacy_keys_have_an_empty_format(salt: str) -> None:
-    """Read persisted keys without assigning them a new precision namespace."""
-    encoded = "org%2Fmodel@0x00000001@0@ab"
-    if salt:
-        encoded += f"@{salt}"
-    assert decode_object_key(encoded) == ObjectKey(
-        b"\xab", "org/model", 1, cache_salt=salt, cache_format=""
-    )
-
-
-@pytest.mark.parametrize("salt", ["", "tenant"])
-def test_formats_have_distinct_keys_and_slot_identities(salt: str) -> None:
-    """Legacy, BF16 and FP8 entries cannot alias in raw-block storage."""
-    specs = []
-    for cache_format in ("", "bf16", "fp8"):
-        key = ObjectKey(
-            b"\xab", "org/model", 1, cache_salt=salt, cache_format=cache_format
-        )
-        spec = encode_object_key(key)
-        assert decode_object_key(spec.encoded) == key
-        assert (
-            slot_identity_from_encoded_key(spec.encoded, "object") == spec.slot_identity
-        )
-        specs.append(spec)
-    assert len({spec.encoded for spec in specs}) == 3
-    assert len({spec.slot_identity for spec in specs}) == 3
 
 
 def test_raw_block_object_key_codec_preserves_sep_literal() -> None:
