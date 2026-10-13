@@ -9,7 +9,7 @@ The LMCache maintainers take security seriously. We appreciate the work of resea
 Report vulnerabilities privately using one of these channels:
 
 1. **GitHub private vulnerability reporting (preferred).** Go to the [Security tab](https://github.com/LMCache/LMCache/security) of this repository and click **Report a vulnerability**. Your report is visible only to the maintainers.
-2. **Email:** security@[TBD-domain]. If you'd like to encrypt your report, our PGP key is available at [TBD-link].
+2. **Email:** security@lmcache.ai.
 
 Please include as much of the following as you can:
 
