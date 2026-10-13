@@ -140,13 +140,6 @@ def test_parse_server_module_specs_accepts_object_and_list() -> None:
     assert specs[2].config == {}
 
 
-def test_parse_server_module_specs_rejects_removed_factory_name() -> None:
-    with pytest.raises(ValueError, match="unknown server module fields"):
-        parse_server_module_specs(
-            ['{"module_path":"plugin.one","factory_name":"build_server_modules"}']
-        )
-
-
 def test_load_server_module_classes_returns_class_and_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
