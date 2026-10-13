@@ -824,6 +824,10 @@ class LMCacheEngine:
 
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
+
+        Active synchronous retrieval does not release lookup pins. After
+        retrieval, the caller must release its pins with ``lookup_unpin(lookup_id)``
+        before issuing further blocking retrievals that may need cache space.
         """
         # Health check: block operation if LMCache is unhealthy
         if not self.is_healthy():
@@ -953,7 +957,9 @@ class LMCacheEngine:
                 if self._is_sync_pd_backend():
                     memory_obj.ref_count_down()
             else:
-                if memory_obj.is_pinned:
+                # Blocking gets acquire references, not ownership of lookup pins.
+                # The lookup owner releases those pins through lookup_unpin().
+                if (self.async_loading or self._is_passive()) and memory_obj.is_pinned:
                     memory_obj.unpin()
                 memory_obj.ref_count_down()
 
@@ -1304,7 +1310,9 @@ class LMCacheEngine:
         )
         assert None not in memory_objs, "Failed to get memory objects to move"
         logger.debug(
-            f"Trying to send {len(memory_objs)} memory objects to {new_position}"
+            "Trying to send %d memory objects to %s",
+            len(memory_objs),
+            new_position,
         )
 
         # TODO: reduce loops

@@ -45,7 +45,8 @@ PYBIND11_MODULE(lmcache_native, m) {
       .value("NL_X_TWO_NB_NH_ONE_BS_HS",
              EngineKVFormat::NL_X_TWO_NB_NH_ONE_BS_HS)
       .value("NL_X_TWO_X_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS)
-      .value("NL_X_NP_X_NB_BS_ONE_HS", EngineKVFormat::NL_X_NP_X_NB_BS_ONE_HS);
+      .value("NL_X_NP_X_NB_BS_ONE_HS", EngineKVFormat::NL_X_NP_X_NB_BS_ONE_HS)
+      .value("NL_X_NB_BS_NH_HS", EngineKVFormat::NL_X_NB_BS_NH_HS);
 
   m.attr("GPUKVFormat") = m.attr("EngineKVFormat");
 
@@ -147,6 +148,8 @@ PYBIND11_MODULE(lmcache_native, m) {
            "Clear the bit at the specified index to 0.")
       .def("test", &Bitmap::test, py::arg("index"),
            "Test the bit at the specified index.")
+      .def("copy", &Bitmap::copy,
+           "Return an independent copy with the same size and bits.")
       .def("popcount", &Bitmap::popcount, "Count the number of bits set to 1.")
       .def("size", &Bitmap::size, "Number of bits in the bitmap.")
       .def("__len__", &Bitmap::size, "Number of bits in the bitmap.")

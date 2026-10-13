@@ -4,8 +4,13 @@
 
 #include "phase_timing_recorder.cuh"
 
+#include <cstdlib>
 #include <deque>
 #include <mutex>
+
+#if defined(USE_ROCM)
+  #include <hip/hip_version.h>
+#endif
 
 namespace {
 
@@ -85,9 +90,11 @@ __device__ inline size_t calculate_engine_global_offset(
     // Content-size HND: L tensors [NB, NH, BS, CS]; same empty K/V axis as
     // NL_X_NB_NH_BS_TWO_HS (kv_size == 1, hs == content_size).
     return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_CS ||
+                       format == EngineKVFormat::NL_X_NB_BS_NH_HS) {
     // Content-size NHD: L tensors [NB, BS, NH, CS]; same empty K/V axis as
-    // NL_X_NB_NH_BS_CS, tokens before heads within a block.
+    // NL_X_NB_NH_BS_CS, tokens before heads within a block. Independent
+    // SGLang components share the same addressing with HS as the content.
     return engine_block_idx * scalars_per_block;
   } else if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS) {
     // TRT-LLM cross-layer HND: single tensor [NB, NL, 2, NH, BS, HS]
@@ -362,6 +369,9 @@ __global__ void multi_layer_block_transfer_kernel(
     case EngineKVFormat::NL_X_NB_BS_NH_CS:                              \
       LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_CS);       \
       break;                                                            \
+    case EngineKVFormat::NL_X_NB_BS_NH_HS:                              \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_HS);       \
+      break;                                                            \
     case EngineKVFormat::NL_X_NB_BSV_BSS:                               \
       LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BSV_BSS);        \
       break;                                                            \
@@ -630,8 +640,12 @@ void execute_object_group_transfer(
 // Direct copy-engine transfer (cudaMemcpyBatchAsync)
 // ---------------------------------------------------------------------------
 
-// cudaMemcpyBatchAsync exists from CUDA 12.8; HIP has no equivalent.
+// cudaMemcpyBatchAsync exists from CUDA 12.8. HIP gained hipMemcpyBatchAsync
+// in ROCm 7.x (HIP 7.15) with the identical 9-arg (failIdx) signature, so the
+// same direct copy-engine path serves both once the sources are hipified.
 #if !defined(USE_ROCM) && defined(CUDART_VERSION) && CUDART_VERSION >= 12080
+  #define LMC_HAS_BATCH_MEMCPY 1
+#elif defined(USE_ROCM) && defined(HIP_VERSION) && HIP_VERSION >= 71500000
   #define LMC_HAS_BATCH_MEMCPY 1
 #else
   #define LMC_HAS_BATCH_MEMCPY 0
@@ -747,7 +761,45 @@ bool batch_memcpy_supported() {
     int driver = 0;
     if (cudaRuntimeGetVersion(&runtime) != cudaSuccess) return false;
     if (cudaDriverGetVersion(&driver) != cudaSuccess) return false;
+  #if defined(USE_ROCM)
+    // HIP versions its runtime/driver on a different scale, so the compile-time
+    // HIP_VERSION guard cannot by itself prove the op is functional: some HIP
+    // builds link hipMemcpyBatchAsync but return hipErrorNotSupported at
+    // runtime. Keep the ROCm direct copy-engine path opt-in -- it is enabled
+    // only when LMCACHE_ROCM_ENABLE_BATCH_MEMCPY is set to a non-zero value.
+    (void)runtime;
+    (void)driver;
+    const char* enable = std::getenv("LMCACHE_ROCM_ENABLE_BATCH_MEMCPY");
+    if (enable == nullptr || enable[0] == '\0' || enable[0] == '0') {
+      return false;
+    }
+    // hipMemcpyBatchAsync's copy engine dereferences the host operand directly,
+    // so the hipHostRegister'd pinned host pool must be device-addressable.
+    // Where hipDeviceAttributeCanUseHostPointerForRegisteredMem == 0 (observed
+    // on MI300/MI355 ROCm configs) the registered host VA is not device-usable
+    // and the batched D2H/H2D copy faults asynchronously, so require the
+    // attribute before selecting the copy-engine path.
+    int device = 0;
+    if (hipGetDevice(&device) != hipSuccess) {
+      return false;
+    }
+    // Some ROCm builds report 0 here even though the registered host VA is
+    // device-addressable; allow an explicit opt-in after the parity tests.
+    const char* force = std::getenv("LMCACHE_ROCM_FORCE_BATCH_MEMCPY");
+    if (force != nullptr && force[0] != '\0' && force[0] != '0') {
+      return true;
+    }
+    int can_use_host_ptr = 0;
+    if (hipDeviceGetAttribute(
+            &can_use_host_ptr,
+            hipDeviceAttributeCanUseHostPointerForRegisteredMem,
+            device) != hipSuccess) {
+      return false;
+    }
+    return can_use_host_ptr != 0;
+  #else
     return runtime >= 12080 && driver >= 12080;
+  #endif
   }();
   return supported;
 #else

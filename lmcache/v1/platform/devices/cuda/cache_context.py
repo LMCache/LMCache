@@ -23,7 +23,10 @@ if TYPE_CHECKING:
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.gds_context import get_gds_context
+from lmcache.v1.gpu_connector.gds_context import (
+    deregister_gds_gpu_buffer,
+    register_gds_gpu_buffer,
+)
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_device,
@@ -451,7 +454,7 @@ class GPUCacheContext(BaseCacheContext):
         # Register the staging buffer with the GDS cuFile context on the
         # context's CUDA stream.
         with torch_dev.stream(self.cuda_stream_):
-            get_gds_context().register_gpu_buffer(self._temp_buffer.buffer)
+            register_gds_gpu_buffer(self._temp_buffer.buffer)
 
         # Third Party
         import cupy
@@ -482,7 +485,7 @@ class GPUCacheContext(BaseCacheContext):
         """
         self.cuda_stream_.synchronize()
         with torch_dev.stream(self.cuda_stream_):
-            get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
+            deregister_gds_gpu_buffer(self._temp_buffer.buffer)
         self._close_kv_wrappers()
 
     def _close_kv_wrappers(self) -> None:

@@ -62,6 +62,7 @@ async def lookup_placements(
             per-request cap or a key field is invalid.
     """
     ctx = get_context(request)
+    directory = ctx.views.get(KeyDirectory)
     if body.keys:
         encoded_keys = list(body.keys)
         obj_keys = [encoded.to_object_key() for encoded in encoded_keys]
@@ -77,8 +78,8 @@ async def lookup_placements(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        obj_keys = directory.get_keys_across_object_groups(obj_keys)
         encoded_keys = [key.to_encoded_object_key() for key in obj_keys]
-    directory = ctx.views.get(KeyDirectory)
     placements = directory.lookup(obj_keys)
     token_ids = directory.get_token_ids([key.chunk_hash for key in obj_keys])
     access_counts = directory.get_access_counts(obj_keys)

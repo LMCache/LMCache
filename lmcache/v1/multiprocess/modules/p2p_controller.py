@@ -297,8 +297,6 @@ class P2PController:
             handle = PrefetchHandle(
                 prefetch_request_id=-1,
                 external_request_id=f"p2p-{task_id}",
-                l1_found_indices=(),
-                l1_hit_chunks=0,
                 total_requested_keys=0,
                 submit_time=time.monotonic(),
             )
@@ -309,10 +307,10 @@ class P2PController:
             )
 
         logger.debug(
-            "P2P lookup submitted: task_id=%d, %d keys, %d L1 hits",
+            "P2P lookup submitted: task_id=%d, %d keys, %d requested",
             task_id,
             len(keys),
-            len(handle.l1_found_indices),
+            handle.total_requested_keys,
         )
         return task_id
 
@@ -348,12 +346,12 @@ class P2PController:
             )
             return None
 
-        found_rows = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if found_rows is None:
+        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        if result is None:
             # Still in progress (only possible once L2 prefetch is enabled).
             return None
 
-        addresses = self._build_addresses(job, found_rows)
+        addresses = self._build_addresses(job, result.hit_cells)
 
         with self._job_lock:
             self._jobs.pop(task_id, None)

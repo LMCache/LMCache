@@ -11,7 +11,7 @@ from lmcache.lmcache_native import (
     EngineKVFormat,
     TransferDirection,
 )
-from lmcache.v1.platform.torch_ops._kv_format import _format_spec, _is_two_major_format
+from lmcache.v1.platform.torch_ops._kv_format import _format_spec
 from lmcache.v1.platform.torch_ops._tensor_from_ptr import (
     _copy_bytes_with_tensor,
     _get_copy_lib,
@@ -279,7 +279,8 @@ def single_layer_kv_transfer(
     valid_token_indices = torch.nonzero(valid_mask_kv, as_tuple=True)[0]
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
-    is_mla = _format_spec(engine_kv_format).is_mla
+    format_spec = _format_spec(engine_kv_format)
+    is_mla = format_spec.is_mla
 
     if is_mla:
         # ── MLA format ──
@@ -303,7 +304,7 @@ def single_layer_kv_transfer(
     else:
         # ── Non-MLA format ──
         # Determine vLLM layout and block_size
-        is_two_major = _is_two_major_format(engine_kv_format)
+        is_two_major = format_spec.is_two_major
         # flash attn:
         #   [2, num_blocks, block_size, num_heads, head_size]
         #   -> dim2 = block_size

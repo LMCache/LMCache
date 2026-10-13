@@ -211,7 +211,7 @@ class TestTraceCacheEventSink:
             "http_port": 8000,
             "mq_port": 0,
         }
-        assert records[2].args == {"phase": "stop"}
+        assert records[2].args == {"phase": "stop", "instance_id": "node-a"}
 
     def test_records_are_ordered_and_timed(self, trace_path):
         recorder = EventsTraceRecorder(trace_path, level_meta={})

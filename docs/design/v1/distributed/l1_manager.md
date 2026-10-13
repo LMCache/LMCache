@@ -92,7 +92,7 @@ A prefetch request still aborts its L2 load when a key becomes resident
 between its L1 lock pass and its `reserve_write`
 (`KEY_NOT_WRITABLE`, reported as `L2_PREFETCH_FAILED{reason="l1_contended"}`).
 That window is the L2 lookup latency, not the L2 load time as before; see
-`storage_controllers/prefetch_l1_lock_pass.md`.
+`storage_controllers/prefetch_controller.md`.
 
 ## Contract-anchoring tests
 
