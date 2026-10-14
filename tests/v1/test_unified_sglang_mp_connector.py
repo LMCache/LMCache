@@ -324,6 +324,29 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
 
         self.assertIn("lookup-request", self.connector._active_sessions)
 
+    def test_lookup_carries_sglang_prefix_hit_hint(self):
+        self.connector.chunk_size = 4
+        self.connector.kv_world_size = 1
+        self.connector._lookups = {}
+        self.connector._active_sessions = set()
+        self.connector._lookup_leader = True
+        self.connector._req_client = Mock()
+        self.connector._req_client.lookup.return_value = _Future(False)
+        self.connector._create_key = Mock(return_value=object())
+        self.connector._sync_success = lambda success: success
+
+        self.connector.submit_lookup(
+            "lookup-request",
+            [1, 2, 3, 4, 5, 6, 7, 8],
+            local_hit_tokens=4,
+            cache_salt="",
+        )
+
+        self.assertEqual(
+            self.connector._create_key.call_args.kwargs["request_configs"],
+            {"lmcache.hint.engine_computed_tokens": 4},
+        )
+
     def test_poll_lookup_uses_short_lived_status_queries(self):
         self.connector.chunk_size = 4
         self.connector._lookup_leader = True
