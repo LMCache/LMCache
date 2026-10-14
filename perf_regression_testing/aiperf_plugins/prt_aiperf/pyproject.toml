@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aiperf-prt"
+version = "0.1.0"
+description = "AIPerf plugin: PRT's weka_trace loader and live-history chat endpoint"
+requires-python = ">=3.10"
+dependencies = ["aiperf==0.13.0"]
+
+# Must not start with "aiperf", or AIPerf treats it as built-in and keeps its own.
+[project.entry-points."aiperf.plugins"]
+prt = "aiperf_prt:plugins.yaml"
+
+[tool.setuptools]
+packages = ["aiperf_prt"]
+
+[tool.setuptools.package-data]
+aiperf_prt = ["plugins.yaml"]

@@ -1,0 +1,14 @@
+# Paste into the Buildkite pipeline's "Steps" editor; it uploads pipeline.yml.
+# Two schedules, each adding PRT_SUITE=nightly or PRT_SUITE=weekly to the env.
+# The queue runs one build at a time: pick non-overlapping times.
+agents:
+  queue: "yotta-h200"
+
+env:
+  PRT_ROOT: ""  # PRT state dir on the host: history, caches, 1.5 TB of L2
+  # PRT_HF_CACHE: "/root/.cache/huggingface"  # HF_HOME holding the model
+  # PRT_RDMA_DEVICES: ""  # e.g. mlx5_0,mlx5_1; the weekly Mooncake needs it
+
+steps:
+  - label: ":pipeline: Upload pipeline"
+    command: buildkite-agent pipeline upload .buildkite/perf_regression_testing/pipeline.yml
