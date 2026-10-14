@@ -515,7 +515,7 @@ Configuration Options
      - Whether to enable internal API server. Default: false
    * - internal_api_server_host
      - LMCACHE_INTERNAL_API_SERVER_HOST
-     - Host for internal API server to bind to. Default: "0.0.0.0"
+     - Host for internal API server to bind to. Default: "127.0.0.1"
    * - internal_api_server_port_start
      - LMCACHE_INTERNAL_API_SERVER_PORT_START
      - Starting port for internal API server. Port assignment: Scheduler = port_start + 0, Worker i = port_start + i + 1. Example: If port_start=6999, then Scheduler=6999, Worker 0=7000, Worker 1=7001, etc. Default: 6999
@@ -525,6 +525,9 @@ Configuration Options
    * - internal_api_server_socket_path_prefix
      - LMCACHE_INTERNAL_API_SERVER_SOCKET_PATH_PREFIX
      - If specified, use Unix domain sockets instead of TCP ports. Socket paths will be "{prefix}_{port}". Example: "/tmp/lmcache_api_socket" creates "/tmp/lmcache_api_socket_6999", "/tmp/lmcache_api_socket_7000", etc. Default: null
+   * - run_script_api_enabled
+     - LMCACHE_RUN_SCRIPT_API_ENABLED
+     - Whether to serve the /run_script endpoint, which executes caller-supplied Python in-process (the restricted builtins are not a security boundary). Default: false
 
 Plugin Configurations
 ---------------------

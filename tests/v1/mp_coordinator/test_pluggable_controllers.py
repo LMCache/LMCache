@@ -8,6 +8,9 @@ the tree entirely.
 """
 
 # Standard
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 import sys
 
 # Third Party
@@ -20,6 +23,9 @@ from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers import build_controllers
 from lmcache.v1.mp_coordinator.controllers.base import ControllerRuntime
+from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
+    FleetEvictionController,
+)
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.views import build_views
 
@@ -279,6 +285,124 @@ def test_a_package_that_does_not_import_is_reported():
         build_controllers(config, build_views(config))
 
 
+# =============================================================================
+# Disabling a built-in controller
+# =============================================================================
+
+
+def _disabling(*names: str) -> MPCoordinatorConfig:
+    """A config that leaves ``names`` unbuilt."""
+    return MPCoordinatorConfig(
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+        extra_config={"disabled_controllers": list(names)},
+    )
+
+
+def test_a_disabled_controller_is_not_built():
+    """The other half of ``controller_packages``: something out of tree can
+    take a built-in controller's job only if the built-in one gets out of
+    the way. The package is always scanned, so this is the only way."""
+    config = _disabling("FleetEvictionController")
+
+    controllers = build_controllers(config, build_views(config))
+
+    assert FleetEvictionController not in [type(c) for c in controllers.all()]
+
+
+def test_disabling_one_controller_leaves_the_others():
+    config = _disabling("FleetEvictionController")
+
+    names = {
+        type(c).__name__ for c in build_controllers(config, build_views(config)).all()
+    }
+
+    assert "PrefetchManager" in names
+
+
+def test_a_disabled_controller_holds_no_durable_state():
+    """The reason this exists: two controllers claiming the same artifact
+    sections write over each other, and the survivor is decided by class
+    name ordering."""
+    config = _disabling("FleetEvictionController")
+
+    sections = [
+        component.name
+        for components in (
+            build_controllers(config, build_views(config)).durable_components().values()
+        )
+        for component in components
+    ]
+
+    assert "pins" not in sections
+
+
+def test_the_endpoints_of_a_disabled_controller_are_not_mounted():
+    """They belong to the controller, so they go with it -- leaving the
+    paths free for whatever took its place, rather than shadowing them."""
+    with TestClient(create_app(_disabling("FleetEvictionController"))) as client:
+        assert client.get("/quota").status_code == 404
+        assert not [
+            path
+            for path in client.app.openapi()["paths"]
+            if "quota" in path or "pins" in path
+        ]
+
+
+def test_those_endpoints_are_mounted_when_it_is_built():
+    """The other half: disabling is what removes them, not their absence."""
+    with TestClient(create_app(_config())) as client:
+        mounted = {
+            path
+            for path in client.app.openapi()["paths"]
+            if "quota" in path or "pins" in path
+        }
+
+        assert mounted == {
+            "/quota",
+            "/quota/config",
+            "/quota/{cache_salt}",
+            "/cache/pins",
+        }
+
+
+def test_deleting_still_works_without_an_eviction_controller():
+    """Deleting is a cache operation that merely consults pins, so a
+    coordinator holding none should still delete rather than 404."""
+    with TestClient(create_app(_disabling("FleetEvictionController"))) as client:
+        response = client.post(
+            "/cache/delete",
+            json={
+                "instance_id": "nobody",
+                "model_name": "m",
+                "world_size": 1,
+                "token_ids": [1, 2, 3, 4],
+            },
+        )
+
+        # 404 for the *instance*, not for the missing controller.
+        assert response.status_code == 404
+        assert "no MP server registered" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("value", ["FleetEvictionController", 42, ["ok", 7]])
+def test_a_malformed_disable_list_is_refused(value):
+    config = MPCoordinatorConfig(extra_config={"disabled_controllers": value})
+
+    with pytest.raises(ValueError, match="disabled_controllers"):
+        build_controllers(config, build_views(config))
+
+
+def test_disabling_something_that_does_not_exist_is_refused():
+    """An operator believing they disabled a controller they did not is
+    worse than a boot failure that says so -- a typo would otherwise leave
+    the built-in one running against whatever replaced it."""
+    config = _disabling("FleetEvctionController")  # codespell:ignore
+
+    with pytest.raises(ValueError, match="not discovered"):
+        build_controllers(config, build_views(config))
+
+
 def test_a_controller_failing_to_start_does_not_take_the_others_down(
     late_controller, tmp_path, monkeypatch
 ):
@@ -355,3 +479,177 @@ def test_the_final_checkpoint_captures_what_a_controller_settled_on(
     during_teardown = order[order.index("tearing-down") : order.index("settled")]
     assert "captured" not in during_teardown, order
     assert order[-2:] == ["settled", "captured"], order
+
+
+_CONSUMING_CONTROLLER = '''
+# SPDX-License-Identifier: Apache-2.0
+"""A controller that records the cache-event stream it is handed."""
+
+from lmcache.v1.mp_coordinator.controllers.base import Controller
+
+SEEN = []
+
+
+class ConsumingController(Controller):
+    def consume(self, batch):
+        SEEN.append(("batch", batch.incarnation, batch.seq))
+
+    def fence_instance(self, instance_id):
+        SEEN.append(("fence", instance_id))
+'''
+
+_DURABLE_CONTROLLER = '''
+# SPDX-License-Identifier: Apache-2.0
+"""A controller whose state must survive a restart."""
+
+from fastapi import APIRouter
+
+from lmcache.v1.mp_coordinator.controllers.base import Controller
+from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
+
+
+class CountingController(Controller):
+    """Counts admitted batches, and keeps the count across a restart."""
+
+    def __init__(self):
+        self.seen = 0
+
+    def consume(self, batch):
+        self.seen += 1
+
+    def fence_instance(self, instance_id):
+        pass
+
+    def get_durable_components(self):
+        return (self,)
+
+    @property
+    def persistence_type(self):
+        return PersistenceType.CHECKPOINT
+
+    @property
+    def name(self):
+        return "acme_counter"
+
+    def capture(self):
+        return {"seen": self.seen}
+
+    def restore(self, state):
+        self.seen = state["seen"]
+
+    def get_routers(self):
+        router = APIRouter()
+
+        @router.get("/acme/seen")
+        async def seen() -> dict:
+            return {"seen": self.seen}
+
+        return (router,)
+'''
+
+
+@contextmanager
+def _external_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, package: str, source: str
+) -> Iterator[str]:
+    """Ship ``source`` as the only module of an importable ``package``.
+
+    Yields the module's name, and forgets the package afterwards so the
+    next test imports it afresh.
+    """
+    root = tmp_path / "external" / package
+    root.mkdir(parents=True)
+    (root / "__init__.py").write_text("")
+    (root / "c.py").write_text(source)
+    monkeypatch.syspath_prepend(str(root.parent))
+    try:
+        yield f"{package}.c"
+    finally:
+        for name in list(sys.modules):
+            if name.startswith(package):
+                del sys.modules[name]
+
+
+def _post_batch(client: TestClient, incarnation: int, seq: int) -> None:
+    """Report one L2 store from ``node-a``, as an MP server would."""
+    response = client.post(
+        "/events",
+        json={
+            "batches": [
+                {
+                    "instance_id": "node-a",
+                    "incarnation": incarnation,
+                    "seq": seq,
+                    "event_type": "store",
+                    "tier": "l2",
+                    "backend": "fs",
+                    "entries": [
+                        {
+                            "key": {
+                                "chunk_hash_hex": f"{incarnation:02x}{seq:02x}",
+                                "model_name": "m",
+                                "kv_rank": 0,
+                            },
+                            "size_bytes": 1024,
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200
+
+
+def test_a_consuming_controller_sees_every_admitted_batch_and_fence(
+    tmp_path, monkeypatch
+):
+    """Implementing ``consume`` is all it takes to be on the event stream:
+    the controller gets what the gate admits, in order, and is fenced
+    when a server restarts -- not the duplicates the gate turned away."""
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+        extra_config={"controller_packages": ["acme_consuming"]},
+    )
+    with _external_package(
+        tmp_path, monkeypatch, "acme_consuming", _CONSUMING_CONTROLLER
+    ) as module:
+        with TestClient(create_app(config)) as client:
+            _post_batch(client, incarnation=1, seq=1)
+            _post_batch(client, incarnation=1, seq=2)
+            # A redelivery: the gate drops it, so no consumer sees it.
+            _post_batch(client, incarnation=1, seq=1)
+            # A restarted server: fenced before its first batch.
+            _post_batch(client, incarnation=2, seq=1)
+        seen = list(sys.modules[module].SEEN)
+
+    assert seen == [
+        ("batch", 1, 1),
+        ("batch", 1, 2),
+        ("fence", "node-a"),
+        ("batch", 2, 1),
+    ]
+
+
+def test_a_controllers_durable_state_survives_a_restart(tmp_path, monkeypatch):
+    """A controller's state is checkpointed under its own section name and
+    handed back to it on the next start; the count it reports after the
+    restart can only come from that section."""
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+        # Written on the clean stop, so no timer is needed.
+        checkpoint_interval=0.0,
+        checkpoint_path=str(tmp_path / "ckpt"),
+        extra_config={"controller_packages": ["acme_durable"]},
+    )
+    with _external_package(tmp_path, monkeypatch, "acme_durable", _DURABLE_CONTROLLER):
+        with TestClient(create_app(config)) as client:
+            _post_batch(client, incarnation=1, seq=1)
+            _post_batch(client, incarnation=1, seq=2)
+            assert client.get("/acme/seen").json() == {"seen": 2}
+
+        with TestClient(create_app(config)) as restarted:
+            restored = restarted.get("/acme/seen").json()
+
+    assert restored == {"seen": 2}

@@ -67,6 +67,7 @@ docker run -d \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \
+    --transport "$LMCACHE_REQUEST_TRANSPORT" \
     --port "$LMCACHE_PORT" \
     --http-port "$LMCACHE_HTTP_PORT"
 
@@ -92,7 +93,7 @@ docker run -d \
     --env PYTHONHASHSEED=0 \
     lmcache/vllm-openai:test \
     "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
     --attention-backend FLASH_ATTN \
     --port "$VLLM_PORT" \
     $GPU_MEMORY_UTIL_ARG
@@ -123,4 +124,3 @@ echo "vLLM baseline container started"
 
 echo "=== Containers launched ==="
 docker ps --filter "name=$LMCACHE_CONTAINER_NAME" --filter "name=$VLLM_CONTAINER_NAME" --filter "name=$VLLM_BASELINE_CONTAINER_NAME"
-

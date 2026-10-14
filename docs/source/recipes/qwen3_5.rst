@@ -1,17 +1,19 @@
 .. _recipe_qwen3_5:
 
-Qwen3.5 / Qwen3.6 series
-========================
+Qwen3.5 / Qwen3.6 / Qwen3.8 series
+==================================
 
 A hybrid architecture interleaving Mamba / Gated-DeltaNet (GDN) linear-attention
-layers with full-attention layers, shared by the **Qwen3.5 and Qwen3.6**
-series. LMCache reinterprets the recurrent state caches as opaque pages at
-registration time; see :doc:`../mp/hybrid_models` for the general handling of
-Mamba / linear-attention models.
+layers with full-attention layers, shared by the **Qwen3.5, Qwen3.6 and
+Qwen3.8** series (all use the ``Qwen3_5ForConditionalGeneration``
+architecture). LMCache reinterprets the recurrent state caches as opaque pages
+at registration time; see :doc:`../mp/hybrid_models` for the general handling
+of Mamba / linear-attention models.
 
 Validated models
 ----------------
 
+- `Qwen/Qwen3.8-27B <https://huggingface.co/Qwen/Qwen3.8-27B>`_ (1 GPU)
 - `Qwen/Qwen3.6-27B <https://huggingface.co/Qwen/Qwen3.6-27B>`_ (1 GPU)
 - `Qwen/Qwen3.5-0.8B <https://huggingface.co/Qwen/Qwen3.5-0.8B>`_ (1 GPU)
 
@@ -39,6 +41,9 @@ Validated models
          * - Model
            - Unified block size ``N``
            - GPUs
+         * - ``Qwen/Qwen3.8-27B``
+           - 784
+           - 1
          * - ``Qwen/Qwen3.6-27B``
            - 784
            - 1
@@ -68,6 +73,12 @@ Validated models
              --max-num-batched-tokens 1567 \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
+
+      |
+
+      **Qwen3.8-27B** (1 GPU, ``N = 784`` → ``2N-1 = 1567``): same block size as
+      Qwen3.6-27B, so the commands above apply unchanged apart from the model
+      id.
 
       |
 
@@ -139,6 +150,7 @@ Caveats
   shared across engines with different attention backends or kernel block
   sizes.
 - vLLM's Mamba prefix caching in ``align`` mode is experimental.
-- ``Qwen/Qwen3.6-27B`` is a vision-language model (it loads a vision tower);
-  the LMCache validation covers **text** generation (the ``hma_lm_eval_qwen3_5``
-  gsm8k store-vs-retrieve gate). Caching of image/video KV is not validated.
+- ``Qwen/Qwen3.6-27B`` and ``Qwen/Qwen3.8-27B`` are vision-language models
+  (they load a vision tower); the LMCache validation covers **text**
+  generation (the ``hma_lm_eval_qwen3_5`` gsm8k store-vs-retrieve gate runs on
+  Qwen3.5 / Qwen3.6). Caching of image/video KV is not validated.

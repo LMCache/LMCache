@@ -14,6 +14,7 @@ on:
             - 'pyproject_cli.toml'
             - 'requirements/cli.txt'
             - '.github/workflows/build_cli_artifacts.yml'
+            - '.github/actions/build-artifacts/action.yml'
 
 env:
     LC_ALL: en_US.UTF-8
@@ -46,20 +47,11 @@ jobs:
               with:
                 fetch-depth: 0
 
-            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
-            # (v*-cu129, v*-alpha) that yield invalid PEP 440 versions (see #3123).
-            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
-              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
-
-            - name: Setup Python 3.13
-              uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+            - name: Prepare artifact build
+              uses: ./.github/actions/build-artifacts
               with:
-                python-version: "3.13"
-
-            - name: Install build tooling
-              run: |
-                python -m pip install --upgrade pip
-                pip install build
+                python_version: "3.13"
+                pip_packages: build
 
             - name: Clean up release artifacts
               run: |
