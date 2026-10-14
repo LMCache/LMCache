@@ -13,8 +13,20 @@ for v in PRT_SUITE PRT_ROOT; do
   fi
 done
 # The time keeps a retried job from reusing the first attempt's dir.
+# The suite needs Python >= 3.11 (tomllib); hosts differ in what they ship.
+if [[ -z "${PYTHON:-}" ]]; then
+  for p in python3.13 python3.12 python3.11 python3; do
+    if "$p" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
+      PYTHON=$p && break
+    fi
+  done
+fi
+if [[ -z "${PYTHON:-}" ]]; then
+  echo "run.sh: no Python >= 3.11 on $(hostname); set PYTHON in the Buildkite env" >&2
+  exit 64
+fi
 out=$PRT_ROOT/prt-suites/buildkite-${BUILDKITE_BUILD_NUMBER:-local}-$PRT_SUITE-$(date -u +%Y%m%d-%H%M%S)
-${PYTHON:-python3.11} -m perf_regression_testing.suite --suite "$PRT_SUITE" --out "$out"
+"$PYTHON" -m perf_regression_testing.suite --suite "$PRT_SUITE" --out "$out"
 rc=$?
 if [[ -f "$out/report.md" ]]; then
   mkdir -p prt-report && cp "$out"/report.* prt-report/
