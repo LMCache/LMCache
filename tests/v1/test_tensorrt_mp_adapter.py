@@ -138,3 +138,26 @@ def test_store_wait_retains_event_on_raw_future(
     )
     raw_future.retain_reference.assert_called_once_with(event)
     device_future.result.assert_called_once_with(timeout=5.0)
+
+
+def test_lookup_carries_trt_prefix_hit_hint(trt_mp_module) -> None:
+    """The LOOKUP reports TensorRT-LLM's prefix-cache hit to the server's KV
+    load policy."""
+    module = trt_mp_module
+    scheduler = module.LMCacheMPKvConnectorScheduler.__new__(
+        module.LMCacheMPKvConnectorScheduler
+    )
+    scheduler._block_size = 4
+    scheduler._chunk_size = 4
+    scheduler._pending = {}
+    scheduler._mq_timeout = 5.0
+    scheduler._model_name = "m"
+    scheduler._world_size = 1
+    scheduler._req_client = MagicMock(name="req_client")
+    scheduler._req_client.query_prefetch_status.return_value.result.return_value = 0
+    request = SimpleNamespace(request_id=7, get_tokens=lambda beam: list(range(16)))
+
+    assert scheduler.get_num_new_matched_tokens(request, 4) == (0, False)
+
+    lookup_key = scheduler._req_client.lookup.call_args.args[0]
+    assert lookup_key.request_configs == {"lmcache.hint.engine_computed_tokens": 4}
