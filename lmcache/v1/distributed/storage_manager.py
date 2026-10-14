@@ -252,6 +252,7 @@ class StorageManager:
                     [self._l2_adapters[d.index] for d in descriptors],
                     descriptors,
                     create_store_policy(config.store_policy),
+                    eviction_config=c.eviction or config.eviction_config,
                 )
                 self._store_controllers[manager.l1_manager_id] = controller
                 controller.start()

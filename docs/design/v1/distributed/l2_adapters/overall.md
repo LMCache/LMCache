@@ -136,7 +136,7 @@ tasks across multiple adapters, use the composite key `(adapter_index, task_id)`
 
 ```
 StorageManager.__init__
-  → StoreController(l1_manager, l2_adapters, descriptors, policy)
+  → StoreController(l1_manager, l2_adapters, descriptors, policy, eviction_config)
   → controller.start()        # spawns background thread
   ...
 StorageManager.close()
@@ -169,11 +169,14 @@ _process_new_keys(keys)
   │     pool so one drain may span models/parallelism configs with different
   │     KV shapes, and each submit_store_task must see uniform (shape, dtype)).
   │
-  ├─ 2. For each per-shape group:
+  ├─ 2. Queue the groups. Pop them oldest first while in-flight stores
+  │     read-lock less than the budget (see below); the rest wait unlocked.
+  │
+  ├─ 3. For each popped group:
   │     StorePolicy.select_store_targets(group_keys, adapters)
   │       → dict[adapter_index, list[ObjectKey]]
   │
-  ├─ 3. For each adapter target:
+  ├─ 4. For each adapter target:
   │     L1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
   │     adapter.submit_store_task(keys, objs)
   │     Track as InFlightStoreTask
@@ -190,14 +193,29 @@ _advance_request(task_key, task)  [state transition]
   ▼
 _finalize_store(task_key, task)  [terminal execution]
   │
-  ├─ 4. L1Manager.finish_read(read_locked_keys)  → release read locks
+  ├─ 5. L1Manager.finish_read(read_locked_keys)  → release read locks
   │
-  ├─ 5. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
+  ├─ 6. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
   │     If failure: log warning (best-effort, no retry)
   │
   ▼
-Done. Keys remain in L1 unless the policy deletes them.
+Done. Keys remain in L1 unless the policy deletes them. Queued groups are
+submitted again once the completions free some budget.
 ```
+
+### In-Flight Budget
+
+A store holds L1 read locks until L2 finishes writing, and eviction skips
+locked keys. When L2 writes slower than L1 fills, unbounded submission would
+lock all of L1 and new writes and prefetches would fail to allocate.
+
+So in-flight stores may read-lock at most `trigger_watermark - eviction_ratio`
+of L1 (taken from the L1's eviction config), which leaves eviction enough
+unlocked data to free `eviction_ratio` once usage reaches the watermark. The
+check happens before each group, so the last group may overshoot it; one group
+always goes out when nothing is in flight. Queued keys hold no locks: if one is
+evicted while it waits, `reserve_read` reports it as not found and it is never
+stored to L2.
 
 ### Lock Invariants
 
