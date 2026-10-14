@@ -282,3 +282,30 @@ def test_adapter_startup_failure_closes_all_created_l1s(
     with pytest.raises(ValueError, match="adapter failed to open"):
         StorageManager(config)
     assert closed == ["dax", "_default"]
+
+
+def test_l1_manager_inherits_global_eviction_settings_by_field() -> None:
+    """--l1-manager inherits the global eviction flags field by field.
+
+    The defaults were once built positionally, so adding a field to
+    EvictionConfig silently shifted every later flag into the wrong field.
+    """
+    config = parse_args(
+        [
+            "--eviction-policy",
+            "LRU",
+            "--eviction-trigger-watermark",
+            "0.9",
+            "--eviction-target-watermark",
+            "0.6",
+            "--eviction-ratio",
+            "0.3",
+            "--l1-manager",
+            json.dumps({"type": "DRAM", "tag": "_default", "size_gb": 1}),
+        ]
+    )
+    eviction = config.eviction_config
+    assert eviction.trigger_watermark == 0.9
+    assert eviction.target_watermark == 0.6
+    assert eviction.eviction_ratio == 0.3
+    assert eviction.extra_logging_enabled is False
