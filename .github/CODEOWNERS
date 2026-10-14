@@ -98,8 +98,8 @@
 /examples/                             @sammshen @deng451e
 
 # CI / Infrastructure
-/.github/                              @hickeyma @sammshen @ApostaC @deng451e
-/.buildkite/                           @sammshen @ApostaC @deng451e @hickeyma
+/.github/                              @hickeyma @sammshen @ApostaC @deng451e @VincyZhang
+/.buildkite/                           @sammshen @ApostaC @deng451e @hickeyma @VincyZhang
 
 # Operator
 /operator/                             @royyhuang @DongDongJu @ruizhang0101
