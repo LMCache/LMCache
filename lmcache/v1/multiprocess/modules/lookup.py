@@ -259,6 +259,11 @@ class LookupModule:
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.set_tokens(list(key.token_ids))
+        # A new lookup for this request abandons the previous one. Settle its
+        # locks here, while the session still describes them: begin_lookup is
+        # about to reset the hit length and lock model the release derives
+        # from, and only the server knows which groups were locked.
+        self._release_abandoned_prefetch(key.request_id)
         session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
@@ -431,24 +436,27 @@ class LookupModule:
                 )
                 return
 
-        hit_chunks = session.prefetch_hit_chunks
-        if hit_chunks < 0:
-            # No lookup result exists (never looked up, or the session was
-            # recreated after END_SESSION). L1 locks are anonymous refcounts:
-            # guessing a range could strip a concurrent reader's lock.
+        # Claim the result so this release runs once: a LOOKUP that lands
+        # first settles the same locks, and a second decrement would strip a
+        # concurrent prefix-sharing request's refcount.
+        claimed = session.take_prefetch_release()
+        if claimed is None:
+            # No unreleased lookup result (never looked up, session recreated
+            # after END_SESSION, or a re-lookup already settled it). L1 locks
+            # are anonymous refcounts: guessing a range could strip a
+            # concurrent reader's lock.
             logger.warning(
                 "free_lookup_locks for request %s without a lookup result; "
                 "nothing to release",
                 key.request_id,
             )
             return
+        _, hit_chunks, locked_gids = claimed
 
         # Release exactly the groups the prefetch locked (std lookup: all;
         # CB prefix leg: its prefix set) -- releasing an unlocked group
         # would drop another request's lock on the shared object key.
-        obj_keys = resolve_prefetched_obj_keys(
-            self._ctx, key, hit_chunks, session.prefetch_locked_gids
-        )
+        obj_keys = resolve_prefetched_obj_keys(self._ctx, key, hit_chunks, locked_gids)
         if not obj_keys:
             return
 
@@ -456,6 +464,45 @@ class LookupModule:
             obj_keys,
             read_locks=key.require_num_kv_readers(),
             l1_owners=self._ctx.get_read_owners(key.request_id),
+        )
+
+    def _release_abandoned_prefetch(self, request_id: str) -> None:
+        """Release read locks left by a previous lookup on this request.
+
+        A re-lookup (preemption/resume, or a covered-skip fallback) abandons
+        the in-flight result. Without this the locks survive only until the
+        read-lock TTL, and a FREE_LOOKUP_LOCKS that arrives after the new
+        ``begin_lookup`` would resolve against the *new* lookup's state and
+        release its locks instead.
+
+        A prefetch that is still running is left alone: its locks belong to
+        the prefetch controller, which settles them in ``_finish_request``.
+
+        Args:
+            request_id: The request whose previous lookup is being replaced.
+        """
+        with self._prefetch_job_lock:
+            if request_id in self._prefetch_jobs:
+                return
+        session = self._ctx.session_manager.get_or_create(request_id)
+        claimed = session.take_prefetch_release()
+        if claimed is None:
+            return
+        stale_key, hit_chunks, locked_gids = claimed
+        obj_keys = resolve_prefetched_obj_keys(
+            self._ctx, stale_key, hit_chunks, locked_gids
+        )
+        if not obj_keys:
+            return
+        logger.info(
+            "Releasing %d read locks from an abandoned lookup for request %s",
+            len(obj_keys),
+            request_id,
+        )
+        self._ctx.storage_manager.finish_read_prefetched(
+            obj_keys,
+            read_locks=stale_key.require_num_kv_readers(),
+            l1_owners=self._ctx.get_read_owners(request_id),
         )
 
     @request_handler(HandlerType.BLOCKING)

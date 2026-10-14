@@ -158,6 +158,32 @@ class Session:
             self._failed_retrieve_releases.clear()
             self._prefetch_owners.clear()
 
+    def take_prefetch_release(
+        self,
+    ) -> tuple[IPCCacheServerKey, int, tuple[int, ...]] | None:
+        """Claim the recorded lookup result for a one-shot lock release.
+
+        Returns the key, hit length and lock model of the lookup whose read
+        locks are still held, and clears them so a second caller gets
+        ``None``. Releases are anonymous refcount decrements, so running one
+        twice would strip a concurrent prefix-sharing request's lock.
+
+        Returns:
+            ``(lookup_ipc_key, hit_chunks, locked_gids)``, or ``None`` when
+            no unreleased result is recorded.
+        """
+        with self._lock:
+            if self.prefetch_hit_chunks < 0 or self.lookup_ipc_key is None:
+                return None
+            claimed = (
+                self.lookup_ipc_key,
+                self.prefetch_hit_chunks,
+                self.prefetch_locked_gids,
+            )
+            self.prefetch_hit_chunks = -1
+            self.prefetch_locked_gids = ()
+            return claimed
+
     def record_prefetch_result(
         self,
         hit_chunks: int,

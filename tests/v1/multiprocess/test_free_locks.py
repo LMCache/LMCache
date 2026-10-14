@@ -123,6 +123,23 @@ def _make_free_locks_ctx(
     session = ctx.session_manager.get_or_create.return_value
     session.prefetch_hit_chunks = hit_chunks
     session.prefetch_locked_gids = tuple(locked_gids)
+    session.lookup_ipc_key = _free_locks_key(1024, start=0, end=1024)
+
+    # Model the real one-shot claim: the first caller gets the lock model,
+    # later callers get None so a release cannot run twice.
+    def _take_prefetch_release():
+        if session.prefetch_hit_chunks < 0:
+            return None
+        claimed = (
+            session.lookup_ipc_key,
+            session.prefetch_hit_chunks,
+            session.prefetch_locked_gids,
+        )
+        session.prefetch_hit_chunks = -1
+        session.prefetch_locked_gids = ()
+        return claimed
+
+    session.take_prefetch_release.side_effect = _take_prefetch_release
     return ctx
 
 
@@ -503,3 +520,61 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
     # Group 0 (recurrent, window 1): only the boundary chunk. Group 1
     # (attention): the whole hit prefix. Group 2 (standalone aux): NOTHING.
     assert released == ["g0-h2", "g1-h0", "g1-h1", "g1-h2"]
+
+
+def test_relookup_settles_the_abandoned_lookups_locks():
+    """A re-lookup releases the locks of the lookup it replaces.
+
+    A request can look up twice -- preemption/resume, or a covered-skip
+    fallback. FREE_LOOKUP_LOCKS carries no range; it reconstructs one from
+    the session's hit length and lock model, which ``begin_lookup`` resets.
+    If the replacement lands first and nothing settles the old result, those
+    locks survive only until the read-lock TTL, and a FREE arriving later
+    resolves against the *new* lookup's state instead.
+    """
+    ctx = _make_free_locks_ctx([b"h0", b"h1"], windows=[-1], hit_chunks=2)
+    module = LookupModule(ctx)
+
+    module._release_abandoned_prefetch("r")
+
+    ctx.storage_manager.finish_read_prefetched.assert_called_once()
+
+
+def test_relookup_leaves_an_in_flight_prefetch_to_its_controller():
+    """Locks of a running prefetch belong to the prefetch controller.
+
+    Releasing them here would double-decrement when the controller settles
+    the same prefetch in ``_finish_request``.
+    """
+    ctx = _make_free_locks_ctx([b"h0", b"h1"], windows=[-1], hit_chunks=2)
+    module = LookupModule(ctx)
+    with module._prefetch_job_lock:
+        module._prefetch_jobs["r"] = MagicMock()
+
+    module._release_abandoned_prefetch("r")
+
+    ctx.storage_manager.finish_read_prefetched.assert_not_called()
+
+
+def test_take_prefetch_release_is_one_shot():
+    """``Session.take_prefetch_release`` hands the lock model to one caller.
+
+    A re-lookup settles the abandoned result and a late FREE_LOOKUP_LOCKS
+    tries to settle the same one. Releases are anonymous refcount
+    decrements, so the second must get nothing rather than strip a
+    concurrent prefix-sharing request's lock.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.session import Session
+
+    session = Session(request_id="r", hasher=MagicMock())
+    key = _free_locks_key(1024, start=0, end=1024)
+    session.begin_lookup(key, (-1,))
+    session.record_prefetch_result(4, (0,), None)
+
+    first = session.take_prefetch_release()
+    assert first is not None
+    _, hit_chunks, locked_gids = first
+    assert hit_chunks == 4 and locked_gids == (0,)
+
+    assert session.take_prefetch_release() is None
