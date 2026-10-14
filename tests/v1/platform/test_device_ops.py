@@ -25,8 +25,14 @@ from lmcache.lmcache_native import EngineKVFormat, TransferDirection
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
+from lmcache.v1.platform.base.native_kernel_device_ops import NativeKernelDeviceOps
 from lmcache.v1.platform.devices.cpu.device_ops import CpuDeviceOps
 from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
+from lmcache.v1.platform.devices.hpu.device_ops import HpuDeviceOps
+from lmcache.v1.platform.devices.musa.device_ops import MusaDeviceOps
+from lmcache.v1.platform.devices.npu.device_ops import NpuDeviceOps
+from lmcache.v1.platform.devices.rbln.device_ops import RblnDeviceOps
+from lmcache.v1.platform.devices.xpu.device_ops import XpuDeviceOps
 from lmcache.v1.platform.ops_types import (
     BatchStep,
     KernelGroupSpec,
@@ -285,6 +291,41 @@ def test_cuda_device_ops_loads_cuda_ops(
     ops.ensure_native()
 
     assert ops.calculate_cdf(None, 0) == "cuda-native"
+
+
+# -- Block transfer --------------------------------------------------------
+
+
+def test_base_allocates_plain_host_output() -> None:
+    """The base allocates an ordinary CPU tensor for block-transfer output."""
+    out = DeviceOps().allocate_block_transfer_output((2, 3), torch.float16)
+
+    assert (out.shape, out.dtype, out.device) == (
+        (2, 3),
+        torch.float16,
+        torch.device("cpu"),
+    )
+    assert not out.is_pinned()
+
+
+@pytest.mark.parametrize(
+    ("ops_cls", "lowers_to_native_kernel"),
+    [
+        (CudaDeviceOps, True),
+        (XpuDeviceOps, True),
+        (NpuDeviceOps, True),
+        (DeviceOps, False),
+        (CpuDeviceOps, False),
+        (HpuDeviceOps, False),
+        (MusaDeviceOps, False),
+        (RblnDeviceOps, False),
+    ],
+)
+def test_only_address_kernel_backends_lower_block_transfer(
+    ops_cls: type[DeviceOps], lowers_to_native_kernel: bool
+) -> None:
+    """CUDA, XPU and Ascend serve tensor block transfers on an address kernel."""
+    assert issubclass(ops_cls, NativeKernelDeviceOps) is lowers_to_native_kernel
 
 
 # -- Package export --------------------------------------------------------
