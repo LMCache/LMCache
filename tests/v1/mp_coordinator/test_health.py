@@ -9,42 +9,53 @@ import time
 from fastapi.testclient import TestClient
 
 # First Party
-from lmcache.v1.mp_coordinator.app import create_app, evict_stale
+from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
-from lmcache.v1.mp_coordinator.views.instance_registry import (
-    InstanceRegistry,
-    MPInstance,
-)
 
 
-def _instance(instance_id: str, heartbeat: float) -> MPInstance:
-    return MPInstance(
-        instance_id=instance_id,
-        ip="127.0.0.1",
-        http_port=8080,
-        registration_time=heartbeat,
-        last_heartbeat_time=heartbeat,
+def _register(client: TestClient, instance_id: str) -> None:
+    client.post(
+        "/instances",
+        json={"instance_id": instance_id, "ip": "127.0.0.1", "http_port": 8080},
     )
 
 
-def test_evict_stale_removes_only_expired():
-    registry = InstanceRegistry()
-    now = time.monotonic()
-    registry.register(_instance("fresh", now))
-    registry.register(_instance("old", now - 100.0))
-
-    evicted = evict_stale(registry, instance_timeout=30.0)
-
-    assert evicted == ["old"]
-    assert registry.contains("fresh")
-    assert not registry.contains("old")
+def _instance_ids(client: TestClient) -> set[str]:
+    return {i["instance_id"] for i in client.get("/instances").json()["instances"]}
 
 
-def test_evict_stale_noop_when_all_fresh():
-    registry = InstanceRegistry()
-    registry.register(_instance("a", time.monotonic()))
-    assert evict_stale(registry, instance_timeout=30.0) == []
-    assert registry.contains("a")
+def test_health_loop_reaps_only_instances_whose_heartbeat_lapsed():
+    config = MPCoordinatorConfig(
+        health_check_interval=0.05,
+        instance_timeout=0.3,
+        eviction_check_interval=0.0,
+    )
+    with TestClient(create_app(config)) as client:
+        _register(client, "fresh")
+        _register(client, "old")
+
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and "old" in _instance_ids(client):
+            client.put("/instances/fresh/heartbeat")
+            time.sleep(0.05)
+
+        assert _instance_ids(client) == {"fresh"}
+
+
+def test_health_loop_keeps_instances_that_heartbeat():
+    config = MPCoordinatorConfig(
+        health_check_interval=0.05,
+        instance_timeout=0.3,
+        eviction_check_interval=0.0,
+    )
+    with TestClient(create_app(config)) as client:
+        _register(client, "a")
+        # Several health passes, each well inside the timeout.
+        for _ in range(12):
+            client.put("/instances/a/heartbeat")
+            time.sleep(0.05)
+
+        assert _instance_ids(client) == {"a"}
 
 
 def _store_batch(instance_id: str, seq: int, tier: str, backend: str, h: str) -> dict:
@@ -83,10 +94,7 @@ def test_reaped_instance_loses_its_l1_usage_but_not_its_l2():
         eviction_check_interval=0.0,
     )
     with TestClient(create_app(config)) as client:
-        client.post(
-            "/instances",
-            json={"instance_id": "node-a", "ip": "127.0.0.1", "http_port": 8080},
-        )
+        _register(client, "node-a")
         client.post(
             "/events",
             json={

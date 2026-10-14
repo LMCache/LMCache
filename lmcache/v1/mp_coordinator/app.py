@@ -80,24 +80,6 @@ from lmcache.v1.utils.router_discovery import discover_api_routers
 logger = init_logger(__name__)
 
 
-def evict_stale(registry: InstanceRegistry, instance_timeout: float) -> list[str]:
-    """Deregister every instance whose heartbeat is older than the timeout.
-
-    Args:
-        registry: The shared instance registry.
-        instance_timeout: Max seconds since the last heartbeat before eviction.
-
-    Returns:
-        The ids of instances evicted in this sweep.
-    """
-    evicted = []
-    for instance_id in registry.stale(instance_timeout):
-        if registry.deregister(instance_id) is not None:
-            logger.warning("Instance %s timed out; evicted", instance_id)
-            evicted.append(instance_id)
-    return evicted
-
-
 def create_app(config: MPCoordinatorConfig) -> FastAPI:
     """Build the coordinator FastAPI app.
 
@@ -218,7 +200,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         as on ``DELETE /instances``; a server that was only slow
         redeclares when it re-registers.
         """
-        for instance_id in evict_stale(registry, config.instance_timeout):
+        for instance_id in _evict_stale(registry, config.instance_timeout):
             event_gate.drop_instance(instance_id)
             server_configs.forget(instance_id)
 
@@ -323,3 +305,21 @@ def _artifact_store(path: str) -> ArtifactStore:
         path: Configured location, empty when the operator wants none.
     """
     return LocalArtifactStore(Path(path)) if path else NullArtifactStore()
+
+
+def _evict_stale(registry: InstanceRegistry, instance_timeout: float) -> list[str]:
+    """Deregister every instance whose heartbeat is older than the timeout.
+
+    Args:
+        registry: The shared instance registry.
+        instance_timeout: Max seconds since the last heartbeat before eviction.
+
+    Returns:
+        The ids of instances evicted in this sweep.
+    """
+    evicted = []
+    for instance_id in registry.stale(instance_timeout):
+        if registry.deregister(instance_id) is not None:
+            logger.warning("Instance %s timed out; evicted", instance_id)
+            evicted.append(instance_id)
+    return evicted
