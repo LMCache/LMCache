@@ -125,4 +125,5 @@ def test_request_server_factory_passes_zmq_service_registrars(
         modules,
         config,
         service_registrars=zmq_registrars,
+        on_peer_disconnected=None,
     )
