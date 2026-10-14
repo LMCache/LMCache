@@ -9,8 +9,18 @@ import pytest
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
-from lmcache.v1.config_base import apply_remote_configs, validate_and_set_config_value
+from lmcache.v1.config import (
+    _CONFIG_ALIASES,
+    _CONFIG_DEFINITIONS,
+    _DEPRECATED_CONFIGS,
+    LMCacheEngineConfig,
+    load_ec_engine_config,
+)
+from lmcache.v1.config_base import (
+    _resolve_config_aliases,
+    apply_remote_configs,
+    validate_and_set_config_value,
+)
 
 BASE_DIR = Path(__file__).parent
 
@@ -1114,3 +1124,31 @@ class TestStoreAndRetrieveLocationEnvConversion:
         restored = LMCacheEngineConfig.from_dict(config.to_dict())
         assert restored.retrieve_locations == ["LocalCPUBackend"]
         assert restored.store_location == "LocalDiskBackend"
+
+
+def test_config_aliases_all_resolve_to_current_names():
+    """Every legacy alias maps to its current config key.
+
+    Regression: the alias lookup used to sit inside the deprecated-key
+    branch, so any alias not also listed in ``_DEPRECATED_CONFIGS`` (10 of the
+    12, e.g. ``enable_xpyd`` and the ``nixl_*`` names) fell through to the
+    "unknown configuration key" branch and was silently dropped.
+    """
+    for old_name, new_name in _CONFIG_ALIASES.items():
+        resolved = _resolve_config_aliases(
+            {old_name: "value"},
+            "test",
+            _CONFIG_DEFINITIONS,
+            _CONFIG_ALIASES,
+            _DEPRECATED_CONFIGS,
+        )
+        assert resolved == {new_name: "value"}, (
+            f"alias {old_name!r} did not resolve to {new_name!r}"
+        )
+
+
+def test_enable_xpyd_alias_applies_from_env(monkeypatch):
+    """A legacy env var name is honored end-to-end via ``from_env``."""
+    monkeypatch.setenv("LMCACHE_ENABLE_XPYD", "true")
+    config = LMCacheEngineConfig.from_env()
+    assert config.enable_pd is True
