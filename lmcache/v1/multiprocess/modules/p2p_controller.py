@@ -147,7 +147,7 @@ class _P2PLookupJob:
 
     submitted_at: float
     """ ``time.monotonic()`` when the lookup was submitted; a job older than
-    the lookup timeout is treated as abandoned by its requester """
+    the L1 read TTL is treated as abandoned by its requester """
 
 
 class P2PController:
@@ -182,6 +182,8 @@ class P2PController:
         self._next_task_id = 0
         self._jobs: dict[int, _P2PLookupJob] = {}
         self._job_lock = threading.Lock()
+        # A job older than this has only expired locks; treat it as abandoned.
+        self._job_ttl_seconds = ctx.storage_manager.max_read_ttl_seconds
         # Last abandoned-job scan time; unlocked, as a race only adds a scan.
         self._last_drop_time = time.monotonic()
 
@@ -285,9 +287,9 @@ class P2PController:
         Returns:
             A unique task id (int) for querying the lookup status later
         """
-        # Scan at most once per lookup timeout; abandoned jobs live <= 2 timeouts.
+        # Scan at most once per read TTL; abandoned jobs live <= 2 TTLs.
         now = time.monotonic()
-        if now - self._last_drop_time >= self._p2p_config.lookup_timeout:
+        if now - self._last_drop_time >= self._job_ttl_seconds:
             self._last_drop_time = now
             self._drop_abandoned_jobs(now)
         with self._job_lock:
@@ -390,17 +392,17 @@ class P2PController:
     # -----------------------------------------------------------------
 
     def _drop_abandoned_jobs(self, now: float) -> None:
-        """Drop finished jobs older than the lookup timeout, draining results.
+        """Drop finished jobs older than the L1 read TTL, draining results.
 
         Args:
             now: ``time.monotonic()`` at the call; jobs submitted more than
-                one lookup timeout before it are abandoned.
+                one read TTL before it are abandoned.
 
         Note:
             Read locks are left to the L1 read TTL; unlocking after expiry
             could release a later reader's lock.
         """
-        cutoff = now - self._p2p_config.lookup_timeout
+        cutoff = now - self._job_ttl_seconds
         with self._job_lock:
             stale = [
                 task_id

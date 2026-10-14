@@ -245,6 +245,14 @@ class TestStorageManagerBasic:
 
         storage_manager.close()
 
+    def test_max_read_ttl_seconds(self, basic_storage_manager_config):
+        """max_read_ttl_seconds reports the configured L1 read-lock TTL."""
+        storage_manager = StorageManager(basic_storage_manager_config)
+        try:
+            assert storage_manager.max_read_ttl_seconds == 300
+        finally:
+            storage_manager.close()
+
     def test_reserve_write_multiple_keys(
         self, basic_storage_manager_config, basic_layout
     ):

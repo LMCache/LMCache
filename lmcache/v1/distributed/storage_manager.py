@@ -754,6 +754,14 @@ class StorageManager:
         return self._quota_manager
 
     @property
+    def max_read_ttl_seconds(self) -> int:
+        """Longest L1 read-lock TTL in seconds across all L1 managers.
+
+        After this long, every read lock taken by a reservation has expired.
+        """
+        return max(m.config.read_ttl_seconds for m in self._l1_managers_by_id.values())
+
+    @property
     def l1_memory_desc(self) -> L1MemoryDesc:
         """Descriptor of the L1 memory buffer backing this storage manager.
 
