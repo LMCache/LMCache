@@ -35,6 +35,8 @@ class TTLListCache(Generic[T]):
         """
         Get cached data, refreshing if expired.
 
+        Expiration is rechecked after waiting for a concurrent refresh.
+
         Args:
             get_fresh_data: Function to get fresh data when cache is expired
             timeout_override: Optional timeout override in seconds.
@@ -54,6 +56,7 @@ class TTLListCache(Generic[T]):
         # Slow path: refresh cache with lock
         with self.cache_lock:
             # Double-check after acquiring lock
+            current_time = time.time()
             if not self.is_expired(timeout_override, current_time):
                 return self.cache
 
