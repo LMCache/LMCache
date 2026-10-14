@@ -477,6 +477,17 @@ class UnifiedLMCacheMPConnector:
             mamba_transfer_tokens=mamba_transfer_tokens,
         )
 
+    def device_indices_for_linker_load(
+        self,
+        full_indices: torch.Tensor,
+        *,
+        swa_indices: Optional[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        return self._sglang_kv_adapter.device_indices_for_linker_load(
+            full_indices,
+            swa_indices=swa_indices,
+        )
+
     def parallel_all_reduce(self, tensor: torch.Tensor, op: dist.ReduceOp) -> None:
         """Synchronize a tensor across the connector's TP and PP ranks."""
         self._parallel_all_reduce(tensor, op)
@@ -1034,11 +1045,21 @@ class UnifiedLMCacheMPConnector:
         *,
         device_indices_start: int,
         cache_salt: str,
+        store_start: Optional[int] = None,
     ) -> Optional[LMCacheStoreOperation]:
         self._ensure_heartbeat_started()
 
         aligned_end = len(token_ids) // self.chunk_size * self.chunk_size
-        start = self.get_store_start(request_id, aligned_end)
+        if store_start is None:
+            start = self.get_store_start(request_id, aligned_end)
+        else:
+            start = store_start
+        if start < 0 or start > aligned_end or start % self.chunk_size:
+            raise ValueError(
+                "LMCache store start must be chunk-aligned and within "
+                f"[0, end]: request_id={request_id!r}, start={start}, "
+                f"end={aligned_end}"
+            )
         if aligned_end <= start:
             return None
         lookup = LMCacheLookupOperation(
