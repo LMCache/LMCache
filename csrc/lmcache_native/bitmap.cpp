@@ -164,8 +164,13 @@ int64_t Bitmap::highest_set_bit() const {
 Bitmap Bitmap::operator&(const Bitmap& other) const {
   const size_t result_size = (size_ <= other.size_) ? size_ : other.size_;
   Bitmap result(result_size);
-  for (size_t i = 0; i < result.data_.size(); ++i) {
+  for (size_t i = 0; i < result.data_.size() - 1; ++i) {
     result.data_[i] = data_[i] & other.data_[i];
+  }
+  // Mask the last byte to only include bits up to result_size
+  if (result.data_.size() > 0) {
+    uint8_t mask = static_cast<uint8_t>((1u << result_size) - 1);
+    result.data_.back() = (result.data_.back() & other.data_.back()) & mask;
   }
   return result;
 }
@@ -173,8 +178,13 @@ Bitmap Bitmap::operator&(const Bitmap& other) const {
 Bitmap Bitmap::operator|(const Bitmap& other) const {
   const size_t result_size = (size_ <= other.size_) ? size_ : other.size_;
   Bitmap result(result_size);
-  for (size_t i = 0; i < result.data_.size(); ++i) {
+  for (size_t i = 0; i < result.data_.size() - 1; ++i) {
     result.data_[i] = data_[i] | other.data_[i];
+  }
+  // Mask the last byte to only include bits up to result_size
+  if (result.data_.size() > 0) {
+    uint8_t mask = static_cast<uint8_t>((1u << result_size) - 1);
+    result.data_.back() = (result.data_.back() | other.data_.back()) & mask;
   }
   return result;
 }

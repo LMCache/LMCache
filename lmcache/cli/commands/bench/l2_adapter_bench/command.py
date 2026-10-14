@@ -621,6 +621,7 @@ def _strip_warmup(result: "BenchResult", warmup: int) -> "BenchResult":
         success_counts=result.success_counts[warmup:],
         expected_max_hit_rate=result.expected_max_hit_rate,
         expected_hit_count=scaled_expected_hit,
+        timed_out_rounds=result.timed_out_rounds,
     )
 
 

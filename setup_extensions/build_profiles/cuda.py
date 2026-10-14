@@ -132,6 +132,7 @@ class CudaProfile(BuildProfile):
             "csrc/cuda/ac_enc.cu",
             "csrc/cuda/ac_dec.cu",
             "csrc/cuda/pos_kernels.cu",
+            "csrc/cuda/fp8_quantize.cu",
             "csrc/cuda/mem_alloc.cpp",
             "csrc/cuda/utils.cpp",
             "csrc/cuda/event_recorder.cpp",
