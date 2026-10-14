@@ -34,10 +34,10 @@ message RegionContract {
   uint64 region_epoch = 2;
   uint64 capacity_bytes = 3;
   uint64 alignment_bytes = 4;
-  bytes layout_fingerprint = 5;
-  string visibility_mode = 6;
-  uint32 max_batch_entries = 7;
-  bool reset_required = 8;
+  bytes layout_fingerprint = 5;  // configured compatibility label, defaults to lmcache/kv_2ltd/v1
+  string visibility_mode = 6;    // coherent or software_fenced; clients provide data visibility
+  uint32 max_batch_entries = 7;  // max entries/tokens per RPC; clients split larger batches
+  bool reset_required = 8;       // previous state may still be in use; only DescribeRegion works
 }
 
 message RegisterClientRequest {

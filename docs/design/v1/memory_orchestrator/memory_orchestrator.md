@@ -43,6 +43,15 @@ capped by `max_batch_entries`; the client splits larger ones, and a split
 `ReserveWrite` or `ReserveRead` that fails part-way aborts or releases what its
 earlier parts were granted.
 
+`RegionContract` describes the region before a client registers:
+
+| Field | Meaning |
+| --- | --- |
+| `layout_fingerprint` | Operator-configured compatibility label, default `lmcache/kv_2ltd/v1`. Registration checks equality; it is not a computed hash or layout negotiation. The orchestrator does not inspect KV bytes. Per-object shapes and dtypes travel with each write. |
+| `visibility_mode` | `coherent` requires a coherent mapping; `software_fenced` requires the client to perform the platform's visibility operations, for example on non-coherent shared CXL memory. Both require transfer completion before publishing. The service checks agreement but does not flush caches or synchronize DMA. |
+| `max_batch_entries` | Maximum entries or tokens per RPC (default 4096). The client splits larger calls to keep each request bounded. |
+| `reset_required` | The startup marker indicates potentially live users of lost metadata, such as after a crash or shutdown with registered clients. Only `DescribeRegion` is served until an offline reset. |
+
 Object keys, tensor shapes and layouts reuse `ObjectKey`, `TensorShape` and
 `MemoryLayoutDesc` from the MP transport's `protos/p2p_service.proto`. The
 orchestrator keeps primitive Python values so its state machine does not
