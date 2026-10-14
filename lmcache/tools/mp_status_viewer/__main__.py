@@ -13,6 +13,9 @@ import sys
 import urllib.error
 import urllib.request
 
+# First Party
+from lmcache.cli.http import kvcache_auth_headers
+
 HEALTHY = "\033[32mHEALTHY\033[0m"
 UNHEALTHY = "\033[31mUNHEALTHY\033[0m"
 
@@ -73,7 +76,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        req = urllib.request.Request(args.url)
+        req = urllib.request.Request(args.url, headers=kvcache_auth_headers())
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())
     except urllib.error.URLError as e:

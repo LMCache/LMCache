@@ -2,6 +2,7 @@
 # Standard
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 import argparse
 import asyncio
 import contextlib
@@ -49,6 +50,7 @@ from lmcache.v1.multiprocess.http_api_registry import (
 )
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_apis.error_handlers import register_error_handlers
+from lmcache.v1.multiprocess.http_auth import APIKeyAuthMiddleware
 from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
     MPRuntimePluginLauncher,
 )
@@ -207,12 +209,14 @@ def run_http_server(
             (an empty URL disables registration)
 
     Raises:
-        ValueError: If P2P is enabled without a coordinator URL, or with an L1
-            tier that is not a single registerable memory region; or if
-            coordinator event reporting or ``--trace-level events`` is enabled
-            with observability disabled (the cache-event stream rides the
-            event bus).
+        ValueError: If the HTTP host is not loopback and neither an API key
+            nor ``--http-allow-unauthenticated`` is set; if P2P is enabled
+            without a coordinator URL, or with an L1 tier that is not a single
+            registerable memory region; or if coordinator event reporting or
+            ``--trace-level events`` is enabled with observability disabled
+            (the cache-event stream rides the event bus).
     """
+    http_config.check_auth_policy()
     if mp_config.p2p_config.enabled:
         if not coordinator_config.url:
             raise ValueError(
@@ -239,9 +243,21 @@ def run_http_server(
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
     _configs["observability"] = obs_config
-    _configs["http"] = http_config
+    # The key lives only in the middleware: ``_configs`` is served by
+    # ``GET /config`` and serialized into the runtime-plugin environment
+    # (plugins inherit LMCACHE_HTTP_API_KEY from the process environment).
+    _configs["http"] = replace(http_config, http_api_key="")
     _configs["coordinator"] = coordinator_config
     app.state.configs = _configs
+    if http_config.http_api_key:
+        app.add_middleware(APIKeyAuthMiddleware, api_key=http_config.http_api_key)
+    elif http_config.http_allow_unauthenticated:
+        logger.warning(
+            "LMCache HTTP API on %s is serving WITHOUT authentication "
+            "(--http-allow-unauthenticated); any peer that can reach it can "
+            "read the environment, clear the cache and change quotas.",
+            http_config.http_host,
+        )
 
     config = uvicorn.Config(
         app=app,

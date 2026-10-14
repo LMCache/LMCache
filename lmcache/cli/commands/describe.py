@@ -24,6 +24,7 @@ from lmcache.cli.http import (
 )
 from lmcache.cli.http import fetch_json as _fetch_json
 from lmcache.cli.http import (
+    kvcache_auth_headers,
     normalize_url,
 )
 
@@ -40,14 +41,16 @@ class DescribeError(Exception):
     """Raised when the describe command cannot fetch or parse status data."""
 
 
-def fetch_json(url: str, timeout: int = 10) -> dict:
+def fetch_json(
+    url: str, timeout: int = 10, headers: dict[str, str] | None = None
+) -> dict:
     """GET *url* and return the parsed JSON body.
 
     Raises:
         DescribeError: On network/HTTP errors.
     """
     try:
-        return _fetch_json(url, timeout=timeout)
+        return _fetch_json(url, timeout=timeout, headers=headers)
     except CLIHTTPError as exc:
         raise DescribeError(str(exc)) from exc
 
@@ -446,7 +449,7 @@ class DescribeCommand(BaseCommand):
     def _describe_kvcache(self, args: argparse.Namespace) -> None:
         base_url = normalize_url(args.url)
         try:
-            data = fetch_json(f"{base_url}/status")
+            data = fetch_json(f"{base_url}/status", headers=kvcache_auth_headers())
         except DescribeError as exc:
             print(str(exc), file=sys.stderr)
             sys.exit(1)

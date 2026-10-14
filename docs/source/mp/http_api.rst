@@ -49,22 +49,93 @@ Server Configuration
      - Description
    * - ``--http-host``
      - ``127.0.0.1``
-     - Host to bind the HTTP server. The admin API has no authentication;
-       only bind a non-loopback address on a trusted network.
+     - Host to bind the HTTP server. A non-loopback host requires an API key
+       (see :ref:`mp-http-authentication`).
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
+   * - ``--http-allow-unauthenticated``
+     - off
+     - Serve without authentication on a non-loopback ``--http-host``. Only
+       for networks where every peer is trusted.
+   * - ``LMCACHE_HTTP_API_KEY`` (env)
+     - unset
+     - API key every request must send as ``Authorization: Bearer <key>``.
+       Environment-only, so it never appears in the process list.
 
 Example:
 
 .. code-block:: bash
 
+    export LMCACHE_HTTP_API_KEY="$(openssl rand -hex 32)"
     lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
         --http-host 0.0.0.0 --http-port 8080
 
 All examples below assume the server is reachable at
-``http://localhost:8080``.
+``http://localhost:8080`` without a key; when a key is set, add
+``-H "Authorization: Bearer $LMCACHE_HTTP_API_KEY"`` to each ``curl``.
+
+.. _mp-http-authentication:
+
+Authentication
+--------------
+
+The HTTP API can read the server's configuration and environment, clear the
+cache, delete objects and change tenant quotas, so it is protected by a single
+shared API key:
+
+- **Loopback (default).** With ``--http-host`` left at ``127.0.0.1`` (or any
+  loopback address / ``localhost``) and no key, the API is served without
+  authentication: only processes on the same host can reach it.
+- **Non-loopback.** Binding any other host (e.g. ``0.0.0.0``) requires
+  ``LMCACHE_HTTP_API_KEY``. Without it the server refuses to start:
+
+  .. code-block:: text
+
+      ValueError: Refusing to serve the LMCache HTTP API on non-loopback host
+      '0.0.0.0' without authentication: set LMCACHE_HTTP_API_KEY, or pass
+      --http-allow-unauthenticated if every peer on this network is trusted.
+
+  ``--http-allow-unauthenticated`` restores the old behavior and logs a
+  warning at startup.
+
+When a key is set, every request except ``GET /healthcheck`` (left open for
+Kubernetes probes) must send it; anything else gets ``401``:
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/status
+    # {"detail":"Missing or invalid API key"}   (HTTP 401)
+
+    curl -s -H "Authorization: Bearer $LMCACHE_HTTP_API_KEY" \
+        http://localhost:8080/status
+
+Clients pick the key up from the same environment variable:
+
+- **MP coordinator.** ``lmcache coordinator`` reads ``LMCACHE_HTTP_API_KEY``
+  and sends it on its eviction, prefetch and cache fan-out calls. All MP
+  servers in a fleet must share one key.
+- **CLI.** ``lmcache kvcache``, ``lmcache quota``, ``lmcache describe
+  kvcache``, the bench commands' LMCache calls, and
+  ``python -m lmcache.tools.mp_status_viewer`` send it when it is exported.
+- **Prometheus.** ``/metrics`` is authenticated too; give the scrape job the
+  key:
+
+  .. code-block:: yaml
+
+      scrape_configs:
+        - job_name: lmcache
+          authorization:
+            credentials_file: /etc/prometheus/lmcache-api-key
+          static_configs:
+            - targets: ["lmcache:8080"]
+
+- **Frontend dashboard.** The frontend holds no key: ``/proxy/...`` and the
+  aggregated ``/metrics`` forward the caller's own ``Authorization`` header.
+
+The key travels in plain text over HTTP. On an untrusted network, terminate
+TLS in front of the server (a reverse proxy, ingress or service mesh).
 
 Endpoint Overview
 -----------------
@@ -95,10 +166,12 @@ compatibility with the vLLM-embedded API server.
      - Purpose
    * - GET
      - ``/``
-     - Static liveness ping (does not touch the engine).
+     - Static liveness ping (does not touch the engine). Requires the API
+       key when one is set.
    * - GET
      - ``/healthcheck``
      - K8s liveness/readiness probe; ``503`` until the engine is initialized.
+       The only route that never requires the API key.
 
 **Inspection and status**
 
@@ -1703,17 +1776,22 @@ Dumps the process environment variables as a sorted, pretty-printed
 JSON document. The response ``Content-Type`` is ``text/plain`` so it can be
 piped directly to a terminal.
 
+Values of variables whose name contains ``KEY``, ``TOKEN``, ``SECRET``,
+``PASSWORD`` or ``CREDENTIAL`` (case-insensitive) are replaced with
+``"<redacted>"``; the name stays visible so you can confirm it is set.
+
 .. warning::
 
-   The payload contains **every** environment variable, including any
-   secrets injected via the environment. There is no redaction or auth —
-   restrict network access to this endpoint in production.
+   Redaction is by name only. A secret stored under another name (e.g. a
+   database URL with an embedded password) is returned as-is, so keep the
+   API key-protected or on loopback.
 
 **Response** (``200 OK``, ``text/plain``):
 
 .. code-block:: json
 
     {
+      "AWS_SECRET_ACCESS_KEY": "<redacted>",
       "HOME": "/root",
       "LMCACHE_LOG_LEVEL": "INFO",
       "PATH": "/usr/local/bin:/usr/bin"

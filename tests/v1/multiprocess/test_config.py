@@ -20,11 +20,14 @@ from lmcache.v1.multiprocess.config import (
     DEFAULT_KAFKA_DELIVERY_TIMEOUT,
     CoordinatorConfig,
     HttpCacheEventSinkConfig,
+    HTTPFrontendConfig,
     KafkaCacheEventSinkConfig,
     MPServerConfig,
     add_coordinator_args,
+    add_http_frontend_args,
     add_mp_server_args,
     parse_args_to_coordinator_config,
+    parse_args_to_http_frontend_config,
     parse_args_to_mp_server_config,
 )
 
@@ -420,3 +423,59 @@ def test_session_ttl_seconds_default_and_flag():
     """Session TTL defaults to 600 s and is settable for deep queueing."""
     assert _parse_mp([]).session_ttl_seconds == 600.0
     assert _parse_mp(["--session-ttl-seconds", "7200"]).session_ttl_seconds == 7200.0
+
+
+def _parse_http(argv: list[str]) -> HTTPFrontendConfig:
+    parser = argparse.ArgumentParser()
+    add_http_frontend_args(parser)
+    return parse_args_to_http_frontend_config(parser.parse_args(argv))
+
+
+def test_http_api_key_comes_from_env(monkeypatch):
+    """The key is read from LMCACHE_HTTP_API_KEY; there is no key flag."""
+    monkeypatch.setenv("LMCACHE_HTTP_API_KEY", "s3cret")
+    config = _parse_http(["--http-host", "0.0.0.0"])
+    assert config.http_api_key == "s3cret"
+    assert not config.http_allow_unauthenticated
+    with pytest.raises(SystemExit):
+        _parse_http(["--http-api-key", "s3cret"])
+
+
+def test_http_defaults_are_loopback_without_key(monkeypatch):
+    monkeypatch.delenv("LMCACHE_HTTP_API_KEY", raising=False)
+    config = _parse_http([])
+    assert config.http_host == "127.0.0.1"
+    assert config.http_api_key == ""
+    config.check_auth_policy()
+
+
+def test_http_allow_unauthenticated_flag_is_parsed(monkeypatch):
+    monkeypatch.delenv("LMCACHE_HTTP_API_KEY", raising=False)
+    config = _parse_http(["--http-allow-unauthenticated"])
+    assert config.http_allow_unauthenticated
+
+
+def test_http_api_key_is_not_in_repr():
+    """Logging the config must not log the secret."""
+    assert "s3cret" not in repr(HTTPFrontendConfig(http_api_key="s3cret"))
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.2", "::1", "localhost"])
+def test_loopback_host_needs_no_key(host):
+    HTTPFrontendConfig(http_host=host).check_auth_policy()
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "", "10.0.0.5", "mp-server"])
+def test_non_loopback_host_without_key_is_refused(host):
+    with pytest.raises(ValueError, match="LMCACHE_HTTP_API_KEY"):
+        HTTPFrontendConfig(http_host=host).check_auth_policy()
+
+
+def test_non_loopback_host_with_key_is_allowed():
+    HTTPFrontendConfig(http_host="0.0.0.0", http_api_key="s3cret").check_auth_policy()
+
+
+def test_non_loopback_host_with_opt_out_is_allowed():
+    HTTPFrontendConfig(
+        http_host="0.0.0.0", http_allow_unauthenticated=True
+    ).check_auth_policy()

@@ -263,12 +263,20 @@ The HTTP frontend is included when running ``lmcache server``.
      - Description
    * - ``--http-host``
      - ``127.0.0.1``
-     - Host to bind the HTTP (FastAPI/uvicorn) server. The admin API has
-       no authentication; only bind a non-loopback address on a trusted
-       network.
+     - Host to bind the HTTP (FastAPI/uvicorn) server. A non-loopback host
+       requires ``LMCACHE_HTTP_API_KEY`` or ``--http-allow-unauthenticated``;
+       otherwise the server refuses to start.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
+   * - ``--http-allow-unauthenticated``
+     - off
+     - Serve the HTTP API without authentication on a non-loopback
+       ``--http-host``. Only for networks where every peer is trusted.
+
+The API key itself is read from the ``LMCACHE_HTTP_API_KEY`` environment
+variable only, so it never appears in the process list; see
+:ref:`mp-http-authentication`.
 
 P2P
 ---

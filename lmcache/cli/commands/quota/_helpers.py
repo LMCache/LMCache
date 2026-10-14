@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 
 # First Party
+from lmcache.cli.http import kvcache_auth_headers
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -56,7 +57,7 @@ def http_request(
         SystemExit: On connection error or non-2xx HTTP response.
     """
     body = None
-    headers: dict[str, str] = {}
+    headers = kvcache_auth_headers()
     if data is not None:
         body = json.dumps(data).encode()
         headers["Content-Type"] = "application/json"

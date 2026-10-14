@@ -116,6 +116,11 @@ class MPCoordinatorConfig:
             envelope per record, the same body ``POST /events`` accepts --
             and ``POST /events`` then answers 404. Kafka needs the
             ``lmcache[kafka]`` extra.
+        mp_server_api_key: Bearer token sent on every call to the MP servers'
+            HTTP APIs (eviction, prefetch, cache fan-out). Must match their
+            ``LMCACHE_HTTP_API_KEY``; empty sends no ``Authorization``
+            header. Kept out of ``repr`` so logging the config never logs the
+            secret.
     """
 
     host: str = "0.0.0.0"
@@ -139,6 +144,7 @@ class MPCoordinatorConfig:
     event_source_config: HttpCacheEventSourceConfig | KafkaCacheEventSourceConfig = (
         field(default_factory=HttpCacheEventSourceConfig)
     )
+    mp_server_api_key: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
         """Validate timing parameters.

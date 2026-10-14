@@ -2,13 +2,16 @@
 """``lmcache coordinator`` — launch the LMCache mp coordinator (HTTP).
 
 The coordinator tracks mp server instances via a registry and evicts those
-whose heartbeats lapse. Configuration comes from CLI flags only; an unset flag
-leaves the corresponding :class:`MPCoordinatorConfig` default.
+whose heartbeats lapse. Configuration comes from CLI flags; an unset flag
+leaves the corresponding :class:`MPCoordinatorConfig` default. The one
+exception is the MP servers' API key, read from ``LMCACHE_HTTP_API_KEY`` so it
+never appears in the process list.
 """
 
 # Standard
 import argparse
 import json
+import os
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
@@ -249,7 +252,8 @@ class CoordinatorCommand(BaseCommand):
         """Build the coordinator config and serve the app with uvicorn.
 
         Builds the config from the supplied flags; every flag left unset keeps
-        its :class:`MPCoordinatorConfig` default.
+        its :class:`MPCoordinatorConfig` default. The MP servers' API key comes
+        from ``LMCACHE_HTTP_API_KEY``.
 
         Args:
             args: Parsed CLI arguments.
@@ -318,6 +322,7 @@ class CoordinatorCommand(BaseCommand):
             fields["event_source_config"] = KafkaCacheEventSourceConfig(**kafka_fields)
         if args.disable_metrics is not None:
             fields["metrics_enabled"] = not args.disable_metrics
+        fields["mp_server_api_key"] = os.getenv("LMCACHE_HTTP_API_KEY", "")
         extra_config = _parse_extra_config(args.extra_config)
         if extra_config is not None:
             fields["extra_config"] = extra_config

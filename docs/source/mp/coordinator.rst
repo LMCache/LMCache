@@ -329,6 +329,14 @@ Registration is best-effort: if the coordinator is unreachable, the MP server
 logs a warning, keeps retrying, and continues serving. A malformed
 heartbeat-interval value is rejected at startup.
 
+The coordinator calls back into each MP server's HTTP API (eviction, prefetch,
+cache fan-out), so the MP servers must bind a non-loopback ``--http-host``,
+which requires an API key (see :ref:`mp-http-authentication`). Export the same
+``LMCACHE_HTTP_API_KEY`` to every MP server and to the coordinator; the
+coordinator sends it as ``Authorization: Bearer <key>`` on every call. This key
+only authenticates the coordinator to the MP servers: the coordinator's own
+HTTP API is not authenticated, so keep it on a trusted network.
+
 HTTP endpoints
 --------------
 
