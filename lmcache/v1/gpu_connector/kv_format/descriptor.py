@@ -150,6 +150,11 @@ class KVPacking(Enum):
     # One shared plane, no K/V distinction (MLA latent cache). KV does not
     # appear in dims. kv_size == 1.
     SHARED = "shared"
+    # One K or V plane per registration with its partner registered on its
+    # own (SGLang's unified MP hands K and V over independently): the pairing
+    # lives outside the layout, so KV appears nowhere and kv_size == 1, but
+    # unlike SHARED the plane is not a latent.
+    COMPONENT = "component"
 
 
 class ScalePlacement(Enum):
@@ -260,9 +265,10 @@ class KVLayoutDescriptor:
             )
 
         has_kv = Axis.KV in seen or Axis.KV in carried
-        if self.kv_packing is KVPacking.SHARED and has_kv:
+        if self.kv_packing in (KVPacking.SHARED, KVPacking.COMPONENT) and has_kv:
             raise ValueError(
-                "SHARED packing must not carry a KV axis, in dims or at a list level"
+                f"{self.kv_packing.name} packing must not carry a KV axis, "
+                "in dims or at a list level"
             )
         if self.kv_packing is KVPacking.SPLIT and not has_kv:
             raise ValueError(
@@ -420,6 +426,11 @@ class KVLayoutDescriptor:
         )
 
     @property
+    def is_single_kv(self) -> bool:
+        """Each list entry is one independent K or V plane, not a pair."""
+        return self.kv_packing is KVPacking.COMPONENT
+
+    @property
     def kv_size(self) -> int:
         """Number of separately addressed K/V planes: 2 for SPLIT, else 1."""
         return 2 if self.kv_packing is KVPacking.SPLIT else 1
@@ -486,6 +497,8 @@ _C = Axis.C
 
 _SPLIT_EXTENTS: Mapping[Axis, int] = MappingProxyType({_KV: 2})
 _MLA_EXTENTS: Mapping[Axis, int] = MappingProxyType({_KV: 1, _H: 1})
+# One K or V plane per registration.
+_COMPONENT_EXTENTS: Mapping[Axis, int] = MappingProxyType({_KV: 1})
 
 
 def _split(
@@ -623,6 +636,19 @@ ENGINE_KV_FORMAT_DESCRIPTORS: Mapping[str, KVLayoutDescriptor] = MappingProxyTyp
             dims=((_B,), (_N,), (_H,), (_C,)),
             grouping=Grouping.PER_LAYER_PLANE_TUPLES,
             kv_packing=KVPacking.SHARED,
+            storage_dtype=DTYPE_UNSPECIFIED,
+        ),
+        # SGLang unified MP independent components: NL x [NB, BS, NH, HS],
+        # every list entry one K or V allocation registered on its own, so NL
+        # counts registered planes rather than model layers and no KV axis
+        # exists anywhere. Same per-tensor dims as the daemon KV_LISTS and
+        # Ascend (K, V)-pair members above: the three differ only in how the
+        # list structure pairs K with V, which grouping and packing record.
+        "NL_X_NB_BS_NH_HS": KVLayoutDescriptor(
+            extents=_COMPONENT_EXTENTS,
+            dims=((_B,), (_N,), (_H,), (_C,)),
+            grouping=Grouping.PER_LAYER,
+            kv_packing=KVPacking.COMPONENT,
             storage_dtype=DTYPE_UNSPECIFIED,
         ),
     }

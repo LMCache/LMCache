@@ -104,6 +104,7 @@ def test_derived_facts_match_spec_facts():
             spec.is_two_major,
             spec.is_pbs_fused,
             spec.is_kv_second_tuple,
+            spec.is_single_kv,
         )
         derived = (
             desc.is_cross_layer,
@@ -115,17 +116,19 @@ def test_derived_facts_match_spec_facts():
             desc.is_two_major,
             desc.is_pbs_fused,
             desc.is_kv_second_tuple,
+            desc.is_single_kv,
         )
         assert derived == declared, f"{fmt}: derived {derived}, declared {declared}"
 
 
 def test_kv_size_matches_packing():
-    # kv_size == 1 exactly for shared (MLA) and fused-packed formats.
+    # kv_size == 1 exactly for shared (MLA), fused-packed and lone-component
+    # formats: one plane per list entry.
     for fmt in _all_formats():
         spec = get_spec_class(fmt)
         desc = from_engine_kv_format(fmt)
-        expected = 1 if (spec.is_mla or spec.is_fused_packed) else 2
-        assert desc.kv_size == expected, fmt
+        one_plane = spec.is_mla or spec.is_fused_packed or spec.is_single_kv
+        assert desc.kv_size == (1 if one_plane else 2), fmt
 
 
 def test_dims_rank_matches_shape_grammar():
@@ -217,6 +220,20 @@ def test_validation_rejects_inconsistent_structures():
             grouping=Grouping.KV_LISTS,
             dims=((Axis.B,), (Axis.N,), (Axis.H,), (Axis.C,)),
         )
+    # COMPONENT is one lone K or V plane per entry, so the same rule applies;
+    # without a KV axis it is the SGLang independent-component entry.
+    with pytest.raises(ValueError, match="COMPONENT"):
+        build(kv_packing=KVPacking.COMPONENT)
+    with pytest.raises(ValueError, match="COMPONENT"):
+        build(
+            kv_packing=KVPacking.COMPONENT,
+            grouping=Grouping.PER_LAYER_KV_PAIRS,
+            dims=((Axis.B,), (Axis.N,), (Axis.H,), (Axis.C,)),
+        )
+    build(
+        kv_packing=KVPacking.COMPONENT,
+        dims=((Axis.B,), (Axis.N,), (Axis.H,), (Axis.C,)),
+    )
     # SPLIT needs a KV axis somewhere; a (K, V) pair list level suffices.
     with pytest.raises(ValueError, match="SPLIT"):
         build(dims=((Axis.B,), (Axis.N,), (Axis.H,), (Axis.C,)))
