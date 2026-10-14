@@ -49,8 +49,8 @@ Requirements
 ------------
 
 * **A coordinator.** P2P needs the coordinator for peer discovery. A server
-  started with ``--p2p-advertise-url`` but no ``--coordinator-url`` refuses to
-  start.
+  started with ``--p2p-advertise-url`` (or ``--p2p-transfer-engine cxl``) but no
+  ``--coordinator-url`` refuses to start.
 * **An RDMA-capable network** (InfiniBand / RoCE) is strongly recommended for
   production performance. By default P2P uses the ``nixl`` transfer engine,
   which ships as the optional ``lmcache[nixl]`` extra — install it with
@@ -61,10 +61,15 @@ Requirements
   (``--gds-l1-path``) and the Device-DAX L1 tier (``--l1-devdax-path``); the
   server refuses to start in those configurations.
 
+The shared CXL pool mode (see `Shared CXL pool`_) has different requirements:
+it needs Device-DAX L1 and ``--cxl-pool-id``, and needs neither NIXL nor an
+RDMA network.
+
 Configuration
 -------------
 
-P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
+P2P is enabled per server by the ``--p2p-advertise-url`` flag, or by
+``--p2p-transfer-engine cxl`` for the shared CXL pool mode. The relevant
 ``lmcache server`` flags are:
 
 .. list-table::
