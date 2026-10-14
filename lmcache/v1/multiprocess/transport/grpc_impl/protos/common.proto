@@ -44,4 +44,5 @@ message EngineGroupInfo {
   int64 sw_size_tokens = 4;
   int64 extra_object_group_tag = 5;
   bool recurrent_state = 6;
+  repeated int64 model_depths = 7;
 }

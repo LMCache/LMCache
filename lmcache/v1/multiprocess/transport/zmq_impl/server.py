@@ -118,11 +118,32 @@ def build_zmq_request_server(
     Returns:
         Configured, but not yet started, ZMQ message queue server.
     """
-    server = MessageQueueServer(
+    all_specs = [spec for module in modules for spec in get_zmq_handler_specs(module)]
+    # Only the layer-wise path has handlers outside the shared RPC contract,
+    # and only the streaming subclass can register and dispatch them; every
+    # other deployment keeps the plain server and its unmodified dispatch.
+    server_cls: type[MessageQueueServer] = MessageQueueServer
+    if mp_config.layerwise_batch > 0:
+        # First Party
+        from lmcache.v1.multiprocess.transport.zmq_impl.mq_streaming import (
+            StreamingMessageQueueServer,
+        )
+        from lmcache.v1.multiprocess.transport.zmq_impl.server_layerwise import (
+            get_layerwise_zmq_handler_specs,
+        )
+
+        server_cls = StreamingMessageQueueServer
+        # Added before the pools are built below, so retrieve_layerwise
+        # shares the client-affinity pool with store and retrieve.
+        all_specs += [
+            spec
+            for module in modules
+            for spec in get_layerwise_zmq_handler_specs(module)
+        ]
+    server = server_cls(
         bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
         context=zmq.Context.instance(),
     )
-    all_specs = [spec for module in modules for spec in get_zmq_handler_specs(module)]
     for spec in all_specs:
         add_handler_helper(
             server,

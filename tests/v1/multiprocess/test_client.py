@@ -107,6 +107,8 @@ def test_business_callers_create_clients_through_factory() -> None:
         repo_root / "tests/v1/multiprocess/test_p2p_controller.py",
         repo_root / "tests/v1/multiprocess/test_protocols.py",
         repo_root / "tests/v1/multiprocess/transport_test_utils.py",
+        repo_root / "tests/v1/multiprocess/test_streaming_mq_server.py",
+        repo_root / "tests/v1/multiprocess/test_layerwise_retrieve_submit_ordering.py",
         repo_root / "tests/cli/commands/bench/test_server_bench.py",
         repo_root / "lmcache/v1/multiprocess/mq.py",
     }

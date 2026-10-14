@@ -7,6 +7,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
+import re
 
 if TYPE_CHECKING:
     # First Party
@@ -207,6 +208,37 @@ def _resolve_per_layer_recurrent(
     return per_layer_recurrent
 
 
+_LAYER_DEPTH_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
+
+
+def _resolve_per_layer_model_depths(
+    layer_names: list[str], num_layers: int
+) -> list[int]:
+    """Map each registered tensor index to its transformer block ordinal.
+
+    Engines name registered KV tensors after the owning module, e.g.
+    ``model.layers.7.attn.swa_cache``, so the block ordinal is recoverable
+    from the name. Models registering several caches per layer do so
+    type-major, which makes the registration ordinal group by cache type
+    rather than by depth; depth is what transfer ordering needs.
+
+    Args:
+        layer_names: Registered layer names, in registration order.
+        num_layers: Number of registered tensors.
+
+    Returns:
+        One depth per registered tensor index. Names without a recognisable
+        ``layers.<N>`` component fall back to their registration index, which
+        reproduces the pre-existing ordering for that layer.
+    """
+    depths = list(range(num_layers))
+    for idx, name in enumerate(layer_names[:num_layers]):
+        match = _LAYER_DEPTH_RE.search(name)
+        if match is not None:
+            depths[idx] = int(match.group(1))
+    return depths
+
+
 def _merge_layer_recurrent(per_layer_recurrent: list[bool], indices: list[int]) -> bool:
     """Merge the per-layer recurrent-state flags of one LMCache group.
 
@@ -349,6 +381,9 @@ def create_engine_group_infos_from_vllm(
     group_tokens_per_block: dict[int, int] = {}
     per_layer_sw_size = [-1] * num_layers
     per_layer_recurrent = [False] * num_layers
+    per_layer_model_depth = _resolve_per_layer_model_depths(
+        list(kv_caches.keys()), num_layers
+    )
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
         for engine_group_id, group in enumerate(vllm_groups):
@@ -409,6 +444,7 @@ def create_engine_group_infos_from_vllm(
             # --separate-object-groups, after the regular groups.
             extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
             recurrent_state=_merge_layer_recurrent(per_layer_recurrent, indices),
+            model_depths=tuple(per_layer_model_depth[idx] for idx in indices),
         )
         for identity, indices in group_layers_by_identity(
             normalized_kv_caches,

@@ -64,6 +64,13 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     KV; the one-block window reflects restore semantics and blend full-window
     forcing must not widen it. Defaulted field: wire-compatible."""
 
+    model_depths: tuple[int, ...] = ()
+    """Model depth (transformer block ordinal) of each entry in
+    ``layer_indices``, same length and order. Empty means the engine did not
+    report depths; consumers then fall back to ``layer_indices``, which is
+    correct only when each model layer registers exactly one KV cache.
+    Defaulted field: wire-compatible with old payloads."""
+
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).

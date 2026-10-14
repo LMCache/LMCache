@@ -55,17 +55,19 @@ class DeviceIpcWrapper(_message.Message):
     def __init__(self, pickled_payload: _Optional[bytes] = ...) -> None: ...
 
 class EngineGroupInfo(_message.Message):
-    __slots__ = ("engine_group_id", "layer_indices", "tokens_per_block", "sw_size_tokens", "extra_object_group_tag", "recurrent_state")
+    __slots__ = ("engine_group_id", "layer_indices", "tokens_per_block", "sw_size_tokens", "extra_object_group_tag", "recurrent_state", "model_depths")
     ENGINE_GROUP_ID_FIELD_NUMBER: _ClassVar[int]
     LAYER_INDICES_FIELD_NUMBER: _ClassVar[int]
     TOKENS_PER_BLOCK_FIELD_NUMBER: _ClassVar[int]
     SW_SIZE_TOKENS_FIELD_NUMBER: _ClassVar[int]
     EXTRA_OBJECT_GROUP_TAG_FIELD_NUMBER: _ClassVar[int]
     RECURRENT_STATE_FIELD_NUMBER: _ClassVar[int]
+    MODEL_DEPTHS_FIELD_NUMBER: _ClassVar[int]
     engine_group_id: int
     layer_indices: _containers.RepeatedScalarFieldContainer[int]
     tokens_per_block: int
     sw_size_tokens: int
     extra_object_group_tag: int
     recurrent_state: bool
-    def __init__(self, engine_group_id: _Optional[int] = ..., layer_indices: _Optional[_Iterable[int]] = ..., tokens_per_block: _Optional[int] = ..., sw_size_tokens: _Optional[int] = ..., extra_object_group_tag: _Optional[int] = ..., recurrent_state: bool = ...) -> None: ...
+    model_depths: _containers.RepeatedScalarFieldContainer[int]
+    def __init__(self, engine_group_id: _Optional[int] = ..., layer_indices: _Optional[_Iterable[int]] = ..., tokens_per_block: _Optional[int] = ..., sw_size_tokens: _Optional[int] = ..., extra_object_group_tag: _Optional[int] = ..., recurrent_state: bool = ..., model_depths: _Optional[_Iterable[int]] = ...) -> None: ...
