@@ -30,20 +30,20 @@ from lmcache import torch_dev, torch_device_type
 
 try:
     # First Party
-    import lmcache.c_ops as lmc_ops
+    import lmcache.cuda_ops as cuda_ops
 
-    _HAS_STRIDED = hasattr(lmc_ops, "rotary_embedding_k_fused_strided")
-except Exception:  # CPU-only / no built c_ops (e.g. the unit-test runner)
-    lmc_ops = None
+    _HAS_STRIDED = hasattr(cuda_ops, "rotary_embedding_k_fused_strided")
+except Exception:  # CPU-only / no built cuda_ops (e.g. the unit-test runner)
+    cuda_ops = None
     _HAS_STRIDED = False
 
-# These tests need CUDA, an available torch device backend, and a built c_ops
+# These tests need CUDA, an available torch device backend, and a built cuda_ops
 # carrying the strided kernel.
 _REQ = torch_dev.is_available() and torch_device_type == "cuda" and _HAS_STRIDED
 
 # Module-level skip keeps every pytest case consistent without repeating
 # per-function decorators.
-pytestmark = _skipif(not _REQ, reason="requires CUDA + built c_ops")
+pytestmark = _skipif(not _REQ, reason="requires CUDA + built cuda_ops")
 
 
 def _make_inputs(n_tokens, n_heads, head_size, max_pos, dtype, device, seed=0):
@@ -68,7 +68,7 @@ def _option1_copy(packed, old_pos, new_pos, cos_sin, head_size, is_neox=True):
     """Gather K contiguous -> existing kernel -> scatter back (in place)."""
     t, h = packed.shape[0], packed.shape[1]
     k = packed[:, :, 0, :].reshape(t, h, head_size).contiguous()
-    lmc_ops.rotary_embedding_k_fused(old_pos, new_pos, k, head_size, cos_sin, is_neox)
+    cuda_ops.rotary_embedding_k_fused(old_pos, new_pos, k, head_size, cos_sin, is_neox)
     packed[:, :, 0, :] = k.reshape(t, h, head_size)
 
 
@@ -76,7 +76,7 @@ def _option2_strided(packed, old_pos, new_pos, cos_sin, head_size, is_neox=True)
     """Strided kernel: rotate the K half in place (head_stride = 2*head_size)."""
     t, h = packed.shape[0], packed.shape[1]
     view = packed.reshape(t, h, 2 * head_size)  # contiguous view
-    lmc_ops.rotary_embedding_k_fused_strided(
+    cuda_ops.rotary_embedding_k_fused_strided(
         old_pos, new_pos, view, head_size, 2 * head_size, cos_sin, is_neox
     )
 

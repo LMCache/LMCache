@@ -39,6 +39,13 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 WORKDIR /workspace
 
+# The NGC Ubuntu base reserves uid 1000 for its default ubuntu account.
+# Replace that account with a dedicated user to reduce container privileges.
+RUN if [ "$(getent passwd 1000 | cut -d: -f1)" = "ubuntu" ]; then userdel ubuntu; fi \
+    && useradd --create-home --uid 1000 --shell /usr/sbin/nologin lmcache \
+    && mkdir -p /home/lmcache/.cache/huggingface \
+    && chown -R lmcache:lmcache /workspace /home/lmcache/.cache
+
 # CUDA arch list used by torch
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
@@ -48,6 +55,15 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 FROM base AS image-build
 
+# Build and run the optional C++ NIXL storage connector against the NIXL SDK
+# headers from the validated source release and its matching packaged runtime.
+ARG NIXL_VERSION=1.3.1
+ENV BUILD_WITH_NIXL=1
+ENV NIXL_INCLUDE_DIR=/opt/nixl-source/src/api/cpp
+ENV NIXL_LIBRARY_DIR=/opt/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs
+ENV NIXL_PLUGIN_DIR=/opt/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/plugins
+ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs:${LD_LIBRARY_PATH}
+
 # install build dependencies
 COPY ./requirements/build.txt build.txt
 
@@ -56,7 +72,7 @@ ARG max_jobs=2
 ENV MAX_JOBS=${max_jobs}
 
 # Number of threads used by nvcc
-ARG nvcc_threads=8
+ARG nvcc_threads=auto
 ENV NVCC_THREADS=$nvcc_threads
 
 ARG CUDA_VERSION
@@ -65,6 +81,9 @@ ARG VLLM_VERSION=nightly
 RUN --mount=type=cache,target=/root/.cache/pip \
     . /opt/venv/bin/activate && \
     uv pip install -r build.txt
+
+RUN git clone --depth 1 --branch "v${NIXL_VERSION}" \
+    https://github.com/ai-dynamo/nixl.git /opt/nixl-source
 
 ARG LMCACHE_COMMIT_ID=1
 
@@ -87,13 +106,17 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
         VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
             "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
     fi && \
+    uv pip install --reinstall-package nixl "nixl==${NIXL_VERSION}" && \
+    test -f "${NIXL_INCLUDE_DIR}/nixl.h" && \
+    test -f "${NIXL_LIBRARY_DIR}/libnixl.so" && \
+    test -f "${NIXL_PLUGIN_DIR}/libplugin_POSIX.so" && \
+    test -f "${NIXL_PLUGIN_DIR}/libplugin_OBJ.so" && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
-    uv pip install ./dist_lmcache/*.whl --verbose && \
-  
-    uv pip install --reinstall-package nixl nixl
+    uv pip install ./dist_lmcache/*.whl --verbose
 
 WORKDIR /workspace
+USER lmcache
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release, cu13) #######################
@@ -122,6 +145,7 @@ RUN . /opt/venv/bin/activate && \
     uv pip install --reinstall-package nixl nixl
 
 WORKDIR /workspace
+USER lmcache
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release, cu129) ######################
@@ -151,4 +175,5 @@ RUN . /opt/venv/bin/activate && \
     uv pip install --reinstall-package nixl nixl
 
 WORKDIR /workspace
+USER lmcache
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]

@@ -485,7 +485,7 @@ void multi_layer_kv_transfer(
     const EngineKVFormat engine_kv_format, const int block_size,
     const int head_size, const int skip_prefix_n_tokens) {
   // head_size is currently unused in the SYCL implementation; accepted to
-  // keep ABI parity with the CUDA c_ops binding so callers can pass the
+  // keep ABI parity with the CUDA cuda_ops binding so callers can pass the
   // same kwargs to either backend.
   (void)head_size;
   int num_origin_elements = key_value.size(3);
@@ -1024,10 +1024,11 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
 
 // ---------------------------------------------------------------------------
 // Pinned host allocation (SYCL/XPU analog of the CUDA cudaHostAlloc path in
-// csrc/mem_alloc.cpp). LMCache local_cpu backend expects a device-accessible
-// (USM host) buffer; without this the XPU build silently fell back to pageable
-// host memory, dropping D2H store throughput ~20x. sycl::malloc_host bound to
-// the current XPU device context gives true USM-pinned host memory.
+// csrc/cuda/mem_alloc.cpp). LMCache local_cpu backend expects a
+// device-accessible (USM host) buffer; without this the XPU build silently fell
+// back to pageable host memory, dropping D2H store throughput ~20x.
+// sycl::malloc_host bound to the current XPU device context gives true
+// USM-pinned host memory.
 //
 // IMPORTANT: We use device 0's context for both alloc and free to ensure
 // context consistency. USM host memory is accessible from all devices, but

@@ -84,6 +84,7 @@ def allocate_and_copy_objects(
           that has been successfully allocated
         - list of the memory objects that has been successfully allocated
     """
+    allocated_keys = []
     allocated_objects = []
     for key, src_memory_obj in zip(keys, src_memory_objs, strict=False):
         if allocator_backend.contains(key):
@@ -111,11 +112,12 @@ def allocate_and_copy_objects(
 
         with torch_dev.stream(stream):
             memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+        allocated_keys.append(key)
         allocated_objects.append(memory_obj)
 
     if stream is not None:
         stream.synchronize()
-    return keys[: len(allocated_objects)], allocated_objects
+    return allocated_keys, allocated_objects
 
 
 class WeightedSemaphore:

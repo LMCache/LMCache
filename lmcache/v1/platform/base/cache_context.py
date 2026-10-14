@@ -15,6 +15,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar
 import array
+import threading
 
 # Third Party
 import torch
@@ -24,13 +25,13 @@ from lmcache.v1.gpu_connector.utils import (
     get_attention_backend,
     get_concrete_engine_kv_shape_from_shape_desc,
     get_engine_kv_shape_description,
-    is_mla,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
-    import lmcache.c_ops as lmc_ops
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+    from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
 class BaseCacheContext(ABC):
@@ -67,6 +68,39 @@ class BaseCacheContext(ABC):
         self.kv_layer_groups_manager_ = kv_layer_groups_manager
         self.block_ids_buffer_ = block_ids_buffer
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        # Imported worker events, held until the stream wait queued on each
+        # has been consumed (see hold_imported_event / release_imported_event).
+        self._held_imports: dict[int, object] = {}
+        self._next_import_token = 0
+        self._held_imports_lock = threading.Lock()
+
+    def hold_imported_event(self, event: object) -> int:
+        """Keep an imported worker event alive until :meth:`release_imported_event`.
+
+        A stream wait queued on an imported event refers to it until the
+        stream has consumed the wait, so the import must outlive the handler
+        that queued it.
+
+        Args:
+            event: The imported event.
+
+        Returns:
+            The token that releases this import.
+        """
+        with self._held_imports_lock:
+            token = self._next_import_token
+            self._next_import_token += 1
+            self._held_imports[token] = event
+            return token
+
+    def release_imported_event(self, token: int) -> None:
+        """Drop the imported event behind ``token``; its stream wait has drained.
+
+        Args:
+            token: Token returned by :meth:`hold_imported_event`.
+        """
+        with self._held_imports_lock:
+            self._held_imports.pop(token, None)
 
     # ------------------------------------------------------------------
     # Abstract -- subclasses MUST implement
@@ -178,11 +212,13 @@ class BaseCacheContext(ABC):
             kernel_group_idx, num_tokens
         )
 
-    def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
+    def get_shape_desc(self, group_idx: int) -> PageBufferShapeDesc:
         """Returns the PageBufferShapeDesc for *group_idx*."""
         return self.kv_layer_groups_manager.get_shape_desc(group_idx)
 
-    def get_engine_kv_format(self, kernel_group_idx: int) -> "lmc_ops.EngineKVFormat":
+    def get_engine_kv_format(
+        self, kernel_group_idx: int
+    ) -> "lmcache_native.EngineKVFormat":
         """Returns the Engine KV format of kernel *kernel_group_idx*.
 
         Raises:
@@ -199,18 +235,22 @@ class BaseCacheContext(ABC):
             )
         return engine_kv_format
 
-    def engine_kv_formats(self) -> list["lmc_ops.EngineKVFormat"]:
+    def engine_kv_formats(self) -> list["lmcache_native.EngineKVFormat"]:
         """Returns the Engine KV format of each kernel group, in group order."""
         num_groups = len(self.kv_layer_groups_manager.kernel_groups)
         return [self.get_engine_kv_format(idx) for idx in range(num_groups)]
 
-    def engine_kv_format_per_layer(self) -> list["lmc_ops.EngineKVFormat | None"]:
+    def engine_kv_format_per_layer(
+        self,
+    ) -> list["lmcache_native.EngineKVFormat | None"]:
         """Returns each layer's Engine KV format, indexed by layer index.
 
         Formats differ across layers for a mixed-format model. ``None`` marks a
         layer in no kernel group (a cross-layer KV-sharing layer).
         """
-        formats: list["lmc_ops.EngineKVFormat | None"] = [None] * len(self.kv_caches_)
+        formats: list["lmcache_native.EngineKVFormat | None"] = [
+            None
+        ] * self.num_layers_
         for kernel_group_idx, group in enumerate(
             self.kv_layer_groups_manager.kernel_groups
         ):
@@ -223,6 +263,57 @@ class BaseCacheContext(ABC):
         """Returns the number of slots per lmcache chunk for D/H
         transfer."""
         return self.kv_layer_groups_manager.get_slots_per_chunk_in_sw(kernel_group_idx)
+
+    def get_kernel_group_kv_pointer_list(self, kernel_group_idx: int) -> list[int]:
+        """Returns the host-side list of paged KV pointers of a kernel group.
+
+        Same pointers and order as :meth:`get_kernel_group_kv_pointers`, as
+        Python ints for host-side address arithmetic. This default reads the
+        device tensor back, which synchronizes the current stream; subclasses
+        cache the list.
+
+        Args:
+            kernel_group_idx: Index of the kernel group.
+
+        Returns:
+            The paged buffer data pointers of the group, in kernel order.
+        """
+        return self.get_kernel_group_kv_pointers(kernel_group_idx).tolist()
+
+    def get_kernel_group_offset_in_object(
+        self, object_group_idx: int, kernel_group_idx: int
+    ) -> int:
+        """Returns the byte offset of a kernel group's region inside one
+        memory object of ``object_group_idx``.
+
+        A memory object concatenates the ``[kv_size, num_layers, slots,
+        hidden]`` regions of its kernel groups in the object group's declared
+        order (the layout of :func:`get_layout_desc` and of the temp staging
+        buffer), each sized for one LMCache chunk.
+
+        Args:
+            object_group_idx: Index of the object group.
+            kernel_group_idx: Index of a kernel group that belongs to it.
+
+        Returns:
+            Byte offset of the kernel group's region from the object start.
+
+        Raises:
+            ValueError: If the kernel group is not part of the object group.
+        """
+        object_group = self.kv_layer_groups_manager.object_groups[object_group_idx]
+        offset = 0
+        for member_idx in object_group.kernel_group_indices:
+            if member_idx == kernel_group_idx:
+                return offset
+            shape, dtype = self.get_kernel_group_shape_dtype(
+                self.lmcache_tokens_per_chunk, member_idx
+            )
+            offset += shape.numel() * dtype.itemsize
+        raise ValueError(
+            f"kernel group {kernel_group_idx} is not part of object group "
+            f"{object_group_idx} (members: {object_group.kernel_group_indices})"
+        )
 
     def get_kv_buffer_shape(
         self, logical_num_tokens: int, group_idx: int = 0
@@ -278,8 +369,12 @@ class BaseCacheContext(ABC):
     def concrete_engine_kv_shape(self) -> str:
         """Returns the engine KV shape with actual numeric values."""
         group = self.kv_layer_groups_manager.kernel_groups[0]
+        engine_kv_format = group.engine_kv_format
+        # Detection-built groups always set engine_kv_format; this property
+        # is only meaningful for them, so None is unreachable here.
+        assert engine_kv_format is not None
         return get_concrete_engine_kv_shape_from_shape_desc(
-            group.shape_desc, group.engine_kv_format
+            group.shape_desc, engine_kv_format
         )
 
     # ------------------------------------------------------------------
@@ -320,7 +415,7 @@ class BaseCacheContext(ABC):
                     group.shape_desc, engine_kv_format
                 )
             ),
-            "is_mla": is_mla(engine_kv_format),
+            "is_mla": lmcache_native.is_mla(engine_kv_format),
             "engine_kv_format": engine_kv_format.name,
             "engine_kv_shape": get_engine_kv_shape_description(engine_kv_format),
             "attention_backend": get_attention_backend(engine_kv_format),

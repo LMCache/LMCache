@@ -60,6 +60,7 @@ class TestRunScriptAPI:
         """Create a mock LMCacheConnectorV1Impl adapter with config."""
         adapter = MagicMock()
         config = LMCacheEngineConfig.from_defaults()
+        config.run_script_api_enabled = True
         adapter.config = config
         return adapter
 
@@ -137,3 +138,20 @@ class TestRunScriptAPI:
 
         assert response.status_code == 400
         assert "No script file provided" in response.text
+
+    def test_run_script_disabled_by_default(self):
+        """Without run_script_api_enabled the endpoint returns 404."""
+        adapter = MagicMock()
+        adapter.config = LMCacheEngineConfig.from_defaults()
+        app.state.lmcache_adapter = adapter
+        try:
+            client = TestClient(app)
+            response = client.post(
+                "/run_script",
+                files={"script": ("test.py", b"result = 1", "text/plain")},
+            )
+            assert response.status_code == 404
+            assert "disabled" in response.text
+        finally:
+            client.close()
+            del app.state.lmcache_adapter

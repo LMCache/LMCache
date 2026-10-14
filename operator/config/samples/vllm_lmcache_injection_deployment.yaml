@@ -4,7 +4,7 @@
 #
 # Because that engine sets spec.injection.payloadImage, the webhook does TWO
 # things to this pod at CREATE:
-#   1. Connection wiring (as in vllm_lmcache_deployment.yaml): hostIPC=true,
+#   1. Connection wiring (as in vllm_lmcache_deployment.yaml): the /dev/shm mount,
 #      --kv-transfer-config on the vLLM container, PYTHONHASHSEED=0.
 #   2. Payload staging: a `lmcache-payload` emptyDir + an init container that
 #      copies the payload image's lmcache tree in, a readOnly mount, and
@@ -17,7 +17,7 @@
 #      reconciled (its `<name>-connection` ConfigMap exists — the webhook reads it).
 #   2. The webhook is deployed: `make deploy` (not `make run`) + cert-manager.
 #   3. This namespace is labeled pod-security.kubernetes.io/enforce=privileged
-#      (the injected hostIPC is rejected by baseline/restricted PSS).
+#      (the injected hostPath /dev/shm mount is rejected by baseline/restricted PSS).
 #   4. The vLLM container launches via the image ENTRYPOINT (["vllm","serve"])
 #      with args ONLY. Do NOT use `command: ["/bin/sh","-c", ...]` — a command
 #      override makes the webhook SKIP injection (it stamps
@@ -25,7 +25,7 @@
 #
 # Verify the swap after creation (the webhook mutates the POD, not the Deployment):
 #   kubectl get pod -l app=vllm-lmcache-versioned -o yaml \
-#     | grep -E "hostIPC|kv-transfer-config|lmcache-injected|lmcache-payload|PYTHONPATH"
+#     | grep -E "lmcache-dev-shm|hostIPC|kv-transfer-config|lmcache-injected|lmcache-payload|PYTHONPATH"
 #   # runtime proof — which lmcache the pod actually imports vs the baked-in one:
 #   POD=$(kubectl get pod -l app=vllm-lmcache-versioned -o name | head -1)
 #   kubectl exec $POD -c vllm -- python3 -c "import lmcache; print(lmcache.__version__, lmcache.__file__)"
@@ -61,8 +61,8 @@ spec:
     spec:
       # Needed for GPU access unless `nvidia` is the default containerd runtime.
       runtimeClassName: nvidia
-      # NOTE: do NOT set hostIPC here or mount an emptyDir at /dev/shm — the
-      # webhook injects hostIPC=true, which shares the host's /dev/shm for CUDA
+      # NOTE: do NOT mount an emptyDir at /dev/shm — the webhook injects a
+      # hostPath mount of the host's /dev/shm for CUDA
       # IPC; an emptyDir would shadow it and break cudaIpcOpenMemHandle.
       containers:
         - name: vllm

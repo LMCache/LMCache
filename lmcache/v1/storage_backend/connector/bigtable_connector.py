@@ -87,8 +87,12 @@ def _extract_shards_from_row(row: Any, family_name: str) -> dict[str, bytes]:
             shards[qual] = val
         else:
             logger.warning(
-                f"Discarding stale shard {qual} with timestamp {ts} "
-                f"(max timestamp is {max_ts}, diff is {(max_ts - ts) / 1e6:.2f}s)"
+                "Discarding stale shard %s with timestamp %s (max timestamp is %s, "
+                "diff is %.2fs)",
+                qual,
+                ts,
+                max_ts,
+                (max_ts - ts) / 1e6,
             )
 
     return shards
@@ -166,8 +170,11 @@ class BigtableConnector(RemoteConnector):
             )
 
         logger.info(
-            f"Initialized Bigtable remote connector for project={self.cfg.project_id}, "
-            f"instance={self.cfg.instance_id}, table={self.cfg.table_name}"
+            "Initialized Bigtable remote connector for project=%s, instance=%s, "
+            "table=%s",
+            self.cfg.project_id,
+            self.cfg.instance_id,
+            self.cfg.table_name,
         )
 
     def _get_client(self):
@@ -184,10 +191,11 @@ class BigtableConnector(RemoteConnector):
             self.google_exceptions = google_exceptions
 
             logger.info(
-                f"Lazily initializing Bigtable async client "
-                f"for project={self.cfg.project_id}, "
-                f"instance={self.cfg.instance_id}, "
-                f"table={self.cfg.table_name}"
+                "Lazily initializing Bigtable async client for project=%s, "
+                "instance=%s, table=%s",
+                self.cfg.project_id,
+                self.cfg.instance_id,
+                self.cfg.table_name,
             )
 
             client_info = ClientInfo(user_agent="lmcache")
@@ -212,9 +220,10 @@ class BigtableConnector(RemoteConnector):
                     google.auth.exceptions.GoogleAuthError,
                 ) as e:
                     logger.warning(
-                        f"Failed to load credentials from "
-                        f"{self.cfg.credentials_path} due to {e}. "
-                        f"Falling back to Application Default Credentials."
+                        "Failed to load credentials from %s due to %s. Falling back to "
+                        "Application Default Credentials.",
+                        self.cfg.credentials_path,
+                        e,
                     )
                     self._client = BigtableDataClientAsync(
                         project=self.cfg.project_id,
@@ -228,7 +237,7 @@ class BigtableConnector(RemoteConnector):
 
             return self._client
         except Exception as e:
-            logger.error(f"Failed to initialize Bigtable async client: {e}")
+            logger.error("Failed to initialize Bigtable async client: %s", e)
             raise
 
     def _get_table(self):
@@ -295,23 +304,23 @@ class BigtableConnector(RemoteConnector):
                 TimeoutError,
             ) as e:
                 logger.warning(
-                    f"Bigtable async timeout in exists: {e}. Treating as miss."
+                    "Bigtable async timeout in exists: %s. Treating as miss.", e
                 )
                 return False
             except (
                 self.google_exceptions.PermissionDenied,
                 self.google_exceptions.Unauthenticated,
             ) as e:
-                logger.error(f"Bigtable permission/auth error in exists: {e}")
+                logger.error("Bigtable permission/auth error in exists: %s", e)
                 raise
             except self.google_exceptions.NotFound as e:
-                logger.error(f"Bigtable NotFound in exists: {e}")
+                logger.error("Bigtable NotFound in exists: %s", e)
                 raise
             except self.google_exceptions.ResourceExhausted:
                 if retries < self.cfg.max_retries:
                     sleep_time = 0.5 * (2**retries)
                     logger.warning(
-                        f"Bigtable ResourceExhausted. Retrying in {sleep_time}s."
+                        "Bigtable ResourceExhausted. Retrying in %ss.", sleep_time
                     )
                     await asyncio.sleep(sleep_time)
                     retries += 1
@@ -368,7 +377,7 @@ class BigtableConnector(RemoteConnector):
                         )
                     except Exception as e:
                         logger.warning(
-                            f"Failed to reassemble shards for key {key_str}: {e}"
+                            "Failed to reassemble shards for key %s: %s", key_str, e
                         )
                         return None
                 else:
@@ -400,8 +409,9 @@ class BigtableConnector(RemoteConnector):
 
                 if len(cell_value) > len(view):
                     logger.warning(
-                        f"Bigtable cell size {len(cell_value)} exceeds "
-                        f"allocated view size {len(view)}"
+                        "Bigtable cell size %s exceeds allocated view size %s",
+                        len(cell_value),
+                        len(view),
                     )
                     memory_obj.ref_count_down()
                     return None
@@ -415,22 +425,24 @@ class BigtableConnector(RemoteConnector):
                 self.google_exceptions.DeadlineExceeded,
                 TimeoutError,
             ) as e:
-                logger.warning(f"Bigtable async timeout in get: {e}. Treating as miss.")
+                logger.warning(
+                    "Bigtable async timeout in get: %s. Treating as miss.", e
+                )
                 return None
             except (
                 self.google_exceptions.PermissionDenied,
                 self.google_exceptions.Unauthenticated,
             ) as e:
-                logger.error(f"Bigtable permission/auth error in get: {e}")
+                logger.error("Bigtable permission/auth error in get: %s", e)
                 raise
             except self.google_exceptions.NotFound as e:
-                logger.error(f"Bigtable NotFound in get: {e}")
+                logger.error("Bigtable NotFound in get: %s", e)
                 raise
             except self.google_exceptions.ResourceExhausted:
                 if retries < self.cfg.max_retries:
                     sleep_time = 0.5 * (2**retries)
                     logger.warning(
-                        f"Bigtable ResourceExhausted. Retrying in {sleep_time}s."
+                        "Bigtable ResourceExhausted. Retrying in %ss.", sleep_time
                     )
                     await asyncio.sleep(sleep_time)
                     retries += 1
@@ -455,9 +467,10 @@ class BigtableConnector(RemoteConnector):
 
         if blob_size_mb > limit_mb:
             logger.warning(
-                f"Bigtable chunk size {blob_size_mb:.2f} MB exceeds "
-                f"threshold {limit_mb} MB. "
-                f"Skipping write to prevent hard failures."
+                "Bigtable chunk size %.2f MB exceeds threshold %s MB. Skipping write "
+                "to prevent hard failures.",
+                blob_size_mb,
+                limit_mb,
             )
             return
 
@@ -474,8 +487,9 @@ class BigtableConnector(RemoteConnector):
             if max(len(s) for s in shards.values()) > 90 * 1024 * 1024:
                 rk_str = row_key.decode("utf-8", errors="ignore")
                 logger.warning(
-                    f"Skipping write to Bigtable for key {rk_str} "
-                    f"because a single shard exceeds the 90MB cell size limit."
+                    "Skipping write to Bigtable for key %s because a single shard "
+                    "exceeds the 90MB cell size limit.",
+                    rk_str,
                 )
                 return
 
@@ -541,31 +555,30 @@ class BigtableConnector(RemoteConnector):
                     )
                 self.exists_cache.put(key_str, True)
                 logger.debug(
-                    f"Successfully wrote "
-                    f"{row_key.decode('utf-8', errors='ignore')} "
-                    f"via async Bigtable"
+                    "Successfully wrote %s via async Bigtable",
+                    row_key.decode("utf-8", errors="ignore"),
                 )
                 return
             except (
                 self.google_exceptions.DeadlineExceeded,
                 TimeoutError,
             ) as e:
-                logger.warning(f"Bigtable async timeout in put: {e}. Skipping write.")
+                logger.warning("Bigtable async timeout in put: %s. Skipping write.", e)
                 return
             except (
                 self.google_exceptions.PermissionDenied,
                 self.google_exceptions.Unauthenticated,
             ) as e:
-                logger.error(f"Bigtable permission/auth error in put: {e}")
+                logger.error("Bigtable permission/auth error in put: %s", e)
                 raise
             except self.google_exceptions.NotFound as e:
-                logger.error(f"Bigtable NotFound in put: {e}")
+                logger.error("Bigtable NotFound in put: %s", e)
                 raise
             except self.google_exceptions.ResourceExhausted:
                 if retries < self.cfg.max_retries:
                     sleep_time = 0.5 * (2**retries)
                     logger.warning(
-                        f"Bigtable ResourceExhausted. Retrying in {sleep_time}s."
+                        "Bigtable ResourceExhausted. Retrying in %ss.", sleep_time
                     )
                     await asyncio.sleep(sleep_time)
                     retries += 1
@@ -638,7 +651,7 @@ class BigtableConnector(RemoteConnector):
                             )
                         except Exception as e:
                             logger.warning(
-                                f"Failed to reassemble shards for key {key_str}: {e}"
+                                "Failed to reassemble shards for key %s: %s", key_str, e
                             )
                             memory_objs.append(None)
                             continue
@@ -674,8 +687,9 @@ class BigtableConnector(RemoteConnector):
 
                     if len(cell_value) > len(view):
                         logger.warning(
-                            f"Bigtable cell size {len(cell_value)} "
-                            f"exceeds allocated view size {len(view)}"
+                            "Bigtable cell size %s exceeds allocated view size %s",
+                            len(cell_value),
+                            len(view),
                         )
                         memory_obj.ref_count_down()
                         memory_objs.append(None)
@@ -695,23 +709,23 @@ class BigtableConnector(RemoteConnector):
                 TimeoutError,
             ) as e:
                 logger.warning(
-                    f"Bigtable async timeout in batched_get: {e}. Treating as miss."
+                    "Bigtable async timeout in batched_get: %s. Treating as miss.", e
                 )
                 return [None] * len(keys)
             except (
                 self.google_exceptions.PermissionDenied,
                 self.google_exceptions.Unauthenticated,
             ) as e:
-                logger.error(f"Bigtable permission/auth error in batched_get: {e}")
+                logger.error("Bigtable permission/auth error in batched_get: %s", e)
                 raise
             except self.google_exceptions.NotFound as e:
-                logger.error(f"Bigtable NotFound in batched_get: {e}")
+                logger.error("Bigtable NotFound in batched_get: %s", e)
                 raise
             except self.google_exceptions.ResourceExhausted:
                 if retries < self.cfg.max_retries:
                     sleep_time = 0.5 * (2**retries)
                     logger.warning(
-                        f"Bigtable ResourceExhausted. Retrying in {sleep_time}s."
+                        "Bigtable ResourceExhausted. Retrying in %ss.", sleep_time
                     )
                     await asyncio.sleep(sleep_time)
                     retries += 1
@@ -761,7 +775,8 @@ class BigtableConnector(RemoteConnector):
                     for k_str in batch_keys:
                         self.exists_cache.put(k_str, True)
                     logger.debug(
-                        f"Successfully batched put {len(batch)} rows via async Bigtable"
+                        "Successfully batched put %s rows via async Bigtable",
+                        len(batch),
                     )
                     return
                 except (
@@ -769,22 +784,22 @@ class BigtableConnector(RemoteConnector):
                     TimeoutError,
                 ) as e:
                     logger.warning(
-                        f"Bigtable async timeout in batched_put: {e}. Skipping."
+                        "Bigtable async timeout in batched_put: %s. Skipping.", e
                     )
                     return
                 except (
                     self.google_exceptions.PermissionDenied,
                     self.google_exceptions.Unauthenticated,
                 ) as e:
-                    logger.error(f"Bigtable permission/auth error in batched_put: {e}")
+                    logger.error("Bigtable permission/auth error in batched_put: %s", e)
                     raise
                 except self.google_exceptions.NotFound as e:
-                    logger.error(f"Bigtable NotFound in batched_put: {e}")
+                    logger.error("Bigtable NotFound in batched_put: %s", e)
                     raise
                 except self.google_exceptions.ResourceExhausted:
                     if retries < self.cfg.max_retries:
                         sleep_time = 0.5 * (2**retries)
-                        logger.warning(f"Retrying Bigtable in {sleep_time}s.")
+                        logger.warning("Retrying Bigtable in %ss.", sleep_time)
                         await asyncio.sleep(sleep_time)
                         retries += 1
                     else:
@@ -795,8 +810,8 @@ class BigtableConnector(RemoteConnector):
                         return
                 except Exception as e:
                     logger.error(
-                        f"Unexpected error in Bigtable "
-                        f"_batched_put_internal flush: {e}",
+                        "Unexpected error in Bigtable _batched_put_internal flush: %s",
+                        e,
                         exc_info=True,
                     )
                     raise
@@ -813,9 +828,11 @@ class BigtableConnector(RemoteConnector):
 
             if blob_size_mb > limit_mb:
                 logger.warning(
-                    f"Bigtable chunk size {blob_size_mb:.2f} MB exceeds "
-                    f"threshold {limit_mb} MB. "
-                    f"Skipping write for key {key.to_string()}."
+                    "Bigtable chunk size %.2f MB exceeds threshold %s MB. Skipping "
+                    "write for key %s.",
+                    blob_size_mb,
+                    limit_mb,
+                    key.to_string(),
                 )
                 continue
 
@@ -834,8 +851,9 @@ class BigtableConnector(RemoteConnector):
                 )
                 if max(len(s) for s in shards.values()) > 90 * 1024 * 1024:
                     logger.warning(
-                        f"Skipping batched write to Bigtable for key {key.to_string()} "
-                        f"because a single shard exceeds the 90MB cell size limit."
+                        "Skipping batched write to Bigtable for key %s because a "
+                        "single shard exceeds the 90MB cell size limit.",
+                        key.to_string(),
                     )
                     continue
 
@@ -974,22 +992,22 @@ class BigtableConnector(RemoteConnector):
                 self.google_exceptions.DeadlineExceeded,
                 TimeoutError,
             ) as e:
-                logger.warning(f"Bigtable async timeout in batched_contains: {e}")
+                logger.warning("Bigtable async timeout in batched_contains: %s", e)
                 return count
             except (
                 self.google_exceptions.PermissionDenied,
                 self.google_exceptions.Unauthenticated,
             ) as e:
-                logger.error(f"Bigtable auth error in batched_contains: {e}")
+                logger.error("Bigtable auth error in batched_contains: %s", e)
                 raise
             except self.google_exceptions.NotFound as e:
-                logger.error(f"Bigtable NotFound in batched_contains: {e}")
+                logger.error("Bigtable NotFound in batched_contains: %s", e)
                 raise
             except self.google_exceptions.ResourceExhausted:
                 if retries < self.cfg.max_retries:
                     sleep_time = 0.5 * (2**retries)
                     logger.warning(
-                        f"Bigtable ResourceExhausted. Retrying in {sleep_time}s."
+                        "Bigtable ResourceExhausted. Retrying in %ss.", sleep_time
                     )
                     await asyncio.sleep(sleep_time)
                     retries += 1
@@ -1035,7 +1053,9 @@ class BigtableConnector(RemoteConnector):
                     )
                 except Exception as e:
                     logger.warning(
-                        f"Failed to remove key {key} from Bigtable in background: {e}"
+                        "Failed to remove key %s from Bigtable in background: %s",
+                        key,
+                        e,
                     )
 
             asyncio.run_coroutine_threadsafe(
@@ -1045,7 +1065,7 @@ class BigtableConnector(RemoteConnector):
             return True
         except Exception as e:
             logger.warning(
-                f"Failed to schedule removal of key {key} from Bigtable: {e}"
+                "Failed to schedule removal of key %s from Bigtable: %s", key, e
             )
             return False
 
@@ -1142,5 +1162,5 @@ class BigtableConnector(RemoteConnector):
                 pass
             return 0
         except Exception as e:
-            logger.warning(f"Bigtable ping failed: {e}")
+            logger.warning("Bigtable ping failed: %s", e)
             return 1

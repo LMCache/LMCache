@@ -72,6 +72,10 @@ const (
 	// SkipReasonTargetContainerNotFound is stamped when the requested target
 	// container names a container that does not exist on the pod.
 	SkipReasonTargetContainerNotFound = "target-container-not-found"
+
+	// SkipReasonUnknownPDRole is stamped when the pod's pd-role annotation is
+	// set to a value other than "prefiller" or "decoder".
+	SkipReasonUnknownPDRole = "unknown-pd-role"
 )
 
 // injectionKeys is one injector's annotation key set. It mirrors the same four
@@ -125,7 +129,8 @@ func (k injectionKeys) gate(
 //
 // pdRole must be lmcachev1alpha1.PDRolePrefiller or PDRoleDecoder when the engine
 // is in PD mode, and empty for non-PD engines. It selects the appropriate
-// kv-transfer-config key from the connection ConfigMap.
+// kv-transfer-config key from the connection ConfigMap; any other non-empty
+// value skips the injection with SkipReasonUnknownPDRole.
 //
 // Parameters:
 //   - specDefault: the engine's default target container name (nil = first); the
@@ -159,8 +164,12 @@ func prepareInjection(
 		kvJSON = connCM.Data[resources.KVTransferConfigPrefillerDataKey]
 	case lmcachev1alpha1.PDRoleDecoder:
 		kvJSON = connCM.Data[resources.KVTransferConfigDecoderDataKey]
-	default:
+	case "":
 		kvJSON = connCM.Data[kvTransferConfigDataKey]
+	default:
+		log.Info("Skipped injection: unknown pd-role annotation value",
+			"engine", engineName, "pdRole", pdRole)
+		return "", 0, keys.skip(req, pod, SkipReasonUnknownPDRole), false
 	}
 
 	idx, found := resolveTargetContainer(pod, specDefault, pod.Annotations[keys.container])
@@ -176,6 +185,54 @@ func prepareInjection(
 		return "", 0, keys.skip(req, pod, SkipReasonCommandOverride), false
 	}
 	return kvJSON, idx, admission.Response{}, true
+}
+
+// applyIPCSharing wires the pod for cross-pod CUDA IPC with the node-local
+// engine, mirroring the engine's IPC mode. By default (hostIPC=false,
+// isolatedIPC=false) it mounts the host's /dev/shm into the target container
+// via hostPath — the CUDA IPC requirement is that both processes see the same
+// /dev/shm tmpfs (PyTorch's CUDA IPC handles reference a ref-counter file
+// there). When the engine opts into hostIPC, the pod instead joins the host
+// IPC namespace, which exposes the host's /dev/shm without a mount. A pod
+// that already has hostIPC enabled also needs no /dev/shm mount.
+//
+// When the engine runs isolated IPC (which overrides hostIPC), the handles
+// rendezvous in the kernel driver and nothing is shared with the engine at
+// all; the pod instead gets a pod-private memory-backed /dev/shm for vLLM's
+// own workers (Kubernetes' 64Mi default is too small for them, and today
+// they incidentally ride the host mount).
+//
+// In every mode, user-supplied wiring is left untouched: an existing mount at
+// /dev/shm or an existing volume named "lmcache-dev-shm" suppresses the
+// injection.
+//
+// Parameters:
+//   - pod: the decoded pod (mutated in place: hostIPC or volumes).
+//   - target: the resolved vLLM container (mutated in place: volume mount).
+//   - hostIPC: the engine's resolved spec.hostIPC value.
+//   - isolatedIPC: the engine's resolved isolated-IPC mode
+//     (LMCacheEngineSpec.IsolatedIPCEnabled); takes priority over hostIPC.
+func applyIPCSharing(pod *corev1.Pod, target *corev1.Container, hostIPC, isolatedIPC bool) {
+	if hostIPC && !isolatedIPC {
+		pod.Spec.HostIPC = true
+	}
+	if pod.Spec.HostIPC {
+		return
+	}
+	// Leave user-supplied wiring untouched: an existing mount at /dev/shm, or
+	// an existing volume named "lmcache-dev-shm" (whatever its source — mounting a
+	// volume of unknown source at /dev/shm could silently shadow the host
+	// tmpfs, and appending a same-named volume would be invalid).
+	if resources.HasDevShmMount(target.VolumeMounts) ||
+		resources.HasDevShmVolume(pod.Spec.Volumes) {
+		return
+	}
+	if isolatedIPC {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, resources.BuildPrivateDevShmVolume())
+	} else {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, resources.BuildDevShmVolume())
+	}
+	target.VolumeMounts = append(target.VolumeMounts, resources.BuildDevShmVolumeMount())
 }
 
 // stampInjected stamps the idempotency guard (and the kv-transfer-config-present

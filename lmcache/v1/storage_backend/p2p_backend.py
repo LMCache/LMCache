@@ -152,7 +152,9 @@ class PeerInfo:
         try:
             self.lookup_socket.close(linger=0)
         except Exception as e:
-            logger.error("Failed to close peer %s lookup socket", self.peer_init_url, e)
+            logger.error(
+                "Failed to close peer %s lookup socket: %s", self.peer_init_url, e
+            )
         self.lookup_socket = new_lookup_socket
 
 
@@ -318,7 +320,7 @@ class P2PBackend(StorageBackendInterface):
         layout_info = ret_msg.layout_info[0]
         _, location, num_hit_chunks, target_peer_init_url = layout_info
 
-        logger.info(f"Got layout info from controller: {layout_info}")
+        logger.info("Got layout info from controller: %s", layout_info)
 
         if num_hit_chunks > 0:
             try:
@@ -378,7 +380,7 @@ class P2PBackend(StorageBackendInterface):
                 logger.error("Unknown message type: %s", type(msg))
                 ret_msg = P2PErrorMsg(error_code=P2PErrorCode.UNKNOWN_MSG_TYPE)
 
-            logger.info(f"P2P transfer finished for request {monitor_req_id}")
+            logger.info("P2P transfer finished for request %d", monitor_req_id)
             self.stats_monitor.on_p2p_transfer_finished(monitor_req_id)
 
             await self.async_peer_socket.send(msgspec.msgpack.encode(ret_msg))

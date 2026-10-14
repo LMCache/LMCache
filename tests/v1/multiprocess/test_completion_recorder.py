@@ -28,14 +28,14 @@ if not (torch_dev.is_available() and torch_device_type == "cuda"):
 
 try:
     # First Party
-    import lmcache.c_ops as lmc_ops
+    import lmcache.cuda_ops as cuda_ops
 except ImportError:
     pytest.skip(
-        "requires lmcache.c_ops",
+        "requires lmcache.cuda_ops",
         allow_module_level=True,
     )
 
-if not hasattr(lmc_ops, "record_completion_on_stream"):
+if not hasattr(cuda_ops, "record_completion_on_stream"):
     pytest.skip(
         "requires native record_completion_on_stream",
         allow_module_level=True,
@@ -60,20 +60,20 @@ def dispatcher():
 
 
 class TestRecordAndDrain:
-    """Low-level tests on lmc_ops.record_completion_on_stream / drain."""
+    """Low-level tests on cuda_ops.record_completion_on_stream / drain."""
 
     def test_drain_empty(self):
-        completions = lmc_ops.drain_recorded_completions()
+        completions = cuda_ops.drain_recorded_completions()
         assert completions == []
 
     def test_single_completion_payload_is_bytes(self, stream):
         # drain must hand back py::bytes, not utf-8-decoded str — msgpack
         # output is arbitrary bytes including invalid utf-8.
         encoded = msgspec.msgpack.encode([b"key-1", b"key-2"])
-        lmc_ops.record_completion_on_stream(stream.ptr, "finish_write", encoded)
+        cuda_ops.record_completion_on_stream(stream.ptr, "finish_write", encoded)
         stream.synchronize()
 
-        completions = lmc_ops.drain_recorded_completions()
+        completions = cuda_ops.drain_recorded_completions()
         assert len(completions) == 1
         kind, payload = completions[0]
         assert kind == "finish_write"
@@ -85,12 +85,12 @@ class TestRecordAndDrain:
 
     def test_many_completions_in_order(self, stream):
         for i in range(50):
-            lmc_ops.record_completion_on_stream(
+            cuda_ops.record_completion_on_stream(
                 stream.ptr, "finish_write", msgspec.msgpack.encode(i)
             )
         stream.synchronize()
 
-        completions = lmc_ops.drain_recorded_completions()
+        completions = cuda_ops.drain_recorded_completions()
         assert len(completions) == 50
         for idx, (kind, payload) in enumerate(completions):
             assert kind == "finish_write"

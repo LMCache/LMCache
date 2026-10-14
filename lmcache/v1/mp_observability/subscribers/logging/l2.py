@@ -21,7 +21,6 @@ class L2LoggingSubscriber(EventSubscriber):
             EventType.L2_STORE_SUBMITTED: self._on_store_submitted,
             EventType.L2_STORE_COMPLETED: self._on_store_completed,
             EventType.L2_PREFETCH_LOOKUP_SUBMITTED: self._on_lookup_submitted,
-            EventType.L2_PREFETCH_LOOKUP_COMPLETED: self._on_lookup_completed,
             EventType.L2_PREFETCH_LOAD_SUBMITTED: self._on_load_submitted,
             EventType.L2_PREFETCH_LOAD_COMPLETED: self._on_load_completed,
             EventType.L2_KEYS_EVICTED: self._on_evicted,
@@ -48,13 +47,6 @@ class L2LoggingSubscriber(EventSubscriber):
             event.metadata["request_id"],
             event.metadata["key_count"],
             event.metadata["adapter_count"],
-        )
-
-    def _on_lookup_completed(self, event: Event) -> None:
-        logger.debug(
-            "L2 prefetch lookup completed: request %d, %d prefix hits",
-            event.metadata["request_id"],
-            event.metadata["prefix_hit_count"],
         )
 
     def _on_load_submitted(self, event: Event) -> None:

@@ -1,6 +1,6 @@
 # LMCacheEngine that pins injected vLLM pods to a specific lmcache build.
 #
-# On top of the usual connection wiring (--kv-transfer-config, hostIPC,
+# On top of the usual connection wiring (--kv-transfer-config, /dev/shm sharing,
 # PYTHONHASHSEED), spec.injection.payloadImage makes the webhook stage an lmcache
 # payload into every opted-in vLLM pod (emptyDir + init container + read-only
 # mount + PYTHONPATH=/lmcache-payload), so vLLM imports THAT lmcache instead of

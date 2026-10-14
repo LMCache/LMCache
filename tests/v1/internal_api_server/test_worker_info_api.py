@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Iterator
 import asyncio
 import json
 import threading
@@ -14,12 +15,14 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.cache_controller.controller_manager import LMCacheControllerManager
-from lmcache.v1.cache_controller.message import HeartbeatMsg, Msg, RegisterMsg
+from lmcache.v1.cache_controller.message import (
+    HeartbeatMsg,
+    Msg,
+    RegisterMsg,
+    RegisterRetMsg,
+)
 from lmcache.v1.internal_api_server.api_server import app
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
-
-# Test utilities
-from tests.v1.utils import get_available_port
 
 logger = init_logger(__name__)
 
@@ -32,23 +35,34 @@ class TestWorkerInfoAPI:
         return get_zmq_context(use_asyncio=False)
 
     @pytest.fixture
-    def controller_urls(self):
-        pull_port = get_available_port()
-        reply_port = get_available_port()
-        heartbeat_port = get_available_port()
+    def controller_urls(self) -> dict[str, str]:
+        """Request OS-assigned ports for the three controller sockets."""
         return {
-            "pull": f"127.0.0.1:{pull_port}",
-            "reply": f"127.0.0.1:{reply_port}",
-            "heartbeat": f"127.0.0.1:{heartbeat_port}",
+            "pull": "127.0.0.1:0",
+            "reply": "127.0.0.1:0",
+            "heartbeat": "127.0.0.1:0",
         }
 
     @pytest.fixture
-    def real_controller_manager(self, zmq_context, controller_urls):
+    def real_controller_manager(
+        self, controller_urls: dict[str, str]
+    ) -> Iterator[LMCacheControllerManager]:
+        """Bind controller sockets and publish their assigned addresses to clients."""
         controller_manager = LMCacheControllerManager(
             controller_urls=controller_urls,
             health_check_interval=10,
             lmcache_worker_timeout=30,
         )
+
+        # Clients and heartbeat registration need the ports chosen during bind.
+        for role, socket in (
+            ("pull", controller_manager.controller_pull_socket),
+            ("reply", controller_manager.controller_reply_socket),
+            ("heartbeat", controller_manager.controller_heartbeat_socket),
+        ):
+            controller_manager.controller_urls[role] = socket.getsockopt_string(
+                zmq.LAST_ENDPOINT
+            ).removeprefix("tcp://")
 
         self.controller_thread = threading.Thread(
             target=lambda: asyncio.run(controller_manager.start_all()), daemon=True
@@ -61,10 +75,15 @@ class TestWorkerInfoAPI:
         controller_manager.close()
 
     @pytest.fixture
-    def worker_socket(self, zmq_context, controller_urls):
+    def worker_socket(
+        self,
+        zmq_context: zmq.Context,
+        real_controller_manager: LMCacheControllerManager,
+    ) -> Iterator[zmq.Socket]:
+        """Connect a worker to the controller's assigned pull endpoint."""
         socket = get_zmq_socket(
             zmq_context,
-            controller_urls["pull"],
+            real_controller_manager.controller_urls["pull"],
             protocol="tcp",
             role=zmq.PUSH,
             bind_or_connect="connect",
@@ -73,11 +92,15 @@ class TestWorkerInfoAPI:
         socket.close()
 
     @pytest.fixture
-    def req_socket(self, zmq_context, controller_urls):
-        """DEALER socket for register operations (DEALER-ROUTER mode)"""
+    def req_socket(
+        self,
+        zmq_context: zmq.Context,
+        real_controller_manager: LMCacheControllerManager,
+    ) -> Iterator[zmq.Socket]:
+        """Connect a DEALER socket to the controller's assigned reply endpoint."""
         socket = get_zmq_socket(
             zmq_context,
-            controller_urls["reply"],
+            real_controller_manager.controller_urls["reply"],
             protocol="tcp",
             role=zmq.DEALER,
             bind_or_connect="connect",
@@ -86,11 +109,15 @@ class TestWorkerInfoAPI:
         socket.close()
 
     @pytest.fixture
-    def heartbeat_socket(self, zmq_context, controller_urls):
-        """DEALER socket for heartbeat operations"""
+    def heartbeat_socket(
+        self,
+        zmq_context: zmq.Context,
+        real_controller_manager: LMCacheControllerManager,
+    ) -> Iterator[zmq.Socket]:
+        """Connect a DEALER socket to the controller's assigned heartbeat endpoint."""
         socket = get_zmq_socket(
             zmq_context,
-            controller_urls["heartbeat"],
+            real_controller_manager.controller_urls["heartbeat"],
             protocol="tcp",
             role=zmq.DEALER,
             bind_or_connect="connect",
@@ -238,6 +265,21 @@ class TestWorkerInfoAPI:
             self._assert_worker_fields(worker)
             assert worker["registration_time"] == pytest.approx(time.time(), abs=2)
             assert worker["last_heartbeat_time"] == pytest.approx(time.time(), abs=2)
+
+    def test_controller_ports_are_assigned_and_advertised(
+        self, real_controller_manager: LMCacheControllerManager, req_socket: zmq.Socket
+    ) -> None:
+        """OS-assigned ports are distinct and registration advertises the bound port."""
+        urls = real_controller_manager.controller_urls
+        ports = [int(url.rsplit(":", 1)[1]) for url in urls.values()]
+        assert all(port > 0 for port in ports)
+        assert len(set(ports)) == 3
+
+        response = self._send_message(
+            req_socket, "register", "assigned_ports", 0, "127.0.0.1", 8000
+        )
+        assert isinstance(response, RegisterRetMsg)
+        assert response.extra_config["heartbeat_url"] == urls["heartbeat"]
 
     def test_real_workers_by_instance(self, client_with_real_controller, req_socket):
         self._send_message(req_socket, "register", "instance1", 0, "127.0.0.1", 8000)

@@ -24,6 +24,9 @@ EventBus  (async queue + drain thread)
     │
     ├──► L1MetricsSubscriber          → OTel counter.add(...)
     ├──► SMMetricsSubscriber          → OTel counter.add(...)
+    ├──► TransferPhaseMetricsSubscriber → DMA staging throughput per step
+    ├──► TransferPhaseSampler         → on MP_*_END: pops finished GPU phase
+    │                                    timings → MP_TRANSFER_PHASE_SAMPLES
     ├──► EventBusSelfMetricsSubscriber → OTel observable gauges/counters
     │                                    (bus health: queue depth, drain
     │                                    lag, drops, subscriber exceptions)
@@ -32,7 +35,9 @@ EventBus  (async queue + drain thread)
     ├──► MPServerLoggingSubscriber    → logger.debug(...)
     ├──► ExtraStatsLoggingSubscriber  → logger.info(...) (opt-in periodic
     │                                    per-GPU L0<->L1 transfer stats)
-    └──► MPServerTracingSubscriber    → OTel span start/end
+    ├──► MPServerTracingSubscriber    → OTel span start/end
+    └──► TransferPhaseTracingSubscriber → transfer phase child spans
+                                          under mp.store / mp.retrieve
 
 OTel SDK  (configured at startup)
     │
@@ -55,6 +60,7 @@ CLI, pass the flags below; when embedding programmatically, construct an
 |---|---|---|
 | `--disable-observability` | off | Disable the EventBus entirely. No events are published or consumed. |
 | `--disable-metrics` | off | Skip registering metrics subscribers (OTel counters). |
+| `--disable-grpc-metrics` | off | Skip gRPC Python runtime metrics while leaving LMCache metrics enabled. By default, the MP server enables these metrics only for `--transport grpc`. |
 | `--disable-logging` | off | Skip registering logging subscribers. |
 | `--enable-tracing` | off | Register tracing subscribers (OTel spans). Disabled by default. **Requires `--otlp-endpoint`.** |
 | `--event-bus-queue-size N` | `10000` | Maximum number of events in the EventBus queue before tail-drop. |
@@ -73,6 +79,7 @@ CLI, pass the flags below; when embedding programmatically, construct an
 | `enabled` | `bool` | `True` | Master switch for the EventBus. |
 | `max_queue_size` | `int` | `10000` | Maximum events in the EventBus queue before tail-drop. |
 | `metrics_enabled` | `bool` | `True` | Register metrics subscribers (OTel counters / histograms). |
+| `grpc_metrics_enabled` | `bool \| None` | `None` | Register gRPC Python runtime metrics with the same OTel provider. `None` means the MP server enables them for gRPC transport and disables them for ZMQ. Requires `grpcio-observability`, which upstream currently supports on Linux. |
 | `logging_enabled` | `bool` | `True` | Register logging subscribers. |
 | `tracing_enabled` | `bool` | `False` | Register tracing subscribers (OTel spans). |
 | `otlp_endpoint` | `str \| None` | `None` | OTLP gRPC endpoint. When set, metrics and traces are pushed. When `None`, metrics use Prometheus pull fallback. |
@@ -96,7 +103,9 @@ CLI, pass the flags below; when embedding programmatically, construct an
 
 Tracing is opt-in (`--enable-tracing`).  When enabled, `MPServerTracingSubscriber`
 creates OTel spans from MP server START/END event pairs (store, retrieve,
-lookup/prefetch).  Trace export requires an OTLP endpoint — there is no local
+lookup/prefetch), and ``TransferPhaseTracingSubscriber`` nests a per-phase
+breakdown of each transfer under its store/retrieve span (see
+``docs/source/mp/observability/traces.rst``).  Trace export requires an OTLP endpoint — there is no local
 fallback.  `--enable-tracing` **requires** `--otlp-endpoint`; the server will
 raise a `ValueError` at startup if the endpoint is missing.
 

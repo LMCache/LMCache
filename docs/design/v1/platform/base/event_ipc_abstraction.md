@@ -60,6 +60,34 @@ class EventIPCBackend(Protocol):
     def synchronize_event(self, event: object, device: object) -> None: ...
 ```
 
+### Ordering contract
+
+`import_event` must return an event that represents the *producer's* work, on
+the producer's stream, in the producer's process. The imported event is the
+only thing ordering the two processes: the producer records it and ships the
+handle without synchronizing, and the consumer's `wait_event` before touching
+shared KV-cache memory is what keeps it from reading blocks the producer has
+not finished writing.
+
+A backend must therefore not fabricate the event. Concretely, if
+`import_event` cannot open the handle and instead returns an event it created
+locally, or one it has already recorded and synchronized, then that event is
+complete the moment the consumer receives it. The subsequent `wait_event`
+returns immediately, the consumer's transfer kernel runs alongside the
+producer's writes, and it can read partially written KV-cache blocks.
+
+Substituting host-side synchronization does not work either. Draining the
+importing process's own streams says nothing about the exporting process --
+they are separate contexts, and without MPS-style serialization their kernels
+are interleaved rather than ordered.
+
+The failure is silent: no error is raised, and it only shows up as wrong cache
+contents under load. See LMCache/LMCache#4422 for a concrete case.
+
+If a device cannot support cross-process event import, it must fail
+`check_event_support` so the caller falls back to a transfer mode that does not
+depend on cross-process ordering, rather than silently degrading correctness.
+
 The lookup entry point is:
 
 ```python
@@ -80,10 +108,10 @@ The concrete backend owns their types and ABI details.
 ```text
 lmcache/v1/platform/base/event_ipc.py     # protocol, lookup, default backend
 lmcache/v1/platform/base/device_spec.py  # optional DeviceSpec capability
-lmcache/v1/platform/cpu/__init__.py      # CPU stub backend registration
-lmcache/v1/platform/cuda/__init__.py     # CUDA backend registration
-lmcache/v1/platform/musa/event_ipc.py    # MUSA capability gate and adapter
-lmcache/v1/platform/musa/ipc_wrapper.py  # MUSA availability and torch.musa loader
+lmcache/v1/platform/devices/cpu/__init__.py      # CPU stub backend registration
+lmcache/v1/platform/devices/cuda/__init__.py     # CUDA backend registration
+lmcache/v1/platform/devices/musa/event_ipc.py    # MUSA capability gate and adapter
+lmcache/v1/platform/devices/musa/ipc_wrapper.py  # MUSA availability and torch.musa loader
 ```
 
 ### Default backend
@@ -109,7 +137,7 @@ accelerator's event implementation.
 
 ### MUSA backend
 
-`MusaEventIPCBackend` lives under `lmcache/v1/platform/musa/`. It first checks
+`MusaEventIPCBackend` lives under `lmcache/v1/platform/devices/musa/`. It first checks
 `is_musa_event_ipc_available()` from `musa/ipc_wrapper.py`, then adapts the
 current TorchMUSA event API through `DefaultEventIPCBackend`:
 
@@ -120,7 +148,7 @@ handle = event.ipc_handle()
 remote_event = torch_musa.Event.from_ipc_handle(device, handle)
 ```
 
-The generic layer does not import `platform.musa`; only the MUSA `DeviceSpec`
+The generic layer does not import `platform.devices.musa`; only the MUSA `DeviceSpec`
 and backend do. If the opt-in MUSA event API is unavailable,
 `check_event_support()` raises a device-named `RuntimeError`. Memory IPC and
 server-side block transfer are separate capabilities and are not required to
@@ -140,7 +168,9 @@ class DeviceSpec:
 class CudaDeviceSpec(DeviceSpec):
     @property
     def event_ipc_backend(self) -> EventIPCBackend:
-        return DefaultEventIPCBackend(event_module=torch.cuda, ...)
+        # TimelineSemaphoreEventIPCBackend when isolated IPC is enabled
+        # (the default), else DefaultEventIPCBackend(event_module=torch.cuda)
+        return _select_event_ipc_backend(self.device_type)
 
 class MusaDeviceSpec(DeviceSpec):
     @property
@@ -151,29 +181,39 @@ class MusaDeviceSpec(DeviceSpec):
 This keeps platform capabilities together. Adding another backend requires a
 new platform package/spec, not an edit to the multiprocess transfer modules.
 
+CUDA selects between two backends via the process-global isolated-IPC switch
+(`lmcache.v1.platform.ipc_policy`, default off): the timeline-semaphore
+backend works across containers that share no host IPC namespace or
+`/dev/shm` (see `../cuda/timeline_semaphore_event_ipc.md`), while
+`DefaultEventIPCBackend` uses CUDA interprocess event handles. The switch is
+set at process initialization from `lmcache.mp.isolated_ipc` (vLLM connector
+extra_config) and `--isolated-ipc` (MP server CLI), before the first backend
+resolution; the selection is module-level, not spec-instance state, so every
+`DeviceSpec` instance in the process resolves identically.
+
 ## Generic Multiprocess Flow
 
 ```text
 Worker adapter
-  create/record producer event using its existing device API
-  get_event_ipc_backend(device)
-  export_event(producer_event, device)
+  after mode/config selection: resolve and validate event_backend once
+  event_backend.create_event / record_event / export_event
   send event handle in STORE/RETRIEVE
 
 Server: lmcache_driven_transfer.py
-  get_event_ipc_backend(cache_context.device)
-  check_event_support(device)
-  import_event(worker_handle, device)
-  wait_event(imported_event, cache_context.stream)
+  at KV registration: resolve, validate, and cache event_backend in ContextEntry
+  event_backend.import_event / wait_event
   enqueue KV transfer
-  create_event(device), record_event(done_event, stream)
-  export_event(done_event, device)
+  event_backend.create_event / record_event / export_event
 
 Worker: futures.py
-  get_event_ipc_backend(device)
-  import_event(server_handle, device)
-  query_event / wait_event / synchronize_event
+  reuse the transfer context's cached event_backend
+  event_backend.import_event / query_event / wait_event / synchronize_event
 ```
+
+Backend lookup and capability validation belong to initialization or cache
+registration, after process-wide IPC configuration is finalized. Request hot
+paths call the cached backend directly; they do not repeat platform discovery
+or support probing for each event operation.
 
 The following generic modules use only the platform API:
 
@@ -187,7 +227,8 @@ alias for `to_device_future()`.
 
 ## Error Contract
 
-`check_event_support(device)` runs before any cross-process memory transfer.
+`event_backend.check_event_support(device)` runs once during initialization or
+registration, before any cross-process memory transfer.
 The default backend rejects missing `Event`, missing `interprocess` support, or
 missing `Event.from_ipc_handle`. The MUSA backend additionally rejects a
 disabled/unavailable MUSA event API, a missing TorchMUSA module, or an event
@@ -229,11 +270,11 @@ injected event modules.
 
 ## Review Checklist
 
-- [ ] Generic handle-path modules do not import `platform.musa`.
+- [ ] Generic handle-path modules do not import `platform.devices.musa`.
 - [ ] Generic handle-path modules do not branch on a concrete device type.
 - [ ] `CUDAMessagingFuture` and `to_cuda_future` remain compatible aliases.
 - [ ] Concrete device specs explicitly register their event IPC backends.
 - [ ] Missing specs and unsupported event IPC fail without fallback.
-- [ ] MUSA event behavior is isolated under `platform/musa`.
+- [ ] MUSA event behavior is isolated under `platform/devices/musa`.
 - [ ] Unsupported event IPC fails before unsafe memory access.
 - [ ] Platform and future tests cover import/export and stream ordering.

@@ -176,6 +176,7 @@ class MPServerMessage(UsageMessage):
     hash_algorithm: str
     engine_type: str
     enable_segmented_prefix: bool
+    enable_dedup_content: bool
     supported_transfer_mode: str
     separate_object_groups: bool
     max_gpu_workers: int
@@ -215,20 +216,20 @@ class MPServerMessage(UsageMessage):
         # load it).
         # First Party
         from lmcache import __version__
+        from lmcache.v1.distributed.config import get_configured_capacity_bytes
         from lmcache.v1.distributed.l2_adapters.config import (
             get_type_name_for_config,
         )
 
-        l1_config = storage_manager_config.l1_manager_config
-        memory_config = l1_config.memory_config
-        if l1_config.gds_l1_config is not None:
-            l1_size_bytes = l1_config.gds_l1_config.size_in_bytes
-            l1_medium = "gds"
-        else:
-            l1_size_bytes = (
-                memory_config.size_in_bytes + memory_config.devdax_size_in_bytes
+        l1_configs = storage_manager_config.l1_manager_configs
+        capacities = [get_configured_capacity_bytes(c) for c in l1_configs]
+        l1_size_bytes = sum(sum(c.values()) for c in capacities)
+        l1_medium = "+".join(
+            sorted(
+                {b.value for c in capacities for b in c}, key=lambda n: (n != "dram", n)
             )
-            l1_medium = "dram+devdax" if memory_config.devdax_path else "dram"
+        )
+        memory_config = storage_manager_config.l1_manager_config.memory_config
         adapter_configs = storage_manager_config.l2_adapter_config.adapters
         l2_adapter_types = ",".join(
             get_type_name_for_config(adapter_config)
@@ -246,6 +247,7 @@ class MPServerMessage(UsageMessage):
             hash_algorithm=mp_config.hash_algorithm,
             engine_type=mp_config.engine_type,
             enable_segmented_prefix=mp_config.enable_segmented_prefix,
+            enable_dedup_content=mp_config.enable_dedup_content,
             supported_transfer_mode=mp_config.supported_transfer_mode,
             separate_object_groups=mp_config.separate_object_groups,
             max_gpu_workers=mp_config.max_gpu_workers,
@@ -253,8 +255,10 @@ class MPServerMessage(UsageMessage):
             p2p_enabled=mp_config.p2p_config.enabled,
             l1_size_bytes=l1_size_bytes,
             l1_medium=l1_medium,
-            l1_shm_enabled=bool(memory_config.shm_name),
-            eviction_policy=storage_manager_config.eviction_config.eviction_policy,
+            l1_shm_enabled=len(l1_configs) == 1 and bool(memory_config.shm_name),
+            eviction_policy=",".join(
+                c.eviction.eviction_policy for c in l1_configs if c.eviction is not None
+            ),
             l2_adapter_types=l2_adapter_types,
             l2_serde_types=l2_serde_types,
             l2_store_policy=storage_manager_config.store_policy,
