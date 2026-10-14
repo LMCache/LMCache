@@ -16,7 +16,8 @@ or controllers — it just defines:
   a thread pool and signaling an eventfd on completion.
 - A factory / registration mechanism so adapters can reference a serde
   by name (`{"type": "fp8", ...}` in JSON config).
-- One built-in serde: **fp8 quantization**.
+- Built-in serdes for **fp8 quantization**, **AES-GCM encryption**,
+  **checksum-based corruption detection**, and **TurboQuant**.
 
 How the async interface is actually plugged into the L2 path lives in
 [`docs/design/v1/distributed/l2_adapters/serde_wrapper.md`][wrapper-doc]
@@ -34,7 +35,9 @@ lmcache/v1/distributed/serde/
   async_processor.py  # AsyncSerdeProcessor (thread-pool + eventfd wrapper)
   factory.py          # register_serde_factory / create_serde_processor
   fp8.py              # Fp8QuantizationSerializer / Deserializer
+  turboquant/         # TurboQuant serde backend (see turboquant.md)
   aesgcm.py           # AES-GCM encryption serde (see aesgcm.md)
+  checksum.py         # xxh3_64 corruption-detection serde (see checksum.md)
   key_provider.py     # KeyProvider / HkdfKeyProvider for aesgcm
   multi.py            # MultiSerializer / MultiDeserializer (tuple-shaped
                       # extension; see "Multi-output extension" below)
