@@ -1,0 +1,1504 @@
+{
+  "components": {
+    "schemas": {
+      "BlendEvictRequest": {
+        "description": "Body of ``DELETE /blend/fingerprints``: evict by storage key.\n\nAttributes:\n    object_keys: ``object_key`` values to evict.",
+        "properties": {
+          "object_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Object Keys",
+            "type": "array"
+          }
+        },
+        "title": "BlendEvictRequest",
+        "type": "object"
+      },
+      "BlendEvictResponse": {
+        "description": "Reply to ``DELETE /blend/fingerprints``.\n\nAttributes:\n    removed: Number of fingerprint entries evicted.",
+        "properties": {
+          "removed": {
+            "title": "Removed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "removed"
+        ],
+        "title": "BlendEvictResponse",
+        "type": "object"
+      },
+      "BlendFingerprintRequest": {
+        "description": "Body of ``POST /blend/fingerprints``: register stored ranges.\n\nAttributes:\n    ranges: Stored token ranges to register (idempotent).",
+        "properties": {
+          "ranges": {
+            "items": {
+              "$ref": "#/components/schemas/StoreRangeModel"
+            },
+            "title": "Ranges",
+            "type": "array"
+          }
+        },
+        "title": "BlendFingerprintRequest",
+        "type": "object"
+      },
+      "BlendFingerprintResponse": {
+        "description": "Reply to ``POST /blend/fingerprints``.\n\nAttributes:\n    inserted: Number of fingerprints newly registered.",
+        "properties": {
+          "inserted": {
+            "title": "Inserted",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "inserted"
+        ],
+        "title": "BlendFingerprintResponse",
+        "type": "object"
+      },
+      "BlendMatchRequest": {
+        "description": "Body of ``POST /blend/match``.\n\nAttributes:\n    model_scope: Scope to match within.\n    tokens_b64: The request tokens, packed via :func:`encode_tokens`\n        (base64 little-endian ``uint32``).",
+        "properties": {
+          "model_scope": {
+            "title": "Model Scope",
+            "type": "string"
+          },
+          "tokens_b64": {
+            "default": "",
+            "title": "Tokens B64",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_scope"
+        ],
+        "title": "BlendMatchRequest",
+        "type": "object"
+      },
+      "BlendMatchResponse": {
+        "description": "Reply to ``POST /blend/match``.\n\nAttributes:\n    matches: Matched chunks, ascending by ``cur_st``.",
+        "properties": {
+          "matches": {
+            "items": {
+              "$ref": "#/components/schemas/GlobalMatchModel"
+            },
+            "title": "Matches",
+            "type": "array"
+          }
+        },
+        "required": [
+          "matches"
+        ],
+        "title": "BlendMatchResponse",
+        "type": "object"
+      },
+      "DeleteRequest": {
+        "description": "Body of ``POST /cache/delete`` on the coordinator.\n\nAttributes:\n    instance_id: Identifier of the target MP server (must be registered).\n    model_name: Model whose layout the target uses to resolve keys.\n    world_size: World size selecting the layout and the per-rank fan-out.\n    token_ids: Prompt tokens whose complete chunks should be deleted.\n    cache_salt: Per-tenant isolation salt applied to the produced keys.\n    tier: Which tier(s) to delete: ``l1`` (L1 only), ``l2`` (L2 only), or\n        ``all`` (both). ``l1`` never touches L2 and vice versa.\n    force: When True, delete even locked/pinned keys -- bypasses L1\n        locks/pins on the node and the coordinator's L2 pin filter.",
+        "properties": {
+          "cache_salt": {
+            "default": "",
+            "title": "Cache Salt",
+            "type": "string"
+          },
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          },
+          "instance_id": {
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          },
+          "tier": {
+            "$ref": "#/components/schemas/Tier",
+            "default": "all"
+          },
+          "token_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Token Ids",
+            "type": "array"
+          },
+          "world_size": {
+            "minimum": 1.0,
+            "title": "World Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "instance_id",
+          "model_name",
+          "world_size"
+        ],
+        "title": "DeleteRequest",
+        "type": "object"
+      },
+      "DeleteResponse": {
+        "description": "Reply to ``POST /cache/delete`` on the coordinator.\n\nAttributes:\n    instance_id: The target MP server the request was dispatched to.\n    requested: Number of whole chunks the token sequence resolved to.\n    affected: Total keys removed across the tiers acted on -- L1 keys deleted\n        by the node plus L2 keys deleted by the coordinator. A chunk resident\n        in both tiers (``tier=all``) contributes to both, so ``affected`` may\n        exceed ``requested`` (which counts chunks, not per-tier keys).\n    skipped: Total keys refused because they were locked/pinned (non-force\n        only) -- L1 keys the node refused plus L2 keys held back for an L2 pin.\n    status: ``\"deleted\"`` / ``\"noop\"``.",
+        "properties": {
+          "affected": {
+            "default": 0,
+            "title": "Affected",
+            "type": "integer"
+          },
+          "instance_id": {
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "requested": {
+            "default": 0,
+            "title": "Requested",
+            "type": "integer"
+          },
+          "skipped": {
+            "default": 0,
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instance_id",
+          "status"
+        ],
+        "title": "DeleteResponse",
+        "type": "object"
+      },
+      "EncodedObjectKey": {
+        "description": "JSON-safe wire form of :class:`ObjectKey` \u2014 ``chunk_hash`` is\nhex-encoded; other fields are preserved verbatim.",
+        "properties": {
+          "cache_salt": {
+            "default": "",
+            "title": "Cache Salt",
+            "type": "string"
+          },
+          "chunk_hash_hex": {
+            "title": "Chunk Hash Hex",
+            "type": "string"
+          },
+          "kv_rank": {
+            "title": "Kv Rank",
+            "type": "integer"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          },
+          "object_group_id": {
+            "default": 0,
+            "title": "Object Group Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "chunk_hash_hex",
+          "model_name",
+          "kv_rank"
+        ],
+        "title": "EncodedObjectKey",
+        "type": "object"
+      },
+      "EventType": {
+        "description": "Cache events reported by an MP server.",
+        "enum": [
+          "store",
+          "lookup",
+          "delete"
+        ],
+        "title": "EventType",
+        "type": "string"
+      },
+      "GlobalMatchModel": {
+        "description": "Wire form of one matched chunk (see ``GlobalMatch``).\n\nAttributes:\n    object_key: Shared-L2 storage key of the matched chunk.\n    old_st: Token position in the stored sequence (re-RoPE source).\n    cur_st: Token position in the request (re-RoPE target).",
+        "properties": {
+          "cur_st": {
+            "title": "Cur St",
+            "type": "integer"
+          },
+          "object_key": {
+            "title": "Object Key",
+            "type": "string"
+          },
+          "old_st": {
+            "title": "Old St",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "object_key",
+          "old_st",
+          "cur_st"
+        ],
+        "title": "GlobalMatchModel",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "PinRequest": {
+        "description": "Body of ``POST`` / ``DELETE /cache/pins`` on the coordinator.\n\nPinning protects the resolved keys from L2 eviction until unpinned. The\ncoordinator resolves ``token_ids`` to keys locally; L2 pins are fleet-wide\n(per ``cache_salt``), so no target instance is needed.\n\nAttributes:\n    model_name: Model whose rank fan-out to use when resolving keys.\n    world_size: World size selecting the per-rank fan-out.\n    token_ids: Prompt tokens whose complete chunks should be (un)pinned.\n    cache_salt: Per-tenant isolation salt applied to the produced keys.",
+        "properties": {
+          "cache_salt": {
+            "default": "",
+            "title": "Cache Salt",
+            "type": "string"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          },
+          "token_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Token Ids",
+            "type": "array"
+          },
+          "world_size": {
+            "minimum": 1.0,
+            "title": "World Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "model_name",
+          "world_size"
+        ],
+        "title": "PinRequest",
+        "type": "object"
+      },
+      "PinResponse": {
+        "description": "Reply to ``POST`` / ``DELETE /cache/pins`` on the coordinator.\n\nAttributes:\n    requested: Number of whole chunks the token sequence resolved to.\n    affected: Number of L2 keys pinned (on pin) or unpinned (on unpin);\n        disambiguated by ``status``.\n    status: ``\"pinned\"`` / ``\"unpinned\"``.",
+        "properties": {
+          "affected": {
+            "default": 0,
+            "title": "Affected",
+            "type": "integer"
+          },
+          "requested": {
+            "default": 0,
+            "title": "Requested",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "PinResponse",
+        "type": "object"
+      },
+      "PrefetchRequest": {
+        "description": "Body of ``POST /cache/prefetches`` on the coordinator.\n\nAsks the coordinator to warm one MP server's L1 with the chunks of a token\nsequence. The caller describes content by ``token_ids`` -- the unit the\ncache speaks -- not by internal cache keys, which it cannot construct. The\ncoordinator forwards the request verbatim to that server's own\n``POST /cache/prefetches``, which hashes the tokens and expands them into the\nper-rank keys.\n\nAttributes:\n    instance_id: Identifier of the target MP server (must be registered).\n    model_name: Model whose layout the target uses to allocate L1 buffers.\n    world_size: World size selecting the layout and the per-rank fan-out.\n    token_ids: Prompt tokens whose complete chunks should be warmed.\n    cache_salt: Per-tenant isolation salt applied to the produced keys.",
+        "properties": {
+          "cache_salt": {
+            "default": "",
+            "title": "Cache Salt",
+            "type": "string"
+          },
+          "instance_id": {
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          },
+          "token_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Token Ids",
+            "type": "array"
+          },
+          "world_size": {
+            "minimum": 1.0,
+            "title": "World Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "instance_id",
+          "model_name",
+          "world_size"
+        ],
+        "title": "PrefetchRequest",
+        "type": "object"
+      },
+      "PrefetchResponse": {
+        "description": "Reply to ``POST /cache/prefetches`` on the coordinator.\n\nAttributes:\n    instance_id: The target MP server the prefetch was submitted to.\n    request_id: The server's job id to poll via\n        ``GET /cache/prefetches/{instance_id}/{request_id}``. Empty when\n        ``status`` is ``\"noop\"`` (nothing to warm).\n    chunks: Number of whole chunks submitted to warm.\n    status: ``\"submitted\"`` (a job is in flight) or ``\"noop\"`` (the\n        sequence was shorter than one chunk).",
+        "properties": {
+          "chunks": {
+            "default": 0,
+            "title": "Chunks",
+            "type": "integer"
+          },
+          "instance_id": {
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "request_id": {
+            "default": "",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instance_id",
+          "status"
+        ],
+        "title": "PrefetchResponse",
+        "type": "object"
+      },
+      "QuotaConfigRequest": {
+        "description": "Body of ``PUT /quota/config``.\n\nAttributes:\n    default_limit_gb: Byte budget in GiB applied to salts with no\n        explicit quota entry. ``None`` (default) leaves unquota'd\n        salts exempt from eviction.\n    tier: Cache tier the config applies to (only ``l2`` today).",
+        "properties": {
+          "default_limit_gb": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Limit Gb"
+          },
+          "tier": {
+            "$ref": "#/components/schemas/Tier",
+            "default": "l2"
+          }
+        },
+        "title": "QuotaConfigRequest",
+        "type": "object"
+      },
+      "QuotaConfigResponse": {
+        "description": "Reply to ``GET`` / ``PUT /quota/config``.\n\nAttributes:\n    default_limit_gb: Current default limit in GiB, or ``None``\n        when unquota'd salts are exempt from eviction.",
+        "properties": {
+          "default_limit_gb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Limit Gb"
+          }
+        },
+        "required": [
+          "default_limit_gb"
+        ],
+        "title": "QuotaConfigResponse",
+        "type": "object"
+      },
+      "QuotaResponse": {
+        "description": "Reply to ``PUT`` or ``DELETE /quota/{cache_salt}``.\n\nAttributes:\n    cache_salt: The tenant identifier (``_default`` for empty salt).\n    limit_gb: The current limit in GiB (0.0 after deletion).\n    status: ``\"ok\"`` or ``\"removed\"`` or ``\"not_found\"``.",
+        "properties": {
+          "cache_salt": {
+            "title": "Cache Salt",
+            "type": "string"
+          },
+          "limit_gb": {
+            "title": "Limit Gb",
+            "type": "number"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cache_salt",
+          "limit_gb",
+          "status"
+        ],
+        "title": "QuotaResponse",
+        "type": "object"
+      },
+      "RegisterRequest": {
+        "description": "Body of a ``POST /instances`` registration request.\n\nAttributes:\n    instance_id: Identifier of the mp server. Optional -- if empty (or\n        whitespace-only), the coordinator generates one and returns it.\n    ip: IP/host of the mp server's HTTP server. Whitespace is stripped and a\n        blank value is rejected, since the coordinator calls this address.\n    http_port: Port of the mp server's HTTP server, which the coordinator\n        calls to push work to this instance.\n    metadata: Free-form registration hints.\n    p2p_advertised_url: URL the instance advertises for peer-to-peer\n        transfers. Optional -- empty when the instance does not participate\n        in P2P.\n    mq_port: Port of the instance's ZMQ message-queue server that P2P peers\n        send lookup/unlock RPCs to, reachable at the instance's ``ip``.\n        Optional -- 0 when P2P is disabled.",
+        "properties": {
+          "http_port": {
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Http Port",
+            "type": "integer"
+          },
+          "instance_id": {
+            "default": "",
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "ip": {
+            "minLength": 1,
+            "title": "Ip",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Metadata",
+            "type": "object"
+          },
+          "mq_port": {
+            "default": 0,
+            "maximum": 65535.0,
+            "minimum": 0.0,
+            "title": "Mq Port",
+            "type": "integer"
+          },
+          "p2p_advertised_url": {
+            "default": "",
+            "title": "P2P Advertised Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ip",
+          "http_port"
+        ],
+        "title": "RegisterRequest",
+        "type": "object"
+      },
+      "RegisterResponse": {
+        "description": "Reply to a successful ``POST /instances``.\n\nAttributes:\n    instance_id: The registered instance's id.\n    re_registered: ``True`` if this replaced an existing registration.",
+        "properties": {
+          "instance_id": {
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "re_registered": {
+            "title": "Re Registered",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "instance_id",
+          "re_registered"
+        ],
+        "title": "RegisterResponse",
+        "type": "object"
+      },
+      "ReportUsageRequest": {
+        "description": "Body of ``POST /quota/events``.\n\nAttributes:\n    instance_id: Identifier of the MP server that produced this batch.\n    seq: Monotonically increasing sequence number scoped to this\n        ``instance_id``. Starts at 1 for the first flush after the\n        server starts.\n    events: Batch of store/lookup events to record.\n    tier: Cache tier the events apply to (only ``l2`` is supported today).",
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/UsageEvent"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "instance_id": {
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "seq": {
+            "minimum": 1.0,
+            "title": "Seq",
+            "type": "integer"
+          },
+          "tier": {
+            "$ref": "#/components/schemas/Tier",
+            "default": "l2"
+          }
+        },
+        "required": [
+          "instance_id",
+          "seq",
+          "events"
+        ],
+        "title": "ReportUsageRequest",
+        "type": "object"
+      },
+      "ReportUsageResponse": {
+        "description": "Reply to ``POST /quota/events``.\n\nAttributes:\n    recorded: Number of events processed.",
+        "properties": {
+          "recorded": {
+            "title": "Recorded",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recorded"
+        ],
+        "title": "ReportUsageResponse",
+        "type": "object"
+      },
+      "SetQuotaRequest": {
+        "description": "Body of ``PUT /quota/{cache_salt}``.\n\nAttributes:\n    limit_gb: Non-negative byte budget in GiB.\n    tier: Cache tier the quota applies to (only ``l2`` is supported today).",
+        "properties": {
+          "limit_gb": {
+            "minimum": 0.0,
+            "title": "Limit Gb",
+            "type": "number"
+          },
+          "tier": {
+            "$ref": "#/components/schemas/Tier",
+            "default": "l2"
+          }
+        },
+        "required": [
+          "limit_gb"
+        ],
+        "title": "SetQuotaRequest",
+        "type": "object"
+      },
+      "StatusListResponse": {
+        "description": "Reply to ``GET /quota``.\n\nAttributes:\n    total_gb: Aggregate usage in GiB.\n    by_cache_salt: Per-tenant breakdown with quota and usage.",
+        "properties": {
+          "by_cache_salt": {
+            "items": {
+              "$ref": "#/components/schemas/StatusResponse"
+            },
+            "title": "By Cache Salt",
+            "type": "array"
+          },
+          "total_gb": {
+            "title": "Total Gb",
+            "type": "number"
+          }
+        },
+        "required": [
+          "total_gb",
+          "by_cache_salt"
+        ],
+        "title": "StatusListResponse",
+        "type": "object"
+      },
+      "StatusResponse": {
+        "description": "Combined quota and usage for a single ``cache_salt``.\n\nAttributes:\n    cache_salt: The tenant identifier.\n    quota_limit_gb: The byte budget in GiB (0.0 if no quota set).\n    quota_exists: Whether an explicit quota is registered.\n    usage_gb: Current usage in GiB.",
+        "properties": {
+          "cache_salt": {
+            "title": "Cache Salt",
+            "type": "string"
+          },
+          "quota_exists": {
+            "title": "Quota Exists",
+            "type": "boolean"
+          },
+          "quota_limit_gb": {
+            "title": "Quota Limit Gb",
+            "type": "number"
+          },
+          "usage_gb": {
+            "title": "Usage Gb",
+            "type": "number"
+          }
+        },
+        "required": [
+          "cache_salt",
+          "quota_limit_gb",
+          "quota_exists",
+          "usage_gb"
+        ],
+        "title": "StatusResponse",
+        "type": "object"
+      },
+      "StoreRangeModel": {
+        "description": "Wire form of one published stored token range (see ``StoreRange``).\n\nThe coordinator chunks ``tokens`` at its chunk size and hashes each chunk;\nchunk ``i`` maps to ``object_keys[i]`` at ``old_st_base + i * chunk_size``.\n\nAttributes:\n    model_scope: Reuse scope (the model name).\n    tokens: The stored tokens (``token_ids[start:end]``).\n    object_keys: Shared-L2 storage key (hex) per chunk, in order.\n    old_st_base: Token position of the range's first token.",
+        "properties": {
+          "model_scope": {
+            "title": "Model Scope",
+            "type": "string"
+          },
+          "object_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Object Keys",
+            "type": "array"
+          },
+          "old_st_base": {
+            "minimum": 0.0,
+            "title": "Old St Base",
+            "type": "integer"
+          },
+          "tokens": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Tokens",
+            "type": "array"
+          }
+        },
+        "required": [
+          "model_scope",
+          "old_st_base"
+        ],
+        "title": "StoreRangeModel",
+        "type": "object"
+      },
+      "Tier": {
+        "description": "A cache tier.\n\nSubclasses ``str`` so it validates from / compares equal to the bare wire\nvalue (``Tier.L2 == \"l2\"``) and serializes as that value. ``ALL`` is only\nvalid for operations that explicitly support multiple tiers.",
+        "enum": [
+          "l1",
+          "l2",
+          "all"
+        ],
+        "title": "Tier",
+        "type": "string"
+      },
+      "UsageEvent": {
+        "description": "A single cache event reported by an MP server.\n\nAttributes:\n    type: The event type.\n    key: The cache key this event applies to.\n    bytes: Bytes stored (``store`` only; ``0`` for other types).",
+        "properties": {
+          "bytes": {
+            "minimum": 0.0,
+            "title": "Bytes",
+            "type": "integer"
+          },
+          "key": {
+            "$ref": "#/components/schemas/EncodedObjectKey"
+          },
+          "type": {
+            "$ref": "#/components/schemas/EventType"
+          }
+        },
+        "required": [
+          "type",
+          "key",
+          "bytes"
+        ],
+        "title": "UsageEvent",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "LMCache MP Coordinator",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/blend/fingerprints": {
+      "delete": {
+        "description": "Evict fingerprints by storage key (idempotent).\n\nReturns:\n    Number of fingerprint entries removed.",
+        "operationId": "evict_fingerprints_blend_fingerprints_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlendEvictRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlendEvictResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Evict Fingerprints"
+      },
+      "post": {
+        "description": "Register published chunk fingerprints (idempotent).\n\nReturns:\n    Number of fingerprints newly inserted.",
+        "operationId": "publish_fingerprints_blend_fingerprints_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlendFingerprintRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlendFingerprintResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Publish Fingerprints"
+      }
+    },
+    "/blend/match": {
+      "post": {
+        "description": "Match a request's rolling-hash array against the directory.\n\nThe request tokens arrive base64-packed (``tokens_b64``); they are decoded\nto a ``uint64`` array and handed straight to the matcher.\n\nReturns:\n    Matched chunks (``object_key`` / ``old_st`` / ``cur_st``), ascending by\n    ``cur_st``.",
+        "operationId": "match_fingerprints_blend_match_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlendMatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlendMatchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Match Fingerprints"
+      }
+    },
+    "/cache/delete": {
+      "post": {
+        "description": "Delete a token sequence on one MP server, per ``body.tier`` (l1 / l2 / all).\n\nArgs:\n    body: Target instance, model/world_size, token_ids, cache_salt, tier,\n        force.\n\nReturns:\n    ``DeleteResponse`` with ``requested`` chunks, ``affected`` keys removed,\n    and ``skipped`` keys refused (L1 locks reported by the node, plus L2 pins\n    held back by the coordinator).\n\nRaises:\n    HTTPException: 400 if the token cap is exceeded or a key field is invalid;\n        404 if ``instance_id`` is not registered; 502 if the target server is\n        unreachable or rejects the delete.",
+        "operationId": "request_delete_cache_delete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request Delete"
+      }
+    },
+    "/cache/pins": {
+      "delete": {
+        "description": "Unpin a token sequence's keys from the L2 eviction plan.\n\nSymmetric with pin: resolves the keys locally and releases them, making them\neligible for L2 eviction again.\n\nArgs:\n    body: model/world_size, token_ids, cache_salt.\n\nReturns:\n    ``PinResponse`` with ``requested`` chunks and ``affected`` L2 keys unpinned.\n\nRaises:\n    HTTPException: 400 if the token cap is exceeded or a key field is invalid.",
+        "operationId": "request_unpin_cache_pins_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PinRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PinResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request Unpin"
+      },
+      "post": {
+        "description": "Pin a token sequence's keys in the L2 eviction plan.\n\nThe coordinator resolves the token sequence to its object keys locally and\nrecords them so they are excluded from its L2 eviction plan (fleet-wide,\nper ``cache_salt``). No MP-server round-trip.\n\nArgs:\n    body: model/world_size, token_ids, cache_salt.\n\nReturns:\n    ``PinResponse`` with ``requested`` chunks and ``affected`` L2 keys pinned.\n\nRaises:\n    HTTPException: 400 if the token cap is exceeded or a key field is invalid.",
+        "operationId": "request_pin_cache_pins_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PinRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PinResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request Pin"
+      }
+    },
+    "/cache/prefetches": {
+      "post": {
+        "description": "Submit a warm prefetch of a token sequence on one MP server.\n\nResolves ``body.instance_id`` in the registry and proxies to that server's\n``POST /cache/prefetches``, which submits the load and returns a\n``request_id``. Poll ``GET /cache/prefetches/{instance_id}/{request_id}``.\n\nArgs:\n    body: Target instance, model/world_size, the token_ids to warm, and the\n        per-tenant cache_salt.\n\nReturns:\n    ``PrefetchResponse`` carrying the server's ``request_id`` (empty when the\n    sequence was shorter than one chunk -- ``status`` ``\"noop\"``).\n\nRaises:\n    HTTPException: 404 if ``instance_id`` is not registered; 502 if the\n        target server is unreachable or rejects the submit.",
+        "operationId": "request_prefetch_cache_prefetches_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrefetchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrefetchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request Prefetch"
+      }
+    },
+    "/cache/prefetches/{instance_id}/{request_id}": {
+      "get": {
+        "description": "Proxy a warm-prefetch status poll to the owning MP server.\n\nThe warm holds no lock, so this poll only reports progress; the first poll\nthat observes completion drops the job on the server (exactly-once). Poll\nuntil ``\"completed\"``.\n\nArgs:\n    instance_id: The MP server the prefetch was submitted to.\n    request_id: The id returned by ``POST /cache/prefetches``.\n\nReturns:\n    The server's status body relayed verbatim with its status code (200\n    ``pending`` / ``completed``, or 404 for an unknown id).\n\nRaises:\n    HTTPException: 404 if ``instance_id`` is not registered; 502 if the\n        target server is unreachable.",
+        "operationId": "get_prefetch_status_cache_prefetches__instance_id___request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Prefetch Status"
+      }
+    },
+    "/healthz": {
+      "get": {
+        "description": "Report coordinator liveness.\n\nReturns:\n    ``{\"status\": \"healthy\"}``.",
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Healthz Healthz Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Healthz"
+      }
+    },
+    "/instances": {
+      "get": {
+        "description": "List all registered mp servers.\n\nReturns:\n    ``{\"instances\": [ {instance_id, ip, http_port, ...}, ... ]}``.",
+        "operationId": "list_instances_instances_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response List Instances Instances Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Instances"
+      },
+      "post": {
+        "description": "Register (or re-register) an mp server.\n\nThe body is validated by :class:`RegisterRequest`; FastAPI returns 422 on a\nmalformed body. An empty ``instance_id`` is replaced with a generated one,\nreturned in the response so the caller learns its assigned id.\n\nReturns:\n    A :class:`RegisterResponse` carrying the (possibly generated) id.",
+        "operationId": "register_instance_instances_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register Instance"
+      }
+    },
+    "/instances/{instance_id}": {
+      "delete": {
+        "description": "Deregister an mp server.\n\nIdempotent: returns 204 whether or not the instance was registered.\n\nReturns:\n    An empty 204 response.",
+        "operationId": "deregister_instance_instances__instance_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Deregister Instance"
+      }
+    },
+    "/instances/{instance_id}/heartbeat": {
+      "put": {
+        "description": "Record a heartbeat for an instance.\n\nReturns:\n    ``{\"instance_id\": str}`` with 200 if known, or a 404 JSON error if the\n    instance is unknown (the caller should re-register via ``POST\n    /instances``).",
+        "operationId": "heartbeat_instances__instance_id__heartbeat_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "instance_id",
+            "required": true,
+            "schema": {
+              "title": "Instance Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Heartbeat Instances  Instance Id  Heartbeat Put"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Heartbeat"
+      }
+    },
+    "/quota": {
+      "get": {
+        "description": "List quota and usage across all cache salts.\n\nArgs:\n    tier: Cache tier (only ``l2`` is supported today).\n\nReturns:\n    Total usage plus per-salt breakdown with quota info.",
+        "operationId": "list_status_quota_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tier",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Tier",
+              "default": "l2"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Status"
+      }
+    },
+    "/quota/config": {
+      "get": {
+        "description": "Read the default quota applied to salts with no explicit entry.\n\nArgs:\n    tier: Cache tier (only ``l2`` is supported today).\n\nReturns:\n    The current config; ``default_limit_gb`` is ``null`` while\n    unquota'd salts are exempt from eviction (the boot default).",
+        "operationId": "get_quota_config_quota_config_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tier",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Tier",
+              "default": "l2"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Quota Config"
+      },
+      "put": {
+        "description": "Set the default quota applied to salts with no explicit entry.\n\nArgs:\n    body: The default limit to apply (and the ``tier`` it applies to).\n\nReturns:\n    The applied config.",
+        "operationId": "set_quota_config_quota_config_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuotaConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Quota Config"
+      }
+    },
+    "/quota/events": {
+      "post": {
+        "description": "Record a batch of ``store`` / ``lookup`` / ``delete`` events.\n\nUsage events feed the same per-``cache_salt`` ledger the quota status reads\nexpose, so they live in the ``/quota`` group alongside the quota writes.\n\nArgs:\n    body: Event batch tagged with the reporter's ``instance_id``, ``seq``,\n        and the ``tier`` the events apply to.\n\nReturns:\n    Number of events processed.",
+        "operationId": "report_events_quota_events_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportUsageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportUsageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Report Events"
+      }
+    },
+    "/quota/{cache_salt}": {
+      "delete": {
+        "description": "Remove a salt's quota entry.\n\nArgs:\n    cache_salt: Tenant identifier; use ``_default`` for the empty salt.\n    tier: Cache tier (only ``l2`` is supported today).\n\nReturns:\n    ``QuotaResponse`` with ``status`` ``\"removed\"`` or ``\"not_found\"``.",
+        "operationId": "delete_quota_quota__cache_salt__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cache_salt",
+            "required": true,
+            "schema": {
+              "title": "Cache Salt",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tier",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Tier",
+              "default": "l2"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Quota"
+      },
+      "get": {
+        "description": "Read quota and usage for a single salt.\n\nArgs:\n    cache_salt: Tenant identifier; use ``_default`` for the empty salt.\n    tier: Cache tier (only ``l2`` is supported today).\n\nReturns:\n    Combined quota and live usage detail.",
+        "operationId": "get_status_quota__cache_salt__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cache_salt",
+            "required": true,
+            "schema": {
+              "title": "Cache Salt",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tier",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Tier",
+              "default": "l2"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Status"
+      },
+      "put": {
+        "description": "Create or update a quota.\n\nArgs:\n    cache_salt: Tenant identifier; use ``_default`` for the empty salt.\n    body: Quota limit to apply (and the ``tier`` it applies to).\n\nReturns:\n    The applied quota, or a 400 JSON response if the limit is invalid.",
+        "operationId": "set_quota_quota__cache_salt__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cache_salt",
+            "required": true,
+            "schema": {
+              "title": "Cache Salt",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetQuotaRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Quota"
+      }
+    }
+  }
+}
