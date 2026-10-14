@@ -285,8 +285,7 @@ class P2PController:
         Returns:
             A unique task id (int) for querying the lookup status later
         """
-        # Scan for abandoned jobs at most once per lookup timeout, so an
-        # abandoned job lives at most two timeouts.
+        # Scan at most once per lookup timeout; abandoned jobs live <= 2 timeouts.
         now = time.monotonic()
         if now - self._last_drop_time >= self._p2p_config.lookup_timeout:
             self._last_drop_time = now
