@@ -2,6 +2,7 @@
 # Standard
 from concurrent.futures import Future
 from contextlib import nullcontext
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import threading
 import time
@@ -37,6 +38,28 @@ if TYPE_CHECKING:
     from lmcache.v1.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
+
+# Per-task / per-thread list of keys touched during a pin=True lookup.
+# Must not be instance state: StorageManager serves concurrent lookups as
+# interleaved coroutines on one asyncio thread, so a shared list lets one
+# request's touch_cache() wipe another request's keys (see #4137).
+_keys_in_request_var: ContextVar[Optional[List[CacheEngineKey]]] = ContextVar(
+    "local_cpu_keys_in_request", default=None
+)
+
+
+def _get_keys_in_request() -> List[CacheEngineKey]:
+    keys = _keys_in_request_var.get()
+    if keys is None:
+        keys = []
+        _keys_in_request_var.set(keys)
+    return keys
+
+
+def _take_keys_in_request() -> List[CacheEngineKey]:
+    keys = _keys_in_request_var.get()
+    _keys_in_request_var.set(None)
+    return keys if keys is not None else []
 
 
 class LocalCPUBackend(AllocatorBackendInterface):
@@ -85,11 +108,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.config = config
         self.metadata = metadata
 
-        # to help maintain suffix -> prefix order in the dict
-        # assumption: only one request is looked up at a time
-        # (only one worker per cache engine)
-        self.keys_in_request: List[CacheEngineKey] = []
-
         # Batched message sender for controller communication
         self.batched_msg_sender: Optional[BatchedMessageSender] = None
 
@@ -118,7 +136,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             lambda: len(self.hot_cache)
         )
         prometheus_logger.local_cpu_keys_in_request_count.set_function(
-            lambda: len(self.keys_in_request)
+            lambda: len(_keys_in_request_var.get() or [])
         )
 
     def __str__(self):
@@ -131,15 +149,23 @@ class LocalCPUBackend(AllocatorBackendInterface):
             if pin:
                 self.hot_cache[key].pin()
                 # vllm lookup sets pin to True
-                self.keys_in_request.append(key)
+                _get_keys_in_request().append(key)
             return True
 
     def touch_cache(self):
         # flip the order of the keys in the request
         with self.cpu_lock:
-            for key in reversed(self.keys_in_request):
+            keys_in_request = _take_keys_in_request()
+            for key in reversed(keys_in_request):
+                # A key can leave hot_cache between the lookup that pinned it and
+                # this touch. update_on_hit assumes it is still there -- the LRU
+                # policy calls hot_cache.move_to_end(key), which raises KeyError --
+                # so skip anything that is gone. This was previously masked: with a
+                # single shared list, the first touch_cache() consumed every
+                # request's keys, so the rest were dropped rather than touched.
+                if key not in self.hot_cache:
+                    continue
                 self.cache_policy.update_on_hit(key, self.hot_cache)
-            self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         """
@@ -251,7 +277,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 if pin:
                     self.hot_cache[key].pin()
                     # vllm lookup sets pin to True
-                    self.keys_in_request.append(key)
+                    _get_keys_in_request().append(key)
                 num_hit_chunks += 1
         return num_hit_chunks
 
