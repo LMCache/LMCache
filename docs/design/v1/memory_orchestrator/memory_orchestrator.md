@@ -68,6 +68,18 @@ wire contract rather than being inferred from Python field order.
 | `ReserveRead` / `FinishRead` | per key: `READ_GRANTED` (handle, layout, leases), `MISS`, `BUSY_WRITING`; release leases |
 | `Usage`, `CloseClient` | counters; retire this incarnation |
 
+These RPCs sit below `L1ManagerInterface`. The shared L1 binding will translate
+its existing key-based calls: write keys and `MemoryLayoutDesc` become entries
+with payload sizes, while read keys and `read_locks` become entries with reader
+counts. Local tags and temporary staging remain binding concerns. The service
+returns region-relative handles instead of process-local `MemoryObj` pointers.
+
+Completion identifies a reservation, not just a key. If a write expires and
+the same key is reserved again, its old token must not publish the replacement.
+Each read lease likewise identifies one reader: retrying a release must not
+decrement another reader's count. `TokenBatch` carries these tokens plus the
+client/region envelope; the binding retains them behind the local L1 API.
+
 ```text
               ReserveWrite               FinishWrite
 (no object) ---------------> WRITING -----------------> VALID (terminal here:

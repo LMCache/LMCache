@@ -113,6 +113,8 @@ message ReserveReadReply { repeated ReadGrant grants = 1; }  // request order
 
 message TokenBatch {
   Envelope env = 1;
+  // Reservation tokens identify this writer or these individual read leases,
+  // so a late or duplicate completion cannot affect another grant for the key.
   repeated bytes tokens = 2;
 }
 
