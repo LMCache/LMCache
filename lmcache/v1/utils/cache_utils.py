@@ -56,7 +56,8 @@ class TTLListCache(Generic[T]):
         # Slow path: refresh cache with lock
         with self.cache_lock:
             # Double-check after acquiring lock
-            current_time = time.time()
+            # A backward clock adjustment must not revive an expired entry.
+            current_time = max(current_time, time.time())
             if not self.is_expired(timeout_override, current_time):
                 return self.cache
 
