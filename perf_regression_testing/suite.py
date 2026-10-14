@@ -26,6 +26,7 @@ from typing import IO, Any
 import argparse
 import fcntl
 import json
+import logging
 import signal
 import sys
 import time
@@ -41,6 +42,9 @@ from perf_regression_testing.runner.config import (
     resolve,
 )
 from perf_regression_testing.runner.run import EXIT_VALID, run
+
+# stdlib logging: PRT runs on the host, where LMCache is not installed.
+logger = logging.getLogger(__name__)
 
 EXIT_SUITE_FAIL, EXIT_SUITE_INVALID, EXIT_LOCKED = 1, 2, 75
 REPORT_COLS = [
@@ -156,7 +160,11 @@ def suite(name: str, out: Path) -> int:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     rep: dict[str, Any] = {"suite": name, "date": stamp, "runs": []}
 
+    logger.info("suite %s, output %s", name, out)
+
     def finish(code: int) -> int:
+        if code >= 0:
+            logger.info("suite %s done, exit %d", name, code)
         rep["exit_code"] = code
         (out / "report.json").write_text(json.dumps(rep, indent=1))
         (out / "report.md").write_text(report_md(rep))
@@ -217,6 +225,7 @@ def suite(name: str, out: Path) -> int:
                 rep["runs"].append({"workload": w, "deployment": d, "summary": summary})
                 codes.append(EXIT_SUITE_INVALID)
                 continue
+            logger.info("run %s/%s", w, d)
             code = run(spec, run_dir, by_target[spec.image_target], aiperf)
             summary = json.loads((run_dir / "summary.json").read_text())
             entry = {"workload": w, "deployment": d, "summary": summary}
@@ -235,7 +244,9 @@ def suite(name: str, out: Path) -> int:
                 entry["vs_history"] = res = baseline.check(
                     history, record, reg["metrics"], alpha
                 )
-                regressed |= any(c["regressed"] for c in res["metrics"].values())
+                worse = [m for m, c in res["metrics"].items() if c["regressed"]]
+                logger.info("%s/%s vs history: %s", w, d, worse or "no regression")
+                regressed |= bool(worse)
                 baseline.append(hist_path, {**record, "regimes": res["regimes"]})
             rep["runs"].append(entry)
             codes.append(code)
@@ -287,6 +298,12 @@ def main() -> None:
     )
     ap.add_argument("--lock-wait-s", type=float, default=3600)
     a = ap.parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [prt] %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+    )
     # Buildkite stops a timed-out or cancelled step with SIGTERM, whose default
     # action skips the finally blocks that remove containers and shm regions.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(EXIT_SUITE_INVALID))

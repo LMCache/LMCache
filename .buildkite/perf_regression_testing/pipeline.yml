@@ -4,7 +4,7 @@ steps:
     command: bash .buildkite/perf_regression_testing/run.sh
     # A hung suite blocks every pipeline on this one-build-at-a-time queue.
     timeout_in_minutes: 240
-    artifact_paths: "prt-report/report.*"
+    artifact_paths: "prt-report/**/*"
     # 2 and 75 are host problems; only 1 (a gated regression) fails the build.
     soft_fail:
       - exit_status: 2

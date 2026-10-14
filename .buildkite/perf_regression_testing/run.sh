@@ -28,8 +28,13 @@ fi
 out=$PRT_ROOT/prt-suites/buildkite-${BUILDKITE_BUILD_NUMBER:-local}-$PRT_SUITE-$(date -u +%Y%m%d-%H%M%S)
 "$PYTHON" -m perf_regression_testing.suite --suite "$PRT_SUITE" --out "$out"
 rc=$?
+# The host is not reachable from Buildkite: keep every log as an artifact.
+if [[ -d "$out" ]]; then
+  mkdir -p prt-report
+  (cd "$out" && find . \( -name '*.log' -o -name '*.json' -o -name '*.md' \) \
+    -not -path '*/aiperf/*' -print0 | xargs -0 -r cp --parents -t "$OLDPWD/prt-report")
+fi
 if [[ -f "$out/report.md" ]]; then
-  mkdir -p prt-report && cp "$out"/report.* prt-report/
   style=success
   [[ $rc -eq 1 ]] && style=error
   [[ $rc -ne 0 && $rc -ne 1 ]] && style=warning

@@ -17,12 +17,16 @@ vLLM nightly is retried the next night. State lives in
 from pathlib import Path
 from typing import Any
 import json
+import logging
 import subprocess
 import time
 
 # First Party
 from perf_regression_testing.runner import docker
 from perf_regression_testing.runner.config import PKG_DIR
+
+# stdlib logging: PRT runs on the host, where LMCache is not installed.
+logger = logging.getLogger(__name__)
 
 BUILD_SH = PKG_DIR / "docker" / "build.sh"
 # Rebuilt every night; anything not kept is removed by :func:`prune`.
@@ -45,6 +49,8 @@ def build(args: list[str], log: Path) -> str:
     Raises:
         RuntimeError: when the build fails; the message names the log.
     """
+    logger.info("building %s image (log: %s)", args[0], log)
+    t0 = time.monotonic()
     with open(log, "w") as f:
         rc = subprocess.run(
             ["bash", str(BUILD_SH), *args], stdout=f, stderr=subprocess.STDOUT
@@ -53,6 +59,7 @@ def build(args: list[str], log: Path) -> str:
     if rc != 0:
         tail = " | ".join(lines[-5:])
         raise RuntimeError(f"build.sh {args[0]} rc={rc} ({log}): {tail}")
+    logger.info("built %s in %.0f s", lines[-1], time.monotonic() - t0)
     return lines[-1]
 
 

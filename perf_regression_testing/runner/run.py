@@ -21,6 +21,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -43,8 +44,13 @@ from perf_regression_testing.runner.sampler import Sampler
 from perf_regression_testing.runner.score import score
 from perf_regression_testing.workloads.agentic.fetch_trace import dir_digest
 
+# stdlib logging: PRT runs on the host, where LMCache is not installed.
+logger = logging.getLogger(__name__)
+
 EXIT_VALID, EXIT_INVALID, EXIT_GPU_BUSY, EXIT_NOT_UP, EXIT_INPUT = 0, 2, 3, 4, 5
 SHM_DIR = Path("/dev/shm")
+# AIPerf runs for up to hours; log that it is alive this often.
+_HEARTBEAT_S = 300.0
 SHM_REGION = re.compile(r"Created mmap file /dev/shm/(vllm_offload_[0-9a-f-]+\.mmap)")
 
 
@@ -181,11 +187,14 @@ def start_servers(
     for name, content in spec.files.items():
         (out / name).write_text(json.dumps(content, indent=1))
     for s in spec.services:
+        logger.info("starting %s", s.name)
         docker.start(cmds[s.name], out / f"{s.name}.log")
         if not docker.wait_http(
             s.ready_url, s.ready_timeout_s, f"prt-{run_id}-{s.name}"
         ):
             return f"{s.name} not up"
+    logger.info("starting vLLM (log: %s)", out / "vllm.log")
+    t0 = time.monotonic()
     docker.start(cmds["vllm"], out / "vllm.log")
     if not docker.wait_http(
         f"http://127.0.0.1:{spec.vllm_port}/v1/models",
@@ -193,6 +202,7 @@ def start_servers(
         f"prt-{run_id}-vllm",
     ):
         return "vllm not up"
+    logger.info("vLLM up after %.0f s", time.monotonic() - t0)
     return None
 
 
@@ -336,6 +346,7 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
         (out / "summary.json").write_text(json.dumps(summary, indent=1))
         return code
 
+    logger.info("%s: waiting for %d idle GPUs", run_id, spec.gpu_count)
     gpus = pick_gpus(spec.gpu_count, spec.gpu_busy_wait_s)
     if gpus is None:
         # Without a reason the suite would record a run that never ran.
@@ -388,11 +399,17 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
             out / "samples.jsonl", f"http://127.0.0.1:{spec.vllm_port}/metrics"
         )
         sampler.start()
+        logger.info("AIPerf running (log: %s)", out / "aiperf.log")
         aiperf = docker.start(cmds["aiperf"], out / "aiperf.log")
-        try:
-            rc = aiperf.wait(timeout=spec.aiperf_timeout_s)
-        except subprocess.TimeoutExpired:
-            rc = None
+        t0 = time.monotonic()
+        deadline = t0 + spec.aiperf_timeout_s
+        rc = None
+        while rc is None and (left := deadline - time.monotonic()) > 0:
+            try:
+                rc = aiperf.wait(timeout=min(_HEARTBEAT_S, left))
+            except subprocess.TimeoutExpired:
+                mins = (time.monotonic() - t0) / 60
+                logger.info("AIPerf still running, %.0f min", mins)
         summary["aiperf_rc"] = rc
         if rc != 0:
             summary["invalid"].append(f"aiperf rc={rc}")
@@ -417,6 +434,7 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
         )
         wipe_scratch(spec)
 
+    logger.info("%s: torn down", run_id)
     log = (out / "vllm.log").read_text(errors="replace")
     for pat in spec.invalid_log_patterns:
         if pat in log:
@@ -426,4 +444,13 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
             summary.update(score(out, spec.window_s))
         except (KeyError, ValueError) as e:
             summary["invalid"].append(f"score failed: {e!r}")
-    return finish(EXIT_INVALID if summary["invalid"] else EXIT_VALID)
+    if summary["invalid"]:
+        logger.info("%s: INVALID: %s", run_id, "; ".join(summary["invalid"]))
+        return finish(EXIT_INVALID)
+    logger.info(
+        "%s: valid, ttft_p50 %.2f s, decode_p50 %.1f tok/s",
+        run_id,
+        summary["ttft_p50"],
+        summary["decode_p50"],
+    )
+    return finish(EXIT_VALID)
