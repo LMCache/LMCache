@@ -60,22 +60,21 @@ absolute resident length after each successful compaction.
 | Logical progress | vLLM request | Model positions, RoPE, request progress |
 | Resident KV length | vLLM KV allocator | Allocation, reclaim, physical KV addressing |
 | Block IDs | vLLM scheduler / allocator | Physical blocks owned by the request |
-| Recent R-KV query window | LMCache worker | Token-selection policy only |
+| Recent R-KV query window | Request-local R-KV algorithm | Token selection |
 
 For example, after 1,000 logical tokens a request may have only 256 resident KV
 entries. The next model position is still 1,000, while KV read/write addressing
 continues from physical position 256.
 
-vLLM remains authoritative for allocation and block ownership. LMCache owns the
-token-selection policy and the GPU KV rewrite.
+vLLM remains authoritative for allocation and block ownership. The selected algorithm owns token selection; LMCache owns the GPU KV rewrite.
 
 ## R-KV and compaction contract
 
-R-KV returns retained positions from the request's **current physical KV
-sequence**. The MVP uses one request-level retained set shared by all KV heads
-and layers.
+R-KV returns retained positions from each layer/head's **current physical KV
+sequence**. Heads may select different positions, but retain the same number of
+entries so the request has one resident KV length.
 
-For example:
+For example (one KV head):
 
 ```text
 Current KV:      [A B C D | E F G H]
@@ -98,14 +97,15 @@ retained sequence positions directly to source physical slots and maps the
 front of the same resident sequence to destination slots:
 
 ```text
-source_slots      = resident_slots[retained]
-destination_slots = resident_slots[:budget]
+source_slots      = resident_slots[retained_positions_for_head]
+destination_slots = resident_slots[:kept_count]
 ```
 
-The executor applies those source/destination copies in place. For
-FlashAttention's NHD cache layout, the worker views
-`[blocks, 2, slots, heads, dim]` as `[blocks, slots, 2, heads, dim]`, so one
-physical-slot copy moves K and V together.
+For each layer/head, LMCache gathers only the retained K/V entries before
+writing them to the leading physical slots. This preserves the algorithm's
+selection order even when source and destination slots overlap. The caller must
+ensure those blocks are private. Temporary memory scales with retained entries;
+this path has no fixed-size temporary-memory cap.
 
 The MVP compacts only private blocks. Prefix caching/shared-block copy-on-write
 is out of scope.
