@@ -10,10 +10,9 @@
 # Environment variables:
 #   LMCACHE_BENCH_TRANSFER_MODE  engine_driven|lmcache_driven
 #                                (default: engine_driven)
-#   LMCACHE_E2E_TRANSPORT_MODE   engine_driven|lmcache_driven|shm|pickle
+#   LMCACHE_E2E_TRANSPORT_MODE   engine_driven|lmcache_driven|shm|inline
 #                                (default: engine_driven)
-#                                "pickle" is a legacy alias for safe inline transfer.
-#   LMCACHE_E2E_DATA_MODE        shm|pickle (default: shm; same legacy alias)
+#   LMCACHE_E2E_DATA_MODE        shm|inline (default: shm)
 #   LMCACHE_REQUEST_TRANSPORT    zmq|grpc (default: zmq)
 #   LMCACHE_HTTP_PORT_BENCH      HTTP port for bench (default: 18080)
 #   LMCACHE_REQUEST_PORT_BENCH   request port for bench (default: 15555)
@@ -60,8 +59,7 @@ case "${REQUEST_TRANSPORT}" in
 esac
 
 # Map user-facing LMCACHE_E2E_TRANSPORT_MODE to internal representation.
-# shm/pickle are legacy aliases for engine-driven sub-mode selection; the
-# pickle-named option now selects the safe inline tensor codec.
+# shm/inline select the corresponding engine-driven sub-mode.
 case "${E2E_TRANSPORT_MODE}" in
   lmcache_driven|engine_driven)
     MAPPED_TRANSPORT_MODE="${E2E_TRANSPORT_MODE}"
@@ -71,13 +69,13 @@ case "${E2E_TRANSPORT_MODE}" in
     MAPPED_TRANSPORT_MODE="engine_driven"
     MAPPED_DATA_MODE="shm"
     ;;
-  pickle)
+  inline)
     MAPPED_TRANSPORT_MODE="engine_driven"
-    MAPPED_DATA_MODE="pickle"
+    MAPPED_DATA_MODE="inline"
     ;;
   *)
     echo "!! Unknown LMCACHE_E2E_TRANSPORT_MODE='${E2E_TRANSPORT_MODE}'"
-    echo "   Valid values: engine_driven, lmcache_driven, shm, pickle"
+    echo "   Valid values: engine_driven, lmcache_driven, shm, inline"
     exit 1
     ;;
 esac

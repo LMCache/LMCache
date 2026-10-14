@@ -74,13 +74,13 @@ def create_transfer_strategy(
             pending_reads=pending_reads,
             pending_lock=pending_lock,
             transfer_key_factory=transfer_key_factory,
-            fallback_strategy=PickleTransferStrategy(
+            fallback_strategy=InlineTransferStrategy(
                 storage_manager, read_owner_resolver
             ),
         )
 
     logger.info("Using safe inline non-GPU transfer strategy")
-    return PickleTransferStrategy(storage_manager, read_owner_resolver)
+    return InlineTransferStrategy(storage_manager, read_owner_resolver)
 
 
 class TransferStrategy(abc.ABC):
@@ -168,7 +168,7 @@ class TransferStrategy(abc.ABC):
         """
 
 
-class PickleTransferStrategy(TransferStrategy):
+class InlineTransferStrategy(TransferStrategy):
     """Safe inline transport for non-GPU transfer requests.
 
     This is the default transport when SHM is unavailable, and it is also used as a
@@ -350,7 +350,7 @@ class ShmTransferStrategy(TransferStrategy):
         transfer_key_factory: Callable[
             [IPCCacheServerKey, int], tuple[int, IPCCacheServerKey]
         ],
-        fallback_strategy: PickleTransferStrategy,
+        fallback_strategy: InlineTransferStrategy,
     ) -> None:
         """Initialize SHM transfer strategy.
 

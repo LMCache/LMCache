@@ -176,8 +176,6 @@ def create_engine_driven_context(
     mq_timeout: float,
     shm_name: str,
     pool_size: int,
-    *,
-    use_pickle: bool = False,
 ) -> EngineDrivenContext:
     """Factory that returns the appropriate :class:`EngineDrivenContext` implementation.
 
@@ -193,16 +191,10 @@ def create_engine_driven_context(
         shm_name: Shared-memory segment name. Empty values force inline mode.
         pool_size: Shared-memory pool size in bytes. Non-positive values force
             inline mode.
-        use_pickle: Legacy flag that explicitly uses inline transport even when
-            SHM info is available.
-
     Returns:
         A concrete :class:`EngineDrivenContext` instance.
     """
-    if not shm_name or pool_size <= 0:
-        use_pickle = True
-
-    if not use_pickle:
+    if shm_name and pool_size > 0:
         # Local
         from .shm import EngineDrivenContextShm
 
@@ -224,10 +216,10 @@ def create_engine_driven_context(
             )
 
     # Local
-    from .pickle import EngineDrivenContextPickle
+    from .inline import EngineDrivenContextInline
 
-    logger.info("Creating EngineDrivenContextPickle (safe inline transport)")
-    return EngineDrivenContextPickle(metadata, req_client, mq_timeout)
+    logger.info("Creating EngineDrivenContextInline")
+    return EngineDrivenContextInline(metadata, req_client, mq_timeout)
 
 
 # ---------------------------------------------------------------------------

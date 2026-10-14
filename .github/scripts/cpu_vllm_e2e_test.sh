@@ -18,8 +18,7 @@
 #   LMCACHE_REQUEST_PORT      Request RPC port (default: 5555)
 #   LMCACHE_TRANSPORT_MODE   Transport: engine_driven|lmcache_driven
 #                             (default: engine_driven)
-#   LMCACHE_DATA_MODE        Data transfer mode: shm|pickle (default: shm).
-#                            "pickle" is a legacy alias for safe inline transfer.
+#   LMCACHE_DATA_MODE        Data transfer mode: shm|inline (default: shm)
 #   LMCACHE_HTTP_PORT        HTTP port for LMCache server  (default: 8080)
 #   VLLM_PORT                HTTP port for vLLM server     (default: 8000)
 #   LMCACHE_L1_SIZE_GB       LMCache L1 cache size in GB   (default: 2)
@@ -58,8 +57,13 @@ case "${LMCACHE_TRANSPORT_MODE}" in
       shm)
         export LMCACHE_SHM_NAME="__default__"
         ;;
-      pickle)
+      inline)
         export LMCACHE_SHM_NAME=""
+        ;;
+      *)
+        echo "!! Unknown LMCACHE_DATA_MODE='${LMCACHE_DATA_MODE}'"
+        echo "   Valid values: shm, inline"
+        exit 1
         ;;
     esac
     export LMCACHE_MP_TRANSFER_MODE="engine_driven"

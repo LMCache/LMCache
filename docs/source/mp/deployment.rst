@@ -349,9 +349,9 @@ KV transfers between the server and vLLM workers use a typed inline tensor
 path by default.  Pass ``--shm-name`` with a segment name to create a
 shared-memory (SHM) pool instead:
 
-The typed inline protocol is not compatible with older pickle-based workers or
-servers. Upgrade both sides together; legacy pickle payloads are rejected rather
-than decoded or accepted as a fallback.
+The typed inline protocol is not compatible with older workers or servers.
+Upgrade both sides together; payloads from the previous untyped protocol are
+rejected rather than accepted as a fallback.
 
 .. list-table::
    :header-rows: 1

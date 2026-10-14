@@ -17,7 +17,7 @@ from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
-class EngineDrivenContextPickle(EngineDrivenContext):
+class EngineDrivenContextInline(EngineDrivenContext):
     """Safe inline implementation of :class:`EngineDrivenContext`.
 
     Transport mechanism:

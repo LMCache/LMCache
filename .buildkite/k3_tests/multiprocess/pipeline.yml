@@ -460,7 +460,7 @@ steps:
         command: |
           case "{{matrix.mode}}" in
             shm) ;;  # rely on script defaults (engine-driven + shm transport)
-            pickle) export LMCACHE_SHM_NAME="" ;;
+            inline) export LMCACHE_SHM_NAME="" ;;
             server_copy) export LMCACHE_MP_TRANSFER_MODE="lmcache_driven" ;;
           esac
           bash .github/scripts/run-cpu-e2e-validation.sh
@@ -468,7 +468,7 @@ steps:
           setup:
             mode:
               - "shm"
-              - "pickle"
+              - "inline"
               - "server_copy"
             request_transport:
               - "zmq"

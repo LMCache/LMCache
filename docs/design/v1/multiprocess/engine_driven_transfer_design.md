@@ -28,7 +28,7 @@ Worker adapter (vLLM MP adapter)
           ├─ AsyncEngineDrivenTransferContext (async_engine_driven.py)
           │    (store-only async: all three phases run in background thread pool)
           └─ EngineDrivenContext (transfer_context/base.py)
-             ├─ EngineDrivenContextPickle (safe inline tensor codec)
+             ├─ EngineDrivenContextInline (safe inline tensor codec)
              └─ EngineDrivenContextShm    (transfer_context/shm.py)
 
 MPCacheServer (server)
@@ -41,7 +41,7 @@ MPCacheServer (server)
 │    └─ shm_pool_info (pre-computed once)
 └─ EngineDrivenTransferModule (modules/engine_driven_transfer.py)
      └─ TransferStrategy (modules/server_transfer.py)
-          ├─ PickleTransferStrategy (safe inline tensor codec)
+          ├─ InlineTransferStrategy (safe inline tensor codec)
           └─ ShmTransferStrategy
 ```
 
@@ -133,7 +133,7 @@ and block-id flattening), then submits all three phases to a background
 
 During `register`, worker receives `RegisterEngineDrivenContextResponse(shm_name, pool_size)`
 from server and then calls `create_engine_driven_context(...)` to construct
-`EngineDrivenContextPickle` or `EngineDrivenContextShm`.
+`EngineDrivenContextInline` or `EngineDrivenContextShm`.
 
 Why `prepare → data operation → commit`:
 - `prepare_*`: set up transport state (for SHM this allocates/returns shared buffers;
@@ -173,12 +173,11 @@ mixed-device configurations by raising an error.
   logic to a `TransferStrategy`.
 
 Server transfer strategy implementations:
-- **PickleTransferStrategy**: typed inline tensor prepare/commit behavior. The
-  legacy class name is retained for source compatibility; it never decodes pickle.
+- **InlineTransferStrategy**: typed inline tensor prepare/commit behavior.
 - **ShmTransferStrategy**: SHM slot-based prepare/commit behavior, with the safe
   typed codec as fallback when inline bytes are provided.
 
-This mirrors the worker split (`EngineDrivenContextPickle` / `EngineDrivenContextShm`):
+This mirrors the worker split (`EngineDrivenContextInline` / `EngineDrivenContextShm`):
 both sides keep common request flow while isolating transport-specific logic.
 
 `MPCacheServerContext` is the shared container injected into modules at init.
@@ -214,12 +213,12 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 ### 2.5 Current File Layout (Key Components)
 
 - `lmcache/v1/multiprocess/modules/engine_driven_transfer.py`: `EngineDrivenTransferModule`
-- `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `PickleTransferStrategy`, `ShmTransferStrategy`
+- `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `InlineTransferStrategy`, `ShmTransferStrategy`
 - `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`, `create_transfer_context`, `MPTransferMode`
 - `lmcache/v1/multiprocess/transfer_context/async_engine_driven.py`: `AsyncEngineDrivenTransferContext`
 - `lmcache/v1/multiprocess/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
-- `lmcache/v1/multiprocess/transfer_context/pickle.py`: legacy-named
-  `EngineDrivenContextPickle` using the safe inline tensor codec
+- `lmcache/v1/multiprocess/transfer_context/inline.py`:
+  `EngineDrivenContextInline` using the safe inline tensor codec
 - `lmcache/v1/multiprocess/transfer_context/tensor_wire.py`: versioned tensor
   metadata and raw-byte encoding with strict layout validation
 - `lmcache/v1/multiprocess/transfer_context/shm.py`: `EngineDrivenContextShm`
@@ -268,8 +267,9 @@ The inline payload is a versioned MessagePack envelope. Each tensor carries only
 an allowlisted dtype name, shape, and raw contiguous bytes. Both endpoints require
 the registered dtype and shape, an exact request-derived tensor count, exact byte
 lengths, and bounded individual and cumulative sizes. Unknown versions or fields
-and every legacy pickle payload are rejected without a pickle fallback. This wire
-change is intentionally fail closed, so workers and servers must upgrade together.
+and payloads from the previous untyped protocol are rejected without a fallback.
+This wire change is intentionally fail closed, so workers and servers must upgrade
+together.
 
 ```text
 Store (inline tensor)

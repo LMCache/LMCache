@@ -3,11 +3,9 @@
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
 import os
-import pickle
 import sys
 
 # Third Party
@@ -34,7 +32,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
     create_engine_driven_context,
 )
-from lmcache.v1.multiprocess.transfer_context.pickle import EngineDrivenContextPickle
+from lmcache.v1.multiprocess.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.multiprocess.transfer_context.shm import EngineDrivenContextShm
 from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
     decode_tensors,
@@ -54,19 +52,6 @@ if TYPE_CHECKING:
     from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
         EngineDrivenTransferModule,
     )
-
-
-def _write_execution_marker(path: str) -> None:
-    """Write a marker if a hostile pickle reducer is ever invoked."""
-    Path(path).write_text("executed", encoding="utf-8")
-
-
-class _ExecutionMarker:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-
-    def __reduce__(self) -> tuple[Callable[[str], None], tuple[str]]:
-        return (_write_execution_marker, (str(self.path),))
 
 
 class ServerModuleFactory(Protocol):
@@ -1576,12 +1561,11 @@ def test_server_store_and_retrieve_cpu_chunks(
     assert torch.allclose(recovered_chunks[0], payload)
 
 
-def test_server_commit_store_rejects_pickle_without_executing_reducer(
+def test_server_commit_store_rejects_untyped_payload_before_storage_access(
     stub_lmcache_native: Any,
     server_module_factory: ServerModuleFactory,
-    tmp_path: Path,
 ) -> None:
-    """A network-controlled legacy pickle must fail before storage is touched."""
+    """A network-controlled untyped payload fails before storage is touched."""
     mock_storage = MagicMock()
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h"]
@@ -1592,13 +1576,9 @@ def test_server_commit_store_rejects_pickle_without_executing_reducer(
     module.register_kv_cache_engine_driven_context(
         _default_register_payload(instance_id=2)
     )
-    marker = tmp_path / "pickle-executed"
-    hostile_payload = pickle.dumps([_ExecutionMarker(marker)])
-
     with pytest.raises(msgspec.DecodeError):
-        module.commit_store(_default_key(), 2, hostile_payload)
+        module.commit_store(_default_key(), 2, b"not-a-typed-tensor-envelope")
 
-    assert not marker.exists()
     mock_storage.reserve_write.assert_not_called()
 
 
@@ -1895,7 +1875,7 @@ def test_engine_driven_inline_context_uses_typed_tensor_wire_format() -> None:
             context={},
         )
     )
-    context = EngineDrivenContextPickle(
+    context = EngineDrivenContextInline(
         metadata=EngineDrivenContextMetadata(
             layout_desc=MemoryLayoutDesc(
                 shapes=[torch.Size([2, 2])],
@@ -2068,7 +2048,7 @@ def test_engine_driven_context_shm_init_raises_when_segment_missing() -> None:
         )
 
 
-def test_create_engine_driven_context_falls_back_to_pickle_without_shm_info() -> None:
+def test_create_engine_driven_context_uses_inline_without_shm_info() -> None:
     context = create_engine_driven_context(
         metadata=EngineDrivenContextMetadata(
             layout_desc=MemoryLayoutDesc(
@@ -2083,26 +2063,7 @@ def test_create_engine_driven_context_falls_back_to_pickle_without_shm_info() ->
         shm_name="",
         pool_size=0,
     )
-    assert isinstance(context, EngineDrivenContextPickle)
-
-
-def test_create_engine_driven_context_use_pickle_ignores_valid_shm_info() -> None:
-    context = create_engine_driven_context(
-        metadata=EngineDrivenContextMetadata(
-            layout_desc=MemoryLayoutDesc(
-                shapes=[torch.Size([2, 2])],
-                dtypes=[torch.float32],
-            ),
-            block_size=1,
-            use_mla=False,
-        ),
-        req_client=MagicMock(),
-        mq_timeout=1.0,
-        shm_name="lmcache_valid_shm",
-        pool_size=4096,
-        use_pickle=True,
-    )
-    assert isinstance(context, EngineDrivenContextPickle)
+    assert isinstance(context, EngineDrivenContextInline)
 
 
 def test_engine_driven_context_shm_close_is_idempotent() -> None:
