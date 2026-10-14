@@ -133,15 +133,28 @@ registered shape; they differ in how K and V bytes are laid out in memory:
 | `<= v0.29` | `(num_kernel_pages, kernel_block_size, num_kv_heads, head_size)` | rank 4; dense K kernel pages, then dense V (one pool or two allocations) |
 | `v0.30` | `(num_kernel_pages, kernel_block_size, num_kv_heads, head_size)` | rank 4; `[K0][V0][K1][V1]…` in one pool (`stride(0)` spans one K row plus the following V row) |
 
+On v0.30 the input planes may carry one or more TP-local KV heads on axis 2;
+all of those heads are folded into each kernel row (`row_elems =
+kernel_block_size * num_kv_heads * head_size`). The interleaved matcher
+requires a dense trailing NHD slice on axes 1..3, K/V in the same underlying
+storage with V one row after K, and dim-0 stride `2 * row_bytes`. Whole-tensor
+`is_contiguous()` is intentionally not required because dim 0 skips the
+interleaved partner row.
+
 Through v0.29, `_SubpagedAttentionContiguousPlaneViewEdit` re-views each plane
 to `(num_logical_blocks, scheduler_block_size, num_kv_heads, head_size)`
 (format 16, `NL_X_TWO_X_NB_BS_NH_HS`). The tile check uses
 `real_page_size_bytes`, because hybrid `page_size_bytes` includes Mamba conv
 padding absent from the K/V views. v0.30's
-`_SubpagedAttentionInterleavedPlaneViewEdit` returns one uint8 plane
-`(num_logical_blocks, scheduler_block_size, 1, page_bytes / scheduler_block_size)`
-(format 17, `NL_X_NP_X_NB_BS_ONE_HS`, when the edit wraps it in a one-element
-list). The fused rank-4/5 rule is registered before the plane rules; among
+`_SubpagedAttentionInterleavedPlaneViewEdit` re-views the contiguous K+V span
+from K, in the original dtype, as
+`(num_logical_blocks, 2, scheduler_block_size, 1, head_size)`
+(format 2, `NL_X_NB_TWO_BS_NH_HS`). That is the same opaque rank-5 page as
+`_SubpagedAttentionViewEdit`. Axis 1 is the first and second half of each
+logical page, not semantic K and V; physical heads are folded into
+`head_size`. Format 17 remains the detector result for real plane tuples
+such as MLA/DSA and slice-strided Mamba, not for this attention edit. The
+fused rank-4/5 rule is registered before the plane rules; among
 those, the interleaved rule is registered first. A pair that matches neither
 layout is left unchanged. Matching uses strides and contiguity, not the
 vLLM-Ascend version string — the table rows are the layouts those releases
@@ -210,11 +223,19 @@ logical-block view can have a pure-K plane). The synthetic head shape
 `(1, page_bytes / (2 * block_size * elem))` signals this deliberately.
 
 vLLM-Ascend adds two sub-paged attention edits on top of that contract. A
-fused or v0.30 interleaved `(K, V)` pair is re-paged as one uint8 plane that
-mixes true K and V at kernel-page granularity (registers as format 17 when
-returned in a one-element list; a flat rank-4 tensor would be format 13). The
-v0.29 contiguous reshape keeps K, V, dtype, and heads, and only changes the
-block axis (format 16).
+v0.30 interleaved `(K, V)` pair is re-paged as the same original-dtype rank-5
+opaque page as the fused edit (format 2, `NL_X_NB_TWO_BS_NH_HS`). Its axis 1
+mixes true K and V at kernel-page granularity: each synthetic plane is one
+half of the logical page, not a pure K or V plane. Format 17 remains for
+actual plane tuples (MLA/DSA and slice-strided Mamba). The v0.29 contiguous
+reshape keeps K, V, dtype, and heads, and only changes the block axis
+(format 16).
+
+Pre-change format-17 attention objects and post-change format-2 objects have
+different LMCache object layouts. Do not mix them; purge or version existing
+cached hybrid-attention entries when deploying the format-2 edit. The
+synthetic output is NHD-shaped, like `_SubpagedAttentionViewEdit`, and is not
+an HND layout.
 
 Byte transport round-trips correctly because store and retrieve share the same
 bijective block-id → bytes mapping. Consequences:

@@ -5,8 +5,9 @@ This is needed to mask out attention-specific details while making sure that
 LMCache can still store / load KV cache correctly.
 
 Currently there are four Mamba-related edits plus the sub-paged attention
-edits (fused tensor, interleaved plane, contiguous plane, and MLA), one per
-:class:`KVCacheGroupEdit` subclass below. The registry is only consulted when
+edits (fused tensor, interleaved rank-5 view, contiguous plane, and MLA),
+one per :class:`KVCacheGroupEdit` subclass below. The registry is only
+consulted when
 ``kv_cache_config.has_mamba_layers``. :func:`validate_kv_cache_groups`
 additionally rejects, at startup, group specs the transfer path cannot serve
 correctly yet (see its docstring).
@@ -198,6 +199,32 @@ def _synthetic_attention_shape(elems_per_page: int, block_size: int) -> tuple[in
     return _SYNTHETIC_NUM_HEADS, elems_per_page // denom
 
 
+def _synthetic_attention_page_view(
+    base: torch.Tensor,
+    num_blocks: int,
+    block_size: int,
+    page_size_bytes: int,
+) -> torch.Tensor:
+    """Re-view ``base`` as one opaque logical page per block.
+
+    The result is ``(num_blocks, 2, block_size, 1, head_size)`` in ``base``'s
+    dtype, starting at ``base``'s storage offset. Axis 1 holds two equal byte
+    slabs of the page, not semantic K and V. A list of these tensors detects
+    as ``NL_X_NB_TWO_BS_NH_HS`` (format 2).
+
+    Raises:
+        ValueError: If the page does not factor into the synthetic shape.
+    """
+    elems_per_page = page_size_bytes // base.element_size()
+    num_heads, head_size = _synthetic_attention_shape(elems_per_page, block_size)
+    flat = base.as_strided(
+        (num_blocks, elems_per_page),
+        (elems_per_page, 1),
+        storage_offset=int(base.storage_offset()),
+    )
+    return flat.reshape(num_blocks, 2, block_size, num_heads, head_size)
+
+
 class KVCacheGroupEdit(ABC):
     """One structural edit rule for a KV cache group's registered cache.
 
@@ -290,17 +317,12 @@ class _MambaPageViewEdit(KVCacheGroupEdit):
                 f"({conv_state.stride(0) * conv_state.element_size()} bytes) "
                 f"does not equal the page size ({spec.page_size_bytes} bytes)"
             )
-        num_blocks = conv_state.shape[0]
-        elems_per_page = spec.page_size_bytes // conv_state.element_size()
-        num_heads, head_size = _synthetic_attention_shape(
-            elems_per_page, spec.block_size
+        return _synthetic_attention_page_view(
+            conv_state,
+            int(conv_state.shape[0]),
+            int(spec.block_size),
+            int(spec.page_size_bytes),
         )
-        flat = conv_state.as_strided(
-            (num_blocks, elems_per_page),
-            (elems_per_page, 1),
-            storage_offset=conv_state.storage_offset(),
-        )
-        return flat.reshape(num_blocks, 2, spec.block_size, num_heads, head_size)
 
 
 class _MambaSlicePlaneEdit(KVCacheGroupEdit):
@@ -544,12 +566,12 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
                     "re-view as logical pages"
                 )
 
-        num_blocks = num_kernel_pages // ratio
-        elems_per_page = spec.page_size_bytes // kv_cache.element_size()
-        num_heads, head_size = _synthetic_attention_shape(
-            elems_per_page, logical_block_size
+        return _synthetic_attention_page_view(
+            ordered,
+            num_kernel_pages // ratio,
+            logical_block_size,
+            int(spec.page_size_bytes),
         )
-        return ordered.view(num_blocks, 2, logical_block_size, num_heads, head_size)
 
 
 ######################
@@ -759,13 +781,16 @@ def _subpaged_plane_pair_ratio(
     """Return the logical/kernel block ratio for a sub-paged rank-4 pair.
 
     ``None`` means the pair is not a standard-paged attention cache whose
-    kernel block evenly divides the scheduler block.
+    kernel block evenly divides the scheduler block, or K/V differ in dtype
+    or device.
     """
     if get_kv_cache_spec_kind(
         spec
     ) not in _SUBPAGEABLE_ATTENTION_KINDS or _declares_slot_compression(spec):
         return None
     if k_plane.ndim != 4 or v_plane.ndim != 4 or k_plane.shape != v_plane.shape:
+        return None
+    if k_plane.dtype != v_plane.dtype or k_plane.device != v_plane.device:
         return None
     kernel_block_size = int(k_plane.shape[1])
     logical_block_size = int(spec.block_size)
@@ -781,8 +806,51 @@ def _subpaged_plane_pair_ratio(
     return ratio
 
 
+def _dense_trailing_nhd_row(plane: torch.Tensor) -> bool:
+    """Whether ``plane`` has a dense NHD row on axes 1..3.
+
+    Dim 0 may be gapped (interleaved K/V kernel pages); only the trailing
+    ``(kernel_block, num_heads, head_size)`` slice must be dense.
+    """
+    if plane.ndim != 4:
+        return False
+    num_heads, head_size = int(plane.shape[2]), int(plane.shape[3])
+    return (
+        int(plane.stride(3)) == 1
+        and int(plane.stride(2)) == head_size
+        and int(plane.stride(1)) == num_heads * head_size
+    )
+
+
+def _is_interleaved_kernel_kv_pair(
+    k_plane: torch.Tensor,
+    v_plane: torch.Tensor,
+    *,
+    ratio: int,
+    page_size_bytes: int,
+) -> bool:
+    """Return whether K/V are v0.30 interleaved kernel pages in one pool."""
+    if not (_dense_trailing_nhd_row(k_plane) and _dense_trailing_nhd_row(v_plane)):
+        return False
+    row_elems = int(k_plane.shape[1:].numel())
+    row_bytes = row_elems * int(k_plane.element_size())
+    kernel_stride_bytes = int(k_plane.stride(0)) * int(k_plane.element_size())
+    if kernel_stride_bytes != 2 * row_bytes or int(v_plane.stride(0)) != int(
+        k_plane.stride(0)
+    ):
+        return False
+    if k_plane.untyped_storage().data_ptr() != v_plane.untyped_storage().data_ptr():
+        return False
+    if v_plane.storage_offset() != k_plane.storage_offset() + row_elems:
+        return False
+    ptr_gap = v_plane.data_ptr() - k_plane.data_ptr()
+    if ptr_gap != row_elems * int(k_plane.element_size()):
+        return False
+    return kernel_stride_bytes * ratio == page_size_bytes
+
+
 class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
-    """Re-view interleaved K/V kernel pages as one logical byte plane.
+    """Re-view interleaved K/V kernel pages as one synthetic logical page.
 
     vLLM-Ascend v0.30 pages hybrid attention as two rank-4 tensors at the
     kernel block size (``select_common_block_size``), while the scheduler
@@ -792,13 +860,16 @@ class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
         ``[K0][V0][K1][V1]...``
 
     K's ``stride(0)`` is one K row plus the following V row, and V starts at
-    the next row. The eight K+V pairs of one scheduler block are one
-    contiguous byte span, so the edit is one uint8 plane over K's storage.
-    ``apply`` returns that plane in a one-element list, so registration
-    detects ``NL_X_NP_X_NB_BS_ONE_HS`` (format 17). A bare rank-4 plane
-    without the list wrapper would be ``NL_X_NB_BS_NH_CS`` (format 13).
-    Separate dense K-only and V-only views at the scheduler block size are
-    not possible without a copy.
+    the next row. The K+V pairs of one scheduler block are one contiguous
+    byte span, so the edit re-views that span from K in the original dtype:
+
+        ``(num_logical_blocks, 2, scheduler_block_size, 1, head_size)``
+
+    That is the same opaque rank-5 page produced by
+    :class:`_SubpagedAttentionViewEdit`, so registration detects
+    ``NL_X_NB_TWO_BS_NH_HS`` (format 2). Axis 1 is the first and second half
+    of each logical page, not semantic K and V. Separate dense K-only and
+    V-only views at the scheduler block size are not possible without a copy.
 
     The tile check uses ``page_size_bytes``, the full interleaved span.
     """
@@ -813,28 +884,20 @@ class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
         ratio = _subpaged_plane_pair_ratio(spec, k_plane, v_plane)
         if ratio is None:
             return False
-        row_elems = int(k_plane.shape[1:].numel())
-        row_bytes = row_elems * int(k_plane.element_size())
-        kernel_stride_bytes = int(k_plane.stride(0)) * int(k_plane.element_size())
-        # One KV head per rank makes index 2 equal 1. A wider head axis is
-        # not this interleaved NHD layout.
-        if not (
-            int(k_plane.shape[2]) == 1
-            and kernel_stride_bytes == 2 * row_bytes
-            and v_plane.stride(0) == k_plane.stride(0)
-            and v_plane.element_size() == k_plane.element_size()
-            and v_plane.storage_offset() == k_plane.storage_offset() + row_elems
-        ):
-            return False
-        return kernel_stride_bytes * ratio == int(spec.page_size_bytes)
+        return _is_interleaved_kernel_kv_pair(
+            k_plane,
+            v_plane,
+            ratio=ratio,
+            page_size_bytes=int(spec.page_size_bytes),
+        )
 
     def apply(
         self,
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         _layout_hints: LayoutHints,
-    ) -> list[torch.Tensor]:
-        """Return one uint8 plane covering each logical K+V page.
+    ) -> torch.Tensor:
+        """Re-view interleaved kernel pages at logical-block granularity.
 
         Raises:
             ValueError: If ``kv_cache`` is not a two-tensor pair, or the
@@ -862,27 +925,18 @@ class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
                 f"{ratio} interleaved kernel pages ({logical_block_stride_bytes} "
                 f"bytes) do not tile the logical page ({page_size_bytes} bytes)"
             )
-        if page_size_bytes % logical_block_size != 0:
-            raise ValueError(
-                f"scheduler block size {logical_block_size} does not divide the "
-                f"{page_size_bytes}-byte page"
-            )
         num_kernel_pages = int(k_plane.shape[0])
         if num_kernel_pages % ratio != 0:
             raise ValueError(
                 f"kernel page count {num_kernel_pages} is not a multiple of "
                 f"the logical/kernel block ratio {ratio}"
             )
-        num_logical_blocks = num_kernel_pages // ratio
-        width = page_size_bytes // logical_block_size
-        page_u8 = k_plane.view(torch.uint8)
-        return [
-            page_u8.as_strided(
-                (num_logical_blocks, logical_block_size, 1, width),
-                (logical_block_stride_bytes, width, width, 1),
-                storage_offset=int(page_u8.storage_offset()),
-            )
-        ]
+        return _synthetic_attention_page_view(
+            k_plane,
+            num_kernel_pages // ratio,
+            logical_block_size,
+            page_size_bytes,
+        )
 
 
 class _SubpagedAttentionContiguousPlaneViewEdit(KVCacheGroupEdit):
@@ -914,11 +968,7 @@ class _SubpagedAttentionContiguousPlaneViewEdit(KVCacheGroupEdit):
         ratio = _subpaged_plane_pair_ratio(spec, k_plane, v_plane)
         if ratio is None:
             return False
-        if not (
-            k_plane.is_contiguous()
-            and v_plane.is_contiguous()
-            and k_plane.dtype == v_plane.dtype
-        ):
+        if not (k_plane.is_contiguous() and v_plane.is_contiguous()):
             return False
         row_bytes = int(k_plane.shape[1:].numel()) * int(k_plane.element_size())
         return 2 * row_bytes * ratio == _unpadded_attention_page_bytes(spec)

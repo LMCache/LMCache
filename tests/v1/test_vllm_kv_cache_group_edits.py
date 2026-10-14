@@ -36,6 +36,13 @@ import sys
 import pytest
 import torch
 
+# First Party
+from lmcache.utils import EngineType
+from lmcache.v1.gpu_connector.kv_format import detect_format, get_spec
+import lmcache.lmcache_native as lmcache_native
+
+pytestmark = pytest.mark.no_shared_allocator
+
 # One registered cache value, mirroring the module's own ``RegisteredKVCache``:
 # a paged KV tensor, or ``[conv_state, ssm_state]`` for Mamba layers.
 _RegisteredKVCache: TypeAlias = torch.Tensor | list[torch.Tensor]
@@ -633,11 +640,14 @@ def _subpaged_kv_planes(
     prefix_elems: int = 0,
     interleaved: bool = True,
     contiguous: bool = False,
+    num_kv_heads: int = 1,
+    num_logical_blocks: int = 2,
+    inner_stride: tuple[int, int, int, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, _Spec, torch.Tensor]:
     """Rank-4 K and V planes paged below the scheduler block.
 
-    Shape ``(num_kernel_pages, kernel_block_size, 1, head_size)`` with
-    ``kernel_block_size < spec.block_size``. ``interleaved=True`` is the
+    Shape ``(num_kernel_pages, kernel_block_size, num_kv_heads, head_size)``
+    with ``kernel_block_size < spec.block_size``. ``interleaved=True`` is the
     vLLM-Ascend v0.30 pool: K's ``stride(0)`` covers one K row plus the
     following V row. ``contiguous=True`` is vLLM-Ascend <= v0.29: every K
     kernel page, then every V kernel page, each plane dense.
@@ -648,9 +658,8 @@ def _subpaged_kv_planes(
     logical_block_size = 64
     ratio = logical_block_size // kernel_block_size
     head_size = 4
-    num_logical_blocks = 2
     num_kernel_pages = num_logical_blocks * ratio
-    row_elems = kernel_block_size * head_size
+    row_elems = kernel_block_size * num_kv_heads * head_size
     if contiguous:
         kernel_stride_elems = row_elems
         plane_count = 2
@@ -662,8 +671,11 @@ def _subpaged_kv_planes(
         dtype=torch.bfloat16,
     )
     storage[:prefix_elems] = -1
-    shape = (num_kernel_pages, kernel_block_size, 1, head_size)
-    stride = (kernel_stride_elems, head_size, head_size, 1)
+    shape = (num_kernel_pages, kernel_block_size, num_kv_heads, head_size)
+    if inner_stride is None:
+        stride = (kernel_stride_elems, num_kv_heads * head_size, head_size, 1)
+    else:
+        stride = inner_stride
     k_plane = storage.as_strided(shape, stride, storage_offset=prefix_elems)
     if contiguous:
         v_offset = prefix_elems + num_kernel_pages * row_elems
@@ -680,56 +692,150 @@ def _subpaged_kv_planes(
     return k_plane, v_plane, spec, storage
 
 
-def test_subpaged_plane_edit_fires_on_interleaved_kv(edits):
+@pytest.mark.parametrize("num_kv_heads", [1, 4])
+def test_subpaged_plane_edit_fires_on_interleaved_kv(edits, num_kv_heads):
     """vLLM-Ascend v0.30 interleaved K/V planes must be re-paged.
 
     The fused rank-4/5 rule does not match a pair, so the interleaved rule
-    is what restores the scheduler block size. The output is one uint8
-    plane (format 17 when wrapped in a one-element list), and the
+    is what restores the scheduler block size. The output is the same
+    original-dtype rank-5 page as the fused edit (format 2), and the
     contiguous rule must not also match.
     """
-    k_plane, v_plane, spec, _storage = _subpaged_kv_planes()
+    k_plane, v_plane, spec, _storage = _subpaged_kv_planes(num_kv_heads=num_kv_heads)
     pair = (k_plane, v_plane)
     interleaved = edits._SubpagedAttentionInterleavedPlaneViewEdit()
     contiguous = edits._SubpagedAttentionContiguousPlaneViewEdit()
     assert interleaved.matches(spec, pair)
     assert not contiguous.matches(spec, pair)
     viewed = _edit_attention(edits, pair, attention_spec=spec)
-    assert len(viewed) == 1
-    plane = viewed[0]
-    page_bytes = int(spec.page_size_bytes)
-    width = page_bytes // int(spec.block_size)
-    assert plane.dtype == torch.uint8
-    assert tuple(plane.shape) == (
-        int(k_plane.shape[0]) // (int(spec.block_size) // int(k_plane.shape[1])),
+    assert isinstance(viewed, torch.Tensor)
+    ratio = int(spec.block_size) // int(k_plane.shape[1])
+    num_blocks = int(k_plane.shape[0]) // ratio
+    synthetic_head_size = int(k_plane.shape[2]) * int(k_plane.shape[3])
+    page_elems = int(spec.page_size_bytes) // int(viewed.element_size())
+    assert viewed.dtype == k_plane.dtype
+    assert viewed.ndim == 5
+    assert tuple(viewed.shape) == (
+        num_blocks,
+        2,
         int(spec.block_size),
         1,
-        width,
+        synthetic_head_size,
     )
-    assert tuple(plane.stride()) == (page_bytes, width, width, 1)
-    uint8_offset = int(k_plane.view(torch.uint8).storage_offset())
-    assert int(plane.storage_offset()) == uint8_offset
+    assert tuple(viewed.stride()) == (
+        page_elems,
+        page_elems // 2,
+        synthetic_head_size,
+        synthetic_head_size,
+        1,
+    )
+    assert viewed.untyped_storage().data_ptr() == k_plane.untyped_storage().data_ptr()
+    assert int(viewed.storage_offset()) == int(k_plane.storage_offset())
+    assert viewed.numel() == num_blocks * page_elems
 
 
-def test_subpaged_plane_edit_groups_contiguous_kernel_pages(edits):
+@pytest.mark.parametrize("num_kv_heads", [1, 4])
+def test_subpaged_plane_edit_groups_contiguous_kernel_pages(edits, num_kv_heads):
     """Logical block ``n`` must cover kernel pages ``n*k .. n*k+k-1``.
 
-    vLLM-Ascend v0.30 interleaves those pages in one pool, and bytes before
+    vLLM-Ascend v0.30 interleaves those pages in one pool, and elements before
     K's storage offset are not part of block 0.
     """
     prefix_elems = 17
-    k_plane, v_plane, spec, storage = _subpaged_kv_planes(prefix_elems=prefix_elems)
-    plane = _edit_attention(edits, (k_plane, v_plane), attention_spec=spec)[0]
+    k_plane, v_plane, spec, storage = _subpaged_kv_planes(
+        prefix_elems=prefix_elems, num_kv_heads=num_kv_heads
+    )
+    viewed = _edit_attention(edits, (k_plane, v_plane), attention_spec=spec)
+    assert isinstance(viewed, torch.Tensor)
 
-    raw = storage.view(torch.uint8)
-    page_bytes = spec.page_size_bytes
-    base = prefix_elems * storage.element_size()
-    for block in range(plane.shape[0]):
-        start = base + block * page_bytes
+    page_elems = spec.page_size_bytes // storage.element_size()
+    for block in range(viewed.shape[0]):
+        start = prefix_elems + block * page_elems
         torch.testing.assert_close(
-            plane[block].reshape(-1), raw[start : start + page_bytes]
+            viewed[block].reshape(-1), storage[start : start + page_elems]
         )
-    assert int(raw[0]) != int(plane.reshape(-1)[0])
+    assert int(viewed.storage_offset()) == prefix_elems
+    assert int(storage[0]) != int(viewed.reshape(-1)[0])
+
+
+@pytest.mark.parametrize("num_kv_heads", [1, 4])
+def test_interleaved_plane_edit_matches_fused_page_view(edits, num_kv_heads):
+    """The interleaved pair must edit to the same tensor as the fused rule.
+
+    Both inputs describe ``[K0][V0][K1][V1]...`` in one allocation. The fused
+    rule sees one rank-5 kernel-paged tensor; the interleaved rule sees the
+    K and V views of that tensor. Their logical-page views must be identical.
+    """
+    prefix_elems = 17
+    k_plane, v_plane, spec, storage = _subpaged_kv_planes(
+        prefix_elems=prefix_elems, num_kv_heads=num_kv_heads
+    )
+    num_kernel_pages = int(k_plane.shape[0])
+    kernel_block_size = int(k_plane.shape[1])
+    head_size = int(k_plane.shape[3])
+    row_elems = kernel_block_size * num_kv_heads * head_size
+    fused = storage.as_strided(
+        (num_kernel_pages, 2, kernel_block_size, num_kv_heads, head_size),
+        (2 * row_elems, row_elems, num_kv_heads * head_size, head_size, 1),
+        storage_offset=prefix_elems,
+    )
+    fused_view = edits._SubpagedAttentionViewEdit().apply(spec, fused, {})
+    interleaved_view = edits._SubpagedAttentionInterleavedPlaneViewEdit().apply(
+        spec, (k_plane, v_plane), {}
+    )
+    assert tuple(interleaved_view.shape) == tuple(fused_view.shape)
+    assert tuple(interleaved_view.stride()) == tuple(fused_view.stride())
+    assert interleaved_view.dtype == fused_view.dtype
+    assert int(interleaved_view.storage_offset()) == int(fused_view.storage_offset())
+    assert (
+        interleaved_view.untyped_storage().data_ptr()
+        == fused_view.untyped_storage().data_ptr()
+    )
+    torch.testing.assert_close(
+        interleaved_view.reshape(-1), fused_view.reshape(-1)
+    )
+
+
+@pytest.mark.parametrize("num_kv_heads", [1, 4])
+def test_interleaved_plane_edit_detects_as_format_2(edits, num_kv_heads, monkeypatch):
+    """A layer list of the edited tensor is format 2 at the scheduler block.
+
+    ``num_logical_blocks`` is not 2: a leading size of 2 is the K/V axis of
+    format 1, so two blocks would make the rank-5 shape ambiguous.
+    """
+    monkeypatch.setattr(
+        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
+        "npu",
+    )
+    k_plane, v_plane, spec, _storage = _subpaged_kv_planes(
+        num_kv_heads=num_kv_heads, num_logical_blocks=4
+    )
+    viewed = _edit_attention(edits, (k_plane, v_plane), attention_spec=spec)
+    fmt, normalized = detect_format(
+        [viewed], EngineType.VLLM, {"kv_layout": "NHD"}
+    )
+    assert fmt == lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
+    assert get_spec(normalized, fmt).block_size() == int(spec.block_size)
+
+
+def test_subpaged_plane_edit_rejects_non_dense_interleaved_inner_stride(edits):
+    """Interleaved dim-0 stride is not enough without a dense NHD row."""
+    k_plane, v_plane, spec, _storage = _subpaged_kv_planes(num_kv_heads=4)
+    kernel_stride_elems = int(k_plane.stride(0))
+    bad_stride = (kernel_stride_elems, 4, 8, 1)
+    k_bad = k_plane.as_strided(k_plane.shape, bad_stride, k_plane.storage_offset())
+    v_bad = v_plane.as_strided(v_plane.shape, bad_stride, v_plane.storage_offset())
+    interleaved = edits._SubpagedAttentionInterleavedPlaneViewEdit()
+    assert not interleaved.matches(spec, (k_bad, v_bad))
+
+
+def test_subpaged_plane_edit_rejects_interleaved_separate_storage(edits):
+    """K and V must share one pool; separate allocations are not interleaved."""
+    k_plane, v_plane, spec, _storage = _subpaged_kv_planes(num_kv_heads=4)
+    v_clone = v_plane.clone()
+    assert v_clone.untyped_storage().data_ptr() != k_plane.untyped_storage().data_ptr()
+    interleaved = edits._SubpagedAttentionInterleavedPlaneViewEdit()
+    assert not interleaved.matches(spec, (k_plane, v_clone))
 
 
 def test_subpaged_plane_edit_rejects_separate_kv_planes(edits):
