@@ -20,6 +20,7 @@ import ctypes
 import itertools
 import os
 import threading
+import uuid
 import weakref
 
 # Third Party
@@ -247,6 +248,22 @@ _CPU_SHM_SEGMENTS: dict[int, _ShmSegmentRecord] = {}
 _CPU_SHM_LOCK = threading.Lock()
 _CPU_SHM_COUNTER = itertools.count()
 
+# Stable unique ID for this LMCache instance, used in SHM segment names.
+#
+# Raw os.getpid() is the wrong identifier: containers with independent PID
+# namespaces recycle the same low PIDs, so two instances sharing /dev/shm
+# (e.g. via ipc: host) can land on the same PID and collide on
+# shm_open("/lmcache_kv_<pid>_N", O_CREAT|O_EXCL) — the second call gets
+# EEXIST and the worker crashes.
+#
+# LMCACHE_INSTANCE_ID lets the caller inject a unique token (e.g. from the
+# Kubernetes Downward API: metadata.uid) without rebuilding the image.
+# Without the env var a per-process UUID is generated at import time, which
+# is unique across any combination of containers and PID namespaces.
+_LMCACHE_INSTANCE_ID: str = (
+    os.environ.get("LMCACHE_INSTANCE_ID") or uuid.uuid4().hex[:16]
+)
+
 
 # Process-level registry that pins the base ``flat`` buffer of every live
 # ``to_tensor()`` mmap until its storage is finalized. Keyed by ``id(storage)``,
@@ -374,9 +391,9 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
             )
         return CpuShmTensorWrapper(tensor, hit_name, segment_nbytes=hit_nbytes)
 
-    shm_name = "%s%d_%d" % (
+    shm_name = "%s%s_%d" % (
         CpuShmTensorWrapper.SHM_NAME_PREFIX,
-        os.getpid(),
+        _LMCACHE_INSTANCE_ID,
         next(_CPU_SHM_COUNTER),
     )
     # Perform the heavy work (syscall + copy + tensor mutation) outside
