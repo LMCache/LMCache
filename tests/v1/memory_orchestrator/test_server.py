@@ -37,6 +37,7 @@ from lmcache.v1.memory_orchestrator.client import MemoryOrchestratorClient
 from lmcache.v1.memory_orchestrator.server import OrchestratorConfig, parse_args
 from lmcache.v1.memory_orchestrator.service import OrchestratorServicer
 from lmcache.v1.memory_orchestrator.state import RegionState
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_pb2
 from tests.v1.memory_orchestrator.harness import (
     REGION_ID,
     STARTUP_TIMEOUT_S,
@@ -106,10 +107,13 @@ def raw_reserve_write(
         ),
         entries=[
             pb2.WriteEntry(
-                key=pb2.ObjectKey(chunk_hash=name.encode(), model_name="model"),
+                key=p2p_service_pb2.ObjectKey(
+                    chunk_hash=name.encode(), model_name="model"
+                ),
                 payload_bytes=ALIGN,
-                layout=pb2.ObjectLayout(
-                    shapes=[pb2.TensorShape(dims=[2, 8])], dtypes=["bfloat16"]
+                layout=p2p_service_pb2.MemoryLayoutDesc(
+                    shapes=[p2p_service_pb2.TensorShape(dims=[2, 8])],
+                    dtypes=["bfloat16"],
                 ),
             )
             for name in names

@@ -61,7 +61,11 @@ class TokenStatus(enum.Enum):
 
 @dataclass(frozen=True)
 class WireObjectKey:
-    """Identity of one stored KV object; hashable so it can index state."""
+    """Torch-free projection of ``distributed.api.ObjectKey`` for region state.
+
+    Fields match the shared P2P ``ObjectKey`` schema; a codec test checks the
+    field names of all three definitions and exercises wire round trips.
+    """
 
     chunk_hash: bytes
     model_name: str

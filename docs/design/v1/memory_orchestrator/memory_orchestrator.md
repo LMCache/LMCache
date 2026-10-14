@@ -43,6 +43,13 @@ capped by `max_batch_entries`; the client splits larger ones, and a split
 `ReserveWrite` or `ReserveRead` that fails part-way aborts or releases what its
 earlier parts were granted.
 
+Object keys, tensor shapes and layouts reuse `ObjectKey`, `TensorShape` and
+`MemoryLayoutDesc` from the MP transport's `protos/p2p_service.proto`. The
+orchestrator keeps primitive Python values so its state machine does not
+depend on torch. A codec test checks the Python key fields against this shared
+schema and verifies round trips; protobuf field numbers remain an explicit
+wire contract rather than being inferred from Python field order.
+
 | RPC | Does |
 | --- | --- |
 | `DescribeRegion` | region id, epoch, capacity, alignment, visibility mode, layout fingerprint, batch limit, `reset_required` |

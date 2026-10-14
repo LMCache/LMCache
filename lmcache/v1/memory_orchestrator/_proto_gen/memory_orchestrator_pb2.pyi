@@ -2,6 +2,7 @@
 # ruff: noqa
 # fmt: off
 # isort: skip_file
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_pb2 as _p2p_service_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
@@ -67,34 +68,6 @@ class RegisterClientReply(_message.Message):
     released_leases: int
     def __init__(self, region_epoch: _Optional[int] = ..., retired_writes: _Optional[int] = ..., released_leases: _Optional[int] = ...) -> None: ...
 
-class ObjectKey(_message.Message):
-    __slots__ = ("chunk_hash", "model_name", "kv_rank", "object_group_id", "cache_salt")
-    CHUNK_HASH_FIELD_NUMBER: _ClassVar[int]
-    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
-    KV_RANK_FIELD_NUMBER: _ClassVar[int]
-    OBJECT_GROUP_ID_FIELD_NUMBER: _ClassVar[int]
-    CACHE_SALT_FIELD_NUMBER: _ClassVar[int]
-    chunk_hash: bytes
-    model_name: str
-    kv_rank: int
-    object_group_id: int
-    cache_salt: str
-    def __init__(self, chunk_hash: _Optional[bytes] = ..., model_name: _Optional[str] = ..., kv_rank: _Optional[int] = ..., object_group_id: _Optional[int] = ..., cache_salt: _Optional[str] = ...) -> None: ...
-
-class TensorShape(_message.Message):
-    __slots__ = ("dims",)
-    DIMS_FIELD_NUMBER: _ClassVar[int]
-    dims: _containers.RepeatedScalarFieldContainer[int]
-    def __init__(self, dims: _Optional[_Iterable[int]] = ...) -> None: ...
-
-class ObjectLayout(_message.Message):
-    __slots__ = ("shapes", "dtypes")
-    SHAPES_FIELD_NUMBER: _ClassVar[int]
-    DTYPES_FIELD_NUMBER: _ClassVar[int]
-    shapes: _containers.RepeatedCompositeFieldContainer[TensorShape]
-    dtypes: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, shapes: _Optional[_Iterable[_Union[TensorShape, _Mapping]]] = ..., dtypes: _Optional[_Iterable[str]] = ...) -> None: ...
-
 class Handle(_message.Message):
     __slots__ = ("offset", "length", "generation")
     OFFSET_FIELD_NUMBER: _ClassVar[int]
@@ -110,10 +83,10 @@ class WriteEntry(_message.Message):
     KEY_FIELD_NUMBER: _ClassVar[int]
     PAYLOAD_BYTES_FIELD_NUMBER: _ClassVar[int]
     LAYOUT_FIELD_NUMBER: _ClassVar[int]
-    key: ObjectKey
+    key: _p2p_service_pb2.ObjectKey
     payload_bytes: int
-    layout: ObjectLayout
-    def __init__(self, key: _Optional[_Union[ObjectKey, _Mapping]] = ..., payload_bytes: _Optional[int] = ..., layout: _Optional[_Union[ObjectLayout, _Mapping]] = ...) -> None: ...
+    layout: _p2p_service_pb2.MemoryLayoutDesc
+    def __init__(self, key: _Optional[_Union[_p2p_service_pb2.ObjectKey, _Mapping]] = ..., payload_bytes: _Optional[int] = ..., layout: _Optional[_Union[_p2p_service_pb2.MemoryLayoutDesc, _Mapping]] = ...) -> None: ...
 
 class ReserveWriteRequest(_message.Message):
     __slots__ = ("env", "entries")
@@ -155,9 +128,9 @@ class ReadEntry(_message.Message):
     __slots__ = ("key", "reader_count")
     KEY_FIELD_NUMBER: _ClassVar[int]
     READER_COUNT_FIELD_NUMBER: _ClassVar[int]
-    key: ObjectKey
+    key: _p2p_service_pb2.ObjectKey
     reader_count: int
-    def __init__(self, key: _Optional[_Union[ObjectKey, _Mapping]] = ..., reader_count: _Optional[int] = ...) -> None: ...
+    def __init__(self, key: _Optional[_Union[_p2p_service_pb2.ObjectKey, _Mapping]] = ..., reader_count: _Optional[int] = ...) -> None: ...
 
 class ReserveReadRequest(_message.Message):
     __slots__ = ("env", "entries")
@@ -187,9 +160,9 @@ class ReadGrant(_message.Message):
     status: ReadGrant.Status
     handle: Handle
     leases: _containers.RepeatedScalarFieldContainer[bytes]
-    layout: ObjectLayout
+    layout: _p2p_service_pb2.MemoryLayoutDesc
     payload_bytes: int
-    def __init__(self, status: _Optional[_Union[ReadGrant.Status, str]] = ..., handle: _Optional[_Union[Handle, _Mapping]] = ..., leases: _Optional[_Iterable[bytes]] = ..., layout: _Optional[_Union[ObjectLayout, _Mapping]] = ..., payload_bytes: _Optional[int] = ...) -> None: ...
+    def __init__(self, status: _Optional[_Union[ReadGrant.Status, str]] = ..., handle: _Optional[_Union[Handle, _Mapping]] = ..., leases: _Optional[_Iterable[bytes]] = ..., layout: _Optional[_Union[_p2p_service_pb2.MemoryLayoutDesc, _Mapping]] = ..., payload_bytes: _Optional[int] = ...) -> None: ...
 
 class ReserveReadReply(_message.Message):
     __slots__ = ("grants",)

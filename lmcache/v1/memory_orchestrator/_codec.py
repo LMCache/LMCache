@@ -27,6 +27,7 @@ from lmcache.v1.memory_orchestrator.api import (
     WriteRequest,
     WriteStatus,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_pb2
 
 _WireT = TypeVar("_WireT")
 _ApiT = TypeVar("_ApiT")
@@ -47,9 +48,9 @@ def _from_proto(cls: type[_ApiT], msg: Message) -> _ApiT:
 
 # Keys and handles are converted once per batch entry, so they spell out their
 # fields; the generic helper costs about twice as much per entry.
-def _key_to_proto(key: WireObjectKey) -> pb2.ObjectKey:
+def _key_to_proto(key: WireObjectKey) -> p2p_service_pb2.ObjectKey:
     """Convert an object key to its wire form."""
-    return pb2.ObjectKey(
+    return p2p_service_pb2.ObjectKey(
         chunk_hash=key.chunk_hash,
         model_name=key.model_name,
         kv_rank=key.kv_rank,
@@ -58,7 +59,7 @@ def _key_to_proto(key: WireObjectKey) -> pb2.ObjectKey:
     )
 
 
-def _key_from_proto(msg: pb2.ObjectKey) -> WireObjectKey:
+def _key_from_proto(msg: p2p_service_pb2.ObjectKey) -> WireObjectKey:
     """Convert a wire object key."""
     return WireObjectKey(
         chunk_hash=msg.chunk_hash,
@@ -83,15 +84,15 @@ def _handle_from_proto(msg: pb2.Handle) -> Handle:
     return Handle(offset=msg.offset, length=msg.length, generation=msg.generation)
 
 
-def _layout_to_proto(layout: WireLayout) -> pb2.ObjectLayout:
+def _layout_to_proto(layout: WireLayout) -> p2p_service_pb2.MemoryLayoutDesc:
     """Convert an object layout to its wire form."""
-    return pb2.ObjectLayout(
-        shapes=[pb2.TensorShape(dims=shape) for shape in layout.shapes],
+    return p2p_service_pb2.MemoryLayoutDesc(
+        shapes=[p2p_service_pb2.TensorShape(dims=shape) for shape in layout.shapes],
         dtypes=layout.dtypes,
     )
 
 
-def _layout_from_proto(msg: pb2.ObjectLayout) -> WireLayout:
+def _layout_from_proto(msg: p2p_service_pb2.MemoryLayoutDesc) -> WireLayout:
     """Convert a wire object layout."""
     return WireLayout(
         shapes=tuple(tuple(shape.dims) for shape in msg.shapes),

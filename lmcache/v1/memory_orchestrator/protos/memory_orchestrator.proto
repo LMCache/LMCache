@@ -7,6 +7,8 @@ syntax = "proto3";
 
 package lmcache.memory_orchestrator.v1;
 
+import "p2p_service.proto";
+
 service MemoryOrchestrator {
   rpc DescribeRegion (Envelope)              returns (RegionContract);
   rpc RegisterClient (RegisterClientRequest) returns (RegisterClientReply);
@@ -51,21 +53,6 @@ message RegisterClientReply {
   uint32 released_leases = 3;  // read leases of an older incarnation dropped
 }
 
-message ObjectKey {
-  bytes chunk_hash = 1;
-  string model_name = 2;
-  int64 kv_rank = 3;
-  int64 object_group_id = 4;
-  string cache_salt = 5;
-}
-
-message TensorShape { repeated int64 dims = 1; }
-
-message ObjectLayout {
-  repeated TensorShape shapes = 1;
-  repeated string dtypes = 2;  // torch dtype names without the "torch." prefix
-}
-
 message Handle {
   uint64 offset = 1;      // byte offset inside the region
   uint64 length = 2;      // aligned extent length
@@ -73,9 +60,9 @@ message Handle {
 }
 
 message WriteEntry {
-  ObjectKey key = 1;
+  lmcache.mp.ObjectKey key = 1;
   uint64 payload_bytes = 2;  // unaligned payload size, > 0
-  ObjectLayout layout = 3;   // stored verbatim and returned to readers
+  lmcache.mp.MemoryLayoutDesc layout = 3;  // stored verbatim and returned to readers
 }
 
 message ReserveWriteRequest {
@@ -99,7 +86,7 @@ message WriteGrant {
 message ReserveWriteReply { repeated WriteGrant grants = 1; }  // request order
 
 message ReadEntry {
-  ObjectKey key = 1;
+  lmcache.mp.ObjectKey key = 1;
   uint32 reader_count = 2;  // >= 1; one lease per reader
 }
 
@@ -118,7 +105,7 @@ message ReadGrant {
   Status status = 1;
   Handle handle = 2;          // READ_GRANTED only
   repeated bytes leases = 3;  // reader_count leases, READ_GRANTED only
-  ObjectLayout layout = 4;    // READ_GRANTED only
+  lmcache.mp.MemoryLayoutDesc layout = 4;  // READ_GRANTED only
   uint64 payload_bytes = 5;   // READ_GRANTED only
 }
 

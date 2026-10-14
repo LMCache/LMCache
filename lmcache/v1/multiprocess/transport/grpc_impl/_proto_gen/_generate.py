@@ -59,6 +59,11 @@ def _patch_generated_file(path: Path, generated_package: str) -> None:
         rf"from {generated_package} import \1 as \2",
         text,
     )
+    # The orchestrator imports the P2P key and layout schemas.
+    text = text.replace(
+        f"from {generated_package} import p2p_service_pb2",
+        f"from {GENERATED_PACKAGE} import p2p_service_pb2",
+    )
     prefix = ""
     if not text.startswith(SPDX_HEADER):
         prefix += SPDX_HEADER
@@ -122,6 +127,10 @@ def generate(generated_package: str = GENERATED_PACKAGE) -> None:
             generated modules; its directory must exist under the project
             root. Defaults to the multiprocess transport bindings.
 
+    Note:
+        Generate the multiprocess bindings before the memory orchestrator,
+        which imports its P2P messages. ``GENERATED_PACKAGES`` has this order.
+
     Raises:
         RuntimeError: If no schemas exist, compilation fails, or a generated
             module cannot be imported.
@@ -140,6 +149,7 @@ def generate(generated_package: str = GENERATED_PACKAGE) -> None:
         [
             "grpc_tools.protoc",
             f"-I{proto_dir}",
+            f"-I{_package_dir(GENERATED_PACKAGE).parent / 'protos'}",
             f"--python_out={generated_dir}",
             f"--pyi_out={generated_dir}",
             f"--grpc_python_out={generated_dir}",
