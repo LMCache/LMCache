@@ -163,9 +163,9 @@ the answer depend on registration order.
   leaves only through `DELETE`. Three paths reach it: a higher incarnation on
   the stream (restart), the stale-eviction loop (heartbeat timeout), and
   `DELETE /instances/{id}` (clean shutdown).
-- **Deregistration** also drops the declaration, which would otherwise grow
-  without bound across a churning fleet. Surviving L2 bytes are still
-  reported, without a ratio.
+- **Deregistration** (`DELETE /instances/{id}` or a heartbeat timeout) also
+  drops the declaration, which would otherwise grow without bound across a
+  churning fleet. Surviving L2 bytes are still reported, without a ratio.
 
 An instance appears in the fleet view when it is registered, holds bytes, *or*
 has declared capacity — so a departed server whose L2 placements survive is
