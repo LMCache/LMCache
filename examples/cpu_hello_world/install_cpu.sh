@@ -61,7 +61,7 @@ ${PIP_BIN} install "${VLLM_CPU_SPEC}" \
 # So we copy the dist-info to a `vllm-<ver>+cpu.dist-info` alias and rewrite
 # Name/Version. This is idempotent.
 echo "==> Aliasing vllm-cpu-nightly dist-info -> vllm (+cpu)"
-python - <<'PY'
+python3 - <<'PY'
 import importlib.metadata as md
 import pathlib
 import shutil
@@ -105,7 +105,7 @@ ${PIP_BIN} install -e . --no-deps --no-build-isolation
 # ------------------------------------------------------------------ #
 echo ""
 echo "==> [3/3] Verifying the CPU install"
-python - <<'PY'
+python3 - <<'PY'
 import torch
 import vllm
 import lmcache

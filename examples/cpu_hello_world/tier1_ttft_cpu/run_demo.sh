@@ -39,7 +39,7 @@ VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-600}"
 LMCACHE_READY_TIMEOUT="${LMCACHE_READY_TIMEOUT:-60}"
 CPU_KVCACHE_SPACE_GB="${VLLM_CPU_KVCACHE_SPACE:-1}"
 
-WORK_DIR="$(mktemp -d -t lmcache_tier1_XXXX)"
+WORK_DIR="$(demo_mktemp_dir lmcache_tier1)"
 LMCACHE_LOG="${WORK_DIR}/lmcache.log"
 VLLM_LOG="${WORK_DIR}/vllm.log"
 PROMPT_SHARED="${WORK_DIR}/prompt_shared.txt"

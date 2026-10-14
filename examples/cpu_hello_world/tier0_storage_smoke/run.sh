@@ -32,8 +32,8 @@ BENCH_NUM_TOKENS="${BENCH_NUM_TOKENS:-512}"
 TRANSFER_MODE="${TRANSFER_MODE:-engine_driven}"
 HEALTHCHECK_TIMEOUT="${HEALTHCHECK_TIMEOUT:-60}"
 
-LOG_FILE="$(mktemp -t lmcache_tier0_XXXX.log)"
-BENCH_LOG="$(mktemp -t lmcache_tier0_bench_XXXX.log)"
+LOG_FILE="$(demo_mktemp lmcache_tier0)"
+BENCH_LOG="$(demo_mktemp lmcache_tier0_bench)"
 SERVER_PID=""
 
 cleanup() {

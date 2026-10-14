@@ -7,9 +7,32 @@
 #   wait_for_endpoint_contains URL TIMEOUT EXPECTED LABEL
 #   scrape_metric METRIC_NAME HTTP_PORT   -> integer counter total (or 0)
 #   pick_loopback_iface                   -> echoes lo (Linux) / lo0 (macOS)
+#   demo_mktemp PREFIX                    -> portable temp file path
+#   demo_mktemp_dir PREFIX                -> portable temp directory path
 #
 # These mirror the logic proven in .github/scripts/run-cpu-e2e-validation.sh
 # so the demo behaves like LMCache's own CPU CI.
+
+# Create a temp file (demo_mktemp) or directory (demo_mktemp_dir) from PREFIX.
+#
+# Why not `mktemp -t PREFIX...`: the two platforms disagree about `-t`.
+# GNU/Linux treats the argument as a template that MUST end with at least
+# three X's, so `-t foo_XXXX.log` aborts with "must end with at least three
+# consecutive 'X's". macOS treats it as a bare prefix and appends its own
+# random suffix, so the same call leaves the literal characters "XXXX.log"
+# embedded in the filename. Passing a full template path behaves identically
+# on both, and `${TMPDIR%/}` keeps macOS's trailing slash out of the result.
+demo_mktemp() {
+  local prefix="$1"
+  local base="${TMPDIR:-/tmp}"
+  mktemp "${base%/}/${prefix}_XXXXXX"
+}
+
+demo_mktemp_dir() {
+  local prefix="$1"
+  local base="${TMPDIR:-/tmp}"
+  mktemp -d "${base%/}/${prefix}_XXXXXX"
+}
 
 # Poll an HTTP endpoint until it responds and (optionally) its body contains
 # EXPECTED. Returns 0 on success, 1 on timeout.

@@ -41,5 +41,5 @@ language model or measure TTFT. For that, continue to
 - `--transfer-mode engine_driven` is the default; `lmcache_driven` also works.
   POSIX shared-memory transports are Linux-only.
 - An alternative, model-free storage check is
-  `python -m lmcache.v1.basic_check --mode test_storage_manager` (see
+  `python3 -m lmcache.v1.basic_check --mode test_storage_manager` (see
   [`examples/basic_check/`](../../basic_check/)).
