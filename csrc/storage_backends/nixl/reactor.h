@@ -42,7 +42,8 @@ class NixlReactorDriver {
   virtual void log_load_error(const std::string& message) = 0;
 };
 
-// Centralized reactor eligibility: enable_reactor admits allowlisted backends only.
+// Centralized reactor eligibility: enable_reactor admits allowlisted backends
+// only.
 inline bool nixl_reactor_eligible(const std::string& backend,
                                   const NixlStorageCapabilities& capabilities,
                                   bool enable_reactor) {
