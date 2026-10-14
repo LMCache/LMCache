@@ -618,6 +618,12 @@ complete region. Such a sample is exported with `parsed: false`, an empty
 answer, and `f1: null`. Completed answers are scored by SQuAD-normalized
 token-overlap F1, best over the gold answers.
 
+The shared `quality/scoring.py` also exports `answer_match` for answer-quality
+comparisons. References with numeric figures must pass its numeric value check;
+punctuation-stripped phrase equality cannot bypass it (`1.5` differs from `15`).
+Its existing rounding tolerance, scale conversion and nonnumeric phrase rules
+are unchanged. This does not change the token-overlap F1 used by this workload.
+
 `f1_mean` covers **parsed samples only** and is always reported beside
 `parse_rate`: a high F1 over a third of the samples is a different result from
 the same F1 over all of them.
