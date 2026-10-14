@@ -24,7 +24,8 @@ reports metrics. ``--prompt`` supports placeholders: ``{lmcache}`` loads
 usage data reported by the engine (``stream_options: {include_usage: true}``).
 The output token count also uses the reported ``completion_tokens``, including
 zero. If that count is absent, the requested ``--max-tokens`` is used as an
-estimate.
+estimate. TTFT is measured to the first output token; on the chat endpoint,
+reasoning and tool-call tokens count as output, not only answer text.
 
 .. code-block:: bash
 
