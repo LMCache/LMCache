@@ -154,6 +154,12 @@ Step-by-Step
 
     kubectl apply -f examples/multi_process/lmcache-daemonset.yaml
 
+.. note::
+   The LMCache server in the DaemonSet binds the transport port only to
+   ``127.0.0.1`` on the host network. vLLM pods reach the server on the same
+   node through the loopback interface, so the transport port is never
+   exposed beyond the node.
+
 **Step 3: Deploy vLLM**
 
 .. code-block:: bash

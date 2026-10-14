@@ -425,6 +425,15 @@ def test_session_ttl_seconds_default_and_flag():
     assert _parse_mp(["--session-ttl-seconds", "7200"]).session_ttl_seconds == 7200.0
 
 
+def test_kv_load_policy_default_and_flag():
+    """The KV load policy defaults to DEFAULT and accepts a module path."""
+    assert _parse_mp([]).kv_load_policy == "DEFAULT"
+    assert (
+        _parse_mp(["--kv-load-policy", "my_pkg.policies:Custom"]).kv_load_policy
+        == "my_pkg.policies:Custom"
+    )
+
+
 def _parse_http(argv: list[str]) -> HTTPFrontendConfig:
     parser = argparse.ArgumentParser()
     add_http_frontend_args(parser)
