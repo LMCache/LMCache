@@ -53,5 +53,5 @@ class NeuronDeviceSpec(DeviceSpec):
         except Exception:
             return False
 
-    def is_handle_transfer_available(self) -> bool:
+    def is_lmcache_driven_available(self) -> bool:
         return False

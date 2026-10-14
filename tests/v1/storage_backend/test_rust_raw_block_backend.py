@@ -67,6 +67,10 @@ class _FakeRawBlockDevice:
     def size_bytes(self):
         return len(self._data)
 
+    def worker_error(self) -> str | None:
+        """Return no terminal error unless a failure test overrides this method."""
+        return None
+
     def pread_into(self, offset, out, payload_len, total_len=None):
         del total_len
         out[:payload_len] = self._data[offset : offset + payload_len]
@@ -104,14 +108,27 @@ class _FakeRawBlockDevice:
         buffers: list[Any],
         total_lens: list[int],
         placement_ids: list[int | None] | None = None,
+        payload_lens: list[int] | None = None,
     ) -> int:
         del placement_ids
+        resolved_payload_lens = (
+            [int(payload) for payload in payload_lens]
+            if payload_lens is not None
+            else [int(total) for total in total_lens]
+        )
         batch_id = self._next_batch_id
         self._next_batch_id += 1
         self.batched_writes.append((list(offsets), list(total_lens)))
         results = []
-        for offset, buf, total_len in zip(offsets, buffers, total_lens, strict=True):
-            self.pwrite_from_buffer(offset, buf, total_len, total_len)
+        for offset, buf, total_len, payload_len in zip(
+            offsets, buffers, total_lens, resolved_payload_lens, strict=True
+        ):
+            # Mirror the Rust bounce: store only the valid payload and zero the
+            # [payload_len, total_len) padding region.
+            self.pwrite_from_buffer(offset, buf, payload_len, total_len)
+            self._data[offset + payload_len : offset + total_len] = bytes(
+                total_len - payload_len
+            )
             results.append(True)
         self._batch_results[batch_id] = results
         return batch_id
@@ -2712,6 +2729,35 @@ def _make_raw_block_backend(
         loop=loop,
         dst_device="cpu",
     )
+
+
+@pytest.mark.no_shared_allocator
+def test_rust_raw_block_backend_skips_failed_worker_without_retaining_objects(
+    monkeypatch: pytest.MonkeyPatch,
+    loop_in_thread: asyncio.AbstractEventLoop,
+) -> None:
+    """Skipping a failed worker preserves the caller's object references."""
+    _install_fake_raw_block_device(monkeypatch, size_bytes=64 * 1024 * 1024)
+    allocator = AdHocMemoryAllocator(device="cpu")
+    backend = _make_raw_block_backend(
+        "/tmp/plugin-worker-failure", allocator, loop_in_thread
+    )
+    key = CacheEngineKey("test_model", 1, 0, 7001, torch.bfloat16)
+    memory_obj = _make_byte_obj(32)
+    try:
+        ref_count = memory_obj.get_ref_count()
+        with patch.object(
+            _FakeRawBlockDevice,
+            "worker_error",
+            return_value="io_uring worker submission failed: test error",
+        ):
+            assert backend.batched_submit_put_task([key], [memory_obj]) is None
+            assert not backend.contains(key)
+            assert not backend.exists_in_put_tasks(key)
+            assert memory_obj.get_ref_count() == ref_count
+    finally:
+        memory_obj.ref_count_down()
+        backend.close()
 
 
 def test_rust_raw_block_backend_batched_submit_rolls_back_refs_on_dispatch_failure(

@@ -75,3 +75,16 @@ For multiple servers, specify the scheme on every entry in
 ``tcp://host1:5555,tcp://host2:5555`` or
 ``grpc://host1:5555,grpc://host2:5555``. All clients and servers in a
 deployment must use matching transports.
+
+
+IPC descriptor compatibility
+----------------------------
+
+Device IPC wrappers use versioned, data-only MessagePack descriptors in both
+transports. Legacy pickle descriptors are rejected; upgrade workers and servers
+together. MUSA handles must use MessagePack scalars, lists and string-keyed maps;
+opaque SDK objects require an explicit codec and are rejected.
+
+This closes the device-wrapper deserialization path in CVE-2026-105192. It does
+not add RPC authentication or replace engine-driven tensor-data pickle payloads.
+Keep MP endpoints restricted to trusted clients.
