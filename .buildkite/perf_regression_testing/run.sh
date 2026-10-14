@@ -12,7 +12,8 @@ for v in PRT_SUITE PRT_ROOT; do
     exit 64
   fi
 done
-out=$PRT_ROOT/prt-suites/buildkite-${BUILDKITE_BUILD_NUMBER:-local}-$PRT_SUITE
+# The time keeps a retried job from reusing the first attempt's dir.
+out=$PRT_ROOT/prt-suites/buildkite-${BUILDKITE_BUILD_NUMBER:-local}-$PRT_SUITE-$(date -u +%Y%m%d-%H%M%S)
 ${PYTHON:-python3.11} -m perf_regression_testing.suite --suite "$PRT_SUITE" --out "$out"
 rc=$?
 if [[ -f "$out/report.md" ]]; then

@@ -49,7 +49,15 @@ def substitute(value: Any, subst: dict[str, str]) -> Any:
 
 
 def _for_replica(value: Any, i: int) -> Any:
-    """Resolve the replica placeholders in every string inside ``value``."""
+    """Resolve the replica placeholders in every string inside ``value``.
+
+    Args:
+        value: A config value: string, dict or list, nested freely.
+        i: The replica index.
+
+    Returns:
+        A copy of ``value``; a string that is only a placeholder becomes an int.
+    """
 
     def num(m: re.Match[str]) -> int:
         return int(m.group(1) or 0) + int(m.group(2) or 1) * i

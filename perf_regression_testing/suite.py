@@ -26,6 +26,7 @@ from typing import IO, Any
 import argparse
 import fcntl
 import json
+import signal
 import sys
 import time
 import traceback
@@ -93,14 +94,8 @@ def report_md(rep: dict[str, Any]) -> str:
     """
     im = rep["images"]
     vllm = f"vLLM {(im.get('vllm_commit') or '?')[:9]}"
-    if im.get("host_error"):
-        vllm += f" (NOT RUN: {im['host_error']})"
-    elif im.get("disk_full"):
-        vllm += f" (NO IMAGES: {im['disk_full']})"
-    elif im.get("error"):
-        vllm += f" (NO IMAGES: {im['error']})"
-    elif im.get("aiperf_error"):
-        vllm += f" (NO AIPERF IMAGE: {im['aiperf_error']})"
+    if im.get("error"):
+        vllm += f" (NOT RUN: {im['error']})"
     elif im.get("vllm_source") == "pinned":
         since = time.strftime("%Y-%m-%d", time.localtime(im["pinned_since"]))
         vllm += f" (pinned since {since})"
@@ -170,13 +165,13 @@ def suite(name: str, out: Path) -> int:
     try:
         check_host(cfg, plan["deployments"])
     except HostSetupError as e:
-        rep["images"] = {"usable": False, "host_error": str(e)}
+        rep["images"] = {"usable": False, "error": str(e)}
         return finish(EXIT_SUITE_INVALID)
     free_gb, min_gb = docker.root_free_gb(), cfg["host"]["min_docker_free_gb"]
     if free_gb < min_gb:
         rep["images"] = {
             "usable": False,
-            "disk_full": f"docker root fs {free_gb:.1f} GB free < {min_gb} GB",
+            "error": f"docker root fs {free_gb:.1f} GB free < {min_gb} GB",
         }
         return finish(EXIT_SUITE_INVALID)
 
@@ -205,11 +200,11 @@ def suite(name: str, out: Path) -> int:
         aiperf = images.build(["aiperf"], out / "build_aiperf.log")
     except RuntimeError as e:
         im["usable"] = False
-        im["aiperf_error"] = str(e)
+        im["error"] = f"aiperf image: {e}"
         return finish(EXIT_SUITE_INVALID)
     reg = cfg["regression"]
     alpha = reg["false_alarm_rate"] / len(reg["metrics"])
-    hist_path = Path(cfg["host"]["root"]) / "prt-results" / "history.jsonl"
+    hist_path = root / "prt-results" / "history.jsonl"
     history = baseline.load_history(hist_path)
     codes = []
     regressed = False
@@ -249,7 +244,9 @@ def suite(name: str, out: Path) -> int:
     rep["pruned_images"] = images.prune(list(by_target.values()))
     if any(c != EXIT_VALID for c in codes):
         return finish(EXIT_SUITE_INVALID)
-    images.pin(root, im)
+    # Only a vLLM that LMCache ran on is pinned for the week.
+    if "lmcache" in im:
+        images.pin(root, im)
     if plan["gate"] and regressed:
         return finish(EXIT_SUITE_FAIL)
     return finish(EXIT_VALID)
@@ -288,8 +285,11 @@ def main() -> None:
         type=Path,
         help="must not exist; default <host.root>/prt-suites/<suite>_<UTC time>",
     )
-    ap.add_argument("--lock-wait-s", type=float, default=6 * 3600)
+    ap.add_argument("--lock-wait-s", type=float, default=3600)
     a = ap.parse_args()
+    # Buildkite stops a timed-out or cancelled step with SIGTERM, whose default
+    # action skips the finally blocks that remove containers and shm regions.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(EXIT_SUITE_INVALID))
     try:
         root = Path(load()["host"]["root"])
         held = lock(root / "prt-suite.lock", a.lock_wait_s)

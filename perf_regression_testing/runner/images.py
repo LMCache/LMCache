@@ -115,7 +115,6 @@ def pin(root: Path, images: dict[str, Any]) -> None:
         json.dumps(
             {
                 "serving": images["serving"],
-                "vllm_commit": images["vllm_commit"],
                 "time": images["time"],
             },
             indent=1,

@@ -122,6 +122,7 @@ def score(run_dir: Path, window_s: float) -> dict[str, Any]:
 
     Raises:
         KeyError: a server counter was never sampled.
+        ValueError: there are no profiling requests.
     """
     reqs = load_requests(run_dir / "aiperf" / "profile_export.jsonl")
     ws, we, win = window_bounds(reqs, window_s)
@@ -136,7 +137,7 @@ def score(run_dir: Path, window_s: float) -> dict[str, Any]:
 
     src = {k: delta(f"vllm:prompt_tokens_by_source/{k}") for k in _SOURCES}
     total = sum(src.values())
-    out: dict[str, Any] = {
+    return {
         "window_start": ws,
         "window_s": we - ws,
         "requests": len(ok),
@@ -150,4 +151,3 @@ def score(run_dir: Path, window_s: float) -> dict[str, Any]:
         "external_token_share": src["external_kv_transfer"] / total if total else None,
         "preemptions": delta("vllm:num_preemptions_total"),
     }
-    return out

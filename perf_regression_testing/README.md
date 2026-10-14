@@ -6,7 +6,7 @@ suite runs vLLM native offloading and Mooncake on the same setup as a
 reference; those runs never fail the build.
 
 ```
-suite.py --suite nightly|weekly            (one suite at a time: flock)
+suite.py --suite nightly|weekly            (one suite at a time: a lock file)
   -> LMCache: this checkout (Buildkite builds dev)
   -> images: vLLM nightly, pinned for a week; LMCache built FROM it
              (a failed build ends the night, exit 2)
@@ -46,9 +46,7 @@ permutation p-value). The one setting is `[regression].false_alarm_rate`
 
 - a single bad night never fails the gate;
 - a new config needs about 10 runs before it can fail;
-- a confirmed shift starts a new baseline, so it fails the gate once;
-- the report names what changed where the shift began (`vllm`, `lmcache`,
-  `both`, or `neither` = drift).
+- a confirmed shift starts a new baseline, so it fails the gate once.
 
 ## Host setup (once)
 
@@ -71,7 +69,7 @@ python3.11 perf_regression_testing/workloads/agentic/fetch_trace.py \
     build $PRT_ROOT/work/weka-062126-256k-dir
 ```
 
-Needs docker with the NVIDIA runtime, `flock`, Python >= 3.11 (standard
+Needs docker with the NVIDIA runtime, Python >= 3.11 (standard
 library only; `fetch_trace.py build` needs `huggingface_hub`), and for
 Mooncake RDMA devices and `gh`. A missing snapshot or variable exits 2.
 

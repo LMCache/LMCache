@@ -77,7 +77,14 @@ def _trace_of(conv: Conversation) -> str:
 
 
 def _tag_inherited(conversations: list[Conversation]) -> int:
-    """Tag assistant messages equal to a tagged one in their trace; return the count."""
+    """Tag assistant messages equal to a tagged one in the same trace.
+
+    Args:
+        conversations: All built conversations; tagged in place.
+
+    Returns:
+        The number of messages newly tagged.
+    """
     by_trace: dict[str, dict[str, str]] = {}
     for conv in conversations:
         known = by_trace.setdefault(_trace_of(conv), {})
@@ -231,6 +238,16 @@ def _plan_turn0_layouts(
 
     Chains go in turn-0 time order, so a provider that itself inherited is
     replayed (token-free) with its inherited framing.
+
+    Args:
+        trace: The trace's first record (tool and system token counts).
+        plan: The trace's parent reconstruction plan.
+        child_plans: All child plans; only active subagents' are used.
+        flat_plans: The trace's flat plans.
+
+    Returns:
+        ``{session_id: layout}``, only for non-main chains whose inherited
+        framing differs from the default one.
     """
     bs = plan.block_size
     chains: list[tuple[str | None, list[Any], int, int]] = [
@@ -345,13 +362,13 @@ class PrtWekaTraceLoader(WekaTraceLoader):
         return conversations
 
     def _build_reconstruction_plans(self, data: dict[str, list[Any]]) -> Any:
+        """Build plans as the base loader, recording each chain's turn-0 layout."""
         plans = super()._build_reconstruction_plans(data)
         flats_by_trace: dict[str, list[Any]] = defaultdict(list)
         for fp in plans.flat_plans:
             flats_by_trace[fp.parent_trace_id].append(fp)
-        layouts: dict[str, Layout] = {}
         for plan in plans.parent_plans:
-            layouts.update(
+            self._turn0_layouts.update(
                 _plan_turn0_layouts(
                     data[plan.trace_id][0],
                     plan,
@@ -359,7 +376,6 @@ class PrtWekaTraceLoader(WekaTraceLoader):
                     flats_by_trace[plan.trace_id],
                 )
             )
-        self._turn0_layouts.update(layouts)
         return plans
 
     def _reconstruct_parallel(self, **kwargs: Any) -> list[Conversation]:

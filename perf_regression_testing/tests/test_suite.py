@@ -24,8 +24,8 @@ def test_low_docker_disk_stops_the_suite_before_any_build(
     monkeypatch.setattr(suite.images, "tonight", no_build)
     assert suite.suite("weekly", tmp_path / "s") == suite.EXIT_SUITE_INVALID
     rep = json.loads((tmp_path / "s" / "report.json").read_text())
-    assert "0.2 GB free" in rep["images"]["disk_full"]
-    assert "NO IMAGES" in (tmp_path / "s" / "report.md").read_text()
+    assert "0.2 GB free" in rep["images"]["error"]
+    assert "NOT RUN" in (tmp_path / "s" / "report.md").read_text()
 
 
 def test_missing_model_stops_the_suite_before_any_build(
@@ -37,8 +37,40 @@ def test_missing_model_stops_the_suite_before_any_build(
     monkeypatch.setattr(suite.images, "tonight", no_build)
     assert suite.suite("nightly", tmp_path / "s") == suite.EXIT_SUITE_INVALID
     rep = json.loads((tmp_path / "s" / "report.json").read_text())
-    assert "hf download" in rep["images"]["host_error"]
+    assert "hf download" in rep["images"]["error"]
     assert "NOT RUN" in (tmp_path / "s" / "report.md").read_text()
+
+
+@pytest.mark.parametrize("name, pinned", [("nightly", True), ("weekly", False)])
+def test_only_a_suite_that_ran_lmcache_pins_a_new_vllm(
+    name: str, pinned: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = suite.load()
+    model = Path(cfg["model"]["path"])
+    model.mkdir(parents=True)
+    (model / "config.json").write_text("{}")
+    monkeypatch.setattr(suite.docker, "root_free_gb", lambda: 1e9)
+    monkeypatch.setattr(suite.docker, "image_label", lambda image, key: "x")
+
+    def tonight(root: Path, src: Path, out: Path, need_lmcache: bool) -> dict:
+        im = {"usable": True, "vllm_source": "nightly", "time": 0.0}
+        im |= {"serving": "prt-serving:new", "vllm_commit": "v"}
+        lm = {"lmcache": "prt-lmcache:new", "lmcache_commit": "l"}
+        return im | (lm if need_lmcache else {})
+
+    def run(spec: object, out: Path, image: str, aiperf: str) -> int:
+        out.mkdir(parents=True)
+        summary = {"invalid": [], "vllm_commit": "v", "lmcache_commit": "l"}
+        (out / "summary.json").write_text(json.dumps(summary))
+        return suite.EXIT_VALID
+
+    monkeypatch.setattr(suite.images, "tonight", tonight)
+    monkeypatch.setattr(suite.images, "build", lambda args, log: f"prt-{args[0]}")
+    monkeypatch.setattr(suite.images, "prune", lambda keep: [])
+    monkeypatch.setattr(suite, "run", run)
+    assert suite.suite(name, tmp_path / "s") == suite.EXIT_VALID
+    pin = Path(cfg["host"]["root"]) / "prt-images" / "pinned.json"
+    assert pin.exists() == pinned
 
 
 def test_a_held_lock_times_out_and_a_released_one_is_taken(tmp_path: Path) -> None:

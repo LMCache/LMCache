@@ -49,7 +49,11 @@ SHM_REGION = re.compile(r"Created mmap file /dev/shm/(vllm_offload_[0-9a-f-]+\.m
 
 
 def _idle_gpus() -> list[int]:
-    """Indices of the GPUs with no compute process, ascending."""
+    """Return the indices of the GPUs with no compute process.
+
+    Returns:
+        GPU indices, ascending.
+    """
 
     def query(arg: str) -> list[str]:
         return subprocess.run(
@@ -101,9 +105,8 @@ def _trace_ok(spec: RunSpec) -> str | None:
 
 
 def _wipe(path: Path) -> None:
-    if path.exists():
-        # A DiskCap freeze leaves the dirs read-only, and rmtree would skip them.
-        set_dirs_writable(path, True)
+    # A DiskCap freeze leaves the dirs read-only, and rmtree would skip them.
+    set_dirs_writable(path, True)
     shutil.rmtree(path, ignore_errors=True)
     path.mkdir(parents=True)
 
@@ -178,12 +181,12 @@ def start_servers(
     for name, content in spec.files.items():
         (out / name).write_text(json.dumps(content, indent=1))
     for s in spec.services:
-        docker.start(cmds[s.name], [], out / f"{s.name}.log")
+        docker.start(cmds[s.name], out / f"{s.name}.log")
         if not docker.wait_http(
             s.ready_url, s.ready_timeout_s, f"prt-{run_id}-{s.name}"
         ):
             return f"{s.name} not up"
-    docker.start(cmds["vllm"], [], out / "vllm.log")
+    docker.start(cmds["vllm"], out / "vllm.log")
     if not docker.wait_http(
         f"http://127.0.0.1:{spec.vllm_port}/v1/models",
         spec.vllm_startup_timeout_s,
@@ -382,10 +385,10 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
             summary["invalid"].append(reason)
             return finish(EXIT_NOT_UP)
         sampler = Sampler(
-            out / "samples.jsonl", [f"http://127.0.0.1:{spec.vllm_port}/metrics"]
+            out / "samples.jsonl", f"http://127.0.0.1:{spec.vllm_port}/metrics"
         )
         sampler.start()
-        aiperf = docker.start(cmds["aiperf"], [], out / "aiperf.log")
+        aiperf = docker.start(cmds["aiperf"], out / "aiperf.log")
         try:
             rc = aiperf.wait(timeout=spec.aiperf_timeout_s)
         except subprocess.TimeoutExpired:
@@ -418,7 +421,9 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
     for pat in spec.invalid_log_patterns:
         if pat in log:
             summary["invalid"].append(f"vllm.log contains {pat!r}")
-    if summary["invalid"]:
-        return finish(EXIT_INVALID)
-    summary.update(score(out, spec.window_s))
-    return finish(EXIT_VALID)
+    if not summary["invalid"]:
+        try:
+            summary.update(score(out, spec.window_s))
+        except (KeyError, ValueError) as e:
+            summary["invalid"].append(f"score failed: {e!r}")
+    return finish(EXIT_INVALID if summary["invalid"] else EXIT_VALID)

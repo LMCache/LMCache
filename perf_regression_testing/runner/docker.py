@@ -82,19 +82,18 @@ def run_args(
     return args + [image]
 
 
-def start(args: list[str], cmd: list[str], log_path: Path) -> subprocess.Popen[bytes]:
+def start(args: list[str], log_path: Path) -> subprocess.Popen[bytes]:
     """Start ``docker run`` attached in a child process, logging to a file.
 
     Args:
         args: Output of :func:`run_args`.
-        cmd: Command and arguments run inside the container.
         log_path: File that receives the container's stdout and stderr.
 
     Returns:
         The ``docker run`` client process.
     """
     with open(log_path, "w") as log:
-        return subprocess.Popen(args + cmd, stdout=log, stderr=subprocess.STDOUT)
+        return subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT)
 
 
 def status(name: str) -> str | None:

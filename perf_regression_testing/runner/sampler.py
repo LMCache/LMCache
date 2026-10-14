@@ -22,6 +22,15 @@ _LINE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+(\S+)")
 
 
 def _scrape(url: str, rec: dict[str, Any]) -> None:
+    """Add the counters :data:`METRICS` and :data:`BY_SOURCE` from ``url``.
+
+    Values are summed over labels; by-source counters are keyed
+    ``vllm:prompt_tokens_by_source/<source>``.
+
+    Args:
+        url: A Prometheus text endpoint.
+        rec: The tick's record, updated in place.
+    """
     with urllib.request.urlopen(url, timeout=4) as r:
         text = r.read().decode()
     for line in text.splitlines():
@@ -47,18 +56,18 @@ class Sampler:
     def __init__(
         self,
         out: Path,
-        urls: list[str],
+        url: str,
         interval_s: float = 5.0,
     ) -> None:
         """Prepare a sampler; call :meth:`start` to begin.
 
         Args:
             out: JSONL file to append to.
-            urls: Prometheus endpoints to scrape.
+            url: Prometheus endpoint to scrape.
             interval_s: Seconds between ticks.
         """
         self.out = out
-        self.urls = urls
+        self.url = url
         self.interval_s = interval_s
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -73,20 +82,20 @@ class Sampler:
         self._thread.join()
 
     def _loop(self) -> None:
+        """Write one record per tick until stopped; a failed scrape is recorded."""
         with open(self.out, "a") as f:
             while not self._stop.is_set():
                 t = time.time()
                 rec: dict[str, Any] = {"t": t}
-                for url in self.urls:
-                    try:
-                        _scrape(url, rec)
-                    except (
-                        urllib.error.URLError,
-                        ConnectionError,
-                        TimeoutError,
-                        ValueError,
-                    ) as e:
-                        rec[f"err {url}"] = str(e)
+                try:
+                    _scrape(self.url, rec)
+                except (
+                    urllib.error.URLError,
+                    ConnectionError,
+                    TimeoutError,
+                    ValueError,
+                ) as e:
+                    rec["err"] = str(e)
                 f.write(json.dumps(rec) + "\n")
                 f.flush()
                 self._stop.wait(max(0.0, self.interval_s - (time.time() - t)))
