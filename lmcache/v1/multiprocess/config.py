@@ -6,6 +6,7 @@
 from dataclasses import dataclass, field
 from typing import Literal
 import argparse
+import ipaddress
 import json
 import math
 import os
@@ -250,6 +251,40 @@ class HTTPFrontendConfig:
 
     http_port: int = 8080
     """HTTP server port."""
+
+    http_api_key: str = field(default="", repr=False)
+    """Bearer token every request except ``/healthcheck`` must send as
+    ``Authorization: Bearer <key>``. Empty disables authentication. Kept out
+    of ``repr`` so logging the config never logs the secret."""
+
+    http_allow_unauthenticated: bool = False
+    """Allow a non-loopback ``http_host`` without ``http_api_key``. Only for
+    networks where every peer is trusted."""
+
+    def check_auth_policy(self) -> None:
+        """Refuse to serve the HTTP API unauthenticated beyond loopback.
+
+        The API can read credentials (``/env``), clear the cache and change
+        tenant quotas, so it must not be reachable from the network without
+        a key unless the operator opts out explicitly.
+
+        Raises:
+            ValueError: If ``http_host`` is not a loopback address, no
+                ``http_api_key`` is set, and ``http_allow_unauthenticated``
+                is not set.
+        """
+        if (
+            self.http_api_key
+            or self.http_allow_unauthenticated
+            or _is_loopback_host(self.http_host)
+        ):
+            return
+        raise ValueError(
+            "Refusing to serve the LMCache HTTP API on non-loopback host %r "
+            "without authentication: set LMCACHE_HTTP_API_KEY, or pass "
+            "--http-allow-unauthenticated if every peer on this network is "
+            "trusted." % self.http_host
+        )
 
 
 DEFAULT_HTTP_FRONTEND_CONFIG = HTTPFrontendConfig()
@@ -738,15 +773,23 @@ def add_http_frontend_args(
         "--http-host",
         type=str,
         default="127.0.0.1",
-        help="Host to bind the HTTP server. Default is 127.0.0.1; the admin "
-        "API has no authentication, so only bind a non-loopback address on a "
-        "trusted network.",
+        help="Host to bind the HTTP server. Default is 127.0.0.1. A "
+        "non-loopback host requires LMCACHE_HTTP_API_KEY (or "
+        "--http-allow-unauthenticated).",
     )
     http_group.add_argument(
         "--http-port",
         type=int,
         default=8080,
         help="Port to bind the HTTP server. Default is 8080.",
+    )
+    http_group.add_argument(
+        "--http-allow-unauthenticated",
+        action="store_true",
+        help="Serve the HTTP API without authentication on a non-loopback "
+        "--http-host. Without this flag a non-loopback host requires "
+        "LMCACHE_HTTP_API_KEY. Only use on a network where every peer is "
+        "trusted.",
     )
     return parser
 
@@ -757,6 +800,9 @@ def parse_args_to_http_frontend_config(
     """
     Convert parsed command line arguments to an HTTPFrontendConfig.
 
+    The API key comes from the ``LMCACHE_HTTP_API_KEY`` environment variable
+    only: a command-line flag would expose it in the process list.
+
     Args:
         args: Parsed arguments from the argument parser.
 
@@ -766,6 +812,8 @@ def parse_args_to_http_frontend_config(
     return HTTPFrontendConfig(
         http_host=args.http_host,
         http_port=args.http_port,
+        http_api_key=os.getenv("LMCACHE_HTTP_API_KEY", ""),
+        http_allow_unauthenticated=args.http_allow_unauthenticated,
     )
 
 
@@ -1026,3 +1074,22 @@ def parse_args_to_coordinator_config(
         blend_timeout=blend_timeout,
         blend_match_concurrency=blend_match_concurrency,
     )
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return whether binding ``host`` keeps the server reachable only locally.
+
+    Args:
+        host: The bind host, as passed to uvicorn.
+
+    Returns:
+        ``True`` for ``localhost`` and loopback IP literals; ``False`` for
+        anything else, including wildcard addresses and other hostnames,
+        which may resolve to any interface.
+    """
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False

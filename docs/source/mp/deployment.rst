@@ -265,7 +265,8 @@ Health Checking (HTTP Server)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 For Kubernetes liveness/readiness probes, deploy the HTTP server variant
-instead.  Use the ``/healthcheck`` endpoint:
+instead.  Use the ``/healthcheck`` endpoint, which stays reachable without the
+API key:
 
 .. code-block:: yaml
 
@@ -281,6 +282,19 @@ instead.  Use the ``/healthcheck`` endpoint:
         port: 8080
       initialDelaySeconds: 5
       periodSeconds: 10
+
+Probes reach the pod IP, so the HTTP server must bind a non-loopback
+``--http-host`` such as ``0.0.0.0``, which requires an API key (see
+:ref:`mp-http-authentication`). Supply it from a Secret:
+
+.. code-block:: yaml
+
+    env:
+      - name: LMCACHE_HTTP_API_KEY
+        valueFrom:
+          secretKeyRef:
+            name: lmcache-http-api-key
+            key: api-key
 
 Monitoring Integration
 ~~~~~~~~~~~~~~~~~~~~~~

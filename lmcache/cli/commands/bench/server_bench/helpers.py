@@ -27,6 +27,7 @@ import urllib.request
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.cli.http import kvcache_auth_headers
 
 # ``lmcache bench server`` allocates real CUDA tensors and talks to
 # the MP server via ZMQ, both of which are absent from the thin
@@ -467,7 +468,7 @@ def _query_checksum(
         req = urllib.request.Request(
             url,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **kvcache_auth_headers()},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:

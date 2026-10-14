@@ -302,11 +302,12 @@ sequenceDiagram
 # 1. Start discover service
 python -m lmcache.tools.simple_discover_service
 
-# 2. Start LMCache MP server with frontend plugin
+# 2. Start LMCache MP server with frontend plugin (a non-loopback
+#    --http-host would also need LMCACHE_HTTP_API_KEY exported)
 python -m lmcache.v1.multiprocess.http_server \
     --host localhost --port 5555 \
     --l1-size-gb 10 \
-    --http-host 0.0.0.0 --http-port 8080 \
+    --http-host 127.0.0.1 --http-port 8080 \
     --runtime-plugin-locations lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py \
     --runtime-plugin-config '{"plugin.frontend.heartbeat_url": "http://localhost:5000/heartbeat"}'
 ```
@@ -315,6 +316,9 @@ python -m lmcache.v1.multiprocess.http_server \
 
 1. Reads `http_host` / `http_port` from `http_config` to
    auto-build the `--nodes` argument, avoiding duplicate CLI flags.
+   `http_config.http_api_key` is always blank in the blob (it is logged and
+   served by `GET /config`); a plugin that calls the HTTP API reads
+   `LMCACHE_HTTP_API_KEY` from the environment it inherits.
 2. Reads `plugin.frontend.*` keys from `runtime_plugin_extra_config`
    and converts them into `app.main()` CLI arguments (e.g.
    `--heartbeat-url`).

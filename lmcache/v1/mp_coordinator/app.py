@@ -227,7 +227,14 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
             # Bound to the running event loop, so it cannot be built with
             # the rest of the app.
             outbound_client = await stack.enter_async_context(
-                httpx.AsyncClient(timeout=30.0)
+                httpx.AsyncClient(
+                    timeout=30.0,
+                    headers=(
+                        {"Authorization": "Bearer " + config.mp_server_api_key}
+                        if config.mp_server_api_key
+                        else None
+                    ),
+                )
             )
             app.state.outbound_client = outbound_client
             if config.checkpoint_path:

@@ -112,6 +112,7 @@ from lmcache.cli.commands.bench.engine_bench.workloads.base import (
     BaseWorkload,
     MetricSection,
 )
+from lmcache.cli.http import kvcache_auth_headers
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -469,7 +470,8 @@ def scrape_lookup_tokens(metrics_url: str) -> dict[str, float | str]:
         url = f"{url}/metrics"
     totals: dict[str, float | str] = {"hit": 0.0, "requested": 0.0, "family": ""}
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
+        request = urllib.request.Request(url, headers=kvcache_auth_headers())
+        with urllib.request.urlopen(request, timeout=10) as resp:
             body = resp.read().decode()
     except (urllib.error.URLError, OSError, ValueError) as exc:
         logger.debug("Could not scrape %s: %s", url, exc)

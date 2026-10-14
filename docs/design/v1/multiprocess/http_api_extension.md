@@ -57,6 +57,21 @@ registry = HTTPAPIRegistry(app)
 registry.register_all_apis()
 ```
 
+### Authentication
+
+`run_http_server()` wraps the whole app in `APIKeyAuthMiddleware`
+(`http_auth.py`) when `LMCACHE_HTTP_API_KEY` is set, so every discovered route
+is protected without opting in; only `/healthcheck` is exempt, for
+Kubernetes probes. The middleware is added in `run_http_server()` rather than
+at import because the key is only known once the config is parsed.
+
+Fail-closed: `HTTPFrontendConfig.check_auth_policy()` refuses to start on a
+non-loopback `--http-host` with no key unless `--http-allow-unauthenticated`
+is passed. The key is blanked in `app.state.configs`, because `GET /config`
+serves those configs and runtime plugins receive them as logged JSON.
+
+A new endpoint therefore needs no auth code, and must not exempt itself.
+
 ---
 
 ## Auto-Discovery Flow

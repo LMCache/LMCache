@@ -834,8 +834,13 @@ async def serve_frontend():
 
 
 # Helper function to fetch metrics from a single node
-async def _fetch_node_metrics(node):
-    """Fetch metrics from a single node"""
+async def _fetch_node_metrics(node, headers: dict[str, str]):
+    """Fetch metrics from a single node, sending ``headers`` with the request.
+
+    ``headers`` carries the caller's own ``Authorization`` (if any): the
+    frontend holds no node credentials, so it never grants access the caller
+    lacks.
+    """
     try:
         # Check if port is a socket path
         is_socket_path = "/" in node["port"]
@@ -846,14 +851,14 @@ async def _fetch_node_metrics(node):
             # Use localhost as host
             url = "http://localhost/metrics"
             async with httpx.AsyncClient(transport=transport, timeout=5.0) as client:
-                response = await client.get(url)
+                response = await client.get(url, headers=headers)
                 response.raise_for_status()
                 return response.text
         else:
             # Build URL for regular port
             url = f"http://{node['host']}:{node['port']}/metrics"
             async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(url)
+                response = await client.get(url, headers=headers)
                 response.raise_for_status()
                 return response.text
     except Exception as e:
@@ -861,8 +866,11 @@ async def _fetch_node_metrics(node):
 
 
 @router.get("/metrics")
-async def aggregated_metrics():
+async def aggregated_metrics(request: Request):
     """Aggregate /metrics from all leaf (child) nodes across every proxy.
+
+    The caller's ``Authorization`` header is forwarded to each node, so nodes
+    that require an API key are scraped with the caller's own credentials.
 
     Previously only nodes under the ``local_proxy`` entry were
     aggregated, which silently returned nothing in supplier mode
@@ -890,8 +898,10 @@ async def aggregated_metrics():
             "# No nodes available for metrics collection\n", status_code=404
         )
 
+    authorization = request.headers.get("authorization")
+    headers = {"Authorization": authorization} if authorization else {}
     metrics_results = await asyncio.gather(
-        *[_fetch_node_metrics(node) for node in nodes]
+        *[_fetch_node_metrics(node, headers) for node in nodes]
     )
 
     # Combine all metrics with node name as comment header

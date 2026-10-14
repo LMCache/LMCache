@@ -105,3 +105,14 @@ def test_main_ignores_kafka_flags_under_http_transport() -> None:
     _, config, _ = _serve(["--kafka-bootstrap-servers", "broker:9092"])
 
     assert isinstance(config.event_source_config, HttpCacheEventSourceConfig)
+
+
+def test_main_reads_mp_server_api_key_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The key comes from the env var so it never shows in the process list."""
+    monkeypatch.setenv("LMCACHE_HTTP_API_KEY", "s3cret")
+    _, config, _ = _serve([])
+
+    assert config.mp_server_api_key == "s3cret"
+    assert "s3cret" not in repr(config)

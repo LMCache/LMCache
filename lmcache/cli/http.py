@@ -4,6 +4,7 @@
 # Standard
 from typing import Any
 import json
+import os
 import urllib.error
 import urllib.request
 
@@ -31,12 +32,29 @@ def normalize_url(url: str) -> str:
     return url.rstrip("/")
 
 
-def fetch_json(url: str, timeout: int = 10) -> dict[str, Any]:
+def kvcache_auth_headers() -> dict[str, str]:
+    """Return the headers that authenticate to the LMCache HTTP server.
+
+    Reads ``LMCACHE_HTTP_API_KEY``, the variable the server takes its key
+    from, so one exported value configures both sides.
+
+    Returns:
+        ``{"Authorization": "Bearer <key>"}`` when the variable is set,
+        otherwise an empty dict.
+    """
+    api_key = os.getenv("LMCACHE_HTTP_API_KEY", "")
+    return {"Authorization": "Bearer " + api_key} if api_key else {}
+
+
+def fetch_json(
+    url: str, timeout: int = 10, headers: dict[str, str] | None = None
+) -> dict[str, Any]:
     """GET *url* and return the parsed JSON body.
 
     Args:
         url: The URL to fetch.
         timeout: Request timeout in seconds.
+        headers: Extra request headers, e.g. :func:`kvcache_auth_headers`.
 
     Returns:
         The parsed JSON response as a dictionary.
@@ -44,7 +62,7 @@ def fetch_json(url: str, timeout: int = 10) -> dict[str, Any]:
     Raises:
         CLIHTTPError: On network, HTTP, or JSON decoding errors.
     """
-    req = urllib.request.Request(url)
+    req = urllib.request.Request(url, headers=headers or {})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())

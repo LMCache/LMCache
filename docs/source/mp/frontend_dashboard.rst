@@ -139,7 +139,7 @@ Verify it is up:
     lmcache server \
         --l1-size-gb 2 \
         --eviction-policy LRU \
-        --http-host 0.0.0.0 --http-port 8085 \
+        --http-host 127.0.0.1 --http-port 8085 \
         --runtime-plugin-locations \
             lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py \
         --runtime-plugin-config \
@@ -147,6 +147,14 @@ Verify it is up:
 
 The plugin subprocess sends a heartbeat to the discovery service every
 30 seconds (configurable via ``plugin.frontend.heartbeat-interval``).
+
+.. note::
+   This example binds the HTTP server to loopback. For a dashboard on
+   another host, bind a non-loopback ``--http-host``, which requires
+   ``LMCACHE_HTTP_API_KEY`` (see :ref:`mp-http-authentication`). The
+   dashboard holds no key: it forwards the caller's own ``Authorization``
+   header, and the browser UI sends none, so views backed by a
+   key-protected server return ``401``.
 
 .. important::
    **Why ``plugin.frontend.report-host: 127.0.0.1`` matters for local dev.**

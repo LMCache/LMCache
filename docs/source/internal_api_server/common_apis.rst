@@ -18,7 +18,9 @@ Common APIs are available across all components (scheduler, worker, controller).
 ``GET /env`` — Environment Variables
 -------------------------------------
 
-Get all environment variables of the running process.
+Get all environment variables of the running process. Values of variables
+whose name contains ``KEY``, ``TOKEN``, ``SECRET``, ``PASSWORD`` or
+``CREDENTIAL`` (case-insensitive) are returned as ``"<redacted>"``.
 
 - **Method**: ``GET``
 - **Path**: ``/env``

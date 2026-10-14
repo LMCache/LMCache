@@ -19,6 +19,7 @@ except ModuleNotFoundError as exc:
     OpenAI = None  # type: ignore[assignment]
 
 # First Party
+from lmcache.cli.http import kvcache_auth_headers
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -141,7 +142,7 @@ def _fetch_lmcache_status(lmcache_url: str) -> dict:
     logger.debug("Fetching LMCache status from %s", status_url)
 
     try:
-        req = urllib.request.Request(status_url)
+        req = urllib.request.Request(status_url, headers=kvcache_auth_headers())
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode())
     except (urllib.error.URLError, OSError) as e:
