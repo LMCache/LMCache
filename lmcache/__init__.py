@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# Standard
+import os
+
 # First Party
 from lmcache.logging import init_logger
 
@@ -17,7 +20,23 @@ except ImportError:
 
 logger = init_logger(__name__)
 
-__all__ = ["__version__", "torch_dev", "torch_device_type"]
+__all__ = ["__version__", "get_include", "torch_dev", "torch_device_type"]
+
+
+def get_include() -> str:
+    """Return the directory of LMCache's native extension API headers.
+
+    Add it to a CUDA extension's ``include_dirs`` to reuse LMCache's transfer
+    kernels (``#include "cuda/mp_mem_kernels_detail.cuh"``) and call the
+    ``lmcache.cuda_ops._ext_api`` table (``#include "cuda/lmcache_ext_api.h"``).
+    Wheels ship the headers as ``lmcache/include``; a source checkout (e.g. an
+    editable install) uses ``csrc`` directly.
+    """
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    shipped = os.path.join(package_dir, "include")
+    if os.path.isdir(shipped):
+        return shipped
+    return os.path.join(os.path.dirname(package_dir), "csrc")
 
 
 try:
