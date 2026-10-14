@@ -24,6 +24,7 @@ from setuptools.command.build_py import build_py as _build_py  # noqa: E402
 
 # First Party
 from setup_extensions import BuildPolicy, BuildProfile  # noqa: E402
+from setup_extensions.ext_api_headers import EXT_API_HEADERS  # noqa: E402
 
 
 def _read_requirements(path: Path) -> list[str]:
@@ -60,7 +61,8 @@ def _load_proto_generator() -> ModuleType:
 
 
 class _BuildPyWithGrpcStubs(_build_py):
-    """Generate ignored gRPC bindings before packaging LMCache."""
+    """Generate ignored gRPC bindings before packaging LMCache, and ship the
+    native extension API headers with it."""
 
     def run(self) -> None:
         distribution_name = self.distribution.get_name().replace("_", "-").lower()
@@ -68,6 +70,16 @@ class _BuildPyWithGrpcStubs(_build_py):
             generator = _load_proto_generator()
             generator.generate()
         super().run()
+        if distribution_name != "lmcache-cli":
+            self._copy_ext_api_headers()
+
+    def _copy_ext_api_headers(self) -> None:
+        """Copy csrc/<rel> to lmcache/include/<rel> (see lmcache.get_include)."""
+        include_dir = Path(self.build_lib) / "lmcache" / "include"
+        for rel in EXT_API_HEADERS:
+            dst = include_dir / rel
+            self.mkpath(str(dst.parent))
+            self.copy_file(str(ROOT_DIR / "csrc" / rel), str(dst))
 
 
 if __name__ == "__main__":

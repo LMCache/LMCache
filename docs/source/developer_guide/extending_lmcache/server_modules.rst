@@ -188,6 +188,47 @@ Both ZMQ and gRPC clients expose ``server_module_call``:
        raise RuntimeError(response.error)
    echo = msgspec.msgpack.decode(response.payload, type=EchoResponse)
 
+Reusing LMCache's CUDA kernels
+------------------------------
+
+A plug-in that moves KV data with its own CUDA extension can reuse LMCache's
+transfer kernel and plan executor instead of copying them. The headers are
+installed with LMCache; ``lmcache.get_include()`` returns their directory:
+
+.. code-block:: python
+
+   import lmcache
+   from torch.utils.cpp_extension import CUDAExtension
+
+   CUDAExtension(
+       "my_package._native",
+       sources=["csrc/my_transfer.cu"],
+       include_dirs=[lmcache.get_include()],
+   )
+
+- ``cuda/mp_mem_kernels_detail.cuh`` holds the multi-layer block transfer
+  kernel and ``lmcache_mp::launch_multi_layer_block_transfer``, header-only.
+  Two template parameters change what the kernel reads without touching its
+  body: the object-pointer source (``MemoryObj4`` by value, or a device array
+  of pointers) and the object-offset policy (``TwoLTDObjectOffset`` by
+  default, or your own type with the same ``offset`` member).
+- ``cuda/lmcache_ext_api.h`` declares the function table that
+  ``lmcache.cuda_ops`` exports as the ``_ext_api`` capsule. Fetch it once with
+  ``lmcache_ext::import_api()`` in ``PYBIND11_MODULE``. Its
+  ``execute_object_group_transfer`` runs an object-group plan exactly as
+  ``cuda_ops.execute_object_group_transfer`` does (staging copies, bounds
+  checks, ordering, phase timing), and calls your function for each kernel
+  launch.
+
+The plan types (``KernelGroupSpec``, ``BatchStep``, ...) are the ones
+LMCache's modules already bind, so your extension's functions accept the
+objects that ``lmcache.lmcache_native`` and ``lmcache.cuda_ops`` construct.
+Build your extension against the LMCache version it runs with:
+``import_api()`` raises ``ImportError`` if the table version or the plan types'
+layout differs. ``tests/v1/ext_api_probe/probe.cu`` is a minimal working
+example. The headers are CUDA sources; a ROCm build of a plug-in must hipify
+them itself.
+
 Liveness and cleanup
 --------------------
 
