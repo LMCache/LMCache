@@ -285,10 +285,17 @@ class P2PController:
         Returns:
             A unique task id (int) for querying the lookup status later
         """
-        self._drop_abandoned_jobs()
+        now = time.monotonic()
         with self._job_lock:
             task_id = self._next_task_id
             self._next_task_id += 1
+            # Scan for abandoned jobs at most once per lookup timeout, so an
+            # abandoned job lives at most two timeouts.
+            drop_due = now - self._last_drop_time >= self._p2p_config.lookup_timeout
+            if drop_due:
+                self._last_drop_time = now
+        if drop_due:
+            self._drop_abandoned_jobs(now)
 
         key_groups = _group_keys_by_object_group(keys, group_layout_descs)
         if key_groups:
@@ -385,23 +392,19 @@ class P2PController:
     # Internal helpers
     # -----------------------------------------------------------------
 
-    def _drop_abandoned_jobs(self) -> None:
+    def _drop_abandoned_jobs(self, now: float) -> None:
         """Drop finished jobs older than the lookup timeout, draining results.
 
-        Scans at most once per lookup timeout, so an abandoned job lives at
-        most two timeouts.
+        Args:
+            now: ``time.monotonic()`` at the call; jobs submitted more than
+                one lookup timeout before it are abandoned.
 
         Note:
             Read locks are left to the L1 read TTL; unlocking after expiry
             could release a later reader's lock.
         """
-        now = time.monotonic()
-        timeout = self._p2p_config.lookup_timeout
+        cutoff = now - self._p2p_config.lookup_timeout
         with self._job_lock:
-            if now - self._last_drop_time < timeout:
-                return
-            self._last_drop_time = now
-            cutoff = now - timeout
             stale = [
                 task_id
                 for task_id, job in self._jobs.items()
