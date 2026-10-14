@@ -310,7 +310,12 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
     as separate contiguous slices carved from a shared pool. Each slice's
     per-block stride is its own byte size, not the padded page, so
     :class:`_MambaPageViewEdit` does not apply. The transfer path expects
-    one uint8 plane per slice, ``[num_blocks, block_size, 1, width]``.
+    one uint8 plane per slice, ``[num_blocks, block_size, 1, width]`` with
+    ``width = nbytes_per_block // block_size``. ``matches`` and ``apply``
+    require each state to be a dense contiguous slice with the same
+    ``num_blocks`` and require ``spec.block_size`` (scheduler block size) to
+    divide that per-block byte count; otherwise ``width`` is not integral and
+    the edit does not match (``apply`` raises if forced).
     """
 
     name = "mamba-slice-planes"

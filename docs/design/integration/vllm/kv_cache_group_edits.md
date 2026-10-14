@@ -45,14 +45,23 @@ format discovery (the SSM view starts mid-page). The edit reinterprets each
 page as one bf16 tensor shaped `(num_blocks, 2, block_size, 1, head_size)`
 over the same storage, where `head_size` is derived so the bytes fill the page
 exactly. `matches` requires the conv state's per-block stride to equal
-`page_size_bytes`.
+`page_size_bytes` (one scheduler block == one full padded page in memory).
 
-When conv's per-block stride is only the slice (not the padded page), a
-second rule re-views each state as one uint8 format-17 plane
-``[num_blocks, block_size, 1, width]`` at the scheduler ``block_size`` (with
-``width = state_bytes / block_size``). The edit only changes the shape so
-format detection can see the slices; alignment, row size, and plane count are
-checked by the transfer kernel, not here.
+On some backends (e.g. vLLM-Ascend ≤ v0.29) conv and SSM are still one
+logical page per block, but they register as **two separate tensors** carved
+from a shared pool. Each tensor's per-block stride is only **that slice's**
+byte length (conv-only or ssm-only), not `page_size_bytes`, so the packed
+page reinterpretation above does not apply.
+
+A second rule then registers **one uint8 plane per slice** (conv and ssm
+stay two LMCache tensors). For each slice it keeps the same storage and only
+changes metadata: dtype `uint8` and shape
+``[num_blocks, block_size, 1, width]``, where ``block_size`` is the
+scheduler's ``kv_cache_spec.block_size`` and ``width`` is how many bytes sit
+in each "row" of that synthetic layout (`bytes_per_block / block_size`).
+That shape is what LMCache's format detector recognizes as format 17
+(opaque sub-planes). The edit does not copy or pad bytes; the transfer kernel
+checks alignment, row size, and plane count when store/load runs.
 
 ### 2. Sub-paged full attention
 
