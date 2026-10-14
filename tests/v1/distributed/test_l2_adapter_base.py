@@ -36,6 +36,15 @@ class _StubAdapter(L2AdapterInterface):
     """Minimal adapter that satisfies the abstract surface so we can
     exercise base-class behavior in isolation."""
 
+    def __init__(
+        self,
+        max_capacity_bytes: int = 0,
+        accounting_sizes: list[int] | None = None,
+    ) -> None:
+        super().__init__(max_capacity_bytes=max_capacity_bytes)
+        self._accounting_sizes = accounting_sizes
+        self._completed_stores: dict[L2TaskId, L2StoreResult] = {}
+
     def get_store_event_fd(self) -> int:
         return -1
 
@@ -46,10 +55,19 @@ class _StubAdapter(L2AdapterInterface):
         return -1
 
     def submit_store_task(self, keys, objects):
+        sizes = [obj.get_size() for obj in objects]
+        self._notify_keys_stored(
+            keys,
+            sizes,
+            accounting_sizes=self._accounting_sizes,
+        )
+        self._completed_stores[0] = L2StoreResult(True, sum(sizes))
         return 0
 
     def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
-        return {}
+        completed = self._completed_stores
+        self._completed_stores = {}
+        return completed
 
     def submit_lookup_and_lock_task(
         self, keys, group_layout_descs: dict[int, MemoryLayoutDesc]
@@ -70,6 +88,16 @@ class _StubAdapter(L2AdapterInterface):
 
     def close(self) -> None:
         return None
+
+
+class _StubMemoryObj:
+    """Minimal object exposing the size used by the public store method."""
+
+    def __init__(self, size: int) -> None:
+        self._size = size
+
+    def get_size(self) -> int:
+        return self._size
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +159,41 @@ class TestSupportsGlobalEviction:
 
 
 class TestBaseAccounting:
+    def test_public_store_defaults_to_additive_accounting(self):
+        a = _StubAdapter(max_capacity_bytes=10_000)
+        key = _make_key(1, salt="alice")
+
+        task_id = a.submit_store_task([key], [_StubMemoryObj(100)])
+
+        assert a.pop_completed_store_tasks()[task_id].bytes_transferred() == 100
+        assert a.get_usage().total_bytes_used == 100
+        assert a.get_usage().bytes_by_cache_salt == {"alice": 100}
+
+    def test_explicit_accounting_size_does_not_change_published_size(self):
+        a = _StubAdapter(max_capacity_bytes=10_000, accounting_sizes=[0])
+        listener = _RecordingListener()
+        a.register_listener(listener)
+        key = _make_key(1, salt="alice")
+
+        a.submit_store_task([key], [_StubMemoryObj(100)])
+
+        assert a.get_usage().total_bytes_used == 0
+        assert a.get_usage().bytes_by_cache_salt == {}
+        assert listener.stored == [[key]]
+        assert listener.stored_sizes == [[100]]
+
+    def test_accounting_size_mismatch_has_no_side_effects(self):
+        a = _StubAdapter(max_capacity_bytes=10_000, accounting_sizes=[])
+        listener = _RecordingListener()
+        a.register_listener(listener)
+
+        with pytest.raises(ValueError, match="accounting_sizes length mismatch"):
+            a.submit_store_task([_make_key(1)], [_StubMemoryObj(100)])
+
+        assert a.get_usage().total_bytes_used == 0
+        assert listener.stored == []
+        assert a.pop_completed_store_tasks() == {}
+
     def test_store_increments_aggregate_and_by_cache_salt(self):
         a = _StubAdapter(max_capacity_bytes=10_000)
         k_alice = _make_key(1, salt="alice")
@@ -283,11 +346,13 @@ class _RecordingListener(L2AdapterListener):
 
     def __init__(self) -> None:
         self.stored: list[list[ObjectKey]] = []
+        self.stored_sizes: list[list[int]] = []
         self.accessed: list[list[ObjectKey]] = []
         self.deleted: list[list[ObjectKey]] = []
 
     def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         self.stored.append(list(keys))
+        self.stored_sizes.append(list(sizes))
 
     def on_l2_keys_accessed(self, keys: list[ObjectKey]) -> None:
         self.accessed.append(list(keys))
