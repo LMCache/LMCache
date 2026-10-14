@@ -182,6 +182,8 @@ class P2PController:
         self._next_task_id = 0
         self._jobs: dict[int, _P2PLookupJob] = {}
         self._job_lock = threading.Lock()
+        # When _drop_abandoned_jobs last scanned _jobs; guarded by _job_lock.
+        self._last_drop_time = time.monotonic()
 
         # Orchestration state (guarded by _orch_lock; written only by the poll
         # thread, read by report_status).
@@ -386,12 +388,20 @@ class P2PController:
     def _drop_abandoned_jobs(self) -> None:
         """Drop finished jobs older than the lookup timeout, draining results.
 
+        Scans at most once per lookup timeout, so an abandoned job lives at
+        most two timeouts.
+
         Note:
             Read locks are left to the L1 read TTL; unlocking after expiry
             could release a later reader's lock.
         """
-        cutoff = time.monotonic() - self._p2p_config.lookup_timeout
+        now = time.monotonic()
+        timeout = self._p2p_config.lookup_timeout
         with self._job_lock:
+            if now - self._last_drop_time < timeout:
+                return
+            self._last_drop_time = now
+            cutoff = now - timeout
             stale = [
                 task_id
                 for task_id, job in self._jobs.items()

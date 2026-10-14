@@ -414,25 +414,36 @@ def test_abandoned_lookup_is_dropped_after_lookup_timeout(
 
 
 def test_abandoned_lookup_still_running_is_kept(monkeypatch: pytest.MonkeyPatch):
-    """An expired lookup whose prefetch has not finished stays until it does,
-    so its result is still drained."""
+    """An expired lookup whose prefetch has not finished stays until a later
+    scan finds it finished; scans run at most once per lookup timeout."""
     clock = _FakeClock()
     monkeypatch.setattr(p2p_controller, "time", clock)
     controller, ctx = _make_controller()
     ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
         total_requested_keys=1
     )
+    timeout = P2PConfig().lookup_timeout
     layouts = {0: _make_layout_desc()}
     controller.p2p_lookup_and_lock([_make_key(0)], layouts)
 
-    clock.now += P2PConfig().lookup_timeout + 1
+    # First scan: the expired job is still running, so it is kept.
+    clock.now += timeout + 1
     ctx.storage_manager.query_prefetch_status.return_value = None
     controller.p2p_lookup_and_lock([_make_key(1)], layouts)
     assert controller.report_status()["active_p2p_lookup_jobs"] == 2
 
+    # Within one timeout of that scan, lookups do not scan again.
+    ctx.storage_manager.query_prefetch_status.reset_mock()
     ctx.storage_manager.query_prefetch_status.return_value = _result([Bitmap(1)])
     controller.p2p_lookup_and_lock([_make_key(2)], layouts)
-    assert controller.report_status()["active_p2p_lookup_jobs"] == 2
+    assert controller.report_status()["active_p2p_lookup_jobs"] == 3
+    ctx.storage_manager.query_prefetch_status.assert_not_called()
+
+    # The next scan finds it finished and drops only that job.
+    clock.now += timeout
+    controller.p2p_lookup_and_lock([_make_key(3)], layouts)
+    assert controller.report_status()["active_p2p_lookup_jobs"] == 3
+    ctx.storage_manager.query_prefetch_status.assert_called_once()
 
 
 def test_unlock_objects_calls_finish_read_prefetched():
