@@ -17,7 +17,7 @@ its endpoints with it; either way this file names no controller.
 """
 
 # Standard
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 import asyncio
@@ -95,6 +95,28 @@ def evict_stale(registry: InstanceRegistry, instance_timeout: float) -> list[str
             logger.warning("Instance %s timed out; evicted", instance_id)
             evicted.append(instance_id)
     return evicted
+
+
+def unreturned_instances(
+    registry: InstanceRegistry, restored: Iterable[str]
+) -> list[str]:
+    """Return the restored instances that never registered again.
+
+    Args:
+        registry: The shared instance registry.
+        restored: Instances that came back from the checkpoint.
+
+    Returns:
+        The ids still missing from the registry.
+    """
+    missing = []
+    for instance_id in restored:
+        if not registry.contains(instance_id):
+            logger.warning(
+                "Instance %s did not re-register after restore; evicted", instance_id
+            )
+            missing.append(instance_id)
+    return missing
 
 
 def create_app(config: MPCoordinatorConfig) -> FastAPI:
@@ -212,14 +234,9 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
                 event_gate.drop_instance(instance_id)
                 server_configs.forget(instance_id)
             if restored_instances and time.monotonic() >= restored_deadline:
-                for instance_id in restored_instances:
-                    if not registry.contains(instance_id):
-                        logger.warning(
-                            "Instance %s did not re-register after restore; evicted",
-                            instance_id,
-                        )
-                        event_gate.drop_instance(instance_id)
-                        server_configs.forget(instance_id)
+                for instance_id in unreturned_instances(registry, restored_instances):
+                    event_gate.drop_instance(instance_id)
+                    server_configs.forget(instance_id)
                 restored_instances.clear()
 
     @asynccontextmanager

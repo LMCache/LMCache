@@ -234,6 +234,11 @@ class EventGate:
                 self._departed[instance_id] = cursor.incarnation
 
     def readmit_instance(self, instance_id: str) -> None:
+        """Take L1 batches from ``instance_id`` again after it re-registers.
+
+        Args:
+            instance_id: The instance that registered again.
+        """
         with self._lock:
             self._departed.pop(instance_id, None)
 
