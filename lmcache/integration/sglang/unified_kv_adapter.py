@@ -190,6 +190,48 @@ class SGLangUnifiedKVAdapter:
                 raise AssertionError(f"Unexpected LMCache component {component_type}")
         return result
 
+    def device_indices_for_linker_load(
+        self,
+        full_indices: torch.Tensor,
+        *,
+        swa_indices: Optional[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        """Build LMCache group indices from linker-owned destination slots."""
+        allocator = self.token_to_kv_pool_allocator
+        result: list[torch.Tensor] = []
+        for component_type in self.tree_components:
+            if component_type is ComponentType.FULL:
+                result.append(allocator.translate_kv_indices_for_transfer(full_indices))
+            elif component_type is ComponentType.SWA:
+                if swa_indices is None:
+                    raise ValueError("LMCache linker load requires SWA indices")
+                missing_tokens = len(full_indices) - len(swa_indices)
+                if missing_tokens < 0 or missing_tokens % self.page_size:
+                    raise ValueError(
+                        "LMCache linker SWA indices must be a page-aligned "
+                        "suffix of the FULL transfer"
+                    )
+                physical = (
+                    allocator.swa_attn_allocator.translate_kv_indices_for_transfer(
+                        swa_indices
+                    ).to(torch.int64)
+                )
+                if missing_tokens:
+                    physical = torch.cat(
+                        (
+                            torch.zeros(
+                                missing_tokens,
+                                dtype=torch.int64,
+                                device=physical.device,
+                            ),
+                            physical,
+                        )
+                    )
+                result.append(physical)
+            else:
+                raise AssertionError(f"Unexpected LMCache component {component_type}")
+        return result
+
     def _resolve_pool_tensors(self, kv_pool) -> tuple[torch.Tensor, ...]:
         kv_buffer = getattr(kv_pool, "kv_buffer", None)
         if kv_buffer is not None:
