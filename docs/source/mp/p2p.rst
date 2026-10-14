@@ -62,8 +62,9 @@ Requirements
   server refuses to start in those configurations.
 
 The shared CXL pool mode (see `Shared CXL pool`_) has different requirements:
-it needs Device-DAX L1 and ``--cxl-pool-id``, and needs neither NIXL nor an
-RDMA network.
+it needs a single Device-DAX L1 with ``--cxl-pool-id`` (no other L1 manager
+and no DRAM + Device-DAX hybrid L1), and needs neither NIXL nor an RDMA
+network.
 
 Configuration
 -------------

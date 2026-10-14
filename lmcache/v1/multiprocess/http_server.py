@@ -18,6 +18,7 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
     l1_exposes_single_memory_region,
+    l1_is_single_cxl_region,
     parse_args_to_config,
 )
 from lmcache.v1.mp_coordinator.cache_events import (
@@ -227,9 +228,12 @@ def run_http_server(
                 "--p2p-advertise-url is set."
             )
         if mp_config.p2p_config.transfer_engine == "cxl":
-            memory = storage_manager_config.l1_manager_config.memory_config
-            if not memory.cxl_pool_id or not memory.devdax_path:
-                raise ValueError("CXL P2P requires --cxl-pool-id and --l1-devdax-path")
+            if not l1_is_single_cxl_region(storage_manager_config):
+                raise ValueError(
+                    "CXL P2P requires a single L1 that is the shared CXL slab: "
+                    "set --l1-devdax-path and --cxl-pool-id, with no other L1 "
+                    "manager and no DRAM + Device-DAX hybrid L1."
+                )
         elif not l1_exposes_single_memory_region(storage_manager_config):
             raise ValueError(
                 "P2P requires a single L1 memory region the transfer channel "

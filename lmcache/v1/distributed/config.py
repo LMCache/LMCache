@@ -772,6 +772,26 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
     return True
 
 
+def l1_is_single_cxl_region(config: StorageManagerConfig) -> bool:
+    """Whether L1 is exactly one shared-CXL slab that peers can borrow from.
+
+    CXL P2P exports only the owned slab, so any other L1 memory (a second L1
+    manager, or the DRAM part of a hybrid DRAM + Device-DAX L1) would hold
+    objects peers can never read.
+
+    Args:
+        config: Storage manager configuration to inspect.
+
+    Returns:
+        ``True`` if there is one L1, it has a CXL pool id (which implies a
+        Device-DAX path), and it has no DRAM overflow; ``False`` otherwise.
+    """
+    if len(config.l1_manager_configs) != 1:
+        return False
+    memory = config.l1_manager_config.memory_config
+    return bool(memory.cxl_pool_id) and not memory.devdax_size_in_bytes
+
+
 def add_storage_manager_args(
     parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
