@@ -36,13 +36,13 @@ transport shares:
 - **Interface fields** — `dtype`, `shape`, `stride`, `storage_offset`, `device_uuid`. Subclasses populate these in `__init__`; the base uses them for equality and the receiving side uses them to rebuild the logical view.
 - **Device discovery** — `_get_device_uuid`, `_discover_devices`,`_get_device_index_from_uuid`. These are `@classmethod`s (not static) and route through the `torch_dev` abstraction, so they work across device backends, and a subclass can override `_get_device_uuid` if its backend needs a different identity source.
 - **Equality** — `__eq__` uses a `type(self) is type(other)` guard, so two different wrapper subclasses never compare equal even if their fields coincide.
-- **Serialization** — `Serialize`/`Deserialize` are `pickle.dumps` / `pickle.loads`. Pickle preserves the concrete subclass identity across the wire, which is what lets a single ext code carry every wrapper type (see below).
+- **Serialization** — `Serialize`/`Deserialize` encode typed MessagePack descriptors from `platform/base/ipc_wire.py`. A fixed local tag-to-wrapper allowlist preserves concrete identity without loading Python objects from the wire.
 - **`to_tensor()`** — abstract; raises `NotImplementedError`. Every subclass overrides it with its transport-specific reconstruction.
 
 ## How to dispatch
 
 - `_CUSTOMERIZED_SERIALIZERS` is keyed on `DeviceIPCWrapper` with ext code 1, dispatched by `isinstance` in the encoder hook. Every subclass instance therefore encodes through the same path.
-- `Serialize` is `pickle.dumps(obj)` -> the concrete subclass survives on the wire. `Deserialize` reconstructs it and `to_tensor()` dispatches to the correct override.
+- Each wrapper implements `to_wire` / `from_wire` for its explicit descriptor. `Deserialize` validates the version, tag and fields before selecting a local implementation; only `to_tensor()` opens device resources.
 - `KVCache = list[DeviceIPCWrapper]` is the registered msgspec type, so a single `list[...]` payload can mix any of the wrappers and the server needs zero per-type branching.
 
 ## The concrete wrappers
@@ -82,7 +82,23 @@ needed:
 
 ## Backward compatibility
 
-- The wire envelope remains ext code 1 and `pickle`-over-`Ext`. MUSA sender and receiver processes must use compatible `MusaIPCWrapper` versions because the payload carries a TorchMUSA tensor handle.
+- ZMQ ext code 1 and the gRPC bytes field remain unchanged, but their contents are versioned MessagePack. Old pickle payloads are rejected with no fallback: upgrade clients and servers together.
+- MUSA handles must contain only MessagePack scalars, lists and string-keyed maps. Opaque SDK objects require an explicit data codec; they are rejected rather than pickled.
+- Additional wrapper implementations require an explicit descriptor and local allowlist entry; arbitrary subclasses are not reconstructed from network input.
 - `MusaIPCWrapper` keeps the receiver-side `open_tensor()` owner alive locally and excludes that owner from serialized state.
 - `CudaIPCWrapper` / `RawCudaIPCWrapper` keep their names, fields, and behavior; only their base class changed. Existing callers and the TRT-LLM adapter are unaffected.
 - The single `isinstance`-based equality check now uses `type(self) is type(other)`, which is stricter and correct.
+
+## Security boundary
+
+CVE-2026-105192 reached `pickle.loads` through msgpack ext code 1 while
+`REGISTER_KV_CACHE` arguments were being decoded, before handler validation.
+The transport did not authenticate the sender. Typed descriptors remove this
+Python object execution path from both ZMQ and gRPC. Unknown fields, versions,
+tags and invalid metadata are rejected; receiver-local fds, owners and mapping
+counts are never restored from wire input.
+
+This change does not add transport authentication or replace engine-driven
+`cpu_data` / retrieve-response pickle serialization. Continue restricting MP
+ports to trusted clients. Descriptor validation is not authorization to access
+another client's shared memory.
