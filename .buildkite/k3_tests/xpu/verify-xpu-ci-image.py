@@ -125,7 +125,7 @@ def main() -> None:
             token,
             {
                 "commit": commit,
-                "branch": "dev",
+                "branch": "xpu-nightly",
                 "message": f"XPU nightly wheel candidate {image}",
                 "env": {
                     "XPU_CANDIDATE_IMAGE": image,

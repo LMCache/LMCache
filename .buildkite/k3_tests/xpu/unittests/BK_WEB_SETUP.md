@@ -37,10 +37,14 @@ non-Bash command must source `/opt/intel/oneapi/setvars.sh` separately if it
 needs the compiler environment.
 
 The verifier triggers the existing `unit-tests-xpu` and `xpu-mp-test` Buildkite
-pipelines. Configure `BUILD_KITE_API_TOKEN` as a secret with `read_builds` and
-`write_builds` scopes. The existing
-`DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` must be able to push to the public
-`lmcache/vllm-openai-xpu-ci` repository; XPU nodes must be able to pull it.
+pipelines with `branch: xpu-nightly` and the exact GitHub Actions source commit.
+This separates nightly builds from `dev` builds when Buildkite skips queued or
+cancels running builds on the same branch; it does not require a separate
+nightly pipeline or checkout of an `xpu-nightly` Git branch. Configure
+`BUILD_KITE_API_TOKEN` as a secret with `read_builds` and `write_builds` scopes.
+The existing `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` must be able to push to
+the public `lmcache/vllm-openai-xpu-ci` repository; XPU nodes must be able to
+pull it.
 The `buildkite-git-creds` Kubernetes secret on the XPU queue must contain
 `GITHUB_TOKEN` with GitHub Actions artifact read permission for `LMCache/LMCache`.
 GitHub Actions must be able to update `buildkite_latest_tested_vllm`.
