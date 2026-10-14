@@ -425,3 +425,23 @@ def test_mla_rejects_wrong_rank_layers() -> None:
             EngineKVFormat.NL_X_NB_BS_HS,
             0,
         )
+
+
+def test_mla_blocked_scale_layout_is_refused() -> None:
+    """An MLA-shaped cache whose blocks store values before scales is refused.
+
+    ``NL_X_NB_BSV_BSS`` shares the MLA ``[NB, BS, HS]`` shape, so a whole-block
+    copy would silently write blocked bytes into a token-major chunk.
+    """
+    with pytest.raises(ValueError, match="supports only per-layer"):
+        RblnDeviceOps().multi_layer_block_kv_transfer(
+            _mla_layers(),
+            _mla_chunks(),
+            list(range(NUM_BLOCKS)),
+            torch.device("cpu"),
+            TransferDirection.D2H,
+            _mla_shape_desc(),
+            CHUNK_TOKENS,
+            EngineKVFormat.NL_X_NB_BSV_BSS,
+            0,
+        )

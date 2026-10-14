@@ -129,6 +129,7 @@ class RblnDeviceOps(DeviceOps):
             and format_spec.is_mla
             and not format_spec.is_pbs_fused
             and not format_spec.is_kv_second_tuple
+            and not format_spec.requires_blocked_scale_repacking
         )
         is_hnd = (
             format_spec.is_layer_list

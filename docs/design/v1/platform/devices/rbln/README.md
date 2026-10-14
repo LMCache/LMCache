@@ -82,10 +82,11 @@ Consequences of the format being first-class:
   value: a per-layer two-major HND layout (`is_layer_list`, `is_hnd`,
   `is_two_major`, not `is_fused_packed`) takes the HND sequence, and a
   per-layer `[NB, BS, HS]` MLA layout (`is_layer_list`, `is_mla`, not
-  `is_pbs_fused` / `is_kv_second_tuple`) takes the MLA one (below). The HND
-  side applies `squeeze_singleton_axis` at entry, so `kv_ops.py` keeps
-  indexing a 5-D tensor. `kv_layout.py` therefore exports the strict squeeze
-  plus the `is_rbln_kv_layout` predicate -- no tolerant pass-through variant.
+  `is_pbs_fused` / `is_kv_second_tuple` / `requires_blocked_scale_repacking`)
+  takes the MLA one (below). The HND side applies `squeeze_singleton_axis` at
+  entry, so `kv_ops.py` keeps indexing a 5-D tensor. `kv_layout.py` therefore
+  exports the strict squeeze plus the `is_rbln_kv_layout` predicate -- no
+  tolerant pass-through variant.
   `NL_X_TWO_NB_NH_BS_HS` (6) shares format 15's layout facts (the singleton
   axis is the only difference), but vLLM-RBLN never allocates it, so a 5-D
   cache fails loudly in the squeeze rather than being accepted.
