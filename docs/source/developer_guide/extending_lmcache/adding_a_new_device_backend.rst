@@ -8,7 +8,7 @@ This guide explains how to add a **new accelerator** to LMCache in
 ownership model:
 
 - **In-tree integration:** contribute and maintain the backend under
-  ``lmcache/v1/platform/<device>/`` in the LMCache repository. This fits
+  ``lmcache/v1/platform/devices/<backend>/`` in the LMCache repository. This fits
   backends that should ship, test, and release with LMCache.
 - **External wheel integration:** maintain the backend in a vendor repository
   and publish a wheel through the ``lmcache.device_plugins`` entry-point
@@ -62,14 +62,15 @@ Step 1: Choose the ownership model
 Option A — integrate in the LMCache repository
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Create a platform package directly in LMCache::
+Create a backend package directly in LMCache::
 
-    lmcache/v1/platform/foo/
+    lmcache/v1/platform/devices/foo/
     ├── __init__.py
     └── device_ops.py
 
 Define ``FooDeviceSpec`` in ``__init__.py``. LMCache scans its built-in
-platform packages, so this option needs no entry point or registration list.
+``platform.devices`` packages, so this option needs no entry point or
+registration list.
 Submit the code, tests, and device documentation in an LMCache PR; after
 merge, the backend follows the LMCache release lifecycle.
 
@@ -117,7 +118,7 @@ Step 2: Implement ``FooDeviceSpec``
 
 Create the spec in the location selected in Step 1:
 
-- In-tree: ``lmcache/v1/platform/foo/__init__.py``.
+- In-tree: ``lmcache/v1/platform/devices/foo/__init__.py``.
 - External wheel: ``src/lmcache_foo/device.py``.
 
 The implementation is the same in both layouts:
@@ -176,7 +177,7 @@ Step 3: Implement ``FooDeviceOps``
 
 Create ``device_ops.py`` next to the spec package:
 
-- In-tree: ``lmcache/v1/platform/foo/device_ops.py``.
+- In-tree: ``lmcache/v1/platform/devices/foo/device_ops.py``.
 - External wheel: ``src/lmcache_foo/device_ops.py``.
 
 .. code-block:: python
@@ -326,9 +327,12 @@ when exactly one reports available. If multiple backends report available, set
 
 .. note::
 
-   The default transfer mode is ``auto`` (CUDA → LMCache-driven, other
-   devices → engine-driven).  The example above explicitly sets
-   ``engine_driven`` so that a new non-CUDA device works without
+   The default transfer mode is ``auto``, which resolves to the device
+   spec's declared default
+   (:meth:`~lmcache.v1.platform.base.device_spec.DeviceSpec.default_mp_transfer_mode`):
+   devices with a complete LMCache-driven stack (CUDA, NPU) get
+   LMCache-driven, everything else engine-driven.  The example above
+   explicitly sets ``engine_driven`` so that a new device works without
    additional capability checks.  For the ``lmcache_driven`` mode
    (IPC zero-copy), see :ref:`Advanced transfer mode <part-2-performance>`.
 
@@ -426,21 +430,26 @@ Implementation notes
 
 For concrete reference implementations, see:
 
-- ``lmcache/v1/platform/cuda/device_ops.py`` — binds the compiled
+- ``lmcache/v1/platform/devices/cuda/device_ops.py`` — binds the compiled
   ``lmcache.cuda_ops`` pybind11 extension.
-- ``lmcache/v1/platform/xpu/device_ops.py`` — binds the SYCL
+- ``lmcache/v1/platform/devices/xpu/device_ops.py`` — binds the SYCL
   ``lmcache.xpu_ops`` extension.
-- ``lmcache/v1/platform/musa/device_ops.py`` — method overrides
+- ``lmcache/v1/platform/devices/musa/device_ops.py`` — method overrides
   without a separate native module.
 
 Advanced transfer mode
 ~~~~~~~~~~~~~~~~~~~~~~
 
-By default, the transfer mode is **AUTO**: the router dispatches
-strictly by ``device_type`` — ``device_type == "cuda"`` goes to
-``LMCacheDrivenTransferContext`` (IPC zero-copy), everything else to
-``EngineDrivenTransferContext``.  A non-CUDA device that supports IPC
-handle transfer can still opt into LMCache-driven explicitly (below).
+By default, the transfer mode is **AUTO**: ``auto`` resolves to the
+device spec's declared default
+(:meth:`~lmcache.v1.platform.base.device_spec.DeviceSpec.default_mp_transfer_mode`).
+The base implementation derives that default from
+:meth:`~lmcache.v1.platform.base.device_spec.DeviceSpec.is_lmcache_driven_available`:
+devices with a complete LMCache-driven stack (CUDA, NPU) default to
+``LMCacheDrivenTransferContext`` (IPC zero-copy), everything else —
+including opt-in-only stacks such as CPU SHM and MUSA handles — to
+``EngineDrivenTransferContext``.  A device whose LMCache-driven stack is
+available but not the default can still opt in explicitly (below).
 
 .. note::
 
@@ -460,13 +469,13 @@ checks — both must succeed, otherwise the factory raises
    :attr:`~lmcache.v1.platform.base.device_spec.DeviceSpec.ipc_wrapper_cls`.
    :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
    binding off the registered spec — no separate registry / auto-scan.
-2. ``DeviceSpec.is_handle_transfer_available()`` must return ``True``
-   (the base-class default; override to ``False`` only if your device
-   lacks IPC handle transfer).
+2. ``DeviceSpec.is_lmcache_driven_available()`` must return ``True``
+   (the base-class default is ``False``; a device with the complete
+   handle-transfer stack overrides it to ``True``).
 
 Separately, the LMCache-driven server module also requires a
 ``BaseCacheContext`` subclass next to the backend (for example,
-``lmcache/v1/platform/foo/cache_context.py`` in-tree or
+``lmcache/v1/platform/devices/foo/cache_context.py`` in-tree or
 ``lmcache_foo/cache_context.py`` externally) **and** a matching
 ``DeviceSpec.create_cache_context`` override that lazy-imports and
 instantiates it.  The platform-agnostic factory
@@ -572,9 +581,9 @@ Override these methods in your ``DeviceSpec``:
 
             return FooIPCWrapper
 
-        def is_handle_transfer_available(self) -> bool:
-            """Return True if your device supports IPC handle transfer."""
-            return True  # base-class default; override to False if unsupported
+        def is_lmcache_driven_available(self) -> bool:
+            """Return True when the device can serve the LMCache-driven path."""
+            return True  # base default is False; required to enable lmcache_driven
 
         @property
         def pin_memory_backend(self):
@@ -629,17 +638,17 @@ References
    * - Cache context factory
      - ``lmcache/v1/platform/cache_context.py``
    * - Reference ``DeviceSpec`` (CUDA)
-     - ``lmcache/v1/platform/cuda/__init__.py``
+     - ``lmcache/v1/platform/devices/cuda/__init__.py``
    * - Reference ``DeviceOps`` (CUDA, bind_native)
-     - ``lmcache/v1/platform/cuda/device_ops.py``
+     - ``lmcache/v1/platform/devices/cuda/device_ops.py``
    * - Reference ``DeviceOps`` (XPU, bind_native)
-     - ``lmcache/v1/platform/xpu/device_ops.py``
+     - ``lmcache/v1/platform/devices/xpu/device_ops.py``
    * - Reference ``DeviceOps`` (MUSA, method overrides)
-     - ``lmcache/v1/platform/musa/device_ops.py``
+     - ``lmcache/v1/platform/devices/musa/device_ops.py``
    * - Reference ``DeviceSpec`` (Neuron / Trainium, engine-driven only)
-     - ``lmcache/v1/platform/neuron/__init__.py``
+     - ``lmcache/v1/platform/devices/neuron/__init__.py``
    * - Reference ``DeviceOps`` (Neuron, torch baseline)
-     - ``lmcache/v1/platform/neuron/device_ops.py``
+     - ``lmcache/v1/platform/devices/neuron/device_ops.py``
    * - Engine-driven call site
      - ``lmcache/v1/multiprocess/transfer_context/worker_transfer.py``
        (``EngineDrivenTransferContext``, ``create_transfer_context``)

@@ -18,7 +18,9 @@ fail() {
 [ -f /opt/intel/oneapi/setvars.sh ] || fail "/opt/intel/oneapi/setvars.sh not found"
 # shellcheck disable=SC1091
 log "enable Intel XPU runtime environment"
+set +u
 source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
+set -u
 
 log "checking torch.xpu and xpu h/w availability"
 python - <<'PY'
@@ -29,10 +31,20 @@ print("torch.xpu.is_available() = True")
 PY
 
 cd "${REPO_ROOT}"
-source "${REPO_ROOT}/.buildkite/k3_harness/setup-lmcache-only-env.sh"
 
 log "installing job dependencies"
 uv pip install -r requirements/common.txt -r requirements/test.txt
+
+# Includes the mandatory PR-base rebase before installing LMCache.
+export BUILD_WITH_SYCL=1
+source "${REPO_ROOT}/.buildkite/k3_harness/setup-lmcache-only-env.sh"
+python -c "from importlib.metadata import version; print('vLLM version:', version('vllm'))"
+python - <<'PY'
+import lmcache
+import lmcache.xpu_ops
+
+print("LMCache XPU extension installed")
+PY
 
 discover_xpu_tests() {
   python - <<'PY'
@@ -77,6 +89,9 @@ log "discovered ${#XPU_TEST_FILES[@]} XPU-related test files"
 printf '  %s\n' "${XPU_TEST_FILES[@]}"
 
 PYTEST_ARGS=(-q --maxfail=1 -m "not cuda and not musa and not sglang")
+if [ -n "${XPU_WHEEL_ARTIFACT_ID:-}" ]; then
+  PYTEST_ARGS+=(--import-mode=importlib)
+fi
 if [ -n "${TEST_SELECTOR:-}" ]; then
   PYTEST_ARGS+=(-k "${TEST_SELECTOR}")
 fi
@@ -84,4 +99,3 @@ fi
 log "running XPU-related tests"
 pytest "${PYTEST_ARGS[@]}" "${XPU_TEST_FILES[@]}"
 log "xpu smoke test finished successfully"
-

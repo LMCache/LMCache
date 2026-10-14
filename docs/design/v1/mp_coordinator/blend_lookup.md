@@ -41,7 +41,8 @@ LOOKUP (blend server, cb_unified_lookup)
   local matcher (always) ─┐
   request tokens          │
     ── POST /directory/blend-lookup ──▶ blend index: roll + filter +
-                                        resolve + verify token-exact
+       (tokens + this server's       │    resolve + verify token-exact
+        model/salt/world_size)       │    + scope to the caller's namespace
     ◀── matches: [(chunk_hash, old_st, cur_st)] ──┘
   → union of both sources
   → non-prefix set (drop prefix-covered, leftmost-greedy overlap dedup)
@@ -61,21 +62,24 @@ Consequences of being event-fed rather than blend-published:
 
 ## Identity and scope
 
-The index is keyed by **content only** — no model, salt, or rank. A match
-names a `chunk_hash`, and the querying server expands it into per-rank
-`ObjectKey`s using **its own** `cache_salt`, `model_name`, and
-`world_size` (`ipc_key_to_object_keys`), exactly as the local path does.
-So a cross-salt or cross-model match lands in the requester's own
-namespace and confirmed-misses at the sparse prefetch unless a matching
-copy exists — tenant isolation holds with **one index for the fleet**.
-Filtering by the *storer's* identity would be wrong: content is shared
-first-writer-wins, so the first storer's tenant would get pinned and
-others could never match their own copies of identical content.
+Entries are keyed by **content**, but each chunk under that content
+records the namespaces that stored it — `(model_name, cache_salt,
+world_size)`, the same three fields `ipc_key_to_object_keys` reads. The
+lookup query carries the requester's, and matches are restricted to
+chunks some instance stored in it, so every match expands into
+`ObjectKey`s that exist. Tenant isolation holds with **one index for the
+fleet**, and it is now enforced rather than merely survived: a
+cross-tenant match is not returned at all, instead of being returned and
+confirmed-missing at the sparse prefetch.
 
-The cost is that a cross-tenant match with no same-salt copy is a wasted
-prefetch — the already-tolerated stale-entry failure mode. The index does
-reveal cross-salt content *existence* to the trusted mp-servers, and the
-coordinator sees raw tokens (content), not just opaque hashes:
+Scoping loses no reuse — cross-model KV is not interchangeable and
+cross-salt is isolated by design — and recovers reuse the blind table
+lost, since the requester's own copy of a document cached under a
+different prefix is a *different* `chunk_hash` that a single untagged
+occupant would hide. See [blend_index.md](blend_index.md) — Identity and
+scope.
+
+The coordinator still sees raw tokens (content), not just opaque hashes:
 acceptable for trusted fleet infra, revisit if not.
 
 ## Lookup flow in `cb_unified_lookup`
@@ -146,7 +150,8 @@ still works locally in that case — the fleet leg is simply absent.
 | emitter token-binding evicted | chunk unindexed fleet-wide | same |
 | fingerprint collision | candidate skipped | token verification rejects it |
 | chunk evicted from peer L1, no L2 copy | wasted prefetch | miss → recompute |
-| cross-salt / cross-model match, no local copy | wasted prefetch | requester-identity ObjectKey misses → recompute |
+| content held only by another model/tenant/world size | no fleet match | scoped out coordinator-side; local matches still apply |
+| chunk stored by only some ranks of the caller's world size | wasted prefetch | claims are per namespace, not per rank → ObjectKey misses → recompute |
 
 ## Future evolution
 

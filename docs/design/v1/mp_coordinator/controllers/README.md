@@ -32,9 +32,11 @@ A setting a controller needs but the core config does not name goes in
 ## Registering HTTP endpoints
 
 The routers in `http_apis/` resolve their collaborator with
-`ctx.controllers.get(FleetEvictionController)`, which works only for a class
-the coordinator already imports. A controller that ships elsewhere instead
-implements `get_routers`, returning routers built around itself:
+`ctx.controllers.get(SomeController)`, which works only for a class the
+coordinator already imports — and leaves the route mounted even when that class
+is not built. A controller owns its endpoints instead by implementing
+`get_routers`, returning routers built around itself; the built-in eviction
+controller does this for `/quota` and `/cache/pins`:
 
 ```python
 class WidgetController(Controller):
@@ -154,6 +156,49 @@ a field per out-of-tree concern. A name may address a package (walked entire)
 or a single module. A name that does not import raises rather than being
 skipped -- an operator asked for it, so a silent skip would look like a
 controller that loaded and did nothing.
+
+## Replacing a built-in controller
+
+Loading one is not enough to replace one. This package is always scanned, so a
+built-in controller is built whether or not something else now does its job --
+and two controllers doing the same job is not a redundancy, it is a conflict:
+they hold state under the same artifact sections (a document is keyed by
+section name, so the last writer wins, decided by class-name ordering) and
+answer for the same endpoints.
+
+Name it, and it is not built:
+
+```bash
+lmcache coordinator --extra-config '{
+  "controller_packages": ["acme_controllers"],
+  "disabled_controllers": ["FleetEvictionController"]
+}'
+```
+
+A name that matches nothing discovered raises, for the same reason a package
+that does not import does: an operator believing they disabled something they
+did not is worse than a boot failure that says so -- a typo would silently
+leave the built-in controller running against whatever replaced it.
+
+The endpoints that speak for a disabled controller are simply not mounted:
+they come from its `get_routers`, so they go with it. That is why the built-in
+eviction controller now owns `/quota` and `/cache/pins` rather than having them
+discovered from `http_apis/` — a route that outlives its controller either
+answers with nothing or, worse, shadows the replacement's identically-named
+one, because `http_apis` routers mount first.
+
+An endpoint that merely *consults* a controller is different: it resolves it
+with `Registry.find` and carries on without. `/cache/delete` holds back pinned
+keys when there is an eviction controller to ask, and deletes everything asked
+for when there is not.
+
+**A replacement can serve the same paths.** With the built-in controller
+unbuilt, `/quota` and `/cache/pins` are free, so a controller taking its place
+can register them and existing clients need no change.
+
+A controller replacing a built-in one inherits its durable state, because the
+sections are named by the component rather than by its owner -- so a swap keeps
+the pins and quotas the previous one held, provided only one of them is built.
 
 **Controllers only.** There is no `--view-package`: a view is shared fleet
 state, so which views exist is the coordinator's contract. An out-of-tree

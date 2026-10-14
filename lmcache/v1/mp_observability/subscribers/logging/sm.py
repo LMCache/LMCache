@@ -24,18 +24,10 @@ class SMLoggingSubscriber(EventSubscriber):
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {
-            EventType.SM_READ_PREFETCHED: self._on_read_prefetched,
             EventType.SM_READ_PREFETCHED_FINISHED: self._on_read_prefetched_finished,
             EventType.SM_WRITE_RESERVED: self._on_write_reserved,
             EventType.SM_WRITE_FINISHED: self._on_write_finished,
         }
-
-    def _on_read_prefetched(self, event: Event) -> None:
-        logger.debug(
-            "SM read prefetched: %d succeeded, %d failed",
-            len(event.metadata["succeeded_keys"]),
-            len(event.metadata["failed_keys"]),
-        )
 
     def _on_read_prefetched_finished(self, event: Event) -> None:
         logger.debug(

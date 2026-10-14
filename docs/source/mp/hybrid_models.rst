@@ -35,9 +35,12 @@ Recipe pages for the validated hybrid-attention architectures:
    * - gpt-oss
      - Sliding-window + full
      - :doc:`/recipes/gpt_oss`
-   * - Qwen3.5 / Qwen3.6 series
+   * - Qwen3.5 / Qwen3.6 / Qwen3.8 series
      - Mamba / GDN + full
      - :doc:`/recipes/qwen3_5`
+   * - Qwen3.8-Flash-Next
+     - GDN linear-attention + QSA sparse full (scratch ring)
+     - :doc:`/recipes/qwen3_8_flash_next`
    * - Kimi-Linear
      - KDA linear-attention + MLA full
      - :doc:`/recipes/kimi_linear`
@@ -47,9 +50,15 @@ Recipe pages for the validated hybrid-attention architectures:
    * - DeepSeek-V4-Flash
      - Sparse-MLA (multiple KV groups)
      - :doc:`/recipes/deepseek_v4_flash`
+   * - DeepSeek-V4.1-Flash
+     - Sparse-MLA + per-layer sliding window (9 KV groups, scratch ring)
+     - :doc:`/recipes/deepseek_v41_flash`
    * - GLM 5.1/5.2
      - Dynamic Sparse Attention (multiple KV groups)
      - :doc:`/recipes/glm5_2`
+   * - GLM-5.3
+     - Dynamic Sparse Attention (single KV group)
+     - :doc:`/recipes/glm5_3`
    * - MiniMax-M3
      - Sparse attention + lightning indexer (mixed KV formats in one group)
      - :doc:`/recipes/minimax_m3`
@@ -62,10 +71,13 @@ Recipe pages for the validated hybrid-attention architectures:
    /recipes/gemma4
    /recipes/gpt_oss
    /recipes/qwen3_5
+   /recipes/qwen3_8_flash_next
    /recipes/kimi_linear
    /recipes/kimi_k3
    /recipes/deepseek_v4_flash
+   /recipes/deepseek_v41_flash
    /recipes/glm5_2
+   /recipes/glm5_3
    /recipes/minimax_m3
 
 What Works
@@ -134,8 +146,9 @@ Mamba / Linear-Attention Hybrids
 --------------------------------
 
 Models that interleave **Mamba / Gated-DeltaNet (GDN) linear-attention layers**
-with full attention — the Qwen3.5 and Qwen3.6 series (``Qwen/Qwen3.5-0.8B``,
-``Qwen/Qwen3.6-27B``, …), Qwen3-Next, Kimi-Linear
+with full attention — the Qwen3.5, Qwen3.6 and Qwen3.8 series
+(``Qwen/Qwen3.5-0.8B``, ``Qwen/Qwen3.6-27B``, ``Qwen/Qwen3.8-27B``, …),
+Qwen3-Next, Kimi-Linear
 (``moonshotai/Kimi-Linear-48B-A3B-Instruct``), Kimi K3
 (``moonshotai/Kimi-K3``), and other GDN hybrids — are supported.
 Unlike a paged key/value cache, their linear-attention layers keep a recurrent
@@ -199,6 +212,9 @@ example:
      - Unified block size ``N``
      - GPUs
    * - ``Qwen/Qwen3.6-27B``
+     - 784
+     - 1
+   * - ``Qwen/Qwen3.8-27B``
      - 784
      - 1
    * - ``Qwen/Qwen3.5-0.8B``
@@ -266,8 +282,8 @@ Caveats
   is not validated.
 - vLLM's Mamba prefix caching in ``align`` mode is marked experimental upstream.
 
-See the :doc:`Qwen3.5 / Qwen3.6 recipe <../recipes/qwen3_5>` for the validated
-end-to-end commands and the per-model block sizes.
+See the :doc:`Qwen3.5 / Qwen3.6 / Qwen3.8 recipe <../recipes/qwen3_5>` for the
+validated end-to-end commands and the per-model block sizes.
 
 Verifying Correctness
 ---------------------

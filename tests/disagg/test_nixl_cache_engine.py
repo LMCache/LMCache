@@ -72,7 +72,7 @@ def verify_kv_cache_pattern(kv_cache, slot_mapping, pattern_value=0.99, toleranc
     """Verify that the KV cache contains the expected pattern at the
     specified slot mappings
     """
-    logger.info(f"Verifying KV cache pattern {pattern_value}")
+    logger.info("Verifying KV cache pattern %s", pattern_value)
     all_correct = True
     for layer_idx, layer_tensor in tqdm(enumerate(kv_cache), total=len(kv_cache)):
         num_blocks = layer_tensor.shape[1]
@@ -83,8 +83,10 @@ def verify_kv_cache_pattern(kv_cache, slot_mapping, pattern_value=0.99, toleranc
         mean_value = actual_values.mean().item()
         if abs(mean_value - pattern_value) > tolerance:
             logger.error(
-                f"Pattern mismatch at layer {layer_idx}: "
-                f"expected mean ~{pattern_value}, got {mean_value}"
+                "Pattern mismatch at layer %s: expected mean ~%s, got %s",
+                layer_idx,
+                pattern_value,
+                mean_value,
             )
             all_correct = False
 
@@ -232,21 +234,23 @@ if __name__ == "__main__":
     throughputs = []
 
     for round_num in range(args.num_rounds):
-        logger.info(f"\nStarting round {round_num + 1}/{args.num_rounds}")
+        logger.info("\nStarting round %s/%s", round_num + 1, args.num_rounds)
 
         if args.role == "sender":
             # Wait a bit for the receiver to set up
             time.sleep(2)
 
-            logger.info(f"Storing {len(tokens)} tokens ({args.num_chunks} chunks)...")
+            logger.info(
+                "Storing %s tokens (%s chunks)...", len(tokens), args.num_chunks
+            )
             start_time = time.time()
             engine.store(tokens, kvcaches=kv_cache, slot_mapping=slot_mapping)
 
             end_time = time.time()
             elapsed_time = end_time - start_time
-            logger.info(f"Stored {len(tokens)} tokens in {elapsed_time:.6f} seconds")
+            logger.info("Stored %s tokens in %.6f seconds", len(tokens), elapsed_time)
             throughput = calculate_throughput(total_size, elapsed_time)
-            logger.info(f"Throughput: {throughput:.2f} GB/s")
+            logger.info("Throughput: %.2f GB/s", throughput)
             throughputs.append(throughput)
 
         else:  # receiver
@@ -268,15 +272,16 @@ if __name__ == "__main__":
                 # Check for timeout
                 if time.time() - start_time > timeout:
                     logger.error(
-                        "Timed out waiting for data. Received only "
-                        f"{received_count}/{args.num_chunks} chunks."
+                        "Timed out waiting for data. Received only %s/%s chunks.",
+                        received_count,
+                        args.num_chunks,
                     )
                     break
 
                 time.sleep(0.1)  # Small sleep to avoid busy waiting
 
             if received_count == args.num_chunks:
-                logger.info(f"Received all {args.num_chunks} chunks")
+                logger.info("Received all %s chunks", args.num_chunks)
 
                 # Retrieve and verify the data
                 logger.info("Retrieving and verifying data...")
@@ -294,11 +299,12 @@ if __name__ == "__main__":
                 retrieved_tokens = torch.sum(ret_mask).item()
                 if retrieved_tokens == len(tokens):
                     logger.info(
-                        f"Successfully retrieved all {retrieved_tokens} tokens "
-                        f"in {elapsed_time:.6f} seconds"
+                        "Successfully retrieved all %s tokens in %.6f seconds",
+                        retrieved_tokens,
+                        elapsed_time,
                     )
                     throughput = calculate_throughput(total_size, elapsed_time)
-                    logger.info(f"Retrieval throughput: {throughput:.2f} GB/s")
+                    logger.info("Retrieval throughput: %.2f GB/s", throughput)
 
                     # Verify the data by checking if the retrieved KV cache
                     # has the expected pattern
@@ -315,11 +321,14 @@ if __name__ == "__main__":
                         )
                 else:
                     logger.error(
-                        "Failed to retrieve all tokens. Retrieved "
-                        f"{retrieved_tokens}/{len(tokens)} tokens."
+                        "Failed to retrieve all tokens. Retrieved %s/%s tokens.",
+                        retrieved_tokens,
+                        len(tokens),
                     )
             else:
-                logger.error(f"Only received {received_count}/{args.num_chunks} chunks")
+                logger.error(
+                    "Only received %s/%s chunks", received_count, args.num_chunks
+                )
 
         # Wait between rounds
         time.sleep(2)
@@ -330,10 +339,10 @@ if __name__ == "__main__":
         std_throughput = np.std(throughputs) if len(throughputs) > 1 else 0
         logger.info("\nSummary Statistics:")
         logger.info(
-            f"Mean throughput: {mean_throughput:.2f} ± {std_throughput:.2f} GB/s"
+            "Mean throughput: %.2f ± %.2f GB/s", mean_throughput, std_throughput
         )
-        logger.info(f"Min throughput: {min(throughputs):.2f} GB/s")
-        logger.info(f"Max throughput: {max(throughputs):.2f} GB/s")
+        logger.info("Min throughput: %.2f GB/s", min(throughputs))
+        logger.info("Max throughput: %.2f GB/s", max(throughputs))
 
     # Cleanup at the very end
     LMCacheEngineBuilder.destroy("test_engine")
