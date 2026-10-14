@@ -96,23 +96,13 @@ so both ranks stay reachable and both must be handled. Gating the rule on rank
 error. The re-view only reinterprets byte ranges, so it is otherwise
 indifferent to which layout it is handed.
 
-vLLM-Ascend through v0.29 registers the same mismatch as a `(K, V)` pair of
-contiguous rank-4 planes
-`(num_kernel_pages, kernel_block_size, num_kv_heads, head_size)`, in one pool
-or two allocations. `_SubpagedAttentionContiguousPlaneViewEdit`
-(`subpaged-attention-contiguous-plane-view`) re-views each plane to
-`(num_kernel_pages / k, scheduler_block_size, num_kv_heads, head_size)`,
-still format 16 (`NL_X_TWO_X_NB_BS_NH_HS`). The tile check uses
-`real_page_size_bytes`, because hybrid `page_size_bytes` includes Mamba conv
-padding absent from the K/V views. A pair that is not this layout is left
-unchanged.
-
 The registered tensor is also a `permute` view of the backend's physical
 layout (`get_kv_cache_stride_order`, `vllm/v1/worker/gpu/attn_utils.py`), so it
 is generally *not* contiguous in logical dim order — under NHD the 0.26.0
 rank-4 stride order `(0, 2, 1, 3)` is a transpose. Pages only tile by byte
-range in memory order, so the **rank-4** branch re-views in descending-stride
-order.
+range in memory order, so the **rank-4** branch of `_SubpagedAttentionViewEdit`
+re-views in descending-stride order. That path is mainline vLLM only; the
+vLLM-Ascend `(K, V)` plane edits below do not use it.
 
 **Rank 5 deliberately keeps the stricter logical-order contiguity guard.** The
 edited view is NHD-shaped by construction, so under an HND hint the detector
@@ -124,6 +114,28 @@ rank-5 one: under an explicit `VLLM_KV_CACHE_LAYOUT=HND` every edited group,
 Mamba included, resolves `block_size` to 1. Not reached by default
 (`get_required_kvcache_layout` returns `None`, so vLLM falls back to NHD);
 tracked separately.
+
+vLLM-Ascend registers the same scheduler-versus-kernel mismatch as a `(K, V)`
+pair of rank-4 planes at the kernel block size. Both releases use the same
+registered shape; they differ in how K and V bytes are laid out in memory:
+
+| vLLM-Ascend | shape (each of `K`, `V`) | layout |
+|---|---|---|
+| `<= v0.29` | `(num_kernel_pages, kernel_block_size, num_kv_heads, head_size)` | rank 4; dense K kernel pages, then dense V (one pool or two allocations) |
+| `v0.30` | `(num_kernel_pages, kernel_block_size, num_kv_heads, head_size)` | rank 4; `[K0][V0][K1][V1]…` in one pool (`stride(0)` spans one K row plus the following V row) |
+
+Through v0.29, `_SubpagedAttentionContiguousPlaneViewEdit` re-views each plane
+to `(num_logical_blocks, scheduler_block_size, num_kv_heads, head_size)`
+(format 16, `NL_X_TWO_X_NB_BS_NH_HS`). The tile check uses
+`real_page_size_bytes`, because hybrid `page_size_bytes` includes Mamba conv
+padding absent from the K/V views. v0.30's
+`_SubpagedAttentionInterleavedPlaneViewEdit` returns one uint8 plane
+`(num_logical_blocks, scheduler_block_size, 1, page_bytes / scheduler_block_size)`
+(format 17, `NL_X_NP_X_NB_BS_ONE_HS`, when the edit wraps it in a one-element
+list). The interleaved rule is registered first; a pair that matches neither
+layout is left unchanged. Matching uses strides and contiguity, not the
+vLLM-Ascend version string — the table rows are the layouts those releases
+emit today.
 
 ### 3. Sub-paged MLA
 
@@ -182,9 +194,17 @@ rather than being transferred wrongly.
 
 An edited view's dims are addressing metadata only (block id → byte range).
 The named dims are **not** semantic: a Mamba view's "K plane" is conv/ssm
-bytes, The contiguous attention reshape keeps K, V, dtype, and heads, and only
-changes the block axis (format 16).
-The synthetic head shape on the opaque views signals this deliberately.
+bytes, and a sub-paged attention view's "K plane" interleaves true K and V at
+kernel-page granularity (true K is not contiguous across kernel pages, so no
+logical-block view can have a pure-K plane). The synthetic head shape
+`(1, page_bytes / (2 * block_size * elem))` signals this deliberately.
+
+vLLM-Ascend adds two sub-paged attention edits on top of that contract. A
+fused or v0.30 interleaved `(K, V)` pair is re-paged as one uint8 plane that
+mixes true K and V at kernel-page granularity (registers as format 17 when
+returned in a one-element list; a flat rank-4 tensor would be format 13). The
+v0.29 contiguous reshape keeps K, V, dtype, and heads, and only changes the
+block axis (format 16).
 
 Byte transport round-trips correctly because store and retrieve share the same
 bijective block-id → bytes mapping. Consequences:
@@ -200,13 +220,16 @@ bijective block-id → bytes mapping. Consequences:
 ## Invariants
 
 - Edits are pure tensor views over the registered storage — never copies.
-- A sub-paged view is only produced when `k` kernel pages tile the logical
-  page: one fused span of `spec.page_size_bytes`, or the two contiguous
-  halves added together equaling `real_page_size_bytes` (falling back to
-  `page_size_bytes` when the spec has no unpadded size). A matched
-  layout whose bytes do not tile raises `ValueError` rather than transferring
-  a compressed layout. A pair that is not one of the recognized layouts is
-  left unchanged.
+- A sub-paged view is only produced when `kernel_page_bytes * k ==
+  spec.page_size_bytes`; any mismatch raises `ValueError` (fail loudly rather
+  than silently transfer a compressed layout).
+- On vLLM-Ascend, a sub-paged view is also produced when `k` kernel pages tile
+  the logical page: one fused or interleaved span of `spec.page_size_bytes`,
+  or the two contiguous halves added together equaling `real_page_size_bytes`
+  (falling back to `page_size_bytes` when the spec has no unpadded size). A
+  matched layout whose bytes do not tile raises `ValueError` rather than
+  transferring a compressed layout. A pair that is not one of the recognized
+  layouts is left unchanged.
 - After edits, every registered tensor's block dim equals its group's
   `kv_cache_spec.block_size`, so the server derives `compress_ratio == 1` for
   these groups.

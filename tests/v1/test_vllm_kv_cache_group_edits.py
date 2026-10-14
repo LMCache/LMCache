@@ -558,6 +558,58 @@ def test_flash_attention_hybrid_needs_no_attention_edit(edits):
     assert edited["attn.0"].shape[2] == LOGICAL_BLOCK_SIZE
 
 
+def _mamba_kv_cache_with_prefix(
+    prefix_elems: int,
+) -> tuple[list[torch.Tensor], int, torch.Tensor]:
+    """vLLM-Ascend v0.30 packed pages after ``prefix_elems`` in a shared pool."""
+    elem = torch.finfo(torch.bfloat16).bits // 8
+    elems_per_page = 2 * LOGICAL_BLOCK_SIZE * 3
+    conv_elems = 2 * LOGICAL_BLOCK_SIZE
+    ssm_elems = 2 * LOGICAL_BLOCK_SIZE
+    storage = torch.arange(
+        prefix_elems + NUM_LOGICAL_BLOCKS * elems_per_page, dtype=torch.bfloat16
+    )
+    storage[:prefix_elems] = -1
+    conv_state = storage.as_strided(
+        (NUM_LOGICAL_BLOCKS, conv_elems),
+        (elems_per_page, 1),
+        storage_offset=prefix_elems,
+    )
+    ssm_state = storage.as_strided(
+        (NUM_LOGICAL_BLOCKS, ssm_elems),
+        (elems_per_page, 1),
+        storage_offset=prefix_elems + conv_elems,
+    )
+    return [conv_state, ssm_state], elems_per_page * elem, storage
+
+
+def test_mamba_page_view_handles_nonzero_storage_offset(edits):
+    """vLLM-Ascend v0.30 Mamba state starts at a nonzero storage offset."""
+    prefix_elems = 64
+    caches, page_bytes, storage = _mamba_kv_cache_with_prefix(prefix_elems)
+    spec = _mamba_spec(page_bytes)
+    assert edits._MambaPageViewEdit().matches(spec, caches)
+    viewed = edits._MambaPageViewEdit().apply(spec, caches, {})
+
+    elems_per_page = page_bytes // storage.element_size()
+    assert viewed.dtype == storage.dtype
+    assert tuple(viewed.shape) == (
+        NUM_LOGICAL_BLOCKS,
+        2,
+        LOGICAL_BLOCK_SIZE,
+        1,
+        elems_per_page // (2 * LOGICAL_BLOCK_SIZE),
+    )
+    assert int(viewed.storage_offset()) == prefix_elems
+    expected = storage.as_strided(
+        (NUM_LOGICAL_BLOCKS, elems_per_page),
+        (elems_per_page, 1),
+        storage_offset=prefix_elems,
+    )
+    torch.testing.assert_close(viewed.reshape(NUM_LOGICAL_BLOCKS, -1), expected)
+    assert int(viewed.reshape(-1)[0]) != -1
+
+
 def _subpaged_kv_planes(
     *,
     prefix_elems: int = 0,
@@ -610,6 +662,69 @@ def _subpaged_kv_planes(
     return k_plane, v_plane, spec, storage
 
 
+def test_subpaged_plane_edit_fires_on_interleaved_kv(edits):
+    """vLLM-Ascend v0.30 interleaved K/V planes must be re-paged.
+
+    The fused rank-4/5 rule does not match a pair, so the interleaved rule
+    is what restores the scheduler block size. The output is one uint8
+    plane (format 13), and the contiguous rule must not also match.
+    """
+    k_plane, v_plane, spec, _storage = _subpaged_kv_planes()
+    pair = (k_plane, v_plane)
+    interleaved = edits._SubpagedAttentionInterleavedPlaneViewEdit()
+    contiguous = edits._SubpagedAttentionContiguousPlaneViewEdit()
+    assert interleaved.matches(spec, pair)
+    assert not contiguous.matches(spec, pair)
+    viewed = _edit_attention(edits, pair, attention_spec=spec)
+    assert len(viewed) == 1
+    plane = viewed[0]
+    page_bytes = int(spec.page_size_bytes)
+    width = page_bytes // int(spec.block_size)
+    assert plane.dtype == torch.uint8
+    assert tuple(plane.shape) == (
+        int(k_plane.shape[0]) // (int(spec.block_size) // int(k_plane.shape[1])),
+        int(spec.block_size),
+        1,
+        width,
+    )
+    assert tuple(plane.stride()) == (page_bytes, width, width, 1)
+    uint8_offset = int(k_plane.view(torch.uint8).storage_offset())
+    assert int(plane.storage_offset()) == uint8_offset
+
+
+def test_subpaged_plane_edit_groups_contiguous_kernel_pages(edits):
+    """Logical block ``n`` must cover kernel pages ``n*k .. n*k+k-1``.
+
+    vLLM-Ascend v0.30 interleaves those pages in one pool, and bytes before
+    K's storage offset are not part of block 0.
+    """
+    prefix_elems = 17
+    k_plane, v_plane, spec, storage = _subpaged_kv_planes(prefix_elems=prefix_elems)
+    plane = _edit_attention(edits, (k_plane, v_plane), attention_spec=spec)[0]
+
+    raw = storage.view(torch.uint8)
+    page_bytes = spec.page_size_bytes
+    base = prefix_elems * storage.element_size()
+    for block in range(plane.shape[0]):
+        start = base + block * page_bytes
+        torch.testing.assert_close(
+            plane[block].reshape(-1), raw[start : start + page_bytes]
+        )
+    assert int(raw[0]) != int(plane.reshape(-1)[0])
+
+
+def test_subpaged_plane_edit_rejects_separate_kv_planes(edits):
+    """A one-row stride that does not tile the logical page is left unchanged."""
+    k_plane, v_plane, spec, _storage = _subpaged_kv_planes(interleaved=False)
+    pair = (k_plane, v_plane)
+    interleaved = edits._SubpagedAttentionInterleavedPlaneViewEdit()
+    contiguous = edits._SubpagedAttentionContiguousPlaneViewEdit()
+    assert not interleaved.matches(spec, pair)
+    assert not contiguous.matches(spec, pair)
+    assert not interleaved.matches(spec, [k_plane])
+    assert not contiguous.matches(spec, [k_plane])
+
+
 def test_subpaged_plane_edit_groups_contiguous_kernel_pages_per_plane(edits):
     """Logical block ``n`` covers kernel pages ``n*k .. n*k+k-1`` on each plane.
 
@@ -621,7 +736,9 @@ def test_subpaged_plane_edit_groups_contiguous_kernel_pages_per_plane(edits):
         prefix_elems=prefix_elems, contiguous=True
     )
     pair = (k_plane, v_plane)
+    interleaved = edits._SubpagedAttentionInterleavedPlaneViewEdit()
     contiguous = edits._SubpagedAttentionContiguousPlaneViewEdit()
+    assert not interleaved.matches(spec, pair)
     assert contiguous.matches(spec, pair)
     viewed = _edit_attention(edits, pair, attention_spec=spec)
     assert len(viewed) == 2
@@ -684,7 +801,29 @@ def test_subpaged_plane_edit_rejects_untiled_contiguous_kv(edits):
     pair = (k_plane, v_plane)
     edit = edits._SubpagedAttentionContiguousPlaneViewEdit()
     assert not edit.matches(spec, pair)
+    assert not edits._SubpagedAttentionInterleavedPlaneViewEdit().matches(spec, pair)
     with pytest.raises(ValueError, match="do not tile the logical page"):
         edit.apply(spec, pair, {})
     assert _edit_attention(edits, pair, attention_spec=spec) is pair
 
+
+def test_subpaged_plane_rules_are_ordered_and_exclusive(edits):
+    """Interleaved matches before contiguous, and exactly one rule fires."""
+    names = [type(edit).__name__ for edit in edits._EDITS]
+    interleaved = "_SubpagedAttentionInterleavedPlaneViewEdit"
+    contiguous = "_SubpagedAttentionContiguousPlaneViewEdit"
+    fused = "_SubpagedAttentionViewEdit"
+    assert names.index(interleaved) < names.index(contiguous)
+    assert names.index(contiguous) < names.index(fused)
+    for contiguous_layout in (False, True):
+        k_plane, v_plane, spec, _storage = _subpaged_kv_planes(
+            contiguous=contiguous_layout
+        )
+        pair = (k_plane, v_plane)
+        matches = [
+            type(edit).__name__
+            for edit in edits._EDITS
+            if edit.matches(spec, pair)
+        ]
+        expected = contiguous if contiguous_layout else interleaved
+        assert matches == [expected]

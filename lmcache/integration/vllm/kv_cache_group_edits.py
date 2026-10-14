@@ -5,7 +5,7 @@ This is needed to mask out attention-specific details while making sure that
 LMCache can still store / load KV cache correctly.
 
 Currently there are four Mamba-related edits plus the sub-paged attention
-edits (fused tensor, contiguous plane, and MLA), one per
+edits (fused tensor, interleaved plane, contiguous plane, and MLA), one per
 :class:`KVCacheGroupEdit` subclass below. The registry is only consulted when
 ``kv_cache_config.has_mamba_layers``. :func:`validate_kv_cache_groups`
 additionally rejects, at startup, group specs the transfer path cannot serve
@@ -273,21 +273,17 @@ class _MambaPageViewEdit(KVCacheGroupEdit):
         kv_cache: RegisteredKVCache,
         _layout_hints: LayoutHints,
     ) -> torch.Tensor:
-        # vLLM lays out one padded page per block as (conv | ssm | pad), and
-        # the conv state is the view that starts at the page base: its leading
-        # dim is the block count and its per-block stride is one full page.
-        # Re-striding it therefore covers the whole page, ssm and pad included.
+        # vLLM lays out one padded page per block as (conv | ssm | pad). The
+        # conv state's leading dim is the block count and its per-block stride
+        # is one full page; it may start at a non-zero storage offset when the
+        # pool is shared across layers. Re-striding covers the whole page, ssm
+        # and pad included, without including bytes before that offset.
         if not isinstance(kv_cache, list) or not kv_cache:
             raise ValueError(
                 f"expected a Mamba [conv_state, ssm_state] tensor list, "
                 f"got {type(kv_cache).__name__}"
             )
         conv_state = kv_cache[0]
-        if conv_state.storage_offset() != 0:
-            raise ValueError(
-                f"Mamba conv state must view the page base, got "
-                f"storage_offset={conv_state.storage_offset()}"
-            )
         if conv_state.stride(0) * conv_state.element_size() != spec.page_size_bytes:
             raise ValueError(
                 f"Mamba conv state per-block stride "
@@ -299,7 +295,11 @@ class _MambaPageViewEdit(KVCacheGroupEdit):
         num_heads, head_size = _synthetic_attention_shape(
             elems_per_page, spec.block_size
         )
-        flat = conv_state.as_strided((num_blocks, elems_per_page), (elems_per_page, 1))
+        flat = conv_state.as_strided(
+            (num_blocks, elems_per_page),
+            (elems_per_page, 1),
+            storage_offset=conv_state.storage_offset(),
+        )
         return flat.reshape(num_blocks, 2, spec.block_size, num_heads, head_size)
 
 
@@ -777,6 +777,107 @@ def _subpaged_plane_pair_ratio(
     return ratio
 
 
+class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
+    """Re-view interleaved K/V kernel pages as one logical byte plane.
+
+    vLLM-Ascend v0.30 pages hybrid attention as two rank-4 tensors at the
+    kernel block size (``select_common_block_size``), while the scheduler
+    uses the inflated hybrid block (``_align_hybrid_block_size``). K and V
+    share one pool:
+
+        ``[K0][V0][K1][V1]...``
+
+    K's ``stride(0)`` is one K row plus the following V row, and V starts at
+    the next row. The eight K+V pairs of one scheduler block are one
+    contiguous byte span, so the edit is one uint8 plane over K's storage.
+    That plane detects as ``NL_X_NB_BS_NH_CS`` (format 13). Separate
+    1024-token K and V views are not possible without a copy.
+
+    The tile check uses ``page_size_bytes``, the full interleaved span.
+    """
+
+    name = "subpaged-attention-interleaved-plane-view"
+
+    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+        planes = _attention_kv_plane_pair(kv_cache)
+        if planes is None:
+            return False
+        k_plane, v_plane = planes
+        ratio = _subpaged_plane_pair_ratio(spec, k_plane, v_plane)
+        if ratio is None:
+            return False
+        row_elems = int(k_plane.shape[1:].numel())
+        row_bytes = row_elems * int(k_plane.element_size())
+        kernel_stride_bytes = int(k_plane.stride(0)) * int(k_plane.element_size())
+        # One KV head per rank makes index 2 equal 1. A wider head axis is
+        # not this interleaved NHD layout.
+        if not (
+            int(k_plane.shape[2]) == 1
+            and kernel_stride_bytes == 2 * row_bytes
+            and v_plane.stride(0) == k_plane.stride(0)
+            and v_plane.element_size() == k_plane.element_size()
+            and v_plane.storage_offset() == k_plane.storage_offset() + row_elems
+        ):
+            return False
+        return kernel_stride_bytes * ratio == int(spec.page_size_bytes)
+
+    def apply(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        _layout_hints: LayoutHints,
+    ) -> list[torch.Tensor]:
+        """Return one uint8 plane covering each logical K+V page.
+
+        Raises:
+            ValueError: If ``kv_cache`` is not a two-tensor pair, or the
+                interleaved kernel pages do not tile ``page_size_bytes``.
+        """
+        planes = _attention_kv_plane_pair(kv_cache)
+        if planes is None:
+            raise ValueError(
+                f"expected a (K, V) attention pair, got {type(kv_cache).__name__}"
+            )
+        k_plane, _v_plane = planes
+        logical_block_size = int(spec.block_size)
+        kernel_block_size = int(k_plane.shape[1])
+        if kernel_block_size <= 0 or logical_block_size % kernel_block_size != 0:
+            raise ValueError(
+                f"logical block size {logical_block_size} is not a multiple of "
+                f"kernel block size {kernel_block_size}"
+            )
+        ratio = logical_block_size // kernel_block_size
+        page_size_bytes = int(spec.page_size_bytes)
+        kernel_stride_bytes = int(k_plane.stride(0)) * int(k_plane.element_size())
+        logical_block_stride_bytes = ratio * kernel_stride_bytes
+        if logical_block_stride_bytes != page_size_bytes:
+            raise ValueError(
+                f"{ratio} interleaved kernel pages ({logical_block_stride_bytes} "
+                f"bytes) do not tile the logical page ({page_size_bytes} bytes)"
+            )
+        if page_size_bytes % logical_block_size != 0:
+            raise ValueError(
+                f"scheduler block size {logical_block_size} does not divide the "
+                f"{page_size_bytes}-byte page"
+            )
+        num_kernel_pages = int(k_plane.shape[0])
+        if num_kernel_pages % ratio != 0:
+            raise ValueError(
+                f"kernel page count {num_kernel_pages} is not a multiple of "
+                f"the logical/kernel block ratio {ratio}"
+            )
+        num_logical_blocks = num_kernel_pages // ratio
+        width = page_size_bytes // logical_block_size
+        page_u8 = k_plane.view(torch.uint8)
+        return [
+            page_u8.as_strided(
+                (num_logical_blocks, logical_block_size, 1, width),
+                (logical_block_stride_bytes, width, width, 1),
+                storage_offset=int(page_u8.storage_offset()),
+            )
+        ]
+
+
 class _SubpagedAttentionContiguousPlaneViewEdit(KVCacheGroupEdit):
     """Re-view two contiguous kernel-paged planes at the scheduler block.
 
@@ -864,12 +965,14 @@ class _SubpagedAttentionContiguousPlaneViewEdit(KVCacheGroupEdit):
         return [k_plane.view(logical_shape), v_plane.view(logical_shape)]
 
 
-# Rule registry, in match priority order.
+# Rule registry, in match priority order. The interleaved stride signature is
+# registered before the broader contiguous-plane rule.
 _EDITS: tuple[KVCacheGroupEdit, ...] = (
     _MambaUnifiedViewEdit(),
     _MambaPageViewEdit(),
     _MambaSlicePlaneEdit(),
     _SubpagedMLAAttentionViewEdit(),
+    _SubpagedAttentionInterleavedPlaneViewEdit(),
     _SubpagedAttentionContiguousPlaneViewEdit(),
     _SubpagedAttentionViewEdit(),
 )

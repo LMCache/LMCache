@@ -521,22 +521,16 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
 # means num_planes, NP = 1 latent-only, 2 MLA, 3 DSA, HS possibly
 # differing per plane)
 #
-# ``NL_X_NB_TWO_BS_NH_HS`` *could* in principle also be the block
-# axis on dim-0, but no real serving engine emits a padded layout of
-# that format yet, and supporting it would require: (a) deciding
-# (without a ground-truth example) which axis carries the padding
-# -- NB boundary vs K<->V offset -- and (b) a coordinated change in
-# ``attempt_permute_to_contiguous_view`` to let interior-dim padding
-# through for that one format. Rather than ship an unverifiable code
-# path, we keep ``NL_X_NB_TWO_BS_NH_HS`` out of this set, which means
-# any padded tensor of that format will fail loudly via the
-# non-block-axis dim-0-padding check below. Revisit and add a
-# properly-tested branch when a concrete use case lands.
+# ``NL_X_NB_TWO_BS_NH_HS``: after ``_MambaPageViewEdit``, a vLLM-Ascend
+# v0.30 packed Mamba page is one 5D tensor. Dim-0 remains the block axis, and
+# ``stride(0)`` is the padded page (``conv | ssm | pad``), not the tight
+# product of the inner dims.
 _BLOCK_AXIS_FORMATS: frozenset = frozenset(
     {
         lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
         lmcache_native.EngineKVFormat.NL_X_NB_BSV_BSS,
         lmcache_native.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,
+        lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
         # Under vLLM's blocks-first layouts (BLHNC / BLNHC) these views'
         # stride(0) spans every layer's bytes for the block; when the cache
         # is layer-compact, stride(0) is simply the tight per-block step.
