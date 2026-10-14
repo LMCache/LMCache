@@ -52,14 +52,8 @@ from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
 )
 from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
 from lmcache.v1.mp_coordinator.observability import (
-    register_background_loop_metrics,
-    register_broadcaster_metrics,
-    register_controller_metrics,
-    register_event_gate_metrics,
-    register_event_loop_metrics,
-    register_kafka_source_metrics,
-    register_key_directory_metrics,
-    register_registry_metrics,
+    CoordinatorMetricSources,
+    register_coordinator_metrics,
 )
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
@@ -172,15 +166,22 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # Whether each controller's run() was entered; the lifespan flips it.
     controllers_up = {type(c).__name__: False for c in controllers.all()}
     if config.metrics_enabled:
-        register_key_directory_metrics(views.get(KeyDirectory))
-        register_background_loop_metrics(background_loops)
-        register_controller_metrics(controllers_up)
-        register_event_loop_metrics(event_loop_monitor)
-        register_registry_metrics(registry)
-        register_event_gate_metrics(event_gate)
-        register_broadcaster_metrics(event_broadcaster)
-        if isinstance(event_source, KafkaCacheEventSource):
-            register_kafka_source_metrics(event_source)
+        register_coordinator_metrics(
+            CoordinatorMetricSources(
+                key_directory=views.get(KeyDirectory),
+                event_gate=event_gate,
+                broadcaster=event_broadcaster,
+                background_loops=background_loops,
+                event_loop_monitor=event_loop_monitor,
+                registry=registry,
+                controllers_up=controllers_up,
+                kafka_source=(
+                    event_source
+                    if isinstance(event_source, KafkaCacheEventSource)
+                    else None
+                ),
+            )
+        )
 
     ctx = CoordinatorContext(
         views=views,

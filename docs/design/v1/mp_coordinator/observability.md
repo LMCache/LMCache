@@ -363,7 +363,8 @@ Three steps, each one or more small PRs. Tests read public state only:
 | P2 | HTTP server and outbound metrics; tracing once trace context exists | `test_metrics_api.py`, `test_directory_api.py`, `test_cache_api.py` |
 
 Components keep plain running totals and `stats()` snapshots and create no
-instruments. Every instrument is registered in `observability.py`, reading
-those snapshots; its `register_*_metrics` functions take an optional `meter`.
+instruments. Every metric is one row of a table in `observability.py`, read
+from those snapshots; `register_coordinator_metrics` registers them all and
+takes an optional `meter`.
 Production passes nothing and gets the global one; tests pass a private meter
 so readings don't leak between tests.

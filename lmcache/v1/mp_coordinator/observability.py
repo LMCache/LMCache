@@ -2,12 +2,15 @@
 """OpenTelemetry metrics for the MP coordinator.
 
 Metric names are part of the coordinator's versioned contract: dashboards and
-alerts depend on them. See ``docs/design/v1/mp_coordinator/observability.md``.
+alerts depend on them. Every metric is one row of :func:`_metric_specs`, read
+at scrape time from a component's ``stats()`` snapshot. See
+``docs/design/v1/mp_coordinator/observability.md``.
 """
 
 # Standard
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 import socket
 import time
 
@@ -43,9 +46,35 @@ if TYPE_CHECKING:
         KeyDirectory,
     )
 
+# ``(value, attributes)`` per series, as one metric reports at a scrape.
+Points = list[tuple[float, dict[str, str]]]
 
-# The meter every coordinator instrument is registered on.
-_METER_NAME = "lmcache.mp_coordinator"
+
+@dataclass(frozen=True)
+class CoordinatorMetricSources:
+    """The components the coordinator's metrics read.
+
+    Attributes:
+        key_directory: Placements and their bytes.
+        event_gate: Cache-event loss and freshness, fleet-wide and per server.
+        broadcaster: Per-consumer apply time and failures.
+        background_loops: Liveness of every periodic loop.
+        event_loop_monitor: How long the event loop was blocked.
+        registry: Fleet membership and heartbeats.
+        controllers_up: Whether each controller, keyed by class name,
+            started. The app fills it in as it enters each controller.
+        kafka_source: The Kafka cache-event source, or ``None`` when events
+            arrive over HTTP (no Kafka metrics then).
+    """
+
+    key_directory: "KeyDirectory"
+    event_gate: "EventGate"
+    broadcaster: "CacheEventBroadcaster"
+    background_loops: "BackgroundLoops"
+    event_loop_monitor: "EventLoopMonitor"
+    registry: "InstanceRegistry"
+    controllers_up: Mapping[str, bool]
+    kafka_source: "KafkaCacheEventSource | None" = None
 
 
 def init_coordinator_metrics(config: MPCoordinatorConfig) -> None:
@@ -72,429 +101,263 @@ def init_coordinator_metrics(config: MPCoordinatorConfig) -> None:
     )
 
 
-def register_key_directory_metrics(
-    key_directory: "KeyDirectory", meter: "Meter | None" = None
+def register_coordinator_metrics(
+    sources: CoordinatorMetricSources, meter: "Meter | None" = None
 ) -> None:
-    """Register gauges for the current Key Directory placement state.
+    """Register every coordinator metric over ``sources``.
 
-    The callbacks remain bound to the directory owned by the coordinator app.
-    The pre-rename ``lmcache_mp.*`` names are emitted alongside for one
-    release, so existing dashboards keep working while they migrate.
+    Each instrument is observable: it reads a component's ``stats()`` at
+    scrape time, so nothing in the components records into OTel.
 
     Args:
-        key_directory: The actual discovered directory used by the coordinator.
+        sources: The components the metrics read.
         meter: Meter to register on. Defaults to the global provider's
             coordinator meter; tests pass one from a private provider.
     """
     if meter is None:
-        meter = metrics.get_meter(_METER_NAME)
-    placements_callback = _make_tier_gauge_callback(
-        key_directory, lambda stats: (stats.l1_count, stats.l2_count)
-    )
-    placement_bytes_callback = _make_tier_gauge_callback(
-        key_directory, lambda stats: (stats.l1_size_bytes, stats.l2_size_bytes)
-    )
-    meter.create_observable_gauge(
-        "lmcache_coordinator.key_directory.placements",
-        callbacks=[placements_callback],
-        description="Placements recorded in the key directory, by tier. A "
-        "placement is one place a key is stored: L1 on one server, or one L2 "
-        "backend.",
-    )
-    meter.create_observable_gauge(
-        "lmcache_coordinator.key_directory.placement_bytes",
-        callbacks=[placement_bytes_callback],
-        description="Reported logical bytes of the placements recorded in the "
-        "key directory, by tier.",
-    )
-    # TODO(ruizhang0101): remove the pre-rename names one release after the
-    # lmcache_coordinator.* names ship.
-    meter.create_observable_gauge(
-        "lmcache_mp.key_directory_placement_count",
-        callbacks=[placements_callback],
-        description="Deprecated: use lmcache_coordinator.key_directory.placements.",
-    )
-    meter.create_observable_gauge(
-        "lmcache_mp.key_directory_placement_size_bytes",
-        callbacks=[placement_bytes_callback],
-        description="Deprecated: use "
-        "lmcache_coordinator.key_directory.placement_bytes.",
-    )
+        meter = metrics.get_meter("lmcache.mp_coordinator")
+    for spec in _metric_specs(sources):
+        create = (
+            meter.create_observable_gauge
+            if spec.kind == "gauge"
+            else meter.create_observable_counter
+        )
+        create(
+            spec.name,
+            callbacks=[_make_observation_callback(spec.read)],
+            unit=spec.unit,
+            description=spec.description,
+        )
 
 
-def register_event_gate_metrics(
-    event_gate: "EventGate", meter: "Meter | None" = None
-) -> None:
-    """Register the gate's loss metrics: fleet counters and per-server gauges.
+@dataclass(frozen=True)
+class _MetricSpec:
+    """One metric: its name, instrument kind, description and reader."""
 
-    Both read :meth:`EventGate.stats`. The counters cover this process's
-    lifetime. The gauges give one series per
-    emitter the gate tracks, gone when its cursor goes (departure or
-    timeout), which is why per-server values are gauges rather than
-    counters. Each covers the emitter's current incarnation.
-
-    Args:
-        event_gate: The gate admitting the coordinator's cache events.
-        meter: Meter to register on. Defaults to the global provider's
-            coordinator meter; tests pass one from a private provider.
-    """
-    if meter is None:
-        meter = metrics.get_meter(_METER_NAME)
-
-    def read_batches_received() -> list[tuple[float, dict[str, str]]]:
-        stats = event_gate.stats()
-        return [
-            (stats.batches_applied, {"result": "applied"}),
-            (stats.batches_duplicate, {"result": "duplicate"}),
-            (stats.batches_stale, {"result": "stale"}),
-        ]
-
-    meter.create_observable_counter(
-        "lmcache_coordinator.ingest.event_batches_received",
-        callbacks=[_make_observation_callback(read_batches_received)],
-        description="Cache-event batches received from mp servers, by what "
-        "the gate did with them.",
-    )
-    meter.create_observable_counter(
-        "lmcache_coordinator.ingest.event_batches_missing",
-        callbacks=[
-            _make_observation_callback(
-                lambda: [(event_gate.stats().batches_missing, {})]
-            )
-        ],
-        description="Cache-event batches that never arrived: skipped seq "
-        "values in a stream the gate was already tracking.",
-    )
-    meter.create_observable_counter(
-        "lmcache_coordinator.ingest.events_dropped_by_servers",
-        callbacks=[
-            _make_observation_callback(
-                lambda: [(event_gate.stats().events_dropped, {})]
-            )
-        ],
-        description="Cache events the mp servers reported dropping before "
-        "they reached the coordinator.",
-    )
-    meter.create_observable_gauge(
-        "lmcache_coordinator.ingest.server_event_batches_missing",
-        callbacks=[
-            _make_server_gauge_callback(
-                event_gate, lambda stream: stream.missing_batches
-            )
-        ],
-        description="Cache-event batches from this server that never arrived, "
-        "in its current run.",
-    )
-    meter.create_observable_gauge(
-        "lmcache_coordinator.ingest.server_events_dropped",
-        callbacks=[
-            _make_server_gauge_callback(
-                event_gate, lambda stream: stream.events_dropped
-            )
-        ],
-        description="Cache events this server reported dropping before they "
-        "reached the coordinator, in its current run.",
-    )
-    meter.create_observable_gauge(
-        "lmcache_coordinator.ingest.server_view_incomplete",
-        callbacks=[
-            _make_server_gauge_callback(
-                event_gate, lambda stream: int(stream.gap_detected)
-            )
-        ],
-        description="1 while the coordinator knows it is missing part of this "
-        "server's cache.",
-    )
-    meter.create_observable_gauge(
-        "lmcache_coordinator.ingest.server_seconds_since_last_event",
-        callbacks=[
-            _make_server_gauge_callback(
-                event_gate, lambda stream: stream.seconds_since_last_event
-            )
-        ],
-        description="Seconds since this server's last cache-event batch was applied.",
-    )
-    meter.create_observable_gauge(
-        "lmcache_coordinator.ingest.server_event_delivery_delay_seconds",
-        callbacks=[
-            _make_server_gauge_callback(
-                event_gate, lambda stream: stream.event_delivery_delay_seconds
-            )
-        ],
-        unit="s",
-        description="For this server's last applied batch, time from the "
-        "server sending it to the coordinator applying it, across the two "
-        "hosts' clocks.",
-    )
+    name: str
+    kind: Literal["gauge", "counter"]
+    description: str
+    read: Callable[[], Points]
+    unit: str = ""
 
 
-def register_broadcaster_metrics(
-    broadcaster: "CacheEventBroadcaster", meter: "Meter | None" = None
-) -> None:
-    """Register per-consumer counters over the broadcaster's tallies.
-
-    Every view and controller that consumes cache events gets the same
-    three series, labelled by its class name: batches delivered, time spent
-    applying them (apply time / batches delivered is the average per
-    batch), and failures. A failure leaves that consumer disagreeing with
-    the others.
-
-    Args:
-        broadcaster: The broadcaster fanning batches out to the consumers.
-        meter: Meter to register on. Defaults to the global provider's
-            coordinator meter; tests pass one from a private provider.
-    """
-    if meter is None:
-        meter = metrics.get_meter(_METER_NAME)
-
-    def read_batches_delivered() -> list[tuple[float, dict[str, str]]]:
-        return [
-            (stats.batches_delivered, {"consumer": consumer})
-            for consumer, stats in broadcaster.stats().items()
-        ]
-
-    def read_apply_seconds() -> list[tuple[float, dict[str, str]]]:
-        return [
-            (stats.apply_seconds, {"consumer": consumer})
-            for consumer, stats in broadcaster.stats().items()
-        ]
-
-    def read_apply_failures() -> list[tuple[float, dict[str, str]]]:
-        points: list[tuple[float, dict[str, str]]] = []
-        for consumer, stats in broadcaster.stats().items():
-            points.append(
-                (stats.consume_failures, {"consumer": consumer, "op": "consume"})
-            )
-            points.append((stats.fence_failures, {"consumer": consumer, "op": "fence"}))
-        return points
-
-    meter.create_observable_counter(
-        "lmcache_coordinator.ingest.batches_delivered",
-        callbacks=[_make_observation_callback(read_batches_delivered)],
-        description="Admitted cache-event batches handed to each consumer.",
-    )
-    meter.create_observable_counter(
-        "lmcache_coordinator.ingest.batch_apply_time_seconds",
-        callbacks=[_make_observation_callback(read_apply_seconds)],
-        description="Time each consumer spent applying admitted batches.",
-    )
-    meter.create_observable_counter(
-        "lmcache_coordinator.ingest.batch_apply_failures",
-        callbacks=[_make_observation_callback(read_apply_failures)],
-        description="Batches (op=consume) or fences (op=fence) a consumer "
-        "failed to apply; that consumer now disagrees with the others.",
-    )
-
-
-def register_kafka_source_metrics(
-    source: "KafkaCacheEventSource", meter: "Meter | None" = None
-) -> None:
-    """Register the Kafka source's read and lag metrics.
-
-    All read :meth:`KafkaCacheEventSource.stats`: records read by outcome
-    (a counter for this process's lifetime), and the partitions held and
-    records not yet read per partition (gauges).
-
-    Args:
-        source: The Kafka source feeding the gate.
-        meter: Meter to register on. Defaults to the global provider's
-            coordinator meter; tests pass one from a private provider.
-    """
-    if meter is None:
-        meter = metrics.get_meter(_METER_NAME)
-
-    def read_records_read() -> list[tuple[float, dict[str, str]]]:
-        stats = source.stats()
-        return [
-            (stats.records_applied, {"result": "applied"}),
-            (stats.records_undecodable, {"result": "undecodable"}),
-            (stats.records_failed, {"result": "failed"}),
-        ]
-
-    def read_unread_records() -> list[tuple[float, dict[str, str]]]:
-        return [
-            (unread, {"partition": str(partition)})
-            for partition, unread in source.stats().unread_records.items()
-        ]
-
-    meter.create_observable_counter(
-        "lmcache_coordinator.kafka.records_read",
-        callbacks=[_make_observation_callback(read_records_read)],
-        description="Cache-event records read from Kafka, by outcome: applied, "
-        "or skipped as undecodable or failed.",
-    )
-    meter.create_observable_gauge(
-        "lmcache_coordinator.kafka.partitions_assigned",
-        callbacks=[
-            _make_observation_callback(
-                lambda: [(source.stats().partitions_assigned, {})]
-            )
-        ],
-        description="Partitions of the cache-event topic this coordinator "
-        "holds; fewer than the topic has means another consumer-group member "
-        "holds the rest.",
-    )
-    meter.create_observable_gauge(
-        "lmcache_coordinator.kafka.unread_records",
-        callbacks=[_make_observation_callback(read_unread_records)],
-        description="Cache-event records not yet read, per partition.",
-    )
-
-
-def register_background_loop_metrics(
-    background_loops: "BackgroundLoops", meter: "Meter | None" = None
-) -> None:
-    """Register liveness metrics for every loop started on ``background_loops``.
-
-    All read :meth:`BackgroundLoops.stats`, so loops started later (a
-    controller's, once the app runs) are reported too. ``time() -
-    last_success_timestamp_seconds > 3 * interval_seconds`` means a loop has
-    stopped making progress.
-
-    Args:
-        background_loops: The runner the coordinator's loops are started on.
-        meter: Meter to register on. Defaults to the global provider's
-            coordinator meter; tests pass one from a private provider.
-    """
-    if meter is None:
-        meter = metrics.get_meter(_METER_NAME)
-
-    def read_last_success() -> list[tuple[float, dict[str, str]]]:
-        return [
-            (stats.last_success_timestamp, {"loop": name})
-            for name, stats in background_loops.stats().items()
-            if stats.last_success_timestamp is not None
-        ]
-
-    def read_interval() -> list[tuple[float, dict[str, str]]]:
-        return [
-            (stats.interval_seconds, {"loop": name})
-            for name, stats in background_loops.stats().items()
-        ]
-
-    def read_passes() -> list[tuple[float, dict[str, str]]]:
-        points: list[tuple[float, dict[str, str]]] = []
-        for name, stats in background_loops.stats().items():
-            points.append((stats.passes_ok, {"loop": name, "result": "ok"}))
-            points.append((stats.passes_failed, {"loop": name, "result": "failed"}))
-        return points
-
-    meter.create_observable_gauge(
-        "lmcache_coordinator.background_loop.last_success_timestamp_seconds",
-        callbacks=[_make_observation_callback(read_last_success)],
-        description="Wall-clock time each background loop last finished a "
-        "pass without an error.",
-    )
-    meter.create_observable_gauge(
-        "lmcache_coordinator.background_loop.interval_seconds",
-        callbacks=[_make_observation_callback(read_interval)],
-        description="Configured seconds between each background loop's passes.",
-    )
-    meter.create_observable_counter(
-        "lmcache_coordinator.background_loop.passes",
-        callbacks=[_make_observation_callback(read_passes)],
-        description="Background loop passes, by result; a failed pass is "
-        "logged and the loop keeps running.",
-    )
-
-
-def register_controller_metrics(
-    controllers_up: Mapping[str, bool], meter: "Meter | None" = None
-) -> None:
-    """Register whether each controller is running.
-
-    Args:
-        controllers_up: Whether each controller, keyed by class name,
-            started. The app fills it in as it enters each controller.
-        meter: Meter to register on. Defaults to the global provider's
-            coordinator meter; tests pass one from a private provider.
-    """
-    if meter is None:
-        meter = metrics.get_meter(_METER_NAME)
-    meter.create_observable_gauge(
-        "lmcache_coordinator.controller.up",
-        callbacks=[
-            _make_observation_callback(
-                lambda: [
-                    (int(up), {"controller": controller})
-                    for controller, up in controllers_up.items()
-                ]
-            )
-        ],
-        description="1 if the controller is running, 0 if it failed to start "
-        "and the work it does is not happening.",
-    )
+def _metric_specs(sources: CoordinatorMetricSources) -> list[_MetricSpec]:
+    """Return the coordinator's metric catalog, bound to ``sources``."""
+    key_directory = sources.key_directory
+    event_gate = sources.event_gate
+    broadcaster = sources.broadcaster
+    loops = sources.background_loops
+    prefix = "lmcache_coordinator."
+    specs = [
+        # -- Key directory ----------------------------------------------------
+        _MetricSpec(
+            prefix + "key_directory.placements",
+            "gauge",
+            "Placements recorded in the key directory, by tier. A placement is "
+            "one place a key is stored: L1 on one server, or one L2 backend.",
+            lambda: _tier_points(key_directory, lambda s: (s.l1_count, s.l2_count)),
+        ),
+        _MetricSpec(
+            prefix + "key_directory.placement_bytes",
+            "gauge",
+            "Reported logical bytes of the placements recorded in the key "
+            "directory, by tier.",
+            lambda: _tier_points(
+                key_directory, lambda s: (s.l1_size_bytes, s.l2_size_bytes)
+            ),
+        ),
+        # TODO(ruizhang0101): remove the pre-rename names one release after
+        # the lmcache_coordinator.* names ship.
+        _MetricSpec(
+            "lmcache_mp.key_directory_placement_count",
+            "gauge",
+            "Deprecated: use lmcache_coordinator.key_directory.placements.",
+            lambda: _tier_points(key_directory, lambda s: (s.l1_count, s.l2_count)),
+        ),
+        _MetricSpec(
+            "lmcache_mp.key_directory_placement_size_bytes",
+            "gauge",
+            "Deprecated: use lmcache_coordinator.key_directory.placement_bytes.",
+            lambda: _tier_points(
+                key_directory, lambda s: (s.l1_size_bytes, s.l2_size_bytes)
+            ),
+        ),
+        # -- Ingest: is the view complete, and how old is it? -----------------
+        _MetricSpec(
+            prefix + "ingest.event_batches_received",
+            "counter",
+            "Cache-event batches received from mp servers, by what the gate "
+            "did with them.",
+            lambda: _batches_received_points(event_gate),
+        ),
+        _MetricSpec(
+            prefix + "ingest.event_batches_missing",
+            "counter",
+            "Cache-event batches that never arrived: skipped seq values in a "
+            "stream the gate was already tracking.",
+            lambda: [(event_gate.stats().batches_missing, {})],
+        ),
+        _MetricSpec(
+            prefix + "ingest.events_dropped_by_servers",
+            "counter",
+            "Cache events the mp servers reported dropping before they reached "
+            "the coordinator.",
+            lambda: [(event_gate.stats().events_dropped, {})],
+        ),
+        _MetricSpec(
+            prefix + "ingest.server_event_batches_missing",
+            "gauge",
+            "Cache-event batches from this server that never arrived, in its "
+            "current run.",
+            lambda: _server_points(event_gate, lambda s: s.missing_batches),
+        ),
+        _MetricSpec(
+            prefix + "ingest.server_events_dropped",
+            "gauge",
+            "Cache events this server reported dropping before they reached "
+            "the coordinator, in its current run.",
+            lambda: _server_points(event_gate, lambda s: s.events_dropped),
+        ),
+        _MetricSpec(
+            prefix + "ingest.server_view_incomplete",
+            "gauge",
+            "1 while the coordinator knows it is missing part of this server's cache.",
+            lambda: _server_points(event_gate, lambda s: int(s.gap_detected)),
+        ),
+        _MetricSpec(
+            prefix + "ingest.server_seconds_since_last_event",
+            "gauge",
+            "Seconds since this server's last cache-event batch was applied.",
+            lambda: _server_points(event_gate, lambda s: s.seconds_since_last_event),
+        ),
+        _MetricSpec(
+            prefix + "ingest.server_event_delivery_delay_seconds",
+            "gauge",
+            "For this server's last applied batch, time from the server "
+            "sending it to the coordinator applying it, across the two hosts' "
+            "clocks.",
+            lambda: _server_points(
+                event_gate, lambda s: s.event_delivery_delay_seconds
+            ),
+            unit="s",
+        ),
+        _MetricSpec(
+            prefix + "ingest.batches_delivered",
+            "counter",
+            "Admitted cache-event batches handed to each consumer.",
+            lambda: [
+                (stats.batches_delivered, {"consumer": consumer})
+                for consumer, stats in broadcaster.stats().items()
+            ],
+        ),
+        _MetricSpec(
+            prefix + "ingest.batch_apply_time_seconds",
+            "counter",
+            "Time each consumer spent applying admitted batches.",
+            lambda: [
+                (stats.apply_seconds, {"consumer": consumer})
+                for consumer, stats in broadcaster.stats().items()
+            ],
+        ),
+        _MetricSpec(
+            prefix + "ingest.batch_apply_failures",
+            "counter",
+            "Batches (op=consume) or fences (op=fence) a consumer failed to "
+            "apply; that consumer now disagrees with the others.",
+            lambda: _apply_failure_points(broadcaster),
+        ),
+        # -- Loops: are they alive? -------------------------------------------
+        _MetricSpec(
+            prefix + "background_loop.last_success_timestamp_seconds",
+            "gauge",
+            "Wall-clock time each background loop last finished a pass without "
+            "an error.",
+            lambda: [
+                (stats.last_success_timestamp, {"loop": name})
+                for name, stats in loops.stats().items()
+                if stats.last_success_timestamp is not None
+            ],
+        ),
+        _MetricSpec(
+            prefix + "background_loop.interval_seconds",
+            "gauge",
+            "Configured seconds between each background loop's passes.",
+            lambda: [
+                (stats.interval_seconds, {"loop": name})
+                for name, stats in loops.stats().items()
+            ],
+        ),
+        _MetricSpec(
+            prefix + "background_loop.passes",
+            "counter",
+            "Background loop passes, by result; a failed pass is logged and "
+            "the loop keeps running.",
+            lambda: _loop_pass_points(loops),
+        ),
+        _MetricSpec(
+            prefix + "controller.up",
+            "gauge",
+            "1 if the controller is running, 0 if it failed to start and the "
+            "work it does is not happening.",
+            lambda: [
+                (int(up), {"controller": controller})
+                for controller, up in sources.controllers_up.items()
+            ],
+        ),
+        _MetricSpec(
+            prefix + "event_loop.blocked_seconds",
+            "counter",
+            "Total time the coordinator's event loop was blocked.",
+            lambda: [(sources.event_loop_monitor.blocked_seconds, {})],
+            unit="s",
+        ),
+        _MetricSpec(
+            prefix + "registry.server_seconds_since_heartbeat",
+            "gauge",
+            "Seconds since each registered server's last heartbeat.",
+            lambda: _heartbeat_age_points(sources.registry),
+        ),
+    ]
+    if sources.kafka_source is not None:
+        specs.extend(_kafka_specs(sources.kafka_source))
+    return specs
 
 
-def register_event_loop_metrics(
-    event_loop_monitor: "EventLoopMonitor", meter: "Meter | None" = None
-) -> None:
-    """Register how long the coordinator's event loop was blocked.
-
-    Its rate is the fraction of wall time the loop was stalled; every
-    request handler, heartbeat and background loop waited that long.
-
-    Args:
-        event_loop_monitor: The monitor running on the coordinator's loop.
-        meter: Meter to register on. Defaults to the global provider's
-            coordinator meter; tests pass one from a private provider.
-    """
-    if meter is None:
-        meter = metrics.get_meter(_METER_NAME)
-    meter.create_observable_counter(
-        "lmcache_coordinator.event_loop.blocked_seconds",
-        callbacks=[
-            _make_observation_callback(
-                lambda: [(event_loop_monitor.blocked_seconds, {})]
-            )
-        ],
-        unit="s",
-        description="Total time the coordinator's event loop was blocked.",
-    )
-
-
-def register_registry_metrics(
-    registry: "InstanceRegistry", meter: "Meter | None" = None
-) -> None:
-    """Register the time since each registered server's last heartbeat.
-
-    One series per registered server; it disappears when the server leaves.
-    Paired with ``ingest.server_seconds_since_last_event``, it tells a
-    silent server (heartbeats, no events) from a dead one.
-
-    Args:
-        registry: The fleet membership view.
-        meter: Meter to register on. Defaults to the global provider's
-            coordinator meter; tests pass one from a private provider.
-    """
-    if meter is None:
-        meter = metrics.get_meter(_METER_NAME)
-
-    def read_heartbeat_age() -> list[tuple[float, dict[str, str]]]:
-        now = time.monotonic()
-        return [
-            (now - instance.last_heartbeat_time, {"instance_id": instance.instance_id})
-            for instance in registry.all_instances()
-        ]
-
-    meter.create_observable_gauge(
-        "lmcache_coordinator.registry.server_seconds_since_heartbeat",
-        callbacks=[_make_observation_callback(read_heartbeat_age)],
-        description="Seconds since each registered server's last heartbeat.",
-    )
+def _kafka_specs(source: "KafkaCacheEventSource") -> list[_MetricSpec]:
+    """Return the Kafka source's metrics, for a coordinator reading Kafka."""
+    prefix = "lmcache_coordinator.kafka."
+    return [
+        _MetricSpec(
+            prefix + "records_read",
+            "counter",
+            "Cache-event records read from Kafka, by outcome: applied, or "
+            "skipped as undecodable or failed.",
+            lambda: _records_read_points(source),
+        ),
+        _MetricSpec(
+            prefix + "partitions_assigned",
+            "gauge",
+            "Partitions of the cache-event topic this coordinator holds; fewer "
+            "than the topic has means another consumer-group member holds the "
+            "rest.",
+            lambda: [(source.stats().partitions_assigned, {})],
+        ),
+        _MetricSpec(
+            prefix + "unread_records",
+            "gauge",
+            "Cache-event records not yet read, per partition.",
+            lambda: [
+                (unread, {"partition": str(partition)})
+                for partition, unread in source.stats().unread_records.items()
+            ],
+        ),
+    ]
 
 
 def _make_observation_callback(
-    read_points: Callable[[], list[tuple[float, dict[str, str]]]],
+    read_points: Callable[[], Points],
 ) -> Callable[["CallbackOptions"], list["Observation"]]:
-    """Return an instrument callback reporting ``read_points``'s values.
-
-    Args:
-        read_points: Returns ``(value, attributes)`` pairs, one per series.
-
-    Returns:
-        A callback observing each pair as one series.
-    """
+    """Return an instrument callback reporting ``read_points``'s values."""
 
     def _observe(_options: "CallbackOptions") -> list["Observation"]:
         return [
@@ -505,56 +368,71 @@ def _make_observation_callback(
     return _observe
 
 
-def _make_tier_gauge_callback(
+def _tier_points(
     key_directory: "KeyDirectory",
     read_l1_and_l2: Callable[["DirectoryStats"], tuple[int, int]],
-) -> Callable[["CallbackOptions"], list["Observation"]]:
-    """Return a gauge callback that reports one value per cache tier.
-
-    Args:
-        key_directory: The directory whose stats the callback reads.
-        read_l1_and_l2: Picks the ``(l1, l2)`` values out of the stats.
-
-    Returns:
-        A callback observing the L1 value under ``tier="l1"`` and the L2
-        value under ``tier="l2"``.
-    """
-
-    def _observe_tiers(_options: "CallbackOptions") -> list["Observation"]:
-        l1_value, l2_value = read_l1_and_l2(key_directory.stats())
-        return [
-            metrics.Observation(l1_value, {"tier": "l1"}),
-            metrics.Observation(l2_value, {"tier": "l2"}),
-        ]
-
-    return _observe_tiers
+) -> Points:
+    """Return the directory's ``(l1, l2)`` values as one point per tier."""
+    l1_value, l2_value = read_l1_and_l2(key_directory.stats())
+    return [(l1_value, {"tier": "l1"}), (l2_value, {"tier": "l2"})]
 
 
-def _make_server_gauge_callback(
+def _server_points(
     event_gate: "EventGate",
     read_value: Callable[["InstanceStreamStats"], float | None],
-) -> Callable[["CallbackOptions"], list["Observation"]]:
-    """Return a gauge callback that reports one value per mp server.
+) -> Points:
+    """Return one point per tracked server, skipping a server whose value is
+    ``None`` (not known yet)."""
+    points: Points = []
+    for instance_id, stream in event_gate.stats().streams.items():
+        value = read_value(stream)
+        if value is not None:
+            points.append((value, {"instance_id": instance_id}))
+    return points
 
-    Args:
-        event_gate: The gate whose stream cursors the callback reads.
-        read_value: Picks the value to report out of one server's cursor;
-            ``None`` when that server has no value yet.
 
-    Returns:
-        A callback observing each tracked server's value under its
-        ``instance_id``. A server the gate stopped tracking, or one with no
-        value yet, is not reported.
-    """
+def _batches_received_points(event_gate: "EventGate") -> Points:
+    """Return the gate's batch counts by what it did with them."""
+    stats = event_gate.stats()
+    return [
+        (stats.batches_applied, {"result": "applied"}),
+        (stats.batches_duplicate, {"result": "duplicate"}),
+        (stats.batches_stale, {"result": "stale"}),
+    ]
 
-    def _observe_servers(_options: "CallbackOptions") -> list["Observation"]:
-        observations = []
-        for instance_id, stream in event_gate.stats().streams.items():
-            value = read_value(stream)
-            if value is not None:
-                observations.append(
-                    metrics.Observation(value, {"instance_id": instance_id})
-                )
-        return observations
 
-    return _observe_servers
+def _apply_failure_points(broadcaster: "CacheEventBroadcaster") -> Points:
+    """Return each consumer's consume and fence failures."""
+    points: Points = []
+    for consumer, stats in broadcaster.stats().items():
+        points.append((stats.consume_failures, {"consumer": consumer, "op": "consume"}))
+        points.append((stats.fence_failures, {"consumer": consumer, "op": "fence"}))
+    return points
+
+
+def _loop_pass_points(loops: "BackgroundLoops") -> Points:
+    """Return each loop's passes by result."""
+    points: Points = []
+    for name, stats in loops.stats().items():
+        points.append((stats.passes_ok, {"loop": name, "result": "ok"}))
+        points.append((stats.passes_failed, {"loop": name, "result": "failed"}))
+    return points
+
+
+def _heartbeat_age_points(registry: "InstanceRegistry") -> Points:
+    """Return the seconds since each registered server's last heartbeat."""
+    now = time.monotonic()
+    return [
+        (now - instance.last_heartbeat_time, {"instance_id": instance.instance_id})
+        for instance in registry.all_instances()
+    ]
+
+
+def _records_read_points(source: "KafkaCacheEventSource") -> Points:
+    """Return the Kafka source's records by outcome."""
+    stats = source.stats()
+    return [
+        (stats.records_applied, {"result": "applied"}),
+        (stats.records_undecodable, {"result": "undecodable"}),
+        (stats.records_failed, {"result": "failed"}),
+    ]

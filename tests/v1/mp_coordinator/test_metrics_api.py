@@ -82,7 +82,7 @@ def test_otlp_push_returns_404() -> None:
 
 
 @pytest.mark.parametrize("otlp_endpoint", [None, "http://collector:4317"])
-def test_enabled_app_registers_its_discovered_key_directory(
+def test_enabled_app_registers_metrics_over_its_own_components(
     otlp_endpoint: str | None,
 ) -> None:
     config = MPCoordinatorConfig(
@@ -93,14 +93,20 @@ def test_enabled_app_registers_its_discovered_key_directory(
     )
 
     with patch(
-        "lmcache.v1.mp_coordinator.app.register_key_directory_metrics"
+        "lmcache.v1.mp_coordinator.app.register_coordinator_metrics"
     ) as mock_register:
         app = create_app(config)
 
-    mock_register.assert_called_once_with(app.state.ctx.views.get(KeyDirectory))
+    mock_register.assert_called_once()
+    sources = mock_register.call_args.args[0]
+    ctx = app.state.ctx
+    assert sources.key_directory is ctx.views.get(KeyDirectory)
+    assert sources.event_gate is ctx.event_gate
+    # An HTTP-source coordinator exports no Kafka metrics.
+    assert sources.kafka_source is None
 
 
-def test_disabled_app_does_not_register_key_directory_metrics() -> None:
+def test_disabled_app_does_not_register_metrics() -> None:
     config = MPCoordinatorConfig(
         metrics_enabled=False,
         health_check_interval=0.0,
@@ -108,7 +114,7 @@ def test_disabled_app_does_not_register_key_directory_metrics() -> None:
     )
 
     with patch(
-        "lmcache.v1.mp_coordinator.app.register_key_directory_metrics"
+        "lmcache.v1.mp_coordinator.app.register_coordinator_metrics"
     ) as mock_register:
         create_app(config)
 
