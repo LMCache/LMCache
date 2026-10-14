@@ -1323,7 +1323,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request.request_id,
             token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
-            request_configs=tracker.request_configs,
+            # vLLM's prefix-cache hit, for the server's KV load policy.
+            request_configs={
+                **(tracker.request_configs or {}),
+                "lmcache.hint.engine_computed_tokens": num_computed_tokens,
+            },
             reserve_last_token=self._reserve_last_token_for_lookup,
         )
 
