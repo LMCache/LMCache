@@ -127,11 +127,10 @@ class DeviceOps:
 ### 3.3 Key design decisions
 
 - **No `OPS` constant.** Op names are derived dynamically from the class body
-  via `inspect.isfunction(member)`, excluding `_`-prefixed names,
-  infrastructure methods (`ensure_native`, `bind_native`), and capability
-  queries (`block_transfer_input_kind`). This keeps the class body as the
-  single source of truth — add a method and it is automatically part of the
-  contract and eligible for native rebinding.
+  via `inspect.isfunction(member)`, excluding `_`-prefixed names and
+  infrastructure methods (`ensure_native`, `bind_native`). This keeps the class
+  body as the single source of truth — add a method and it is automatically
+  part of the contract and eligible for native rebinding.
 
 - **`bind_native` is public** so subclasses call `self.bind_native(module)` in
   their `ensure_native()` override. It sets native callables and types as
@@ -146,29 +145,29 @@ class DeviceOps:
   `resolve_device_ops(device.type).tensor_from_ptr(...)`. There is no second
   device-name registry or `if/elif` dispatch table to keep synchronized.
 
-- **Block-transfer operand convention is declared, not inferred
-  (transitional).** `multi_layer_block_kv_transfer` currently has two calling
-  conventions: tensor operands (torch baseline, MUSA, RBLN) and packed pointers
-  (the compiled CUDA/ROCm, XPU and Ascend bindings). Engine-driven
-  gather/scatter ask the ops resolved for the KV tensors' device which one to
-  build:
+- **`multi_layer_block_kv_transfer` takes tensors.** Callers pass the paged
+  KV tensors, host chunk tensors and `list[int]` block IDs; how a backend
+  moves them is its own business. The CUDA/ROCm, XPU and Ascend kernels take
+  raw addresses instead, so those backends derive from
+  `NativeKernelDeviceOps` (`platform/base/native_kernel_device_ops.py`).
+  Its `bind_native` keeps the compiled kernel off the public method, and the
+  method lowers tensors to the kernel's operands: a per-layer address table,
+  chunk addresses, a device block-ID tensor, and launches of at most four
+  chunks. Because the kernel's GPU threads read host chunks directly, it also
+  pins or stages unpinned chunks, and `allocate_block_transfer_output` hands
+  callers pinned buffers while the kernel is bound.
 
-  ```python
-  device_ops = resolve_device_ops(device.type)
-  accepts_tensor = (
-      device_ops.block_transfer_input_kind() is BlockTransferInputKind.TENSORS
-  )
+  ```text
+  gather_paged_kv_to_cpu / scatter_cpu_to_paged_kv        (tensors only)
+    └─ device_ops.multi_layer_block_kv_transfer(KV tensors, chunk tensors, ...)
+          ├─ DeviceOps             → torch baseline         (CPU, HPU, Neuron)
+          ├─ MUSA / RBLN overrides → their tensor paths
+          └─ NativeKernelDeviceOps → address kernel         (CUDA/ROCm, XPU, Ascend)
   ```
 
-  The default is `TENSORS`. `bind_native` records `POINTERS` when the module it
-  binds exports `multi_layer_block_kv_transfer`, so a missing extension, or one
-  without that op, keeps the tensor baseline. A subclass that overrides
-  `multi_layer_block_kv_transfer` at class level with a pointer-taking
-  implementation must also override `block_transfer_input_kind()`. The query
-  replaces signature inspection, which depended on how Python or pybind
-  exposed the callable. It describes only the public calling convention, not
-  native availability or per-request support, and is removed once
-  block-transfer callers pass Tensor requests
+  The LMCache-driven callers (`object_group_transfer`, the TRT-LLM connector)
+  still pass the kernel's address form, which `NativeKernelDeviceOps`
+  forwards unchanged until those callers move to tensors
   ([#4465](https://github.com/LMCache/LMCache/issues/4465) step 3).
 
 ### 3.4 What got migrated
@@ -189,17 +188,19 @@ class DeviceOps:
 ```mermaid
 classDiagram
     DeviceOps <|-- CpuDeviceOps
-    DeviceOps <|-- XpuDeviceOps
     DeviceOps <|-- MusaDeviceOps
     DeviceOps <|-- HpuDeviceOps
-    DeviceOps <|-- CudaDeviceOps
-    DeviceOps <|-- NpuDeviceOps
+    DeviceOps <|-- NativeKernelDeviceOps
+    NativeKernelDeviceOps <|-- XpuDeviceOps
+    NativeKernelDeviceOps <|-- CudaDeviceOps
+    NativeKernelDeviceOps <|-- NpuDeviceOps
     class DeviceOps {
       +device_type = "" (unregistered)
       torch/CPU baseline (36 ops)
       +ensure_native()
       +bind_native(module)
     }
+    class NativeKernelDeviceOps { private block kernel; tensors → kernel addresses }
     class CpuDeviceOps { "cpu"; +tensor_from_ptr() }
     class CudaDeviceOps { "cuda"; +tensor_from_ptr(); bind_native(cuda_ops) }
     class XpuDeviceOps { "xpu"; bind_native(xpu_ops): 12 SYCL + 24 torch }
@@ -224,7 +225,7 @@ class CpuDeviceOps(DeviceOps):
 
 ```python
 # platform/devices/cuda/device_ops.py
-class CudaDeviceOps(DeviceOps):
+class CudaDeviceOps(NativeKernelDeviceOps):
     device_type: ClassVar[str] = "cuda"
 
     def tensor_from_ptr(self, ptr, shape, dtype, device):
@@ -252,7 +253,7 @@ class CudaDeviceOps(DeviceOps):
 
 ```python
 # platform/devices/xpu/device_ops.py
-class XpuDeviceOps(DeviceOps):
+class XpuDeviceOps(NativeKernelDeviceOps):
     device_type: ClassVar[str] = "xpu"
 
     def ensure_native(self) -> None:

@@ -9,7 +9,8 @@ mirroring ``lmcache.cuda_ops``); this package only wires detection and
 backend selection. If the plugin is missing, :meth:`ensure_native` raises
 :class:`ImportError`: the torch baseline would reconstruct pointer-mode
 staging buffers as CPU tensors and silently transfer in the wrong
-address space.
+address space. Block transfer keeps its tensor API: :class:`NativeKernelDeviceOps`
+lowers it to the plugin's kernel.
 """
 
 # Future
@@ -25,7 +26,7 @@ import torch
 
 # First Party
 from lmcache.v1.platform import torch_ops
-from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.base.native_kernel_device_ops import NativeKernelDeviceOps
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -64,7 +65,7 @@ def _synchronize_npu_stream_pointer(stream_ptr: int) -> None:
         )
 
 
-class NpuDeviceOps(DeviceOps):
+class NpuDeviceOps(NativeKernelDeviceOps):
     device_type: ClassVar[str] = "npu"
 
     def ensure_native(self) -> None:

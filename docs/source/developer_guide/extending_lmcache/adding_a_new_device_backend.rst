@@ -420,14 +420,13 @@ Implementation notes
   the hot entry points for both engine-driven and LMCache-driven
   transfer; other functions in ``torch_ops.py`` can be overridden as
   needed.
-- Engine-driven transfer asks ``DeviceOps.block_transfer_input_kind()``
-  whether to pass ``multi_layer_block_kv_transfer`` tensors or raw
-  pointers. If ``bind_native`` installs that function from your module, it
-  receives pointers (``BlockTransferInputKind.POINTERS``), as the compiled
-  CUDA and SYCL bindings expect. If you instead override the method on your
-  ``DeviceOps`` subclass and it takes pointers, also override
-  ``block_transfer_input_kind()`` to return ``POINTERS``; otherwise it
-  receives tensors.
+- Callers pass tensors to ``multi_layer_block_kv_transfer``. If your
+  compiled kernel takes raw addresses like CUDA's, derive your ``DeviceOps``
+  from ``NativeKernelDeviceOps``
+  (``lmcache/v1/platform/base/native_kernel_device_ops.py``): it keeps the
+  bound kernel off the public method and converts tensors to the kernel's
+  addresses, including pinned host buffers. If your kernel takes tensors, a
+  plain ``DeviceOps`` subclass that binds it is enough.
 - If you fall back to the generic path from inside a device-specific
   wrapper (e.g. when inputs are unsupported), call the corresponding
   ``lmcache.v1.platform.torch_ops`` function directly to preserve

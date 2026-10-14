@@ -5,6 +5,8 @@
 :meth:`bind_native` in :meth:`ensure_native` to layer the compiled CUDA
 extension on top of the torch baseline. If the extension is missing, a warning
 is logged and the instance stays on the torch fallback (soft-fail, same as XPU).
+Block transfer keeps its tensor API: :class:`NativeKernelDeviceOps` lowers it
+to the compiled kernel.
 """
 
 # Future
@@ -20,7 +22,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.base.native_kernel_device_ops import NativeKernelDeviceOps
 from lmcache.v1.platform.torch_ops._tensor_from_ptr import _get_copy_lib
 
 _DTYPE_TO_TYPESTR = {
@@ -101,7 +103,7 @@ def _copy_from_device_pointer(
     return tensor.view(*shape)
 
 
-class CudaDeviceOps(DeviceOps):
+class CudaDeviceOps(NativeKernelDeviceOps):
     device_type: ClassVar[str] = "cuda"
 
     def tensor_from_ptr(

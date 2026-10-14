@@ -8,66 +8,16 @@ symptom was corrupted content much later.
 
 These tests assert the ordering contract without a GPU, so they run in the
 CPU-only unit CI. The hardware reproductions live alongside them in
-``test_engine_driven_transfer.py`` and skip without CUDA.
+``test_engine_driven_transfer.py`` and skip without CUDA. The scatter case is
+owned by the native block-transfer backend and is covered in
+``tests/v1/platform/test_native_kernel_device_ops.py``.
 """
 
 # Standard
-from typing import cast
 from unittest.mock import MagicMock, patch
 
 # Third Party
 import torch
-
-# First Party
-from lmcache.v1.platform.ops_types import BlockTransferInputKind
-
-
-def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
-    """Unpinned input must be synced before scatter returns.
-
-    ``scatter_cpu_to_paged_kv`` pins unpinned chunks into temporaries and
-    launches async H2D reads on them through raw pointers, which torch's
-    stream tracking cannot see. Returning drops the last reference, so the
-    caching host allocator can hand that memory to the next caller while the
-    copies are in flight. The documented caller-side synchronize cannot cover
-    it -- by then the temporaries are gone -- so scatter must sync itself.
-    """
-    # First Party
-    from lmcache.v1.multiprocess.transfer_context import base
-
-    kv = {f"layer_{i}": torch.zeros(2, 4, 4, 2, 8) for i in range(2)}
-
-    # Mock chunks, not real tensors: pin_memory() needs an accelerator, so the
-    # ptr-only branch cannot execute for real on the CPU-only unit CI. What we
-    # are pinning down is the ordering contract, not the copy itself.
-    def _unpinned_chunk() -> MagicMock:
-        c = MagicMock()
-        c.is_pinned.return_value = False
-        c.pin_memory.return_value = c
-        c.data_ptr.return_value = 0
-        return c
-
-    chunks = [_unpinned_chunk()]
-
-    # The mock ops declare the pointer convention of a compiled backend;
-    # only the platform resolver's selected ops are substituted.
-    ops = MagicMock()
-    ops.block_transfer_input_kind.return_value = BlockTransferInputKind.POINTERS
-    with (
-        patch.object(base, "synchronize_device") as synchronize,
-        patch.object(base, "resolve_device_ops", return_value=ops),
-    ):
-        # cast: the mocks stand in for tensors on purpose (see above).
-        base.scatter_cpu_to_paged_kv(
-            kv, list(range(4)), cast(list[torch.Tensor], chunks), 4
-        )
-        assert ops.multi_layer_block_kv_transfer.called, (
-            "fixture must reach the async H2D launches"
-        )
-        assert synchronize.called, (
-            "scatter must complete async H2D before releasing the temporaries "
-            "it pinned; otherwise the host allocator reuses them mid-copy"
-        )
 
 
 def test_pickle_store_syncs_before_commit_serializes() -> None:

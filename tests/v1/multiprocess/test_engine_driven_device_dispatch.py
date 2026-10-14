@@ -3,7 +3,6 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import cast
 from unittest.mock import MagicMock
 
 # Third Party
@@ -17,9 +16,8 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
-from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
-from lmcache.v1.platform.ops_types import BlockTransferInputKind, PageBufferShapeDesc
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache
 import lmcache.lmcache_native as lmcache_native
 
@@ -32,22 +30,25 @@ class _BlockTransferCall:
     """Operands one ``multi_layer_block_kv_transfer`` call received."""
 
     paged: DiscoverableKVCache
-    objects: list[int] | list[torch.Tensor]
+    chunks: list[int] | list[torch.Tensor]
     block_ids: torch.Tensor | list[int]
     direction: lmcache_native.TransferDirection
     skip_prefix_n_blocks: int
 
 
 class _RecordingOps(DeviceOps):
-    """Ops that declare a block-transfer convention and record each call."""
+    """Ops that record block transfers and output allocations."""
 
-    def __init__(self, input_kind: BlockTransferInputKind) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.input_kind = input_kind
         self.calls: list[_BlockTransferCall] = []
+        self.allocations: list[tuple[tuple[int, ...], torch.dtype]] = []
 
-    def block_transfer_input_kind(self) -> BlockTransferInputKind:
-        return self.input_kind
+    def allocate_block_transfer_output(
+        self, shape: tuple[int, ...], dtype: torch.dtype
+    ) -> torch.Tensor:
+        self.allocations.append((shape, dtype))
+        return torch.empty(shape, dtype=dtype)
 
     def multi_layer_block_kv_transfer(
         self,
@@ -64,7 +65,7 @@ class _RecordingOps(DeviceOps):
         self.calls.append(
             _BlockTransferCall(
                 paged=paged_buffer_ptrs_tensor,
-                objects=lmcache_objects_ptrs,
+                chunks=lmcache_objects_ptrs,
                 block_ids=block_ids,
                 direction=direction,
                 skip_prefix_n_blocks=skip_prefix_n_blocks,
@@ -93,14 +94,6 @@ def _make_kv(num_blocks: int) -> dict[str, torch.Tensor]:
     return {
         f"layer.{i}": torch.zeros(2, num_blocks, _BLOCK_SIZE, 2, 8) for i in range(2)
     }
-
-
-def _pinned_chunk(ptr: int) -> MagicMock:
-    """Stand in for a pinned host chunk; real pinning needs an accelerator."""
-    chunk = MagicMock()
-    chunk.is_pinned.return_value = True
-    chunk.data_ptr.return_value = ptr
-    return chunk
 
 
 def _assert_roundtrip(
@@ -179,22 +172,17 @@ def test_cpu_and_cuda_kv_can_share_one_process(
         gpu_first: Exercise native-first as well as CPU-first capability caching.
         output_kind: Allocate chunks or use unpinned shared-memory output buffers.
     """
-    pytest.importorskip("lmcache.cuda_ops")
-    if (
-        resolve_device_ops("cuda").block_transfer_input_kind()
-        is not BlockTransferInputKind.POINTERS
-    ):
-        pytest.skip("requires the native CUDA block-transfer binding")
+    native = pytest.importorskip("lmcache.cuda_ops")
+    if not hasattr(native, "multi_layer_block_kv_transfer"):
+        pytest.skip("requires the native CUDA block-transfer kernel")
     devices = ("cuda", "cpu", "cuda") if gpu_first else ("cpu", "cuda", "cpu")
     for device in devices:
         _assert_roundtrip(device, torch.float16, output_kind)
 
 
-def test_tensor_input_kind_passes_original_tensors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Tensor-convention ops receive the KV tensors and caller chunks as-is."""
-    ops = _RecordingOps(BlockTransferInputKind.TENSORS)
+def test_gather_scatter_pass_tensors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ops resolved for the KV device receive tensors, never addresses."""
+    ops = _RecordingOps()
     requested = _patch_resolver(monkeypatch, ops)
     kv = _make_kv(num_blocks=6)
     out = [torch.empty(2, 2, 2 * _BLOCK_SIZE, 16) for _ in range(2)]
@@ -211,78 +199,28 @@ def test_tensor_input_kind_passes_original_tensors(
         assert isinstance(call.paged, list)
         layers = [layer for layer in call.paged if isinstance(layer, torch.Tensor)]
         assert [layer.data_ptr() for layer in layers] == layer_ptrs
-        assert call.objects is out
+        assert call.chunks is out
     assert gather_call.block_ids == [1, 3, 0, 5]
     assert gather_call.direction == lmcache_native.TransferDirection.D2H
     assert gather_call.skip_prefix_n_blocks == 0
     assert scatter_call.block_ids == [2, 4, 0, 1]
     assert scatter_call.direction == lmcache_native.TransferDirection.H2D
     assert scatter_call.skip_prefix_n_blocks == 1
+    assert ops.allocations == []
 
 
-def test_pointer_input_kind_passes_packed_pointers_in_batches(
+def test_gather_without_out_uses_backend_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pointer-convention ops receive packed pointers, at most 4 chunks a call."""
-    ops = _RecordingOps(BlockTransferInputKind.POINTERS)
-    requested = _patch_resolver(monkeypatch, ops)
-    kv = _make_kv(num_blocks=10)
-    chunk_ptrs = [0x1000 * (i + 1) for i in range(5)]
-    chunks = cast(list[torch.Tensor], [_pinned_chunk(ptr) for ptr in chunk_ptrs])
-    block_ids = list(range(10))
+    """Gather asks the backend for its output buffers instead of choosing them."""
+    ops = _RecordingOps()
+    _patch_resolver(monkeypatch, ops)
 
-    assert gather_paged_kv_to_cpu(kv, block_ids, 2, _NHD, out=chunks) is chunks
-    scatter_cpu_to_paged_kv(
-        kv, block_ids, chunks, 2, skip_first_n_tokens=_BLOCK_SIZE, layout_hints=_NHD
-    )
+    chunks = gather_paged_kv_to_cpu(_make_kv(num_blocks=6), [1, 3, 0, 5], 2, _NHD)
 
-    assert requested == ["cpu", "cpu"]
-    assert len(ops.calls) == 4
-    layer_ptrs = [tensor.data_ptr() for tensor in kv.values()]
-    expected = [
-        (lmcache_native.TransferDirection.D2H, chunk_ptrs[:4], block_ids[:8], 0),
-        (lmcache_native.TransferDirection.D2H, chunk_ptrs[4:], block_ids[8:], 0),
-        (lmcache_native.TransferDirection.H2D, chunk_ptrs[:4], block_ids[:8], 1),
-        (lmcache_native.TransferDirection.H2D, chunk_ptrs[4:], block_ids[8:], 0),
-    ]
-    for call, (direction, objects, blocks, skip) in zip(
-        ops.calls, expected, strict=True
-    ):
-        assert isinstance(call.paged, torch.Tensor)
-        assert call.paged.dtype == torch.int64
-        assert call.paged.tolist() == layer_ptrs
-        assert call.objects == objects
-        assert isinstance(call.block_ids, torch.Tensor)
-        assert call.block_ids.dtype == torch.int64
-        assert call.block_ids.tolist() == blocks
-        assert call.direction == direction
-        assert call.skip_prefix_n_blocks == skip
-
-
-def test_each_call_follows_its_resolved_ops_input_kind(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Tensor and pointer ops alternate in one process without stale state.
-
-    The real CPU round trips only succeed through the Tensor branch: the
-    pointer branch would need pinned host memory, which CPU-only hosts lack.
-    """
-    _assert_roundtrip("cpu", torch.float16)
-
-    pointer_ops = _RecordingOps(BlockTransferInputKind.POINTERS)
-    with monkeypatch.context() as patch_ctx:
-        _patch_resolver(patch_ctx, pointer_ops)
-        scatter_cpu_to_paged_kv(
-            _make_kv(num_blocks=2),
-            [0, 1],
-            cast(list[torch.Tensor], [_pinned_chunk(0x1000)]),
-            2,
-            layout_hints=_NHD,
-        )
-    (pointer_call,) = pointer_ops.calls
-    assert isinstance(pointer_call.paged, torch.Tensor)
-
-    _assert_roundtrip("cpu", torch.float16)
+    assert ops.allocations == [((2, 2, 2 * _BLOCK_SIZE, 16), torch.float32)] * 2
+    (call,) = ops.calls
+    assert call.chunks == chunks
 
 
 def test_cpu_context_never_synchronizes_accelerator(

@@ -11,16 +11,15 @@ kernels via :meth:`DeviceOps.bind_native`.
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
-if TYPE_CHECKING:
-    # Third Party
-    import torch
+# Third Party
+import torch
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.platform import ops_types, torch_ops
-from lmcache.v1.platform.ops_types import BlockTransferInputKind, PageBufferShapeDesc
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -59,9 +58,6 @@ class DeviceOps:
 
     def __init__(self) -> None:
         self._native_bound: bool = False
-        self._block_transfer_input_kind: BlockTransferInputKind = (
-            BlockTransferInputKind.TENSORS
-        )
 
     def __getattr__(self, name: str) -> Any:
         """Report an unavailable optional native symbol.
@@ -97,8 +93,7 @@ class DeviceOps:
         Walks the native module's public symbols.  For each callable or
         type, binds it on this instance — replacing the torch fallback if
         one exists, or adding a native-only symbol that has no pure-Python
-        equivalent.  A bound ``multi_layer_block_kv_transfer`` switches
-        :meth:`block_transfer_input_kind` to ``POINTERS``.
+        equivalent.
         """
         bound_ops = 0
         bound_types = 0
@@ -118,9 +113,6 @@ class DeviceOps:
         ekf = getattr(module, "EngineKVFormat", None)
         if ekf is not None:
             self.GPUKVFormat = ekf
-        if callable(getattr(module, "multi_layer_block_kv_transfer", None)):
-            # Compiled block-transfer bindings take packed pointers, not tensors.
-            self._block_transfer_input_kind = BlockTransferInputKind.POINTERS
         logger.debug(
             "bind_native: %s <- %s (%d ops, %d types)",
             type(self).__name__,
@@ -199,26 +191,23 @@ class DeviceOps:
             "tensor construction from raw pointers."
         )
 
-    def block_transfer_input_kind(self) -> BlockTransferInputKind:
-        """Return the operand convention of :meth:`multi_layer_block_kv_transfer`.
+    def allocate_block_transfer_output(
+        self, shape: tuple[int, ...], dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Allocate a host chunk for :meth:`multi_layer_block_kv_transfer` to fill.
 
-        The answer describes only how this instance's public block-transfer
-        operation must be called. It does not report whether native code is
-        installed or enabled internally, nor whether a particular request is
-        supported.
+        Backends whose transfer needs particular host memory override this, so
+        callers never choose a memory kind themselves.
 
-        The default is ``TENSORS``. :meth:`bind_native` records ``POINTERS``
-        when it installs a native ``multi_layer_block_kv_transfer``. A
-        subclass that overrides :meth:`multi_layer_block_kv_transfer` at class
-        level with a pointer-taking implementation must also override this
-        method.
-
-        Transitional: removed once block-transfer callers pass Tensor requests.
+        Args:
+            shape: Canonical chunk shape: ``[2, L, T, H*D]`` for split K/V
+                formats or ``[L, T, H*D]`` for single-plane formats.
+            dtype: KV element dtype.
 
         Returns:
-            The convention callers must use to build the operation's arguments.
+            An uninitialized CPU tensor of ``shape`` and ``dtype``.
         """
-        return self._block_transfer_input_kind
+        return torch.empty(shape, dtype=dtype, device="cpu")
 
     def multi_layer_block_kv_transfer(
         self,
@@ -232,6 +221,33 @@ class DeviceOps:
         engine_kv_format: lmcache_native.EngineKVFormat,
         skip_prefix_n_blocks: int,
     ) -> None:
+        """Move whole paged KV blocks between paged KV tensors and host chunks.
+
+        Callers pass tensors; a backend converts them to whatever its kernels
+        need.
+
+        Args:
+            paged_buffer_ptrs_tensor: Normalized paged KV tensors on ``device``.
+            lmcache_objects_ptrs: Host chunk tensors in the canonical
+                token-major layout; written in place for ``D2H`` and read for
+                ``H2D``.
+            block_ids: Paged-block IDs in chunk order, ``lmcache_chunk_size //
+                shape_desc.bs`` per chunk.
+            device: Device that owns the paged KV tensors.
+            direction: ``D2H`` gathers into the chunks; ``H2D`` scatters them.
+            shape_desc: Paged-buffer shape descriptor.
+            lmcache_chunk_size: Tokens per chunk.
+            engine_kv_format: Engine KV layout.
+            skip_prefix_n_blocks: Number of leading blocks to skip.
+
+        Note:
+            Work may still be in flight on return. Synchronize ``device``
+            before reading ``D2H`` chunks or reusing ``H2D`` chunks. Until
+            #4465 step 3.10, the LMCache-driven callers still pass their
+            established address form (a device address tensor, ``list[int]``
+            chunk addresses and a device block-ID tensor); new callers must
+            pass tensors.
+        """
         return torch_ops.multi_layer_block_kv_transfer(
             paged_buffer_ptrs_tensor,
             lmcache_objects_ptrs,

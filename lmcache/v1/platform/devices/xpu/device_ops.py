@@ -4,7 +4,8 @@
 :class:`XpuDeviceOps` calls :meth:`bind_native` in :meth:`ensure_native`
 to layer the SYCL extension on top of the torch baseline.  If the extension
 is not built, a warning is logged and the instance stays on the torch
-fallback.
+fallback. Block transfer keeps its tensor API: :class:`NativeKernelDeviceOps`
+lowers it to the SYCL kernel.
 """
 
 # Future
@@ -15,12 +16,12 @@ from typing import ClassVar
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.base.native_kernel_device_ops import NativeKernelDeviceOps
 
 logger = init_logger(__name__)
 
 
-class XpuDeviceOps(DeviceOps):
+class XpuDeviceOps(NativeKernelDeviceOps):
     device_type: ClassVar[str] = "xpu"
 
     def ensure_native(self) -> None:
