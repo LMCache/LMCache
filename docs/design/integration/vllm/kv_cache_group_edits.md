@@ -97,6 +97,13 @@ order. It remains rank 4 after the edit: NHD emits `[NB, BS, 1, CS]`, while
 HND emits `[NB, 1, BS, CS]`. This preserves the layout identity needed by the
 fused-K/V detector to read the logical block size from the correct axis.
 
+HND is also a default backend layout, not only an explicit override:
+FlashInfer on compute capability 10 and ROCm AITER FA prefer `LBHNC`, which
+LMCache resolves as HND. These backends advertise fixed kernel block sizes,
+so a hybrid model whose logical block size is larger can enter the sub-paged
+edit under the default layout. Preserving rank 4 is therefore necessary on
+these default paths as well.
+
 **Rank 5 deliberately keeps the stricter logical-order contiguity guard.** The
 edited view is NHD-shaped by construction, so under an HND hint the detector
 selects `NL_X_NB_TWO_NH_BS_HS`, whose `block_size()` reads the synthetic
@@ -104,7 +111,10 @@ selects `NL_X_NB_TWO_NH_BS_HS`, whose `block_size()` reads the synthetic
 permuted legacy rank-5 HND tensor would therefore replace a loud startup
 failure with silent wrong addressing. Rank-4 fused attention avoids that
 ambiguity by retaining rank and placing its token axis from the resolved
-layout hint; legacy rank-5 HND remains fail-loud rather than silently wrong.
+layout hint. This guard rejects permuted legacy rank-5 HND inputs; it does
+not fix already-contiguous synthetic rank-5 views. The Mamba state-page edit
+and legacy rank-5 sub-paged attention views still resolve block size 1 under
+an HND hint. Those cases remain outside the rank-4 fix.
 
 ### 3. Sub-paged MLA
 
