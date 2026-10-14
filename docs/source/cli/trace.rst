@@ -39,7 +39,7 @@ A ``storage`` file:
    Trace file: path/to/trace.lct
      level:                      storage
      format_version:             1
-     trace_schema_version:       1
+     trace_schema_version:       2
      duration:                   12.345s
      sm_config_digest:           a1b2c3d4
      total_records:              2048
@@ -58,7 +58,7 @@ how many store entries carry token ids.
    Trace file: events-node-a.lct
      level:                      events
      format_version:             1
-     trace_schema_version:       1
+     trace_schema_version:       2
      duration:                   612.480s
      sm_config_digest:           7a10b9a5c8e8344d32b5f8b7a530327a19f189439f5d2d5151065fd5d19ecff8
      cache_event_schema_version: 1
@@ -90,6 +90,21 @@ cleanly; a missing ``stop`` means the process was killed and the tail may be
 truncated. ``restarts`` counts incarnations beyond the first.
 
 The only argument is the positional ``FILE`` (path to a ``.lct`` trace file).
+
+Current readers can inspect trace schema versions 1 and 2; other versions
+are rejected. New recordings of both levels use trace schema version 2.
+
+.. warning::
+
+   Schema-version-1 **storage** traces cannot be replayed by
+   ``lmcache trace replay``: their recorder may have omitted
+   ``ObjectKey.cache_salt``, so original key identity cannot be recovered.
+   Record a new schema-version-2 storage trace for replay.
+
+``replay-events`` accepts events traces with trace schema version 1 or 2.
+It separately checks ``cache_event_schema_version`` when that metadata is
+present and non-null, rejecting unsupported values. Missing or null metadata
+remains accepted.
 
 
 replay
