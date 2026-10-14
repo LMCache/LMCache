@@ -182,8 +182,7 @@ class P2PController:
         self._next_task_id = 0
         self._jobs: dict[int, _P2PLookupJob] = {}
         self._job_lock = threading.Lock()
-        # When _drop_abandoned_jobs last scanned _jobs. Unlocked: a race only
-        # causes a redundant scan, and scans pop jobs under _job_lock.
+        # Last abandoned-job scan time; unlocked, as a race only adds a scan.
         self._last_drop_time = time.monotonic()
 
         # Orchestration state (guarded by _orch_lock; written only by the poll
