@@ -288,14 +288,31 @@ class VllmServiceFactory(BaseServiceFactory):
         # Third Party
         from vllm.distributed.parallel_state import (
             get_tensor_model_parallel_rank,
+            get_world_group,
         )
 
         self._ensure_engine()
         assert self.lmcache_engine is not None
-        return ZMQOffloadServer(
-            self.lmcache_engine,
-            get_tensor_model_parallel_rank(),
-        )
+        # The socket path is keyed by rank, so the rank must be unique among the
+        # engine's workers. The tensor-parallel rank is not: with context
+        # parallelism and TP=1 every worker has tp_rank 0, they all bind the same
+        # ipc path, and a simultaneous bind fails with EADDRINUSE. Use the
+        # worker's rank in the world group instead.
+        try:
+            rank = get_world_group().rank_in_group
+        except Exception:
+            rank = get_tensor_model_parallel_rank()
+        # The offload server is optional: failing to start it must not fail the
+        # whole LMCacheManager (which would put the worker in degraded mode).
+        try:
+            return ZMQOffloadServer(self.lmcache_engine, rank)
+        except Exception as e:
+            logger.error(
+                "Offload server for rank %s could not start, continuing without it: %s",
+                rank,
+                e,
+            )
+            return None
 
     def maybe_create_runtime_plugin_launcher(
         self,
