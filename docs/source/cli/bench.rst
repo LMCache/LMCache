@@ -887,6 +887,11 @@ tweak individual settings:
 Output
 ~~~~~~
 
+Each scheduled engine request is attempted once. Automatic SDK retries are
+disabled, so retryable HTTP errors (such as 429 or 503) and connection errors
+are recorded as failures without adding retry traffic or backoff delays to
+the benchmark. This also applies to warmup requests.
+
 Terminal (real-time progress)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
