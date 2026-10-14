@@ -10,11 +10,14 @@ break as soon as that one shipped elsewhere.
 # Standard
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 # Third Party
 import httpx
+
+# First Party
+from lmcache.v1.mp_coordinator.background_loops import BackgroundLoops
 
 if TYPE_CHECKING:
     # First Party
@@ -27,15 +30,19 @@ if TYPE_CHECKING:
 class ControllerRuntime:
     """What a controller can only be handed once the app is running.
 
-    One field today. It stays a struct so that a second loop-bound
-    collaborator can be added without touching the signature of every
-    controller that never asked for it.
+    A struct, so a loop-bound collaborator can be added without touching
+    the signature of every controller that never asked for it.
 
     Attributes:
         http_client: Shared client for outbound calls to mp servers.
+        background_loops: Where a controller starts its periodic work, so a
+            failed pass is counted and the loop keeps running, and the loop
+            is reported with the coordinator's own. Defaults to a private
+            runner, so a runtime built with only ``http_client`` still works.
     """
 
     http_client: httpx.AsyncClient
+    background_loops: BackgroundLoops = field(default_factory=BackgroundLoops)
 
 
 class Controller:

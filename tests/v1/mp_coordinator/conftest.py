@@ -17,5 +17,9 @@ def _isolate_key_directory_metric_registration() -> Iterator[None]:
         patch("lmcache.v1.mp_coordinator.app.register_event_gate_metrics"),
         patch("lmcache.v1.mp_coordinator.app.register_broadcaster_metrics"),
         patch("lmcache.v1.mp_coordinator.app.register_kafka_source_metrics"),
+        patch("lmcache.v1.mp_coordinator.app.register_background_loop_metrics"),
+        patch("lmcache.v1.mp_coordinator.app.register_controller_metrics"),
+        patch("lmcache.v1.mp_coordinator.app.register_event_loop_metrics"),
+        patch("lmcache.v1.mp_coordinator.app.register_registry_metrics"),
     ):
         yield

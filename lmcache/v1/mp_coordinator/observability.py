@@ -6,9 +6,10 @@ alerts depend on them. See ``docs/design/v1/mp_coordinator/observability.md``.
 """
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 import socket
+import time
 
 # Third Party
 from opentelemetry import metrics
@@ -22,6 +23,10 @@ if TYPE_CHECKING:
     from opentelemetry.metrics import CallbackOptions, Meter, Observation
 
     # First Party
+    from lmcache.v1.mp_coordinator.background_loops import (
+        BackgroundLoops,
+        EventLoopMonitor,
+    )
     from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
         CacheEventBroadcaster,
     )
@@ -32,6 +37,7 @@ if TYPE_CHECKING:
     from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
         KafkaCacheEventSource,
     )
+    from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
     from lmcache.v1.mp_coordinator.views.key_directory import (
         DirectoryStats,
         KeyDirectory,
@@ -332,6 +338,149 @@ def register_kafka_source_metrics(
         "lmcache_coordinator.kafka.unread_records",
         callbacks=[_make_observation_callback(read_unread_records)],
         description="Cache-event records not yet read, per partition.",
+    )
+
+
+def register_background_loop_metrics(
+    background_loops: "BackgroundLoops", meter: "Meter | None" = None
+) -> None:
+    """Register liveness metrics for every loop started on ``background_loops``.
+
+    All read :meth:`BackgroundLoops.stats`, so loops started later (a
+    controller's, once the app runs) are reported too. ``time() -
+    last_success_timestamp_seconds > 3 * interval_seconds`` means a loop has
+    stopped making progress.
+
+    Args:
+        background_loops: The runner the coordinator's loops are started on.
+        meter: Meter to register on. Defaults to the global provider's
+            coordinator meter; tests pass one from a private provider.
+    """
+    if meter is None:
+        meter = metrics.get_meter(_METER_NAME)
+
+    def read_last_success() -> list[tuple[float, dict[str, str]]]:
+        return [
+            (stats.last_success_timestamp, {"loop": name})
+            for name, stats in background_loops.stats().items()
+            if stats.last_success_timestamp is not None
+        ]
+
+    def read_interval() -> list[tuple[float, dict[str, str]]]:
+        return [
+            (stats.interval_seconds, {"loop": name})
+            for name, stats in background_loops.stats().items()
+        ]
+
+    def read_passes() -> list[tuple[float, dict[str, str]]]:
+        points: list[tuple[float, dict[str, str]]] = []
+        for name, stats in background_loops.stats().items():
+            points.append((stats.passes_ok, {"loop": name, "result": "ok"}))
+            points.append((stats.passes_failed, {"loop": name, "result": "failed"}))
+        return points
+
+    meter.create_observable_gauge(
+        "lmcache_coordinator.background_loop.last_success_timestamp_seconds",
+        callbacks=[_make_observation_callback(read_last_success)],
+        description="Wall-clock time each background loop last finished a "
+        "pass without an error.",
+    )
+    meter.create_observable_gauge(
+        "lmcache_coordinator.background_loop.interval_seconds",
+        callbacks=[_make_observation_callback(read_interval)],
+        description="Configured seconds between each background loop's passes.",
+    )
+    meter.create_observable_counter(
+        "lmcache_coordinator.background_loop.passes",
+        callbacks=[_make_observation_callback(read_passes)],
+        description="Background loop passes, by result; a failed pass is "
+        "logged and the loop keeps running.",
+    )
+
+
+def register_controller_metrics(
+    controllers_up: Mapping[str, bool], meter: "Meter | None" = None
+) -> None:
+    """Register whether each controller is running.
+
+    Args:
+        controllers_up: Whether each controller, keyed by class name,
+            started. The app fills it in as it enters each controller.
+        meter: Meter to register on. Defaults to the global provider's
+            coordinator meter; tests pass one from a private provider.
+    """
+    if meter is None:
+        meter = metrics.get_meter(_METER_NAME)
+    meter.create_observable_gauge(
+        "lmcache_coordinator.controller.up",
+        callbacks=[
+            _make_observation_callback(
+                lambda: [
+                    (int(up), {"controller": controller})
+                    for controller, up in controllers_up.items()
+                ]
+            )
+        ],
+        description="1 if the controller is running, 0 if it failed to start "
+        "and the work it does is not happening.",
+    )
+
+
+def register_event_loop_metrics(
+    event_loop_monitor: "EventLoopMonitor", meter: "Meter | None" = None
+) -> None:
+    """Register how long the coordinator's event loop was blocked.
+
+    Its rate is the fraction of wall time the loop was stalled; every
+    request handler, heartbeat and background loop waited that long.
+
+    Args:
+        event_loop_monitor: The monitor running on the coordinator's loop.
+        meter: Meter to register on. Defaults to the global provider's
+            coordinator meter; tests pass one from a private provider.
+    """
+    if meter is None:
+        meter = metrics.get_meter(_METER_NAME)
+    meter.create_observable_counter(
+        "lmcache_coordinator.event_loop.blocked_seconds",
+        callbacks=[
+            _make_observation_callback(
+                lambda: [(event_loop_monitor.blocked_seconds, {})]
+            )
+        ],
+        unit="s",
+        description="Total time the coordinator's event loop was blocked.",
+    )
+
+
+def register_registry_metrics(
+    registry: "InstanceRegistry", meter: "Meter | None" = None
+) -> None:
+    """Register the time since each registered server's last heartbeat.
+
+    One series per registered server; it disappears when the server leaves.
+    Paired with ``ingest.server_seconds_since_last_event``, it tells a
+    silent server (heartbeats, no events) from a dead one.
+
+    Args:
+        registry: The fleet membership view.
+        meter: Meter to register on. Defaults to the global provider's
+            coordinator meter; tests pass one from a private provider.
+    """
+    if meter is None:
+        meter = metrics.get_meter(_METER_NAME)
+
+    def read_heartbeat_age() -> list[tuple[float, dict[str, str]]]:
+        now = time.monotonic()
+        return [
+            (now - instance.last_heartbeat_time, {"instance_id": instance.instance_id})
+            for instance in registry.all_instances()
+        ]
+
+    meter.create_observable_gauge(
+        "lmcache_coordinator.registry.server_seconds_since_heartbeat",
+        callbacks=[_make_observation_callback(read_heartbeat_age)],
+        description="Seconds since each registered server's last heartbeat.",
     )
 
 

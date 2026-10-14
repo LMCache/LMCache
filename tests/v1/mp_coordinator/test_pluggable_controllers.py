@@ -28,6 +28,7 @@ from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
 )
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.views import build_views
+import lmcache.v1.mp_coordinator.app as app_module
 
 _OUT_OF_TREE_ROUTES = '''
 # SPDX-License-Identifier: Apache-2.0
@@ -438,6 +439,9 @@ def test_a_controller_failing_to_start_does_not_take_the_others_down(
 
     assert fleet.status_code == 200
     assert greeting.status_code == 200
+    controllers_up = app_module.register_controller_metrics.call_args.args[0]
+    assert controllers_up["ZzzFailingController"] is False
+    assert controllers_up["FleetEvictionController"] is True
     # The healthy one ran for the app's lifetime and was torn down.
     assert calls == ["start", "stop"]
 

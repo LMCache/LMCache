@@ -28,6 +28,10 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.mp_coordinator.background_loops import (
+    BackgroundLoops,
+    EventLoopMonitor,
+)
 from lmcache.v1.mp_coordinator.config import (
     KafkaCacheEventSourceConfig,
     MPCoordinatorConfig,
@@ -48,10 +52,14 @@ from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
 )
 from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
 from lmcache.v1.mp_coordinator.observability import (
+    register_background_loop_metrics,
     register_broadcaster_metrics,
+    register_controller_metrics,
     register_event_gate_metrics,
+    register_event_loop_metrics,
     register_kafka_source_metrics,
     register_key_directory_metrics,
+    register_registry_metrics,
 )
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
@@ -159,8 +167,16 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # Before the checkpoint, so a restored key arrives already pinned.
     metadata_persister.load()
     load_checkpoint(checkpoint_store, checkpoint_components)
+    background_loops = BackgroundLoops()
+    event_loop_monitor = EventLoopMonitor()
+    # Whether each controller's run() was entered; the lifespan flips it.
+    controllers_up = {type(c).__name__: False for c in controllers.all()}
     if config.metrics_enabled:
         register_key_directory_metrics(views.get(KeyDirectory))
+        register_background_loop_metrics(background_loops)
+        register_controller_metrics(controllers_up)
+        register_event_loop_metrics(event_loop_monitor)
+        register_registry_metrics(registry)
         register_event_gate_metrics(event_gate)
         register_broadcaster_metrics(event_broadcaster)
         if isinstance(event_source, KafkaCacheEventSource):
@@ -175,34 +191,30 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         metadata_persister=metadata_persister,
     )
 
-    async def _checkpoint_loop() -> None:
-        """Checkpoint on a timer until cancelled.
+    async def _write_checkpoint() -> None:
+        """One pass of the checkpoint loop.
 
         Only derived state runs on a timer: it changes continuously, so a
         cadence is the only sensible cost. Operator intent is written when
         it changes instead (see ``MetadataPersister``).
         """
-        while True:
-            await asyncio.sleep(config.checkpoint_interval)
-            await asyncio.to_thread(
-                save_checkpoint,
-                checkpoint_store,
-                quiesce,
-                checkpoint_components,
-            )
+        await asyncio.to_thread(
+            save_checkpoint,
+            checkpoint_store,
+            quiesce,
+            checkpoint_components,
+        )
 
-    async def _health_loop() -> None:
-        """Evict stale instances on a timer until cancelled.
+    async def _evict_stale_instances() -> None:
+        """One pass of the health loop.
 
         A timed-out instance takes its L1 contents with it, so its
         reported L1 state is fenced across every consumer. Its L2
         contents stay: they live on storage the fleet shares and leave
         only via ``DELETE`` events.
         """
-        while True:
-            await asyncio.sleep(config.health_check_interval)
-            for instance_id in evict_stale(registry, config.instance_timeout):
-                event_gate.drop_instance(instance_id)
+        for instance_id in evict_stale(registry, config.instance_timeout):
+            event_gate.drop_instance(instance_id)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -239,7 +251,9 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
             # with it: the endpoints belonging to no controller keep
             # working, and whatever the failed one does simply is not
             # happening -- the log is the only notice of that.
-            runtime = ControllerRuntime(http_client=outbound_client)
+            runtime = ControllerRuntime(
+                http_client=outbound_client, background_loops=background_loops
+            )
             for controller in controllers.all():
                 try:
                     await stack.enter_async_context(controller.run(runtime))
@@ -247,15 +261,25 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
                     logger.exception(
                         "Controller %s failed to start", type(controller).__name__
                     )
+                    continue
+                controllers_up[type(controller).__name__] = True
             await event_source.start()
             stack.push_async_callback(event_source.stop)
             # Nested, so they stop before the stack unwinds. Awaited too:
             # ``save_checkpoint`` runs in a thread a cancel cannot reach.
-            timers = []
+            timers = [asyncio.create_task(event_loop_monitor.run())]
             if config.checkpoint_path and config.checkpoint_interval > 0:
-                timers.append(asyncio.create_task(_checkpoint_loop()))
+                timers.append(
+                    background_loops.start(
+                        "checkpoint", config.checkpoint_interval, _write_checkpoint
+                    )
+                )
             if config.health_check_interval > 0:
-                timers.append(asyncio.create_task(_health_loop()))
+                timers.append(
+                    background_loops.start(
+                        "health", config.health_check_interval, _evict_stale_instances
+                    )
+                )
             logger.info(
                 "MP coordinator listening on http://%s:%d", config.host, config.port
             )

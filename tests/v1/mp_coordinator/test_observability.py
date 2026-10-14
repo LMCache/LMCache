@@ -15,6 +15,11 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventEntry,
     CacheEventType,
 )
+from lmcache.v1.mp_coordinator.background_loops import (
+    BackgroundLoops,
+    BackgroundLoopStats,
+    EventLoopMonitor,
+)
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
@@ -24,6 +29,10 @@ from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
 )
 from lmcache.v1.mp_coordinator.observability import init_coordinator_metrics
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
+from lmcache.v1.mp_coordinator.views.instance_registry import (
+    InstanceRegistry,
+    MPInstance,
+)
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 # Local
@@ -323,3 +332,95 @@ def test_kafka_source_metrics_report_reads_partitions_and_lag() -> None:
         labels(partition="0"): 0,
         labels(partition="1"): 40,
     }
+
+
+class _StubLoops:
+    def __init__(self, stats: dict[str, BackgroundLoopStats]) -> None:
+        self.current = stats
+
+    def stats(self) -> dict[str, BackgroundLoopStats]:
+        return self.current
+
+
+def test_background_loop_metrics_report_each_loop() -> None:
+    loops = _StubLoops(
+        {
+            "health": BackgroundLoopStats(
+                interval_seconds=10.0,
+                last_success_timestamp=1700000000.0,
+                passes_ok=5,
+                passes_failed=1,
+            ),
+            "eviction": BackgroundLoopStats(interval_seconds=5.0, passes_failed=2),
+        }
+    )
+    meter, reader = private_meter()
+
+    observability.register_background_loop_metrics(cast(BackgroundLoops, loops), meter)
+
+    values = read_values(reader)
+    prefix = "lmcache_coordinator.background_loop."
+    # A loop that never succeeded reports no last-success time.
+    assert values[prefix + "last_success_timestamp_seconds"] == {
+        labels(loop="health"): 1700000000.0
+    }
+    assert values[prefix + "interval_seconds"] == {
+        labels(loop="health"): 10.0,
+        labels(loop="eviction"): 5.0,
+    }
+    assert values[prefix + "passes"] == {
+        labels(loop="health", result="ok"): 5,
+        labels(loop="health", result="failed"): 1,
+        labels(loop="eviction", result="ok"): 0,
+        labels(loop="eviction", result="failed"): 2,
+    }
+
+
+def test_controller_metric_reports_each_controller_s_state() -> None:
+    controllers_up = {"FleetEvictionController": True, "Broken": False}
+    meter, reader = private_meter()
+
+    observability.register_controller_metrics(controllers_up, meter)
+
+    assert read_values(reader)["lmcache_coordinator.controller.up"] == {
+        labels(controller="FleetEvictionController"): 1,
+        labels(controller="Broken"): 0,
+    }
+
+
+class _StubMonitor:
+    blocked_seconds = 1.5
+
+
+def test_event_loop_metric_reports_the_blocked_time() -> None:
+    meter, reader = private_meter()
+
+    observability.register_event_loop_metrics(
+        cast(EventLoopMonitor, _StubMonitor()), meter
+    )
+
+    assert read_values(reader)["lmcache_coordinator.event_loop.blocked_seconds"] == {
+        labels(): 1.5
+    }
+
+
+def test_registry_metric_reports_each_server_s_heartbeat_age() -> None:
+    registry = InstanceRegistry()
+    registry.register(
+        MPInstance(
+            instance_id="mp-0",
+            ip="10.0.0.1",
+            http_port=8000,
+            registration_time=time.time(),
+            last_heartbeat_time=time.monotonic() - 7.0,
+        )
+    )
+    meter, reader = private_meter()
+
+    observability.register_registry_metrics(registry, meter)
+
+    ages = read_values(reader)[
+        "lmcache_coordinator.registry.server_seconds_since_heartbeat"
+    ]
+    assert set(ages) == {labels(instance_id="mp-0")}
+    assert 7.0 <= ages[labels(instance_id="mp-0")] < 10.0
