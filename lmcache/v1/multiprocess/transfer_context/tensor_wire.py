@@ -4,6 +4,7 @@
 # Standard
 from typing import Annotated, Literal, TypeAlias
 import math
+import warnings
 
 # Third Party
 import msgspec
@@ -13,8 +14,8 @@ import torch
 from lmcache.v1.platform.base.ipc_wire import DTYPES, NonNegative
 
 TensorShape: TypeAlias = Annotated[tuple[NonNegative, ...], msgspec.Meta(max_length=16)]
-TensorBytes: TypeAlias = Annotated[
-    bytes, msgspec.Meta(max_length=2 * 1024 * 1024 * 1024)
+TensorBuffer: TypeAlias = Annotated[
+    memoryview, msgspec.Meta(max_length=2 * 1024 * 1024 * 1024)
 ]
 
 _MAX_TOTAL_TENSOR_BYTES = 16 * 1024 * 1024 * 1024
@@ -28,7 +29,7 @@ class TensorFrame(msgspec.Struct, forbid_unknown_fields=True):
 
     dtype: str
     shape: TensorShape
-    data: TensorBytes
+    data: TensorBuffer
 
 
 TensorFrames: TypeAlias = Annotated[list[TensorFrame], msgspec.Meta(max_length=65536)]
@@ -67,7 +68,9 @@ def encode_tensors(tensors: list[torch.Tensor]) -> bytes:
         shape = tuple(tensor.shape)
         if len(shape) > 16:
             raise ValueError("Inline tensor rank exceeds 16")
-        raw = tensor.detach().contiguous().view(torch.uint8).numpy().tobytes()
+        raw = memoryview(
+            tensor.detach().contiguous().view(torch.uint8).numpy().tobytes()
+        )
         if len(raw) > _MAX_TENSOR_BYTES:
             raise ValueError("Inline tensor exceeds 2 GiB")
         total_bytes += len(raw)
@@ -93,7 +96,8 @@ def decode_tensors(
         expected_count: Required tensor count.
 
     Returns:
-        Writable CPU tensors backed by decoded raw bytes.
+        CPU tensors backed directly by the immutable input payload. Callers must
+        treat the returned tensors as read-only.
 
     Raises:
         ValueError: If the envelope or any tensor metadata, count, or byte length
@@ -141,6 +145,13 @@ def decode_tensors(
         total_bytes += len(frame.data)
         if total_bytes > _MAX_TOTAL_TENSOR_BYTES:
             raise ValueError("Inline tensor payload exceeds 16 GiB")
-        raw = torch.frombuffer(bytearray(frame.data), dtype=torch.uint8)
+        # Downstream copies or scatters from these tensors without mutating them.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="The given buffer is not writable",
+                category=UserWarning,
+            )
+            raw = torch.frombuffer(frame.data, dtype=torch.uint8)
         tensors.append(raw.view(dtype).reshape(frame.shape))
     return tensors

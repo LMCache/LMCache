@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the safe inline engine-driven tensor wire format."""
 
+# Standard
+import gc
+import warnings
+
 # Third Party
 import msgspec
 import pytest
@@ -20,16 +24,37 @@ def test_tensor_wire_round_trip(dtype: torch.dtype) -> None:
     """Round trip typed tensors, including a non-contiguous input."""
     tensor = torch.arange(24, dtype=torch.float32).reshape(4, 6).T.to(dtype)
 
-    decoded = decode_tensors(
-        encode_tensors([tensor]),
-        expected_shape=tensor.shape,
-        expected_dtype=dtype,
-        expected_count=1,
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        decoded = decode_tensors(
+            encode_tensors([tensor]),
+            expected_shape=tensor.shape,
+            expected_dtype=dtype,
+            expected_count=1,
+        )
 
     assert len(decoded) == 1
     assert torch.equal(decoded[0], tensor)
     assert decoded[0].is_contiguous()
+
+
+def test_tensor_wire_decoded_tensor_keeps_payload_alive() -> None:
+    """Keep zero-copy tensor storage valid after the encoded payload is released."""
+
+    def decode() -> list[torch.Tensor]:
+        tensor = torch.arange(8, dtype=torch.float32)
+        payload = encode_tensors([tensor])
+        return decode_tensors(
+            payload,
+            expected_shape=tensor.shape,
+            expected_dtype=tensor.dtype,
+            expected_count=1,
+        )
+
+    decoded = decode()
+    gc.collect()
+
+    assert torch.equal(decoded[0], torch.arange(8, dtype=torch.float32))
 
 
 def test_tensor_wire_rejects_unknown_fields() -> None:
@@ -54,9 +79,12 @@ def test_tensor_wire_rejects_unknown_fields() -> None:
 @pytest.mark.parametrize(
     ("frame", "match"),
     [
-        (TensorFrame("float16", (2, 2), b"\0" * 8), "dtype mismatch"),
-        (TensorFrame("float32", (4,), b"\0" * 16), "shape mismatch"),
-        (TensorFrame("float32", (2, 2), b"\0" * 12), "byte length mismatch"),
+        (TensorFrame("float16", (2, 2), memoryview(b"\0" * 8)), "dtype mismatch"),
+        (TensorFrame("float32", (4,), memoryview(b"\0" * 16)), "shape mismatch"),
+        (
+            TensorFrame("float32", (2, 2), memoryview(b"\0" * 12)),
+            "byte length mismatch",
+        ),
     ],
 )
 def test_tensor_wire_rejects_mismatched_metadata(
@@ -79,7 +107,7 @@ def test_tensor_wire_rejects_dtype_outside_shared_allowlist() -> None:
     payload = msgspec.msgpack.encode(
         TensorEnvelope(
             version=1,
-            tensors=[TensorFrame("os.system", (2, 2), b"\0" * 16)],
+            tensors=[TensorFrame("os.system", (2, 2), memoryview(b"\0" * 16))],
         )
     )
 
