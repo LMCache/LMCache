@@ -28,6 +28,7 @@ def run_args(
     devices: list[str],
     cap_add: list[str],
     seccomp: str | None = None,
+    cap_drop: tuple[str, ...] = (),
 ) -> list[str]:
     """Build the ``docker run`` options shared by every runner container.
 
@@ -43,6 +44,7 @@ def run_args(
         cap_add: Linux capabilities to add (``--cap-add``).
         seccomp: ``--security-opt seccomp=`` value, or None for docker's
             default profile.
+        cap_drop: Linux capabilities to drop (``--cap-drop``).
 
     Returns:
         ``docker run`` arguments up to and including the image.
@@ -69,6 +71,8 @@ def run_args(
         args += ["--device", d]
     for c in cap_add:
         args += ["--cap-add", c]
+    for c in cap_drop:
+        args += ["--cap-drop", c]
     if seccomp is not None:
         args += ["--security-opt", f"seccomp={seccomp}"]
     for m in mounts:
@@ -108,29 +112,6 @@ def status(name: str) -> str | None:
         text=True,
     )
     return r.stdout.strip() if r.returncode == 0 else None
-
-
-def cgroup_dir(name: str) -> Path:
-    """Return the cgroup v2 directory of running container ``name``.
-
-    Args:
-        name: Name of a running container.
-
-    Returns:
-        The container's directory under ``/sys/fs/cgroup``.
-
-    Raises:
-        subprocess.CalledProcessError: the container does not exist.
-    """
-    out = subprocess.run(
-        ["docker", "inspect", "-f", "{{.State.Pid}}", name],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    with open(f"/proc/{int(out.stdout)}/cgroup") as f:
-        (line,) = (x for x in f if x.startswith("0::"))
-    return Path("/sys/fs/cgroup" + line[3:].strip())
 
 
 def root_free_gb() -> float:

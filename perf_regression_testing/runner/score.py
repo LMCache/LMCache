@@ -110,17 +110,12 @@ def _at(samples: list[dict[str, Any]], t: float, key: str) -> float:
     return prev[key]
 
 
-def score(
-    run_dir: Path,
-    window_s: float,
-    l2_read: dict[str, Any] | None,
-) -> dict[str, Any]:
+def score(run_dir: Path, window_s: float) -> dict[str, Any]:
     """Compute the run's metrics.
 
     Args:
         run_dir: Run dir holding ``aiperf/`` and ``samples.jsonl``.
         window_s: The workload's ``scoring.window_s``.
-        l2_read: The deployment's ``l2_read`` table, or None.
 
     Returns:
         Metrics, keyed by name.
@@ -155,7 +150,4 @@ def score(
         "external_token_share": src["external_kv_transfer"] / total if total else None,
         "preemptions": delta("vllm:num_preemptions_total"),
     }
-    if l2_read is not None:
-        read = sum(delta(f"io_rbytes/{c}") for c in l2_read["containers"])
-        out["l2_read_gb"] = read / 1e9
     return out

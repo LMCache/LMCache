@@ -4,7 +4,7 @@
 Flow::
 
     pick idle GPUs -> trace pinned? -> wipe scratch -> start services -> ready?
-    -> start vLLM -> ready? -> clear caches -> sampler on -> AIPerf
+    -> start vLLM -> ready? -> sampler on -> AIPerf
     -> services still up? -> stop all -> record scratch usage -> wipe scratch
     -> validity + score
 
@@ -21,13 +21,10 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 import json
-import os
 import re
 import shutil
 import subprocess
 import time
-import urllib.error
-import urllib.request
 
 # First Party
 from perf_regression_testing.runner import docker
@@ -133,27 +130,6 @@ def prepare_scratch(spec: RunSpec) -> str | None:
     return None
 
 
-def scratch_usage(spec: RunSpec, measured: dict[str, int]) -> dict[str, int]:
-    """Return the bytes allocated under each scratch dir, after the run.
-
-    Args:
-        spec: Resolved run settings.
-        measured: Scratch path -> bytes already measured
-            (``used_bytes`` of :meth:`DiskCap.stop`); not walked again.
-
-    Returns:
-        Scratch path -> allocated bytes.
-    """
-    return {
-        d["path"]: (
-            measured[d["path"]]
-            if d["path"] in measured
-            else allocated_bytes(Path(d["path"]))
-        )
-        for d in _scratch_dirs(spec)
-    }
-
-
 def wipe_scratch(spec: RunSpec) -> None:
     """Wipe every scratch dir (after a run).
 
@@ -215,26 +191,6 @@ def start_servers(
     ):
         return "vllm not up"
     return None
-
-
-def post(url: str) -> int:
-    """POST an empty body to ``url``.
-
-    Args:
-        url: Endpoint to POST to.
-
-    Returns:
-        The HTTP status, including 4xx/5xx.
-
-    Raises:
-        urllib.error.URLError: the server could not be reached.
-    """
-    req = urllib.request.Request(url, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return r.status
-    except urllib.error.HTTPError as e:
-        return e.code
 
 
 def _git_commit() -> str:
@@ -307,6 +263,12 @@ def build_commands(
             gpus,
             spec.devices,
             spec.cap_add,
+            # Without it a root container ignores DiskCap's read-only dirs.
+            cap_drop=(
+                ("DAC_OVERRIDE",)
+                if any("cap_gb" in d for d in spec.vllm_scratch)
+                else ()
+            ),
         )
         + [
             "vllm",
@@ -419,18 +381,8 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
         if reason:
             summary["invalid"].append(reason)
             return finish(EXIT_NOT_UP)
-        for url in spec.clear_endpoints:
-            status = post(url)
-            if status // 100 != 2:
-                summary["invalid"].append(f"clear {url}: HTTP {status}")
-                return finish(EXIT_INVALID)
-        io = {}
-        if spec.l2_read is not None:
-            dev = os.stat(spec.l2_read["path"]).st_dev
-            for role in spec.l2_read["containers"]:
-                io[role] = (docker.cgroup_dir(f"prt-{run_id}-{role}") / "io.stat", dev)
         sampler = Sampler(
-            out / "samples.jsonl", [f"http://127.0.0.1:{spec.vllm_port}/metrics"], io
+            out / "samples.jsonl", [f"http://127.0.0.1:{spec.vllm_port}/metrics"]
         )
         sampler.start()
         aiperf = docker.start(cmds["aiperf"], [], out / "aiperf.log")
@@ -456,10 +408,10 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
                 summary["invalid"].append(f"{p}: cap watch died: {c['error']}")
             if c["peak_bytes"] > c["cap_bytes"]:
                 summary["invalid"].append(f"{p}: {c['peak_bytes']} B over its cap")
-        used = scratch_usage(
-            spec, {p: c["used_bytes"] for p, c in summary["disk_cap"].items()}
+        dirs = _scratch_dirs(spec)
+        summary["l2_disk_used_gb"] = (
+            sum(allocated_bytes(Path(d["path"])) for d in dirs) / 1e9 if dirs else None
         )
-        summary["l2_disk_used_gb"] = sum(used.values()) / 1e9 if used else None
         wipe_scratch(spec)
 
     log = (out / "vllm.log").read_text(errors="replace")
@@ -468,5 +420,5 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
             summary["invalid"].append(f"vllm.log contains {pat!r}")
     if summary["invalid"]:
         return finish(EXIT_INVALID)
-    summary.update(score(out, spec.window_s, spec.l2_read))
+    summary.update(score(out, spec.window_s))
     return finish(EXIT_VALID)

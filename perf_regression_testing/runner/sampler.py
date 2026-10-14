@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Background sampler: server counters and process I/O, one JSON line per tick.
+"""Background sampler: server counters, one JSON line per tick.
 
 Each line holds ``t`` (unix seconds), every :data:`METRICS` sample summed over
-labels and URLs, ``vllm:prompt_tokens_by_source/<source>``, and
-``io_rbytes/<container>`` (cgroup ``io.stat`` read bytes from one device).
+labels and URLs, and ``vllm:prompt_tokens_by_source/<source>``.
 """
 
 # Standard
 from pathlib import Path
 from typing import Any
 import json
-import os
 import re
 import threading
 import time
@@ -43,24 +41,13 @@ def _scrape(url: str, rec: dict[str, Any]) -> None:
         rec[key] = rec.get(key, 0.0) + float(value)
 
 
-def _rbytes(io_stat: Path, dev: int) -> int:
-    key = f"{os.major(dev)}:{os.minor(dev)} "
-    with open(io_stat) as f:
-        for line in f:
-            if line.startswith(key):
-                return int(line.split("rbytes=")[1].split()[0])
-    # A cgroup lists a device only after its first I/O to it.
-    return 0
-
-
 class Sampler:
-    """Samples metrics URLs and cgroup read bytes into a JSONL file."""
+    """Samples metrics URLs into a JSONL file."""
 
     def __init__(
         self,
         out: Path,
         urls: list[str],
-        io: dict[str, tuple[Path, int]],
         interval_s: float = 5.0,
     ) -> None:
         """Prepare a sampler; call :meth:`start` to begin.
@@ -68,13 +55,10 @@ class Sampler:
         Args:
             out: JSONL file to append to.
             urls: Prometheus endpoints to scrape.
-            io: Container role -> (its cgroup ``io.stat``, device number
-                ``st_dev``) whose read bytes to record.
             interval_s: Seconds between ticks.
         """
         self.out = out
         self.urls = urls
-        self.io = io
         self.interval_s = interval_s
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -103,11 +87,6 @@ class Sampler:
                         ValueError,
                     ) as e:
                         rec[f"err {url}"] = str(e)
-                for name, (io_stat, dev) in self.io.items():
-                    try:
-                        rec[f"io_rbytes/{name}"] = _rbytes(io_stat, dev)
-                    except OSError as e:
-                        rec[f"err io_rbytes/{name}"] = str(e)
                 f.write(json.dumps(rec) + "\n")
                 f.flush()
                 self._stop.wait(max(0.0, self.interval_s - (time.time() - t)))

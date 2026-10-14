@@ -37,7 +37,7 @@ def _serve(text: str) -> tuple[HTTPServer, str]:
 def test_counters_are_summed_over_labels_and_urls(tmp_path: Path) -> None:
     servers = [_serve(ENGINE), _serve(ENGINE)]
     out = tmp_path / "samples.jsonl"
-    s = Sampler(out, [u for _, u in servers], {}, interval_s=0.05)
+    s = Sampler(out, [u for _, u in servers], interval_s=0.05)
     s.start()
     time.sleep(0.1)
     s.stop()
@@ -54,7 +54,7 @@ def test_an_unreachable_url_is_recorded_not_raised(tmp_path: Path) -> None:
     srv.shutdown()
     srv.server_close()
     out = tmp_path / "samples.jsonl"
-    s = Sampler(out, [url], {}, interval_s=0.05)
+    s = Sampler(out, [url], interval_s=0.05)
     s.start()
     time.sleep(0.1)
     s.stop()

@@ -5,7 +5,6 @@
 layers overriding earlier ones key by key. A service with ``replicas = N``
 expands into N services: ``<i>`` becomes ``i`` and ``<B+Si>`` becomes
 ``B + S * i``; a string that is only a placeholder becomes an integer.
-``server_metrics`` and ``l2_read.containers`` entries expand the same way.
 """
 
 # Standard
@@ -65,17 +64,6 @@ def _for_replica(value: Any, i: int) -> Any:
     if isinstance(value, list):
         return [_for_replica(v, i) for v in value]
     return value
-
-
-def _per_replica(items: list[str], replicas: int) -> list[str]:
-    """Expand each entry holding a replica placeholder into one per replica."""
-    out: list[str] = []
-    for item in items:
-        if _REPLICA.search(item):
-            out += [_for_replica(item, i) for i in range(replicas)]
-        else:
-            out.append(item)
-    return out
 
 
 def load(path: Path = CONFIG_PATH) -> dict[str, Any]:
@@ -212,9 +200,7 @@ class RunSpec:
     trace: dict[str, Any]
     trace_dir: Path
     window_s: float
-    clear_endpoints: list[str]
     invalid_log_patterns: list[str]
-    l2_read: dict[str, Any] | None
 
 
 def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
@@ -235,7 +221,6 @@ def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
     d = cfg["deployments"][deployment]
     host = cfg["host"]
     templates = d.get("services", [])
-    replicas = next((s["replicas"] for s in templates if "replicas" in s), 1)
     raw_services = []
     for s in templates:
         if "replicas" in s:
@@ -256,22 +241,10 @@ def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
         )
         for s in raw_services
     ]
-    l2_read = d.get("l2_read")
-    if l2_read is not None:
-        l2_read = {
-            **l2_read,
-            "containers": _per_replica(l2_read["containers"], replicas),
-        }
-    server_metrics = [
-        f"http://127.0.0.1:{cfg['vllm']['port']}/metrics",
-        *_per_replica(d.get("server_metrics", []), replicas),
-    ]
     trace = w["trace"]
     trace_dir = Path(host["root"]) / trace["dir"]
     aiperf_args = {**cfg["aiperf"]["args"], **w["aiperf"].get("args", {})}
     aiperf_args["input-file"] = str(trace_dir)
-    if w["aiperf"].get("server_metrics"):
-        aiperf_args["server-metrics"] = list(server_metrics)
     return RunSpec(
         workload=workload,
         deployment=deployment,
@@ -300,10 +273,5 @@ def resolve(cfg: dict[str, Any], workload: str, deployment: str) -> RunSpec:
         trace=trace,
         trace_dir=trace_dir,
         window_s=w["scoring"]["window_s"],
-        clear_endpoints=[
-            *cfg["validity"]["clear_endpoints"],
-            *d.get("clear_endpoints", []),
-        ],
         invalid_log_patterns=cfg["validity"]["invalid_log_patterns"],
-        l2_read=l2_read,
     )

@@ -67,6 +67,18 @@ def test_only_mooncake_clients_run_without_seccomp(tmp_path: Path) -> None:
             assert opts == []
 
 
+@pytest.mark.parametrize(
+    ("deployment", "dropped"),
+    [("vllm_native", ["DAC_OVERRIDE"]), ("vllm_lmcache", [])],
+)
+def test_a_capped_vllm_cannot_override_dir_permissions(
+    tmp_path: Path, deployment: str, dropped: list[str]
+) -> None:
+    spec = resolve(load(), "agentic", deployment)
+    cmd = run.build_commands(spec, [0, 1, 2, 3], "t", tmp_path, "img", "aiperf")["vllm"]
+    assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--cap-drop"] == dropped
+
+
 def test_only_regions_this_run_created_are_removed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

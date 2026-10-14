@@ -80,8 +80,3 @@ def test_a_replicated_service_expands_per_index() -> None:
         assert s.args["http_port"] == 19301 + i
         assert s.ready_url == f"http://127.0.0.1:{19301 + i}/health"
         assert s.scratch[0]["path"].endswith(f"/l2/c{i}")
-    assert spec.l2_read is not None
-    assert spec.l2_read["containers"] == [s.name for s in clients]
-    assert spec.aiperf_args["server-metrics"][2:] == [
-        f"http://127.0.0.1:{19301 + i}/metrics" for i in range(4)
-    ]

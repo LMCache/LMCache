@@ -18,10 +18,10 @@ def test_low_docker_disk_stops_the_suite_before_any_build(
     (model / "config.json").write_text("{}")
     monkeypatch.setattr(suite.docker, "root_free_gb", lambda: 0.2)
 
-    def no_build(cfg: object) -> Path:
+    def no_build(*args: object, **kwargs: object) -> dict:
         raise AssertionError("built with a full disk")
 
-    monkeypatch.setattr(suite, "update_lmcache", no_build)
+    monkeypatch.setattr(suite.images, "tonight", no_build)
     assert suite.suite("weekly", tmp_path / "s") == suite.EXIT_SUITE_INVALID
     rep = json.loads((tmp_path / "s" / "report.json").read_text())
     assert "0.2 GB free" in rep["images"]["disk_full"]
@@ -31,10 +31,10 @@ def test_low_docker_disk_stops_the_suite_before_any_build(
 def test_missing_model_stops_the_suite_before_any_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def no_build(cfg: object) -> Path:
+    def no_build(*args: object, **kwargs: object) -> dict:
         raise AssertionError("built without the model")
 
-    monkeypatch.setattr(suite, "update_lmcache", no_build)
+    monkeypatch.setattr(suite.images, "tonight", no_build)
     assert suite.suite("nightly", tmp_path / "s") == suite.EXIT_SUITE_INVALID
     rep = json.loads((tmp_path / "s" / "report.json").read_text())
     assert "hf download" in rep["images"]["host_error"]

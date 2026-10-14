@@ -7,7 +7,7 @@ reference; those runs never fail the build.
 
 ```
 suite.py --suite nightly|weekly            (one suite at a time: flock)
-  -> LMCache: check out the dev tip
+  -> LMCache: this checkout (Buildkite builds dev)
   -> images: vLLM nightly, pinned for a week; LMCache built FROM it
              (a failed build ends the night, exit 2)
   -> for each (workload, deployment) pair of the suite:
@@ -34,7 +34,7 @@ the same budget, 800 GiB DRAM + 1500 GiB disk; only the cache layer differs:
 
 Tested metrics: decode p10/p50 (tok/s per request) and TTFT p50/p95.
 Recorded only: request count, errors, preemptions, prompt tokens by source
-(and the cache layer's share), L2 bytes read, L2 disk used.
+(and the cache layer's share), L2 disk used.
 
 ## How a regression is decided
 

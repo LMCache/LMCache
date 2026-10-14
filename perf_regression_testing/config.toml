@@ -44,7 +44,6 @@ startup_timeout_s = 2400
 
 [vllm.env]
 VLLM_USE_V2_MODEL_RUNNER = "1"
-VLLM_SERVER_DEV_MODE = "1"  # needed for /reset_prefix_cache
 PYTHONHASHSEED = "0"
 HF_HUB_OFFLINE = "1"
 VLLM_CACHE_ROOT = "<root>/vllm-cache"  # see [container].mounts
@@ -112,8 +111,6 @@ no-gpu-telemetry = true
 [validity]
 # Run is invalid if vllm.log contains any of these.
 invalid_log_patterns = ["unhealthy"]
-# POSTed before AIPerf starts; deployments add their own `clear_endpoints`.
-clear_endpoints = ["http://127.0.0.1:18000/reset_prefix_cache"]
 
 # A deployment = vLLM base + `vllm_env` / `vllm_args` + `services`, the
 # cache-layer containers started before vLLM from the same image.
@@ -123,14 +120,6 @@ clear_endpoints = ["http://127.0.0.1:18000/reset_prefix_cache"]
 
 [deployments.vllm_lmcache]
 image_target = "lmcache"
-clear_endpoints = [
-  "http://127.0.0.1:18080/cache/clear",
-  "http://127.0.0.1:18080/metrics/reset",
-]
-server_metrics = ["http://127.0.0.1:18080/metrics"]
-# Bytes these containers read from the device holding `path` (cgroup io.stat).
-# Not tokens: cache layers store different layouts.
-l2_read = { containers = ["lmcache"], path = "<root>/l2" }
 
 [deployments.vllm_lmcache.vllm_args]
 kv-transfer-config = '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":16555,"lmcache.mp.mq_timeout":1500}}'
@@ -159,8 +148,7 @@ l2-prefetch-policy = "retain"
 [deployments.vllm_lmcache.services.args.l2-adapter]
 type = "fs_native"
 base_path = "<root>/l2"
-# Bypass the page cache, which would serve L2 from RAM outside the L1 budget
-# and hide reads from io_rbytes.
+# Bypass the page cache, which would serve L2 from RAM outside the L1 budget.
 use_odirect = true
 num_workers = 16
 max_capacity_gb = 1500
@@ -174,7 +162,6 @@ eviction = { eviction_policy = "LRU", trigger_watermark = 0.9, eviction_ratio = 
 # be a multiple of it.
 image_target = "serving"
 vllm_scratch = [{ path = "<root>/l2", min_free_gb = 1500, cap_gb = 1500 }]
-l2_read = { containers = ["vllm"], path = "<root>/l2" }
 
 [deployments.vllm_native.vllm_args]
 # Per-rank fs dirs are <root_dir>_r<rank>, so root_dir sits inside the scratch.
@@ -188,9 +175,6 @@ kv-transfer-config = '{"kv_connector":"OffloadingConnector","kv_role":"kv_both",
 image_target = "mooncake"
 devices = ["/dev/infiniband"]
 cap_add = ["SYS_NICE"]
-# Entries with a replica placeholder expand once per client.
-server_metrics = ["http://127.0.0.1:19003/metrics", "http://127.0.0.1:<19301+i>/metrics"]
-l2_read = { containers = ["mooncake_client<i>"], path = "<root>/l2" }
 
 [deployments.vllm_mooncake.vllm_env]
 MOONCAKE_CONFIG_PATH = "<artifact_dir>/mooncake.json"
@@ -292,12 +276,6 @@ gate = false
 metrics = ["decode_p10", "decode_p50", "ttft_p50", "ttft_p95"]
 false_alarm_rate = 0.033
 
-[lmcache]
-# suite.py checks out the tip of this branch into <host.root>/<checkout>.
-repo = "https://github.com/LMCache/LMCache.git"
-branch = "dev"
-checkout = "prt-lmcache-src"
-
 # A workload = pinned trace + AIPerf args on top of [aiperf] + scoring window.
 # `vllm_args` here apply to every deployment.
 
@@ -313,7 +291,6 @@ dir_digest = "0766fc32f6ba084bc36c897221726e88c1c2e55094fd9bad9ce7aab95464610f"
 [workloads.agentic.aiperf]
 env = { PRT_LIVE_HISTORY_TOKENIZER = "<model_path>", AIPERF_DATASET_WEKA_PARALLEL_WORKERS = "1" }
 # PRT_LIVE_HISTORY_LOG_DIR is set by the runner.
-server_metrics = true  # --server-metrics = vLLM /metrics + the deployment's server_metrics
 
 [workloads.agentic.aiperf.args]
 # Just past the KV-capacity knee on purpose: more load on the cache layer.

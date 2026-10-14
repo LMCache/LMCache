@@ -8,7 +8,7 @@ Usage (repo root, Python >= 3.11, docker on the host, env as in config.toml)::
 Flow::
 
     lock <host.root>/prt-suite.lock (suites share the L2 dir)
-    -> LMCache checkout at the tip of [lmcache].branch
+    -> LMCache under test: this checkout (Buildkite's commit)
     -> tonight's images (runner/images.py), mooncake if needed, AIPerf
     -> runner/run.py for each pair of [suites.<name>], one after another
     -> each valid run vs its own history (runner/baseline.py), then into history
@@ -26,7 +26,6 @@ from typing import IO, Any
 import argparse
 import fcntl
 import json
-import subprocess
 import sys
 import time
 import traceback
@@ -34,6 +33,7 @@ import traceback
 # First Party
 from perf_regression_testing.runner import baseline, docker, images
 from perf_regression_testing.runner.config import (
+    PKG_DIR,
     HostSetupError,
     check_host,
     load,
@@ -47,33 +47,8 @@ REPORT_COLS = [
     ("ttft_p95", "TTFT p95 s"),
     ("preemptions", "preemptions"),
     ("external_token_share", "cache-layer token share"),
-    ("l2_read_gb", "L2 read GB"),
     ("l2_disk_used_gb", "L2 disk used GB"),
 ]
-
-
-def _git(*args: str) -> str:
-    return subprocess.run(
-        ["git", *args], capture_output=True, text=True, check=True
-    ).stdout.strip()
-
-
-def update_lmcache(cfg: dict[str, Any]) -> Path:
-    """Check out the tip of the LMCache branch under test in our own clone.
-
-    Args:
-        cfg: Parsed config.
-
-    Returns:
-        The checkout dir (clean, detached at the fetched tip).
-    """
-    lm = cfg["lmcache"]
-    src = Path(cfg["host"]["root"]) / lm["checkout"]
-    if not src.exists():
-        _git("clone", "--no-checkout", lm["repo"], str(src))
-    _git("-C", str(src), "fetch", lm["repo"], lm["branch"])
-    _git("-C", str(src), "checkout", "--detach", "--force", "FETCH_HEAD")
-    return src
 
 
 def _fmt(v: Any) -> str:
@@ -206,10 +181,9 @@ def suite(name: str, out: Path) -> int:
         return finish(EXIT_SUITE_INVALID)
 
     targets = {cfg["deployments"][d]["image_target"] for d in plan["deployments"]}
-    src = update_lmcache(cfg)
     root = Path(cfg["host"]["root"])
     rep["images"] = im = images.tonight(
-        root, src, out / "images", need_lmcache="lmcache" in targets
+        root, PKG_DIR.parent, out / "images", need_lmcache="lmcache" in targets
     )
     if not im["usable"]:
         return finish(EXIT_SUITE_INVALID)
