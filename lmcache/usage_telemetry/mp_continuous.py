@@ -97,7 +97,11 @@ class MPContinuousUsageReporter(EventSubscriber):
                 f"max_buffered_samples must be positive, got {max_buffered_samples}"
             )
         self._chunk_size = chunk_size
-        self._specs = specs if specs is not None else self._default_metric_specs()
+        self._specs = (
+            specs
+            if specs is not None
+            else default_metric_specs(lambda: self._chunk_size)
+        )
         spec_fields = [spec.field for spec in self._specs]
         message_fields = {
             f.name for f in fields(ContinuousContextMessage)
@@ -145,31 +149,6 @@ class MPContinuousUsageReporter(EventSubscriber):
         with self._lock:
             self._chunk_size = chunk_size
             self._buffers = {spec.field: [] for spec in self._specs}
-
-    def _default_metric_specs(self) -> list[MetricSpec]:
-        """Build default metric specs that read the current chunk size."""
-        specs = default_metric_specs(1)
-
-        def wrap_spec(spec: MetricSpec) -> MetricSpec:
-            def extract(event: Event) -> int | float | None:
-                sample = spec.extract(event)
-                if sample is None:
-                    return None
-                if spec.field in (
-                    "interval_num_hit_tokens",
-                    "interval_num_stored_tokens",
-                ):
-                    return sample * self._chunk_size
-                return sample
-
-            return MetricSpec(
-                event_type=spec.event_type,
-                field=spec.field,
-                extract=extract,
-                reduce=spec.reduce,
-            )
-
-        return [wrap_spec(spec) for spec in specs]
 
     @swallow_telemetry_errors
     def flush(self) -> None:
