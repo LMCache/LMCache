@@ -18,17 +18,22 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
-import math
 import os
-import random
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import WarmupPolicy
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
+from lmcache.cli.commands.bench.engine_bench.quality.alignment import ChunkAligner
 from lmcache.cli.commands.bench.engine_bench.quality.dataset import (
     Sample,
     load_samples,
     resolve_dataset_path,
+)
+from lmcache.cli.commands.bench.engine_bench.quality.prompts import (
+    QA_QUESTION_TEMPLATE,
+    QA_SYSTEM_PROMPT,
+    compose_qa_messages,
+    compose_store_messages,
 )
 from lmcache.cli.commands.bench.engine_bench.quality.scoring import (
     QualityAggregator,
@@ -38,10 +43,7 @@ from lmcache.cli.commands.bench.engine_bench.quality.scoring import (
 )
 from lmcache.cli.commands.bench.engine_bench.request_sender import RequestSender
 from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
-from lmcache.cli.commands.bench.engine_bench.tokenizers import (
-    build_single_token_pool,
-    try_load_tokenizer,
-)
+from lmcache.cli.commands.bench.engine_bench.tokenizers import try_load_tokenizer
 from lmcache.cli.commands.bench.engine_bench.workloads.base import (
     BaseWorkload,
     MetricSection,
@@ -55,30 +57,10 @@ logger = init_logger(__name__)
 # two runs that padded differently would no longer share prompts.
 DEFAULT_DOC_ALIGN_TOKENS = 256
 
-# Padding words, drawn per document so no two documents share filler (which
-# would make their padded chunks collide in a content-addressed cache).
-_FILLER_VOCAB_SIZE = 4096
-
-# Absent from any real passage, and does not merge with template text.
-_TEMPLATE_SENTINEL = "██SENTINEL██"
-
 # Warmup and measured completions arrive through the same callback, so the
 # two are told apart by request-id prefix.
 _PREFILL_REQUEST_PREFIX = "prefill_doc"
 _MEASURED_REQUEST_PREFIX = "sample"
-
-_SYSTEM_PROMPT = (
-    "Answer the question using only the given passages. You may reason "
-    "through the problem, but put only the concise final answer between "
-    "<final_answer> and </final_answer>. Always emit both tags.\n\n"
-    "The following are the given passages.\n"
-)
-
-_QUESTION_TEMPLATE = (
-    "\n\nAnswer the question using only the passages above. End with exactly "
-    "one concise answer in this form: <final_answer>answer</final_answer>.\n\n"
-    "Question: {question}\nAnswer:"
-)
 
 
 @dataclass
@@ -239,8 +221,8 @@ class RagQaQualityWorkload(BaseWorkload):
                 f"documents to cache chunks. Install transformers and pass "
                 f"--model with a HuggingFace repo ID or a local path."
             )
-        self._pool = build_single_token_pool(
-            self._tokenizer, _FILLER_VOCAB_SIZE, seed=seed
+        self._aligner = ChunkAligner(
+            self._tokenizer, model_name, config.doc_align_tokens, seed
         )
 
         dataset_path = resolve_dataset_path(config.dataset)
@@ -255,89 +237,9 @@ class RagQaQualityWorkload(BaseWorkload):
     # Prompt construction
     # ------------------------------------------------------------------
 
-    def _token_length(self, text: str) -> int:
-        """Return the token length of *text* without special tokens."""
-        return len(self._tokenizer.encode(text, add_special_tokens=False))
-
-    def _chat_prefix_tokens(self) -> int:
-        """Count the tokens the chat template inserts before the content.
-
-        Documents align to chunk boundaries only if everything ahead of the
-        first one is a whole number of chunks, and the template wrapper is
-        part of that.  Measured by rendering a sentinel.
-
-        Returns:
-            The prefix length, or ``0`` when the model has no chat template —
-            alignment is then approximate, and cache reuse partial.
-        """
-        try:
-            rendered = self._tokenizer.apply_chat_template(
-                [{"role": "user", "content": _TEMPLATE_SENTINEL}],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-        except Exception as e:  # noqa: BLE001 - a template failure is non-fatal
-            logger.warning(
-                "Could not render a chat template for %s (%s); document "
-                "alignment will be approximate",
-                self._model_name,
-                e,
-            )
-            return 0
-
-        head = str(rendered).split(_TEMPLATE_SENTINEL)[0]
-        return self._token_length(head)
-
-    def _pad_to_multiple(self, text: str, offset: int, rng: random.Random) -> str:
-        """Pad *text* so ``offset + len(text)`` is a whole chunk count.
-
-        Args:
-            text: The text to pad.
-            offset: Tokens that precede *text* in the request.
-            rng: Seeded RNG selecting this text's filler words.
-
-        Returns:
-            The padded text, unchanged if already on a chunk boundary.
-        """
-        align = self._config.doc_align_tokens
-        current = self._token_length(text)
-        total = offset + current
-        target = math.ceil(total / align) * align
-        if target == total:
-            return text
-
-        num_words = target - total
-        padded = text
-        # Correct against a re-encode: a merged boundary token shifts the
-        # estimate, and an off-by-one phase error costs a whole chunk.
-        for _ in range(8):
-            words = [rng.choice(self._pool.words) for _ in range(max(num_words, 0))]
-            padded = text + "\n" + self._pool.join(words)
-            actual = offset + self._token_length(padded)
-            if actual == target:
-                return padded
-            num_words += target - actual
-
-        logger.warning(
-            "Could not pad a block to a %d-token boundary (off by %d); "
-            "cache reuse will be partial",
-            align,
-            offset + self._token_length(padded) - target,
-        )
-        return padded
-
     def _build_system_block(self) -> str:
         """Build the shared system prompt, padded to end on a chunk boundary."""
-        prefix_tokens = self._chat_prefix_tokens()
-        block = self._pad_to_multiple(
-            _SYSTEM_PROMPT, prefix_tokens, random.Random(self._seed)
-        )
-        logger.info(
-            "System block: %d tokens after a %d-token chat-template prefix",
-            self._token_length(block),
-            prefix_tokens,
-        )
-        return block
+        return self._aligner.system_block(QA_SYSTEM_PROMPT)
 
     def _build_document_blocks(self) -> dict[str, str]:
         """Pad every distinct document to a whole number of chunks.
@@ -349,12 +251,8 @@ class RagQaQualityWorkload(BaseWorkload):
         blocks: dict[str, str] = {}
         for sample in self._samples:
             for document in sample.documents:
-                if document in blocks:
-                    continue
-                # Seeded from the text, so padding does not depend on the
-                # order samples put the document in.
-                rng = random.Random(f"{self._seed}:{document}")
-                blocks[document] = self._pad_to_multiple(document, 0, rng)
+                if document not in blocks:
+                    blocks[document] = self._aligner.passage_block(document)
         logger.info("Padded %d distinct documents", len(blocks))
         return blocks
 
@@ -372,13 +270,11 @@ class RagQaQualityWorkload(BaseWorkload):
 
     def _build_composite(self, sample: Sample) -> list[dict[str, str]]:
         """Build the measured request for *sample*."""
-        documents = "".join(self._document_blocks[d] for d in sample.documents)
-        content = (
-            self._system_block
-            + documents
-            + _QUESTION_TEMPLATE.format(question=sample.question)
+        return compose_qa_messages(
+            self._system_block,
+            [self._document_blocks[d] for d in sample.documents],
+            sample.question,
         )
-        return [{"role": "user", "content": content}]
 
     def _run_fingerprint(self) -> str:
         """Return a digest of everything that determines the prompts.
@@ -396,8 +292,8 @@ class RagQaQualityWorkload(BaseWorkload):
                 "model": self._model_name,
                 "seed": self._seed,
                 "sample_ids": [s.sample_id for s in self._samples],
-                "system_prompt": _SYSTEM_PROMPT,
-                "question_template": _QUESTION_TEMPLATE,
+                "system_prompt": QA_SYSTEM_PROMPT,
+                "question_template": QA_QUESTION_TEMPLATE,
             },
             sort_keys=True,
         )
@@ -432,7 +328,7 @@ class RagQaQualityWorkload(BaseWorkload):
         total = len(self._corpus)
         for index, block in enumerate(self._corpus):
             request_id = f"{_PREFILL_REQUEST_PREFIX}{index}"
-            messages = [{"role": "user", "content": self._system_block + block}]
+            messages = compose_store_messages(self._system_block, [block])
             self._progress_monitor.log_message(f"Prefill {index + 1}/{total}")
             self._progress_monitor.on_request_sent(request_id)
             result = await self._request_sender.send_warmup_request(

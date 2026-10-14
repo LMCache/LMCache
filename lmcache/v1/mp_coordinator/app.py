@@ -47,7 +47,12 @@ from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
     KafkaCacheEventSource,
 )
 from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
-from lmcache.v1.mp_coordinator.observability import register_key_directory_metrics
+from lmcache.v1.mp_coordinator.observability import (
+    register_broadcaster_metrics,
+    register_event_gate_metrics,
+    register_kafka_source_metrics,
+    register_key_directory_metrics,
+)
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
     save_checkpoint,
@@ -66,6 +71,7 @@ from lmcache.v1.mp_coordinator.persistence.store import (
 from lmcache.v1.mp_coordinator.views import build_views
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.views.server_config import ServerConfigRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
@@ -103,6 +109,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     """
     views = build_views(config)
     registry = views.get(InstanceRegistry)
+    server_configs = views.get(ServerConfigRegistry)
     controllers = build_controllers(config, views)
     # Resolves pin requests' token_ids to object keys; must match the fleet's
     # chunk size and hash algorithm (see MPCoordinatorConfig).
@@ -156,6 +163,10 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     load_checkpoint(checkpoint_store, checkpoint_components)
     if config.metrics_enabled:
         register_key_directory_metrics(views.get(KeyDirectory))
+        register_event_gate_metrics(event_gate)
+        register_broadcaster_metrics(event_broadcaster)
+        if isinstance(event_source, KafkaCacheEventSource):
+            register_kafka_source_metrics(event_source)
 
     ctx = CoordinatorContext(
         views=views,
@@ -188,12 +199,15 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         A timed-out instance takes its L1 contents with it, so its
         reported L1 state is fenced across every consumer. Its L2
         contents stay: they live on storage the fleet shares and leave
-        only via ``DELETE`` events.
+        only via ``DELETE`` events. Its capacity declaration goes too,
+        as on ``DELETE /instances``; a server that was only slow
+        redeclares when it re-registers.
         """
         while True:
             await asyncio.sleep(config.health_check_interval)
             for instance_id in evict_stale(registry, config.instance_timeout):
                 event_gate.drop_instance(instance_id)
+                server_configs.forget(instance_id)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

@@ -45,6 +45,7 @@ _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
 _MAX_PUT_MANY_IO_URING_BATCH_KEYS = 64
+_MAX_FIXED_BUFFER_REGION_BYTES = 1 << 30
 _MAX_FDP_PLACEMENT_ID = 0xFFFF
 
 # FDP placement ID semantics are shared by design across raw-block write paths.
@@ -500,7 +501,7 @@ class RawBlockCore:
         )
         return aligned_bytes
 
-    def _rawdev(self):
+    def _rawdev(self) -> Any:
         """Return the lazily opened Rust raw-block device binding."""
         if self._raw is None:
             try:
@@ -520,6 +521,7 @@ class RawBlockCore:
                 iouring_queue_depth=self.iouring_queue_depth,
                 use_uring_cmd=self.use_uring_cmd,
             )
+        self.raise_if_failed()
         return self._raw
 
     def raw_device(self) -> Any:
@@ -587,6 +589,50 @@ class RawBlockCore:
         logger.info(
             "RawBlockCore: registered %d paged buffers for io_uring fixed I/O",
             len(buffers),
+        )
+
+    def register_fixed_buffer_range(self, ptr: int, size: int) -> None:
+        """Register one stable memory range for io_uring fixed-buffer I/O.
+
+        Args:
+            ptr: Base address of the stable memory range.
+            size: Size of the stable memory range in bytes.
+
+        Raises:
+            ValueError: If ``ptr`` or ``size`` is not positive.
+            Exception: Propagates errors from the Rust registration API.
+
+        Notes:
+            The range is divided into regions no larger than 1 GiB, which is
+            the maximum size supported for one io_uring registered buffer.
+        """
+        if self.io_engine != "io_uring":
+            return
+
+        ptr = int(ptr)
+        size = int(size)
+        if ptr <= 0:
+            raise ValueError("fixed-buffer range pointer must be > 0")
+        if size <= 0:
+            raise ValueError("fixed-buffer range size must be > 0")
+
+        buffer_ptrs: list[int] = []
+        buffer_sizes: list[int] = []
+        next_ptr = ptr
+        remaining = size
+        while remaining > 0:
+            region_size = min(remaining, _MAX_FIXED_BUFFER_REGION_BYTES)
+            buffer_ptrs.append(next_ptr)
+            buffer_sizes.append(region_size)
+            next_ptr += region_size
+            remaining -= region_size
+
+        self._rawdev().register_fixed_buffers(buffer_ptrs, buffer_sizes)
+        logger.info(
+            "RawBlockCore: registered %d regions covering %d bytes for "
+            "io_uring fixed I/O",
+            len(buffer_ptrs),
+            size,
         )
 
     def contains_key(self, encoded_key: str, *, lock: bool = False) -> bool:
@@ -752,6 +798,7 @@ class RawBlockCore:
         Raises:
             ValueError: If either sequence is empty, sequence lengths do not
                 match, or a placement identifier is 0.
+            RuntimeError: If the native io_uring worker has permanently failed.
         """
         if not keys or not objs:
             raise ValueError("keys and objs must be non-empty")
@@ -762,6 +809,7 @@ class RawBlockCore:
             len(keys),
             field_name="placement_ids",
         )
+        self.raise_if_failed()
 
         if self.io_engine == "io_uring" and len(keys) > 1:
             return self._put_many_batch_io(keys, objs, per_key_placement_ids)
@@ -843,8 +891,11 @@ class RawBlockCore:
             lock: If true, increment L2 lock refcounts for every hit.
 
         Returns:
-            A list of booleans aligned with ``encoded_keys``.
+            A list of booleans aligned with ``encoded_keys``. A permanently
+            failed io_uring worker reports all misses without locking keys.
         """
+        if self._worker_error() is not None:
+            return [False] * len(encoded_keys)
         results: list[bool] = []
         with self._lock:
             for encoded_key in encoded_keys:
@@ -875,11 +926,13 @@ class RawBlockCore:
         Raises:
             ValueError: If either sequence is empty or the sequence lengths do
                 not match.
+            RuntimeError: If the native io_uring worker has permanently failed.
         """
         if not encoded_keys or not objs:
             raise ValueError("encoded_keys and objs must be non-empty")
         if len(encoded_keys) != len(objs):
             raise ValueError("encoded_keys and objs must have the same length")
+        self.raise_if_failed()
 
         with self._lock:
             items = [
@@ -1049,11 +1102,38 @@ class RawBlockCore:
         """
         return self._apply_loaded_state(data)
 
+    def raise_if_failed(self) -> None:
+        """Reject work after a terminal native io_uring submission failure.
+
+        Raises:
+            RuntimeError: Includes the worker's terminal error. Recoverable
+                submission errors and ordinary per-request I/O failures do not
+                mark the worker as failed.
+        """
+        worker_error = self._worker_error()
+        if worker_error is not None:
+            raise RuntimeError(worker_error)
+
     def report_status(self) -> dict:
-        """Return raw-block health, layout, metadata, and in-flight counters."""
+        """Return health, registration, layout, and in-flight status.
+
+        Returns:
+            Status dictionary with ``is_healthy=False`` after close or terminal
+            worker failure, and the failure reason in ``worker_error`` when
+            available. Fixed-buffer fields describe successful kernel
+            registration. Inspecting status never opens a new native device.
+        """
         with self._lock:
+            worker_error = self._worker_error()
+            raw_device = self._raw
+            fixed_buffers_registered, fixed_buffer_registered_bytes = (
+                raw_device.fixed_buffer_status()
+                if raw_device is not None
+                else (False, 0)
+            )
             return {
-                "is_healthy": not self._closed,
+                "is_healthy": not self._closed and worker_error is None,
+                "worker_error": worker_error,
                 "type": "RawBlockCore",
                 "key_namespace": self.key_namespace,
                 "device_path": self.device_path,
@@ -1076,6 +1156,8 @@ class RawBlockCore:
                 "inflight_io_count": self._inflight_io_count,
                 "use_odirect": self.use_odirect,
                 "enable_zero_copy": self.enable_zero_copy,
+                "fixed_buffers_registered": fixed_buffers_registered,
+                "fixed_buffer_registered_bytes": fixed_buffer_registered_bytes,
                 "io_engine": self.io_engine,
                 "iouring_queue_depth": self.iouring_queue_depth,
                 "use_uring_cmd": self.use_uring_cmd,
@@ -1112,6 +1194,12 @@ class RawBlockCore:
                 )
             finally:
                 self._raw = None
+
+    def _worker_error(self) -> str | None:
+        if self._raw is None or self._closed:
+            return None
+        get_worker_error = getattr(self._raw, "worker_error", None)
+        return get_worker_error() if get_worker_error is not None else None
 
     def _cleanup_after_init_failure(self) -> None:
         """Close resources that may have been opened before init failed."""
@@ -2525,7 +2613,7 @@ class RawBlockCore:
         n = len(offsets)
         if self.io_engine == "posix" and self._recovery_read_threads > 1 and n > 1:
             return self._read_slot_headers_posix_parallel(offsets)
-        if self.io_engine == "io_uring" and not self.use_uring_cmd and n > 1:
+        if self.io_engine == "io_uring" and n > 1:
             return self._read_slot_headers_batched(offsets)
         return [self._read_slot_header(off) for off in offsets]
 
@@ -2592,9 +2680,8 @@ class RawBlockCore:
 
         Allocates a single contiguous pointer-aligned buffer for the batch,
         issues one ``batched_read`` + ``wait_iouring``, and decodes each header
-        independently. Used for the regular io_uring (block) path; NVMe
-        passthrough (``use_uring_cmd``) recovery uses the serial path until its
-        passthrough read is validated separately.
+        independently. Used for both regular io_uring block I/O and NVMe
+        passthrough (``use_uring_cmd``).
 
         Args:
             offsets: Device byte offsets for this batch (non-empty).

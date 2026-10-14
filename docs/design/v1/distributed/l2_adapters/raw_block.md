@@ -114,6 +114,38 @@ mode.
 The adapter uses caller-provided `MemoryObj` buffers for load operations. It
 does not allocate destination buffers on the load path.
 
+## Worker Failure and Task Completion
+
+Recoverable io_uring submission errors (`EAGAIN`, `EINTR`, and `EBUSY`) retry
+after completion progress or exponential backoff from 1 to 100 ms. Permanent
+errors, or 30 seconds without submission or completion progress, stop new
+native I/O admission. `RawBlockCore.report_status()` then reports
+`is_healthy=False` and the terminal reason in `worker_error`. An ordinary
+per-request I/O error does not mark the worker as failed.
+
+An open adapter reports a known worker failure through its task results, not
+through a synchronous exception from `submit_*`. It allocates a task ID and
+passes an already-failed future to the existing completion callback without
+queuing work in the thread pool:
+
+- lookup and load complete with all-zero bitmaps of the submitted key count;
+- store completes with `L2StoreResult(False, 0)` without writing data;
+- each completion decrements its in-flight counter, publishes the result, and
+  signals the corresponding eventfd. Results are consumed once.
+
+This lets the controllers release failed-load buffers and lookup/store locks
+through their normal completion paths. Existing L1 and healthy-adapter hits
+remain usable; missing data can be recomputed by the serving engine. Unlocks
+remain available after worker failure. Invalid arguments and submissions after
+adapter close still raise. The legacy non-MP backend skips new stores after a
+known worker failure without retaining objects or raising to its caller.
+
+I/O already accepted by the kernel keeps its buffers until terminal completion
+or cancellation completion; a worker error alone must not complete those
+tasks. Close and destructor cleanup release the GIL while draining and joining
+the worker. Cleanup can still wait indefinitely for uncancellable I/O: the
+submission retry budget is not a shutdown timeout.
+
 ## Locking Model
 
 LMCache MP already uses L1 locks for CPU-memory object lifetime. `raw_block`
@@ -137,8 +169,8 @@ Rules:
 - recovery by loading the latest durable checkpoint and rebuilding the in-memory
   index
 - POSIX recovery validates per-slot headers with an internal pool of 8 reader
-  threads. Regular `io_uring` batches header reads up to
-  `iouring_queue_depth`, while `io_uring_cmd` keeps serial validation.
+  threads. Both regular `io_uring` and `io_uring_cmd` batch header reads up to
+  `iouring_queue_depth`.
 
 The on-device format is intentionally unchanged by the MP adapter work.
 
