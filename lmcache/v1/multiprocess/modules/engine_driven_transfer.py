@@ -440,15 +440,24 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             context=entry.metadata,
             resolve_obj_keys=self._resolve_single_group_obj_keys,
         )
-        if st is not None and result:
+        if result:
             num_tokens = (
                 len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
             )
-            logger.info(
-                "Stored %d tokens in %.3f seconds",
-                num_tokens,
-                time.perf_counter() - st,
-            )
+            if st is not None:
+                logger.info(
+                    "Stored %d tokens in %.3f seconds",
+                    num_tokens,
+                    time.perf_counter() - st,
+                )
+            else:
+                # The request session ended before the async store
+                # committed (e.g. a one-token request); the store itself
+                # succeeded, only the start timestamp is gone.
+                logger.info(
+                    "Stored %d tokens (request already finished)",
+                    num_tokens,
+                )
         return result
 
     @request_handler(
