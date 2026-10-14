@@ -272,6 +272,25 @@ def mock_reg_controller():
                     return KVChunkInfo(instance_id, worker_id, location)
         return None
 
+    def mock_find_kv_all(key, exclude_instance_id=None):
+        """Mirror RegistryTree.find_kv_all: one KVChunkInfo per holding
+        instance, in iteration order (first worker per instance wins)."""
+        # First Party
+        from lmcache.v1.cache_controller.utils import KVChunkInfo
+
+        holders = {}
+        for report_id, locations in mock_registry.kv_pool.items():
+            instance_id, worker_id = report_id
+            if exclude_instance_id and instance_id == exclude_instance_id:
+                continue
+            if instance_id in holders:
+                continue
+            for location, keys in locations.items():
+                if key in keys:
+                    holders[instance_id] = KVChunkInfo(instance_id, worker_id, location)
+                    break
+        return holders
+
     def mock_get_worker_kv_keys(instance_id, worker_id, location):
         report_id = (instance_id, worker_id)
         if report_id in mock_registry.kv_pool:
@@ -362,6 +381,7 @@ def mock_reg_controller():
     mock_registry.admit_kv = Mock(side_effect=mock_admit_kv)
     mock_registry.evict_kv = Mock(side_effect=mock_evict_kv)
     mock_registry.find_kv = Mock(side_effect=mock_find_kv)
+    mock_registry.find_kv_all = Mock(side_effect=mock_find_kv_all)
     mock_registry.get_worker_kv_keys = Mock(side_effect=mock_get_worker_kv_keys)
     mock_registry.get_total_kv_count = Mock(side_effect=mock_get_total_kv_count)
     mock_registry.get_seq_discontinuity_count = Mock(
