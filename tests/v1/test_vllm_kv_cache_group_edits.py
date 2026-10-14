@@ -202,7 +202,14 @@ def _mamba_kv_cache() -> tuple[list[torch.Tensor], int]:
 
 
 def _slice_strided_mamba_kv_cache() -> tuple[list[torch.Tensor], int]:
-    """Mamba states with per-block stride equal to each slice, not the page."""
+    """A Mamba ``[conv_state, ssm_state]`` pair with slice-sized block strides.
+
+    Returns the pair and a hybrid ``page_size_bytes`` for the spec (conv + ssm
+    + pad) that is larger than either slice. Each state is a dense contiguous
+    view: stepping along dim-0 advances only that state's bytes, which is what
+    vLLM-Ascend <= v0.29 registers. That layout matches
+    ``_MambaSlicePlaneEdit`` and must not match ``_MambaPageViewEdit``.
+    """
     elem = torch.finfo(torch.bfloat16).bits // 8
     conv_nbytes = LOGICAL_BLOCK_SIZE
     ssm_nbytes = 2 * LOGICAL_BLOCK_SIZE
@@ -434,7 +441,12 @@ def test_subpaged_apply_rejects_unknown_rank(edits):
 
 
 def test_mamba_page_view_skips_slice_strided_list(edits):
-    """A conv stride equal to the slice, not the page, skips the page-view edit."""
+    """Slice-strided conv/ssm must use the plane edit, not the page view.
+
+    When per-block stride equals each slice's byte length rather than
+    ``page_size_bytes``, ``_MambaPageViewEdit`` must not match and
+    ``_MambaSlicePlaneEdit`` must.
+    """
     caches, page_bytes = _slice_strided_mamba_kv_cache()
     spec = _mamba_spec(page_bytes)
     assert not edits._MambaPageViewEdit().matches(spec, caches)
@@ -442,7 +454,12 @@ def test_mamba_page_view_skips_slice_strided_list(edits):
 
 
 def test_mamba_slice_planes_on_slice_strided_list(edits):
-    """Slice-strided conv/ssm become uint8 format-17 planes."""
+    """Slice-strided conv/ssm are re-viewed as two uint8 format-17 planes.
+
+    End-to-end through ``apply_kv_cache_group_edits``: each state keeps its
+    own width (conv and ssm differ), dtype is ``uint8``, and the token axis
+    matches ``spec.block_size``.
+    """
     caches, page_bytes = _slice_strided_mamba_kv_cache()
     spec = _mamba_spec(page_bytes)
     config = _Config(
@@ -461,7 +478,12 @@ def test_mamba_slice_planes_on_slice_strided_list(edits):
 
 
 def test_mamba_slice_planes_skip_indivisible_slice(edits):
-    """A dense slice that block_size does not divide passes through."""
+    """Non-divisible per-block bytes must not match the slice-plane edit.
+
+    ``_MambaSlicePlaneEdit`` requires ``nbytes_per_block % block_size == 0``
+    so ``width`` is integral. An off-by-one ``block_size`` must leave the
+    cache unchanged through the public entry point.
+    """
     caches, page_bytes = _slice_strided_mamba_kv_cache()
     spec = _mamba_spec(page_bytes)
     spec.block_size = LOGICAL_BLOCK_SIZE + 1
@@ -474,7 +496,11 @@ def test_mamba_slice_planes_skip_indivisible_slice(edits):
 
 
 def test_mamba_page_view_applies_on_packed_page(edits):
-    """Packed page-base conv still uses the page-view edit."""
+    """Packed page-base conv still uses the page-view edit.
+
+    When conv's per-block stride spans the full padded page, only
+    ``_MambaPageViewEdit`` may match; the slice-plane rule must not.
+    """
     caches, page_bytes = _mamba_kv_cache()
     spec = _mamba_spec(page_bytes)
     assert edits._MambaPageViewEdit().matches(spec, caches)
@@ -561,7 +587,13 @@ def test_flash_attention_hybrid_needs_no_attention_edit(edits):
 def _mamba_kv_cache_with_prefix(
     prefix_elems: int,
 ) -> tuple[list[torch.Tensor], int, torch.Tensor]:
-    """vLLM-Ascend v0.30 packed pages after ``prefix_elems`` in a shared pool."""
+    """Packed Mamba pages with a nonzero offset in a shared pool.
+
+    Returns ``[conv_state, ssm_state]``, the page size in bytes, and the
+    backing storage tensor. Bytes ``[0:prefix_elems)`` are filler; conv and ssm
+    still use per-block stride ``elems_per_page`` like ``_mamba_kv_cache``, but
+    ``storage_offset`` is ``prefix_elems`` on conv (ssm follows conv in-page).
+    """
     elem = torch.finfo(torch.bfloat16).bits // 8
     elems_per_page = 2 * LOGICAL_BLOCK_SIZE * 3
     conv_elems = 2 * LOGICAL_BLOCK_SIZE
@@ -584,7 +616,12 @@ def _mamba_kv_cache_with_prefix(
 
 
 def test_mamba_page_view_handles_nonzero_storage_offset(edits):
-    """vLLM-Ascend v0.30 Mamba state starts at a nonzero storage offset."""
+    """Packed page view must not require conv to start at storage offset zero.
+
+    vLLM-Ascend v0.30 places hybrid Mamba state after other layers in one pool;
+    ``_MambaPageViewEdit.apply`` must re-stride from conv's offset without
+    pulling in bytes before ``prefix_elems``.
+    """
     prefix_elems = 64
     caches, page_bytes, storage = _mamba_kv_cache_with_prefix(prefix_elems)
     spec = _mamba_spec(page_bytes)
@@ -667,7 +704,8 @@ def test_subpaged_plane_edit_fires_on_interleaved_kv(edits):
 
     The fused rank-4/5 rule does not match a pair, so the interleaved rule
     is what restores the scheduler block size. The output is one uint8
-    plane (format 13), and the contiguous rule must not also match.
+    plane (format 17 when wrapped in a one-element list), and the
+    contiguous rule must not also match.
     """
     k_plane, v_plane, spec, _storage = _subpaged_kv_planes()
     pair = (k_plane, v_plane)
@@ -714,7 +752,11 @@ def test_subpaged_plane_edit_groups_contiguous_kernel_pages(edits):
 
 
 def test_subpaged_plane_edit_rejects_separate_kv_planes(edits):
-    """A one-row stride that does not tile the logical page is left unchanged."""
+    """Interleaved layout with a one-row stride must not match either plane rule.
+
+    ``interleaved=False`` gives K/V strides that do not tile
+    ``page_size_bytes``; neither Ascend plane edit nor a bare K list may match.
+    """
     k_plane, v_plane, spec, _storage = _subpaged_kv_planes(interleaved=False)
     pair = (k_plane, v_plane)
     interleaved = edits._SubpagedAttentionInterleavedPlaneViewEdit()
@@ -769,7 +811,11 @@ def test_subpaged_plane_edit_groups_contiguous_kernel_pages_per_plane(edits):
 
 
 def test_subpaged_plane_edit_accepts_separate_contiguous_allocations(edits):
-    """Distinct contiguous K and V allocations use the same reshape."""
+    """Contiguous K/V in distinct storages still reshape at the scheduler block.
+
+    ``v_plane.clone()`` forces a separate allocation; the contiguous-plane edit
+    must still re-page both tensors in place.
+    """
     k_plane, v_plane, spec, _storage = _subpaged_kv_planes(contiguous=True)
     pair = (k_plane, v_plane.clone())
     viewed = _edit_attention(edits, pair, attention_spec=spec)
@@ -795,7 +841,11 @@ def test_subpaged_plane_edit_accepts_mamba_padded_page(edits):
 
 
 def test_subpaged_plane_edit_rejects_untiled_contiguous_kv(edits):
-    """A contiguous pair whose pages do not tile the logical page is not edited."""
+    """Inflated ``page_size_bytes`` without matching bytes must fail loudly.
+
+    Doubling the spec page while leaving the tensors unchanged must not match,
+    ``apply`` must raise, and the public entry point must pass the pair through.
+    """
     k_plane, v_plane, spec, _storage = _subpaged_kv_planes(contiguous=True)
     spec.page_size_bytes *= 2
     pair = (k_plane, v_plane)
@@ -808,7 +858,12 @@ def test_subpaged_plane_edit_rejects_untiled_contiguous_kv(edits):
 
 
 def test_subpaged_plane_rules_are_ordered_and_exclusive(edits):
-    """Interleaved matches before contiguous, and exactly one rule fires."""
+    """Ascend plane rules precede the fused rule and are mutually exclusive.
+
+    Registry order is interleaved, then contiguous, then fused; for each
+    Ascend fixture exactly one of the two plane rules matches the ``(K, V)``
+    pair.
+    """
     names = [type(edit).__name__ for edit in edits._EDITS]
     interleaved = "_SubpagedAttentionInterleavedPlaneViewEdit"
     contiguous = "_SubpagedAttentionContiguousPlaneViewEdit"
