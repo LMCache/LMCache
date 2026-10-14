@@ -85,10 +85,15 @@ def parse_kvcache_shape_spec(spec_str: str) -> List[LayerGroupSpec]:
     - "(2,2,256,4,16):float16:2" (single group)
     - "(2,2,256,4,16):float16:2;(3,2,256,4,4):bfloat16:2" (two groups)
 
-    Note: The shape string (inside parentheses) is not parsed and kept as string
-    to support different Attention implementations with varying shapes.
+    Args:
+        spec_str: Semicolon-delimited layer group specifications.
 
-    Returns a list of LayerGroupSpec objects.
+    Returns:
+        The parsed layer group specifications.
+
+    Raises:
+        ValueError: If the specification is empty, malformed, or contains an
+            unsupported dtype or invalid number.
     """
     if not spec_str:
         raise ValueError("KV shape specification cannot be empty")
@@ -121,12 +126,19 @@ def parse_kvcache_shape_spec(spec_str: str) -> List[LayerGroupSpec]:
         dtype_str = parts[0].strip()
         layer_count_str = parts[1].strip()
 
+        dtype_key = dtype_str.lower()
+        if dtype_key not in dtype_map:
+            raise ValueError(
+                f"Unrecognized dtype '{dtype_str}' in group specification: "
+                f"{group_spec}. Supported: {list(dtype_map.keys())}"
+            )
+
         try:
             # Parse shape tuple - support arbitrary dimensions
             shape_parts = shape_str.split(",")
             shape = tuple(int(part.strip()) for part in shape_parts)
             layer_count = int(layer_count_str)
-            dtype = dtype_map.get(dtype_str.strip().lower(), torch.float16)
+            dtype = dtype_map[dtype_key]
 
             # Create LayerGroupSpec with parsed shape
             groups.append(LayerGroupSpec(layer_count, shape, dtype))
