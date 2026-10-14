@@ -11,6 +11,7 @@ is skipped when torch_neuronx is not installed.
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
+import importlib
 import sys
 
 # Third Party
@@ -44,10 +45,17 @@ def _raise_runtime_error() -> bool:
     raise RuntimeError("NRT init failed: all NeuronCores are in use")
 
 
-def _is_available_with(neuron: object, *, torch_neuronx: object) -> bool:
+def _is_available_with(
+    neuron: object, *, torch_neuronx: object, lite: object = None
+) -> bool:
     """Run ``is_available`` with stubbed modules; ``None`` means not installed."""
     with patch.dict(
-        "sys.modules", {"torch": _StubTorch(neuron), "torch_neuronx": torch_neuronx}
+        "sys.modules",
+        {
+            "torch": _StubTorch(neuron),
+            "torch_neuronx": torch_neuronx,
+            "libtorch_neuronx_lite": lite,
+        },
     ):
         return NeuronDeviceSpec().is_available()
 
@@ -231,22 +239,21 @@ def test_neuron_no_event_ipc(
 
 
 @pytest.mark.neuron
-def test_neuron_device_type_matches_torch_neuronx() -> None:
-    """Fail loudly if our assumed device_type no longer matches
-    what torch_neuronx actually registers.
+def test_neuron_device_type_matches_registered_backend() -> None:
+    """Fail loudly if our assumed device_type no longer matches what the
+    installed Neuron torch backend registers.
 
-    This test runs only when torch_neuronx is installed (e.g. on
-    Trainium hardware).  On non-Neuron hosts it is skipped.
+    Runs when ``libtorch_neuronx_lite`` (vllm-neuron images) or
+    ``torch_neuronx`` is installed.  Skipped on hosts with neither.
     """
-    pytest.importorskip(
-        "torch_neuronx",
-        reason="torch_neuronx not installed — cannot verify device string",
-    )
     # Third Party
     import torch
 
+    if not NeuronDeviceSpec().is_available():
+        pytest.skip("no Neuron torch backend or device available")
+
     assert hasattr(torch, "neuron"), (
-        "torch_neuronx is installed but torch.neuron does not exist. "
+        "A Neuron torch backend is installed but torch.neuron does not exist. "
         "The Neuron SDK may have changed how it registers the device. "
         "Update NeuronDeviceSpec.device_type and torch_module_name."
     )
@@ -258,7 +265,7 @@ def test_neuron_device_type_matches_torch_neuronx() -> None:
     actual = t.device.type
     assert actual == "neuron", (
         f"NeuronDeviceSpec assumes device_type='neuron' but "
-        f"torch_neuronx reports '{actual}'. Update NeuronDeviceSpec."
+        f"the Neuron backend reports '{actual}'. Update NeuronDeviceSpec."
     )
 
 
@@ -283,8 +290,30 @@ def test_available_with_torch_neuronx_installed() -> None:
 
 
 def test_unavailable_without_the_torch_neuron_backend() -> None:
-    """No ``torch.neuron`` and no ``torch_neuronx`` means not available."""
+    """No ``torch.neuron`` and no Neuron torch backend means not available."""
     assert _is_available_with(None, torch_neuronx=None) is False
+
+
+def test_lite_backend_registers_torch_neuron() -> None:
+    """Without ``torch_neuronx`` (as in the vllm-neuron images), importing
+    ``libtorch_neuronx_lite`` registers ``torch.neuron``."""
+    stub_torch = _StubTorch()
+    neuron = SimpleNamespace(is_available=lambda: True)
+    real_import = importlib.import_module
+
+    def fake_import(name: str, package: str | None = None) -> object:
+        if name == "libtorch_neuronx_lite":
+            stub_torch.neuron = neuron
+            return SimpleNamespace()
+        if name == "torch_neuronx":
+            raise ImportError(name)
+        return real_import(name, package)
+
+    with (
+        patch.dict("sys.modules", {"torch": stub_torch}),
+        patch("importlib.import_module", fake_import),
+    ):
+        assert NeuronDeviceSpec().is_available() is True
 
 
 def test_unavailable_when_torch_neuron_reports_no_device() -> None:

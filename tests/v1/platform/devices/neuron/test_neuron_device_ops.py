@@ -12,6 +12,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
 from lmcache.v1.platform.devices.neuron.device_ops import NeuronDeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.torch_ops import multi_layer_block_kv_transfer
@@ -177,13 +178,60 @@ def test_never_indexes_the_paged_cache(monkeypatch: pytest.MonkeyPatch) -> None:
 # -- Guards ----------------------------------------------------------------
 
 
-def test_unsupported_format_is_refused() -> None:
-    with pytest.raises(ValueError, match="NL_X_TWO_NB_NH_BS_HS"):
+def _has_spec(fmt: EngineKVFormat) -> bool:
+    try:
+        get_spec_class(fmt)
+    except ValueError:
+        return False
+    return True
+
+
+# The singleton-axis HND format is refused by tensor rank, tested separately.
+UNSUPPORTED_FORMATS = [
+    fmt
+    for fmt in EngineKVFormat.__members__.values()
+    if fmt not in (HND, EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS) and _has_spec(fmt)
+]
+
+
+@pytest.mark.parametrize("fmt", UNSUPPORTED_FORMATS, ids=lambda f: f.name)
+def test_unsupported_format_is_refused(fmt: EngineKVFormat) -> None:
+    with pytest.raises(ValueError, match="two-major HND"):
         _transfer(
             _paged_layers(),
             _chunks(),
             TransferDirection.D2H,
-            engine_kv_format=EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            engine_kv_format=fmt,
+        )
+
+
+def test_singleton_axis_layout_is_refused() -> None:
+    """``[2, NB, NH, 1, BS, HS]`` shares the HND two-major properties but has
+    an extra axis the block transfer cannot unpack."""
+    layers = [t.unsqueeze(3) for t in _paged_layers()]
+    with pytest.raises(ValueError, match="two-major HND"):
+        _transfer(
+            layers,
+            _chunks(),
+            TransferDirection.D2H,
+            engine_kv_format=EngineKVFormat.NL_X_TWO_NB_NH_ONE_BS_HS,
+        )
+
+
+def test_kv_size_must_be_two() -> None:
+    desc = _shape_desc()
+    desc.kv_size = 1
+    with pytest.raises(ValueError, match="two-major HND"):
+        NeuronDeviceOps().multi_layer_block_kv_transfer(
+            _paged_layers(),
+            _chunks(),
+            SCATTERED_BLOCKS,
+            torch.device("cpu"),
+            TransferDirection.D2H,
+            desc,
+            CHUNK_TOKENS,
+            HND,
+            0,
         )
 
 

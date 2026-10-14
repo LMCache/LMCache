@@ -60,15 +60,39 @@ def _neuron_device_count() -> int:
     return len(glob.glob("/dev/neuron*")) or 1
 
 
+#: Modules that register ``torch.neuron`` as an import side effect, in the
+#: order tried.  vllm-neuron images ship only ``libtorch_neuronx_lite``.
+_NEURON_TORCH_BACKENDS = ("libtorch_neuronx_lite", "torch_neuronx")
+
+
+def _register_torch_neuron() -> None:
+    """Import the first available Neuron torch backend so ``torch.neuron``
+    exists.  Does nothing if none is installed."""
+    # Standard
+    import importlib
+
+    for module_name in _NEURON_TORCH_BACKENDS:
+        try:
+            importlib.import_module(module_name)
+        except ImportError:
+            continue
+        return
+
+
 def _neuron_synchronize() -> None:
     """Flush pending device work.
 
-    ``torch_xla.sync()`` is issued when torch-xla is loaded, so the lazy XLA
-    backend (where pending work *is* queued until a step boundary) is flushed
-    instead of silently skipped.  Otherwise this does nothing: the native
-    TorchNeuron backend exposes no stream or event abstraction, so there is no
-    asynchronous queue to drain and device work has already completed by the
-    time control returns.
+    Neuron operations are enqueued asynchronously, so device work may still be
+    executing when control returns here.  What is needed to reach a safe point
+    depends on the backend in use:
+
+    - Under torch-xla, work is queued until a step boundary, so an explicit
+      ``torch_xla.sync()`` is issued when torch-xla is loaded rather than
+      skipped.
+    - The native TorchNeuron backend exposes no stream or event abstraction, so
+      there is no queue to drain by hand.  PyTorch synchronizes automatically
+      when copying between host and device or when reading tensor values, which
+      covers the copies on the transfer path.
 
     Failures are swallowed: an unavailable step barrier must not take down the
     transfer path.
@@ -150,7 +174,9 @@ class NeuronDeviceSpec(DeviceSpec):
         """Check Neuron availability.
 
         Uses ``torch.neuron`` if already registered (e.g. by vllm-neuron),
-        else imports ``torch_neuronx`` to register it.  Also fills in the
+        else imports a Neuron torch backend to register it: first
+        ``libtorch_neuronx_lite`` (shipped in the vllm-neuron images), then
+        ``torch_neuronx``.  Also fills in the
         device-module methods the SDK omits, so that the generic
         ``torch_dev.<method>()`` call sites throughout LMCache work on Neuron
         without each one needing a Neuron-specific branch.
@@ -160,11 +186,7 @@ class NeuronDeviceSpec(DeviceSpec):
             import torch
 
             if not hasattr(torch, "neuron"):
-                try:
-                    # Third Party
-                    import torch_neuronx  # noqa: F401 — side-effect: registers torch.neuron
-                except ImportError:
-                    return False
+                _register_torch_neuron()
             if not hasattr(torch, "neuron"):
                 return False
             _install_device_module_shims(torch.neuron)  # type: ignore[attr-defined]
