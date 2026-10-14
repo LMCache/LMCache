@@ -369,6 +369,65 @@ def test_native_plan_falls_back_for_non_lazy_objects():
 
 
 @native_retrieve_plan_required
+def test_native_plan_accepts_segmented_objects():
+    """Objects of a SegmentedMemoryAllocator (the GTT L1), one per segment,
+    get a native plan that stages them from their own pointers."""
+    # Standard
+    import ctypes
+    import os
+
+    # Third Party
+    import numpy as np
+    import torch
+
+    # First Party
+    from lmcache.v1.memory_allocators.segmented_memory_allocator import (
+        SegmentedMemoryAllocator,
+    )
+
+    eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
+    page = os.sysconf("SC_PAGE_SIZE")
+    segments: dict[int, ctypes.Array] = {}
+
+    def alloc_segment(size: int) -> int:
+        buf = (ctypes.c_uint8 * (size + page))()
+        ptr = -(-ctypes.addressof(buf) // page) * page
+        segments[ptr] = buf
+        return ptr
+
+    def free_segment(ptr: int) -> None:
+        del segments[ptr]
+
+    allocator = SegmentedMemoryAllocator(
+        2 * page, 2 * page, page, alloc_segment, free_segment, align_bytes=page
+    )
+    try:
+        objs = [
+            allocator.allocate(torch.Size([obj_bytes]), torch.uint8) for _ in range(2)
+        ]
+        assert [obj.meta.address for obj in objs if obj is not None] == [0, page]
+        runs = [
+            [
+                (SimpleNamespace(cur_st=4 * i, cur_ed=4 * i + 4, old_st=100), (obj,))
+                for i, obj in enumerate(objs)
+            ]
+        ]
+        cpu_block_tables = [
+            (np.array([10, 11], dtype=np.int64), 4),
+            (np.array([20, 21], dtype=np.int64), 4),
+        ]
+        plan = eng._build_cb_retrieve_plan_flat(
+            gpu_context, rope_state, cpu_block_tables, runs, max_batch=2
+        )
+        assert plan is not None
+        staging = plan[1][0]
+        assert staging[:, 1].tolist() == [obj.data_ptr for obj in objs]
+        assert staging[:, 3].tolist() == [obj.meta.address for obj in objs]
+    finally:
+        allocator.close()
+
+
+@native_retrieve_plan_required
 def test_native_plan_falls_back_for_compressed_group():
     """A compressed group (tokens != slots per block) disables the plan."""
     # Third Party

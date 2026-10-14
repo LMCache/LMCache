@@ -122,6 +122,9 @@ class SegmentedMemoryAllocator(TensorMemoryAllocator):
     :class:`TensorMemoryAllocator` over a :class:`_SegmentedAddressManager`.
     """
 
+    # Each object lies in one pinned segment, so any split of its copy is valid.
+    SUPPORTS_NATIVE_STAGING = True
+
     def __init__(
         self,
         init_size: int,

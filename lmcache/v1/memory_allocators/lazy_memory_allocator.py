@@ -69,6 +69,9 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
     PIN_CHUNK_SIZE = 1 << 26  # 64 MB pin chunk
     COMMIT_SIZE = 1 << 30  # Do a commit every 1 GB
     LOG_INTERVAL = 10 << 30  # Log expansion progress every 10 GB
+    # Native staging copies split at PIN_CHUNK_SIZE boundaries of
+    # meta.address, so each piece lies in one pin registration.
+    SUPPORTS_NATIVE_STAGING = True
 
     def __init__(
         self,

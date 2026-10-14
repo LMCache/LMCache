@@ -338,7 +338,7 @@ class RetrieveMixin:
         Returns:
             ``(group_specs, (staging, ropes, scatters, step_offsets),
             keepalive)``, or ``None`` when the native plan cannot serve this
-            request (old cuda_ops, non-lazy host objects, ``max_batch < 2``,
+            request (old cuda_ops, unstageable host objects, ``max_batch < 2``,
             unsupported geometry) — the caller then fails the retrieve and
             the client degrades to full recompute.
         """
@@ -347,10 +347,9 @@ class RetrieveMixin:
         pairs = [pair for run in runs for pair in run]
         if not pairs:
             return None
-        # Native staging requires the lazy-allocator (pin-chunked) host path.
         for _, chunk_objs in pairs:
             for memory_obj in chunk_objs:
-                if not isinstance(memory_obj.parent(), LazyMemoryAllocator):
+                if not getattr(memory_obj.parent(), "SUPPORTS_NATIVE_STAGING", False):
                     return None
 
         # Specs are invariant per registration except the slot-mapping fields:
@@ -1016,7 +1015,7 @@ class RetrieveMixin:
                     if native_flat is None:
                         raise RuntimeError(
                             "CB retrieve: native plan unavailable (cuda_ops "
-                            "without execute_cb_retrieve_plan_flat, non-lazy "
+                            "without execute_cb_retrieve_plan_flat, unstageable "
                             "host objects, max_batch < 2, or unsupported "
                             "geometry); failing the retrieve — the client "
                             "degrades this request to full recompute."
