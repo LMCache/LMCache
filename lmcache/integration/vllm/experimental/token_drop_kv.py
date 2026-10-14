@@ -28,3 +28,25 @@ class PagedKVSequenceView:
 
     def get_values(self) -> torch.Tensor:
         return self._read(1)
+
+    def compact_kv_in_place(self, kept_positions: torch.Tensor) -> int:
+        """Pack per-head K/V into this request's private blocks.
+
+        Example: [A B C D], keep [1, 3] -> [B D _ _].
+        Positions are [kept_tokens, kv_heads] valid resident indices in output
+        order. Caller guarantees exclusive block ownership.
+        """
+        if kept_positions.ndim != 2 or kept_positions.shape[1] != self._cache.shape[3]:
+            raise ValueError("Expected [kept_tokens, kv_heads] positions")
+        kept_len = kept_positions.shape[0]
+        if not 0 < kept_len <= self._blocks.numel():
+            raise ValueError("Invalid retained token count")
+
+        heads = torch.arange(self._cache.shape[3], device=self._cache.device)
+        selected = self._cache[
+            self._blocks[kept_positions], :, self._offsets[kept_positions], heads
+        ]
+        self._cache[
+            self._blocks[:kept_len, None], :, self._offsets[:kept_len, None], heads
+        ] = selected
+        return kept_len
