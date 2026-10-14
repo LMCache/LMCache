@@ -44,7 +44,15 @@ contiguously in one padded page (`conv | ssm | pad`). The raw pair trips
 format discovery (the SSM view starts mid-page). The edit reinterprets each
 page as one bf16 tensor shaped `(num_blocks, 2, block_size, 1, head_size)`
 over the same storage, where `head_size` is derived so the bytes fill the page
-exactly.
+exactly. `matches` requires the conv state's per-block stride to equal
+`page_size_bytes`.
+
+When conv's per-block stride is only the slice (not the padded page), a
+second rule re-views each state as one uint8 format-17 plane
+``[num_blocks, block_size, 1, width]`` at the scheduler ``block_size`` (with
+``width = state_bytes / block_size``). The edit only changes the shape so
+format detection can see the slices; alignment, row size, and plane count are
+checked by the transfer kernel, not here.
 
 ### 2. Sub-paged full attention
 
@@ -87,6 +95,17 @@ so both ranks stay reachable and both must be handled. Gating the rule on rank
 5 alone silently disabled it on 0.26.0 and corrupted store/retrieve with no
 error. The re-view only reinterprets byte ranges, so it is otherwise
 indifferent to which layout it is handed.
+
+vLLM-Ascend through v0.29 registers the same mismatch as a `(K, V)` pair of
+contiguous rank-4 planes
+`(num_kernel_pages, kernel_block_size, num_kv_heads, head_size)`, in one pool
+or two allocations. `_SubpagedAttentionContiguousPlaneViewEdit`
+(`subpaged-attention-contiguous-plane-view`) re-views each plane to
+`(num_kernel_pages / k, scheduler_block_size, num_kv_heads, head_size)`,
+still format 16 (`NL_X_TWO_X_NB_BS_NH_HS`). The tile check uses
+`real_page_size_bytes`, because hybrid `page_size_bytes` includes Mamba conv
+padding absent from the K/V views. A pair that is not this layout is left
+unchanged.
 
 The registered tensor is also a `permute` view of the backend's physical
 layout (`get_kv_cache_stride_order`, `vllm/v1/worker/gpu/attn_utils.py`), so it
@@ -163,10 +182,9 @@ rather than being transferred wrongly.
 
 An edited view's dims are addressing metadata only (block id → byte range).
 The named dims are **not** semantic: a Mamba view's "K plane" is conv/ssm
-bytes, and a sub-paged attention view's "K plane" interleaves true K and V at
-kernel-page granularity (true K is not contiguous across kernel pages, so no
-logical-block view can have a pure-K plane). The synthetic head shape
-`(1, page_bytes / (2 * block_size * elem))` signals this deliberately.
+bytes, The contiguous attention reshape keeps K, V, dtype, and heads, and only
+changes the block axis (format 16).
+The synthetic head shape on the opaque views signals this deliberately.
 
 Byte transport round-trips correctly because store and retrieve share the same
 bijective block-id → bytes mapping. Consequences:
@@ -182,9 +200,13 @@ bijective block-id → bytes mapping. Consequences:
 ## Invariants
 
 - Edits are pure tensor views over the registered storage — never copies.
-- A sub-paged view is only produced when `kernel_page_bytes * k ==
-  spec.page_size_bytes`; any mismatch raises `ValueError` (fail loudly rather
-  than silently transfer a compressed layout).
+- A sub-paged view is only produced when `k` kernel pages tile the logical
+  page: one fused span of `spec.page_size_bytes`, or the two contiguous
+  halves added together equaling `real_page_size_bytes` (falling back to
+  `page_size_bytes` when the spec has no unpadded size). A matched
+  layout whose bytes do not tile raises `ValueError` rather than transferring
+  a compressed layout. A pair that is not one of the recognized layouts is
+  left unchanged.
 - After edits, every registered tensor's block dim equals its group's
   `kv_cache_spec.block_size`, so the server derives `compress_ratio == 1` for
   these groups.
