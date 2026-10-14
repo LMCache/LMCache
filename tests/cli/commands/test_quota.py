@@ -18,7 +18,7 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.quota import QuotaCommand
-from lmcache.cli.commands.quota.helpers import (
+from lmcache.cli.commands.quota._helpers import (
     DEFAULT_SALT_SENTINEL,
     escape_salt,
     normalize_url,

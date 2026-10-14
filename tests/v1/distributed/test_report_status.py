@@ -10,6 +10,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -23,6 +24,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2AdapterConfig,
 )
+from tests.v1.distributed.utils import should_use_lazy_alloc
 
 try:
     # First Party
@@ -32,14 +34,11 @@ except ImportError:
         "Skipping because StorageManager cannot be imported", allow_module_level=True
     )
 
-# Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
-
-def should_use_lazy_alloc() -> bool:
-    return torch.cuda.is_available()
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 
 # =============================================================================
@@ -156,6 +155,8 @@ class TestStorageManagerReportStatus:
         assert l1["write_locked_count"] == 0
         assert l1["read_locked_count"] == 0
         assert l1["temporary_count"] == 0
+        assert l1["staging_object_count"] == 0
+        assert l1["staging_bytes"] == 0
         assert l1["memory_used_bytes"] == 0
         assert l1["memory_total_bytes"] > 0
         assert l1["memory_usage_ratio"] == 0.0
@@ -197,18 +198,24 @@ class TestStorageManagerReportStatus:
     def test_l1_status_reflects_writes(self, storage_manager_no_l2, basic_layout):
         """After writing objects, L1 status should reflect them."""
         keys = [make_object_key(i) for i in range(3)]
-        reserved = storage_manager_no_l2.reserve_write(keys, basic_layout, "new")
+        reserved = storage_manager_no_l2.reserve_write(keys, basic_layout)
         assert len(reserved) == 3
 
+        # Reserved objects are staging objects until they are admitted.
         l1 = storage_manager_no_l2.report_status()["l1_manager"]
         assert l1["total_object_count"] == 3
         assert l1["write_locked_count"] == 3
-        assert l1["memory_used_bytes"] > 0
+        assert l1["staging_object_count"] == 3
+        assert l1["staging_bytes"] > 0
+        assert l1["memory_used_bytes"] >= l1["staging_bytes"]
 
-        # Finish writes
+        # Finish writes: admission empties the staging area.
         storage_manager_no_l2.finish_write(keys)
         l1 = storage_manager_no_l2.report_status()["l1_manager"]
+        assert l1["total_object_count"] == 3
         assert l1["write_locked_count"] == 0
+        assert l1["staging_object_count"] == 0
+        assert l1["staging_bytes"] == 0
 
     def test_health_propagation(self, storage_manager_no_l2):
         """Top-level is_healthy should be True when all children are healthy."""

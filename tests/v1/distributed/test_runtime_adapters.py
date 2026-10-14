@@ -17,6 +17,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -32,16 +33,17 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
 )
 from lmcache.v1.distributed.storage_controllers.store_controller import StoreController
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     DefaultStorePolicy,
 )
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 from lmcache.v1.distributed.storage_manager import StorageManager
+from tests.v1.distributed.utils import should_use_lazy_alloc
 
-# Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 # =============================================================================
 # Helpers
@@ -63,10 +65,6 @@ def make_layout() -> MemoryLayoutDesc:
     )
 
 
-def should_use_lazy_alloc() -> bool:
-    return torch.cuda.is_available()
-
-
 def wait_for_condition(predicate, timeout: float = 5.0, poll: float = 0.02) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -84,8 +82,8 @@ def make_adapter() -> MockL2Adapter:
     return MockL2Adapter(make_mock_config())
 
 
-def make_descriptor(index: int) -> AdapterDescriptor:
-    return AdapterDescriptor(index=index, config=make_mock_config())
+def make_descriptor(index: int) -> L2AdapterDescriptor:
+    return L2AdapterDescriptor(index=index, config=make_mock_config())
 
 
 def adapter_by_id(sm: StorageManager, adapter_id: int) -> MockL2Adapter:
@@ -111,7 +109,6 @@ def write_keys_to_l1(
         keys=keys,
         is_temporary=[False] * len(keys),
         layout_desc=layout,
-        mode="new",
     )
     written = [k for k, (e, m) in results.items() if m is not None]
     if written:
@@ -295,7 +292,7 @@ class TestStorageManagerRuntimeAdapters:
 
             layout = make_layout()
             keys = [make_object_key(i) for i in range(4)]
-            ret = sm.reserve_write(keys, layout, mode="new")
+            ret = sm.reserve_write(keys, layout)
             sm.finish_write(list(ret.keys()))
 
             assert wait_for_condition(
@@ -359,7 +356,7 @@ class TestStorageManagerRuntimeAdapters:
 
             layout = make_layout()
             keys = [make_object_key(i) for i in range(3)]
-            ret = sm.reserve_write(keys, layout, mode="new")
+            ret = sm.reserve_write(keys, layout)
             sm.finish_write(list(ret.keys()))
 
             assert wait_for_condition(

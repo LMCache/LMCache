@@ -946,6 +946,44 @@ def test_receiver_reservation_admission_timeout(async_receiver):
     asyncio.run(run())
 
 
+def test_receiver_admission_fails_fast_when_request_exceeds_buffer(async_receiver):
+    """A request larger than the whole buffer is rejected immediately.
+
+    When a prefill's declared total_chunks exceeds the receiver buffer's total
+    capacity it can never be admitted, no matter how much the buffer drains.
+    The receiver must reject it right away with an actionable error instead of
+    blocking for the full pd_allocation_timeout_sec and then reporting a
+    misleading "over-subscribed" timeout that tears down the transfer.
+    """
+    async_receiver.allocate = _auto_alloc()
+    total = async_receiver._recv_reservation_mgr.get_total_chunks()
+    oversized = total + 1
+
+    # A large admission timeout would be burned if the fail-fast were missing;
+    # the guard must return well before it could elapse.
+    async_receiver._recv_reservation_mgr._allocation_timeout = 30.0
+
+    async def run():
+        t0 = time.monotonic()
+        with pytest.raises(RuntimeError, match="buffer too small"):
+            await async_receiver._async_allocate_and_put(
+                _make_alloc_req(
+                    [_make_key(9999)],
+                    req_id="req-too-big",
+                    total_chunks=oversized,
+                )
+            )
+        elapsed = time.monotonic() - t0
+        # Fail fast: nowhere near the 30s admission timeout.
+        assert elapsed < 1.0
+        # The rejected request must not leave a reservation behind.
+        mgr = async_receiver._recv_reservation_mgr
+        assert "req-too-big" not in mgr._reservations
+        assert mgr._total_reserved == 0
+
+    asyncio.run(run())
+
+
 def test_receiver_cancel_notif_releases_keys_and_reservation(async_receiver):
     """CancelNotif removes keys, releases reservation, and cleans up tracking.
 

@@ -5,9 +5,9 @@
 from typing import Optional
 
 # First Party
-from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.utils import get_size_bytes
+from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
@@ -87,6 +87,8 @@ class GDSL1MemoryManager:
                 address=address,
                 phy_size=allocated,
                 ref_count=0,
+                shapes=list(layout_desc.shapes),
+                dtypes=list(layout_desc.dtypes),
             )
             objects.append(GDSMemoryObject(meta))
         return L1Error.SUCCESS, objects
@@ -103,7 +105,19 @@ class GDSL1MemoryManager:
         """
         for mo in mem_objs:
             self._address_manager.free(mo.metadata.address, mo.get_physical_size())
+            mo.invalidate()
         return L1Error.SUCCESS
+
+    def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
+        """Return the storage medium backing ``memory_obj``.
+
+        Args:
+            memory_obj: An object allocated by this manager.
+
+        Returns:
+            ``L1BackendType.GDS`` — this tier's only medium is the slab file.
+        """
+        return L1BackendType.GDS
 
     def get_memory_usage(self) -> tuple[int, int]:
         """Return ``(used_bytes, total_bytes)`` of the slab."""

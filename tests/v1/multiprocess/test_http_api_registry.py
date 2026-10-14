@@ -181,7 +181,7 @@ class TestHTTPAPIRegistry:
         return test_app
 
     def test_root_endpoint_registered(self, app_with_registry):
-        """The ``/`` endpoint from root_api is reachable."""
+        """The ``/`` endpoint from info_api is reachable."""
         client = TestClient(app_with_registry)
         resp = client.get("/")
         assert resp.status_code == 200
@@ -191,5 +191,5 @@ class TestHTTPAPIRegistry:
     def test_all_expected_routes_present(self, app_with_registry):
         """All four expected routes are registered."""
         routes = set(app_with_registry.openapi()["paths"])
-        expected = {"/", "/healthcheck", "/clear-cache", "/status"}
+        expected = {"/", "/healthcheck", "/cache/clear", "/status"}
         assert expected.issubset(routes)

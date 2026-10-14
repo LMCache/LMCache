@@ -11,7 +11,10 @@ Public surface:
 """
 
 # First Party
-from lmcache.v1.gpu_connector.kv_format.detection import detect_format
+from lmcache.v1.gpu_connector.kv_format.detection import (
+    detect_format,
+    extract_kv_cache_shapes,
+)
 from lmcache.v1.gpu_connector.kv_format.specs import (
     KVFormatSpec,
     concrete_shape,
@@ -25,6 +28,7 @@ __all__ = [
     "concrete_shape",
     "describe_shape",
     "detect_format",
+    "extract_kv_cache_shapes",
     "get_spec",
     "get_spec_class",
 ]

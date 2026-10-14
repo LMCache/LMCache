@@ -42,6 +42,7 @@ import math
 import torch
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.serde.multi import (
     LayoutDescGroup,
     MemoryObjGroup,
@@ -103,7 +104,8 @@ class AsymK16V8MultiSerializer(MultiSerializer):
     def group_size(self) -> int:
         return _GROUP_SIZE_STORAGE_ONLY
 
-    def serialize(self, src: MemoryObjGroup, dst: MemoryObj) -> int:
+    def serialize(self, src: MemoryObjGroup, dst: MemoryObj, key: ObjectKey) -> int:
+        # ``key`` unused: this serde is content-agnostic.
         validate_group_size(src, _GROUP_SIZE_STORAGE_ONLY, role="src")
         k_obj, v_obj = src
         if k_obj is None or v_obj is None:
@@ -207,7 +209,8 @@ class AsymK16V8MultiDeserializer(MultiDeserializer):
     def group_size(self) -> int:
         return _GROUP_SIZE_STORAGE_ONLY
 
-    def deserialize(self, src: MemoryObj, dst: MemoryObjGroup) -> None:
+    def deserialize(self, src: MemoryObj, dst: MemoryObjGroup, key: ObjectKey) -> None:
+        # ``key`` unused: this serde is content-agnostic.
         validate_group_size(dst, _GROUP_SIZE_STORAGE_ONLY, role="dst")
         if src.tensor is None:
             raise ValueError("AsymK16V8MultiDeserializer: src.tensor is None")
@@ -330,7 +333,8 @@ class AsymK16V8VOnlyMultiSerializer(MultiSerializer):
     def group_size(self) -> int:
         return _GROUP_SIZE_V_ONLY
 
-    def serialize(self, src: MemoryObjGroup, dst: MemoryObj) -> int:
+    def serialize(self, src: MemoryObjGroup, dst: MemoryObj, key: ObjectKey) -> int:
+        # ``key`` unused: this serde is content-agnostic.
         validate_group_size(src, _GROUP_SIZE_V_ONLY, role="src")
         k_obj, v_obj = src
         if k_obj is not None:
@@ -468,7 +472,8 @@ class AsymK16V8VOnlyMultiDeserializer(MultiDeserializer):
     def group_size(self) -> int:
         return _GROUP_SIZE_V_ONLY
 
-    def deserialize(self, src: MemoryObj, dst: MemoryObjGroup) -> None:
+    def deserialize(self, src: MemoryObj, dst: MemoryObjGroup, key: ObjectKey) -> None:
+        # ``key`` unused: this serde is content-agnostic.
         validate_group_size(dst, _GROUP_SIZE_V_ONLY, role="dst")
         if src.tensor is None:
             raise ValueError("AsymK16V8VOnlyMultiDeserializer: src.tensor is None")

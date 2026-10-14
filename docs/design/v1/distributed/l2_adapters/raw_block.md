@@ -38,10 +38,48 @@ StoreController / PrefetchController
 - Preserve restart recovery semantics.
 - Keep the MP controller flow unchanged: store, lookup-and-lock, load, unlock.
 
-## TODO
+## FDP Placement Base
 
-- FDP / placement-hint support.
-- A raw NVMe command path.
+The MP `raw_block` adapter supports NVMe Flexible Data Placement (FDP) status
+discovery when `io_engine="io_uring"` and `use_uring_cmd=true`. At startup, it
+queries FDP reclaim unit handle status from the device and reports the
+discovered mapping. Startup fails if the query fails or the device reports no
+placement identifiers.
+
+FDP plumbing is split by layer: `RawBlockL2Adapter` discovers and registers
+non-zero placement identifiers, while `RawBlockCore` enforces that explicit
+identifier 0 is never used. `fdp_placement_ids` is the KV data placement pool:
+explicit data identifiers are rejected if they overlap with
+`meta_checkpoint_placement_id` or are not reported by the device. If
+`fdp_placement_ids` is omitted, the adapter registers all device-reported
+non-zero identifiers except the metadata checkpoint identifier.
+
+The adapter maps KV data writes onto FDP placement identifiers with a
+cache-salt prefix policy. It derives a case-insensitive bucket from the part of
+`ObjectKey.cache_salt` before `:` only when the separator is present, assigns
+buckets to placement identifiers in first-seen order, and reuses the same
+identifier for later writes in that bucket. Values without `:` or with an empty
+prefix omit the directive; `rag:` is a valid opt-in to the `rag` bucket. The
+mapping is availability-first: if the number of buckets exceeds the number of
+registered data placement identifiers, extra buckets fall back to no directive
+and the adapter emits one warning. Status reporting tracks a fallback count and
+a bounded bucket sample rather than retaining all fallback bucket names. Empty
+`cache_salt` values also omit the directive. The mapping is process-local and
+may change after restart; read correctness is unaffected because `cache_salt` is
+part of the object key rather than the read path's FDP directive. Metadata
+checkpoint writes can use an explicit configured placement identifier while
+defaulting to no directive when unset. User-facing FDP configuration rules live in
+`docs/source/mp/l2_storage/raw_block.rst`; low-level NVMe command encoding
+details live in `rust/raw_block/README.md`.
+
+When `pid_affinity` slot reuse is enabled, `RawBlockCore` tracks each free
+slot's latest placement identifier in memory and prefers a matching slot during
+reuse. If no matching slot is available, it falls back to another free slot or
+allocates a new slot.
+
+Slot affinity is not checkpointed because FDP placement assignments are
+process-local. After recovery, free slots have no recorded affinity until they
+are reused.
 
 ## Key Design Choice
 
@@ -76,6 +114,38 @@ mode.
 The adapter uses caller-provided `MemoryObj` buffers for load operations. It
 does not allocate destination buffers on the load path.
 
+## Worker Failure and Task Completion
+
+Recoverable io_uring submission errors (`EAGAIN`, `EINTR`, and `EBUSY`) retry
+after completion progress or exponential backoff from 1 to 100 ms. Permanent
+errors, or 30 seconds without submission or completion progress, stop new
+native I/O admission. `RawBlockCore.report_status()` then reports
+`is_healthy=False` and the terminal reason in `worker_error`. An ordinary
+per-request I/O error does not mark the worker as failed.
+
+An open adapter reports a known worker failure through its task results, not
+through a synchronous exception from `submit_*`. It allocates a task ID and
+passes an already-failed future to the existing completion callback without
+queuing work in the thread pool:
+
+- lookup and load complete with all-zero bitmaps of the submitted key count;
+- store completes with `L2StoreResult(False, 0)` without writing data;
+- each completion decrements its in-flight counter, publishes the result, and
+  signals the corresponding eventfd. Results are consumed once.
+
+This lets the controllers release failed-load buffers and lookup/store locks
+through their normal completion paths. Existing L1 and healthy-adapter hits
+remain usable; missing data can be recomputed by the serving engine. Unlocks
+remain available after worker failure. Invalid arguments and submissions after
+adapter close still raise. The legacy non-MP backend skips new stores after a
+known worker failure without retaining objects or raising to its caller.
+
+I/O already accepted by the kernel keeps its buffers until terminal completion
+or cancellation completion; a worker error alone must not complete those
+tasks. Close and destructor cleanup release the GIL while draining and joining
+the worker. Cleanup can still wait indefinitely for uncancellable I/O: the
+submission retry budget is not a shutdown timeout.
+
 ## Locking Model
 
 LMCache MP already uses L1 locks for CPU-memory object lifetime. `raw_block`
@@ -98,6 +168,9 @@ Rules:
 - optional verification on load
 - recovery by loading the latest durable checkpoint and rebuilding the in-memory
   index
+- POSIX recovery validates per-slot headers with an internal pool of 8 reader
+  threads. Both regular `io_uring` and `io_uring_cmd` batch header reads up to
+  `iouring_queue_depth`.
 
 The on-device format is intentionally unchanged by the MP adapter work.
 
@@ -130,16 +203,24 @@ The MP adapter is configured through `--l2-adapter` JSON:
 }
 ```
 
+For FDP configuration examples, see `docs/source/mp/l2_storage/raw_block.rst`.
+
 Important validation rules:
 
+- `block_align` must be a power of two
 - `slot_bytes`, `header_bytes`, and `meta_total_bytes` must be aligned to
   `block_align`
+- with `use_uring_cmd=true`, `block_align` must be a multiple of the NVMe
+  namespace LBA size
 - `slot_bytes >= header_bytes + 1`
 - `per_tp_device_paths` is rejected in MP mode
 - `load_checkpoint_on_init=false` starts with an empty in-memory index instead
   of loading the latest on-device metadata checkpoint
-- with `use_odirect=true`, MP L1 alignment must satisfy
+- with `use_odirect=true` or `use_uring_cmd=true`, MP L1 alignment must satisfy
   `l1_align_bytes >= block_align`
+- with `use_odirect=true`, raw-block I/O rejects offsets and total I/O lengths
+  that are not aligned to `block_align`; misaligned write buffers use an
+  aligned bounce buffer
 
 ## Relationship to Non-MP Mode
 

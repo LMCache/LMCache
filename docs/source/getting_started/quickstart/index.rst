@@ -3,6 +3,11 @@
 More Examples
 =============
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 This section provides quick examples to help you get started with LMCache's key features.
 
 KV Cache Offloading

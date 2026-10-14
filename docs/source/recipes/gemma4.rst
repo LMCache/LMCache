@@ -86,6 +86,57 @@ Compression support
      - Not validated
      -
 
+MTP (speculative decoding) support
+----------------------------------
+
+Gemma 4 supports MTP speculative decoding through separate **assistant
+checkpoints** (``google/gemma-4-<size>-it-assistant``), which vLLM loads as
+the draft model. The draft layers carry their own KV cache; LMCache detects
+them from vLLM's ``speculative_config`` and stores/retrieves the draft-layer
+KV together with the target model's -- no extra LMCache flags are required.
+
+**Status:** Validated with LMCache (vLLM MP connector):
+
+- ``google/gemma-4-31B-it`` + ``google/gemma-4-31B-it-assistant`` (2 GPUs)
+- ``google/gemma-4-12B-it`` + ``google/gemma-4-12B-it-assistant`` (1 GPU,
+  needs ``--enforce-eager``; see below)
+- ``google/gemma-4-E4B-it`` + ``google/gemma-4-E4B-it-assistant`` (1 GPU)
+
+Add to the ``vllm serve`` command shown above:
+
+.. code-block:: bash
+
+   --speculative-config \
+       '{"method":"mtp","model":"google/gemma-4-31B-it-assistant","num_speculative_tokens":1}' \
+   --attention-backend TRITON_ATTN
+
+.. warning::
+
+   ``--attention-backend TRITON_ATTN`` is **required when MTP is enabled**.
+   The target model alone auto-selects the Triton backend (FlashAttention
+   does not support Gemma 4's 512-dim global-attention heads), but the
+   assistant draft model's backend selection picks FlashAttention and the
+   engine crashes at startup with *"FlashAttention forward only supports
+   head dimension at most 256"*. Pinning the backend explicitly covers both
+   models.
+
+Validation evidence (gsm8k store-vs-retrieve, 100 samples, exact score match
+required under ``VLLM_BATCH_INVARIANT=1``): 31B scored 0.78 in both the
+computed and the LMCache-retrieved run with the MTP acceptance rate unchanged
+(0.911 vs 0.910); 12B scored 0.28 in both runs (acceptance 0.854 vs 0.853);
+E4B scored 0.69 in both runs with acceptance rate identical (0.807).
+Cold-vs-warm TTFT improved 3.7x (31B) / 1.7x (12B) / 1.4x (E4B) with MTP
+enabled throughout.
+
+.. note::
+
+   The 12B Unified assistant requires ``--enforce-eager`` on the vLLM
+   nightly tested: its draft head applies a token-suppression list held in
+   an unpinned CPU tensor (``gemma4_mtp.py``, ``compute_logits``), which
+   aborts CUDA graph capture with *"Cannot copy between CPU and CUDA
+   tensors during CUDA graph capture"*. This is an upstream vLLM issue,
+   unrelated to LMCache; 31B and E4B assistants are unaffected.
+
 Caveats
 -------
 

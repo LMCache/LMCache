@@ -6,9 +6,13 @@ This covers the health-monitoring surface for L2 prefetch (see LM-291):
 
 - ``lmcache_mp.l2_prefetch_failure`` — count of keys that failed to load from
   L2 to L1. Tagged by ``reason``:
-    * ``l1_oom``    — L1 had no room to receive the prefetched object.
-    * ``not_found`` — L2 reported the key present during lookup but the load
-      returned no data (adapter-level inconsistency, e.g. concurrent delete).
+    * ``l1_oom``       — L1 had no room to receive the prefetched object.
+    * ``l1_contended`` — the key appeared in L1 (write-locked by a concurrent
+      request) between the prefetch's L1 claim and its buffer reservation, so
+      the load was skipped.
+    * ``not_found``    — L2 reported the key present during lookup but the
+      load returned no data (adapter-level inconsistency, e.g. concurrent
+      delete).
 
 The ``serde_failure`` reason is intentionally omitted until the serde PR
 lands; once it does, it becomes an additive third value of the same tag
@@ -41,8 +45,8 @@ class L2FailureMetricsSubscriber(EventSubscriber):
             "lmcache_mp.l2_prefetch_failure",
             description=(
                 "Count of keys that were expected in L2 but failed to load "
-                "into L1. Tagged by ``reason`` = l1_oom | not_found and "
-                "``model_name``."
+                "into L1. Tagged by ``reason`` = l1_oom | l1_contended | "
+                "not_found and ``model_name``."
             ),
             unit="chunks",
         )

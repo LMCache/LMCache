@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Literal, Optional
+import hashlib
 import os
 import socket
 
@@ -14,6 +15,14 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 ServiceKind = Literal["lookup", "offload", "lookup_worker", "lookup_scheduler"]
+
+# ``sockaddr_un.sun_path`` is 108 bytes on Linux (107 usable chars + NUL), and
+# ZMQ rejects IPC paths longer than that. A long base directory (e.g. a
+# supercomputer scratch filesystem assigned via ``TMPDIR``) plus the
+# UUID-heavy descriptive socket name can easily exceed it, so the generated
+# path must be kept within this limit. See
+# https://github.com/LMCache/LMCache/issues/3529.
+IPC_SOCKET_PATH_MAX_LEN = 107
 
 # Default timeout constants for socket operations (in milliseconds)
 DEFAULT_SOCKET_RECV_TIMEOUT_MS = 30000
@@ -83,7 +92,7 @@ def close_zmq_socket(socket: zmq.asyncio.Socket, linger: int = 0) -> None:
         socket.setsockopt(zmq.LINGER, linger)  # type: ignore[attr-defined]
         socket.close()
     except Exception as e:
-        logger.error(f"Warning: Failed to close socket cleanly: {e}")
+        logger.error("Warning: Failed to close socket cleanly: %s", e)
 
 
 def get_ip():
@@ -162,4 +171,68 @@ def get_zmq_rpc_path_lmcache(
         f"lmcache_rpc_port_{rpc_port}"
     )
 
-    return socket_path
+    return _enforce_ipc_path_limit(socket_path, base_url)
+
+
+def _ipc_path_nbytes(path: str) -> int:
+    """Length of ``path`` as the kernel sees it: ``sun_path`` is byte-sized,
+    not character-sized, so a non-ASCII base directory must be measured after
+    encoding (the ``ipc://`` scheme prefix is not part of ``sun_path``)."""
+    return len(os.fsencode(path))
+
+
+def _enforce_ipc_path_limit(socket_path: str, base_url: str) -> str:
+    """Keep an IPC socket path within the ``sockaddr_un`` length limit.
+
+    The descriptive path is preferred for readability/debuggability and is
+    returned unchanged when it already fits. When it would exceed
+    :data:`IPC_SOCKET_PATH_MAX_LEN` (long ``base_url`` on shared filesystems),
+    the descriptive filename is replaced by a short, deterministic digest of
+    the full path so that every caller — both the binding server and the
+    connecting client — derives the *same* shortened path from the same
+    inputs. The digest is taken over the full descriptive path, so distinct
+    ``(engine_id, service_name, rpc_port, rank)`` tuples keep distinct sockets.
+
+    Length is measured in bytes (``sun_path`` is byte-sized), so non-ASCII
+    base directories are handled correctly.
+
+    Args:
+        socket_path: The descriptive ``{base_url}/engine_..._rpc_port_N`` path.
+        base_url: The base directory the socket should live under.
+
+    Returns:
+        ``socket_path`` if it already fits, otherwise a shortened path under
+        ``base_url`` that is within the limit.
+
+    Raises:
+        ValueError: If ``base_url`` is itself so long that even a shortened
+            name cannot fit. Falling back to a different directory is *not*
+            done on purpose: the binding server and connecting client may be
+            separate processes with different ``TMPDIR``, so a temp-dir
+            fallback could resolve differently on each end and silently break
+            IPC. Raising here is deterministic on both ends; the user must
+            point ``VLLM_RPC_BASE_PATH`` / ``TMPDIR`` at a shorter directory.
+    """
+    if _ipc_path_nbytes(socket_path) <= IPC_SOCKET_PATH_MAX_LEN:
+        return socket_path
+
+    digest = hashlib.sha256(os.fsencode(socket_path)).hexdigest()[:16]
+    shortened = os.path.join(base_url, f"lmcache_rpc_{digest}")
+
+    if _ipc_path_nbytes(shortened) > IPC_SOCKET_PATH_MAX_LEN:
+        raise ValueError(
+            f"Cannot construct an IPC socket path within the "
+            f"{IPC_SOCKET_PATH_MAX_LEN}-byte sockaddr_un limit: base directory "
+            f"{base_url!r} is too long to host even a shortened socket name. "
+            f"Set VLLM_RPC_BASE_PATH (or TMPDIR) to a shorter directory."
+        )
+
+    logger.warning(
+        "IPC socket path (%d bytes) exceeds the %d-byte sockaddr_un limit; "
+        "using shortened path %r instead of %r.",
+        _ipc_path_nbytes(socket_path),
+        IPC_SOCKET_PATH_MAX_LEN,
+        shortened,
+        socket_path,
+    )
+    return shortened

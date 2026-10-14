@@ -98,7 +98,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
                 kv_cache_utils.init_none_hash(self.hash_func)
                 NONE_HASH = _normalize_hash_to_int(kv_cache_utils.NONE_HASH)
                 logger.info(
-                    f"Initialized NONE_HASH={NONE_HASH} from vLLM (>= PR#20511)"
+                    "Initialized NONE_HASH=%s from vLLM (>= PR#20511)", NONE_HASH
                 )
             else:
                 NONE_HASH = 0
@@ -107,7 +107,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             NONE_HASH = 0
             logger.info("Using default NONE_HASH=0 (vLLM not available)")
 
-        logger.info(f"Using hash algorithm: {hash_algorithm}")
+        logger.info("Using hash algorithm: %s", hash_algorithm)
         self.metadata = metadata
         # Whether only the first rank should save cache. This flag is also used
         # to control the logical world_size embedded into CacheEngineKey.
@@ -152,7 +152,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
                     module = __import__(module_path, fromlist=[func_name])
                     hash_func = getattr(module, func_name)
                     logger.info(
-                        f"Loaded '{func_name}' from {module_path} (direct import)"
+                        "Loaded '%s' from %s (direct import)", func_name, module_path
                     )
                     return hash_func
                 except (ImportError, AttributeError):
@@ -160,8 +160,9 @@ class TokenDatabase(metaclass=abc.ABCMeta):
 
         # Fallback to builtin hash
         logger.warning(
-            f"Could not load '{hash_algorithm}' from vLLM. Using builtin hash. "
-            "This may cause inconsistencies in distributed caching."
+            "Could not load '%s' from vLLM. Using builtin hash. "
+            "This may cause inconsistencies in distributed caching.",
+            hash_algorithm,
         )
 
         # Check PYTHONHASHSEED when using builtin hash
@@ -187,7 +188,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         for name in names_to_try:
             try:
                 hash_func = get_hash_fn_by_name(name)
-                logger.info(f"Loaded '{name}' from {module_name}")
+                logger.info("Loaded '%s' from %s", name, module_name)
                 return hash_func
             except ValueError:
                 continue

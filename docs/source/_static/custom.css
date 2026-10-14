@@ -135,3 +135,9 @@ nav .toctree-l1:has(> a.expandable) {
 .hero-description {
     text-align: justify;
 }
+
+/* Theme-aware images: show the light variant by default, swap to the dark
+   variant when the sphinxawesome theme is in dark mode (html.dark). */
+.only-dark { display: none; }
+html.dark .only-light { display: none; }
+html.dark .only-dark { display: revert; }

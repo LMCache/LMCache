@@ -1,13 +1,18 @@
 Blending
 ================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 CacheBlend enables KV cache reuse for non-prefix positions by recomputing a subset of tokens at non-prefix positions.
 For example, CacheBlend can combine multiple (pre-)computed KV caches, when their corresponding texts are concatenated in the LLM input
 
 Configuring CacheBlend in RAG scenarios
 -------------------------------------------------
 
-Here, we will explain the code in our end-to-end `example <https://github.com/LMCache/LMCache/tree/dev/examples/blend_kv_v1/blend.py>`_>.
+Here, we will explain the code in our end-to-end `example <https://github.com/LMCache/LMCache/tree/dev/examples/blend_in_process/blend.py>`_>.
 
 Below are some blending-related configurations (and explanations):
 

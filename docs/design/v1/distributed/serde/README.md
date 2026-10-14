@@ -34,6 +34,8 @@ lmcache/v1/distributed/serde/
   async_processor.py  # AsyncSerdeProcessor (thread-pool + eventfd wrapper)
   factory.py          # register_serde_factory / create_serde_processor
   fp8.py              # Fp8QuantizationSerializer / Deserializer
+  aesgcm.py           # AES-GCM encryption serde (see aesgcm.md)
+  key_provider.py     # KeyProvider / HkdfKeyProvider for aesgcm
   multi.py            # MultiSerializer / MultiDeserializer (tuple-shaped
                       # extension; see "Multi-output extension" below)
   utils.py            # serialized_layout_desc, make_temp_key
@@ -58,8 +60,8 @@ lmcache/v1/distributed/serde/
 ```
 
 - **Sync layer** is where the user cares. Pure Python (or torch) code,
-  no threads, no fds. Two abstract methods: `serialize(src, dst)` and
-  `estimate_serialized_size(layout_desc)`.
+  no threads, no fds. Two abstract methods: `serialize(src, dst, key)`
+  and `estimate_serialized_size(layout_desc)`.
 - **Async layer** is what the `SerdeL2AdapterWrapper` talks to. It
   owns two eventfds (one for serialize, one for deserialize) that
   must be distinct, and queues completed tasks in a dict the wrapper
@@ -71,14 +73,26 @@ classes and register a factory.
 
 ## Contracts
 
-### `Serializer.serialize(src, dst) -> int`
+### `Serializer.serialize(src, dst, key) -> int`
 
 - `src` is a `MemoryObj` holding KV data (read-locked by the caller).
 - `dst` is a `MemoryObj` byte buffer (write-locked by the caller),
   sized ≥ `estimate_serialized_size(layout_of_src)`.
+- `key` is the `ObjectKey` for this `src`/`dst` pair, positionally
+  aligned with the batch. Serdes that transform bytes per-object
+  (e.g. an encryption serde keyed on `cache_salt`) read it;
+  transform-agnostic serdes (fp8, turboquant) ignore it.
 - Must return the number of bytes actually written to `dst`.
 - Must be **deterministic** given the same `src` — the wrapper relies
   on the serialize step being reproducible across retries.
+- **Writing raw bytes into `dst`:** go through `dst.byte_array` and cast
+  it to the native format first — `memoryview(dst.byte_array).cast("B")`.
+  `byte_array` is a ctypes-backed view with format `"<B"`, and CPython
+  does not support slice assignment into a non-native format (a bare
+  `dst[i:j] = ...` raises `NotImplementedError: memoryview: unsupported
+  format <B`). The `aesgcm` serde takes this path; tensor-based serdes
+  (fp8, turboquant) instead write through `dst.tensor` and never touch
+  `byte_array`.
 
 ### `Serializer.estimate_serialized_size(layout_desc) -> int`
 
@@ -90,18 +104,24 @@ classes and register a factory.
   uses the first object's layout to size temps for the whole batch,
   so a data-dependent estimate would break all-or-nothing allocation.
 
-### `Deserializer.deserialize(src, dst) -> None`
+### `Deserializer.deserialize(src, dst, key) -> None`
 
 - `src` is a byte-buffer MemoryObj filled by L2 load.
 - `dst` is a KV-shaped MemoryObj (write-locked), already the correct
   shape and dtype.
+- `key` is the `ObjectKey` for this `src`/`dst` pair (see
+  `serialize` above for the per-object rationale).
 - No return value — the caller observes completion via the async
   layer's event fd.
+- Writing raw bytes into `dst` follows the same rule as `serialize`:
+  cast via `memoryview(dst.byte_array).cast("B")`.
 
 ### `SerdeProcessor` (async)
 
-- `submit_serialize(src_objs, dst_objs) → SerdeTaskId` must be
-  non-blocking. The actual transform runs asynchronously.
+- `submit_serialize(src_objs, dst_objs, keys) → SerdeTaskId` must be
+  non-blocking. `keys` is positionally aligned with `src_objs` /
+  `dst_objs` (the wrapper always supplies them). The actual transform
+  runs asynchronously.
 - `query_serialize_result(task_id) → bool | None` is
   **non-idempotent**: it returns a non-None value exactly once per
   task id. `None` means the task is still in flight.
@@ -201,10 +221,11 @@ as one combined tensor. It does not work in two cases:
   fixed-length tuple of optional MemoryObjs.
 - `LayoutDescGroup = Tuple[Optional[MemoryLayoutDesc], ...]` is the
   parallel layout-descriptor tuple used by size estimators.
-- `MultiSerializer.serialize(src: MemoryObjGroup, dst: MemoryObj)`
-  takes a group whose length equals `MultiSerializer.group_size`.
-- `MultiDeserializer.deserialize(src: MemoryObj, dst: MemoryObjGroup)`
-  produces a group whose length equals
+- `MultiSerializer.serialize(src: MemoryObjGroup, dst: MemoryObj,
+  key: ObjectKey)` takes a group whose length equals
+  `MultiSerializer.group_size`.
+- `MultiDeserializer.deserialize(src: MemoryObj, dst: MemoryObjGroup,
+  key: ObjectKey)` produces a group whose length equals
   `MultiDeserializer.group_size`.
 - `single_to_multi_serializer(s)` and
   `single_to_multi_deserializer(d)` adapt an existing single-tensor

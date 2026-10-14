@@ -662,7 +662,7 @@ class TestMooncakeStoreIntegration:
         assert completed[store_tid].is_successful()
 
         # Lookup all — should find everything
-        lookup_tid = self.adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        lookup_tid = self.adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
         assert bitmap is not None
@@ -677,7 +677,7 @@ class TestMooncakeStoreIntegration:
         keys = [create_object_key(i + 10000) for i in range(3)]
         lookup_fd = self.adapter.get_lookup_and_lock_event_fd()
 
-        lookup_tid = self.adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        lookup_tid = self.adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
         assert bitmap is not None
@@ -700,7 +700,7 @@ class TestMooncakeStoreIntegration:
         assert self.adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup
-        lookup_tid = self.adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_tid = self.adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
         assert bitmap.test(0) is True
@@ -738,7 +738,7 @@ class TestMooncakeStoreIntegration:
         assert self.adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup all
-        lookup_tid = self.adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        lookup_tid = self.adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
         for i in range(n):
@@ -774,7 +774,9 @@ class TestMooncakeStoreIntegration:
             create_object_key(10100),
             create_object_key(10101),
         ]
-        lookup_tid = self.adapter.submit_lookup_and_lock_task(all_keys, _EMPTY_LAYOUT)
+        lookup_tid = self.adapter.submit_lookup_and_lock_task(
+            all_keys, {0: _EMPTY_LAYOUT}
+        )
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
 
@@ -803,7 +805,7 @@ class TestMooncakeStoreIntegration:
         assert self.adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Confirm stored
-        lookup_tid = self.adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_tid = self.adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
         assert bitmap.test(0) is True
@@ -813,7 +815,7 @@ class TestMooncakeStoreIntegration:
         self.adapter.delete([key])
 
         # Lookup again — should be gone
-        lookup_tid = self.adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_tid = self.adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
         assert bitmap.test(0) is False, "Key should not exist after delete"
@@ -846,7 +848,7 @@ class TestMooncakeStoreIntegration:
 
         # Confirm they exist
         lookup_tid = self.adapter.submit_lookup_and_lock_task(
-            stored_keys, _EMPTY_LAYOUT
+            stored_keys, {0: _EMPTY_LAYOUT}
         )
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
@@ -859,7 +861,7 @@ class TestMooncakeStoreIntegration:
 
         # Stored keys should now be gone
         lookup_tid = self.adapter.submit_lookup_and_lock_task(
-            stored_keys, _EMPTY_LAYOUT
+            stored_keys, {0: _EMPTY_LAYOUT}
         )
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
@@ -886,7 +888,7 @@ class TestMooncakeStoreIntegration:
         assert usage_after_store > usage_before, "Usage should increase after store"
 
         # Confirm stored in lookup so _key_sizes is populated
-        _ = self.adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        _ = self.adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(lookup_fd)
         self.adapter.submit_unlock([key])
 
@@ -975,7 +977,7 @@ class TestMooncakeStoreIntegration:
             assert wait_for_event_fd(adapter.get_store_event_fd())
             assert adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
-            lookup_tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+            lookup_tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
             assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
             lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_tid)
             assert lookup_bitmap.test(0) is True

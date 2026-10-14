@@ -26,10 +26,12 @@ from lmcache.utils import (
     CacheEngineKey,
 )
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
+    PagedCpuGpuMemoryAllocator,
+)
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
-    PagedCpuGpuMemoryAllocator,
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import get_zmq_context
@@ -440,7 +442,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> PagedCpuGpuMemoryAllocator:
         if self.corrected_device != "cpu":
-            logger.info(f"Setting cuda device to {self.corrected_device} ")
+            logger.info("Setting cuda device to %s ", self.corrected_device)
             torch_dev.set_device(self.corrected_device)
 
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
@@ -468,10 +470,14 @@ class PDBackendAsync(AllocatorBackendInterface):
 
         if aligned_buffer_size != origin_buffer_size:
             logger.info(
-                f"Auto align pd_buffer_size, origin: {origin_buffer_size}, "
-                f"aligned: {aligned_buffer_size}, chunk size: {chunk_size_bytes}. "
-                f"The remaining {origin_buffer_size - aligned_buffer_size} bytes "
-                f"will not be allocated."
+                "Auto align pd_buffer_size, origin: %s, "
+                "aligned: %s, chunk size: %s. "
+                "The remaining %s bytes "
+                "will not be allocated.",
+                origin_buffer_size,
+                aligned_buffer_size,
+                chunk_size_bytes,
+                origin_buffer_size - aligned_buffer_size,
             )
 
         self._chunk_size_bytes = chunk_size_bytes
@@ -1182,7 +1188,7 @@ class PDBackendAsync(AllocatorBackendInterface):
         socket = async_ctx.socket(zmq.ROUTER)
         alloc_port = self.pd_config.peer_alloc_port
         socket.bind(f"tcp://*:{alloc_port}")
-        logger.info(f"Async mem alloc server listening on port {alloc_port}")
+        logger.info("Async mem alloc server listening on port %s", alloc_port)
         try:
             while self.running:
                 try:
@@ -1302,6 +1308,22 @@ class PDBackendAsync(AllocatorBackendInterface):
                 raise RuntimeError(
                     f"Receiver requires total_chunks > 0 for req {req_id}. "
                     f"Legacy senders (total_chunks=0) are no longer supported."
+                )
+            # Fail fast: a request whose KV needs more chunks than the entire
+            # buffer holds can never be admitted, no matter how much the buffer
+            # drains. Without this guard admission blocks for the full
+            # pd_allocation_timeout_sec and then fails with a misleading
+            # "over-subscribed" timeout, tearing down the transfer mid-flight.
+            buffer_total_chunks = self._recv_reservation_mgr.get_total_chunks()
+            if alloc_request.total_chunks > buffer_total_chunks:
+                raise RuntimeError(
+                    f"PD receiver buffer too small for req {req_id}: the request "
+                    f"needs {alloc_request.total_chunks} chunks but the buffer "
+                    f"holds only {buffer_total_chunks} chunks "
+                    f"(pd_buffer_size={self._aligned_buffer_size} bytes). This "
+                    f"prefill can never be admitted; increase pd_buffer_size to "
+                    f"hold at least {alloc_request.total_chunks} chunks or reduce "
+                    f"the prefill length."
                 )
             admitted = await self._recv_reservation_mgr.async_try_admit(
                 req_id, alloc_request.total_chunks

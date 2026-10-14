@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Abstract base class and shared helpers for CLI subcommands."""
 
+# Future
+from __future__ import annotations
+
 # Standard
+from collections.abc import Sequence
 import abc
 import argparse
+import sys
 
 # First Party
 from lmcache.cli.metrics import (
@@ -12,6 +17,27 @@ from lmcache.cli.metrics import (
     StreamHandler,
     get_formatter,
 )
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
+
+
+def _route_head(tokens: Sequence[str]) -> tuple[str | None, list[str]]:
+    """Split the current level's route head off the remaining tokens.
+
+    Args:
+        tokens: Invocation tokens remaining for this level.
+
+    Returns:
+        ``(head, rest)``, or ``(None, [])`` when *tokens* is empty or
+        starts with an option token — selection stops there.
+    """
+    if not tokens:
+        return None, []
+    token = tokens[0]
+    if token.startswith("-"):
+        return None, []
+    return token, list(tokens[1:])
 
 
 class BaseCommand(abc.ABC):
@@ -123,6 +149,151 @@ class BaseCommand(abc.ABC):
             )
 
         return metrics
+
+    def register_path(
+        self,
+        subparsers: argparse._SubParsersAction,
+        route: Sequence[str],
+    ) -> None:
+        """Directed registration of a leaf: full :meth:`register` when this
+        command heads *route*, name/help summary otherwise.
+
+        Args:
+            subparsers: The subparsers action of the parent parser.
+            route: Invocation tokens for this level (see :func:`_route_head`).
+        """
+        head, _ = _route_head(route)
+        if head == self.name():
+            self.register(subparsers)
+        else:
+            self._register_summary(subparsers)
+
+    def _register_summary(self, subparsers: argparse._SubParsersAction) -> None:
+        """Bind only this command's name and short help: complete choice
+        listings, no ``add_arguments``, no ``func``, no deferred imports.
+        """
+        subparsers.add_parser(self.name(), help=self.help())
+
+
+class CompositeCommand(BaseCommand):
+    """Base class for commands that contain auto-discovered sub-subcommands.
+
+    Subclasses only need to implement :meth:`name` and :meth:`help`.
+    Sub-subcommands are discovered automatically by scanning the package
+    for concrete :class:`BaseCommand` subclasses.
+
+    Example::
+
+        class QueryCommand(CompositeCommand):
+            def name(self) -> str:
+                return "query"
+
+            def help(self) -> str:
+                return "Run one inference request and report metrics."
+    """
+
+    def add_arguments(self, _parser: argparse.ArgumentParser) -> None:
+        """No top-level arguments; all args are registered by subcommands."""
+
+    def register(self, subparsers: argparse._SubParsersAction) -> None:
+        """Register this command and auto-discover all sub-subcommands.
+
+        Scans the package where this class is defined for concrete
+        :class:`BaseCommand` subclasses and registers each one fully as a
+        nested subcommand.
+
+        Args:
+            subparsers: The subparsers action from the root parser.
+        """
+        inner = self._create_parser(subparsers)
+        self._subcmds = self._discover_subcommands()
+        for inst in self._subcmds.values():
+            inst.register(inner)
+
+    def execute(self, args: argparse.Namespace) -> None:
+        """Dispatch to the appropriate sub-subcommand.
+
+        Args:
+            args: Parsed CLI arguments.
+        """
+        target = getattr(args, f"{self.name()}_target", None)
+        subcmd = self._subcmds.get(target) if target else None
+        if subcmd is None:
+            print(
+                f"Unknown {self.name()} target: {target}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        subcmd.execute(args)
+
+    def register_path(
+        self,
+        subparsers: argparse._SubParsersAction,
+        route: Sequence[str],
+    ) -> None:
+        """Directed registration of a group: descend only along *route*;
+        unselected groups are summarized without discovering children.
+
+        Args:
+            subparsers: The subparsers action of the parent parser.
+            route: Invocation tokens for this level (see :func:`_route_head`).
+        """
+        head, rest = _route_head(route)
+        if head != self.name():
+            self._register_summary(subparsers)
+            return
+        inner = self._create_parser(subparsers)
+        self._subcmds = self._discover_subcommands()
+        for inst in self._subcmds.values():
+            inst.register_path(inner, rest)
+
+    def _create_parser(
+        self, subparsers: argparse._SubParsersAction
+    ) -> argparse._SubParsersAction:
+        """Build this group's parser; return its children's subparsers action."""
+        parser = subparsers.add_parser(
+            self.name(),
+            help=self.help(),
+            description=self.help(),
+        )
+        return parser.add_subparsers(
+            dest=f"{self.name()}_target",
+            required=True,
+        )
+
+    def _discover_subcommands(self) -> dict[str, BaseCommand]:
+        """Return ``name -> instance`` of this group's children, in discovery
+        order; imports child wrappers only, never runs ``add_arguments``.
+        """
+        # Deferred import to avoid circular dependency
+        # First Party
+        from lmcache.v1.utils.subclass_discovery import discover_subclasses
+
+        package = self.__class__.__module__
+
+        def _raise(module_name: str, exc: Exception) -> None:
+            raise exc
+
+        subcmds: dict[str, BaseCommand] = {}
+        for cls in discover_subclasses(
+            package,
+            BaseCommand,  # type: ignore[type-abstract]
+            module_filter=lambda name: not name.startswith("_"),
+            require_defined_in_module=True,
+            on_import_error=_raise,
+        ):
+            # Skip the composite command class itself
+            if cls is self.__class__:
+                continue
+            inst = cls()
+            subcmds[inst.name()] = inst
+
+        logger.debug(
+            "CompositeCommand[%s] discovered subcommands: %s",
+            self.name(),
+            list(subcmds.keys()),
+        )
+        return subcmds
 
 
 def _add_output_args(parser: argparse.ArgumentParser) -> None:

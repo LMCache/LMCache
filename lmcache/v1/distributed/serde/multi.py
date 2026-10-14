@@ -60,7 +60,7 @@ from typing import Optional, Sequence, Tuple
 import abc
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.serde.base import Deserializer, Serializer
 from lmcache.v1.memory_management import MemoryObj
 
@@ -105,7 +105,7 @@ class MultiSerializer(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def serialize(self, src: MemoryObjGroup, dst: MemoryObj) -> int:
+    def serialize(self, src: MemoryObjGroup, dst: MemoryObj, key: ObjectKey) -> int:
         """Serialize ``src`` group into ``dst`` byte buffer.
 
         Args:
@@ -118,6 +118,8 @@ class MultiSerializer(abc.ABC):
                 Capacity MUST be at least the value previously
                 returned by :meth:`estimate_serialized_size` for the
                 same layout group.
+            key: Object key for the group. Content-agnostic serdes
+                ignore it.
 
         Returns:
             The number of bytes written to ``dst``.
@@ -160,13 +162,15 @@ class MultiDeserializer(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def deserialize(self, src: MemoryObj, dst: MemoryObjGroup) -> None:
+    def deserialize(self, src: MemoryObj, dst: MemoryObjGroup, key: ObjectKey) -> None:
         """Deserialize ``src`` byte buffer into ``dst`` group.
 
         Args:
             src: Source byte-buffer MemoryObj.
             dst: Destination group with length :attr:`group_size`.
                 ``None`` slots MUST be left untouched.
+            key: Object key for the group. Content-agnostic serdes
+                ignore it.
         """
         raise NotImplementedError
 
@@ -190,7 +194,7 @@ class _SingleAsMultiSerializer(MultiSerializer):
     def group_size(self) -> int:
         return 1
 
-    def serialize(self, src: MemoryObjGroup, dst: MemoryObj) -> int:
+    def serialize(self, src: MemoryObjGroup, dst: MemoryObj, key: ObjectKey) -> int:
         if len(src) != 1:
             raise ValueError(
                 f"_SingleAsMultiSerializer expected group of size 1, got {len(src)}"
@@ -201,7 +205,7 @@ class _SingleAsMultiSerializer(MultiSerializer):
                 "_SingleAsMultiSerializer: single-tensor serializer "
                 "does not admit a None src slot"
             )
-        return self._inner.serialize(single, dst)
+        return self._inner.serialize(single, dst, key)
 
     def estimate_serialized_size(
         self,
@@ -233,7 +237,7 @@ class _SingleAsMultiDeserializer(MultiDeserializer):
     def group_size(self) -> int:
         return 1
 
-    def deserialize(self, src: MemoryObj, dst: MemoryObjGroup) -> None:
+    def deserialize(self, src: MemoryObj, dst: MemoryObjGroup, key: ObjectKey) -> None:
         if len(dst) != 1:
             raise ValueError(
                 f"_SingleAsMultiDeserializer expected group of size 1, got {len(dst)}"
@@ -245,7 +249,7 @@ class _SingleAsMultiDeserializer(MultiDeserializer):
             # even when they have already decided not to materialize
             # the only output.
             return
-        self._inner.deserialize(src, single)
+        self._inner.deserialize(src, single, key)
 
 
 def single_to_multi_serializer(inner: Serializer) -> MultiSerializer:

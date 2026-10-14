@@ -119,10 +119,14 @@ class FSConnector(RemoteConnector):
                 self.os_disk_bs = stat.f_bsize
 
         logger.info(
-            f"Initialized FSConnector with base paths {self.base_paths}, "
-            f"relative tmp dir: {self.relative_tmp_dir}, "
-            f"read ahead size: {self.read_ahead_size}, "
-            f"use O_DIRECT: {self.use_odirect}"
+            "Initialized FSConnector with base paths %s, "
+            "relative tmp dir: %s, "
+            "read ahead size: %s, "
+            "use O_DIRECT: %s",
+            self.base_paths,
+            self.relative_tmp_dir,
+            self.read_ahead_size,
+            self.use_odirect,
         )
         # Create directories for all paths
         for path in self.base_paths:
@@ -194,7 +198,7 @@ class FSConnector(RemoteConnector):
             )
             if not fblock_aligned:
                 logger.warning(
-                    f"Cannot use O_DIRECT for {file_path}, size is not aligned."
+                    "Cannot use O_DIRECT for %s, size is not aligned.", file_path
                 )
                 with open(file_path, "rb") as f:
                     num_read = f.readinto(buffer)
@@ -210,7 +214,7 @@ class FSConnector(RemoteConnector):
             return memory_obj
 
         except Exception as e:
-            logger.error(f"Failed to read from file {file_path}: {str(e)}")
+            logger.error("Failed to read from file %s: %s", file_path, str(e))
             if memory_obj is not None:
                 memory_obj.ref_count_down()
             return None
@@ -297,7 +301,7 @@ class FSConnector(RemoteConnector):
 
         except Exception as e:
             if not isinstance(e, FileNotFoundError):
-                logger.error(f"Failed to read from file {file_path}: {str(e)}")
+                logger.error("Failed to read from file %s: %s", file_path, str(e))
             if memory_obj is not None:
                 memory_obj.ref_count_down()
             return None
@@ -312,7 +316,7 @@ class FSConnector(RemoteConnector):
             )
             os.write(fd, buffer)
         except Exception as e:
-            logger.error(f"Failed to write to file {file_path}: {e}")
+            logger.error("Failed to write to file %s: %s", file_path, e)
             raise
         finally:
             if fd >= 0:
@@ -345,8 +349,10 @@ class FSConnector(RemoteConnector):
                 fblock_aligned = self.os_disk_bs > 0 and size % self.os_disk_bs == 0
                 if not fblock_aligned:
                     logger.warning(
-                        f"Cannot use O_DIRECT for writing size {size}, "
-                        f"which is not aligned to block size {self.os_disk_bs}."
+                        "Cannot use O_DIRECT for writing size %s, "
+                        "which is not aligned to block size %s.",
+                        size,
+                        self.os_disk_bs,
                     )
                     do_use_odirect = False
 
@@ -367,7 +373,7 @@ class FSConnector(RemoteConnector):
             await aiofiles.os.replace(temp_path, final_path)
 
         except Exception as e:
-            logger.error(f"Failed to write file {final_path}: {str(e)}")
+            logger.error("Failed to write file %s: %s", final_path, str(e))
             if await aiofiles.os.path.exists(temp_path):
                 await aiofiles.os.unlink(temp_path)  # Remove corrupted file
             raise
@@ -387,7 +393,7 @@ class FSConnector(RemoteConnector):
             os.remove(file_path)
             return True
         except OSError as e:
-            logger.error(f"Failed to remove file {file_path}: {e}")
+            logger.error("Failed to remove file %s: %s", file_path, e)
             return False
 
     @no_type_check

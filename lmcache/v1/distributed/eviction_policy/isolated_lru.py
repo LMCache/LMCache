@@ -18,7 +18,8 @@ from __future__ import annotations
 
 # Standard
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from typing import cast
 import threading
 
 # First Party
@@ -28,6 +29,8 @@ from lmcache.v1.distributed.internal_api import (
     EvictionAction,
     EvictionDestination,
 )
+from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
+from lmcache.v1.mp_coordinator.utils.encoding import decode_key, encode_key
 
 
 class IsolatedLRUEvictionPolicy(EvictionPolicy):
@@ -49,7 +52,16 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
     def __init__(
         self,
         default_destination: EvictionDestination = EvictionDestination.DISCARD,
+        section_name: str = "lru_order",
     ):
+        """Args:
+        default_destination: Where victims go when no destination is
+            registered.
+        section_name: Name of this policy's section in a durable
+            checkpoint. A coordinator keeps one ordering per enforced
+            tier, and two sections cannot share a name.
+        """
+        self._section_name = section_name
         self._lock = threading.Lock()
         # cache_salt -> ordered {ObjectKey: None} (oldest first).
         self._per_salt_order: dict[str, OrderedDict[ObjectKey, None]] = {}
@@ -189,3 +201,54 @@ class IsolatedLRUEvictionPolicy(EvictionPolicy):
         """Return the set of cache_salts with at least one tracked key."""
         with self._lock:
             return list(self._per_salt_order.keys())
+
+    @property
+    def persistence_type(self) -> PersistenceType:
+        """The ordering is derived from the event stream, so it rides with
+        the directory checkpoint."""
+        return PersistenceType.CHECKPOINT
+
+    @property
+    def name(self) -> str:
+        """Name of this policy's section in a durable checkpoint."""
+        return self._section_name
+
+    def capture(self) -> Mapping[str, object]:
+        """Return each bucket's eviction order, least-recently-used first.
+
+        The ordering *is* the state: recency lives in position, not in a
+        timestamp, so nothing outside this policy can reconstruct it.
+
+        Returns:
+            ``{"buckets": {cache_salt: [key, ...]}}``, each list in
+            eviction order.
+        """
+        with self._lock:
+            return {
+                "buckets": {
+                    cache_salt: [encode_key(key) for key in order]
+                    for cache_salt, order in self._per_salt_order.items()
+                }
+            }
+
+    def restore(self, state: Mapping[str, object]) -> None:
+        """Replace every bucket's ordering with a captured one.
+
+        Call once at startup, after whatever rebuilt the keys themselves —
+        this replaces their ordering rather than merging into it.
+
+        Args:
+            state: A :meth:`capture` value, as decoded from the
+                checkpoint holding it.
+        """
+        buckets = cast("Mapping[str, list[object]]", state["buckets"])
+        with self._lock:
+            self._per_salt_order = {
+                cache_salt: OrderedDict(
+                    (decode_key(encoded), None) for encoded in ordered
+                )
+                for cache_salt, ordered in buckets.items()
+            }
+
+
+# -- Internals ----------------------------------------------------------------

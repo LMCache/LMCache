@@ -5,6 +5,9 @@ from __future__ import annotations
 
 # Standard
 from pathlib import Path
+from threading import Event
+from typing import Any
+from unittest.mock import patch
 
 # Third Party
 import pytest
@@ -16,7 +19,7 @@ from tests.v1.storage_backend.raw_block_test_utils import (
     RAW_BLOCK_CI_HEADER_BYTES,
     RAW_BLOCK_CI_META_TOTAL_BYTES,
     RAW_BLOCK_CI_SLOT_BYTES,
-    install_native_storage_ops_fallback,
+    install_lmcache_native_fallback,
     make_empty_memory_obj,
     make_memory_obj,
     make_object_key,
@@ -25,14 +28,20 @@ from tests.v1.storage_backend.raw_block_test_utils import (
     wait_for_event_fd,
 )
 
-install_native_storage_ops_fallback()
+install_lmcache_native_fallback()
 pytest.importorskip("lmcache_rust_raw_block_io")
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc  # noqa: E402
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
+from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (  # noqa: E402
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
+)
+from lmcache.v1.memory_management import MemoryObj  # noqa: E402
+from lmcache.v1.storage_backend.raw_block import (  # noqa: E402
+    RawBlockKeySpec,
+    RawBlockPutManyResult,
 )
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
@@ -74,7 +83,7 @@ def test_raw_block_l2_adapter_store_lookup_load_roundtrip(tmp_path):
         assert store_result.bytes_transferred() == RAW_BLOCK_CI_SLOT_BYTES
 
         lookup_task_id = adapter.submit_lookup_and_lock_task(
-            [key, missing_key], _EMPTY_LAYOUT
+            [key, missing_key], {0: _EMPTY_LAYOUT}
         )
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
@@ -111,10 +120,951 @@ def test_raw_block_l2_adapter_delete_makes_key_miss(tmp_path):
 
         adapter.delete([key])
 
-        lookup_task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        lookup_task_id = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_bitmap is not None
         assert lookup_bitmap.test(0) is False
     finally:
         adapter.close()
+
+
+class _FakeFdpCore:
+    def __init__(self, status: list[tuple[int, int]] | None = None) -> None:
+        self.status = status if status is not None else [(0, 10), (7, 17)]
+        self.slot_bytes = RAW_BLOCK_CI_SLOT_BYTES
+        self.meta_checkpoint_placement_id: int | None = None
+        self.put_many_calls: list[list[int | None] | None] = []
+        self.worker_failure: str | None = None
+        self.fixed_buffer_range_calls: list[tuple[int, int]] = []
+        self.fixed_buffer_registration_error: Exception | None = None
+        self.registered_bytes = 0
+
+    def fetch_fdp_status(self) -> list[tuple[int, int]]:
+        return self.status
+
+    def report_status(self) -> dict:
+        """Return worker health and capacity for adapter status propagation."""
+        return {
+            "is_healthy": self.worker_failure is None,
+            "worker_error": self.worker_failure,
+            "usable_capacity_bytes": RAW_BLOCK_CI_SLOT_BYTES * 8,
+            "fixed_buffers_registered": self.registered_bytes > 0,
+            "fixed_buffer_registered_bytes": self.registered_bytes,
+        }
+
+    def raise_if_failed(self) -> None:
+        """Raise RuntimeError when a terminal worker failure is configured."""
+        if self.worker_failure is not None:
+            raise RuntimeError(self.worker_failure)
+
+    def put_many(
+        self,
+        specs: list[Any],
+        objects: list[Any],
+        placement_ids: list[int | None] | None = None,
+    ) -> RawBlockPutManyResult:
+        self.put_many_calls.append(
+            None if placement_ids is None else list(placement_ids)
+        )
+        return RawBlockPutManyResult(
+            results=[True] * len(specs),
+            stored_keys=[spec.encoded for spec in specs],
+        )
+
+    def snapshot_indexed_keys(self) -> list[str]:
+        return []
+
+    def register_fixed_buffer_range(self, ptr: int, size: int) -> None:
+        self.fixed_buffer_range_calls.append((ptr, size))
+        if self.fixed_buffer_registration_error is not None:
+            raise self.fixed_buffer_registration_error
+        self.registered_bytes = size
+
+    def close(self) -> None:
+        self.registered_bytes = 0
+
+
+def _make_fdp_config(
+    *,
+    placement_ids: list[int] | None = None,
+    data_placement_policy: str | None = None,
+    slot_reuse_policy: str | None = None,
+    meta_checkpoint_placement_id: int | None = None,
+) -> RawBlockL2AdapterConfig:
+    return RawBlockL2AdapterConfig(
+        device_path="/dev/ng0n1",
+        capacity_bytes=RAW_BLOCK_CI_CAPACITY_BYTES,
+        block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
+        header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
+        slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
+        meta_total_bytes=RAW_BLOCK_CI_META_TOTAL_BYTES,
+        use_odirect=False,
+        enable_zero_copy=False,
+        meta_enable_periodic=False,
+        meta_idle_quiet_ms=0,
+        io_engine="io_uring",
+        use_uring_cmd=True,
+        iouring_queue_depth=8,
+        fdp_enabled=True,
+        fdp_placement_ids=placement_ids,
+        fdp_data_placement_policy=data_placement_policy,
+        fdp_slot_reuse_policy=slot_reuse_policy,
+        meta_checkpoint_placement_id=meta_checkpoint_placement_id,
+        num_store_workers=1,
+        num_lookup_workers=1,
+        num_load_workers=1,
+    )
+
+
+def _make_fdp_adapter(
+    fake_core: _FakeFdpCore,
+    config: RawBlockL2AdapterConfig,
+) -> RawBlockL2Adapter:
+    fake_core.meta_checkpoint_placement_id = config.meta_checkpoint_placement_id
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.RawBlockCore",
+        return_value=fake_core,
+    ):
+        return RawBlockL2Adapter(config)
+
+
+def _make_fixed_buffer_config(
+    *,
+    io_engine: str = "io_uring",
+    enable_zero_copy: bool = True,
+) -> RawBlockL2AdapterConfig:
+    return RawBlockL2AdapterConfig(
+        device_path="/tmp/raw-block",
+        capacity_bytes=RAW_BLOCK_CI_CAPACITY_BYTES,
+        block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
+        header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
+        slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
+        meta_total_bytes=RAW_BLOCK_CI_META_TOTAL_BYTES,
+        use_odirect=False,
+        enable_zero_copy=enable_zero_copy,
+        meta_enable_periodic=False,
+        meta_idle_quiet_ms=0,
+        io_engine=io_engine,
+        iouring_queue_depth=8,
+        num_store_workers=1,
+        num_lookup_workers=1,
+        num_load_workers=1,
+    )
+
+
+def _make_fixed_buffer_adapter(
+    fake_core: _FakeFdpCore,
+    config: RawBlockL2AdapterConfig,
+    l1_memory_desc: L1MemoryDesc | None,
+) -> RawBlockL2Adapter:
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.RawBlockCore",
+        return_value=fake_core,
+    ):
+        return RawBlockL2Adapter(config, l1_memory_desc)
+
+
+def test_raw_block_adapter_registers_eligible_l1_range() -> None:
+    fake_core = _FakeFdpCore()
+    stable_size = (1 << 30) + RAW_BLOCK_CI_BLOCK_ALIGN
+    l1_memory_desc = L1MemoryDesc(
+        ptr=0x4000,
+        size=2 << 30,
+        align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+        stable_registration_size=stable_size,
+    )
+    adapter = _make_fixed_buffer_adapter(
+        fake_core,
+        _make_fixed_buffer_config(),
+        l1_memory_desc,
+    )
+    try:
+        assert fake_core.fixed_buffer_range_calls == [(l1_memory_desc.ptr, stable_size)]
+        status = adapter.report_status()["core"]
+        assert status["fixed_buffers_registered"] is True
+        assert status["fixed_buffer_registered_bytes"] == stable_size
+    finally:
+        adapter.close()
+
+    status = adapter.report_status()["core"]
+    assert status["fixed_buffers_registered"] is False
+    assert status["fixed_buffer_registered_bytes"] == 0
+
+
+@pytest.mark.parametrize(
+    ("io_engine", "enable_zero_copy", "l1_memory_desc"),
+    [
+        (
+            "posix",
+            True,
+            L1MemoryDesc(
+                ptr=0x4000,
+                size=8192,
+                align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+                stable_registration_size=8192,
+            ),
+        ),
+        (
+            "io_uring",
+            False,
+            L1MemoryDesc(
+                ptr=0x4000,
+                size=8192,
+                align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+                stable_registration_size=8192,
+            ),
+        ),
+        ("io_uring", True, None),
+        (
+            "io_uring",
+            True,
+            L1MemoryDesc(
+                ptr=0x4000,
+                size=8192,
+                align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+            ),
+        ),
+    ],
+)
+def test_raw_block_adapter_skips_ineligible_fixed_buffer_registration(
+    io_engine: str,
+    enable_zero_copy: bool,
+    l1_memory_desc: L1MemoryDesc | None,
+) -> None:
+    fake_core = _FakeFdpCore()
+    adapter = _make_fixed_buffer_adapter(
+        fake_core,
+        _make_fixed_buffer_config(
+            io_engine=io_engine,
+            enable_zero_copy=enable_zero_copy,
+        ),
+        l1_memory_desc,
+    )
+    try:
+        assert fake_core.fixed_buffer_range_calls == []
+        status = adapter.report_status()["core"]
+        assert status["fixed_buffers_registered"] is False
+        assert status["fixed_buffer_registered_bytes"] == 0
+    finally:
+        adapter.close()
+
+
+def test_raw_block_adapter_falls_back_when_fixed_buffer_registration_fails() -> None:
+    fake_core = _FakeFdpCore()
+    fake_core.fixed_buffer_registration_error = RuntimeError("memlock exhausted")
+    l1_memory_desc = L1MemoryDesc(
+        ptr=0x4000,
+        size=8192,
+        align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+        stable_registration_size=8192,
+    )
+
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.logger.warning"
+    ) as warning:
+        adapter = _make_fixed_buffer_adapter(
+            fake_core,
+            _make_fixed_buffer_config(),
+            l1_memory_desc,
+        )
+    try:
+        assert fake_core.fixed_buffer_range_calls == [(l1_memory_desc.ptr, 8192)]
+        assert adapter.report_status()["is_healthy"] is True
+        status = adapter.report_status()["core"]
+        assert status["fixed_buffers_registered"] is False
+        assert status["fixed_buffer_registered_bytes"] == 0
+        warning.assert_called_once()
+        assert "Falling back" in warning.call_args.args[0]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_meta_checkpoint_placement_id_reaches_core_config() -> None:
+    config = RawBlockL2AdapterConfig.from_dict(
+        {
+            "device_path": "/dev/ng0n1",
+            "slot_bytes": RAW_BLOCK_CI_SLOT_BYTES,
+            "io_engine": "io_uring",
+            "use_uring_cmd": True,
+            "meta_checkpoint_placement_id": 7,
+        }
+    )
+
+    assert config.meta_checkpoint_placement_id == 7
+    assert config.to_core_config().meta_checkpoint_placement_id == 7
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.parametrize("operation", ["store", "lookup", "load"])
+def test_raw_block_l2_adapter_completes_failed_tasks_without_dispatch(
+    operation: str,
+) -> None:
+    """A terminal worker failure produces one result without queuing work."""
+    fake_core = _FakeFdpCore()
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    try:
+        assert adapter.report_status()["is_healthy"] is True
+        fake_core.worker_failure = "io_uring worker submission failed: test error"
+        keys = [make_object_key(700), make_object_key(701)]
+        with patch(
+            "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter."
+            "ThreadPoolExecutor.submit",
+            side_effect=AssertionError("failed worker must not queue work"),
+        ):
+            if operation == "store":
+                task_id = adapter.submit_store_task(
+                    keys, [make_memory_obj(b"payload") for _key in keys]
+                )
+                event_fd = adapter.get_store_event_fd()
+                results = adapter.pop_completed_store_tasks()
+                assert set(results) == {task_id}
+                assert not results[task_id].is_successful()
+                assert results[task_id].bytes_transferred() == 0
+                assert adapter.pop_completed_store_tasks() == {}
+            elif operation == "lookup":
+                task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+                event_fd = adapter.get_lookup_and_lock_event_fd()
+                bitmap = adapter.query_lookup_and_lock_result(task_id)
+                assert bitmap is not None
+                assert str(bitmap) == "00"
+                assert adapter.query_lookup_and_lock_result(task_id) is None
+            else:
+                task_id = adapter.submit_load_task(
+                    keys, [make_empty_memory_obj(7) for _key in keys]
+                )
+                event_fd = adapter.get_load_event_fd()
+                bitmap = adapter.query_load_result(task_id)
+                assert bitmap is not None
+                assert str(bitmap) == "00"
+                assert adapter.query_load_result(task_id) is None
+
+        assert task_id >= 0
+        assert wait_for_event_fd(event_fd)
+        assert not wait_for_event_fd(event_fd, timeout=0)
+
+        status = adapter.report_status()
+        assert status["is_healthy"] is False
+        assert status["core"]["worker_error"] == fake_core.worker_failure
+        for task_kind in ("store", "lookup", "load"):
+            assert status[f"{task_kind}_inflight_task_count"] == 0
+            assert status[f"completed_{task_kind}_task_count"] == 0
+        assert fake_core.put_many_calls == []
+    finally:
+        adapter.close()
+
+
+@pytest.mark.no_shared_allocator
+def test_raw_block_l2_adapter_failed_store_bypasses_busy_pool() -> None:
+    """New failures complete without retiring a store that is still running."""
+    fake_core = _FakeFdpCore()
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    started = Event()
+    release = Event()
+    put_many = fake_core.put_many
+
+    def blocked_put(
+        specs: list[RawBlockKeySpec],
+        objects: list[MemoryObj],
+        placement_ids: list[int | None] | None = None,
+    ) -> RawBlockPutManyResult:
+        started.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("test store was not released")
+        return put_many(specs, objects, placement_ids)
+
+    try:
+        with patch.object(fake_core, "put_many", side_effect=blocked_put):
+            accepted_id = adapter.submit_store_task(
+                [make_object_key(702)], [make_memory_obj(b"accepted")]
+            )
+            assert started.wait(timeout=5)
+            fake_core.worker_failure = "io_uring worker submission failed: test error"
+            failed_id = adapter.submit_store_task(
+                [make_object_key(703)], [make_memory_obj(b"rejected")]
+            )
+            assert failed_id != accepted_id
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            failed_results = adapter.pop_completed_store_tasks()
+            assert set(failed_results) == {failed_id}
+            assert not failed_results[failed_id].is_successful()
+            assert adapter.report_status()["store_inflight_task_count"] == 1
+
+            release.set()
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            accepted_results = adapter.pop_completed_store_tasks()
+            assert set(accepted_results) == {accepted_id}
+            assert accepted_results[accepted_id].is_successful()
+            assert adapter.report_status()["store_inflight_task_count"] == 0
+            assert len(fake_core.put_many_calls) == 1
+    finally:
+        release.set()
+        adapter.close()
+
+
+def test_raw_block_meta_checkpoint_placement_id_requires_uring_cmd() -> None:
+    with pytest.raises(ValueError, match="meta_checkpoint_placement_id requires"):
+        RawBlockL2AdapterConfig.from_dict(
+            {
+                "device_path": "/tmp/raw-block",
+                "slot_bytes": RAW_BLOCK_CI_SLOT_BYTES,
+                "io_engine": "posix",
+                "meta_checkpoint_placement_id": 7,
+            }
+        )
+
+
+def test_raw_block_meta_checkpoint_placement_id_rejects_zero() -> None:
+    with pytest.raises(ValueError, match="placement identifier 0"):
+        _make_fdp_config(meta_checkpoint_placement_id=0)
+
+
+def test_raw_block_meta_checkpoint_placement_id_must_not_overlap_data_ids() -> None:
+    with pytest.raises(ValueError, match="must not overlap"):
+        _make_fdp_config(
+            placement_ids=[1, 7],
+            meta_checkpoint_placement_id=7,
+        )
+
+
+def test_raw_block_fdp_requires_uring_cmd_config():
+    with pytest.raises(ValueError, match="fdp_enabled requires"):
+        RawBlockL2AdapterConfig(
+            device_path="/dev/ng0n1",
+            slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
+            io_engine="posix",
+            use_uring_cmd=False,
+            fdp_enabled=True,
+        )
+
+
+def test_raw_block_fdp_disabled_ignores_placement_ids() -> None:
+    config = RawBlockL2AdapterConfig(
+        device_path="/tmp/raw-block",
+        slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
+        fdp_enabled=False,
+        fdp_placement_ids=[0, 1],
+    )
+
+    assert config.fdp_enabled is False
+    assert config.fdp_placement_ids is None
+    assert config.fdp_data_placement_policy == "none"
+    assert config.fdp_slot_reuse_policy == "none"
+    assert config.to_core_config().fdp_slot_affinity_enabled is False
+
+
+def test_raw_block_fdp_data_placement_policy_requires_fdp_enabled() -> None:
+    with pytest.raises(ValueError, match="requires fdp_enabled=true"):
+        RawBlockL2AdapterConfig(
+            device_path="/tmp/raw-block",
+            slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
+            fdp_enabled=False,
+            fdp_data_placement_policy="cache_salt_prefix",
+        )
+
+
+def test_raw_block_fdp_data_placement_policy_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="fdp_data_placement_policy"):
+        _make_fdp_config(data_placement_policy="bucket_shuffle")
+
+
+def test_raw_block_fdp_slot_reuse_policy_defaults_to_pid_affinity() -> None:
+    config = _make_fdp_config()
+
+    assert config.fdp_slot_reuse_policy == "pid_affinity"
+    assert config.to_core_config().fdp_slot_affinity_enabled is True
+
+
+def test_raw_block_fdp_slot_reuse_policy_can_be_disabled() -> None:
+    config = _make_fdp_config(slot_reuse_policy="none")
+
+    assert config.fdp_slot_reuse_policy == "none"
+    assert config.to_core_config().fdp_slot_affinity_enabled is False
+
+
+def test_raw_block_fdp_slot_reuse_policy_requires_fdp_enabled() -> None:
+    with pytest.raises(ValueError, match="requires fdp_enabled=true"):
+        RawBlockL2AdapterConfig(
+            device_path="/tmp/raw-block",
+            slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
+            fdp_enabled=False,
+            fdp_slot_reuse_policy="pid_affinity",
+        )
+
+
+def test_raw_block_fdp_slot_reuse_policy_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="fdp_slot_reuse_policy"):
+        _make_fdp_config(slot_reuse_policy="pid_strict")
+
+
+def test_raw_block_fdp_slot_reuse_policy_from_dict_reaches_core() -> None:
+    config = RawBlockL2AdapterConfig.from_dict(
+        {
+            "device_path": "/dev/ng0n1",
+            "slot_bytes": RAW_BLOCK_CI_SLOT_BYTES,
+            "io_engine": "io_uring",
+            "use_uring_cmd": True,
+            "fdp_enabled": True,
+            "fdp_slot_reuse_policy": "none",
+        }
+    )
+
+    assert config.fdp_slot_reuse_policy == "none"
+    assert config.to_core_config().fdp_slot_affinity_enabled is False
+
+
+def test_raw_block_fdp_from_dict_validates_enabled_id_elements() -> None:
+    with pytest.raises(ValueError, match="fdp_placement_ids must contain"):
+        RawBlockL2AdapterConfig.from_dict(
+            {
+                "device_path": "/dev/ng0n1",
+                "slot_bytes": RAW_BLOCK_CI_SLOT_BYTES,
+                "io_engine": "io_uring",
+                "use_uring_cmd": True,
+                "fdp_enabled": True,
+                "fdp_placement_ids": [1, "x"],
+            }
+        )
+
+
+def test_raw_block_fdp_empty_status_fails_startup():
+    fake_core = _FakeFdpCore(status=[])
+    config = _make_fdp_config()
+
+    with pytest.raises(RuntimeError, match="no identifiers"):
+        _make_fdp_adapter(fake_core, config)
+
+
+def test_raw_block_fdp_status_reports_registered_nonzero_ids() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    try:
+        status = adapter.report_status()
+        assert status["fdp_enabled"] is True
+        assert status["fdp_discovered_status"] == [(0, 10), (1, 11), (7, 17)]
+        assert status["fdp_placement_ids"] == [1, 7]
+        assert status["fdp_slot_reuse_policy"] == "pid_affinity"
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_store_empty_salt_omits_placement_ids() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    try:
+        keys = [make_object_key(i) for i in range(4)]
+        objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(4)]
+
+        task_id = adapter.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [None]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_store_can_disable_data_placement_policy() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    adapter = _make_fdp_adapter(
+        fake_core,
+        _make_fdp_config(data_placement_policy="none"),
+    )
+    try:
+        keys = [make_object_key(i, cache_salt="rag:app1") for i in range(2)]
+        objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(2)]
+
+        task_id = adapter.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [None]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_store_requires_cache_salt_separator() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    try:
+        keys = [
+            make_object_key(1, cache_salt="rag"),
+            make_object_key(2, cache_salt=":app1"),
+        ]
+        objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(2)]
+
+        task_id = adapter.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [None]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_bucket_placements"] == {}
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_store_assigns_cache_salt_prefix_buckets() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    try:
+        keys = [
+            make_object_key(1, cache_salt="RAG:app1"),
+            make_object_key(2, cache_salt="rag:app2"),
+            make_object_key(3, cache_salt="rag:"),
+            make_object_key(4, cache_salt="coding_agent:app1"),
+        ]
+        objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(4)]
+
+        task_id = adapter.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [[1, 1, 1, 7]]
+        status = adapter.report_status()
+        assert status["fdp_data_placement_policy"] == "cache_salt_prefix"
+        assert status["fdp_cache_salt_bucket_separator"] == ":"
+        assert status["fdp_cache_salt_bucket_placements"] == {
+            "rag": 1,
+            "coding_agent": 7,
+        }
+        assert status["fdp_cache_salt_fallback_buckets"] == []
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_store_falls_back_when_bucket_ids_are_exhausted() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (7, 17)])
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    try:
+        with patch(
+            "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.logger.warning"
+        ) as warning:
+            keys = [
+                make_object_key(1, cache_salt="rag:app1"),
+                make_object_key(2, cache_salt="chat:app1"),
+                make_object_key(3, cache_salt="coding_agent:app1"),
+            ]
+            objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(3)]
+
+            task_id = adapter.submit_store_task(keys, objects)
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            result = adapter.pop_completed_store_tasks()[task_id]
+
+            keys = [make_object_key(4, cache_salt="search:app1")]
+            objects = [make_memory_obj(b"\x04")]
+            task_id = adapter.submit_store_task(keys, objects)
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            second_result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert second_result.is_successful()
+        assert fake_core.put_many_calls == [[7, None, None], None]
+        assert warning.call_count == 1
+        assert "more cache_salt FDP buckets" in warning.call_args.args[0]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_bucket_placements"] == {"rag": 7}
+        assert status["fdp_cache_salt_fallback_count"] == 3
+        assert status["fdp_cache_salt_fallback_buckets"] == [
+            "chat",
+            "coding_agent",
+            "search",
+        ]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_fallback_bucket_status_is_bounded() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (7, 17)])
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    try:
+        sample_limit = 64
+        fallback_count = sample_limit + 3
+        keys = [make_object_key(1, cache_salt="primary:app")]
+        keys.extend(
+            make_object_key(i + 2, cache_salt=f"overflow{i}:app")
+            for i in range(fallback_count)
+        )
+        objects: list[Any] = [
+            make_memory_obj(bytes([i % 255])) for i in range(len(keys))
+        ]
+
+        task_id = adapter.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [[7, *([None] * fallback_count)]]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_fallback_count"] == fallback_count
+        assert len(status["fdp_cache_salt_fallback_buckets"]) == sample_limit
+        assert all(
+            bucket.startswith("overflow")
+            for bucket in status["fdp_cache_salt_fallback_buckets"]
+        )
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_cache_salt_rank_separates_ranks_within_bucket() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17), (9, 19)])
+    config = _make_fdp_config(data_placement_policy="cache_salt_rank")
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter."
+        "_detect_node_gpu_count",
+        return_value=2,
+    ):
+        adapter = _make_fdp_adapter(fake_core, config)
+    try:
+        keys = [
+            make_object_key(1, cache_salt="RAG:app1", kv_rank=0),
+            make_object_key(2, cache_salt="rag:app2", kv_rank=1),
+            make_object_key(3, cache_salt="rag:app3", kv_rank=0),
+            make_object_key(4, cache_salt="chat:app1", kv_rank=0),
+        ]
+        objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(4)]
+
+        task_id = adapter.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [[1, 7, 1, 9]]
+        status = adapter.report_status()
+        assert status["fdp_data_placement_policy"] == "cache_salt_rank"
+        assert status["fdp_cache_salt_rank_max_placements_per_bucket"] == 2
+        assert status["fdp_cache_salt_rank_placements"] == {
+            "rag": {0: 1, 1: 7},
+            "chat": {0: 9},
+        }
+        assert status["fdp_cache_salt_fallback_buckets"] == []
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_cache_salt_rank_uses_local_rank_from_kv_rank() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17), (9, 19)])
+    config = _make_fdp_config(data_placement_policy="cache_salt_rank")
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter."
+        "_detect_node_gpu_count",
+        return_value=2,
+    ):
+        adapter = _make_fdp_adapter(fake_core, config)
+    try:
+        same_local_rank = ObjectKey.ComputeKVRank(
+            world_size=8,
+            global_rank=5,
+            local_world_size=4,
+            local_rank=1,
+        )
+        same_local_rank_different_global = ObjectKey.ComputeKVRank(
+            world_size=16,
+            global_rank=9,
+            local_world_size=8,
+            local_rank=1,
+        )
+        different_local_rank = ObjectKey.ComputeKVRank(
+            world_size=8,
+            global_rank=6,
+            local_world_size=4,
+            local_rank=2,
+        )
+        keys = [
+            make_object_key(1, cache_salt="rag:app1", kv_rank=same_local_rank),
+            make_object_key(
+                2,
+                cache_salt="rag:app1",
+                kv_rank=same_local_rank_different_global,
+            ),
+            make_object_key(3, cache_salt="rag:app1", kv_rank=different_local_rank),
+        ]
+        objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(3)]
+
+        task_id = adapter.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [[1, 1, 7]]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_rank_placements"] == {"rag": {1: 1, 2: 7}}
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_cache_salt_rank_zero_quota_falls_back_for_new_bucket() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    config = _make_fdp_config(data_placement_policy="cache_salt_rank")
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter."
+        "_detect_node_gpu_count",
+        return_value=0,
+    ):
+        adapter = _make_fdp_adapter(fake_core, config)
+    try:
+        with patch(
+            "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.logger.warning"
+        ) as warning:
+            keys = [make_object_key(1, cache_salt="rag:app1", kv_rank=0)]
+            objects: list[Any] = [make_memory_obj(b"\x01")]
+
+            task_id = adapter.submit_store_task(keys, objects)
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [None]
+        assert warning.call_count == 1
+        assert "node GPU count placement quota" in warning.call_args.args[0]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_rank_max_placements_per_bucket"] == 0
+        assert status["fdp_cache_salt_rank_placements"] == {}
+        assert status["fdp_cache_salt_fallback_count"] == 1
+        assert status["fdp_cache_salt_fallback_buckets"] == ["rag"]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_cache_salt_rank_enforces_gpu_count_bucket_quota() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17), (9, 19)])
+    config = _make_fdp_config(data_placement_policy="cache_salt_rank")
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter."
+        "_detect_node_gpu_count",
+        return_value=2,
+    ):
+        adapter = _make_fdp_adapter(fake_core, config)
+    try:
+        with patch(
+            "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.logger.warning"
+        ) as warning:
+            keys = [
+                make_object_key(1, cache_salt="rag:app1", kv_rank=0),
+                make_object_key(2, cache_salt="rag:app1", kv_rank=1),
+                make_object_key(3, cache_salt="rag:app1", kv_rank=2),
+            ]
+            objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(3)]
+
+            task_id = adapter.submit_store_task(keys, objects)
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [[1, 7, None]]
+        assert warning.call_count == 1
+        assert "node GPU count placement quota" in warning.call_args.args[0]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_rank_placements"] == {"rag": {0: 1, 1: 7}}
+        assert status["fdp_cache_salt_fallback_count"] == 1
+        assert status["fdp_cache_salt_fallback_buckets"] == ["rag"]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_cache_salt_rank_falls_back_when_ids_exhausted() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    config = _make_fdp_config(data_placement_policy="cache_salt_rank")
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter."
+        "_detect_node_gpu_count",
+        return_value=2,
+    ):
+        adapter = _make_fdp_adapter(fake_core, config)
+    try:
+        with patch(
+            "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.logger.warning"
+        ) as warning:
+            keys = [
+                make_object_key(1, cache_salt="rag:app1", kv_rank=0),
+                make_object_key(2, cache_salt="rag:app1", kv_rank=1),
+                make_object_key(3, cache_salt="chat:app1", kv_rank=0),
+            ]
+            objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(3)]
+
+            task_id = adapter.submit_store_task(keys, objects)
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [[1, 7, None]]
+        assert warning.call_count == 1
+        assert "more cache_salt FDP buckets/ranks" in warning.call_args.args[0]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_rank_placements"] == {"rag": {0: 1, 1: 7}}
+        assert status["fdp_cache_salt_fallback_count"] == 1
+        assert status["fdp_cache_salt_fallback_buckets"] == ["chat"]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_status_preserves_configured_id_order() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    adapter = _make_fdp_adapter(
+        fake_core,
+        _make_fdp_config(placement_ids=[7, 1]),
+    )
+    try:
+        status = adapter.report_status()
+        assert status["fdp_placement_ids"] == [7, 1]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_rejects_user_placement_id_zero() -> None:
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.logger.warning"
+    ) as warning:
+        with pytest.raises(ValueError, match="must not contain 0"):
+            _make_fdp_config(placement_ids=[0, 1])
+
+    warning.assert_called_once()
+    assert "placement identifier 0" in warning.call_args.args[0]
+
+
+def test_raw_block_fdp_configured_ids_may_be_device_subset() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config(placement_ids=[1]))
+    try:
+        status = adapter.report_status()
+        assert status["fdp_placement_ids"] == [1]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_user_ids_must_be_reported_by_device() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+
+    with pytest.raises(RuntimeError, match="not reported by device"):
+        _make_fdp_adapter(fake_core, _make_fdp_config(placement_ids=[1, 9]))
+
+
+def test_raw_block_fdp_default_data_ids_exclude_metadata_checkpoint_id() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17), (9, 19)])
+    adapter = _make_fdp_adapter(
+        fake_core,
+        _make_fdp_config(meta_checkpoint_placement_id=7),
+    )
+    try:
+        status = adapter.report_status()
+        assert status["fdp_placement_ids"] == [1, 9]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_meta_checkpoint_id_must_be_reported_by_device() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+
+    with pytest.raises(RuntimeError, match="metadata checkpoint"):
+        _make_fdp_adapter(fake_core, _make_fdp_config(meta_checkpoint_placement_id=9))
+
+
+def test_raw_block_fdp_requires_nonzero_device_ids() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10)])
+
+    with pytest.raises(RuntimeError, match="no non-zero identifiers"):
+        _make_fdp_adapter(fake_core, _make_fdp_config())

@@ -3,6 +3,11 @@
 Internal API Server
 ===================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/http_api`.
+
+
 The ``internal_api_server`` provides HTTP APIs for managing and inspecting
 the LMCache engine at runtime. APIs are organized into three categories:
 

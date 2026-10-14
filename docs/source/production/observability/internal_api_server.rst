@@ -3,6 +3,11 @@
 Internal API Server Metrics
 ====================================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 Another approach to retrieve LMCache metrics is to use the internal API server.
 
 Overview
@@ -46,8 +51,10 @@ The following environment variables are used implicitly with their default value
      - Default Value
      - Description
    * - ``LMCACHE_INTERNAL_API_SERVER_HOST``
-     - ``0.0.0.0``
-     - Host address for the internal API server to bind to.
+     - ``127.0.0.1``
+     - Host address for the internal API server to bind to. The API has no
+       authentication, so only bind a non-loopback address on a trusted
+       network.
    * - ``LMCACHE_INTERNAL_API_SERVER_PORT_START``
      - ``6999``
      - Starting port number, e.g.:

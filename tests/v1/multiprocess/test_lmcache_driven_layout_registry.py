@@ -12,10 +12,25 @@ import pytest
 import torch
 
 
+class _FakeKVLayerGroupsManager:
+    """Minimal manager stub: one full-attention object group."""
+
+    num_object_groups: int = 1
+
+    def get_attn_desc(self) -> Any:
+        """One full-attention object group."""
+        # First Party
+        from lmcache.v1.distributed.api import AttnWindowDesc
+
+        return AttnWindowDesc(num_chunks_in_sw=[-1])
+
+
 class _FakeGPUContext:
     """Small stand-in for GPUCacheContext used by registration tests."""
 
+    device: torch.device = torch.device("cpu")
     num_layers: int = 2
+    kv_layer_groups_manager: _FakeKVLayerGroupsManager = _FakeKVLayerGroupsManager()
 
     def close(self) -> None:
         """No-op teardown (real GPUCacheContext.close deregisters its GDS buffer)."""
@@ -35,17 +50,23 @@ class _FakeDeviceHostFuncDispatcher:
 
 
 @pytest.fixture
-def stub_native_storage_ops() -> Any:
+def stub_lmcache_native() -> Any:
     """Stub native modules so MP server imports work in source-only test runs."""
-    module = types.ModuleType("lmcache.native_storage_ops")
+    module = types.ModuleType("lmcache.lmcache_native")
     module_any = cast(Any, module)
+    module_any.PageBufferShapeDesc = type("PageBufferShapeDesc", (), {})
+    module_any.KernelGroupSpec = type(
+        "KernelGroupSpec",
+        (),
+        {"__init__": lambda self, *args, **kwargs: None},
+    )
     module_any.TTLLock = type("TTLLock", (), {})
     module_any.Bitmap = type("Bitmap", (), {})
     module_any.PeriodicEventNotifier = type("PeriodicEventNotifier", (), {})
     with patch.dict(
         sys.modules,
         {
-            "lmcache.native_storage_ops": module,
+            "lmcache.lmcache_native": module,
             "cupy": MagicMock(),
         },
     ):
@@ -54,7 +75,7 @@ def stub_native_storage_ops() -> Any:
 
 def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     monkeypatch: pytest.MonkeyPatch,
-    stub_native_storage_ops: Any,
+    stub_lmcache_native: Any,
 ) -> None:
     """Unregistering one shared GPU instance must not remove the shared layout."""
     # First Party
@@ -79,6 +100,8 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         layout_hints: object = None,
         engine_group_infos: object = (),
         engine_type: object = None,
+        separate_object_groups: bool = False,
+        full_sw_kv: bool = False,
     ) -> _FakeGPUContext:
         """Return a fake cache context without touching CUDA or wrappers."""
         return _FakeGPUContext()
@@ -124,3 +147,85 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
 
     module.unregister_kv_cache(2)
     assert ctx.layout_desc_registry.find("shared-model", 1) is None
+
+
+def _layout() -> Any:
+    """A minimal layout descriptor for registry tests."""
+    # First Party
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+
+    return MemoryLayoutDesc(shapes=[torch.Size([2, 4])], dtypes=[torch.float16])
+
+
+def test_registry_attn_desc_roundtrip() -> None:
+    """register stores the attention-window descriptor; find_attn_desc reads it."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    registry.register(
+        "m", 2, _layout(), attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+    )
+
+    desc = registry.find_attn_desc("m", 2)
+    assert desc.num_chunks_in_sw == [-1, 2]
+    assert desc.world_size == 2
+
+
+def test_registry_derives_group_layout_descs_when_not_given() -> None:
+    """A registration without group_layout_descs (engine-driven, blend,
+    qstore) still yields one shared-layout entry per object group, so
+    lookups never hit the missing-group-layouts error path."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    layout = _layout()
+    registry.register("m", 1, layout)
+    assert registry.find_group_layout_descs("m", 1) == {0: layout}
+
+    registry.register(
+        "m2", 1, layout, attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+    )
+    assert registry.find_group_layout_descs("m2", 1) == {0: layout, 1: layout}
+
+
+def test_registry_attn_desc_raises_when_unregistered() -> None:
+    """find_attn_desc raises for an unknown (model, world_size) pair."""
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+
+    with pytest.raises(ValueError, match="No attention-window descriptor"):
+        registry.find_attn_desc("missing", 1)
+
+
+def test_registry_windows_default_single_group_when_omitted() -> None:
+    """A registration without windows resolves to a single full-attention group."""
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    registry.register("m", 1, _layout())
+
+    assert registry.find_attn_desc("m", 1).num_chunks_in_sw == [-1]
+
+
+def test_registry_windows_updated_on_reregister() -> None:
+    """Re-registering the same pair refreshes the stored windows."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    registry.register(
+        "m", 1, _layout(), attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1])
+    )
+    registry.register(
+        "m", 1, _layout(), attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 4])
+    )
+
+    assert registry.find_attn_desc("m", 1).num_chunks_in_sw == [-1, 4]

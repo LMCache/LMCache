@@ -10,22 +10,33 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.gpu_connector import xpu_connectors
 from lmcache.v1.gpu_connector.xpu_connectors import (
     SGLangLayerwiseXPUConnector,
     SGLangXPUConnector,
 )
-from lmcache.v1.memory_management import MemoryFormat, PinMemoryAllocator
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
+from lmcache.v1.memory_management import MemoryFormat
 from tests.v1.utils import (
     check_paged_kv_cache_equal_with_mla,
     check_sglang_paged_kv_cache_equal,
     generate_sglang_kv_cache_paged_list_tensors,
 )
+import lmcache.lmcache_native as lmcache_native
+
+pytestmark = [
+    pytest.mark.xpu,
+    pytest.mark.sglang,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "xpu"),
+        reason="requires available xpu runtime",
+    ),
+]
 
 
-def _skip_if_no_xpu():
-    if not hasattr(torch, "xpu") or not torch.xpu.is_available():
-        pytest.skip("torch.xpu is not available")
+def _current_xpu_device() -> torch.device:
+    return torch.device(torch_device_type, torch.xpu.current_device())
 
 
 def _make_unique_slot_mapping(
@@ -90,8 +101,7 @@ def _flat_to_nested_sglang_mha(kvcaches_flat, num_layers: int):
 @pytest.mark.parametrize("use_mla", [False, True])
 def test_sglang_xpu_connector_roundtrip(use_xpu: bool, use_mla: bool):
     """Roundtrip: XPU kvcaches -> CPU memobj -> XPU kvcaches_dst, then compare."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 2
     num_blocks = 4
@@ -178,8 +188,7 @@ def test_sglang_xpu_connector_roundtrip(use_xpu: bool, use_mla: bool):
 @pytest.mark.parametrize("use_mla", [False, True])
 def test_sglang_xpu_connector_roundtrip_multi_chunk(use_xpu: bool, use_mla: bool):
     """Multi-chunk roundtrip with non-contiguous token ranges."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 2
     num_blocks = 6
@@ -273,8 +282,7 @@ def test_sglang_xpu_connector_roundtrip_multi_chunk(use_xpu: bool, use_mla: bool
 @pytest.mark.parametrize("use_xpu", [False, True])
 def test_sglang_xpu_connector_roundtrip_flat_mha_kvcaches(use_xpu: bool):
     """Non-layerwise SGLang can pass flat MHA kvcaches; ensure roundtrip works."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 2
     num_blocks = 4
@@ -367,8 +375,7 @@ def test_sglang_xpu_connector_roundtrip_flat_mha_kvcaches(use_xpu: bool):
 @pytest.mark.parametrize("use_mla", [False, True])
 def test_sglang_xpu_connector_roundtrip_layerwise(use_xpu: bool, use_mla: bool):
     """Layerwise roundtrip using generator protocol."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 4
     num_blocks = 8
@@ -477,8 +484,7 @@ def test_sglang_xpu_connector_roundtrip_layerwise_multi_chunk(
     use_xpu: bool, use_mla: bool
 ):
     """Layerwise multi-chunk roundtrip."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 4
     num_blocks = 8
@@ -588,8 +594,7 @@ def test_sglang_xpu_connector_roundtrip_layerwise_multi_chunk(
 
 def test_sglang_layerwise_uses_kernel_transfers(monkeypatch):
     """Ensure layerwise SGLang path dispatches through kernel transfer ops."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 3
     num_blocks = 6
@@ -645,7 +650,7 @@ def test_sglang_layerwise_uses_kernel_transfers(monkeypatch):
 
     calls: list[tuple[object, bool]] = []
     orig_single_layer_kv_transfer_sgl = (
-        xpu_connectors.lmc_ops.single_layer_kv_transfer_sgl
+        xpu_connectors.device_ops.single_layer_kv_transfer_sgl
     )
 
     def _recording_single_layer_kv_transfer_sgl(
@@ -667,7 +672,7 @@ def test_sglang_layerwise_uses_kernel_transfers(monkeypatch):
         )
 
     monkeypatch.setattr(
-        xpu_connectors.lmc_ops,
+        xpu_connectors.device_ops,
         "single_layer_kv_transfer_sgl",
         _recording_single_layer_kv_transfer_sgl,
     )
@@ -710,12 +715,8 @@ def test_sglang_layerwise_uses_kernel_transfers(monkeypatch):
         next(consumer)
 
         expected_calls_per_direction = num_layers * num_chunks
-        d2h_calls = [
-            c for c in calls if c[0] == xpu_connectors.lmc_ops.TransferDirection.D2H
-        ]
-        h2d_calls = [
-            c for c in calls if c[0] == xpu_connectors.lmc_ops.TransferDirection.H2D
-        ]
+        d2h_calls = [c for c in calls if c[0] == lmcache_native.TransferDirection.D2H]
+        h2d_calls = [c for c in calls if c[0] == lmcache_native.TransferDirection.H2D]
 
         assert len(d2h_calls) == expected_calls_per_direction
         assert len(h2d_calls) == expected_calls_per_direction
@@ -729,8 +730,7 @@ def test_sglang_layerwise_uses_kernel_transfers(monkeypatch):
 
 def test_sglang_layerwise_uses_mla_kernel_transfers(monkeypatch):
     """Ensure MLA layerwise path dispatches through single_layer_kv_transfer."""
-    _skip_if_no_xpu()
-    device = torch.device("xpu:0")
+    device = _current_xpu_device()
 
     num_layers = 3
     num_blocks = 6
@@ -786,9 +786,9 @@ def test_sglang_layerwise_uses_mla_kernel_transfers(monkeypatch):
 
     single_layer_calls: list[tuple[object, bool]] = []
     sgl_calls: list[tuple[object, bool]] = []
-    orig_single_layer_kv_transfer = xpu_connectors.lmc_ops.single_layer_kv_transfer
+    orig_single_layer_kv_transfer = xpu_connectors.device_ops.single_layer_kv_transfer
     orig_single_layer_kv_transfer_sgl = (
-        xpu_connectors.lmc_ops.single_layer_kv_transfer_sgl
+        xpu_connectors.device_ops.single_layer_kv_transfer_sgl
     )
 
     def _recording_single_layer_kv_transfer(
@@ -828,12 +828,12 @@ def test_sglang_layerwise_uses_mla_kernel_transfers(monkeypatch):
         )
 
     monkeypatch.setattr(
-        xpu_connectors.lmc_ops,
+        xpu_connectors.device_ops,
         "single_layer_kv_transfer",
         _recording_single_layer_kv_transfer,
     )
     monkeypatch.setattr(
-        xpu_connectors.lmc_ops,
+        xpu_connectors.device_ops,
         "single_layer_kv_transfer_sgl",
         _recording_single_layer_kv_transfer_sgl,
     )
@@ -879,12 +879,12 @@ def test_sglang_layerwise_uses_mla_kernel_transfers(monkeypatch):
         d2h_calls = [
             c
             for c in single_layer_calls
-            if c[0] == xpu_connectors.lmc_ops.TransferDirection.D2H
+            if c[0] == lmcache_native.TransferDirection.D2H
         ]
         h2d_calls = [
             c
             for c in single_layer_calls
-            if c[0] == xpu_connectors.lmc_ops.TransferDirection.H2D
+            if c[0] == lmcache_native.TransferDirection.H2D
         ]
 
         assert len(d2h_calls) == expected_calls_per_direction

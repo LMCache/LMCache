@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 # Standard
-from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from urllib.parse import quote, unquote
 import asyncio
-import builtins
 import os
 import shutil
 import tempfile
@@ -24,12 +22,19 @@ import huggingface_hub
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
-from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+
+if TYPE_CHECKING:
+    # Standard
+    from collections.abc import Sequence
+    import builtins
+
+    # First Party
+    from lmcache.utils import CacheEngineKey
+    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.memory_management import MemoryObj
+    from lmcache.v1.metadata import LMCacheMetadata
+    from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 

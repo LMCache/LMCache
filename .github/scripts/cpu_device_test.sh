@@ -13,10 +13,11 @@
 #   LMCACHE_E2E_TRANSPORT_MODE   engine_driven|lmcache_driven|shm|pickle
 #                                (default: engine_driven)
 #   LMCACHE_E2E_DATA_MODE        shm|pickle (default: shm)
+#   LMCACHE_REQUEST_TRANSPORT    zmq|grpc (default: zmq)
 #   LMCACHE_HTTP_PORT_BENCH      HTTP port for bench (default: 18080)
-#   LMCACHE_ZMQ_PORT_BENCH       ZMQ port for bench (default: 15555)
+#   LMCACHE_REQUEST_PORT_BENCH   request port for bench (default: 15555)
 #   LMCACHE_HTTP_PORT_E2E        HTTP port for e2e (default: 18081)
-#   LMCACHE_ZMQ_PORT_E2E         ZMQ port for e2e (default: 15557)
+#   LMCACHE_REQUEST_PORT_E2E     request port for e2e (default: 15557)
 #   VLLM_PORT_E2E                HTTP port for vLLM (default: 18000)
 
 set -euo pipefail
@@ -33,16 +34,26 @@ BENCH_TRANSFER_MODE="${LMCACHE_BENCH_TRANSFER_MODE:-engine_driven}"
 E2E_TRANSPORT_MODE="${LMCACHE_E2E_TRANSPORT_MODE:-engine_driven}"
 E2E_DATA_MODE="${LMCACHE_E2E_DATA_MODE:-shm}"
 HTTP_PORT_BENCH="${LMCACHE_HTTP_PORT_BENCH:-18080}"
-ZMQ_PORT_BENCH="${LMCACHE_ZMQ_PORT_BENCH:-15555}"
+REQUEST_PORT_BENCH="${LMCACHE_REQUEST_PORT_BENCH:-${LMCACHE_ZMQ_PORT_BENCH:-15555}}"
 HTTP_PORT_E2E="${LMCACHE_HTTP_PORT_E2E:-18081}"
-ZMQ_PORT_E2E="${LMCACHE_ZMQ_PORT_E2E:-15557}"
+REQUEST_PORT_E2E="${LMCACHE_REQUEST_PORT_E2E:-${LMCACHE_ZMQ_PORT_E2E:-15557}}"
 VLLM_PORT_E2E="${VLLM_PORT_E2E:-18000}"
+REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
 
 # Validate modes
 case "${BENCH_TRANSFER_MODE}" in
   lmcache_driven|engine_driven) ;;
   *)
     echo "!! Unknown LMCACHE_BENCH_TRANSFER_MODE='${BENCH_TRANSFER_MODE}'"
+    exit 1
+    ;;
+esac
+
+case "${REQUEST_TRANSPORT}" in
+  zmq|grpc) ;;
+  *)
+    echo "!! Unknown LMCACHE_REQUEST_TRANSPORT='${REQUEST_TRANSPORT}'"
+    echo "   Valid values: zmq, grpc"
     exit 1
     ;;
 esac
@@ -71,7 +82,8 @@ esac
 
 echo "    Bench transfer mode: ${BENCH_TRANSFER_MODE}"
 echo "    E2E transport mode: ${E2E_TRANSPORT_MODE}"
-echo "    Ports: bench=${HTTP_PORT_BENCH}/${ZMQ_PORT_BENCH}, e2e=${HTTP_PORT_E2E}/${ZMQ_PORT_E2E}/${VLLM_PORT_E2E}"
+echo "    Request transport: ${REQUEST_TRANSPORT}"
+echo "    Ports: bench=${HTTP_PORT_BENCH}/${REQUEST_PORT_BENCH}, e2e=${HTTP_PORT_E2E}/${REQUEST_PORT_E2E}/${VLLM_PORT_E2E}"
 
 # Reap any LMCache/vLLM children started by this run on exit so the
 # next workflow step does not collide on default ZMQ/HTTP ports.
@@ -95,9 +107,10 @@ run_server_bench() {
     # Set environment for bench test
     export LMCACHE_BENCH_TRANSFER_MODE="${BENCH_TRANSFER_MODE}"
     export LMCACHE_HTTP_PORT="${HTTP_PORT_BENCH}"
-    export LMCACHE_ZMQ_PORT="${ZMQ_PORT_BENCH}"
-    export LMCACHE_LOG_FILE="/tmp/cpu_device_bench_${BENCH_TRANSFER_MODE}_lmcache.log"
-    export BENCH_OUTPUT_LOG="/tmp/cpu_device_bench_${BENCH_TRANSFER_MODE}_output.log"
+    export LMCACHE_REQUEST_PORT="${REQUEST_PORT_BENCH}"
+    export LMCACHE_REQUEST_TRANSPORT="${REQUEST_TRANSPORT}"
+    export LMCACHE_LOG_FILE="/tmp/cpu_device_bench_${BENCH_TRANSFER_MODE}_${REQUEST_TRANSPORT}_lmcache.log"
+    export BENCH_OUTPUT_LOG="/tmp/cpu_device_bench_${BENCH_TRANSFER_MODE}_${REQUEST_TRANSPORT}_output.log"
     export LMCACHE_HEALTHCHECK_TIMEOUT="30"
     export BENCH_NUM_REQUESTS="3"
     export BENCH_NUM_TOKENS="512"
@@ -117,10 +130,11 @@ run_vllm_e2e() {
     export LMCACHE_TRANSPORT_MODE="${MAPPED_TRANSPORT_MODE}"
     export LMCACHE_DATA_MODE="${MAPPED_DATA_MODE}"
     export LMCACHE_HTTP_PORT="${HTTP_PORT_E2E}"
-    export LMCACHE_ZMQ_PORT="${ZMQ_PORT_E2E}"
+    export LMCACHE_REQUEST_PORT="${REQUEST_PORT_E2E}"
     export VLLM_PORT="${VLLM_PORT_E2E}"
-    export LMCACHE_LOG_FILE="/tmp/cpu_device_e2e_${E2E_TRANSPORT_MODE}_lmcache.log"
-    export VLLM_LOG_FILE="/tmp/cpu_device_e2e_${E2E_TRANSPORT_MODE}_vllm.log"
+    export LMCACHE_REQUEST_TRANSPORT="${REQUEST_TRANSPORT}"
+    export LMCACHE_LOG_FILE="/tmp/cpu_device_e2e_${E2E_TRANSPORT_MODE}_${REQUEST_TRANSPORT}_lmcache.log"
+    export VLLM_LOG_FILE="/tmp/cpu_device_e2e_${E2E_TRANSPORT_MODE}_${REQUEST_TRANSPORT}_vllm.log"
     export LMCACHE_HEALTHCHECK_TIMEOUT="30"
     export VLLM_READY_TIMEOUT="300"
     
@@ -154,3 +168,4 @@ echo "==> CPU device test passed for modes:"
 echo "    Test mode: ${TEST_MODE}"
 echo "    Server bench: ${BENCH_TRANSFER_MODE}"
 echo "    vLLM e2e: ${E2E_TRANSPORT_MODE}"
+echo "    Request transport: ${REQUEST_TRANSPORT}"

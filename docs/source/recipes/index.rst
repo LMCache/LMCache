@@ -13,10 +13,11 @@ For the generic LMCache + engine wiring (ports, remote hosts, sending a first
 request), see :doc:`../getting_started/quickstart` -- recipes assume that page
 as a prerequisite.
 
-Recipes are grouped by attention architecture:
+Recipes are grouped by architecture:
 
 .. toctree::
    :maxdepth: 1
 
    uniform_attention_models
    /mp/hybrid_models
+   multimodal_models

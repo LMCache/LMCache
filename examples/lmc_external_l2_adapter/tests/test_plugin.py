@@ -294,7 +294,7 @@ class TestPluginRoundTrip:
         assert done.get(tid) is not None
         assert done[tid].is_successful()
 
-        ltid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        ltid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         assert _wait_event_fd(lookup_fd)
         bm = adapter.query_lookup_and_lock_result(ltid)
         assert bm is not None
@@ -341,7 +341,7 @@ class TestPluginRoundTrip:
         assert done.get(tid) is not None
         assert done[tid].is_successful()
 
-        ltid = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        ltid = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
         assert _wait_event_fd(lookup_fd)
         bm = adapter.query_lookup_and_lock_result(ltid)
         assert bm is not None
@@ -364,7 +364,7 @@ class TestPluginRoundTrip:
         adapter.pop_completed_store_tasks()
 
         ltid = adapter.submit_lookup_and_lock_task(
-            [stored_key, missing_key], _EMPTY_LAYOUT
+            [stored_key, missing_key], {0: _EMPTY_LAYOUT}
         )
         assert _wait_event_fd(lookup_fd)
         bm = adapter.query_lookup_and_lock_result(ltid)
@@ -405,7 +405,7 @@ class TestPluginRoundTrip:
         assert done[tid].is_successful()
 
         # Lookup all three
-        ltid = adapter.submit_lookup_and_lock_task([k1, k2, k3], _EMPTY_LAYOUT)
+        ltid = adapter.submit_lookup_and_lock_task([k1, k2, k3], {0: _EMPTY_LAYOUT})
         assert _wait_event_fd(lookup_fd)
         bm = adapter.query_lookup_and_lock_result(ltid)
         assert bm is not None

@@ -9,9 +9,14 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MemoryObj,
+)
 from lmcache.v1.transfer_channel.nixl_channel import NixlChannel
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
@@ -26,7 +31,7 @@ def generate_test_data(
     keys = []
     objs = []
     allocator = AdHocMemoryAllocator(
-        device="cuda",  # Assuming we are using CUDA for the test
+        device=torch_device_type,
     )
     for i in range(num_objs):
         keys.append(
@@ -50,6 +55,27 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
         return float("inf")
     gb = total_bytes / (1024 * 1024 * 1024)
     return gb / elapsed_time
+
+
+def test_generate_test_data_smoke():
+    keys, objs = generate_test_data(2, torch.Size([2, 1, 1, 4]), dtype=torch.float16)
+
+    assert len(keys) == 2
+    assert len(objs) == 2
+    assert keys[0].chunk_hash == 0
+    assert keys[1].chunk_hash == 1
+
+    for i, obj in enumerate(objs, start=1):
+        assert obj.tensor is not None
+        assert tuple(obj.tensor.shape) == (2, 1, 1, 4)
+        assert obj.tensor.dtype == torch.float16
+        expected = torch.full_like(obj.tensor, float(i))
+        assert torch.allclose(obj.tensor, expected)
+
+
+def test_calculate_throughput_basics():
+    assert calculate_throughput(1024**3, 2.0) == pytest.approx(0.5)
+    assert calculate_throughput(1, 0.0) == float("inf")
 
 
 if __name__ == "__main__":
@@ -93,7 +119,7 @@ if __name__ == "__main__":
 
     # Common configuration
     buffer_size = 2**32  # 4GB
-    buffer_device = get_correct_device("cuda", 0)  # Use first GPU
+    buffer_device = get_correct_device(torch_device_type, 0)  # Use first GPU
 
     # Get buffer pointer from first object
     buffer_ptr = objs[0].metadata.address

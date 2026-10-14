@@ -1,6 +1,11 @@
 Encoder caching
 ===============
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 The **Encoder Cache (EC)** stores the output of a multimodal model's
 encoder stage, keyed by vLLM's per-input ``mm_hash``. When two
 requests share a multimodal input — the same image, video, or audio

@@ -74,6 +74,10 @@ class InteractiveState:
     def set(self, key: str, value: Any) -> None:
         self._values[key] = value
 
+    def unset(self, key: str) -> None:
+        """Remove a key so it counts as unset again (used when stepping back)."""
+        self._values.pop(key, None)
+
     @property
     def values(self) -> dict[str, Any]:
         return dict(self._values)
