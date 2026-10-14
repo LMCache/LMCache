@@ -10,6 +10,7 @@ package lmcache.memory_orchestrator.v1;
 import "p2p_service.proto";
 
 service MemoryOrchestrator {
+  // Committed objects are immutable here; eviction and extent reuse are follow-ups.
   rpc DescribeRegion (Envelope)              returns (RegionContract);
   rpc RegisterClient (RegisterClientRequest) returns (RegisterClientReply);
   rpc ReserveWrite   (ReserveWriteRequest)   returns (ReserveWriteReply);

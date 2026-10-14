@@ -151,6 +151,12 @@ flow, replay, startup marker, batch splitting and rollback).
 
 ## Follow-ups
 
+External eviction needs a delete/eviction RPC in the reclamation follow-up.
+A metadata-only delete could hide a key, but would not recover capacity with
+this monotonic allocator. Extent reuse needs coordinated reader/writer
+retirement and protection against late accesses; this PR keeps committed
+objects immutable rather than offering a delete that implies reclamation.
+
 Read lease TTL and client fencing (`Renew`, quarantine of orphaned extents);
 reclamation and eviction (`RequestEvict`, `VALID -> EVICTING -> FREE`,
 generation bump on reuse); several regions per orchestrator (a region table,
