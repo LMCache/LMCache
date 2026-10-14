@@ -761,10 +761,9 @@ def _subpaged_plane_pair_ratio(
     ``None`` means the pair is not a standard-paged attention cache whose
     kernel block evenly divides the scheduler block.
     """
-    if (
-        get_kv_cache_spec_kind(spec) not in _SUBPAGEABLE_ATTENTION_KINDS
-        or _declares_slot_compression(spec)
-    ):
+    if get_kv_cache_spec_kind(
+        spec
+    ) not in _SUBPAGEABLE_ATTENTION_KINDS or _declares_slot_compression(spec):
         return None
     if k_plane.ndim != 4 or v_plane.ndim != 4 or k_plane.shape != v_plane.shape:
         return None
@@ -973,16 +972,15 @@ class _SubpagedAttentionContiguousPlaneViewEdit(KVCacheGroupEdit):
         return [k_plane.view(logical_shape), v_plane.view(logical_shape)]
 
 
-# Rule registry, in match priority order. The interleaved stride signature is
-# registered before the broader contiguous-plane rule.
+# Rule registry, in match priority order.
 _EDITS: tuple[KVCacheGroupEdit, ...] = (
     _MambaUnifiedViewEdit(),
     _MambaPageViewEdit(),
     _MambaSlicePlaneEdit(),
     _SubpagedMLAAttentionViewEdit(),
+    _SubpagedAttentionViewEdit(),
     _SubpagedAttentionInterleavedPlaneViewEdit(),
     _SubpagedAttentionContiguousPlaneViewEdit(),
-    _SubpagedAttentionViewEdit(),
 )
 
 

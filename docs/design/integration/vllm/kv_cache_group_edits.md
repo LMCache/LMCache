@@ -141,7 +141,8 @@ padding absent from the K/V views. v0.30's
 `_SubpagedAttentionInterleavedPlaneViewEdit` returns one uint8 plane
 `(num_logical_blocks, scheduler_block_size, 1, page_bytes / scheduler_block_size)`
 (format 17, `NL_X_NP_X_NB_BS_ONE_HS`, when the edit wraps it in a one-element
-list). The interleaved rule is registered first; a pair that matches neither
+list). The fused rank-4/5 rule is registered before the plane rules; among
+those, the interleaved rule is registered first. A pair that matches neither
 layout is left unchanged. Matching uses strides and contiguity, not the
 vLLM-Ascend version string — the table rows are the layouts those releases
 emit today.

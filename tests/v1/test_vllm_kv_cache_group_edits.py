@@ -179,26 +179,38 @@ def _mamba_spec(page_bytes: int) -> _Spec:
     )
 
 
-def _mamba_kv_cache() -> tuple[list[torch.Tensor], int]:
+def _mamba_kv_cache(
+    prefix_elems: int = 0,
+) -> tuple[list[torch.Tensor], int, torch.Tensor]:
     """A Mamba ``[conv_state, ssm_state]`` pair sharing one padded page.
 
-    Returns the pair and the page size in bytes. ``conv_state`` starts at the
-    page base and its per-block stride spans the whole page (``conv | ssm |
-    pad``), which is what ``_MambaPageViewEdit.apply`` re-strides over.
+    Returns the pair, the page size in bytes, and the backing storage tensor.
+    Per-block stride spans the whole page (``conv | ssm | pad``), which is what
+    ``_MambaPageViewEdit.apply`` re-strides over. When ``prefix_elems > 0``,
+    bytes ``[0:prefix_elems)`` are filler and conv/ssm use that storage offset
+    (vLLM-Ascend v0.30 shared-pool geometry).
     """
     elem = torch.finfo(torch.bfloat16).bits // 8
     # Page must factor as (2, block_size, 1, head_size) for the synthetic view.
     elems_per_page = 2 * LOGICAL_BLOCK_SIZE * 3
     conv_elems, ssm_elems = 2 * LOGICAL_BLOCK_SIZE, 2 * LOGICAL_BLOCK_SIZE
 
-    storage = torch.arange(NUM_LOGICAL_BLOCKS * elems_per_page, dtype=torch.bfloat16)
+    storage = torch.arange(
+        prefix_elems + NUM_LOGICAL_BLOCKS * elems_per_page, dtype=torch.bfloat16
+    )
+    if prefix_elems:
+        storage[:prefix_elems] = -1
     conv_state = storage.as_strided(
-        (NUM_LOGICAL_BLOCKS, conv_elems), (elems_per_page, 1)
+        (NUM_LOGICAL_BLOCKS, conv_elems),
+        (elems_per_page, 1),
+        storage_offset=prefix_elems,
     )
     ssm_state = storage.as_strided(
-        (NUM_LOGICAL_BLOCKS, ssm_elems), (elems_per_page, 1), storage_offset=conv_elems
+        (NUM_LOGICAL_BLOCKS, ssm_elems),
+        (elems_per_page, 1),
+        storage_offset=prefix_elems + conv_elems,
     )
-    return [conv_state, ssm_state], elems_per_page * elem
+    return [conv_state, ssm_state], elems_per_page * elem, storage
 
 
 def _slice_strided_mamba_kv_cache() -> tuple[list[torch.Tensor], int]:
@@ -236,7 +248,7 @@ def _hybrid_config(
     Returns:
         The vLLM-shaped config and the registered ``kv_caches`` mapping.
     """
-    mamba_caches, mamba_page_bytes = _mamba_kv_cache()
+    mamba_caches, mamba_page_bytes, _ = _mamba_kv_cache()
     groups = [
         _Group(layer_names=[f"mamba.{i}"], kv_cache_spec=_mamba_spec(mamba_page_bytes))
         for i in range(NUM_MAMBA_GROUPS)
@@ -501,7 +513,7 @@ def test_mamba_page_view_applies_on_packed_page(edits):
     When conv's per-block stride spans the full padded page, only
     ``_MambaPageViewEdit`` may match; the slice-plane rule must not.
     """
-    caches, page_bytes = _mamba_kv_cache()
+    caches, page_bytes, _ = _mamba_kv_cache()
     spec = _mamba_spec(page_bytes)
     assert edits._MambaPageViewEdit().matches(spec, caches)
     assert not edits._MambaSlicePlaneEdit().matches(spec, caches)
@@ -584,37 +596,6 @@ def test_flash_attention_hybrid_needs_no_attention_edit(edits):
     assert edited["attn.0"].shape[2] == LOGICAL_BLOCK_SIZE
 
 
-def _mamba_kv_cache_with_prefix(
-    prefix_elems: int,
-) -> tuple[list[torch.Tensor], int, torch.Tensor]:
-    """Packed Mamba pages with a nonzero offset in a shared pool.
-
-    Returns ``[conv_state, ssm_state]``, the page size in bytes, and the
-    backing storage tensor. Bytes ``[0:prefix_elems)`` are filler; conv and ssm
-    still use per-block stride ``elems_per_page`` like ``_mamba_kv_cache``, but
-    ``storage_offset`` is ``prefix_elems`` on conv (ssm follows conv in-page).
-    """
-    elem = torch.finfo(torch.bfloat16).bits // 8
-    elems_per_page = 2 * LOGICAL_BLOCK_SIZE * 3
-    conv_elems = 2 * LOGICAL_BLOCK_SIZE
-    ssm_elems = 2 * LOGICAL_BLOCK_SIZE
-    storage = torch.arange(
-        prefix_elems + NUM_LOGICAL_BLOCKS * elems_per_page, dtype=torch.bfloat16
-    )
-    storage[:prefix_elems] = -1
-    conv_state = storage.as_strided(
-        (NUM_LOGICAL_BLOCKS, conv_elems),
-        (elems_per_page, 1),
-        storage_offset=prefix_elems,
-    )
-    ssm_state = storage.as_strided(
-        (NUM_LOGICAL_BLOCKS, ssm_elems),
-        (elems_per_page, 1),
-        storage_offset=prefix_elems + conv_elems,
-    )
-    return [conv_state, ssm_state], elems_per_page * elem, storage
-
-
 def test_mamba_page_view_handles_nonzero_storage_offset(edits):
     """Packed page view must not require conv to start at storage offset zero.
 
@@ -623,7 +604,7 @@ def test_mamba_page_view_handles_nonzero_storage_offset(edits):
     pulling in bytes before ``prefix_elems``.
     """
     prefix_elems = 64
-    caches, page_bytes, storage = _mamba_kv_cache_with_prefix(prefix_elems)
+    caches, page_bytes, storage = _mamba_kv_cache(prefix_elems)
     spec = _mamba_spec(page_bytes)
     assert edits._MambaPageViewEdit().matches(spec, caches)
     viewed = edits._MambaPageViewEdit().apply(spec, caches, {})
@@ -858,27 +839,25 @@ def test_subpaged_plane_edit_rejects_untiled_contiguous_kv(edits):
 
 
 def test_subpaged_plane_rules_are_ordered_and_exclusive(edits):
-    """Ascend plane rules precede the fused rule and are mutually exclusive.
+    """The fused rule precedes the Ascend plane rules, which stay exclusive.
 
-    Registry order is interleaved, then contiguous, then fused; for each
-    Ascend fixture exactly one of the two plane rules matches the ``(K, V)``
-    pair.
+    Registry order is fused, then interleaved, then contiguous. The fused
+    rule only matches a single tensor, so each Ascend ``(K, V)`` fixture
+    still matches exactly one plane rule.
     """
     names = [type(edit).__name__ for edit in edits._EDITS]
     interleaved = "_SubpagedAttentionInterleavedPlaneViewEdit"
     contiguous = "_SubpagedAttentionContiguousPlaneViewEdit"
     fused = "_SubpagedAttentionViewEdit"
+    assert names.index(fused) < names.index(interleaved)
     assert names.index(interleaved) < names.index(contiguous)
-    assert names.index(contiguous) < names.index(fused)
     for contiguous_layout in (False, True):
         k_plane, v_plane, spec, _storage = _subpaged_kv_planes(
             contiguous=contiguous_layout
         )
         pair = (k_plane, v_plane)
         matches = [
-            type(edit).__name__
-            for edit in edits._EDITS
-            if edit.matches(spec, pair)
+            type(edit).__name__ for edit in edits._EDITS if edit.matches(spec, pair)
         ]
         expected = contiguous if contiguous_layout else interleaved
         assert matches == [expected]
