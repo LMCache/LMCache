@@ -372,6 +372,30 @@ single-L1 interface.
        DAX L2 adapter with the same ``device_path`` is registered, that
        adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
        size.
+   * - ``--l1-mlock``
+     - ``False``
+     - ROCm only. ``mlock`` the DRAM L1 so memory compaction cannot migrate
+       it. See *Locked L1 on ROCm* below. ``--l1-manager`` key: ``mlock``.
+
+Locked L1 on ROCm
+-----------------
+
+On ROCm, ``hipHostRegister`` does not page-lock memory: when the kernel
+migrates a registered L1 page (memory compaction), the driver evicts all GPU
+queues of the server until the mapping is restored, which stalls transfers for
+seconds. ``--l1-mlock`` keeps the L1 as ordinary anonymous memory (O_DIRECT,
+RDMA registration and memory-cgroup accounting are unchanged) and locks it.
+Requirements, checked at startup:
+
+- the node sets ``sysctl -w vm.compact_unevictable_allowed=0``; otherwise
+  compaction still moves locked pages;
+- the server may lock the whole L1: ``docker run --ulimit memlock=-1`` or
+  ``CAP_IPC_LOCK``.
+
+Not covered: explicit page migration (``move_pages``, ``migrate_pages``,
+NUMA balancing), khugepaged when transparent huge pages are ``always``
+(use ``madvise`` or ``never``), and host memory registered by other
+processes such as vLLM. Device-DAX L1 is rejected.
 
 GDS L1 Tier
 -----------
