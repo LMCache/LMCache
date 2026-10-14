@@ -22,6 +22,7 @@
 #   CHUNK_SIZE          LMCache chunk size    (default: 16, demo value)
 #   MAX_MODEL_LEN       vLLM max context      (default: 2048)
 #   VLLM_READY_TIMEOUT  seconds               (default: 600)
+#   TRANSFER_MODE       engine_driven|lmcache_driven (default: engine_driven)
 
 set -euo pipefail
 
@@ -38,6 +39,7 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-2048}"
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-600}"
 LMCACHE_READY_TIMEOUT="${LMCACHE_READY_TIMEOUT:-60}"
 CPU_KVCACHE_SPACE_GB="${VLLM_CPU_KVCACHE_SPACE:-1}"
+TRANSFER_MODE="${TRANSFER_MODE:-engine_driven}"
 
 WORK_DIR="$(demo_mktemp_dir lmcache_tier1)"
 LMCACHE_LOG="${WORK_DIR}/lmcache.log"
@@ -111,6 +113,7 @@ lmcache server \
   --l1-size-gb 2 \
   --eviction-policy LRU \
   --chunk-size "${CHUNK_SIZE}" \
+  --supported-transfer-mode "${TRANSFER_MODE}" \
   >"${LMCACHE_LOG}" 2>&1 &
 LMCACHE_PID=$!
 sleep 1

@@ -58,6 +58,7 @@ lmcache server \
   --http-port "${HTTP_PORT}" \
   --l1-size-gb 1 \
   --eviction-policy LRU \
+  --supported-transfer-mode "${TRANSFER_MODE}" \
   >"${LOG_FILE}" 2>&1 &
 SERVER_PID=$!
 

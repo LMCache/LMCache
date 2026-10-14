@@ -22,19 +22,28 @@ minutes.
 | Python 3.10–3.13 | `uv` recommended but not required. |
 | ~4 GB free disk | For the vLLM CPU wheel and the ~0.5 B model (Tier 1). |
 | Internet | Tier 1 downloads the model from Hugging Face on first run. |
+| FFmpeg | Tier 1 only. vLLM imports torchcodec, which dlopens `libavutil`, so `vllm serve` aborts without it even for a text-only model. `apt-get install ffmpeg` / `brew install ffmpeg`. |
 | Docker | Tier 2 only (dashboards). |
 
 ## Install (once)
 
 ```bash
-# from anywhere inside the repo
+# from anywhere inside the repo, in an activated virtual environment
+uv venv --python 3.12 && source .venv/bin/activate
+# or: python3 -m venv .venv && source .venv/bin/activate
+
+source .venv/bin/activate   # the install step above
 examples/cpu_hello_world/install_cpu.sh
-# or, with uv:
+# or, with uv as the pip front-end:
 PIP_BIN="uv pip" examples/cpu_hello_world/install_cpu.sh
 ```
 
-This installs a CPU vLLM build and LMCache in CPU-only mode (`NO_GPU_EXT=1`).
-See the script header for what each step does and why.
+This installs a CPU vLLM build and LMCache in CPU-only mode (`NO_GPU_EXT=1`) by
+delegating to the same two scripts LMCache's CPU CI runs
+(`.github/scripts/install_vllm_cpu.sh` and `install_lmcache_cpu.sh`), so the
+demo installs exactly what CI validates. The script refuses to run outside a
+virtualenv and checks for the system libraries vLLM needs before starting. See
+its header for what each step does and why.
 
 ## The three tiers
 
@@ -48,6 +57,7 @@ Start at Tier 0 (seconds, no download); it confirms the install before you
 pull a model.
 
 ```bash
+source .venv/bin/activate   # the install step above
 examples/cpu_hello_world/install_cpu.sh
 examples/cpu_hello_world/tier0_storage_smoke/run.sh
 examples/cpu_hello_world/tier1_ttft_cpu/run_demo.sh
@@ -115,5 +125,6 @@ model-specific state), so any small model your vLLM build supports should work.
 - **macOS.** Use the default engine-driven transport (POSIX shared-memory
   transports are Linux-only). No other change needed.
 - **No pinned/DMA memory on CPU.** LMCache falls back to regular host memory
-  (`lmcache/python_ops_fallback.py`) — functionally correct, just without the
-  page-locked-memory speedup.
+  (the torch/CPU baseline in `lmcache/v1/platform/torch_ops/`, reached through
+  `DeviceOps`) — functionally correct, just without the page-locked-memory
+  speedup.

@@ -2,103 +2,125 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Install LMCache + vLLM in CPU-only mode for the cpu_hello_world demo.
+# No GPU, CUDA, or nvcc required.
 #
-# This mirrors the CPU install that LMCache's own CI exercises on GPU-less
-# Ubuntu and macOS runners (.github/workflows/cpu_device.yml), packaged as a
-# single user-facing script. It does NOT require a GPU, CUDA, or nvcc.
+# This is a thin wrapper over the two scripts LMCache's own CPU CI runs:
 #
-# What it installs:
-#   1. vLLM CPU build (vllm-cpu-nightly) + its CPU torch wheel, plus the
-#      load-bearing "+cpu" dist-info alias (see the note below) so that
-#      `vllm serve` activates its CPU platform.
-#   2. LMCache built with NO_GPU_EXT=1 (keeps the common C++ extensions
-#      -- storage manager / redis / fs -- and drops only the CUDA kernels;
-#      the pure-Python fallback in lmcache/python_ops_fallback.py handles
-#      host-memory allocation and copies).
+#   .github/scripts/install_vllm_cpu.sh     vLLM CPU wheel + the load-bearing
+#                                           `vllm-<ver>+cpu` dist-info alias
+#   .github/scripts/install_lmcache_cpu.sh  LMCache built with NO_GPU_EXT=1
+#                                           (drops the CUDA kernels, keeps the
+#                                           common C++ extensions) + the gRPC
+#                                           transport bindings
 #
-# Usage (run from anywhere inside the LMCache repo):
+# Delegating rather than reimplementing is deliberate. Those scripts carry
+# fixes this demo would otherwise have to rediscover one breakage at a time --
+# the dist-info alias, an `apache-tvm-ffi<0.1.13` cap that stops xgrammar
+# segfaulting on macOS arm64, and the generated gRPC bindings. Read them for
+# the full reasoning; each step is commented in place.
+#
+# What this wrapper adds is the part CI gets from its workflow file rather
+# than from those scripts: the system-library preflight and the virtualenv
+# check.
+#
+# Usage (run from anywhere inside the LMCache repo, inside an activated venv):
 #   examples/cpu_hello_world/install_cpu.sh
-#   PIP_BIN="uv pip" examples/cpu_hello_world/install_cpu.sh   # use uv
+#   PIP_BIN="uv pip" examples/cpu_hello_world/install_cpu.sh
 #
 # Environment (all optional):
-#   PIP_BIN            pip front-end (default: "pip"; e.g. "uv pip")
-#   VLLM_CPU_SPEC      vLLM CPU package spec (default: "vllm-cpu-nightly").
-#                      Pin to a known-good build for reproducibility, e.g.
-#                      VLLM_CPU_SPEC="vllm-cpu-nightly==<version>".
+#   PIP_BIN                 pip front-end (default: "pip"; e.g. "uv pip")
+#   VLLM_CPU_NIGHTLY_SPEC   vLLM CPU package spec (default: "vllm-cpu-nightly").
+#                           Pin a known-good build for reproducibility, e.g.
+#                           VLLM_CPU_NIGHTLY_SPEC="vllm-cpu-nightly==<version>".
+#                           CI pins per-OS; see the versions it has verified at
+#                           https://github.com/LMCache/LMCache/tree/github_nightly_tested_vllm
+#   PIP_INSTALL_EXTRA_ARGS  extra flags forwarded to the vLLM install
 
 set -euo pipefail
 
-PIP_BIN="${PIP_BIN:-pip}"
-VLLM_CPU_SPEC="${VLLM_CPU_SPEC:-vllm-cpu-nightly}"
-
-# Resolve and cd to the repo root so `pip install -e .` sees pyproject.toml
-# and requirements/.
 REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 cd "${REPO_ROOT}"
+CI_SCRIPTS="${REPO_ROOT}/.github/scripts"
+
 echo "==> Repo root: ${REPO_ROOT}"
 echo "==> Python:    $(python3 --version 2>&1 || true)"
-echo "==> pip front-end: ${PIP_BIN}"
+echo "==> pip front-end: ${PIP_BIN:-pip}"
 
 # ------------------------------------------------------------------ #
-# 1. vLLM CPU build (+ CPU torch)
+# Preflight 1: activated virtualenv
 # ------------------------------------------------------------------ #
-# `--extra-index-url .../whl/cpu` is required because the wheel pins a torch
-# version that only lives on the PyTorch CPU index. `numpy<2` keeps
-# scipy/vLLM happy.
+# Installing editable packages into the system Python is a bad idea, and the
+# CI scripts invoke bare `python`, which on Ubuntu 20.04+ only resolves
+# inside an activated venv.
+if ! python3 -c 'import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 1)' 2>/dev/null; then
+  cat >&2 <<'MSG'
+!! No activated virtual environment detected.
+
+   This script installs LMCache in editable mode and must not write to the
+   system Python. Create and activate one first:
+
+       uv venv --python 3.12 && source .venv/bin/activate
+       # or: python3 -m venv .venv && source .venv/bin/activate
+
+   Then re-run this script.
+MSG
+  exit 1
+fi
+
+# ------------------------------------------------------------------ #
+# Preflight 2: system libraries vLLM dlopens at import time
+# ------------------------------------------------------------------ #
+# Recent vLLM nightlies import torchcodec unconditionally, which dlopens
+# libavutil -- so `vllm serve` aborts with "libavutil.so.NN: cannot open
+# shared object file" without FFmpeg, even for a text-only model. Some CPU
+# code paths also want libnuma. CI installs these from its workflow; we only
+# check and tell you, because an example has no business running sudo on
+# your machine.
+MISSING_HINT=""
+case "$(uname -s)" in
+  Linux)
+    NEEDED=()
+    if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+      NEEDED+=(ffmpeg)
+    fi
+    if ! ldconfig -p 2>/dev/null | grep -q 'libnuma\.so\.1'; then
+      NEEDED+=(libnuma1)
+    fi
+    if [ "${#NEEDED[@]}" -gt 0 ]; then
+      MISSING_HINT="sudo apt-get update && sudo apt-get install -y ${NEEDED[*]}"
+    fi
+    ;;
+  Darwin)
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+      MISSING_HINT="brew install ffmpeg"
+    fi
+    ;;
+esac
+if [ -n "${MISSING_HINT}" ]; then
+  cat >&2 <<MSG
+!! Missing system libraries that vLLM loads at import time.
+
+   Tier 1 (\`vllm serve\`) will fail without them. Install with:
+
+       ${MISSING_HINT}
+
+   Then re-run this script. Tier 0 does not need vLLM and will work
+   regardless.
+MSG
+  exit 1
+fi
+echo "==> System libraries present (FFmpeg/libavutil)"
+
+# ------------------------------------------------------------------ #
+# 1. vLLM CPU build  2. LMCache CPU build
+# ------------------------------------------------------------------ #
 echo ""
-echo "==> [1/3] Installing vLLM CPU build (${VLLM_CPU_SPEC})"
-${PIP_BIN} install --upgrade pip setuptools wheel
-${PIP_BIN} install "numpy<2"
-${PIP_BIN} install "${VLLM_CPU_SPEC}" \
-  --extra-index-url https://download.pytorch.org/whl/cpu
+echo "==> [1/3] Installing vLLM CPU build"
+bash "${CI_SCRIPTS}/install_vllm_cpu.sh"
 
-# The wheel installs the `vllm/` package but registers its dist metadata
-# under `vllm-cpu-nightly`. Two things break without an alias:
-#   * `importlib.metadata.version("vllm")` -> PackageNotFoundError, so the
-#     `vllm serve` CLI won't start.
-#   * vLLM's `cpu_platform_plugin()` greps the dist metadata for the
-#     substring "cpu" to activate the CPU platform.
-# So we copy the dist-info to a `vllm-<ver>+cpu.dist-info` alias and rewrite
-# Name/Version. This is idempotent.
-echo "==> Aliasing vllm-cpu-nightly dist-info -> vllm (+cpu)"
-python3 - <<'PY'
-import importlib.metadata as md
-import pathlib
-import shutil
-
-dist = md.distribution("vllm-cpu-nightly")
-ver = dist.version
-fake_ver = f"{ver}+cpu"
-site_root = pathlib.Path(dist.locate_file(""))
-info_name = next(
-    p.parts[0]
-    for p in (dist.files or [])
-    if p.parts and p.parts[0].endswith(".dist-info")
-)
-src = site_root / info_name
-dst = src.with_name(f"vllm-{fake_ver}.dist-info")
-if dst.exists():
-    shutil.rmtree(dst)
-shutil.copytree(src, dst)
-meta = dst / "METADATA"
-txt = meta.read_text()
-txt = txt.replace("Name: vllm-cpu-nightly", "Name: vllm", 1)
-txt = txt.replace(f"Version: {ver}", f"Version: {fake_ver}", 1)
-meta.write_text(txt)
-print(f"    aliased {src.name} -> {dst.name}")
-PY
-
-# ------------------------------------------------------------------ #
-# 2. LMCache (CPU-only build)
-# ------------------------------------------------------------------ #
 echo ""
-echo "==> [2/3] Installing LMCache (NO_GPU_EXT=1, --no-deps to keep CPU torch)"
-export NO_GPU_EXT=1
-export SETUPTOOLS_SCM_PRETEND_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION:-0.0.0.dev0}"
-${PIP_BIN} install -r requirements/build.txt
-${PIP_BIN} install -r requirements/common.txt
-${PIP_BIN} install -r requirements/cli.txt
-${PIP_BIN} install -e . --no-deps --no-build-isolation
+echo "==> [2/3] Installing LMCache (NO_GPU_EXT=1)"
+bash "${CI_SCRIPTS}/install_lmcache_cpu.sh"
 
 # ------------------------------------------------------------------ #
 # 3. Verify
@@ -108,6 +130,7 @@ echo "==> [3/3] Verifying the CPU install"
 python3 - <<'PY'
 import torch
 import vllm
+
 import lmcache
 
 print(f"    lmcache: {lmcache.__version__}")

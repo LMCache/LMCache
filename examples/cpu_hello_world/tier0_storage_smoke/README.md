@@ -25,8 +25,8 @@ examples/cpu_hello_world/tier0_storage_smoke/run.sh
 ## What this proves
 
 - LMCache's **store → retrieve** path is functional on plain host memory.
-- The CPU-only build (`NO_GPU_EXT=1`) and its pure-Python memory fallback
-  (`lmcache/python_ops_fallback.py`) are working.
+- The CPU-only build (`NO_GPU_EXT=1`) and its torch/CPU memory baseline
+  (`lmcache/v1/platform/torch_ops/`) are working.
 
 ## What it does *not* show
 
