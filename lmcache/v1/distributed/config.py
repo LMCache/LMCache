@@ -310,8 +310,21 @@ class L1MemoryManagerConfig:
 
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
+    cxl_pool_id: str = ""
+    """Shared-pool identity; enables an identity header before the owned slab."""
+    cxl_pool_offset: int = 0
+    """Byte offset of the owned slab header in the shared pool device."""
 
     def __post_init__(self):
+        if self.cxl_pool_id:
+            if self.align_bytes < 4096 or self.align_bytes & (self.align_bytes - 1):
+                raise ValueError("CXL alignment must be a power of two >= 4096")
+            if not self.devdax_path:
+                raise ValueError("cxl-pool-id requires l1-devdax-path")
+            if self.cxl_pool_offset < 0 or self.cxl_pool_offset % self.align_bytes:
+                raise ValueError("cxl-pool-offset must be nonnegative and aligned")
+        elif self.cxl_pool_offset:
+            raise ValueError("cxl-pool-offset requires cxl-pool-id")
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
 
         if self.devdax_path is not None:
@@ -759,6 +772,26 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
     return True
 
 
+def l1_is_single_cxl_region(config: StorageManagerConfig) -> bool:
+    """Whether L1 is exactly one shared-CXL slab that peers can borrow from.
+
+    CXL P2P exports only the owned slab, so any other L1 memory (a second L1
+    manager, or the DRAM part of a hybrid DRAM + Device-DAX L1) would hold
+    objects peers can never read.
+
+    Args:
+        config: Storage manager configuration to inspect.
+
+    Returns:
+        ``True`` if there is one L1, it has a CXL pool id (which implies a
+        Device-DAX path), and it has no DRAM overflow; ``False`` otherwise.
+    """
+    if len(config.l1_manager_configs) != 1:
+        return False
+    memory = config.l1_manager_config.memory_config
+    return bool(memory.cxl_pool_id) and not memory.devdax_size_in_bytes
+
+
 def add_storage_manager_args(
     parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
@@ -849,6 +882,18 @@ def add_storage_manager_args(
             "If a DAX L2 adapter with the same device_path is registered, "
             "that adapter's max_dax_size_gb is used as L1 overflow size."
         ),
+    )
+
+    memory_group.add_argument(
+        "--cxl-pool-id",
+        default="",
+        help="Shared CXL pool identity. Reserves one alignment-sized slab header.",
+    )
+    memory_group.add_argument(
+        "--cxl-pool-offset",
+        type=int,
+        default=0,
+        help="Byte offset of this node's slab header in the shared CXL device.",
     )
 
     # GDS L1 tier (optional, opt-in via --gds-l1-path)
@@ -1098,6 +1143,8 @@ def parse_args_to_config(
             align_bytes=args.l1_align_bytes,
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
+            cxl_pool_id=getattr(args, "cxl_pool_id", ""),
+            cxl_pool_offset=getattr(args, "cxl_pool_offset", 0),
         )
     else:
         memory_config = L1MemoryManagerConfig(
@@ -1108,6 +1155,8 @@ def parse_args_to_config(
             shm_name=shm_name,
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
+            cxl_pool_id=getattr(args, "cxl_pool_id", ""),
+            cxl_pool_offset=getattr(args, "cxl_pool_offset", 0),
         )
 
     gds_l1_config: GdsL1Config | None = None

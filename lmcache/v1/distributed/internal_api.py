@@ -5,9 +5,11 @@ Class for distributed storage manager internal API data structures
 
 # Standard
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from dataclasses import asdict, dataclass, field
+from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 import enum
+import hashlib
+import json
 
 # First Party
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
@@ -17,12 +19,15 @@ from lmcache.v1.memory_management import MemoryObj
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.config import L1ManagerConfig
+    from lmcache.v1.distributed.transfer_channel.api import MemoryRegionAddress
     from lmcache.v1.memory_allocators.devdax_memory_allocator import (
         DevDaxArenaStatus,
         DevDaxRemoveMode,
     )
 
 L1OperationResult = tuple[L1Error, "MemoryObj | None"]
+
+CXL_METADATA_KEY = "lmcache.cxl.arena"
 
 
 @dataclass(frozen=True)
@@ -43,6 +48,76 @@ class L1MemoryDesc:
     size: int
     align_bytes: int
     stable_registration_size: int | None = None
+
+
+@dataclass(frozen=True)
+class CxlArenaDescriptor:
+    """Identify one owner's slab and its current incarnation.
+
+    Args:
+        pool_id: Deployment-assigned identity of the shared pool.
+        offset: Byte offset of the slab header in the pool device.
+        size: Usable payload bytes following the header.
+        alignment: Header length and allocation alignment in bytes.
+        session_id: Fresh identity each time the owner opens the slab.
+
+    Raises:
+        ValueError: If the identity or aligned range is invalid.
+
+    The first ``alignment`` bytes contain an identity fingerprint. Readers
+    verify it through their own mapping before using peer payload pointers.
+    """
+
+    pool_id: str
+    offset: int
+    size: int
+    alignment: int
+    session_id: str
+
+    def __post_init__(self) -> None:
+        if not self.pool_id or not self.session_id:
+            raise ValueError("CXL pool and session identities must be non-empty")
+        if self.alignment < 4096 or self.alignment & (self.alignment - 1):
+            raise ValueError("CXL alignment must be a power of two >= 4096")
+        if (
+            self.offset < 0
+            or self.offset % self.alignment
+            or self.size <= 0
+            or self.size % self.alignment
+        ):
+            raise ValueError("CXL slab offset and size must be aligned")
+
+    def to_json(self) -> str:
+        """Return a canonical JSON string for coordinator registration."""
+        return json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, value: str) -> "CxlArenaDescriptor":
+        """Decode registration metadata; raise ValueError for invalid fields.
+
+        Args:
+            value: JSON produced by :meth:`to_json`.
+
+        Returns:
+            The validated slab descriptor.
+        """
+        try:
+            fields = json.loads(value)
+            if not isinstance(fields, dict):
+                raise ValueError("CXL arena metadata must be an object")
+            for name in ("offset", "size", "alignment"):
+                if type(fields.get(name)) is not int:
+                    raise ValueError(f"CXL {name} must be an integer")
+            for name in ("pool_id", "session_id"):
+                if not isinstance(fields.get(name), str):
+                    raise ValueError(f"CXL {name} must be a string")
+            return cls(**fields)
+        except TypeError as exc:
+            raise ValueError("Invalid CXL arena metadata") from exc
+
+    def fingerprint(self) -> bytes:
+        """Return the 32-byte identity expected in the mapped slab header."""
+        return hashlib.sha256(self.to_json().encode()).digest()
 
 
 @dataclass(frozen=True)
@@ -372,6 +447,35 @@ class L1ManagerInterface(Protocol):
         self, device_path: str, mode: "DevDaxRemoveMode" = ...
     ) -> "DevDaxArenaStatus":
         """Hot-remove a Device-DAX arena."""
+        ...
+
+    @property
+    def cxl_arena(self) -> CxlArenaDescriptor | None:
+        """Return the owned shared-pool slab, or None when not CXL-shared."""
+        ...
+
+    def get_cxl_address(self, obj: MemoryObj) -> "MemoryRegionAddress | None":
+        """Return the peer-addressable location of a read-reserved object."""
+        ...
+
+    def register_shadow(
+        self,
+        key: ObjectKey,
+        obj: MemoryObj,
+        tag: str,
+        *,
+        is_valid: Callable[[], bool],
+        on_release: Callable[[], None],
+    ) -> L1Error:
+        """Stage a borrowed peer view as ``tag``'s write without allocating."""
+        ...
+
+    def reap_expired_shadows(self) -> None:
+        """Drop borrowed views whose owner reservation expired."""
+        ...
+
+    def release_shadows(self) -> None:
+        """Release every borrowed view before peer adapters close."""
         ...
 
     def report_status(self) -> dict:

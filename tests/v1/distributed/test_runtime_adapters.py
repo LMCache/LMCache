@@ -318,6 +318,33 @@ class TestStorageManagerRuntimeAdapters:
         finally:
             sm.close()
 
+    def test_delete_keeps_adapter_when_close_fails(
+        self, empty_storage_manager_config, monkeypatch
+    ):
+        """A failed close leaves the adapter registered so delete can retry."""
+        sm = StorageManager(empty_storage_manager_config)
+        try:
+            adapter_id = sm.add_l2_adapter(make_mock_config())
+            adapter = adapter_by_id(sm, adapter_id)
+            original_close = adapter.close
+            failures = [RuntimeError("live borrowed views")]
+
+            def flaky_close() -> None:
+                if failures:
+                    raise failures.pop()
+                original_close()
+
+            monkeypatch.setattr(adapter, "close", flaky_close)
+
+            with pytest.raises(RuntimeError, match="live borrowed views"):
+                sm.delete_l2_adapter(adapter_id, timeout=10.0)
+            assert active_adapter_ids(sm) == {adapter_id}
+
+            sm.delete_l2_adapter(adapter_id, timeout=10.0)
+            assert active_adapter_ids(sm) == set()
+        finally:
+            sm.close()
+
     def test_delete_unknown_id_raises(self, empty_storage_manager_config):
         sm = StorageManager(empty_storage_manager_config)
         try:
