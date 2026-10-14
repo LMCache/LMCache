@@ -148,15 +148,11 @@ def test_transfer_channel_address_validity():
 # ============================================================================
 
 
-_READ_TTL = 300
-
-
 def _make_controller(
     request_transport: Literal["zmq", "grpc"] = "zmq",
 ) -> tuple[P2PController, MagicMock]:
     """Build a P2P-disabled controller (no thread / transfer channel)."""
     ctx = MagicMock()
-    ctx.storage_manager.max_read_ttl_seconds = _READ_TTL
     controller = P2PController(
         ctx,
         P2PConfig(),
@@ -387,11 +383,11 @@ class _FakeClock:
         return self.now
 
 
-def test_abandoned_lookup_is_dropped_after_read_ttl(
+def test_abandoned_lookup_is_dropped_after_lookup_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A lookup nobody queries is dropped once the L1 read TTL passes, its
-    prefetch result is drained, and its expired read locks are not unlocked."""
+    """A lookup nobody queries is dropped once the lookup timeout passes,
+    its prefetch result is drained, and its read locks are left to the TTL."""
     clock = _FakeClock()
     monkeypatch.setattr(p2p_controller, "time", clock)
     controller, ctx = _make_controller()
@@ -401,13 +397,13 @@ def test_abandoned_lookup_is_dropped_after_read_ttl(
     layouts = {0: _make_layout_desc()}
     abandoned = controller.p2p_lookup_and_lock([_make_key(0)], layouts)
 
-    # Still within the TTL: a new lookup keeps the old job.
-    clock.now += _READ_TTL - 1
+    # Still within the timeout: a new lookup keeps the old job.
+    clock.now += P2PConfig().lookup_timeout - 1
     controller.p2p_lookup_and_lock([_make_key(1)], layouts)
     assert controller.report_status()["active_p2p_lookup_jobs"] == 2
     ctx.storage_manager.query_prefetch_status.assert_not_called()
 
-    # Past the TTL: the next lookup drops the abandoned job only.
+    # Past the timeout: the next lookup drops the abandoned job only.
     clock.now += 2
     ctx.storage_manager.query_prefetch_status.return_value = _result([Bitmap(1)])
     controller.p2p_lookup_and_lock([_make_key(2)], layouts)
@@ -419,23 +415,24 @@ def test_abandoned_lookup_is_dropped_after_read_ttl(
 
 def test_abandoned_lookup_still_running_is_kept(monkeypatch: pytest.MonkeyPatch):
     """An expired lookup whose prefetch has not finished stays until a later
-    scan finds it finished; scans run at most once per read TTL."""
+    scan finds it finished; scans run at most once per lookup timeout."""
     clock = _FakeClock()
     monkeypatch.setattr(p2p_controller, "time", clock)
     controller, ctx = _make_controller()
     ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
         total_requested_keys=1
     )
+    timeout = P2PConfig().lookup_timeout
     layouts = {0: _make_layout_desc()}
     controller.p2p_lookup_and_lock([_make_key(0)], layouts)
 
     # First scan: the expired job is still running, so it is kept.
-    clock.now += _READ_TTL + 1
+    clock.now += timeout + 1
     ctx.storage_manager.query_prefetch_status.return_value = None
     controller.p2p_lookup_and_lock([_make_key(1)], layouts)
     assert controller.report_status()["active_p2p_lookup_jobs"] == 2
 
-    # Within one TTL of that scan, lookups do not scan again.
+    # Within one timeout of that scan, lookups do not scan again.
     ctx.storage_manager.query_prefetch_status.reset_mock()
     ctx.storage_manager.query_prefetch_status.return_value = _result([Bitmap(1)])
     controller.p2p_lookup_and_lock([_make_key(2)], layouts)
@@ -443,7 +440,7 @@ def test_abandoned_lookup_still_running_is_kept(monkeypatch: pytest.MonkeyPatch)
     ctx.storage_manager.query_prefetch_status.assert_not_called()
 
     # The next scan finds it finished and drops only that job.
-    clock.now += _READ_TTL
+    clock.now += timeout
     controller.p2p_lookup_and_lock([_make_key(3)], layouts)
     assert controller.report_status()["active_p2p_lookup_jobs"] == 3
     ctx.storage_manager.query_prefetch_status.assert_called_once()
