@@ -79,8 +79,12 @@ def _register_torch_neuron() -> None:
         return
 
 
-def _neuron_synchronize() -> None:
+def _neuron_synchronize(device: object = None) -> None:
     """Flush pending device work.
+
+    Args:
+        device: Accepted to match ``torch.cuda.synchronize(device)``. Unused:
+            Neuron has no per-device queue to drain.
 
     Neuron operations are enqueued asynchronously, so device work may still be
     executing when control returns here.  What is needed to reach a safe point
