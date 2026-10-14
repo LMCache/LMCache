@@ -275,6 +275,10 @@ def test_build_modules_loads_plugin_and_registers_liveness_target(
 
     def factory(build_context: ExtServerModuleBuildContext):
         assert build_context.server_context is ctx
+        assert any(
+            isinstance(module, server_mod.KVEventModule)
+            for module in build_context.modules
+        )
         return plugin_module
 
     module_name = _install_fake_factory(monkeypatch, factory)

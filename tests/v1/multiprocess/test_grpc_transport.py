@@ -35,6 +35,7 @@ from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
+from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -68,7 +69,41 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
     build_grpc_request_server,
 )
-from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
+
+_GRPC_MODULE_TYPES = (
+    LookupModule,
+    ManagementModule,
+    KVEventModule,
+    P2PController,
+    LMCacheDrivenTransferModule,
+    EngineDrivenTransferModule,
+    QStoreModule,
+    BlendModule,
+    ExtServerModuleRouter,
+)
+
+_GRPC_SERVICE_NAME_OVERRIDES = {
+    EngineDrivenTransferModule: "EngineDrivenService",
+    LMCacheDrivenTransferModule: "LMCacheDrivenService",
+    P2PController: "P2PService",
+    ExtServerModuleRouter: "ExtensionService",
+}
+
+
+def _expected_grpc_service_name(module_type: type[Any]) -> str:
+    """Derive the gRPC service name owned by a server module.
+
+    Args:
+        module_type: Server module class whose service name is required.
+
+    Returns:
+        The conventional service name or its established abbreviated form.
+    """
+    return _GRPC_SERVICE_NAME_OVERRIDES.get(
+        module_type,
+        module_type.__name__.removesuffix("Module") + "Service",
+    )
 
 
 @dataclass
@@ -76,22 +111,6 @@ class _Calls:
     lookup: tuple[IPCCacheServerKey, int] | None = None
     allocation: tuple[int, str, list[BlockAllocationRecord]] | None = None
     clear_force: bool | None = None
-
-
-class _TestDeviceIPCWrapper(DeviceIPCWrapper):
-    """Pickle-safe test wrapper for the shared custom codec."""
-
-    def __init__(self) -> None:
-        self.handle = b"handle"
-        self.dtype = torch.float16
-        self.shape = (2, 4)
-        self.stride = (4, 1)
-        self.storage_offset = 0
-        self.device_uuid = "test-device"
-
-    def to_tensor(self) -> torch.Tensor:
-        """The codec test does not reconstruct a device tensor."""
-        raise NotImplementedError
 
 
 @pytest.fixture
@@ -239,19 +258,10 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
 def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     """Every generated RPC has one codec derived from its gRPC service."""
     bindings = get_service_bindings()
-    assert {
-        "LMCacheDrivenService",
-        "EngineDrivenService",
-        "LookupService",
-        "QStoreService",
-    }.issubset(bindings)
-    assert "EngineService" not in bindings
-    assert {method.name for _, method in iter_methods()} >= {
-        "Store",
-        "PrepareStore",
-        "Lookup",
-        "StoreQ",
+    assert set(bindings) == {
+        _expected_grpc_service_name(module_type) for module_type in _GRPC_MODULE_TYPES
     }
+
     registry = get_method_codec_registry()
     generated_methods = {method.full_name for _, method in iter_methods()}
     assert set(registry.by_full_name) == generated_methods
@@ -270,7 +280,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     )
     assert store_codec.response_type == tuple[bytes, bool]
 
-    clear_codec = registry.by_full_name["lmcache.mp.ControllerService.Clear"]
+    clear_codec = registry.by_full_name["lmcache.mp.ManagementService.Clear"]
     assert clear_codec.operation == "clear"
     assert clear_codec.payload_types == (bool,)
     assert clear_codec.request_decoder(clear_codec.request_encoder((), {})) == (False,)
@@ -309,7 +319,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
         ),
     )
     server_module_codec = registry.by_full_name[
-        "lmcache.mp.ControllerService.ServerModuleCall"
+        "lmcache.mp.ExtensionService.ServerModuleCall"
     ]
     assert server_module_codec.operation == "server_module_call"
     assert server_module_codec.payload_types == (ServerModuleCallRequest,)
@@ -318,19 +328,9 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
 
 def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
     """Every generated RPC resolves to one compatible module annotation."""
-    module_types = (
-        LookupModule,
-        ManagementModule,
-        P2PController,
-        LMCacheDrivenTransferModule,
-        EngineDrivenTransferModule,
-        QStoreModule,
-        BlendModule,
-        ExtServerModuleRouter,
-    )
     handlers = {
         registered.operation: registered.handler
-        for module_type in module_types
+        for module_type in _GRPC_MODULE_TYPES
         for registered in iter_request_handlers(module_type)
     }
     registry = get_method_codec_registry()
@@ -504,13 +504,15 @@ def test_service_message_codec_registry_round_trips_custom_types() -> None:
         "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.p2p_service_pb2"
     )
 
-    wrapper = _TestDeviceIPCWrapper()
+    wrapper = CpuShmTensorWrapper(
+        torch.empty((2, 4), dtype=torch.float16), "/lmcache_codec_test"
+    )
     wrapper_message = common_pb2.DeviceIpcWrapper()
     wrapper_codec = registry.find(wrapper_message.DESCRIPTOR, type(wrapper))
     assert wrapper_codec is not None
     wrapper_codec.writer(wrapper_message, wrapper)
     decoded_wrapper = wrapper_codec.reader(wrapper_message)
-    assert type(decoded_wrapper) is _TestDeviceIPCWrapper
+    assert type(decoded_wrapper) is CpuShmTensorWrapper
     assert decoded_wrapper == wrapper
 
     shape = torch.Size([2, 4])

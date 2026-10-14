@@ -992,7 +992,7 @@ class BytesBufferMemoryObj(MemoryObj):
         return [self.get_shape()]
 
     def get_dtypes(self) -> list[torch.dtype]:
-        return []
+        return [self.get_dtype()]  # type: ignore[list-item]
 
     def get_memory_format(self) -> MemoryFormat:
         return self.metadata.fmt

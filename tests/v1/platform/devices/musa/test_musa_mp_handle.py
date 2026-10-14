@@ -383,7 +383,7 @@ def test_musa_ipc_wrapper_does_not_serialize_receiver_owner(
     wrapper = object.__new__(ipc_wrapper.MusaIPCWrapper)
     wrapper.__setstate__(
         {
-            "handle": SimpleNamespace(token="handle"),
+            "handle": {"token": "handle"},
             "dtype": torch.float32,
             "shape": (1,),
             "stride": (1,),

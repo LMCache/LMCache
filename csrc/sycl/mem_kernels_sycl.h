@@ -6,6 +6,31 @@
 #include <ATen/ATen.h>
 #include <c10/util/Exception.h>
 #include "../kv_transfer_types.h"
+#include "../kv_transfer_plan_types.h"
+
+/**
+ * Enqueue block gather/scatter on the current XPU stream for device.
+ *
+ * paged_buffer_ptrs_tensor and block_ids are contiguous XPU int64/uint64 and
+ * int64 vectors respectively. Object pointers address contiguous device or
+ * USM-host [kv_size, nl, chunk_tokens, nh * hs] buffers. Pointers and buffers
+ * must remain alive until the stream completes. Block IDs must be in [0, nb)
+ * and unique for H2D. Prefix positions and an incomplete final object's tail
+ * are left untouched. No allocation, host copy, or synchronization is done.
+ *
+ * Pointer order is one entry for cross-layer, K layers then V layers for
+ * kv-list, interleaved K/V for per-layer tuples, otherwise one per layer.
+ * Variable-width plane tuples require the tensor-form torch fallback.
+ *
+ * Throws c10::Error for invalid host-visible geometry, metadata, or pointers.
+ */
+void multi_layer_block_kv_transfer(
+    const torch::Tensor& paged_buffer_ptrs_tensor,
+    const std::vector<uintptr_t>& lmcache_objects_ptrs,
+    const torch::Tensor& block_ids, const torch::Device& device,
+    TransferDirection direction, PageBufferShapeDesc shape_desc,
+    int lmcache_chunk_size, EngineKVFormat engine_kv_format,
+    int skip_prefix_n_blocks);
 
 void multi_layer_kv_transfer(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
