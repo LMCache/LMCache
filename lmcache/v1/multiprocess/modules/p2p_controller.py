@@ -182,7 +182,8 @@ class P2PController:
         self._next_task_id = 0
         self._jobs: dict[int, _P2PLookupJob] = {}
         self._job_lock = threading.Lock()
-        # When _drop_abandoned_jobs last scanned _jobs; guarded by _job_lock.
+        # When _drop_abandoned_jobs last scanned _jobs. Unlocked: a race only
+        # causes a redundant scan, and scans pop jobs under _job_lock.
         self._last_drop_time = time.monotonic()
 
         # Orchestration state (guarded by _orch_lock; written only by the poll
@@ -285,17 +286,15 @@ class P2PController:
         Returns:
             A unique task id (int) for querying the lookup status later
         """
+        # Scan for abandoned jobs at most once per lookup timeout, so an
+        # abandoned job lives at most two timeouts.
         now = time.monotonic()
+        if now - self._last_drop_time >= self._p2p_config.lookup_timeout:
+            self._last_drop_time = now
+            self._drop_abandoned_jobs(now)
         with self._job_lock:
             task_id = self._next_task_id
             self._next_task_id += 1
-            # Scan for abandoned jobs at most once per lookup timeout, so an
-            # abandoned job lives at most two timeouts.
-            drop_due = now - self._last_drop_time >= self._p2p_config.lookup_timeout
-            if drop_due:
-                self._last_drop_time = now
-        if drop_due:
-            self._drop_abandoned_jobs(now)
 
         key_groups = _group_keys_by_object_group(keys, group_layout_descs)
         if key_groups:
