@@ -11,6 +11,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.transfer_context import worker_transfer
 from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
@@ -154,3 +155,32 @@ def test_cuda_kv_roundtrips_through_registered_host_memory() -> None:
             assert torch.count_nonzero(tensor[:, [0, 1, 3, 5]]).item() == 0
     finally:
         current_device_spec.unpin_memory(pool_ptr)
+
+
+def test_cpu_context_never_synchronizes_accelerator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CPU STORE/RETRIEVE preserves KV without touching a global accelerator."""
+    global_sync = MagicMock(side_effect=AssertionError("unexpected accelerator sync"))
+    monkeypatch.setattr(worker_transfer.torch_dev, "synchronize", global_sync)
+    monkeypatch.setattr(torch.cuda, "synchronize", global_sync)
+    transport = MagicMock()
+    monkeypatch.setattr(
+        worker_transfer, "create_engine_driven_context", lambda *a, **kw: transport
+    )
+    kv = {"layer_0": torch.arange(512).reshape(2, 4, 4, 2, 8).float()}
+    expected = kv["layer_0"].clone()
+    ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())
+    ctx.register(kv, "test", 1, 4, 1.0, layout_hints={"kv_layout": "NHD"})
+    transport.prepare_store.return_value = None
+    transport.commit_store.return_value = True
+    try:
+        assert ctx.submit_store("req", "key", kv, [[0, 1, 2, 3]], None, 4).result()
+        chunks = transport.commit_store.call_args.args[2]
+        transport.prepare_retrieve.return_value = chunks
+        kv["layer_0"].zero_()
+        assert ctx.submit_retrieve("req", "key", kv, [[0, 1, 2, 3]], None, 4).result()
+        assert torch.equal(kv["layer_0"], expected)
+        global_sync.assert_not_called()
+    finally:
+        ctx.close()

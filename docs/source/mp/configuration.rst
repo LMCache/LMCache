@@ -47,6 +47,14 @@ request metadata throughout the request lifecycle.
    feature explicitly documents support for it.  The in-process
    ``LMCacheConnectorV1`` may interpret these values differently.
 
+The MP server's default ``--kv-load-policy`` acts on ``lmcache.skip_load``: a
+request that sets it to ``true`` gets a lookup miss and is recomputed by the
+engine.  Load policies receive the request configs as sent.  The vLLM
+``LMCacheMPConnector``, the unified SGLang MP connector, and the TensorRT-LLM MP
+adapter add ``lmcache.hint.engine_computed_tokens``, the tokens the engine
+already holds in its own prefix cache, to their lookups.  vLLM omits it on
+eager-prefetch lookups, which run before vLLM checks its prefix cache.
+
 MP Server
 ---------
 
@@ -166,6 +174,15 @@ Source: ``lmcache/v1/multiprocess/config.py``
        ``""`` (empty string, default): SHM disabled; KV transfer uses
        the pickle path.  Any other value: create a SHM pool and use
        that exact name for its segment.
+   * - ``--kv-event-log-size``
+     - ``32768``
+     - CPU store-completion and eviction records retained for subscriptions
+       and reconnects. Workers receive pushes over ZMQ or gRPC and republish
+       them as KV events. ``0`` disables the channel and its capability
+       advertisement. Requires the observability event
+       bus, which ``--disable-observability`` turns off. Workers subscribe
+       automatically when vLLM KV events are enabled and the server advertises
+       support; otherwise they report only their own completed stores.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
@@ -181,6 +198,16 @@ Source: ``lmcache/v1/multiprocess/config.py``
        sent a PING (still warming up, or died before its first request).
        Must be >= ``--worker-reap-timeout-seconds``. Generous by default so
        slow model warmup is never mistaken for a dead worker.
+   * - ``--kv-load-policy``
+     - ``DEFAULT``
+     - Per-request choice between serving a lookup and letting the engine
+       recompute the prompt. The policy runs before the prefetch, so a
+       declined lookup fetches nothing from L2 and takes no locks; the engine
+       sees a miss. ``DEFAULT`` serves every lookup unless the request sets
+       ``"lmcache.skip_load": true`` in ``kv_transfer_params``. A
+       ``package.module:ClassName`` value loads a custom
+       ``lmcache.v1.multiprocess.kv_load_policy.KVLoadPolicy`` subclass from
+       the server's environment, constructed with ``--runtime-plugin-config``.
    * - ``--enable-segmented-prefix``
      - ``False``
      - CacheBlend (``--engine-type blend``) only: on a mid-prefix L2 retrieve
@@ -362,6 +389,11 @@ The DMA path is selected automatically by platform: **cuFile**
 `ROCm/hipFile <https://github.com/ROCm/hipFile>`_) on AMD ROCm. The same
 flags apply to both; no configuration change is needed to switch vendors.
 
+**muFile** (``libmufile.so``) is selected automatically on MUSA, or
+explicitly with ``--gds-l1-backend mufile``. It uses the SmartIO muFile
+stream-ordered API and a filesystem slab, so the SmartIO runtime and its
+MUSA-compatible ``libmufile.so`` must be installed on every worker.
+
 **uGDS** (``libugds.so``) is a third, opt-in backend selected with
 ``--gds-l1-backend ugds``. It is a user-space GPUDirect Storage library that
 builds NVMe commands and rings doorbells from user space, so its IO path issues
@@ -443,8 +475,9 @@ verify the installation.
        at ``<path>/lmcache_gds_slab.bin``.
    * - ``--gds-l1-backend``
      - ``auto``
-     - GDS implementation: ``auto``, ``cufile``, ``hipfile``, ``ugds``, or
-       ``phx``. ``auto`` selects cuFile on CUDA and hipFile on ROCm.
+     - GDS implementation: ``auto``, ``cufile``, ``hipfile``, ``mufile``,
+       ``ugds``, or ``phx``. ``auto`` selects cuFile on CUDA, hipFile on
+       ROCm, and muFile on MUSA.
    * - ``--gds-l1-use-direct-io`` / ``--no-gds-l1-use-direct-io``
      - ``True``
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
@@ -601,6 +634,11 @@ logging, tracing).
    * - ``--disable-metrics``
      - off
      - Skip metrics subscribers (no Prometheus endpoint).
+   * - ``--disable-grpc-metrics``
+     - off
+     - Skip gRPC Python runtime metrics while keeping LMCache metrics enabled.
+       By default, the MP server enables these metrics only for
+       ``--transport grpc``.
    * - ``--disable-logging``
      - off
      - Skip logging subscribers.

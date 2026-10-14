@@ -50,7 +50,7 @@ def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
     # check real, and substitute only the platform resolver's selected ops.
     ops = MagicMock()
     with (
-        patch.object(base, "torch_dev") as dev,
+        patch.object(base, "synchronize_device") as synchronize,
         patch.object(base, "resolve_device_ops", return_value=ops),
     ):
         # cast: the mocks stand in for tensors on purpose (see above).
@@ -60,7 +60,7 @@ def test_scatter_syncs_before_releasing_dynamically_pinned_chunks() -> None:
         assert ops.multi_layer_block_kv_transfer.called, (
             "fixture must reach the async H2D launches"
         )
-        assert dev.synchronize.called, (
+        assert synchronize.called, (
             "scatter must complete async H2D before releasing the temporaries "
             "it pinned; otherwise the host allocator reuses them mid-copy"
         )
@@ -79,34 +79,47 @@ def test_pickle_store_syncs_before_commit_serializes() -> None:
 
     order: list[str] = []
     ctx = worker_transfer.EngineDrivenTransferContext(1, MagicMock())
-    ctx._engine_driven_context = MagicMock()
-    ctx._engine_driven_context.prepare_store.return_value = None  # pickle mode
+    transport = MagicMock()
+    transport.prepare_store.return_value = None  # pickle mode
 
     def _commit(*_a: object, **_k: object) -> bool:
         order.append("commit")
         return True
 
-    ctx._engine_driven_context.commit_store.side_effect = _commit
-    ctx._layout_hints = None
-    ctx._engine_kv_format = None
+    transport.commit_store.side_effect = _commit
+    with patch.object(
+        worker_transfer, "create_engine_driven_context", return_value=transport
+    ):
+        ctx.register(
+            {"layer_0": torch.zeros(2, 4, 4, 2, 8)},
+            "test",
+            1,
+            4,
+            1.0,
+            layout_hints={"kv_layout": "NHD"},
+        )
 
     def _gather(*_a: object, **_k: object) -> list[torch.Tensor]:
         order.append("gather")
         return [torch.zeros(1)]
 
+    device = torch.device("cuda:1")
     with (
-        patch.object(worker_transfer, "torch_dev") as dev,
+        patch.object(worker_transfer, "synchronize_device") as synchronize,
         patch.object(worker_transfer, "gather_paged_kv_to_cpu", side_effect=_gather),
     ):
-        dev.synchronize.side_effect = lambda *a, **k: order.append("sync")
+        synchronize.side_effect = lambda *a, **k: order.append("sync")
         ctx.submit_store(
             "req",
             MagicMock(),  # key
-            {"layer_0": torch.zeros(2, 4, 4, 2, 8)},
+            {"layer_0": MagicMock(spec=torch.Tensor, device=device)},
             [[0, 1, 2, 3]],
             MagicMock(),  # event (unused on this transport)
             4,  # blocks_in_chunk
         )
+
+        synchronize.assert_called_with(device)
+    ctx.close()
 
     # A sync must fall BETWEEN gather and commit. submit_store also syncs
     # before prepare_store, so merely finding a "sync" proves nothing -- that
