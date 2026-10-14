@@ -795,8 +795,11 @@ class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
     K's ``stride(0)`` is one K row plus the following V row, and V starts at
     the next row. The eight K+V pairs of one scheduler block are one
     contiguous byte span, so the edit is one uint8 plane over K's storage.
-    That plane detects as ``NL_X_NB_BS_NH_CS`` (format 13). Separate
-    1024-token K and V views are not possible without a copy.
+    ``apply`` returns that plane in a one-element list, so registration
+    detects ``NL_X_NP_X_NB_BS_ONE_HS`` (format 17). A bare rank-4 plane
+    without the list wrapper would be ``NL_X_NB_BS_NH_CS`` (format 13).
+    Separate dense K-only and V-only views at the scheduler block size are
+    not possible without a copy.
 
     The tile check uses ``page_size_bytes``, the full interleaved span.
     """
