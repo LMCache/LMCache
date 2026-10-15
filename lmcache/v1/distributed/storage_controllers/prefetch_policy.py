@@ -26,6 +26,9 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
+from lmcache.v1.distributed.storage_controllers.policy_loader import (
+    load_external_policy,
+)
 from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
     L1ManagerDescriptor,
@@ -362,20 +365,29 @@ def get_registered_prefetch_policies() -> list[str]:
 
 def create_prefetch_policy(name: str) -> PrefetchPolicy:
     """
-    Create a prefetch policy instance by name.
+    Create a registered or explicitly selected external prefetch policy.
 
     Args:
-        name: Registered policy name.
+        name: Registered policy name or ``package.module:Class`` path to a
+            concrete PrefetchPolicy subclass with a no-argument constructor.
 
     Returns:
         A new PrefetchPolicy instance.
 
     Raises:
-        ValueError: If no policy is registered under the given name.
+        ValueError: The name is unknown or the external class is invalid.
+        ImportError: The selected external module cannot be imported.
+        AttributeError: The selected module does not define the named class.
+        Exception: The selected policy constructor raises.
     """
     if name not in _PREFETCH_POLICY_REGISTRY:
+        if ":" in name:
+            return load_external_policy(name, PrefetchPolicy)
         known = ", ".join(sorted(_PREFETCH_POLICY_REGISTRY)) or "(none)"
-        raise ValueError(f"Unknown prefetch policy {name!r}. Known: {known}")
+        raise ValueError(
+            f"Unknown prefetch policy {name!r}. Known: {known}, "
+            "or 'package.module:Class'"
+        )
     return _PREFETCH_POLICY_REGISTRY[name]()
 
 

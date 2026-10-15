@@ -156,6 +156,35 @@ in ``storage_controllers/`` and calling ``register_store_policy()`` or
 ``register_prefetch_policy()`` at import time.  See the design doc
 ``l2_adapters/design_docs/overall.md`` for details.
 
+External Policy Packages
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+An installed Python package can supply a selector without modifying LMCache.
+Pass ``package.module:Class`` to ``--l2-store-policy`` or
+``--l2-prefetch-policy``. The class must be a concrete ``StorePolicy`` or
+``PrefetchPolicy`` subclass, respectively, with a no-argument constructor.
+Registered names such as ``default``, ``skip_l1`` and ``retain`` keep their
+existing behavior and take precedence over external paths.
+
+For example, with the checkout importable:
+
+.. code-block:: bash
+
+    lmcache server \
+      --l2-store-policy examples.external_policies.policies:KeepL1Only \
+      --l2-prefetch-policy examples.external_policies.policies:RetainLoaded
+
+``KeepL1Only`` suppresses L2 writes and retains L1 copies; normal L1 eviction
+still applies. It does not avoid the GPU-to-L1 copy. ``RetainLoaded`` inherits
+the built-in retention policy. These are loading examples, not cost models.
+
+Only explicitly selected external classes are imported. Invalid selections,
+missing imports, wrong or abstract classes, and constructor failures are
+startup errors; they do not silently enable a different policy. Policies run
+under the existing controller contracts and must not block on external I/O.
+This mechanism does not hot-swap policies or change request-level
+``--kv-load-policy`` behavior.
+
 Serde (compression / quantization)
 ----------------------------------
 
