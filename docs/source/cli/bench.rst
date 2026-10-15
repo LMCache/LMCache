@@ -715,9 +715,12 @@ the files by ``sample_id``:
    lmcache bench engine --engine-url http://localhost:8001 $ARGS --rag-output b.json
 
 The files are comparable **only when their ``run_fingerprint`` values match**.
-It covers dataset, sample ids, budget, template kwargs, model, and chunk
-alignment, so a mismatch means the diff would report an input delta as a
-quality delta.
+It covers the selected samples' ids, rendered prompts and gold answers,
+along with the dataset path, budget, template kwargs, model, seed and chunk
+alignment. Editing a selected question, document or reference at the same
+dataset path changes the fingerprint; output paths and unmeasured records
+do not. Fingerprints from older versions that covered only sample ids are
+not comparable with these content-based fingerprints.
 
 .. note::
 
