@@ -95,8 +95,10 @@ sequenceDiagram
     C->>L: LOOKUP(key, covered_chunks)
     L->>SM: touch [0,c0) in L1+L2 - no lock, no prefetch
     L->>SM: reserve_read + prefetch [c0,end)
-    L-->>C: hit
 
+    S->>C: get_num_new_matched_tokens (re-poll)
+    L-->>C: hit - async result read this poll
+    Note over C: compare fresh APC hit to frozen c0
     alt APC hit shrank below c0
         Note over C: need_full_lookup = true - no release sent
         C-->>S: (None, True) - re-poll
