@@ -25,6 +25,7 @@ See ``docs/design/v1/mp_coordinator/ingest.md``.
 """
 
 # Standard
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 import asyncio
 import threading
@@ -52,6 +53,30 @@ logger = init_logger(__name__)
 
 # Bounds how long stop() waits for the poll loop to notice the stop flag.
 _POLL_TIMEOUT_SECONDS = 1.0
+
+
+@dataclass
+class KafkaSourceStats:
+    """What the Kafka source has read since this process started.
+
+    Attributes:
+        records_applied: Records decoded and handed to the gate.
+        records_undecodable: Records skipped because they did not decode.
+        records_failed: Records skipped because applying them raised.
+        partitions_assigned: Partitions of the topic this coordinator holds.
+            Fewer than the topic has means another member of the consumer
+            group holds the rest, and its events never reach this one.
+        unread_records: Records not yet read, per assigned partition: the
+            partition's high watermark minus the next offset to read. A
+            partition is absent until both are known. Kafka's own lag tools
+            cannot report this, because the group never commits offsets.
+    """
+
+    records_applied: int = 0
+    records_undecodable: int = 0
+    records_failed: int = 0
+    partitions_assigned: int = 0
+    unread_records: dict[int, int] = field(default_factory=dict)
 
 
 class KafkaCacheEventSource(CacheEventSource):
@@ -88,7 +113,7 @@ class KafkaCacheEventSource(CacheEventSource):
     ) -> None:
         try:
             # Third Party
-            from confluent_kafka import Consumer
+            from confluent_kafka import Consumer, KafkaException
         except ImportError as e:
             raise ImportError(
                 "The Kafka cache-event source needs confluent-kafka: "
@@ -97,6 +122,12 @@ class KafkaCacheEventSource(CacheEventSource):
         self._event_gate = event_gate
         self._topic = config.topic
         self._position = position
+        self._kafka_exception: type[Exception] = KafkaException
+        # Counts written by the poll thread; unread_records is computed when
+        # stats() is read.
+        self._stats = KafkaSourceStats()
+        # Replaced whole by each assignment, never changed in place.
+        self._assigned: list["TopicPartition"] = []
         self._consumer = Consumer(
             {
                 "bootstrap.servers": config.bootstrap_servers,
@@ -147,6 +178,17 @@ class KafkaCacheEventSource(CacheEventSource):
             replay_capability=EventReplayCapability.SEEKABLE,
         )
 
+    def stats(self) -> KafkaSourceStats:
+        """Return a copy of what the source has read; see
+        :class:`KafkaSourceStats`.
+
+        ``unread_records`` is computed here, on the caller's thread, from
+        each assigned partition's high watermark in the consumer's cache
+        (updated by every fetch, no broker round trip). A failure there
+        reaches only the caller, never the poll thread doing the ingest.
+        """
+        return replace(self._stats, unread_records=self._unread_records())
+
     # -- Poll thread -----------------------------------------------------------
 
     def _on_assign(
@@ -173,6 +215,8 @@ class KafkaCacheEventSource(CacheEventSource):
             if next_offset is not None:
                 partition.offset = next_offset
         consumer.assign(partitions)
+        self._assigned = list(partitions)
+        self._stats.partitions_assigned = len(partitions)
         logger.info(
             "Kafka ingest assigned %d partition(s): %s",
             len(partitions),
@@ -215,6 +259,7 @@ class KafkaCacheEventSource(CacheEventSource):
                 message.value() or b""
             ).batches
         except ValidationError as e:
+            self._stats.records_undecodable += 1
             logger.warning(
                 "Dropping undecodable cache-event record %s: %s", position, e
             )
@@ -222,8 +267,10 @@ class KafkaCacheEventSource(CacheEventSource):
         try:
             summary = self._event_gate.ingest_batches(batches)
         except Exception:
+            self._stats.records_failed += 1
             logger.exception("Cache-event consumers failed on record %s", position)
             return
+        self._stats.records_applied += 1
         logger.debug(
             "Kafka cache-event record %s: %d applied, %d duplicate, %d stale",
             position,
@@ -231,3 +278,29 @@ class KafkaCacheEventSource(CacheEventSource):
             summary.duplicates,
             summary.stale,
         )
+
+    def _unread_records(self) -> dict[int, int]:
+        """Return the records not yet read, per assigned partition whose
+        high watermark and next offset are both known."""
+        unread_records: dict[int, int] = {}
+        for partition in self._assigned:
+            try:
+                _, high_watermark = self._consumer.get_watermark_offsets(
+                    partition, cached=True
+                )
+            except self._kafka_exception:
+                logger.debug(
+                    "No cached high watermark for %s[%d]",
+                    partition.topic,
+                    partition.partition,
+                )
+                continue
+            next_offset = self._position.next_offset(
+                partition.topic, partition.partition
+            )
+            # A negative watermark means none fetched yet.
+            if high_watermark >= 0 and next_offset is not None:
+                unread_records[partition.partition] = max(
+                    0, high_watermark - next_offset
+                )
+        return unread_records
