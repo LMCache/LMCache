@@ -63,3 +63,13 @@ def test_remove_reports_containers_it_could_not_remove(
     monkeypatch.setattr(docker.subprocess, "run", lambda cmd, **kw: None)
     monkeypatch.setattr(docker, "status", lambda name: "dead")
     assert docker.remove(["a", "b"], timeout_s=30) == ["a", "b"]
+
+
+def test_remove_with_no_stop_time_kills_at_once(
+    clock: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+    monkeypatch.setattr(docker.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+    monkeypatch.setattr(docker, "status", lambda name: None)
+    docker.remove(["a"], stop_s=0)
+    assert calls[0] == ["docker", "stop", "-t", "0", "a"]

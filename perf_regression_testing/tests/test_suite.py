@@ -79,3 +79,14 @@ def test_a_held_lock_times_out_and_a_released_one_is_taken(tmp_path: Path) -> No
     assert suite.lock(tmp_path / "l", 0) is None
     held.close()
     assert suite.lock(tmp_path / "l", 0) is not None
+
+
+def test_an_unknown_suite_is_a_usage_error_naming_the_suites(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("sys.argv", ["suite", "--suite", "daily"])
+    with pytest.raises(SystemExit) as e:
+        suite.main()
+    assert e.value.code == suite.EXIT_SUITE_INVALID
+    err = capsys.readouterr().err
+    assert "'daily'" in err and "nightly" in err and "weekly" in err

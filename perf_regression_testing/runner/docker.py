@@ -16,6 +16,9 @@ import time
 import urllib.error
 import urllib.request
 
+# Seconds a container gets to exit after SIGTERM in a normal teardown.
+STOP_S = 120
+
 
 def run_args(
     name: str,
@@ -174,7 +177,7 @@ def image_label(image: str, key: str) -> str | None:
     return (json.loads(out.stdout) or {}).get(key)
 
 
-def remove(names: list[str], timeout_s: float = 600) -> list[str]:
+def remove(names: list[str], stop_s: int = STOP_S, timeout_s: float = 600) -> list[str]:
     """Stop and remove containers, retrying until they are gone.
 
     ``docker rm -f`` fails while a killed container is still dying, and the
@@ -182,12 +185,14 @@ def remove(names: list[str], timeout_s: float = 600) -> list[str]:
 
     Args:
         names: Container names; ones that do not exist are skipped.
+        stop_s: Seconds each container gets to exit after SIGTERM before it is
+            killed; 0 kills at once.
         timeout_s: Give up retrying after this many seconds.
 
     Returns:
         The names that still exist after ``timeout_s``.
     """
-    subprocess.run(["docker", "stop", "-t", "120", *names], capture_output=True)
+    subprocess.run(["docker", "stop", "-t", str(stop_s), *names], capture_output=True)
     deadline = time.time() + timeout_s
     left = names
     while True:

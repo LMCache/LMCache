@@ -41,7 +41,7 @@ from perf_regression_testing.runner.config import (
     load,
     resolve,
 )
-from perf_regression_testing.runner.run import EXIT_VALID, run
+from perf_regression_testing.runner.run import EXIT_VALID, Cancelled, run
 
 # stdlib logging: PRT runs on the host, where LMCache is not installed.
 logger = logging.getLogger(__name__)
@@ -304,11 +304,19 @@ def main() -> None:
         datefmt="%H:%M:%S",
         stream=sys.stdout,
     )
+
     # Buildkite stops a timed-out or cancelled step with SIGTERM, whose default
     # action skips the finally blocks that remove containers and shm regions.
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(EXIT_SUITE_INVALID))
+    def cancel(*_: Any) -> None:
+        raise Cancelled(EXIT_SUITE_INVALID)
+
+    signal.signal(signal.SIGTERM, cancel)
     try:
-        root = Path(load()["host"]["root"])
+        cfg = load()
+        if a.suite not in cfg["suites"]:
+            # Exits 2, a soft fail like any other unusable suite.
+            ap.error(f"--suite {a.suite!r}: choose from {', '.join(cfg['suites'])}")
+        root = Path(cfg["host"]["root"])
         held = lock(root / "prt-suite.lock", a.lock_wait_s)
         if held is None:
             print(f"another suite still holds {root}/prt-suite.lock", file=sys.stderr)

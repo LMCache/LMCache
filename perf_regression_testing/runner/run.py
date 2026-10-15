@@ -18,6 +18,7 @@ come up, 5 trace or scratch check failed.
 
 # Standard
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import json
@@ -52,8 +53,21 @@ SHM_DIR = Path("/dev/shm")
 # AIPerf runs for up to hours; log that it is alive this often.
 _HEARTBEAT_S = 300.0
 SHM_REGION = re.compile(r"Created mmap file /dev/shm/(vllm_offload_[0-9a-f-]+\.mmap)")
-# "Phase <name> [(<kind>)] <event> | <fields> (<file>.py:<line>)"
-AIPERF_PHASE = re.compile(r"Phase (\S+) (?:\(\S+\) )?([^(\r\n]+?) \(\w+\.py:\d+\)")
+# "<HH:MM:SS>.<ms> <LEVEL> Phase <name> [(<kind>)] <event> | <fields> (<file>:<line>)"
+AIPERF_PHASE = re.compile(
+    r"(\d\d):(\d\d):(\d\d)\.\d+ +[A-Z]+ +"
+    r"Phase (\S+) (?:\(\S+\) )?([^(\r\n]+?) \(\w+\.py:\d+\)"
+)
+AIPERF_DURATION = re.compile(r"target: ([\d.]+)s duration")
+
+
+class Cancelled(SystemExit):
+    """The CI job is being cancelled or timed out (SIGTERM).
+
+    Buildkite kills the job about 10 s after its SIGTERM, too soon for a
+    graceful container stop, so a run interrupted by this kills its containers
+    at once rather than leave them holding the GPUs.
+    """
 
 
 def _idle_gpus() -> list[int]:
@@ -172,24 +186,35 @@ def remove_shm_regions(out: Path) -> list[str]:
     return names
 
 
-def aiperf_phase(log: Path) -> str:
+def aiperf_phase(log: Path, now: datetime) -> str:
     """Return AIPerf's latest phase event, for the heartbeat.
 
     AIPerf logs each phase's start and end, and warmup progress every 30 s.
-    Profiling logs no progress, so during it this stays at its start line.
+    Profiling logs nothing until it ends, so while a fixed-duration phase runs,
+    the time since its start line is appended.
 
     Args:
-        log: AIPerf's stdout log.
+        log: AIPerf's stdout log; its times are UTC wall clock.
+        now: The current time, timezone-aware.
 
     Returns:
-        E.g. ``"warmup progress | returned=41/207 | ... | errors=0"``, or
+        E.g. ``"warmup progress | returned=41/207 | ... | errors=0"``,
+        ``"profiling started | ... target: 960.0s duration (6 of 16 min)"``, or
         ``"loading the trace"`` before the first phase starts.
     """
     hits = AIPERF_PHASE.findall(log.read_text(errors="replace"))
     if not hits:
         return "loading the trace"
-    name, event = hits[-1]
-    return f"{name} {event}"
+    h, m, sec, name, event = hits[-1]
+    text = f"{name} {event}"
+    target = AIPERF_DURATION.search(event)
+    if event.startswith("started") and target:
+        utc = now.astimezone(timezone.utc)
+        start = utc.replace(hour=int(h), minute=int(m), second=int(sec), microsecond=0)
+        # The log has no date: a start "after" now was yesterday.
+        elapsed = (utc - start).total_seconds() % 86400
+        text += f" ({elapsed / 60:.0f} of {float(target[1]) / 60:.0f} min)"
+    return text
 
 
 def start_servers(
@@ -412,6 +437,7 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
     }
     for c in caps.values():
         c.start()
+    stop_s = docker.STOP_S
     try:
         reason = start_servers(spec, cmds, out, run_id)
         if reason:
@@ -431,7 +457,7 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
                 rc = aiperf.wait(timeout=min(_HEARTBEAT_S, left))
             except subprocess.TimeoutExpired:
                 mins = (time.monotonic() - t0) / 60
-                phase = aiperf_phase(out / "aiperf.log")
+                phase = aiperf_phase(out / "aiperf.log", datetime.now(timezone.utc))
                 logger.info("AIPerf %.0f min: %s", mins, phase)
         summary["aiperf_rc"] = rc
         if rc != 0:
@@ -439,11 +465,14 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
         for s in spec.services:
             if docker.status(f"prt-{run_id}-{s.name}") != "running":
                 summary["invalid"].append(f"{s.name} exited during the run")
+    except Cancelled:
+        stop_s = 0
+        raise
     finally:
         if sampler is not None:
             sampler.stop()
         # Not invalid: the measurement is done; the next run fails to start instead.
-        summary["containers_left"] = docker.remove(names)
+        summary["containers_left"] = docker.remove(names, stop_s)
         remove_shm_regions(out)
         summary["disk_cap"] = {p: c.stop() for p, c in caps.items()}
         for p, c in summary["disk_cap"].items():

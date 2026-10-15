@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 
@@ -103,18 +104,33 @@ def test_no_log_removes_nothing(tmp_path: Path) -> None:
 
 
 def test_heartbeat_reports_the_latest_aiperf_phase(tmp_path: Path) -> None:
+    now = datetime(2026, 10, 15, 21, 55, tzinfo=timezone.utc)
     log = tmp_path / "aiperf.log"
     log.write_text("21:47:41.852 INFO     Starting AIPerf System (_single_run.py:81)\n")
-    assert run.aiperf_phase(log) == "loading the trace"
+    assert run.aiperf_phase(log, now) == "loading the trace"
     with log.open("a") as f:
         f.write(
             "21:53:22.097 NOTICE   Phase agentic.warmup (warmup) started"
             " | target: 207 requests (runner.py:660)\n"
         )
-    assert run.aiperf_phase(log) == "agentic.warmup started | target: 207 requests"
+    assert run.aiperf_phase(log, now) == "agentic.warmup started | target: 207 requests"
     with log.open("a") as f:
         f.write(
             "Warmup: 3/207 |   1% [00:33<38:31]21:54:22.111 INFO     Phase warmup"
             " progress | returned=4/207 | errors=0 (runner.py:1318)\n"
         )
-    assert run.aiperf_phase(log) == "warmup progress | returned=4/207 | errors=0"
+    assert run.aiperf_phase(log, now) == "warmup progress | returned=4/207 | errors=0"
+
+
+def test_heartbeat_counts_a_fixed_duration_phase_across_midnight(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "aiperf.log"
+    log.write_text(
+        "23:58:00.000 NOTICE   Phase profiling (profiling) started"
+        " | target: 960.0s duration (runner.py:660)\n"
+    )
+    now = datetime(2026, 10, 16, 0, 4, tzinfo=timezone.utc)
+    assert run.aiperf_phase(log, now) == (
+        "profiling started | target: 960.0s duration (6 of 16 min)"
+    )
