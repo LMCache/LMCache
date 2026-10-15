@@ -349,6 +349,9 @@ class StoreController(StorageControllerInterface):
         """Blocking function to add a new adapter into the store controller
         with the specified adapter ID and descriptor.
 
+        A timed-out operation is cancelled before it can attach. If the
+        loop is already applying it, wait for attachment and report success.
+
         Args:
             adapter_id: Stable id assigned by the StorageManager.
             adapter: The adapter instance to attach.
@@ -356,8 +359,8 @@ class StoreController(StorageControllerInterface):
                 equal ``adapter_id``).
 
         Raises:
-            RuntimeError: If the background loop did not apply the op in
-                time (e.g. the loop is not running).
+            RuntimeError: If the operation was cancelled because the loop
+                did not begin applying it in time (e.g. it is not running).
         """
         op = AddAdapterOp(
             adapter_id=adapter_id,
@@ -369,6 +372,10 @@ class StoreController(StorageControllerInterface):
             self._pending_adapter_ops.append(op)
         self._adapter_ctrl_efd.notify()
         if not op.done.wait(timeout=STORE_LOOP_POLL_TIMEOUT_MS / 1000 + 5.0):
+            with self._adapter_ops_lock:
+                if op.done.is_set():
+                    return
+                op.cancelled = True
             raise RuntimeError(
                 f"StoreController did not attach adapter {adapter_id} in time"
             )
@@ -514,13 +521,17 @@ class StoreController(StorageControllerInterface):
             self._pending_adapter_ops = []
         for op in ops:
             if isinstance(op, AddAdapterOp):
-                self._l2_adapters[op.adapter_id] = op.adapter
-                self._adapter_descriptors[op.adapter_id] = op.descriptor
-                efd = op.adapter.get_store_event_fd()
-                self._efd_to_adapter_index[efd] = op.adapter_id
-                poller.register(efd, select.POLLIN)
-                logger.info("StoreController attached adapter %d", op.adapter_id)
-                op.done.set()
+                # Cancellation must not race with eventfd registration.
+                with self._adapter_ops_lock:
+                    if op.cancelled:
+                        continue
+                    self._l2_adapters[op.adapter_id] = op.adapter
+                    self._adapter_descriptors[op.adapter_id] = op.descriptor
+                    efd = op.adapter.get_store_event_fd()
+                    self._efd_to_adapter_index[efd] = op.adapter_id
+                    poller.register(efd, select.POLLIN)
+                    logger.info("StoreController attached adapter %d", op.adapter_id)
+                    op.done.set()
             elif isinstance(op, RemoveAdapterOp):
                 if op.adapter_id not in self._l2_adapters:
                     # Already gone (double remove); signal so the caller
