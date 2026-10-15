@@ -193,6 +193,46 @@ class TestAnswerMatch:
     @pytest.mark.parametrize(
         "prediction,reference",
         [
+            ("11.588 million", "11.588 billion"),
+            ("11.588 billion", "11.588 million"),
+            ("3 million", "3000 million"),
+            ("3 billion", "3000 billion"),
+            ("$1.5M", "$1.5B"),
+            ("$1.5mn", "$1500bn"),
+            ("1 thousand", "1 million"),
+            ("1 trillion", "1 billion"),
+            ("Revenue: $3 million; profit: $2 billion", "$3 billion and $2 million"),
+        ],
+    )
+    def test_explicit_scales_do_not_hide_different_values(
+        self, prediction: str, reference: str
+    ) -> None:
+        """When both figures name their units, only their actual values may match."""
+        assert not answer_match(prediction, [reference])
+
+    @pytest.mark.parametrize(
+        "prediction,reference",
+        [
+            ("11.588 billion", "11,588 million"),
+            ("11,588 million", "11.588 billion"),
+            ("about $8.74 billion", "$8738 million"),
+            ("3 thousand", "0.003 million"),
+            ("1 trillion", "1000 billion"),
+            ("$1.5B", "$1500M"),
+            ("$2.5bn", "$2500mn"),
+            ("0 million", "0 billion"),
+            ("$3 million and $2 billion", "$0.003 billion and $2000 million"),
+        ],
+    )
+    def test_equivalent_explicit_scales_match(
+        self, prediction: str, reference: str
+    ) -> None:
+        """Unit conversion and rounding still recognize equivalent quantities."""
+        assert answer_match(prediction, [reference])
+
+    @pytest.mark.parametrize(
+        "prediction,reference",
+        [
             ("15", "1.5"),
             ("1.5", "15"),
             ("$1158800", "$11,588.00"),
