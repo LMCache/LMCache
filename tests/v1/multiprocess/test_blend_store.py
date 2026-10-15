@@ -69,9 +69,9 @@ def test_fingerprint_queue_drains_in_order():
     worker.start()
     try:
         jobs = [
-            ([1, 2, 3], [b"h1"], 0, 0, "req-a"),
-            ([4, 5, 6], [b"h2"], 1, 3, "req-b"),
-            ([7, 8, 9], [b"h3"], 0, 6, "req-c"),
+            ([1, 2, 3], [b"h1"], 0, 0, "req-a", 1),
+            ([4, 5, 6], [b"h2"], 1, 3, "req-b", 2),
+            ([7, 8, 9], [b"h3"], 0, 6, "req-c", 3),
         ]
         for j in jobs:
             eng._fingerprint_queue.put(j)
@@ -114,8 +114,8 @@ def test_fingerprint_worker_survives_kernel_exception():
     worker = threading.Thread(target=eng._drain_fingerprint_queue, daemon=True)
     worker.start()
     try:
-        eng._fingerprint_queue.put(([1], [b"h1"], 0, 0, "req-a"))
-        eng._fingerprint_queue.put(([2], [b"h2"], 0, 1, "req-b"))
+        eng._fingerprint_queue.put(([1], [b"h1"], 0, 0, "req-a", 1))
+        eng._fingerprint_queue.put(([2], [b"h2"], 0, 1, "req-b", 2))
         deadline = time.monotonic() + 2.0
         while (
             eng._token_range_matcher.on_new_token_hashes.call_count < 2
@@ -579,6 +579,9 @@ def _store_hook_engine(stored_mask):
 
     eng = MagicMock(spec=BlendModule)
     eng.store = BlendModule.store.__get__(eng)
+    eng._store_and_enqueue_fingerprints = (
+        BlendModule._store_and_enqueue_fingerprints.__get__(eng)
+    )
     eng._transfer_module = MagicMock()
     eng._transfer_module.store_with_chunk_mask.return_value = (
         b"evt",

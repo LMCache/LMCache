@@ -32,6 +32,7 @@ from lmcache.v1.multiprocess.modules.blend.retrieve import (
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
 from lmcache.v1.multiprocess.modules.blend.store import (
     CB_FINGERPRINTS_KIND,
+    CB_STORE_LANDED_KIND,
     FpJob,
     StoreMixin,
 )
@@ -68,6 +69,11 @@ class BlendModule(
     #: — the sparse lookup's read-lock reservation, consumed by exactly one
     #: ``extras.pop`` (the retrieve, or :meth:`_release_unretrieved_locks`).
     UNRETRIEVED_KEYS_EXTRA = "cb.unretrieved_read_locked_keys"
+
+    #: Upper bound on how long a lookup defers for earlier stores to land.
+    #: A store lands within one forward step plus its device-to-host copy;
+    #: the bound only matters if a stream stalls.
+    _STORE_VISIBILITY_TIMEOUT_S = 5.0
 
     def __init__(
         self,
@@ -137,6 +143,18 @@ class BlendModule(
         # so the handler never holds a worker thread across the L2->L1 loads.
         self._cb_jobs: dict[str, _CBUnifiedJob] = {}
         self._cb_jobs_lock = threading.Lock()
+
+        # Store landing: each store holds a sequence number until its L1
+        # commit has run and its fingerprints are indexed (seq -> outstanding
+        # parts). A lookup waits, bounded, for the stores acknowledged before
+        # it (per-request ticket: (newest seq at arrival, deadline)).
+        self._store_landing_lock = threading.Lock()
+        self._store_seq = 0
+        self._unlanded_stores: dict[int, int] = {}
+        self._cb_landing_tickets: dict[str, tuple[int, float]] = {}
+        lmcache_driven_transfer.register_host_func(
+            CB_STORE_LANDED_KIND, self._release_store_landing, int
+        )
 
         # Async fingerprint registration: store enqueues (stream-ordered via
         # the device host-func dispatcher), worker drains. The request_id is

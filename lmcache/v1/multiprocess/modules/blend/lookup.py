@@ -109,6 +109,8 @@ class LookupMixin:
 
         def _drain_fingerprints_sync(self) -> None: ...
 
+        def _stores_landed_before(self, rid: str) -> bool: ...
+
     def _match_fingerprints(self, key: IPCCacheServerKey) -> list[CBMatchResult]:
         """Drain pending registrations, then return raw fingerprint matches
         (any order, possibly overlapping)."""
@@ -465,7 +467,10 @@ class LookupMixin:
         First call submits the prefix lookup + fingerprint match; later calls
         poll, returning ``None`` until both legs are L1-resident (so a worker
         thread never blocks on the L2->L1 loads). The prefix job's L1 read
-        locks persist for the retrieve.
+        locks persist for the retrieve. Before submitting, calls also return
+        ``None`` while a store acknowledged before the lookup's first call
+        has not landed (L1 commit + fingerprint index), bounded by
+        ``_STORE_VISIBILITY_TIMEOUT_S``.
 
         Returns:
             ``None`` while either leg is still loading (the caller re-issues
@@ -479,6 +484,11 @@ class LookupMixin:
         with self._cb_jobs_lock:
             job = self._cb_jobs.get(rid)
         if job is None:
+            # A store acknowledged before this lookup may still be committing
+            # to L1 or waiting to be indexed: defer until it lands, or both
+            # legs would miss it.
+            if not self._stores_landed_before(rid):
+                return None
             # First invocation: start events + submit prefix + fingerprint match.
             self._event_bus.publish(
                 Event(event_type=EventType.CB_REQUEST_START, session_id=rid)
