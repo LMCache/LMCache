@@ -203,14 +203,37 @@ def test_trailing_partial_chunk_is_handled() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_unsupported_format_is_refused() -> None:
-    """Only the HND layout the detector produces is validated."""
-    with pytest.raises(ValueError, match="NL_X_TWO_NB_NH_ONE_BS_HS"):
+@pytest.mark.parametrize(
+    "engine_kv_format",
+    [
+        EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # NHD
+        EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,  # HND, K/V axis after blocks
+        EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,  # HND, K/V packed in content
+        EngineKVFormat.NB_NL_TWO_NH_BS_HS,  # cross-layer HND
+        EngineKVFormat.NL_X_NBBS_ONE_HS,  # MLA, blocks fused with tokens
+        EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,  # MLA plane tuples
+    ],
+    ids=lambda fmt: fmt.name,
+)
+def test_unsupported_layouts_are_refused(engine_kv_format: EngineKVFormat) -> None:
+    """A layout the op sequences cannot address fails on its layout facts."""
+    with pytest.raises(ValueError, match="supports only per-layer"):
         _transfer(
             _paged_layers(),
             _chunks(),
             TransferDirection.D2H,
-            engine_kv_format=EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            engine_kv_format=engine_kv_format,
+        )
+
+
+def test_hnd_without_the_singleton_axis_is_refused() -> None:
+    """A 5-D HND cache passes the layout check but fails the strict squeeze."""
+    with pytest.raises(ValueError, match=r"\[2, NB, NH, 1, BS, HS\]"):
+        _transfer(
+            squeeze_singleton_axis(_paged_layers()),
+            _chunks(),
+            TransferDirection.D2H,
+            engine_kv_format=EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
         )
 
 
@@ -400,5 +423,25 @@ def test_mla_rejects_wrong_rank_layers() -> None:
             _mla_shape_desc(),
             CHUNK_TOKENS,
             EngineKVFormat.NL_X_NB_BS_HS,
+            0,
+        )
+
+
+def test_mla_blocked_scale_layout_is_refused() -> None:
+    """An MLA-shaped cache whose blocks store values before scales is refused.
+
+    ``NL_X_NB_BSV_BSS`` shares the MLA ``[NB, BS, HS]`` shape, so a whole-block
+    copy would silently write blocked bytes into a token-major chunk.
+    """
+    with pytest.raises(ValueError, match="supports only per-layer"):
+        RblnDeviceOps().multi_layer_block_kv_transfer(
+            _mla_layers(),
+            _mla_chunks(),
+            list(range(NUM_BLOCKS)),
+            torch.device("cpu"),
+            TransferDirection.D2H,
+            _mla_shape_desc(),
+            CHUNK_TOKENS,
+            EngineKVFormat.NL_X_NB_BSV_BSS,
             0,
         )
