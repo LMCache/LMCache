@@ -63,6 +63,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
     get_tokens_per_block,
     is_scratch_spec,
 )
+from lmcache.integration.vllm.kv_cache_identity import get_kv_cache_format
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
@@ -553,6 +554,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       enters vLLM's waiting queue. Disabled by default.
     - lmcache.mp.save_decode_cache: also store chunks containing generated
       tokens. Defaults to False; only complete prompt chunks are stored.
+    - lmcache.mp.enable_kv_dtype_isolation: separate caches by KV precision
+      settings. Defaults to False to preserve existing cache keys.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -605,6 +608,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         cache_model_name = get_dcp_decorated_model_name(vllm_config, kv_cache_config)
 
         assert vllm_config.kv_transfer_config is not None
+        enable_kv_dtype_isolation = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.enable_kv_dtype_isolation", False
+            )
+        )
+        if not isinstance(enable_kv_dtype_isolation, bool):
+            raise ValueError("lmcache.mp.enable_kv_dtype_isolation must be a boolean")
+        cache_format = (
+            get_kv_cache_format(vllm_config) if enable_kv_dtype_isolation else ""
+        )
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
         self._save_decode_cache = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.save_decode_cache", False
@@ -732,6 +745,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 server_urls=server_urls,
                 context=zmq_context,
                 model_name=cache_model_name,
+                cache_format=cache_format,
                 vllm_block_size=scheduler_block_size,
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
@@ -764,6 +778,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 server_url=local_server_url,
                 context=zmq_context,
                 model_name=cache_model_name,
+                cache_format=cache_format,
                 vllm_block_size=scheduler_block_size,
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,

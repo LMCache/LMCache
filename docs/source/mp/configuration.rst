@@ -736,6 +736,13 @@ data parallelism (``dp_size > 1``) are rejected with a clear error.
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "tcp://host1:6667,tcp://host2:6667"}}'
 
+KV dtype isolation
+~~~~~~~~~~~~~~~~~~
+
+Set ``"lmcache.mp.enable_kv_dtype_isolation": true`` in ``kv_connector_extra_config``
+on all instances sharing a cache to isolate KV formats such as BF16 and FP8.
+Disabled by default; enabling it causes existing cache entries to miss.
+
 Decode context parallelism (DCP)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -826,6 +833,9 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.save_decode_cache``
      - ``false``
      - Cache generated tokens in addition to prompt tokens.
+   * - ``lmcache.mp.enable_kv_dtype_isolation``
+     - ``false``
+     - Separate cache keys by KV precision settings.
    * - ``lmcache.mp.server_urls``
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of

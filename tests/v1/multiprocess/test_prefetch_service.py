@@ -55,10 +55,10 @@ class _Registry:
         self._windows = windows
         self._attn_raises = attn_raises
 
-    def find_group_layout_descs(self, model_name, world_size):
+    def find_group_layout_descs(self, model_name, world_size, cache_format=""):
         return self._layouts
 
-    def find_attn_desc(self, model_name, world_size):
+    def find_attn_desc(self, model_name, world_size, cache_format=""):
         if self._attn_raises:
             raise ValueError("no attention-window descriptor registered")
         return self._windows

@@ -24,7 +24,7 @@ from lmcache.v1.distributed.api import EncodedObjectKey, ObjectKey, Tier
 # re-RoPE reused KV from the wrong source position.
 UNKNOWN_TOKEN_OFFSET = -1
 
-CACHE_EVENT_SCHEMA_VERSION = 1
+CACHE_EVENT_SCHEMA_VERSION = 2
 """Version of the cache-event wire shape: :class:`CacheEventBatch` as carried
 by ``POST /events``. Bumped when a field is added, removed or changes meaning,
 so an ``events``-level trace file names the shape its records hold and a
@@ -57,6 +57,7 @@ class BlendNamespace:
 
     Attributes:
         model_name: Model the KV belongs to.
+        cache_format: KV encoding identity.
         cache_salt: Per-tenant isolation salt applied to the keys.
         world_size: Parallel world size (TP x PP) selecting the rank
             fan-out.
@@ -65,6 +66,7 @@ class BlendNamespace:
     model_name: str
     cache_salt: str = ""
     world_size: int = 1
+    cache_format: str = ""
 
     @classmethod
     def from_object_key(cls, key: "ObjectKey") -> "BlendNamespace":
@@ -79,6 +81,7 @@ class BlendNamespace:
         return cls(
             model_name=key.model_name,
             cache_salt=key.cache_salt,
+            cache_format=key.cache_format,
             world_size=ObjectKey.WorldSizeFromKVRank(key.kv_rank),
         )
 

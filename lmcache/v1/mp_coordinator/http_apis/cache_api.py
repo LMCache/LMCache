@@ -83,6 +83,7 @@ async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchR
             world_size=body.world_size,
             token_ids=body.token_ids,
             cache_salt=body.cache_salt,
+            cache_format=body.cache_format,
         )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -183,6 +184,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
             body.world_size,
             body.token_ids,
             body.cache_salt,
+            cache_format=body.cache_format,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None

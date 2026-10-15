@@ -28,6 +28,7 @@ std::string key_to_filename(const std::string& key,
   // Input key format (from _object_key_to_string):
   // Unsalted:
   //     <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
+  // Formatted: <model>@<rank>@<group>@<hash>@<salt>@<cache_format>
   // Salted:
   //     <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
   //
@@ -44,7 +45,7 @@ std::string key_to_filename(const std::string& key,
   // '@' (invariant enforced on the Python side), so splitting on '@'
   // is unambiguous — no marker, no rsplit.
 
-  // Split on '@' — must yield 4 (unsalted) or 5 (salted) fields.
+  // Split on '@': 4 legacy unsalted, 5 salted or 6 formatted fields.
   std::vector<std::string> parts;
   size_t start = 0;
   for (size_t pos = 0; pos <= key.size(); ++pos) {
@@ -53,9 +54,10 @@ std::string key_to_filename(const std::string& key,
       start = pos + 1;
     }
   }
-  if (parts.size() != 4 && parts.size() != 5) {
+  if (parts.size() != 4 && parts.size() != 5 && parts.size() != 6) {
     throw std::runtime_error(
-        "FSConnector: malformed key (expected 4 or 5 '@'-separated fields): " +
+        "FSConnector: malformed key (expected 4, 5 or 6 "
+        "'@'-separated fields): " +
         key);
   }
 
@@ -63,7 +65,7 @@ std::string key_to_filename(const std::string& key,
   const std::string& kv_rank_hex = parts[1];
   const std::string& object_group_id_hex = parts[2];
   const std::string& chunk_hash = parts[3];
-  const std::string cache_salt = parts.size() == 5 ? parts[4] : std::string();
+  const std::string cache_salt = parts.size() >= 5 ? parts[4] : std::string();
 
   // Replace '/' with '-SEP-' for filesystem safety
   std::string safe_model = replace_all(model_name, "/", PATH_SLASH_REPLACEMENT);
@@ -82,9 +84,13 @@ std::string key_to_filename(const std::string& key,
   result += object_group_id_hex;
   result += KEY_SEP;
   result += chunk_hash;
-  if (!cache_salt.empty()) {
+  if (!cache_salt.empty() || parts.size() == 6) {
     result += KEY_SEP;
     result += cache_salt;
+  }
+  if (parts.size() == 6) {
+    result += KEY_SEP;
+    result += parts[5];
   }
   result += FILE_EXT;
 
@@ -101,6 +107,7 @@ std::string key_to_filename(const std::string& key,
 //
 // The flat (non-sharded) filename shape produced by key_to_filename():
 //   <safe_model>@0x<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>].data
+// Formatted filenames retain an additional @<cache_format> after the salt.
 // Returns the wire key:
 //   <model>@<kv_rank_hex>@<ogid_hex>@<chunk_hash_hex>[@<cache_salt>]
 //
@@ -125,7 +132,7 @@ std::string filename_to_key(const std::string& filename) {
     }
   }
   // Need model, kv_rank, ogid and chunk_hash (4 fields minimum).
-  if (parts.size() != 4 && parts.size() != 5) {
+  if (parts.size() != 4 && parts.size() != 5 && parts.size() != 6) {
     return {};
   }
 
@@ -170,9 +177,9 @@ std::string get_chunk_hash_from_key(const std::string& key) {
       start = pos + 1;
     }
   }
-  if (parts.size() != 4 && parts.size() != 5) {
+  if (parts.size() != 4 && parts.size() != 5 && parts.size() != 6) {
     throw std::runtime_error(
-        "Malformed key (expected 4 or 5 '@'-separated fields): " + key);
+        "Malformed key (expected 4, 5 or 6 '@'-separated fields): " + key);
   }
   if (parts[3].empty()) {
     throw std::runtime_error(

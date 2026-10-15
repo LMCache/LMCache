@@ -506,6 +506,7 @@ def _decode_pin(entry: Mapping[str, object]) -> tuple[ObjectKey, int]:
         kv_rank=cast(int, fields["kv_rank"]),
         object_group_id=cast(int, fields["object_group_id"]),
         cache_salt=str(fields["cache_salt"]),
+        cache_format=str(fields.get("cache_format", "")),
     )
     return encoded.to_object_key(), cast(int, entry["count"])
 

@@ -44,6 +44,7 @@ def _resolve_ipc_key_and_hashes(
     world_size: int,
     token_ids: list[int],
     cache_salt: str,
+    cache_format: str = "",
 ) -> tuple[IPCCacheServerKey, list[bytes]]:
     """Build the lookup-side IPC key and hash the complete chunks.
 
@@ -64,6 +65,7 @@ def _resolve_ipc_key_and_hashes(
         end=len(token_ids),
         request_id="",
         cache_salt=cache_salt,
+        cache_format=cache_format,
     )
     chunk_hashes = token_hasher.compute_chunk_hashes(list(token_ids))
     return ipc_key, chunk_hashes
@@ -75,6 +77,7 @@ def resolve_object_keys(
     world_size: int,
     token_ids: list[int],
     cache_salt: str,
+    cache_format: str = "",
 ) -> tuple[list[ObjectKey], int]:
     """Resolve a token sequence to the object keys of its complete chunks.
 
@@ -90,6 +93,7 @@ def resolve_object_keys(
         world_size: Tensor-parallel world size selecting the per-rank fan-out.
         token_ids: The token sequence to resolve.
         cache_salt: Per-tenant isolation salt.
+        cache_format: KV encoding identity.
 
     Returns:
         ``(obj_keys, chunk_count)``. ``obj_keys`` holds one key per (chunk, rank)
@@ -101,7 +105,7 @@ def resolve_object_keys(
             (e.g. ``cache_salt``) is invalid.
     """
     ipc_key, chunk_hashes = _resolve_ipc_key_and_hashes(
-        token_hasher, model_name, world_size, token_ids, cache_salt
+        token_hasher, model_name, world_size, token_ids, cache_salt, cache_format
     )
     if not chunk_hashes:
         return [], 0
@@ -117,6 +121,7 @@ def resolve_grouped_object_keys(
     cache_salt: str,
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
+    cache_format: str = "",
 ) -> tuple[list[GroupedObjectKeys], int]:
     """Resolve a token sequence to prefetch key rows for every object group.
 
@@ -131,6 +136,7 @@ def resolve_grouped_object_keys(
         world_size: Tensor-parallel world size selecting the per-rank fan-out.
         token_ids: The token sequence to resolve.
         cache_salt: Per-tenant isolation salt.
+        cache_format: KV encoding identity.
         group_layout_descs: Each object group's memory layout.
         attn_desc: The model's per-group attention windows.
 
@@ -142,7 +148,7 @@ def resolve_grouped_object_keys(
             (e.g. ``cache_salt``) is invalid, or a group has no layout.
     """
     ipc_key, chunk_hashes = _resolve_ipc_key_and_hashes(
-        token_hasher, model_name, world_size, token_ids, cache_salt
+        token_hasher, model_name, world_size, token_ids, cache_salt, cache_format
     )
     if not chunk_hashes:
         return [], 0

@@ -47,6 +47,7 @@ class PrefetchRequest:
     cache_salt: str = ""
     source_tier: Tier = Tier.L2
     target_tier: Tier = Tier.L1
+    cache_format: str = ""
 
 
 @dataclass(frozen=True)
