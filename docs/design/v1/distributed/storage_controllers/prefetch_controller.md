@@ -141,6 +141,9 @@ request. Outstanding adapter tasks are left to complete on their own.
 submission, including queueing and lookup. It is disabled by default and
 does not apply to `NO_LOCK` warmup requests.
 
+Submission copies `PrefetchTaskSpec` with a controller-assigned `deadline_at`;
+reusing the caller's spec starts a fresh budget without modifying that spec.
+
 At expiry, the controller publishes the available L1 result once: a valid
 prefix for `prefix` fetching, or complete found columns for `full` fetching.
 Only the selected cells keep caller read locks. Queued requests can expire

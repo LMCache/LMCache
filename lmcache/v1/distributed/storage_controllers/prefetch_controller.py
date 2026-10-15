@@ -17,7 +17,7 @@ releasing a request at any point is a walk over its maps.
 
 # Standard
 from collections import Counter, defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Callable
 import enum
 import itertools
@@ -304,7 +304,6 @@ def _reserve_l1_cells(
 def _build_request(
     request_id: PrefetchRequestId,
     spec: PrefetchTaskSpec,
-    deadline_at: float | None = None,
 ) -> "InFlightPrefetchRequest":
     """Create the in-flight request for ``spec`` in the lookup phase."""
     return InFlightPrefetchRequest(
@@ -313,7 +312,7 @@ def _build_request(
         fetching_policy=spec.fetching_policy,
         lock_mode=spec.lock_mode,
         num_kv_readers=spec.num_kv_readers,
-        deadline_at=deadline_at,
+        deadline_at=spec.deadline_at,
     )
 
 
@@ -526,15 +525,11 @@ class PrefetchController(StorageControllerInterface):
 
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
-        self._pending_queue: deque[
-            tuple[PrefetchRequestId, PrefetchTaskSpec, float | None]
-        ] = deque()
+        self._pending_queue: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = deque()
 
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
-        self._submission_queue: list[
-            tuple[PrefetchRequestId, PrefetchTaskSpec, float | None]
-        ] = []
+        self._submission_queue: list[tuple[PrefetchRequestId, PrefetchTaskSpec]] = []
         self._next_request_id: PrefetchRequestId = 0
         self._submission_efd = create_event_notifier()
 
@@ -640,7 +635,8 @@ class PrefetchController(StorageControllerInterface):
                     else None
                 )
                 deadline_at = None if timeout is None else self._clock() + timeout
-                self._submission_queue.append((request_id, spec, deadline_at))
+                spec = replace(spec, deadline_at=deadline_at)
+                self._submission_queue.append((request_id, spec))
 
         if not use_l2:
             request = _build_request(request_id, spec)
@@ -1099,12 +1095,12 @@ class PrefetchController(StorageControllerInterface):
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, spec, deadline_at = self._pending_queue.popleft()
+            request_id, spec = self._pending_queue.popleft()
             try:
-                if deadline_at is not None and deadline_at <= self._clock():
-                    self._expire_queued_request(request_id, spec, deadline_at)
+                if spec.deadline_at is not None and spec.deadline_at <= self._clock():
+                    self._expire_queued_request(request_id, spec)
                 else:
-                    self._start_lookup_phase(request_id, spec, deadline_at)
+                    self._start_lookup_phase(request_id, spec)
             except Exception:
                 logger.exception("Failed starting prefetch request %d", request_id)
                 request = self._in_flight_requests.get(request_id)
@@ -1119,13 +1115,12 @@ class PrefetchController(StorageControllerInterface):
         self,
         request_id: PrefetchRequestId,
         spec: PrefetchTaskSpec,
-        deadline_at: float | None = None,
     ) -> None:
         """Create an in-flight request and start its L2 lookup phase."""
-        request = _build_request(request_id, spec, deadline_at)
+        request = _build_request(request_id, spec)
         self._in_flight_requests[request_id] = request
-        if deadline_at is not None:
-            self._armed[request_id] = deadline_at
+        if spec.deadline_at is not None:
+            self._armed[request_id] = spec.deadline_at
         flattened_keys = request.get_flattened_keys()
         self._lock_l1_keys(request)
 
@@ -1775,7 +1770,8 @@ class PrefetchController(StorageControllerInterface):
             return PREFETCH_LOOP_POLL_TIMEOUT_MS
 
         nearest = min(self._armed.values()) if self._armed else None
-        for _request_id, _spec, queued_deadline in self._pending_queue:
+        for _request_id, spec in self._pending_queue:
+            queued_deadline = spec.deadline_at
             if queued_deadline is None:
                 continue
             if nearest is None or queued_deadline < nearest:
@@ -1806,29 +1802,29 @@ class PrefetchController(StorageControllerInterface):
                 self._finish_drain(request)
 
         # Armed deadlines follow submission order; NO_LOCK entries are exempt.
-        kept: deque[tuple[PrefetchRequestId, PrefetchTaskSpec, float | None]] = deque()
-        expired: list[tuple[PrefetchRequestId, PrefetchTaskSpec, float]] = []
+        kept: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = deque()
+        expired: list[tuple[PrefetchRequestId, PrefetchTaskSpec]] = []
         while self._pending_queue:
-            request_id, spec, queued_deadline = self._pending_queue.popleft()
+            request_id, spec = self._pending_queue.popleft()
+            queued_deadline = spec.deadline_at
             if queued_deadline is None:
-                kept.append((request_id, spec, queued_deadline))
+                kept.append((request_id, spec))
                 continue
             if queued_deadline <= now:
-                expired.append((request_id, spec, queued_deadline))
+                expired.append((request_id, spec))
                 continue
-            kept.append((request_id, spec, queued_deadline))
+            kept.append((request_id, spec))
             kept.extend(self._pending_queue)
             self._pending_queue.clear()
             break
         self._pending_queue = kept
-        for request_id, spec, deadline_at in expired:
-            self._expire_queued_request(request_id, spec, deadline_at)
+        for request_id, spec in expired:
+            self._expire_queued_request(request_id, spec)
 
     def _expire_queued_request(
         self,
         request_id: PrefetchRequestId,
         spec: PrefetchTaskSpec,
-        deadline_at: float,
     ) -> None:
         """Publish an expired queued request's L1 hits without starting L2 I/O."""
         flattened_keys = list(
@@ -1847,7 +1843,7 @@ class PrefetchController(StorageControllerInterface):
                 },
             )
         )
-        request = _build_request(request_id, spec, deadline_at)
+        request = _build_request(request_id, spec)
         self._lock_l1_keys(request)
         self._plan_load(request, {})
         hit_length = self._finish_request(request, timed_out=True)

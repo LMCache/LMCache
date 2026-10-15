@@ -245,6 +245,35 @@ class TestConfigValidation:
 
 
 class TestLoadDeadline:
+    def test_reused_spec_gets_independent_submission_deadlines(self, l1_manager):
+        adapter = make_gated_adapter()
+        adapter.gate_lookups()
+        clock = FakeClock()
+        ctrl = make_controller(l1_manager, adapter, clock, timeout=5.0)
+        spec = single_row_spec([make_object_key(0)])
+        ctrl.start()
+        try:
+            first = ctrl.submit_prefetch_request(spec)
+            assert wait_for_condition(lambda: in_flight_count(ctrl) == 1)
+            clock.advance(2.0)
+            second = ctrl.submit_prefetch_request(spec)
+            assert wait_for_condition(lambda: in_flight_count(ctrl) == 2)
+            assert spec.deadline_at is None
+
+            clock.advance(4.0)
+            assert wait_for_condition(lambda: result_ready(ctrl, first))
+            assert not result_ready(ctrl, second)
+            clock.advance(2.0)
+            assert wait_for_condition(lambda: result_ready(ctrl, second))
+            for request_id in (first, second):
+                result = ctrl.query_prefetch_result(request_id)
+                assert result is not None and result.hit_cells[0].popcount() == 0
+        finally:
+            adapter.release_lookups()
+            adapter.release_loads()
+            ctrl.stop()
+            adapter.close()
+
     def test_drain_error_preserves_published_read_locks(self, l1_manager, monkeypatch):
         """A late adapter error cannot release the timeout caller's cache hit."""
         slow = make_gated_adapter()
