@@ -17,6 +17,8 @@ export BK_SETUP_ENV_SCRIPT=".buildkite/k3_harness/setup-lmcache-only-env.sh"
 if [[ "${1:-}" == "lm_eval" ]]; then
     export BATCH_INVARIANT_DEFAULT="1"
     export LM_EVAL_VERIFY_MODE_DEFAULT="samples"
+    # Batch-invariant evaluation is slower; use fewer samples to save CI resources.
+    export LIMIT="${LIMIT:-150}"
 fi
 
 # The shared vLLM harness defaults to FLASH_ATTN when this is unset.
