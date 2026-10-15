@@ -250,7 +250,9 @@ def test_documented_server_command_loads_example_policies() -> None:
     store = create_store_policy(config.store_policy)
     assert store.select_store_targets([], []) == {}
     assert store.select_l1_deletions([]) == []
-    assert isinstance(create_prefetch_policy(config.prefetch_policy), RetainPrefetchPolicy)
+    assert isinstance(
+        create_prefetch_policy(config.prefetch_policy), RetainPrefetchPolicy
+    )
 
 
 @pytest.mark.no_shared_allocator
