@@ -164,7 +164,7 @@ def _make_key(
     num_kv_readers: int = 1,
 ) -> IPCCacheServerKey:
     """Build an IPCCacheServerKey."""
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name=_MODEL_NAME,
         world_size=world_size,
         num_kv_readers=num_kv_readers,

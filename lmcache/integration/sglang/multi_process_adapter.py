@@ -276,14 +276,14 @@ class LMCacheMPConnector:
         request_id: str,
         no_worker_id: bool = False,
     ) -> IPCCacheServerKey:
-        return IPCCacheServerKey(
+        return IPCCacheServerKey.from_token_ids(
             model_name=self.model_name,
             world_size=self.tp_size,
             # Each worker stores and reads only its own object (no MLA-style
             # sharing in this adapter yet).
             num_kv_readers=1,
             worker_id=None if no_worker_id else self.worker_id,
-            token_ids=tuple(token_ids),
+            token_ids=token_ids,
             start=start,
             end=end,
             request_id=request_id,

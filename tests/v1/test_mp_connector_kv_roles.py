@@ -51,6 +51,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.utils import CacheStoreEvent  # noqa: E402
+from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -496,7 +497,10 @@ def test_receive_failure_reporting(
         worker.worker_adapter.submit_retrieve_request(
             "request",
             LoadStoreOp(
-                token_ids=[1, 2, 3, 4], block_ids=[[2]] * num_groups, start=0, end=4
+                token_bytes=pack_token_ids([1, 2, 3, 4]),
+                block_ids=[[2]] * num_groups,
+                start=0,
+                end=4,
             ),
             None,
         )
