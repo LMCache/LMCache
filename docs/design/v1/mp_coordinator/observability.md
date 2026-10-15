@@ -135,8 +135,7 @@ view-completeness gauge, not an alert.
 
 | Metric | Type | Labels | Tells you |
 | --- | --- | --- | --- |
-| `lmcache_mp.coordinator_event_send_delay_seconds` (mp server) | histogram | | Time from a cache store to its event being sent |
-| `ingest.event_delivery_delay_seconds` | histogram | | Time from sent to applied (uses the server's clock) |
+| `ingest.server_event_delivery_delay_seconds` | gauge | `instance_id` | For each server's last applied batch, time from sent to applied (across the two hosts' clocks) |
 | `ingest.server_seconds_since_last_event` | gauge | `instance_id` | Server heartbeats but has stopped sending events |
 | `kafka.unread_records` | gauge | `partition` | Records waiting to be read. Kafka's own lag tools can't see this: the coordinator never commits offsets |
 | `kafka.partitions_assigned` | gauge | | Fewer than the topic has means another coordinator took some |
@@ -341,10 +340,9 @@ No tracing spans for now. Coordinator work is either one request in, one
 response out, or a timer loop; a route latency histogram shows the same thing.
 
 The one cross-process question, "how long until a stored entry shows up in the
-directory?", is answered by two histograms:
-`lmcache_mp.coordinator_event_send_delay_seconds` (store to send, on the mp
-server) and `ingest.event_delivery_delay_seconds` (send to applied, on the
-coordinator).
+directory?", is answered on the coordinator by
+`ingest.server_event_delivery_delay_seconds` (send to applied). Time an event
+waits on the mp server before it is sent is not measured.
 
 When blend lookups carry trace context (the `traceparent` work in the mp
 observability design), the coordinator joins as a server span through FastAPI
@@ -357,7 +355,7 @@ Three steps, each one or more small PRs. Tests read public state only:
 
 | Step | Scope | Tests |
 | --- | --- | --- |
-| P0 | `lmcache_coordinator.` names and the rename of the two existing gauges; `dropped_events` on each batch, counted by the mp server; ingest counters and per-server gauges; consumer errors and apply time; running totals in the key directory and blend index so gauges never walk them; Kafka lag, partitions, bad records; loop watchdog and the catch-and-continue fix; controller up; event-loop blocked time; event send delay and delivery delay; `/status`; example alert rules | `test_event_gate.py`, `test_event_broadcaster.py`, `test_kafka_event_source.py`, `test_kafka_event_sink.py`, `test_cache_events.py`, `test_health.py`, `test_observability.py`, `test_metrics_api.py` |
+| P0 | `lmcache_coordinator.` names and the rename of the two existing gauges; `dropped_events` on each batch, counted by the mp server; ingest counters and per-server gauges; consumer errors and apply time; running totals in the key directory and blend index so gauges never walk them; Kafka lag, partitions, bad records; loop watchdog and the catch-and-continue fix; controller up; event-loop blocked time; event delivery delay; `/status`; example alert rules | `test_event_gate.py`, `test_event_broadcaster.py`, `test_kafka_event_source.py`, `test_kafka_event_sink.py`, `test_cache_events.py`, `test_health.py`, `test_observability.py`, `test_metrics_api.py` |
 | P1 | View and controller metrics (registry, directory, blend, usage, eviction, quota, pins, prefetch); checkpoint metrics; if P0 shows a blocked event loop (p99 of `event_loop.blocked_seconds` above 100 ms), move `POST /events` ingest to a worker thread; metric name constants exported for private controllers, and the private `EvictionController` emitting the same eviction metrics (in coordinator-controllers, released against the same LMCache version); metadata write failures undo the change and return 503 | `persistence/` tests, `test_eviction_controller.py`, `test_quota_api.py`, `test_registry.py` |
 | P2 | HTTP server and outbound metrics; tracing once trace context exists | `test_metrics_api.py`, `test_directory_api.py`, `test_cache_api.py` |
 
