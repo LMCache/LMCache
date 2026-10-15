@@ -17,7 +17,53 @@ from starlette.responses import FileResponse, PlainTextResponse
 import httpx
 import uvicorn
 
+# First Party
+from lmcache.security.api_key import APIKeyVerifier, load_api_keys
+from lmcache.security.http import (
+    HTTPBearerAuthenticationMiddleware,
+    bearer_authorization_header,
+)
+
 _PACKAGE = "lmcache.lmcache_frontend"
+FRONTEND_API_KEY_ENV_VAR = "LMCACHE_FRONTEND_API_KEY"
+FRONTEND_API_KEY_FILE_ENV_VAR = "LMCACHE_FRONTEND_API_KEY_FILE"
+FRONTEND_BACKEND_API_KEY_ENV_VAR = "LMCACHE_FRONTEND_BACKEND_API_KEY"
+FRONTEND_BACKEND_API_KEY_FILE_ENV_VAR = "LMCACHE_FRONTEND_BACKEND_API_KEY_FILE"
+PUBLIC_FRONTEND_PATHS = frozenset({"/", "/health", "/metrics"})
+PUBLIC_FRONTEND_PATH_PREFIXES = ("/static/",)
+
+
+def _authorization_headers(authorization_header: str | None) -> dict[str, str]:
+    """Build outbound headers for an optional backend credential."""
+    if authorization_header is None:
+        return {}
+    return {"Authorization": authorization_header}
+
+
+def _load_backend_authorization(key_file: str | None) -> str | None:
+    """Load the single API key sent to backend HTTP servers.
+
+    Args:
+        key_file: Optional key file supplied through the command line.
+
+    Returns:
+        A Bearer authorization value, or ``None`` when no key is configured.
+
+    Raises:
+        OSError: If a configured key file cannot be read.
+        ValueError: If a key file is invalid or more than one source is set.
+    """
+    key_files = [] if key_file is None else [key_file]
+    api_keys = load_api_keys(
+        key_files,
+        api_key_env_var=FRONTEND_BACKEND_API_KEY_ENV_VAR,
+        api_key_file_env_var=FRONTEND_BACKEND_API_KEY_FILE_ENV_VAR,
+    )
+    if len(api_keys) > 1:
+        raise ValueError("Configure exactly one frontend backend API key source")
+    if not api_keys:
+        return None
+    return bearer_authorization_header(api_keys[0])
 
 
 def _package_resource_path(relative: str) -> str:
@@ -99,15 +145,18 @@ target_nodes = _node_registry.nodes
 heartbeat_service: HeartbeatService = HeartbeatService()
 
 global args
-args = None
+args: argparse.Namespace | None = None
 
 
-async def fetch_child_nodes_from_proxy(proxy_node: dict) -> list[dict]:
+async def fetch_child_nodes_from_proxy(
+    proxy_node: dict, authorization_header: str | None = None
+) -> list[dict]:
     """Fetch child nodes from a single proxy node.
 
     Args:
         proxy_node: Proxy dict with ``name``/``host``/``port`` keys.
             ``/api/nodes`` of the proxy is queried.
+        authorization_header: Optional Bearer value for the proxy request.
 
     Returns:
         A list of leaf node dicts discovered from the proxy.  An
@@ -116,7 +165,9 @@ async def fetch_child_nodes_from_proxy(proxy_node: dict) -> list[dict]:
     try:
         url = f"http://{proxy_node['host']}:{proxy_node['port']}/api/nodes"
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(url)
+            response = await client.get(
+                url, headers=_authorization_headers(authorization_header)
+            )
             response.raise_for_status()
             return_nodes = []
             added_names = set()  # Track node names to avoid duplicates
@@ -148,17 +199,22 @@ async def fetch_child_nodes_from_proxy(proxy_node: dict) -> list[dict]:
 
 async def fetch_all_child_nodes_concurrently(
     proxy_nodes: list[dict],
+    authorization_header: str | None = None,
 ) -> list[dict]:
     """Fetch child nodes from multiple proxy nodes concurrently.
 
     Args:
         proxy_nodes: Proxy dicts to query.  Each dict is mutated in
             place with a new ``nodes`` field.
+        authorization_header: Optional Bearer value for proxy requests.
 
     Returns:
         The same ``proxy_nodes`` list with ``nodes`` populated.
     """
-    tasks = [fetch_child_nodes_from_proxy(proxy) for proxy in proxy_nodes]
+    tasks = [
+        fetch_child_nodes_from_proxy(proxy, authorization_header)
+        for proxy in proxy_nodes
+    ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Process results and handle exceptions
@@ -173,18 +229,30 @@ async def fetch_all_child_nodes_concurrently(
 
 
 async def _fetch_child_nodes_from_api_nodes(
-    host: str, port: str, proxy_name: str
-) -> list:
-    """Try to fetch child nodes via /api/nodes from a multiProcess server.
+    host: str,
+    port: str,
+    proxy_name: str,
+    authorization_header: str | None = None,
+) -> list[dict]:
+    """Fetch child nodes from one multiprocess server.
 
-    Returns a non-empty list of child node dicts when the target is a
-    multiProcess lmcache server that exposes /api/nodes.  Returns an
-    empty list for inProcess nodes (connection error or no children).
+    Args:
+        host: Server host name or address.
+        port: Server HTTP port.
+        proxy_name: Name recorded on returned child nodes.
+        authorization_header: Optional Bearer value for the server request.
+
+    Returns:
+        A non-empty list of child-node dictionaries when the target is a
+        multiprocess LMCache server exposing ``/api/nodes``. Returns an empty
+        list for in-process nodes, connection errors, or no reported children.
     """
     try:
         url = "http://%s:%s/api/nodes" % (host, port)
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(url)
+            response = await client.get(
+                url, headers=_authorization_headers(authorization_header)
+            )
             response.raise_for_status()
         nodes_data = response.json().get("nodes", [])
         children = []
@@ -201,7 +269,9 @@ async def _fetch_child_nodes_from_api_nodes(
         return []
 
 
-async def fetch_nodes_from_supplier(url: str) -> list[dict]:
+async def fetch_nodes_from_supplier(
+    url: str, authorization_header: str | None = None
+) -> list[dict]:
     """Fetch node information from node supplier.
 
     For each discovered node, attempt to retrieve its child nodes via
@@ -209,6 +279,13 @@ async def fetch_nodes_from_supplier(url: str) -> list[dict]:
     succeeds and returns children, those children are used as the
     ``nodes`` list (multiProcess mode).  Otherwise the node itself is
     used as the sole child (inProcess / leaf mode).
+
+    Args:
+        url: Node-supplier endpoint returning process information.
+        authorization_header: Optional Bearer value for discovered nodes.
+
+    Returns:
+        Proxy nodes populated with their discovered children.
     """
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -240,7 +317,9 @@ async def fetch_nodes_from_supplier(url: str) -> list[dict]:
                 for node_key, info in unique_nodes.items()
             ]
             child_tasks = [
-                _fetch_child_nodes_from_api_nodes(p["host"], p["port"], p["name"])
+                _fetch_child_nodes_from_api_nodes(
+                    p["host"], p["port"], p["name"], authorization_header
+                )
                 for p in proxy_list
             ]
             child_results = await asyncio.gather(*child_tasks, return_exceptions=True)
@@ -372,14 +451,27 @@ async def get_all_nodes() -> dict:
 
 
 @router.get("/api/proxies/{proxy_name}/refresh")
-async def refresh_proxy_nodes(proxy_name: str):
-    """Refresh child nodes of a proxy"""
+async def refresh_proxy_nodes(request: Request, proxy_name: str) -> dict:
+    """Refresh the child nodes recorded for one proxy.
+
+    Args:
+        request: Incoming request carrying the frontend application state.
+        proxy_name: Registered proxy to refresh.
+
+    Returns:
+        Success status and the refreshed child-node list.
+
+    Raises:
+        HTTPException: If the proxy is unknown or cannot be refreshed.
+    """
     proxy = next((p for p in target_nodes if p["name"] == proxy_name), None)
     if not proxy:
         raise HTTPException(status_code=404, detail="Proxy not found")
 
     try:
-        child_nodes = await fetch_child_nodes_from_proxy(proxy)
+        child_nodes = await fetch_child_nodes_from_proxy(
+            proxy, request.app.state.backend_authorization_header
+        )
         proxy["nodes"] = child_nodes
         return {"status": "success", "nodes": child_nodes}
     except HTTPException:
@@ -570,13 +662,15 @@ async def proxy_request_by_name(request: Request, node_name: str, path: str):
 )
 async def proxy_request(
     request: Request, target_host: str, target_port_or_socket: str | int, path: str
-):
+) -> PlainTextResponse:
     """Proxy requests to the specified target host and port or socket path.
 
     For security, non-socket targets must match a host/port already
     registered in :data:`_node_registry`; this prevents the endpoint
     from being used as an open relay (SSRF).  Socket paths are
-    accepted as-is because they are local UDS endpoints.
+    accepted as-is because they are local UDS endpoints. When frontend
+    authentication is enabled, the caller's credential is removed and an
+    independently configured backend credential is added instead.
     """
     target_port_or_socket = unquote(str(target_port_or_socket))
     # Check if target_port_or_socket is a socket path (contains '/')
@@ -604,8 +698,14 @@ async def proxy_request(
         target_url = f"http://{safe_host}:{safe_port}/{path}"
         transport = None  # Use default transport
 
+    backend_authorization_header = request.app.state.backend_authorization_header
     headers = {}
     for key, value in request.headers.items():
+        if key.lower() == "authorization" and (
+            request.app.state.http_authentication.enabled
+            or backend_authorization_header is not None
+        ):
+            continue
         if key.lower() in [
             "host",
             "content-length",
@@ -620,6 +720,9 @@ async def proxy_request(
         ]:
             continue
         headers[key] = value
+
+    if backend_authorization_header is not None:
+        headers["Authorization"] = backend_authorization_header
 
     body = await request.body()
 
@@ -719,11 +822,15 @@ async def stop_heartbeat_api():
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-async def load_nodes_from_supplier(node_supplier_url: str | None = None) -> bool:
+async def load_nodes_from_supplier(
+    node_supplier_url: str | None = None,
+    backend_authorization_header: str | None = None,
+) -> bool:
     """Load node information from node supplier.
 
     Args:
         node_supplier_url: Discovery service URL, e.g. ``/lmcache_infos``.
+        backend_authorization_header: Optional Bearer value for discovered nodes.
 
     Returns:
         ``True`` when a non-empty node list was retrieved and stored.
@@ -732,7 +839,9 @@ async def load_nodes_from_supplier(node_supplier_url: str | None = None) -> bool
         return False
 
     print(f"Fetching nodes from supplier: {node_supplier_url}")
-    nodes = await fetch_nodes_from_supplier(node_supplier_url)
+    nodes = await fetch_nodes_from_supplier(
+        node_supplier_url, backend_authorization_header
+    )
     if nodes:
         _node_registry.replace(nodes)
         print(f"Loaded {len(target_nodes)} proxy nodes from supplier")
@@ -747,13 +856,17 @@ async def load_nodes_from_supplier(node_supplier_url: str | None = None) -> bool
         return False
 
 
-async def initialize_nodes(node_supplier_url: str | None = None) -> None:
+async def initialize_nodes(
+    node_supplier_url: str | None = None,
+    backend_authorization_header: str | None = None,
+) -> None:
     """Initialize node configuration from CLI args or supplier URL.
 
     Args:
         node_supplier_url: Optional discovery service URL.  When set,
             nodes are loaded via :func:`load_nodes_from_supplier`.
             Otherwise falls back to ``args.nodes`` / ``args.config``.
+        backend_authorization_header: Optional Bearer value for discovered nodes.
     """
     global args
 
@@ -761,7 +874,7 @@ async def initialize_nodes(node_supplier_url: str | None = None) -> None:
         raise ValueError("args is not initialized")
 
     if node_supplier_url:
-        await load_nodes_from_supplier(node_supplier_url)
+        await load_nodes_from_supplier(node_supplier_url, backend_authorization_header)
     elif args.nodes:
         try:
             nodes = json.loads(args.nodes)
@@ -792,7 +905,9 @@ _supplier_last_refresh: float = 0.0
 _supplier_refresh_lock = asyncio.Lock()
 
 
-async def _maybe_refresh_from_supplier(node_supplier_url: str) -> None:
+async def _maybe_refresh_from_supplier(
+    node_supplier_url: str, backend_authorization_header: str | None
+) -> None:
     """Refresh the node registry from supplier, at most once per interval.
 
     The first caller within the interval performs the refresh; other
@@ -809,20 +924,24 @@ async def _maybe_refresh_from_supplier(node_supplier_url: str) -> None:
         now = time.monotonic()
         if now - _supplier_last_refresh < _SUPPLIER_REFRESH_INTERVAL_SEC:
             return
-        await initialize_nodes(node_supplier_url)
+        await initialize_nodes(node_supplier_url, backend_authorization_header)
         _supplier_last_refresh = time.monotonic()
 
 
 @router.get("/")
-async def serve_frontend():
+async def serve_frontend(request: Request) -> FileResponse:
     """Return frontend homepage.
 
     When a node supplier URL is configured, trigger a throttled
     background-style refresh so opening the homepage repeatedly does
     not hammer the supplier or every proxy's ``/api/nodes``.
     """
-    if args.node_supplier_url:
-        await _maybe_refresh_from_supplier(args.node_supplier_url)
+    node_supplier_url = None if args is None else args.node_supplier_url
+    if node_supplier_url:
+        await _maybe_refresh_from_supplier(
+            node_supplier_url,
+            request.app.state.backend_authorization_header,
+        )
 
     try:
         # Use package resource path
@@ -834,8 +953,16 @@ async def serve_frontend():
 
 
 # Helper function to fetch metrics from a single node
-async def _fetch_node_metrics(node):
-    """Fetch metrics from a single node"""
+async def _fetch_node_metrics(node: dict, authorization_header: str | None) -> str:
+    """Fetch Prometheus metrics from one node.
+
+    Args:
+        node: Node dictionary containing name, host, and port.
+        authorization_header: Optional Bearer value for the node request.
+
+    Returns:
+        Metrics text, or a Prometheus comment describing the failure.
+    """
     try:
         # Check if port is a socket path
         is_socket_path = "/" in node["port"]
@@ -846,14 +973,18 @@ async def _fetch_node_metrics(node):
             # Use localhost as host
             url = "http://localhost/metrics"
             async with httpx.AsyncClient(transport=transport, timeout=5.0) as client:
-                response = await client.get(url)
+                response = await client.get(
+                    url, headers=_authorization_headers(authorization_header)
+                )
                 response.raise_for_status()
                 return response.text
         else:
             # Build URL for regular port
             url = f"http://{node['host']}:{node['port']}/metrics"
             async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(url)
+                response = await client.get(
+                    url, headers=_authorization_headers(authorization_header)
+                )
                 response.raise_for_status()
                 return response.text
     except Exception as e:
@@ -861,7 +992,7 @@ async def _fetch_node_metrics(node):
 
 
 @router.get("/metrics")
-async def aggregated_metrics():
+async def aggregated_metrics(request: Request) -> PlainTextResponse:
     """Aggregate /metrics from all leaf (child) nodes across every proxy.
 
     Previously only nodes under the ``local_proxy`` entry were
@@ -891,7 +1022,10 @@ async def aggregated_metrics():
         )
 
     metrics_results = await asyncio.gather(
-        *[_fetch_node_metrics(node) for node in nodes]
+        *[
+            _fetch_node_metrics(node, request.app.state.backend_authorization_header)
+            for node in nodes
+        ]
     )
 
     # Combine all metrics with node name as comment header
@@ -907,11 +1041,29 @@ async def aggregated_metrics():
     return PlainTextResponse(aggregated)
 
 
-def create_app():
-    """Create and configure FastAPI application"""
+def create_app(
+    http_authentication: APIKeyVerifier | None = None,
+    backend_authorization_header: str | None = None,
+) -> FastAPI:
+    """Create and configure the frontend FastAPI application.
+
+    Args:
+        http_authentication: API keys accepted from frontend callers.
+        backend_authorization_header: Bearer value sent to backend HTTP servers.
+
+    Returns:
+        Configured frontend application.
+    """
     app = FastAPI(
         title="Flexible Proxy Server",
         description="HTTP proxy service supporting specified target hosts and ports",
+    )
+    app.state.http_authentication = http_authentication or APIKeyVerifier()
+    app.state.backend_authorization_header = backend_authorization_header
+    app.add_middleware(
+        HTTPBearerAuthenticationMiddleware,
+        public_paths=PUBLIC_FRONTEND_PATHS,
+        public_path_prefixes=PUBLIC_FRONTEND_PATH_PREFIXES,
     )
     app.include_router(router)
 
@@ -927,7 +1079,8 @@ def create_app():
     return app
 
 
-def main():
+def main() -> None:
+    """Parse frontend options, initialize nodes, and run the dashboard."""
     global args
     parser = argparse.ArgumentParser(description="LMCache Cluster Monitoring Tool")
     parser.add_argument(
@@ -995,13 +1148,36 @@ def main():
         default=False,
         help="Disable HTTP server startup (heartbeat still runs)",
     )
+    parser.add_argument(
+        "--http-api-key-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Read an accepted frontend HTTP bearer key from PATH. Repeat to "
+        "accept multiple keys during rotation.",
+    )
+    parser.add_argument(
+        "--backend-http-api-key-file",
+        default=None,
+        metavar="PATH",
+        help="Read the bearer key sent to backend LMCache HTTP servers from PATH.",
+    )
 
     args = parser.parse_args()
 
-    # Initialize node configuration
-    asyncio.run(initialize_nodes(args.node_supplier_url))
+    http_authentication = APIKeyVerifier.from_named_sources(
+        args.http_api_key_file,
+        api_key_env_var=FRONTEND_API_KEY_ENV_VAR,
+        api_key_file_env_var=FRONTEND_API_KEY_FILE_ENV_VAR,
+    )
+    backend_authorization_header = _load_backend_authorization(
+        args.backend_http_api_key_file
+    )
 
-    app = create_app()
+    # Initialize node configuration
+    asyncio.run(initialize_nodes(args.node_supplier_url, backend_authorization_header))
+
+    app = create_app(http_authentication, backend_authorization_header)
     print(f"Monitoring service running at http://{args.host}:{args.port}")
     print(f"Node management: http://{args.host}:{args.port}/static/index.html")
 
