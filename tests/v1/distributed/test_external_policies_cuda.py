@@ -29,7 +29,9 @@ pytestmark = [pytest.mark.cuda, pytest.mark.no_shared_allocator]
 
 @pytest.mark.parametrize("store_class", ["ExternalStore", "ExternalStoreAll"])
 def test_external_selector_cuda_fs_round_trip(
-    external_package: str, tmp_path: Path, store_class: str
+    external_package: str,  # noqa: F811 - shared pytest fixture imported above
+    tmp_path: Path,
+    store_class: str,
 ) -> None:
     """GPU data stays usable when L2 is suppressed or reloaded from real files."""
     if not torch.cuda.is_available():
