@@ -377,6 +377,7 @@ class L1Manager(L1ManagerInterface):
         self,
         keys: list[ObjectKey],
         read_locks: int = 1,
+        consumed: bool = True,
     ) -> dict[ObjectKey, L1Error]:
         """Finish read access for the given keys.
 
@@ -391,6 +392,12 @@ class L1Manager(L1ManagerInterface):
                 default); the reservation owner releasing the
                 whole reservation passes the ``reserve_read``
                 total.
+            consumed: Whether the caller actually read the objects.
+                Pass False when releasing a reservation whose data
+                was never read (e.g. lookup locks freed because the
+                engine already holds those chunks). Lock handling is
+                identical; the flag is only reported on the
+                ``L1_READ_FINISHED`` event so read metrics can skip it.
 
         Returns:
             A dictionary mapping each object key to an
@@ -449,7 +456,11 @@ class L1Manager(L1ManagerInterface):
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_READ_FINISHED,
-                metadata={"l1_tag": self._config.tag, "keys": successful_keys},
+                metadata={
+                    "l1_tag": self._config.tag,
+                    "keys": successful_keys,
+                    "consumed": consumed,
+                },
             )
         )
         self._event_bus.publish(

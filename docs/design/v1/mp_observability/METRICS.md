@@ -78,7 +78,7 @@ datapoints and are orthogonal to these Resource attributes.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l1_read` | `lmcache_mp_l1_read_chunks_total` | Counter (attr: `cache_salt`) | `L1_READ_FINISHED` | `+len(keys)` per `cache_salt` |
+| `lmcache_mp.l1_read` | `lmcache_mp_l1_read_chunks_total` | Counter (attr: `cache_salt`) | `L1_READ_FINISHED` | `+len(keys)` per `cache_salt`; skipped when `consumed` is False |
 
 **What it answers:** How many chunks are being read from L1?
 

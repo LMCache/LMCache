@@ -65,6 +65,8 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.eviction import L1EvictionPolicy
 from lmcache.v1.distributed.eviction_policy.lru import LRUEvictionPolicy
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 try:
@@ -637,6 +639,47 @@ class TestFinishRead:
         assert result[key] == L1Error.KEY_NOT_EXIST
 
         manager.close()
+
+    def test_finish_read_reports_whether_data_was_consumed(
+        self, basic_l1_config, basic_layout
+    ):
+        """consumed=False releases the lock exactly like a normal finish_read
+        and is reported on the L1_READ_FINISHED event."""
+        bus = init_event_bus(EventBusConfig(enabled=True, max_queue_size=1000))
+        events: list[Event] = []
+        bus.subscribe(EventType.L1_READ_FINISHED, events.append)
+        bus.start()
+        manager = L1Manager(basic_l1_config)
+        try:
+            read_key = make_object_key(1)
+            released_key = make_object_key(2)
+            keys = [read_key, released_key]
+            manager.reserve_write(keys, [False, False], basic_layout)
+            manager.finish_write(keys)
+            manager.reserve_read(keys)
+
+            assert manager.finish_read([read_key])[read_key] == L1Error.SUCCESS
+            result = manager.finish_read([released_key], consumed=False)
+            assert result[released_key] == L1Error.SUCCESS
+            # The lock is gone in both cases.
+            for key in keys:
+                assert manager.finish_read([key])[key] == L1Error.KEY_IN_WRONG_STATE
+
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                if sum(1 for e in events if e.metadata["keys"]) >= 2:
+                    break
+                time.sleep(0.01)
+            consumed_by_key = {
+                key: e.metadata["consumed"]
+                for e in events
+                for key in e.metadata["keys"]
+            }
+            assert consumed_by_key == {read_key: True, released_key: False}
+        finally:
+            manager.close()
+            bus.stop()
+            init_event_bus(EventBusConfig(enabled=False))
 
     def test_finish_read_temporary_object_deleted_when_count_zero(
         self, basic_l1_config, basic_layout
