@@ -94,7 +94,7 @@ def read_requests(
                 timestamp = record["timestamp"]
                 if (
                     type(timestamp) not in (int, float)
-                    or not math.isfinite(timestamp)
+                    or (type(timestamp) is float and not math.isfinite(timestamp))
                     or timestamp < previous_timestamp
                 ):
                     raise ValueError("timestamps must be finite and nondecreasing")
@@ -150,10 +150,8 @@ class HistoricalAdmission:
 
     def __init__(self, max_keys: int, max_request_gap: int) -> None:
         """Set positive history bounds; allocate no workers or I/O resources."""
-        if max_keys < 1 or max_request_gap < 1:
-            raise ValueError("history bounds must be positive")
-        self._max_keys = max_keys
-        self._max_request_gap = max_request_gap
+        self._max_keys = _integer(max_keys, "max_keys", 1)
+        self._max_request_gap = _integer(max_request_gap, "max_request_gap", 1)
         self._last_seen: OrderedDict[int, int] = OrderedDict()
 
     def select_prefix(self, blocks: tuple[int, ...], request_index: int) -> int:
@@ -235,8 +233,8 @@ def evaluate(
     The unlimited-capacity result is an optimistic reuse-work ceiling, NOT a
     finite-capacity optimum, a goodput bound, or evidence of serving benefit.
     """
-    if capacity_chunks < 1 or evaluation_start < 0:
-        raise ValueError("capacity must be positive and evaluation_start nonnegative")
+    capacity_chunks = _integer(capacity_chunks, "capacity_chunks", 1)
+    evaluation_start = _integer(evaluation_start, "evaluation_start")
     history = HistoricalAdmission(history_keys, max_request_gap)
     baseline = LRUCacheFast(capacity_chunks)
     historical = LRUCacheFast(capacity_chunks)

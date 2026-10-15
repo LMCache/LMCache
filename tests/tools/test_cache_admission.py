@@ -3,6 +3,7 @@
 
 # Standard
 from pathlib import Path
+from typing import cast
 import hashlib
 import itertools
 import json
@@ -99,6 +100,60 @@ def test_training_window_is_not_scored(tmp_path: Path) -> None:
     assert report["input_tokens"] == 1024
     assert report["modes"]["historical"]["hit_tokens"] == 1024
     assert report["modes"]["historical"]["written_blocks"] == 0
+
+
+def test_history_refresh_survives_new_key_pressure(tmp_path: Path) -> None:
+    history = HistoricalAdmission(max_keys=2, max_request_gap=10)
+    history.observe((1, 2), 0)
+    history.observe((1,), 1)
+    history.observe((3,), 2)
+    assert history.select_prefix((1,), 3) == 1
+    assert history.select_prefix((2,), 3) == 0
+    path = tmp_path / "trace.jsonl"
+    digest = write_trace(path, [request([block]) for block in (1, 2, 1, 3, 3, 1, 1)])
+    report = evaluate(path, digest, 1, 2, 10)
+    assert report["modes"]["historical"]["hit_tokens"] == 512
+    assert report["modes"]["historical"]["written_blocks"] == 3
+    assert report["modes"]["lru"]["hit_tokens"] == 1024
+
+
+def test_finite_large_integer_timestamps_do_not_overflow(tmp_path: Path) -> None:
+    path = tmp_path / "trace.jsonl"
+    rows = [dict(request([1]), timestamp=10**400 + offset) for offset in range(2)]
+    completed = run_cli(path, write_trace(path, rows))
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["modes"]["lru"]["hit_tokens"] == 512
+
+
+@pytest.mark.parametrize("value", [True, False, 1.5, float("nan"), float("inf")])
+@pytest.mark.parametrize(
+    "field", ["capacity_chunks", "history_keys", "max_request_gap", "evaluation_start"]
+)
+def test_public_evaluate_rejects_noninteger_settings(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    path = tmp_path / "trace.jsonl"
+    digest = write_trace(path, [request([1])])
+    settings = {
+        "capacity_chunks": 1,
+        "history_keys": 2,
+        "max_request_gap": 10,
+        "evaluation_start": 0,
+    }
+    settings[field] = cast(int, value)
+    with pytest.raises(ValueError, match="integer"):
+        evaluate(path, digest, **settings)
+
+
+@pytest.mark.parametrize("value", [True, False, 1.5, float("nan"), float("inf")])
+@pytest.mark.parametrize("field", ["max_keys", "max_request_gap"])
+def test_public_history_constructor_rejects_noninteger_settings(
+    field: str, value: object
+) -> None:
+    settings = {"max_keys": 2, "max_request_gap": 10}
+    settings[field] = cast(int, value)
+    with pytest.raises(ValueError, match="integer"):
+        HistoricalAdmission(**settings)
 
 
 def test_baseline_matches_existing_simulator_and_work_ceiling(tmp_path: Path) -> None:
