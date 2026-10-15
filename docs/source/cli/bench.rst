@@ -1131,6 +1131,9 @@ Options
    * - ``--interval SECS``
      - ``0.5``
      - Delay between successive sub-passes.
+   * - ``--concurrency N``
+     - ``1``
+     - Number of clients sending requests at the same time (see below).
    * - ``--kvcache-shape-spec SPEC``
      - ``(2,1024,16,8,128):float16:32``
      - KV cache shape spec (see below).
@@ -1292,6 +1295,32 @@ See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
 
 
+Concurrent clients
+~~~~~~~~~~~~~~~~~~
+
+With the default ``--concurrency 1`` a single client sends one request at a
+time, so the run measures per-request latency but never queues work on the
+server. ``--concurrency N`` runs ``N`` clients in parallel, each with its own
+connection and KV tensors, and its Workers registered under their own
+``instance_id`` block. Sequences are dealt round-robin (client ``k`` runs
+``start + k``, ``start + k + N``, ...), so no two clients touch the same
+keys and the cold/warm checks stay valid.
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:5555 --mode cpu \
+       --start 0 --end 400 --interval 0 --concurrency 8
+
+The summary adds ``Concurrency``, ``Elapsed (s)``, and ``Requests / s``.
+Use ``--interval 0`` when comparing throughput, otherwise the delay
+dominates. ``Requests / s`` counts cold/warm sequence pairs, matching
+``Total requests``.
+
+Size the server's L1 to hold the whole run. If stores arrive faster than
+the eviction controller frees memory, the server drops them, and the
+affected warm lookups miss and fail their checks.
+
 Profiling the server
 ~~~~~~~~~~~~~~~~~~~~~
 
@@ -1335,8 +1364,9 @@ After the run completes (or is interrupted with ``Ctrl-C``), a structured
 metrics summary is printed. The summary includes:
 
 * **Configuration** -- RPC URL, mode, transfer mode, tokens per request,
-  interval.
-* **Results** -- total requests, checksum OK / FAIL counts, pass rate.
+  interval, concurrency.
+* **Results** -- total requests, checksum OK / FAIL counts, pass rate,
+  elapsed time, requests per second.
 * **Latency sections** -- per-operation latency statistics (count, mean,
   min, max, p50, p99) for cold lookup, cold store, warm lookup, and warm
   retrieve.
