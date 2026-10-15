@@ -382,7 +382,10 @@ def create_prefetch_policy(name: str) -> PrefetchPolicy:
     """
     if name not in _PREFETCH_POLICY_REGISTRY:
         if ":" in name:
-            return load_external_policy(name, PrefetchPolicy)
+            return load_external_policy(
+                name,
+                PrefetchPolicy,  # type: ignore[type-abstract]
+            )
         known = ", ".join(sorted(_PREFETCH_POLICY_REGISTRY)) or "(none)"
         raise ValueError(
             f"Unknown prefetch policy {name!r}. Known: {known}, "

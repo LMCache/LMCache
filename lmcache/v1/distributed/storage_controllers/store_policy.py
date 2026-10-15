@@ -113,7 +113,10 @@ def create_store_policy(name: str) -> StorePolicy:
     """
     if name not in _STORE_POLICY_REGISTRY:
         if ":" in name:
-            return load_external_policy(name, StorePolicy)
+            return load_external_policy(
+                name,
+                StorePolicy,  # type: ignore[type-abstract]
+            )
         known = ", ".join(sorted(_STORE_POLICY_REGISTRY)) or "(none)"
         raise ValueError(
             f"Unknown store policy {name!r}. Known: {known}, or 'package.module:Class'"
