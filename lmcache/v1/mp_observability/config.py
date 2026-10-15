@@ -139,6 +139,12 @@ def add_observability_args(
         help="Disable metrics subscribers (OTel counters).",
     )
     group.add_argument(
+        "--disable-prometheus",
+        dest="disable_metrics",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    group.add_argument(
         "--disable-grpc-metrics",
         action="store_true",
         default=False,
