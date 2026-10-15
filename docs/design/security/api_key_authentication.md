@@ -24,3 +24,8 @@ The MP HTTP server uses the common loader and verifier through
 variables, public `/` and `/healthcheck` routes, and disabled-auth behavior
 remain unchanged. Key-file validation uses common error messages, and token
 comparisons use UTF-8 bytes so non-ASCII input does not raise a comparison error.
+
+`lmcache.v1.multiprocess.transport.auth` supplies request-transport key loading
+for ZMQ and gRPC adapters. Accepted server keys are cumulative, while a client
+sends one explicit key or one environment-supplied key. This helper does not
+enable authentication on any transport by itself.
