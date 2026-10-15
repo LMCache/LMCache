@@ -80,7 +80,7 @@ multiprocess (MP) mode.
 │ │ TransferContext        │  │ TransferContext              │    │
 │ │                        │  │                              │    │
 │ │ • host-side workers    │  │ • IPC-capable device workers │    │
-│ │ • Pickle / SHM backend │  │ • SHM wrappers (host+device) │    │
+│ │ • Inline / SHM backend │  │ • SHM wrappers (host+device) │    │
 │ │ • gather/scatter copy  │  │ • zero-copy handle transfer  │    │
 │ └────────────────────────┘  └──────────────────────────────┘    │
 │                                                                 │
@@ -209,7 +209,7 @@ supported accelerators (CUDA, MUSA, XPU, HPU, Neuron) is available. In that case
 
 The stub is intended for L1-adapter-only flows (e.g., end-to-end MP
 server smoke tests on a CPU-only host) and CLI loading without torch. In
-MP mode, CPU workers use `EngineDrivenTransferContext` (Pickle or SHM
+MP mode, CPU workers use `EngineDrivenTransferContext` (inline or SHM
 backend) for KV transfer; there is no GPU-side connector involved.
 
 `normalize_kv_and_discover_format` also hardcodes `kv_layout = "HND"`

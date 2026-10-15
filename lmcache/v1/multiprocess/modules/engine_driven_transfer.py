@@ -407,7 +407,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             instance_id: Worker instance identifier.
 
         Returns:
-            PrepareStoreResponse with empty slots for pickle mode.
+            PrepareStoreResponse with empty slots for inline mode.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
         response = strategy.prepare_store(
@@ -436,7 +436,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         Args:
             key: Cache key for the token range to store.
             instance_id: Worker instance identifier.
-            cpu_data: Pickled list of CPU tensors produced by the worker.
+            cpu_data: Typed inline CPU tensor payload produced by the worker.
 
         Returns:
             ``True`` when all reserved objects are written, otherwise ``False``.
@@ -512,8 +512,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """Finalize a retrieve operation.
 
         Args:
-            key: Cache key (unused for pickle).
-            instance_id: Worker instance identifier (unused for pickle).
+            key: Cache key (unused for inline transfer).
+            instance_id: Worker instance identifier (unused for inline transfer).
 
         Returns:
             Always ``True``.

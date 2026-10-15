@@ -194,7 +194,8 @@ Supports two run modes via ``--mode``:
   (LMCache-driven handle transfer path).
 - **``cpu``** -- allocates regular CPU tensors and uses the engine-driven
   worker-side gather/scatter path by default. Its ``TransferContext`` uses
-  server-owned SHM staging when available and falls back to pickle transport.
+  server-owned SHM staging when available and falls back to typed inline
+  tensor transport.
   To migrate the tensors to POSIX SHM for the handle path, add
   ``--transfer-mode lmcache_driven``.
 

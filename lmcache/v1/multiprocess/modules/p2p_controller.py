@@ -150,6 +150,10 @@ class _P2PLookupJob:
     """ The same keys as submitted to the storage manager, one row per
     object group; the status result is one bitmap per row """
 
+    submitted_at: float
+    """ ``time.monotonic()`` when the lookup was submitted; a job older than
+    the lookup timeout is treated as abandoned by its requester """
+
 
 class P2PController(DiscoverableModule):
     """Serves lookup requests from peers and maintains one L2 adapter per peer.
@@ -196,6 +200,8 @@ class P2PController(DiscoverableModule):
         self._next_task_id = 0
         self._jobs: dict[int, _P2PLookupJob] = {}
         self._job_lock = threading.Lock()
+        # Last abandoned-job scan time; unlocked, as a race only adds a scan.
+        self._last_drop_time = time.monotonic()
 
         # Orchestration state (guarded by _orch_lock; written only by the poll
         # thread, read by report_status).
@@ -297,6 +303,11 @@ class P2PController(DiscoverableModule):
         Returns:
             A unique task id (int) for querying the lookup status later
         """
+        # Scan at most once per lookup timeout; abandoned jobs live <= 2 timeouts.
+        now = time.monotonic()
+        if now - self._last_drop_time >= self._p2p_config.lookup_timeout:
+            self._last_drop_time = now
+            self._drop_abandoned_jobs(now)
         with self._job_lock:
             task_id = self._next_task_id
             self._next_task_id += 1
@@ -321,7 +332,10 @@ class P2PController(DiscoverableModule):
 
         with self._job_lock:
             self._jobs[task_id] = _P2PLookupJob(
-                handle=handle, keys=keys, key_groups=key_groups
+                handle=handle,
+                keys=keys,
+                key_groups=key_groups,
+                submitted_at=time.monotonic(),
             )
 
         logger.debug(
@@ -392,6 +406,39 @@ class P2PController(DiscoverableModule):
     # -----------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------
+
+    def _drop_abandoned_jobs(self, now: float) -> None:
+        """Drop finished jobs older than the lookup timeout, draining results.
+
+        Args:
+            now: ``time.monotonic()`` at the call; jobs submitted more than
+                one lookup timeout before it are abandoned.
+
+        Note:
+            Read locks are left to the L1 read TTL; unlocking after expiry
+            could release a later reader's lock.
+        """
+        cutoff = now - self._p2p_config.lookup_timeout
+        with self._job_lock:
+            stale = [
+                task_id
+                for task_id, job in self._jobs.items()
+                if job.submitted_at < cutoff
+            ]
+            jobs = [(task_id, self._jobs.pop(task_id)) for task_id in stale]
+        unfinished: list[tuple[int, _P2PLookupJob]] = []
+        for task_id, job in jobs:
+            if self._ctx.storage_manager.query_prefetch_status(job.handle) is None:
+                unfinished.append((task_id, job))
+        if jobs:
+            logger.debug(
+                "Dropped %d abandoned P2P lookup jobs (%d still running)",
+                len(jobs) - len(unfinished),
+                len(unfinished),
+            )
+        if unfinished:
+            with self._job_lock:
+                self._jobs.update(unfinished)
 
     def _build_addresses(
         self,
