@@ -639,8 +639,13 @@ its text, score.
 per stack — and diff by `sample_id`. An unparsed sample's `f1` is `null`, not
 `0.0`, so a diff can pair by id and skip what either run failed to score. The
 files are comparable only when their `run_fingerprint` values match; the
-fingerprint covers dataset, sample ids, budget, template kwargs, model, and
-alignment unit.
+fingerprint covers the selected samples' ids, rendered prompts and gold
+answers, together with the dataset path, budget, template kwargs, model,
+seed and alignment unit. Rewriting a dataset at the same path must change
+the fingerprint when a selected prompt or reference changes. Records beyond
+the sample limit and output-file locations do not affect it. Fingerprints
+from versions that covered only sample ids are not comparable with these
+content-based fingerprints.
 
 Start each run from a clean cache state — restart the server, or
 `lmcache kvcache clear --url <mp-url>` — or a previous run's composites are
