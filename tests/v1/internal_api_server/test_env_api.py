@@ -15,6 +15,8 @@ def test_http_authentication_environment_is_redacted(
 ) -> None:
     """The environment endpoint never returns HTTP authentication secrets."""
     monkeypatch.setenv("LMCACHE_HTTP_API_KEY", "top-secret")
+    monkeypatch.setenv("LMCACHE_API_KEY", "shared-secret")
+    monkeypatch.setenv("LMCACHE_API_KEY_FILE", "/run/secrets/shared-key")
     monkeypatch.setenv("LMCACHE_HTTP_API_KEY_FILE", "/run/secrets/http-key")
     monkeypatch.setenv("LMCACHE_SAFE_TEST_VALUE", "visible")
     app = FastAPI()
@@ -26,5 +28,7 @@ def test_http_authentication_environment_is_redacted(
     assert response.status_code == 200
     environment = response.json()
     assert environment["LMCACHE_HTTP_API_KEY"] == "<redacted>"
+    assert environment["LMCACHE_API_KEY"] == "<redacted>"
+    assert environment["LMCACHE_API_KEY_FILE"] == "/run/secrets/shared-key"
     assert environment["LMCACHE_HTTP_API_KEY_FILE"] == "/run/secrets/http-key"
     assert environment["LMCACHE_SAFE_TEST_VALUE"] == "visible"
