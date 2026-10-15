@@ -128,6 +128,13 @@ Reset is offline: stop every client, stop the orchestrator, remove
 `<state-dir>/<region-id>.marker`, start
 both again. A clean stop with no clients deletes the marker itself.
 
+The marker's hostname and PID are local liveness hints, not Kubernetes node
+identity or client discovery. A replacement pod with a different hostname and
+the same state directory is refused while the old marker remains. A stable
+hostname alone cannot establish that two processes share a PID namespace.
+Cross-pod recovery requires the offline reset above; automatic ownership
+transfer and fencing are outside this milestone.
+
 ```bash
 lmcache memory --region-id pool-a --capacity-gb 512 --alignment 2M \
     --visibility-mode software_fenced --listen 0.0.0.0:7700 \
