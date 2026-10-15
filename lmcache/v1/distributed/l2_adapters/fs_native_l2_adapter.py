@@ -32,6 +32,12 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 
 logger = init_logger(__name__)
 
+# Enough reader threads for the default 1536 MiB budget to bind at 6 MiB
+# objects (chunk_size 256), and for small objects to reach an array's
+# ceiling, which takes a few hundred reads in flight.  Idle readers hold no
+# file descriptor.
+DEFAULT_NUM_READ_WORKERS = 256
+
 
 class FSNativeL2AdapterConfig(L2AdapterConfigBase):
     """
@@ -44,9 +50,9 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
     - relative_tmp_dir: relative sub-dir for temp files.
     - use_odirect: bypass page cache via O_DIRECT.
     - num_read_workers: threads dedicated to executing reads, and so the
-      maximum reads in flight.  0 keeps the legacy path, where reads run
-      on the worker threads and the depth against the device therefore
-      equals num_workers.
+      maximum reads in flight (default 256).  0 keeps the legacy path,
+      where reads run on the worker threads and the depth against the
+      device therefore equals num_workers.
     - read_max_bytes_in_flight: bytes the connector may keep outstanding
       against the device.  0 selects 1536 MiB when num_read_workers is
       positive; ignored otherwise.
@@ -69,7 +75,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         use_odirect: bool = False,
         read_ahead_size: Optional[int] = None,
         max_capacity_gb: float = 0,
-        num_read_workers: int = 0,
+        num_read_workers: int = DEFAULT_NUM_READ_WORKERS,
         read_max_bytes_in_flight: int = 0,
     ):
         self.base_path = base_path
@@ -118,7 +124,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
                 base_path,
             )
 
-        num_read_workers = d.get("num_read_workers", 0)
+        num_read_workers = d.get("num_read_workers", DEFAULT_NUM_READ_WORKERS)
         if not isinstance(num_read_workers, int) or num_read_workers < 0:
             raise ValueError("num_read_workers must be a non-negative integer")
 
@@ -128,6 +134,12 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             or read_max_bytes_in_flight < 0
         ):
             raise ValueError("read_max_bytes_in_flight must be a non-negative integer")
+        if num_read_workers == 0 and read_max_bytes_in_flight > 0:
+            logger.warning(
+                "fs_native: read_max_bytes_in_flight=%d is ignored because "
+                "num_read_workers=0 selects the legacy read path.",
+                read_max_bytes_in_flight,
+            )
 
         return cls(
             base_path=base_path,
@@ -154,7 +166,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "via O_DIRECT (default false)\n"
             "- num_read_workers (int): threads dedicated to "
             "reads, decoupling device queue depth from "
-            "num_workers (default 0 = legacy path)\n"
+            "num_workers (default 256, 0 = legacy path)\n"
             "- read_max_bytes_in_flight (int): bytes kept "
             "outstanding against the device (default 0 = "
             "1536 MiB when num_read_workers > 0)\n"

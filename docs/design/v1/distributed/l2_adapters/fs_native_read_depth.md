@@ -94,13 +94,13 @@ Three properties bound what the budget can do:
 
 | field | meaning |
 |---|---|
-| `num_read_workers` | reader threads, and so the maximum reads in flight; `0` keeps the legacy path where depth equals `num_workers` |
+| `num_read_workers` | reader threads, and so the maximum reads in flight; default `256`; `0` keeps the legacy path where depth equals `num_workers` |
 | `read_max_bytes_in_flight` | bytes outstanding against the device; `0` selects the 1536 MiB default when `num_read_workers` is positive |
 
 The budget bounds dispatched bytes connector-wide, but the reader threads
 are what hold reads against the device, so at 6 MiB objects the full
-1536 MiB default needs `num_read_workers=256` before the budget rather than the
-thread count binds. At `num_read_workers=64` the pool holds 384 MiB, the same as
+1536 MiB budget binds only from 256 readers, which is why that is the
+default. At `num_read_workers=64` the pool holds 384 MiB, the same as
 `num_workers=64` does on the legacy path.
 
 ## Where the fix lives

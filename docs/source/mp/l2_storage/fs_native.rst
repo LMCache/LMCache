@@ -26,10 +26,10 @@ I/O queue depth on a single Python thread.
   for reads that use ``O_DIRECT`` because direct I/O bypasses the page cache.
 - ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB
   for client-side usage tracking.  Default ``0`` disables tracking.
-- ``num_read_workers`` (int, default ``0``): Threads dedicated to reads, and
-  so the maximum reads in flight.  ``0`` keeps the legacy path, where the
-  depth equals ``num_workers``, usually far below what an array of several
-  devices needs.  Each reader thread holds one file open at a time.
+- ``num_read_workers`` (int, default ``256``): Threads dedicated to reads,
+  and so the maximum reads in flight.  ``0`` keeps the legacy path, where
+  the depth equals ``num_workers``, usually far below what an array of
+  several devices needs.  Each reader thread holds one file open at a time.
 - ``read_max_bytes_in_flight`` (int, default ``0``): With ``num_read_workers``
   positive, the bytes kept outstanding against the device.  ``0``
   selects 1536 MiB, chosen for its worst
