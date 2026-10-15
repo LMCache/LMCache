@@ -31,7 +31,7 @@ The alternative is a larger `num_workers`. Throughput is set by the bytes
 outstanding against the device, and an object is `chunk_size x
 bytes_per_token_per_rank`, so a count of objects means something different
 at every `chunk_size`: 64 objects is 384 MiB at `chunk_size` 256 and 12 GiB
-at 8192. Same controls as above, `read_io_depth=256` so the budget binds:
+at 8192. Same controls as above, `num_read_workers=256` so the budget binds:
 
 | reads in flight bounded by | 1.5 MiB objects | 192 MiB objects | worst case |
 |---|---|---|---|
@@ -56,7 +56,7 @@ outstanding and its cause is not established.
 The right figure is a property of the storage. What makes a default possible
 is that the cost is asymmetric: too small is expensive, too large is nearly
 free. Each column is one storage condition, normalised to the best pinned
-budget in that column; 6 MiB objects, `read_io_depth=256`, four workers:
+budget in that column; 6 MiB objects, `num_read_workers=256`, four workers:
 
 | budget | NVMe array | single NVMe | 8 ms latency | 32 ms latency |
 |---|---|---|---|---|
@@ -80,10 +80,10 @@ Three properties bound what the budget can do:
 1. **Dispatch is quantised in whole objects.** Four workers and 192 MiB
    objects cannot dispatch less than 768 MiB.
 2. **The thread pool is a separate ceiling.** Bytes in flight never exceed
-   `read_io_depth x object_size`, whatever the budget says.
+   `num_read_workers x object_size`, whatever the budget says.
 3. **A worker blocks on its own tile.** Objects are dispatched one at a
-   time as the budget has room, so a large tile keeps the depth full, but
-   a batch smaller than the depth holds only its own objects in flight:
+   time as the budget has room, so a large tile keeps every reader busy, but
+   a batch smaller than the pool holds only its own objects in flight:
    four workers and 16-object batches keep at most 64 objects in flight
    however deep the pool is. Against `num_workers=64`, which streams
    continuously, this measured between a tie and 12% behind on the same
@@ -94,13 +94,13 @@ Three properties bound what the budget can do:
 
 | field | meaning |
 |---|---|
-| `read_io_depth` | reader threads, and so the maximum reads in flight; `0` keeps the legacy path where depth equals `num_workers` |
-| `read_max_bytes_in_flight` | bytes outstanding against the device; `0` selects the 1536 MiB default when `read_io_depth` is positive |
+| `num_read_workers` | reader threads, and so the maximum reads in flight; `0` keeps the legacy path where depth equals `num_workers` |
+| `read_max_bytes_in_flight` | bytes outstanding against the device; `0` selects the 1536 MiB default when `num_read_workers` is positive |
 
 The budget bounds dispatched bytes connector-wide, but the reader threads
 are what hold reads against the device, so at 6 MiB objects the full
-1536 MiB default needs `read_io_depth=256` before the budget rather than the
-thread count binds. At `read_io_depth=64` the pool holds 384 MiB, the same as
+1536 MiB default needs `num_read_workers=256` before the budget rather than the
+thread count binds. At `num_read_workers=64` the pool holds 384 MiB, the same as
 `num_workers=64` does on the legacy path.
 
 ## Where the fix lives
@@ -110,7 +110,7 @@ overrides `do_batch_get()` to dispatch a tile's objects one at a time as the
 budget has room and wait for all of them, and `choose_num_tiles()` to keep a
 GET batch as one tile, the shape `MooncakeConnector` already uses; split
 across workers first, a 16-object batch on four workers would keep four
-reads in flight whatever the depth. `ConnectorBase` is unchanged:
+reads in flight whatever the pool size. `ConnectorBase` is unchanged:
 the cost of a reader is backend-specific, a `redis` reader would be one more
 socket and that path needs pipelining instead, and `aerospike` shares one
 client with its own thread pool.

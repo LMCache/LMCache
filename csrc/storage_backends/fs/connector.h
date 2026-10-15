@@ -21,7 +21,7 @@ namespace connector {
 // Key encoding constants — must match fs_l2_adapter.py
 static constexpr const char* TMP_EXT = ".tmp";
 
-// Bytes of reads kept outstanding against the device when read_io_depth is
+// Bytes of reads kept outstanding against the device when num_read_workers is
 // on and no explicit figure is configured.  Chosen as the value whose worst
 // case across a local array, a single NVMe and 8 / 32 ms per-read latency
 // is best; the sweep is in
@@ -45,17 +45,17 @@ struct WorkerFSConn {
 
 class FSConnector : public ConnectorBase<WorkerFSConn> {
  public:
-  // read_io_depth: reader threads, and so the maximum reads in flight.
+  // num_read_workers: reader threads, and so the maximum reads in flight.
   //   Zero keeps the legacy path, where reads run on the worker threads
   //   and the depth against the device equals num_workers.
   // read_max_bytes_in_flight: bytes kept outstanding, connector-wide.
-  //   Zero selects kDefaultReadMaxBytesInFlight when read_io_depth is
+  //   Zero selects kDefaultReadMaxBytesInFlight when num_read_workers is
   //   positive.
-  // Throws std::runtime_error if read_io_depth is negative; threads
+  // Throws std::runtime_error if num_read_workers is negative; threads
   // started before a failure are joined first.
   FSConnector(std::string base_path, int num_workers,
               std::string relative_tmp_dir = "", bool use_odirect = false,
-              size_t read_ahead_size = 0, int read_io_depth = 0,
+              size_t read_ahead_size = 0, int num_read_workers = 0,
               size_t read_max_bytes_in_flight = 0);
   ~FSConnector() override;
 
@@ -109,7 +109,7 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // soon as the byte budget has room, and wait for all of them.
   void do_batch_get_pooled(const Request& req);
 
-  void start_read_pool(int read_io_depth);
+  void start_read_pool(int num_read_workers);
   void stop_read_pool();
   void read_thread_main(WorkerFSConn& conn);
 

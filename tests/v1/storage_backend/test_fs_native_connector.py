@@ -173,7 +173,7 @@ def _aligned_pairs(
 
 
 @pytest.mark.parametrize(
-    "read_io_depth,read_max_bytes_in_flight",
+    "num_read_workers,read_max_bytes_in_flight",
     [
         (0, 0),  # legacy path: one blocking read per object on the worker
         (1, 0),  # a pool of one, so every read still queues behind the last
@@ -185,7 +185,7 @@ def _aligned_pairs(
 )
 def test_reads_return_identical_bytes(
     tmp_path: Path,
-    read_io_depth: int,
+    num_read_workers: int,
     read_max_bytes_in_flight: int,
 ) -> None:
     """Neither the pool nor the budget may change the bytes returned.
@@ -209,7 +209,7 @@ def test_reads_return_identical_bytes(
         writer.close()
 
     reader = LMCacheFSClient(
-        str(tmp_path), 2, "", True, 0, read_io_depth, read_max_bytes_in_flight
+        str(tmp_path), 2, "", True, 0, num_read_workers, read_max_bytes_in_flight
     )
     try:
         if read_max_bytes_in_flight:
@@ -282,7 +282,7 @@ def test_the_default_budget_is_used_when_none_is_configured(tmp_path: Path) -> N
     finally:
         legacy.close()
 
-    # A budget configured without read_io_depth throttles nothing, so it
+    # A budget configured without num_read_workers throttles nothing, so it
     # must not be reported as if it did.
     unused = LMCacheFSClient(str(tmp_path), 2, "", False, 0, 0, 1 << 20)
     try:
@@ -291,8 +291,8 @@ def test_the_default_budget_is_used_when_none_is_configured(tmp_path: Path) -> N
         unused.close()
 
 
-def test_negative_read_io_depth_is_rejected(tmp_path: Path) -> None:
-    """A negative depth is a configuration error, not a silent fallback."""
+def test_negative_num_read_workers_is_rejected(tmp_path: Path) -> None:
+    """A negative num_read_workers is a configuration error, not a silent fallback."""
     LMCacheFSClient = _import_fs_client()
-    with pytest.raises(RuntimeError, match="depth must be >= 0"):
+    with pytest.raises(RuntimeError, match="num_read_workers must be >= 0"):
         LMCacheFSClient(str(tmp_path), 1, "", False, 0, -1)

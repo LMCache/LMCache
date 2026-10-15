@@ -13,7 +13,7 @@ I/O queue depth on a single Python thread.
 **Optional fields:**
 
 - ``num_workers`` (int, default ``4``, > 0): Number of C++ worker threads
-  inside the connector.  With ``read_io_depth`` at ``0`` this is also the
+  inside the connector.  With ``num_read_workers`` at ``0`` this is also the
   read queue depth against the device, since each worker reads one object
   at a time.
 - ``relative_tmp_dir`` (str, default ``""``): Relative sub-directory for
@@ -26,17 +26,17 @@ I/O queue depth on a single Python thread.
   for reads that use ``O_DIRECT`` because direct I/O bypasses the page cache.
 - ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB
   for client-side usage tracking.  Default ``0`` disables tracking.
-- ``read_io_depth`` (int, default ``0``): Threads dedicated to reads, and
+- ``num_read_workers`` (int, default ``0``): Threads dedicated to reads, and
   so the maximum reads in flight.  ``0`` keeps the legacy path, where the
   depth equals ``num_workers``, usually far below what an array of several
   devices needs.  Each reader thread holds one file open at a time.
-- ``read_max_bytes_in_flight`` (int, default ``0``): With ``read_io_depth``
+- ``read_max_bytes_in_flight`` (int, default ``0``): With ``num_read_workers``
   positive, the bytes kept outstanding against the device.  ``0``
   selects 1536 MiB, chosen for its worst
   case across local and network-latency storage; a single slow device
   does better with a smaller value.  Bytes in flight also never exceed
-  ``read_io_depth`` x object size, so the depth must be large enough for
-  the budget to bind.  Sizing notes:
+  ``num_read_workers`` x object size, so ``num_read_workers`` must be
+  large enough for the budget to bind.  Sizing notes:
   ``docs/design/v1/distributed/l2_adapters/fs_native_read_depth.md``.
 
 .. important::

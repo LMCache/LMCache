@@ -74,8 +74,8 @@ static bool try_enable_odirect(int& flags, const void* buf, size_t len,
 // ---------------------------------------------------------------
 
 // No pool, no budget.  A pool with no figure gets the default.
-static size_t effective_read_budget(int depth, size_t budget) {
-  if (depth <= 0) {
+static size_t effective_read_budget(int num_read_workers, size_t budget) {
+  if (num_read_workers <= 0) {
     return 0;
   }
   return budget == 0 ? kDefaultReadMaxBytesInFlight : budget;
@@ -83,7 +83,7 @@ static size_t effective_read_budget(int depth, size_t budget) {
 
 FSConnector::FSConnector(std::string base_path, int num_workers,
                          std::string relative_tmp_dir, bool use_odirect,
-                         size_t read_ahead_size, int read_io_depth,
+                         size_t read_ahead_size, int num_read_workers,
                          size_t read_max_bytes_in_flight)
     : ConnectorBase(num_workers),
       base_path_(std::move(base_path)),
@@ -92,9 +92,9 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
       disk_block_size_(0),
       read_ahead_size_(read_ahead_size),
       read_max_bytes_in_flight_(
-          effective_read_budget(read_io_depth, read_max_bytes_in_flight)) {
-  if (read_io_depth < 0) {
-    throw std::runtime_error("read_io_depth must be >= 0");
+          effective_read_budget(num_read_workers, read_max_bytes_in_flight)) {
+  if (num_read_workers < 0) {
+    throw std::runtime_error("num_read_workers must be >= 0");
   }
 
   // Create base directory
@@ -117,7 +117,7 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
   // Readers first.  On failure join whatever started: the destructor does
   // not run for a half-built object.
   try {
-    start_read_pool(read_io_depth);
+    start_read_pool(num_read_workers);
     start_workers();  // IMPORTANT: call at END of constructor
   } catch (...) {
     close();
@@ -320,17 +320,17 @@ void FSConnector::do_batch_get_pooled(const Request& req) {
 }
 
 // Connections are built here so a failure surfaces in the constructor.
-void FSConnector::start_read_pool(int read_io_depth) {
-  if (read_io_depth <= 0) {
+void FSConnector::start_read_pool(int num_read_workers) {
+  if (num_read_workers <= 0) {
     return;
   }
-  const size_t depth = static_cast<size_t>(read_io_depth);
-  read_conns_.reserve(depth);
-  for (size_t i = 0; i < depth; ++i) {
+  const size_t num_threads = static_cast<size_t>(num_read_workers);
+  read_conns_.reserve(num_threads);
+  for (size_t i = 0; i < num_threads; ++i) {
     read_conns_.push_back(create_connection());
   }
-  read_threads_.reserve(depth);
-  for (size_t i = 0; i < depth; ++i) {
+  read_threads_.reserve(num_threads);
+  for (size_t i = 0; i < num_threads; ++i) {
     read_threads_.emplace_back(
         [this, i] { this->read_thread_main(read_conns_[i]); });
   }
@@ -357,8 +357,8 @@ void FSConnector::read_thread_main(WorkerFSConn& conn) {
   // a busy reader takes read_mu_ once per object, not twice.
   std::unique_lock<std::mutex> lk(read_mu_);
   for (;;) {
-    read_cv_.wait(
-        lk, [this] { return read_stop_ || read_queue_head_ != nullptr; });
+    read_cv_.wait(lk,
+                  [this] { return read_stop_ || read_queue_head_ != nullptr; });
     if (read_queue_head_ == nullptr) {
       return;  // the predicate admits an empty queue only on stop
     }
