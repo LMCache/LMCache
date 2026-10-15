@@ -18,6 +18,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
@@ -33,8 +34,13 @@ from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+    AUTH_ERROR_FRAME,
+    decode_authentication_frame,
     decode_operation,
+    encode_authentication_frame,
     encode_operation,
+    is_authentication_error_frame,
+    is_authentication_frame,
 )
 from lmcache.v1.platform import EventNotifier, create_event_notifier
 
@@ -303,7 +309,9 @@ class MessageQueueClient:
         request_payloads: list[Any]
         responses: queue.Queue | None = None
 
-    def __init__(self, server_url: str, context: zmq.Context):
+    def __init__(
+        self, server_url: str, context: zmq.Context, api_key: str | None = None
+    ) -> None:
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.DEALER)
@@ -311,6 +319,9 @@ class MessageQueueClient:
         self.socket.setsockopt(zmq.RECONNECT_IVL_MAX, RECONNECT_IVL_MAX_MS)
         self.monitor = self.socket.get_monitor_socket(events=zmq.EVENT_DISCONNECTED)
         self.socket.connect(server_url)
+        self._authentication_frame = (
+            encode_authentication_frame(api_key) if api_key is not None else None
+        )
 
         # Input queue
         self.input_queue: queue.Queue = queue.Queue()
@@ -330,7 +341,8 @@ class MessageQueueClient:
         try:
             while wrapped_request := self.input_queue.get_nowait():
                 if isinstance(wrapped_request, list):
-                    self.socket.send_multipart(wrapped_request)
+                    frames = self._with_authentication(wrapped_request)
+                    self.socket.send_multipart(frames)
                     if wrapped_request[-1] == b"cancel":
                         self.pending_streams.pop(
                             decode_request_uid(wrapped_request[0]), None
@@ -379,7 +391,9 @@ class MessageQueueClient:
                             rpc_spec,
                         )
                     self.socket.send_multipart(
-                        [b_request_uid, b_operation] + b_payloads
+                        self._with_authentication(
+                            [b_request_uid, b_operation] + b_payloads
+                        )
                     )
                 except Exception as exc:
                     self.pending_futures.pop(request_uid, None)
@@ -390,6 +404,12 @@ class MessageQueueClient:
                         wrapped_request.future.set_exception(exc)
         except queue.Empty:
             pass
+
+    def _with_authentication(self, frames: list[bytes]) -> list[bytes]:
+        """Prepend the configured versioned authentication frame."""
+        if self._authentication_frame is None:
+            return frames
+        return [self._authentication_frame, *frames]
 
     def process_inbound(self) -> None:
         """Process one inbound response from the server.
@@ -408,6 +428,16 @@ class MessageQueueClient:
             return
         b_request_uid, b_operation, *b_response = msg
         request_uid = msgspec_decode(b_request_uid, cls=RequestUID)
+
+        if is_authentication_error_frame(b_operation):
+            error = PermissionError("ZMQ request authentication failed")
+            if request_uid in self.pending_streams:
+                _, _, responses = self.pending_streams.pop(request_uid)
+                responses.put_nowait(error)
+            elif request_uid in self.pending_futures:
+                future, _ = self.pending_futures.pop(request_uid)
+                future.set_exception(error)
+            return
 
         if request_uid in self.pending_streams:
             stream, rpc_spec, responses = self.pending_streams[request_uid]
@@ -610,12 +640,18 @@ class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
 class MessageQueueServer(RequestServer):
     MAX_REQUESTS_PER_POLL = 64
 
-    def __init__(self, bind_url: str, context: zmq.Context) -> None:
+    def __init__(
+        self,
+        bind_url: str,
+        context: zmq.Context,
+        authentication: APIKeyVerifier | None = None,
+    ) -> None:
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
         self.socket.setsockopt(zmq.ROUTER_MANDATORY, 1)
         self.socket.bind(bind_url)
+        self.authentication = authentication or APIKeyVerifier()
         # Use a cross-platform Notifier instead of zmq PUSH/PULL sockets
         # because blocking handler callbacks run on ThreadPoolExecutor
         # threads, and zmq sockets are not thread-safe. Notifier.notify()
@@ -760,12 +796,21 @@ class MessageQueueServer(RequestServer):
                 raise ValueError("Unknown handler type")
 
     def _handle_request(self, msg: list[bytes]) -> None:
-        assert len(msg) >= 3, (
-            "Expected at least 3 message parts "
-            "[identity, request_uid, operation, *payloads]"
-        )
+        if len(msg) < 3:
+            logger.error(
+                "Malformed ZMQ request: expected identity, request UID, and "
+                "operation frames"
+            )
+            return
 
-        identity, b_request_uid, b_operation, *payloads = msg
+        identity, *request_frames = msg
+        authenticated_frames = self._authenticate_request(identity, request_frames)
+        if authenticated_frames is None:
+            return
+        if len(authenticated_frames) < 2:
+            logger.error("Malformed ZMQ request after authentication")
+            return
+        b_request_uid, b_operation, *payloads = authenticated_frames
         if b_operation == b"":
             state = self.streams.get((identity, b_request_uid))
             if state is not None:
@@ -792,6 +837,31 @@ class MessageQueueServer(RequestServer):
         else:
             logger.error("No handler registered for operation %s", operation)
             logger.error("Available handlers: %s", list(self.handlers.keys()))
+
+    def _authenticate_request(
+        self, identity: bytes, request_frames: list[bytes]
+    ) -> list[bytes] | None:
+        """Authenticate and remove the optional wire envelope before dispatch."""
+        token: str | None = None
+        authenticated_frames = request_frames
+        if request_frames and is_authentication_frame(request_frames[0]):
+            authenticated_frames = request_frames[1:]
+            try:
+                token = decode_authentication_frame(request_frames[0])
+            except (ValueError, msgspec.DecodeError):
+                logger.warning("Rejected malformed ZMQ authentication envelope")
+
+        if not self.authentication.enabled:
+            return authenticated_frames
+        if self.authentication.verify_token(token):
+            return authenticated_frames
+
+        logger.warning("Rejected unauthenticated ZMQ request")
+        if authenticated_frames:
+            self.socket.send_multipart(
+                [identity, authenticated_frames[0], AUTH_ERROR_FRAME]
+            )
+        return None
 
     def _send_responses(self) -> None:
         try:

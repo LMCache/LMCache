@@ -36,3 +36,15 @@ does not raise a comparison error.
 for ZMQ and gRPC adapters. Accepted server keys are cumulative, while a client
 sends one explicit key or one environment-supplied key. This helper does not
 enable authentication on any transport by itself.
+ZMQ request authentication uses a dedicated, versioned frame before the
+request UID and operation. The server removes and verifies this frame before
+decoding request payloads or dispatching a handler. Configure accepted keys
+with repeated `--api-key-file`, `LMCACHE_API_KEY_FILE`, or
+`LMCACHE_API_KEY`. Clients use one explicit key or either environment
+source. Authentication remains disabled when the server has no keys.
+
+The token proves knowledge of a shared secret but does not encrypt ZMQ
+traffic. Use a trusted network or an encrypted tunnel; a future CURVE adapter
+can provide transport encryption and peer identity without replacing the
+shared verifier. Future gRPC authentication can reuse the same request-key
+configuration and verifier with a metadata adapter.

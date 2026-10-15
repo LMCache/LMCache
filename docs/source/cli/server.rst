@@ -68,6 +68,9 @@ Commonly used flags include:
      - Base number of request worker threads.
    * - ``--grpc-server-workers N``
      - gRPC dispatch threads (used only with ``--transport grpc``).
+   * - ``--api-key-file PATH``
+     - Read an API key accepted by the request transport. Repeat during key
+       rotation. Currently supported by ZMQ; see :doc:`/mp/request_transport`.
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
        ``http://coordinator:9300``). Opt-in; enables fleet registration. See

@@ -19,6 +19,7 @@ from lmcache.v1.multiprocess.ext_server_module import (
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, iter_request_handlers
 from lmcache.v1.multiprocess.rpc import RpcOperation
+from lmcache.v1.multiprocess.transport.auth import load_request_authentication
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueServer
 
 
@@ -121,6 +122,7 @@ def build_zmq_request_server(
     server = MessageQueueServer(
         bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
         context=zmq.Context.instance(),
+        authentication=load_request_authentication(mp_config.api_key_files),
     )
     all_specs = [spec for module in modules for spec in get_zmq_handler_specs(module)]
     for spec in all_specs:
