@@ -1,0 +1,7 @@
+# Webhook enabled but cert-manager disabled.
+# The chart should create the MutatingWebhookConfiguration without the
+# cert-manager.io/inject-ca-from annotation, and no Issuer/Certificate.
+webhook:
+  enabled: true
+certManager:
+  enabled: false

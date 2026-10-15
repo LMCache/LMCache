@@ -1,0 +1,33 @@
+# Custom image, custom resources, replicas > 1, extra args/env/volumes.
+# Tests that all customization values flow through to the Deployment.
+image:
+  repository: myregistry.io/lmcache-operator
+  tag: v0.2.0
+  pullPolicy: Always
+replicas: 3
+resources:
+  limits:
+    cpu: "1"
+    memory: 256Mi
+  requests:
+    cpu: 200m
+    memory: 128Mi
+nodeSelector:
+  node-role.kubernetes.io/control-plane: "true"
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+podAnnotations:
+  custom.annotation/example: "true"
+podLabels:
+  custom-label: "value"
+commonLabels:
+  team: ml-platform
+env:
+  - name: LOG_LEVEL
+    value: debug
+extraArgs:
+  - --zap-log-level=5
+  - --zap-encoder=json
+terminationGracePeriodSeconds: 30
