@@ -8,6 +8,9 @@ env:
   PRT_ROOT: ""  # PRT state dir on the host: history, caches, 1.5 TB of L2
   # PRT_HF_CACHE: "/root/.cache/huggingface"  # HF_HOME holding the model
   # PRT_RDMA_DEVICES: ""  # e.g. mlx5_0,mlx5_1; the weekly Mooncake needs it
+  # GH_TOKEN: ""  # read-only GitHub token; the weekly downloads Mooncake's nightly wheel
+  # PRT_RESULTS_REPO: ""  # e.g. owner/prt-results: append the runs there for its Pages site
+  # PRT_RESULTS_TOKEN: ""  # write access to that repo only; better a Buildkite secret
 
 steps:
   - label: ":pipeline: Upload pipeline"

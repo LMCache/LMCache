@@ -85,6 +85,9 @@ Reports go to `$PRT_ROOT/prt-suites/<suite>_<UTC time>/`, the history to
 setting `PRT_SUITE=nightly` or `weekly`; reports go to
 `$PRT_ROOT/prt-suites/buildkite-<build number>-<suite>/` and are attached to
 the build.
+With `PRT_RESULTS_REPO` set, each suite also appends its runs to that repo's
+`data/runs.jsonl` (`publish.py`), which a static GitHub Pages site renders.
+Publishing is best effort and never changes the suite's exit code.
 
 ## Layout
 
@@ -92,6 +95,7 @@ the build.
 |---|---|
 | `config.toml` | every setting, with the reason for each non-default |
 | `suite.py` | one suite: lock, images, runs, check, report |
+| `publish.py` | append a suite's runs to the results repo's `data/runs.jsonl` |
 | `runner/` | images, one run, scoring, sampler, regression check |
 | `docker/` | serving, LMCache, Mooncake and AIPerf images |
 | `aiperf_plugins/` | AIPerf trace framing and live-history replay |

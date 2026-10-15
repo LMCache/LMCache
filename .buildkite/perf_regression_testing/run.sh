@@ -41,4 +41,26 @@ if [[ -f "$out/report.md" ]]; then
   buildkite-agent annotate --style "$style" --context "prt-$PRT_SUITE" \
     < "$out/report.md"
 fi
+# Mirror the runs to the results repo, whose GitHub Pages site renders them.
+# Best effort: the suite's verdict does not depend on it.
+publish() {
+  local dir auth rc
+  dir=$(mktemp -d)
+  auth="Authorization: Basic $(printf 'x-access-token:%s' "${PRT_RESULTS_TOKEN:-}" | base64 -w0)"
+  git -c http.extraHeader="$auth" clone -q --depth 1 \
+      "https://github.com/$PRT_RESULTS_REPO.git" "$dir" &&
+    "$PYTHON" -m perf_regression_testing.publish "$out/report.json" \
+      "$dir/data/runs.jsonl" --host "$(hostname -s)" \
+      --build-url "${BUILDKITE_BUILD_URL:-}" &&
+    git -C "$dir" add data/runs.jsonl &&
+    git -C "$dir" -c user.name=prt-ci -c user.email=prt-ci@users.noreply.github.com \
+      commit -q -m "$PRT_SUITE $(basename "$out")" &&
+    git -C "$dir" -c http.extraHeader="$auth" push -q
+  rc=$?
+  rm -rf "$dir"
+  return $rc
+}
+if [[ -n "${PRT_RESULTS_REPO:-}" && -f "$out/report.json" ]]; then
+  publish || echo "run.sh: publishing to $PRT_RESULTS_REPO failed; the suite result stands" >&2
+fi
 exit "$rc"
