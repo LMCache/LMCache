@@ -50,6 +50,8 @@ def _unwrap_optional(py_type: Any) -> tuple[Any, bool]:
     non_none = tuple(arg for arg in args if arg is not _NONE_TYPE)
     if len(non_none) == len(args):
         return py_type, False
+    if len(non_none) == 2 and set(non_none) == {bytes, int}:
+        return bytes | int, True
     if len(non_none) != 1:
         raise TypeError(f"unsupported optional union {py_type!r}")
     return non_none[0], True
@@ -128,6 +130,11 @@ def _compile_scalar_codec(
     if field.type == field.TYPE_BYTES:
         if py_type is bytes:
             return bytes, bytes
+        if py_type == bytes | int:
+            # Native identities may be bytes or signed/unsigned 64-bit values.
+            # MessagePack preserves the type without a lossy int conversion.
+            decoder = msgspec.msgpack.Decoder(type=py_type)
+            return msgspec.msgpack.encode, decoder.decode
         if py_type is dict or get_origin(py_type) is dict or is_typeddict(py_type):
             return _encode_mapping, _decode_mapping
     if field.type == field.TYPE_STRING:

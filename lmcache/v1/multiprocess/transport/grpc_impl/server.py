@@ -89,6 +89,9 @@ class _GeneratedServicer:
             ) -> None:
                 try:
                     stream = self._dispatch(handler, request, context)
+                except ConnectionError as exc:
+                    context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+                    return
                 except ValueError as exc:
                     context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
                     return
