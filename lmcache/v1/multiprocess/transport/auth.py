@@ -6,10 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 # First Party
-from lmcache.security.api_key import APIKeyVerifier, load_api_keys
-
-REQUEST_API_KEY_ENV_VAR = "LMCACHE_REQUEST_API_KEY"
-REQUEST_API_KEY_FILE_ENV_VAR = "LMCACHE_REQUEST_API_KEY_FILE"
+from lmcache.security.api_key import APIKeyVerifier, load_service_api_keys
 
 
 def load_request_authentication(
@@ -23,11 +20,7 @@ def load_request_authentication(
     Returns:
         A verifier containing all CLI and environment keys.
     """
-    return APIKeyVerifier.from_named_sources(
-        key_files,
-        api_key_env_var=REQUEST_API_KEY_ENV_VAR,
-        api_key_file_env_var=REQUEST_API_KEY_FILE_ENV_VAR,
-    )
+    return APIKeyVerifier(load_service_api_keys(key_files))
 
 
 def load_request_client_api_key(api_key: str | None = None) -> str | None:
@@ -51,11 +44,7 @@ def load_request_client_api_key(api_key: str | None = None) -> str | None:
         if not api_key:
             raise ValueError("Request client API key must not be empty")
         return api_key
-    api_keys = load_api_keys(
-        (),
-        api_key_env_var=REQUEST_API_KEY_ENV_VAR,
-        api_key_file_env_var=REQUEST_API_KEY_FILE_ENV_VAR,
-    )
+    api_keys = load_service_api_keys(())
     if len(api_keys) > 1:
         raise ValueError("Configure exactly one request client API key source")
     return api_keys[0] if api_keys else None
