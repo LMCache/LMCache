@@ -3,7 +3,7 @@
 **Steps editor**: paste contents of `buildkite-pipeline.yml` (fill in `HF_TOKEN`).
 
 **GitHub trigger settings**:
-- Filter: `build.pull_request.labels includes "mp" || build.pull_request.labels includes "full" || build.pull_request.labels includes "skip expensive ci" || build.branch == 'dev'`
+- Filter: `build.pull_request.labels includes "mp" || build.pull_request.labels includes "full" || build.branch == 'dev'`
 - Rebuild on PR label change: Yes
 - Skip queued / cancel running branch builds: Yes
 
