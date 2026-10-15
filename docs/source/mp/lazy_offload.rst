@@ -22,6 +22,28 @@ maintains them.
 This feature is disabled by default and is available only with vLLM and
 ``LMCacheMPConnector``. The LMCache server needs no additional flags.
 
+Per-Request Prefix Limit
+------------------------
+
+The existing ``lmcache.max_offload_tokens`` request setting limits how much
+of a prompt can be offered for storage, independently of eager or lazy mode.
+For direct Python requests, place it in ``SamplingParams.extra_args``:
+
+.. code-block:: python
+
+   from vllm import SamplingParams
+
+   sampling_params = SamplingParams(
+       max_tokens=64,
+       extra_args={"kv_transfer_params": {"lmcache.max_offload_tokens": 1024}},
+   )
+
+Supply a nonnegative integer. Zero prevents new STORE candidates. Only complete
+LMCache chunks within the limit are stored, so a limit smaller than one chunk
+stores nothing. The request's remaining tokens are still computed normally.
+Lazy offload can defer or discard the admitted prefix; it does not widen it.
+This setting does not predict reuse or choose an offload policy.
+
 Enable Lazy Offload
 -------------------
 
