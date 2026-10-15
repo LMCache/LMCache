@@ -13,6 +13,7 @@ from lmcache.v1.multiprocess.rpc import RpcOperation
 
 # RequestType emitted these IDs before operation-name routing. Keep the table
 # frozen; new operations use their string name and must not be added here.
+# ID 11 (query_prefetch_lookup_hits) is retired and must not be reused.
 LEGACY_OPERATION_IDS = MappingProxyType(
     {
         "register_kv_cache": 1,
@@ -25,7 +26,6 @@ LEGACY_OPERATION_IDS = MappingProxyType(
         "lookup": 8,
         "query_prefetch_status": 9,
         "wait_prefetch_status": 10,
-        "query_prefetch_lookup_hits": 11,
         "free_lookup_locks": 12,
         "end_session": 13,
         "register_kv_cache_engine_driven_context": 14,

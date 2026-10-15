@@ -379,6 +379,8 @@ class TestAttributionCounters:
                     "hit_tokens": 1024,
                     "l1_hit_tokens": 768,
                     "l2_hit_tokens": 256,
+                    "l1_hit_keys": 30,
+                    "l2_hit_keys": 6,
                     "early_exit_reason": "",
                 },
             )
@@ -389,6 +391,8 @@ class TestAttributionCounters:
         delta = snapshot()
         assert delta["lmcache_mp.lookup_hit_l1"] == 768
         assert delta["lmcache_mp.lookup_hit_l2"] == 256
+        assert delta["lmcache_mp.lookup_hit_l1_keys"] == 30
+        assert delta["lmcache_mp.lookup_hit_l2_keys"] == 6
         assert delta["lmcache_mp.lookups"] == 1
         assert delta.get("lmcache_mp.lookup_early_exit", 0) == 0
 
@@ -453,5 +457,7 @@ class TestAttributionCounters:
         delta = snapshot()
         assert delta.get("lmcache_mp.lookup_hit_l1", 0) == 0
         assert delta.get("lmcache_mp.lookup_hit_l2", 0) == 0
+        assert delta.get("lmcache_mp.lookup_hit_l1_keys", 0) == 0
+        assert delta.get("lmcache_mp.lookup_hit_l2_keys", 0) == 0
         assert delta["lmcache_mp.lookups"] == 1
         assert delta.get("lmcache_mp.lookup_early_exit", 0) == 0

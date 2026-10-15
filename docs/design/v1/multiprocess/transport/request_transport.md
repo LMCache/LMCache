@@ -83,3 +83,48 @@ subdirectory and adds its scheme mapping to the factory. Application code must
 continue to depend only on `RequestClientFactory` and named request methods;
 transport-specific serialization and connection management stay behind that
 boundary.
+
+## KV event subscriptions
+
+The CPU/L1 channel reuses the event bus and the existing vLLM publisher:
+
+```text
+MP_TOKENS + L1 write/eviction -> KVEventModule's bounded log
+    -> subscribe_kv_events(instance, model, cursor, limit)
+    -> ZMQ / gRPC push -> MP worker buffer -> vLLM -> router
+```
+
+One rank per server subscribes. Completed server writes are the store source;
+a successful store request can skip chunks it could not reserve. Stores
+require known tokens and parent hashes. Unknown bindings are counted and
+skipped, and the binding cache is bounded.
+
+Batches carry an incarnation, cursor, loss flag and ordered records.
+Restart, lost records or disconnect withdraw announced CPU placements.
+Disconnects reopen the subscription; other failures fall back to own completed
+stores. The buffer gauge and generated, drained, batch and resync counters
+expose delivery progress.
+
+Both transports use `MessagingStream` and the same bounded replay log. Readers
+wait on a condition notified by event-bus callbacks, including dropped events.
+gRPC uses a server stream; ZMQ retains the request ID and grants one batch of
+credit per acknowledgment. Slow subscribers do not create unbounded server
+queues; if the shared log overruns their cursor, they receive a loss marker.
+Stream readers do not occupy the ordinary request executor. Cancellation,
+server shutdown and the existing worker reaper release subscriptions.
+
+`modules/kv_events.py` owns the log, token bindings, subscriptions and status.
+It uses the existing `InstanceLivenessTarget` hooks for PING refresh and cleanup;
+`ManagementModule` retains the shared reaper. Subscription expiry only closes
+that stream; it does not reap the worker's cache registrations.
+
+The connector retains `KVEventAggregator` and an ordered batch buffer for
+store/remove/store transitions. Workers receive pushes while idle; vLLM still
+drains and publishes during engine steps, so idle routing entries can remain
+stale until stepping resumes.
+
+Both transports advertise `kv_event_stream`. Enable the event
+bus and vLLM KV events, and match hash algorithms and chunk sizes. Workers
+subscribe automatically to capable servers. See
+`docs/source/mp/configuration.rst` for the server's log-size/disable control.
+L2 events, access events and salted hash interoperability are outside scope.

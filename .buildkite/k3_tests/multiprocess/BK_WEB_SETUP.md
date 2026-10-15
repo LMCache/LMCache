@@ -8,6 +8,9 @@
 - Skip queued / cancel running branch builds: Yes
 
 Heavy test (2 GPUs, Docker-in-Docker, ~45 min) — run on `"mp"`/`"full"` label or dev push, not every PR.
+PRs labeled `"skip expensive ci"` still trigger the upload step, but the repo
+wrapper exits green before uploading heavy multiprocess jobs. Add `force-ci` to
+run the full suite anyway.
 
 > Builds whose only changes are docs/`*.md`/`LICENSE`/`.github/**` auto-pass
 > via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).

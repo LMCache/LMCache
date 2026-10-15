@@ -843,6 +843,8 @@ class TestTierAttributionAttributes:
                 "hit_tokens": 768,
                 "l1_hit_tokens": 512,
                 "l2_hit_tokens": 256,
+                "l1_hit_keys": 20,
+                "l2_hit_keys": 4,
                 "early_exit_reason": "",
             },
         )
@@ -852,10 +854,13 @@ class TestTierAttributionAttributes:
         assert root.attributes["l2_hit_tokens"] == 256
         assert root.attributes["l1_hit_rate"] == pytest.approx(0.5)
         assert root.attributes["l2_hit_rate"] == pytest.approx(0.25)
+        assert root.attributes["l1_hit_keys"] == 20
+        assert root.attributes["l2_hit_keys"] == 4
         assert root.attributes["early_exit_reason"] == ""
         # Typed, unlike the generic child-span loop that stringifies metadata.
         assert isinstance(root.attributes["l1_hit_tokens"], int)
         assert isinstance(root.attributes["l1_hit_rate"], float)
+        assert isinstance(root.attributes["l1_hit_keys"], int)
 
     @pytest.mark.parametrize("reason", ["no_gpu_context", "empty_chunk_hashes"])
     def test_early_exit_reason_and_zero_rates(self, exporter, reason):

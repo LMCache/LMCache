@@ -60,9 +60,9 @@ kv_format/
   (`is_mla`, `is_hnd`, `is_cross_layer`, `attention_backends`).
 - **Static facts are class attributes, declared once.** The structural shape
   (`is_cross_layer` / `is_kv_list` / `is_layer_list`, exactly one true) and the
-  `is_mla` / `is_hnd` / `is_fused_packed` / `is_two_major` / `is_pbs_fused`
-  modifiers are booleans on the spec, defaulting to `False` so a spec only
-  declares what applies. Consumers read them via `get_spec_class(fmt)` — a
+  `is_mla` / `is_hnd` / `is_fused_packed` / `is_two_major` / `is_pbs_fused` /
+  `requires_blocked_scale_repacking` modifiers are booleans on the spec,
+  defaulting to `False` so a spec only declares what applies. Consumers read them via `get_spec_class(fmt)` — a
   call site must never re-list formats (`fmt in (A, B, ...)`), which is how
   the same predicate used to drift across `torch_ops.py`, the transfer
   helpers and the connectors. The device kernels keep their own copy in

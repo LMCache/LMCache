@@ -37,6 +37,7 @@ from lmcache.v1.mp_coordinator.schemas import (
     PrefetchResponse,
 )
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 router = APIRouter()
@@ -185,6 +186,7 @@ async def request_delete(body: DeleteRequest, request: Request) -> DeleteRespons
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
+    resolved = ctx.views.get(KeyDirectory).get_keys_across_object_groups(resolved)
 
     if not chunks:
         return DeleteResponse(

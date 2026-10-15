@@ -722,12 +722,6 @@
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_prefetch_hit_chunks_total[$__rate_interval])",
-          "legendFormat": "hit keys/s",
-          "refId": "C"
-        },
-        {
-          "editorMode": "code",
           "expr": "rate(lmcache_mp_l2_prefetch_load_submitted_requests_total[$__rate_interval])",
           "legendFormat": "load tasks/s",
           "refId": "D"

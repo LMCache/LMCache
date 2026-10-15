@@ -34,10 +34,9 @@ class TestKVCacheCheckAPI:
 
     @pytest.fixture
     def mock_lmcache_adapter(self, mock_kv_caches):
-        """Create a mock LMCacheConnectorV1Impl adapter."""
+        """Create a mock LMCacheManager, exposing `kv_caches` like the real one."""
         adapter = MagicMock()
         adapter.kv_caches = mock_kv_caches
-        adapter.kvcaches = mock_kv_caches  # API uses kvcaches (no underscore)
 
         # Mock lmcache_engine for record_slot tests
         mock_engine = MagicMock()
@@ -181,7 +180,6 @@ class TestKVCacheCheckAPI:
         """Test kvcache check when kv_caches is empty."""
         adapter = MagicMock()
         adapter.kv_caches = {}
-        adapter.kvcaches = {}
         adapter.compute_kvcache_checksums = MagicMock(return_value=None)
         app.state.lmcache_adapter = adapter
         with TestClient(app) as client:
@@ -203,9 +201,9 @@ class TestKVCacheCheckAPI:
         assert "layer_0" in data["layers"]
 
     def test_kvcache_info_empty(self):
-        """Test kvcache info when kvcaches is empty."""
+        """Test kvcache info when kv_caches is empty."""
         adapter = MagicMock()
-        adapter.kvcaches = {}
+        adapter.kv_caches = {}
         app.state.lmcache_adapter = adapter
         with TestClient(app) as client:
             response = client.get("/cache/kvcache/info")

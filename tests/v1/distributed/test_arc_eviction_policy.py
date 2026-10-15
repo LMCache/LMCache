@@ -205,7 +205,13 @@ class TestARCMPListeners:
         listener = L1EvictionPolicy(policy)
         key1, key2 = _key(1), _key(2)
 
+        listener.on_l1_keys_reserved_write([key1, key2])
         listener.on_l1_keys_write_finished([key1, key2])
+
+        state = policy.get_debug_state()
+        assert state["t1"] == [key2, key1]
+        assert state["t2"] == []
+
         listener.on_l1_keys_accessed([key1])
         action = policy.get_eviction_actions(0.5)[0]
         listener.on_l1_keys_deleted_by_manager(action.keys)

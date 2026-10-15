@@ -5,6 +5,8 @@ Overview
    :hidden:
 
    request_transport
+   multi_l1
+   chunk_size_negotiation
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
 vLLM instances reach through a configurable ZMQ or gRPC request transport.
@@ -111,7 +113,7 @@ based on ``--engine-type`` and ``--supported-transfer-mode``.
 
 **``server.py``** -- The transport-neutral server compositor. Creates an
 ``MPCacheServer``, assembles the engine modules
-(``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
+(``LookupModule`` + ``ManagementModule`` + ``KVEventModule`` + ``LMCacheDrivenTransferModule``
 and/or ``EngineDrivenTransferModule`` depending on
 ``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
 ``engine_driven`` loads just one,
@@ -174,7 +176,7 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
        ``--supported-transfer-mode`` is ``engine_driven`` or ``auto``.
        Returns a ``RegisterEngineDrivenContextResponse`` carrying the
        SHM segment name and pool size when the SHM path is in use
-       (empty for the pickle path).
+       (empty for the inline path).
    * - ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
      - SYNC
      - Unregister an engine-driven KV cache context.
@@ -196,12 +198,12 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
    * - ``COMMIT_STORE``
      - BLOCKING
      - (Engine-driven path) Worker commits the chunk's serialized bytes
-       (pickle path) or releases the prepared SHM slot (SHM path) so the
+       (typed inline path) or releases the prepared SHM slot (SHM path) so the
        server can persist into L1 storage.
    * - ``PREPARE_RETRIEVE``
      - BLOCKING
      - (Engine-driven path) Worker asks the server to prepare the
-       retrieval payload for a key. The pickle path returns the bytes
+       retrieval payload for a key. The typed inline path returns the bytes
        inline; the SHM path returns slot info so the worker can read
        from shared memory.
    * - ``COMMIT_RETRIEVE``
@@ -222,11 +224,6 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - (SGLang only) Block until a prefetch job completes, then return its
        loaded chunk count, or ``None`` on timeout. The blocking alternative
        to polling ``QUERY_PREFETCH_STATUS``.
-   * - ``QUERY_PREFETCH_LOOKUP_HITS``
-     - BLOCKING
-     - Query the lookup-phase hit chunk count by request_id, before the
-       prefetch finishes. Returns ``None`` while the lookup is still
-       running.
    * - ``FREE_LOOKUP_LOCKS``
      - BLOCKING
      - Release read locks from a cancelled lookup without doing a full
@@ -348,6 +345,9 @@ methods:
 - ``read_prefetched_results()`` / ``finish_read_prefetched()`` -- Read
   prefetched data from L1 with automatic lock management.
 
+See :doc:`multi_l1` for the internal write-overflow and ownership foundations.
+Normal serving still uses one L1.
+
 L1Manager
 ~~~~~~~~~
 
@@ -380,10 +380,11 @@ tiers selected at startup (all satisfy ``L1ManagerProtocol``):
   The bytes live on disk; reads/writes DMA directly between the GPU staging
   buffer and the slab, driven by the process-global ``GDSContext``
   (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The DMA
-  backend is selected by platform via ``gpu_connector/_gds_async.py`` --
-  cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on AMD
-  ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the
-  vendor-specific requirements. The CPU tier is disabled in this mode.
+  backend is selected by platform via ``gpu_connector/_gds_backends.py`` --
+  cuFile (``libcufile.so``) on NVIDIA, hipFile (``libhipfile.so``) on AMD
+  ROCm, and muFile (``libmufile.so``) on MUSA; see the *GDS L1 Tier* section
+  of :doc:`configuration` for the vendor-specific requirements. The CPU tier
+  is disabled in this mode.
 
 L2 Adapters
 ~~~~~~~~~~~
@@ -494,7 +495,8 @@ and are grouped by concern: ``metrics/`` (OTel counters and lifecycle
 histograms), ``logging/`` (Python logging handlers, lookup-hash JSONL),
 and ``tracing/`` (OTel spans built from START/END event pairs).
 ``init_observability()`` registers the set selected by CLI flags
-(``--disable-metrics``, ``--disable-logging``, ``--enable-tracing``).
+(``--disable-metrics``, ``--disable-grpc-metrics``,
+``--disable-logging``, ``--enable-tracing``).
 
 **OTel providers** are set up via ``otel_init.py`` before subscribers
 are constructed, so module-level ``get_meter()`` / ``get_tracer()``
@@ -590,7 +592,8 @@ Key Source Files
      - gRPC service binding, handler scheduling, and request-server construction
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
-       ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
+       ``management.py`` (``ManagementModule``), ``kv_events.py``
+       (``KVEventModule``, CPU event subscriptions), ``lmcache_driven_transfer.py``
        (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
        (``EngineDrivenTransferModule``), and ``blend.py``
        (``BlendModule``, the paged-aware blend pipeline selected by
