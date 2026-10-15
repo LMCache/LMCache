@@ -431,6 +431,19 @@ class KVLayoutDescriptor:
         return self.kv_packing is KVPacking.COMPONENT
 
     @property
+    def requires_blocked_scale_repacking(self) -> bool:
+        """Each block stores all tokens' values before all tokens' scales.
+
+        A token-major chunk row then needs the two block regions repacked
+        rather than the block copied whole, which is what BLOCK_REGION scale
+        placement states.
+        """
+        return (
+            self.quant is not None
+            and self.quant.placement is ScalePlacement.BLOCK_REGION
+        )
+
+    @property
     def kv_size(self) -> int:
         """Number of separately addressed K/V planes: 2 for SPLIT, else 1."""
         return 2 if self.kv_packing is KVPacking.SPLIT else 1

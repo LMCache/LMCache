@@ -105,6 +105,7 @@ def test_derived_facts_match_spec_facts():
             spec.is_pbs_fused,
             spec.is_kv_second_tuple,
             spec.is_single_kv,
+            spec.requires_blocked_scale_repacking,
         )
         derived = (
             desc.is_cross_layer,
@@ -117,6 +118,7 @@ def test_derived_facts_match_spec_facts():
             desc.is_pbs_fused,
             desc.is_kv_second_tuple,
             desc.is_single_kv,
+            desc.requires_blocked_scale_repacking,
         )
         assert derived == declared, f"{fmt}: derived {derived}, declared {declared}"
 
