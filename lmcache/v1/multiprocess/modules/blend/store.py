@@ -198,40 +198,22 @@ class StoreMixin:
                 job = self._fingerprint_queue.get_nowait()
             except QueueEmpty:
                 break
-            if len(job) == 5:
-                (
-                    tokens_in_range,
-                    chunk_hashes,
-                    start_chunk_idx,
-                    position_offset,
-                    rid,
-                ) = job
-                predecessor_hash = None
-            else:
-                (
-                    tokens_in_range,
-                    chunk_hashes,
-                    start_chunk_idx,
-                    position_offset,
-                    predecessor_hash,
-                    rid,
-                ) = job
+            (
+                tokens_in_range,
+                chunk_hashes,
+                start_chunk_idx,
+                position_offset,
+                predecessor_hash,
+                rid,
+            ) = job
             try:
-                if predecessor_hash is None:
-                    n_new = self._token_range_matcher.on_new_token_hashes(
-                        tokens_in_range,
-                        chunk_hashes,
-                        start_chunk_idx=start_chunk_idx,
-                        position_offset=position_offset,
-                    )
-                else:
-                    n_new = self._token_range_matcher.on_new_token_hashes(
-                        tokens_in_range,
-                        chunk_hashes,
-                        start_chunk_idx=start_chunk_idx,
-                        position_offset=position_offset,
-                        predecessor_hash=predecessor_hash,
-                    )
+                n_new = self._token_range_matcher.on_new_token_hashes(
+                    tokens_in_range,
+                    chunk_hashes,
+                    start_chunk_idx=start_chunk_idx,
+                    position_offset=position_offset,
+                    predecessor_hash=predecessor_hash,
+                )
                 self._emit_fingerprints_registered(rid, n_new)
             except Exception:
                 logger.exception("CB fingerprint registration failed (sync drain)")
@@ -265,40 +247,22 @@ class StoreMixin:
                 job = self._fingerprint_queue.get(timeout=0.1)
             except QueueEmpty:
                 continue
-            if len(job) == 5:
-                (
-                    tokens_in_range,
-                    chunk_hashes,
-                    start_chunk_idx,
-                    position_offset,
-                    rid,
-                ) = job
-                predecessor_hash = None
-            else:
-                (
-                    tokens_in_range,
-                    chunk_hashes,
-                    start_chunk_idx,
-                    position_offset,
-                    predecessor_hash,
-                    rid,
-                ) = job
+            (
+                tokens_in_range,
+                chunk_hashes,
+                start_chunk_idx,
+                position_offset,
+                predecessor_hash,
+                rid,
+            ) = job
             try:
-                if predecessor_hash is None:
-                    n_new = self._token_range_matcher.on_new_token_hashes(
-                        tokens_in_range,
-                        chunk_hashes,
-                        start_chunk_idx=start_chunk_idx,
-                        position_offset=position_offset,
-                    )
-                else:
-                    n_new = self._token_range_matcher.on_new_token_hashes(
-                        tokens_in_range,
-                        chunk_hashes,
-                        start_chunk_idx=start_chunk_idx,
-                        position_offset=position_offset,
-                        predecessor_hash=predecessor_hash,
-                    )
+                n_new = self._token_range_matcher.on_new_token_hashes(
+                    tokens_in_range,
+                    chunk_hashes,
+                    start_chunk_idx=start_chunk_idx,
+                    position_offset=position_offset,
+                    predecessor_hash=predecessor_hash,
+                )
                 self._emit_fingerprints_registered(rid, n_new)
             except Exception:
                 logger.exception("CB fingerprint registration failed (async)")
