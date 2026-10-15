@@ -185,7 +185,7 @@ Alternatively, use the provided example script (accepts the
 
 .. code-block:: bash
 
-    LMCACHE_FRONTEND_API_KEY=frontend-local-key \
+    LMCACHE_API_KEY=frontend-local-key \
     LMCACHE_FRONTEND_BACKEND_API_KEY=backend-local-key \
     python3 -m lmcache.lmcache_frontend.app \
         --port 8000 \
@@ -278,11 +278,11 @@ CLI Reference
      - ``false``
      - Disable the HTTP server; only the heartbeat loop runs.  Used
        internally by the MP plugin.
-   * - ``--http-api-key-file``
+   * - ``--api-key-file``
      - *(none)*
      - Read an accepted frontend Bearer key from a file. Repeat the option
        during key rotation. Environment alternatives are
-       ``LMCACHE_FRONTEND_API_KEY_FILE`` and ``LMCACHE_FRONTEND_API_KEY``.
+       ``LMCACHE_API_KEY_FILE`` and ``LMCACHE_API_KEY``.
    * - ``--backend-http-api-key-file``
      - *(none)*
      - Read the Bearer key sent to backend LMCache HTTP servers. Environment

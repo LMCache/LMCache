@@ -18,15 +18,18 @@ import httpx
 import uvicorn
 
 # First Party
-from lmcache.security.api_key import APIKeyVerifier, load_api_keys
+from lmcache.security.api_key import (
+    APIKeyVerifier,
+    add_api_key_args,
+    load_api_keys,
+    load_service_api_keys,
+)
 from lmcache.security.http import (
     HTTPBearerAuthenticationMiddleware,
     bearer_authorization_header,
 )
 
 _PACKAGE = "lmcache.lmcache_frontend"
-FRONTEND_API_KEY_ENV_VAR = "LMCACHE_FRONTEND_API_KEY"
-FRONTEND_API_KEY_FILE_ENV_VAR = "LMCACHE_FRONTEND_API_KEY_FILE"
 FRONTEND_BACKEND_API_KEY_ENV_VAR = "LMCACHE_FRONTEND_BACKEND_API_KEY"
 FRONTEND_BACKEND_API_KEY_FILE_ENV_VAR = "LMCACHE_FRONTEND_BACKEND_API_KEY_FILE"
 PUBLIC_FRONTEND_PATHS = frozenset({"/", "/health", "/metrics"})
@@ -1148,14 +1151,7 @@ def main() -> None:
         default=False,
         help="Disable HTTP server startup (heartbeat still runs)",
     )
-    parser.add_argument(
-        "--http-api-key-file",
-        action="append",
-        default=[],
-        metavar="PATH",
-        help="Read an accepted frontend HTTP bearer key from PATH. Repeat to "
-        "accept multiple keys during rotation.",
-    )
+    add_api_key_args(parser)
     parser.add_argument(
         "--backend-http-api-key-file",
         default=None,
@@ -1165,11 +1161,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    http_authentication = APIKeyVerifier.from_named_sources(
-        args.http_api_key_file,
-        api_key_env_var=FRONTEND_API_KEY_ENV_VAR,
-        api_key_file_env_var=FRONTEND_API_KEY_FILE_ENV_VAR,
-    )
+    http_authentication = APIKeyVerifier(load_service_api_keys(args.api_key_file))
     backend_authorization_header = _load_backend_authorization(
         args.backend_http_api_key_file
     )
