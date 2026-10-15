@@ -65,6 +65,7 @@ def _compile_reactor_test() -> Path:
     compiler = shutil.which("g++")
     if compiler is None:
         pytest.skip("g++ is required to build the standalone reactor test")
+    assert compiler is not None
     include_dir = _find_include_dir()
     if include_dir is None:
         pytest.skip("NIXL headers not found; set NIXL_INCLUDE_DIR")
