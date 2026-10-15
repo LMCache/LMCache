@@ -4,7 +4,6 @@
 # Standard
 from collections.abc import Sequence
 from pathlib import Path
-import hmac
 import secrets
 
 # Third Party
@@ -16,13 +15,12 @@ PUBLIC_HTTP_PATHS = frozenset({"/", "/healthcheck"})
 
 
 class HTTPAuthenticationConfig:
-    """Pre-hashed API keys used by the HTTP authentication middleware.
+    """API keys used by the HTTP authentication middleware.
 
-    Plaintext keys are converted to keyed HMAC digests as soon as this object
-    is created. A per-process random secret prevents those digests from being
-    useful for offline key guessing. The object deliberately hides the secret
-    and digests from its representation so they are not exposed by logs or the
-    ``/config`` endpoint.
+    Keys are kept only in this private in-memory configuration and are never
+    added to the server configuration returned by ``/config``. The object also
+    deliberately hides them from its representation so they are not exposed
+    by logs.
 
     Args:
         api_keys: Plaintext API keys accepted by the HTTP frontend.
@@ -34,16 +32,7 @@ class HTTPAuthenticationConfig:
     def __init__(self, api_keys: Sequence[str] = ()) -> None:
         if any(not api_key for api_key in api_keys):
             raise ValueError("HTTP API keys must not be empty")
-        self._comparison_secret = secrets.token_bytes(32)
-        self._api_key_hashes = tuple(self._digest(api_key) for api_key in api_keys)
-
-    def _digest(self, api_key: str) -> bytes:
-        """Return a fixed-length, process-bound comparison value."""
-        return hmac.digest(
-            self._comparison_secret,
-            api_key.encode("utf-8"),
-            "sha256",
-        )
+        self._api_keys = tuple(api_keys)
 
     @classmethod
     def from_key_files(
@@ -80,7 +69,7 @@ class HTTPAuthenticationConfig:
     @property
     def enabled(self) -> bool:
         """Return whether at least one API key is configured."""
-        return bool(self._api_key_hashes)
+        return bool(self._api_keys)
 
     def accepts_authorization_header(self, authorization: str | None) -> bool:
         """Validate one HTTP ``Authorization`` header.
@@ -97,17 +86,16 @@ class HTTPAuthenticationConfig:
         if not separator or scheme.lower() != "bearer" or not token:
             return False
 
-        candidate_hash = self._digest(token)
         matched = False
-        for expected_hash in self._api_key_hashes:
-            matched |= secrets.compare_digest(candidate_hash, expected_hash)
+        for expected_api_key in self._api_keys:
+            matched |= secrets.compare_digest(token, expected_api_key)
         return matched
 
     def __repr__(self) -> str:
-        """Return a representation that never includes keys or key hashes."""
+        """Return a representation that never includes API keys."""
         return (
             f"{type(self).__name__}(enabled={self.enabled}, "
-            f"key_count={len(self._api_key_hashes)})"
+            f"key_count={len(self._api_keys)})"
         )
 
 

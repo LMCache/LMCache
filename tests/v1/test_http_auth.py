@@ -77,7 +77,7 @@ def test_each_configured_api_key_is_accepted(api_key: str) -> None:
     assert response.status_code == 200
 
 
-def test_key_file_contents_are_hashed_and_hidden(tmp_path) -> None:
+def test_key_file_contents_are_loaded_and_hidden(tmp_path) -> None:
     """Key files produce usable config without exposing secret material."""
     key_file = tmp_path / "api-key"
     key_file.write_text("top-secret\n", encoding="utf-8")
