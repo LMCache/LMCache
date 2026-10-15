@@ -401,4 +401,7 @@ lmcache/cli/
 | **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench server`, `bench l2`, `describe engine`, corpora |
 | **3** | `kvcache evict` (future) |
 
-Existing `lmcache_server` entry point kept as a deprecated alias for 2 minor releases.
+The existing `lmcache_server` entry point is kept as a deprecated alias for
+`lmcache server` for 2 minor releases. It accepts the same flags as
+`lmcache server`; the removed legacy positional host, port, and device arguments
+are not supported.

@@ -292,7 +292,7 @@ class TestConnectorPluginLauncher:
 
         # Should not raise an exception
         manager = ConnectorManager(
-            url="lm://localhost:1234",
+            url="mock://100",
             loop=async_loop,
             local_cpu_backend=None,
             config=config,
@@ -325,7 +325,7 @@ class TestConnectorPluginLauncher:
 
         # Should not raise an exception
         manager = ConnectorManager(
-            url="lm://localhost:1234",
+            url="mock://100",
             loop=async_loop,
             local_cpu_backend=None,
             config=config,
@@ -357,7 +357,7 @@ class TestConnectorPluginLauncher:
 
         # Should not raise an exception
         manager = ConnectorManager(
-            url="lm://localhost:1234",
+            url="mock://100",
             loop=async_loop,
             local_cpu_backend=None,
             config=config,
@@ -388,7 +388,7 @@ class TestConnectorPluginLauncher:
 
         # Should not raise an exception
         manager = ConnectorManager(
-            url="lm://localhost:1234",
+            url="mock://100",
             loop=async_loop,
             local_cpu_backend=None,
             config=config,
@@ -420,7 +420,7 @@ class TestConnectorPluginLauncher:
 
         # Should not raise an exception
         manager = ConnectorManager(
-            url="lm://localhost:1234",
+            url="mock://100",
             loop=async_loop,
             local_cpu_backend=None,
             config=config,
@@ -444,7 +444,7 @@ class TestConnectorPluginLauncher:
 
         # Should not raise an exception
         manager = ConnectorManager(
-            url="lm://localhost:1234",
+            url="mock://100",
             loop=async_loop,
             local_cpu_backend=None,
             config=config,
@@ -463,7 +463,7 @@ class TestConnectorPluginLauncher:
         """
         # Should not raise an exception
         manager = ConnectorManager(
-            url="lm://localhost:1234",
+            url="mock://100",
             loop=async_loop,
             local_cpu_backend=None,
             config=None,  # No config at all
