@@ -22,23 +22,32 @@ Reset/preemption drops buffered candidates before they can be submitted.
 ## Acceptance Tests
 
 `tests/v1/test_mp_offload_cap.py` constructs actual vLLM Request, BlockPool and
-hashed cache blocks, and calls the actual LMCache tracker/metadata and lazy
-manager. It simulates three chunked-prefill advances. Modes are eager, FIFO
+hashed cache blocks, and initializes the real connector with a mocked adapter
+transport. Public lookup/allocation/build_connector_meta/request-finished and
+completion entry points drive actual tracker/metadata and lazy-manager logic.
+Both new-request and cached-request eager submissions are checked. It simulates
+chunked-prefill advances starting below a chunk and at a storable boundary,
+checking the computed-token bound immediately after every step. Modes are eager, FIFO
 and EVICTION_AWARE; caps are zero, smaller than one chunk, one complete chunk,
 a non-aligned multi-chunk prefix, and uncapped. A zero-token scheduler step
-must not emit buffered stores. Completion releases all test pool ownership;
-reset cases must emit nothing.
+must not emit buffered stores. In-flight source blocks must have exact positive
+reference counts and cannot be handed to a competing allocation. Completion
+must leave every original block at reference count zero, not just a matching
+free-queue length. Reset cases must emit nothing.
 
 CUDA cases initialize real paged GPU tensors, copy the selected metadata
-ranges into a real StorageManager's L1 reservations, finish writes, query a
+ranges into a real StorageManager's L1 reservations. Write keys are derived
+from emitted token identity using the real TokenHasher; lookup keys come from
+an independent expected token sequence. Tests finish writes, query a
 prefix lookup and copy the retained payload back to CUDA. Independently
 constructed expected values verify block mapping and token ranges; exact
 byte counts verify that excluded tokens never cross this test's D2H path.
 A guard-filled GPU suffix must remain unchanged. cap=0 also exercises the
 zero-hit completion path rather than treating a skipped copy as test success.
 
-The scheduler output envelope and single-worker receipt transport are test
-doubles. Torch copies stand in for the MP worker/IPC executor. No model,
+The configuration and scheduler output envelopes and adapter/receipt transport
+are test doubles; constructor state and dispatch are not bypassed. Torch copies
+stand in for the MP worker/IPC executor. No model,
 full connector server, multi-worker receipt protocol, cancellation of an
 in-flight device operation, compiled CUDA transfer kernel or serving metric
 is qualified by these tests. Reset tests cover buffered preemption, not a
