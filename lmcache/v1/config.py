@@ -88,14 +88,16 @@ _EC_FILE_PREFIX = "ec_"
 _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     # Basic configurations
     "chunk_size": {"type": int, "default": 256, "env_converter": int},
-    "retrieve_buffer_size": {
+    "retrieve_window_bytes": {
         "type": int,
         "default": 64 * 1024 * 1024,
         "env_converter": int,
         "description": (
-            "Device staging buffer in bytes for non-layerwise first-rank KV "
-            "retrieval. One buffer of this size is reserved per engine at "
-            "initialization and never grows; it must hold at least one KV chunk."
+            "Target size in bytes of the device staging window a first-rank MLA "
+            "engine uses to broadcast cache hits to its peers. The window holds as "
+            "many whole KV chunks as fit, never fewer than one, so a target below "
+            "one chunk is raised to one chunk with a warning. Each such engine "
+            "reserves one window at initialization; it never grows."
         ),
     },
     "local_cpu": {
@@ -709,8 +711,8 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
 def _validate_config(self: Any) -> None:
     """Validate configuration"""
 
-    if self.retrieve_buffer_size <= 0:
-        raise ValueError("retrieve_buffer_size must be positive")
+    if self.retrieve_window_bytes <= 0:
+        raise ValueError("retrieve_window_bytes must be positive")
 
     # needed for the old async serializer implementation
     # # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation

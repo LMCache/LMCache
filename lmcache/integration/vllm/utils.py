@@ -256,9 +256,9 @@ def get_required_device_memory(vllm_config: "VllmConfig") -> int:
         vllm_config: Serving configuration, including LMCache connector overrides.
 
     Returns:
-        The fixed staging budget, or zero when first-rank retrieval is disabled
-        or a single worker has no peers to broadcast to. This function does not
-        initialize an engine or allocate device memory.
+        The staging buffer size the worker will reserve, or zero when first-rank
+        retrieval is disabled or a single worker has no peers to broadcast to.
+        This function does not initialize an engine or allocate device memory.
 
     Raises:
         ValueError: If the LMCache configuration is invalid.
@@ -272,7 +272,37 @@ def get_required_device_memory(vllm_config: "VllmConfig") -> int:
         or vllm_config.parallel_config.world_size == 1
     ):
         return 0
-    return config.retrieve_buffer_size
+    # First Party
+    from lmcache.integration.vllm.vllm_service_factory import (
+        kv_layout_from_vllm_config,
+    )
+    from lmcache.v1.broadcast_transfer import (
+        chunk_bytes,
+        chunks_per_window,
+        staging_bytes,
+    )
+    from lmcache.v1.metadata import LMCacheMetadata
+
+    # The worker builds its metadata from the same layout function, so the chunk
+    # it sizes its buffer for is the one measured here.
+    kv_shape, kv_dtype, _ = kv_layout_from_vllm_config(config, vllm_config)
+    world_size = vllm_config.parallel_config.world_size
+    layout = LMCacheMetadata(
+        model_name=vllm_config.model_config.model,
+        world_size=world_size,
+        local_world_size=world_size,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=kv_dtype,
+        kv_shape=kv_shape,
+        use_mla=use_mla,
+        chunk_size=config.chunk_size,
+    )
+    bytes_per_chunk = chunk_bytes(layout, config.chunk_size)
+    return staging_bytes(
+        bytes_per_chunk,
+        chunks_per_window(config.retrieve_window_bytes, bytes_per_chunk),
+    )
 
 
 def validate_retrieval_memory_budget(vllm_config: "VllmConfig") -> None:
@@ -303,13 +333,14 @@ def validate_retrieval_memory_budget(vllm_config: "VllmConfig") -> None:
         reserve = getattr(KVConnectorFactory, "get_required_device_memory", None)
     if reserve is None or reserve(vllm_config) < required:
         logger.warning(
-            "retrieve_buffer_size=%d bytes of first-rank retrieval staging are not "
-            "accounted for by vLLM's automatic KV sizing: this deployment has no "
-            "whole-device memory budget guarantee and the buffer comes out of the "
-            "gpu_memory_utilization headroom. Use a vLLM with connector memory "
-            "accounting (get_required_device_memory) or set kv_cache_memory_bytes "
-            "explicitly, leaving room for the staging buffer.",
+            "%d bytes of first-rank retrieval staging (retrieve_window_bytes=%d) "
+            "are not accounted for by vLLM's automatic KV sizing: this deployment "
+            "has no whole-device memory budget guarantee and the buffer comes out "
+            "of the gpu_memory_utilization headroom. Use a vLLM with connector "
+            "memory accounting (get_required_device_memory) or set "
+            "kv_cache_memory_bytes explicitly, leaving room for the staging buffer.",
             required,
+            lmcache_get_or_create_config(vllm_config).retrieve_window_bytes,
         )
 
 

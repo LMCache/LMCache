@@ -24,7 +24,12 @@ import torch
 # First Party
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.broadcast_transfer import Window
+from lmcache.v1.broadcast_transfer import (
+    Window,
+    chunk_bytes,
+    chunks_per_window,
+    staging_bytes,
+)
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus, EventType
@@ -605,7 +610,7 @@ def test_passive_retrieve_touches_no_cache_objects(
     """
     config = LMCacheEngineConfig.from_defaults(
         chunk_size=CHUNK_SIZE,
-        retrieve_buffer_size=4096,
+        retrieve_window_bytes=4096,
         lmcache_instance_id="test_retrieve_pin_ownership",
     )
     metadata = LMCacheMetadata(
@@ -621,7 +626,11 @@ def test_passive_retrieve_touches_no_cache_objects(
     )
     # The first rank's side of the exchange: admission, one window, the end.
     window = Window.from_chunks([(cache_case.memory_objs[0], 0, CHUNK_SIZE)])
-    reservation = (config.retrieve_buffer_size, len(cache_case.tokens), "passive")
+    one_chunk = chunk_bytes(metadata, CHUNK_SIZE)
+    capacity = staging_bytes(
+        one_chunk, chunks_per_window(config.retrieve_window_bytes, one_chunk)
+    )
+    reservation = (capacity, len(cache_case.tokens), "passive")
     engine = LMCacheEngine(
         config,
         metadata,

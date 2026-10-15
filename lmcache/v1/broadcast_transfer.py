@@ -23,6 +23,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 
 # Every chunk starts on an allocator-sized boundary inside the staging buffer so
 # transfer kernels see the same alignment as a standalone device allocation.
@@ -34,6 +35,71 @@ StagedChunk = tuple[MemoryObj, int, int]
 
 def _align(num_bytes: int) -> int:
     return (num_bytes + CHUNK_ALIGNMENT - 1) // CHUNK_ALIGNMENT * CHUNK_ALIGNMENT
+
+
+def chunk_bytes(metadata: LMCacheMetadata, chunk_size: int) -> int:
+    """Return the bytes of one full KV chunk under ``metadata``'s current layout.
+
+    Args:
+        metadata: Engine metadata; its kernel groups, once registered, decide
+            the per-group shapes and dtypes.
+        chunk_size: Tokens per chunk.
+
+    Returns:
+        The packed size of a ``chunk_size``-token chunk in bytes.
+    """
+    return sum(
+        shape.numel() * dtype.itemsize
+        for shape, dtype in zip(
+            metadata.get_shapes(chunk_size), metadata.get_dtypes(), strict=True
+        )
+    )
+
+
+def staging_bytes(bytes_per_chunk: int, window_chunks: int) -> int:
+    """Return the staging buffer size that packs ``window_chunks`` chunks per window.
+
+    Every chunk starts on a ``CHUNK_ALIGNMENT`` boundary, so the buffer is
+    ``window_chunks - 1`` aligned strides plus one chunk, and
+    :func:`plan_windows` fits exactly ``window_chunks`` chunks into it.
+
+    Args:
+        bytes_per_chunk: Bytes of one full chunk.
+        window_chunks: Chunks per window; at least 1.
+
+    Returns:
+        The buffer size in bytes.
+
+    Raises:
+        ValueError: If either argument is below 1.
+    """
+    if bytes_per_chunk < 1 or window_chunks < 1:
+        raise ValueError("A staging window needs at least one chunk of one byte")
+    return (window_chunks - 1) * _align(bytes_per_chunk) + bytes_per_chunk
+
+
+def chunks_per_window(target_bytes: int, bytes_per_chunk: int) -> int:
+    """Return how many chunks a staging window of at most ``target_bytes`` holds.
+
+    The count is rounded down so that :func:`staging_bytes` stays within the
+    target, but never below one chunk: a window must be able to carry the unit
+    the exchange moves, so a target smaller than one chunk yields one chunk.
+
+    Args:
+        target_bytes: Configured window size in bytes; positive.
+        bytes_per_chunk: Bytes of one full chunk; positive.
+
+    Returns:
+        The number of chunks per window, at least 1.
+
+    Raises:
+        ValueError: If either argument is below 1.
+    """
+    if target_bytes < 1 or bytes_per_chunk < 1:
+        raise ValueError("A staging window needs a positive target and chunk size")
+    if target_bytes <= bytes_per_chunk:
+        return 1
+    return 1 + (target_bytes - bytes_per_chunk) // _align(bytes_per_chunk)
 
 
 @dataclass(frozen=True)
@@ -154,8 +220,9 @@ def plan_windows(
             raise ValueError("A KV chunk no longer exposes its tensor")
         if size > capacity:
             raise ValueError(
-                f"A KV chunk of {size} bytes exceeds the {capacity}-byte "
-                "staging buffer (retrieve_buffer_size)"
+                f"A KV chunk of {size} bytes exceeds the {capacity}-byte staging "
+                "buffer, which was sized from retrieve_window_bytes and the KV "
+                "layout known when the engine started"
             )
         if index > begin and _align(used) + size > capacity:
             windows.append(chunks[begin:index])

@@ -13,9 +13,13 @@ from lmcache.v1.broadcast_transfer import (
     CHUNK_ALIGNMENT,
     StagedChunk,
     Window,
+    chunk_bytes,
+    chunks_per_window,
     pack,
     plan_windows,
+    staging_bytes,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
@@ -178,3 +182,54 @@ def test_pack_rejects_an_invalidated_source() -> None:
 
     with pytest.raises(ValueError, match="valid tensor storage"):
         pack(chunks, views)
+
+
+def test_staging_bytes_fits_exactly_the_requested_chunks() -> None:
+    """A window sized for N chunks packs N of them and not one more."""
+    chunks = make_chunks(5, 2)  # 48 bytes each
+    one = chunks[0][0].get_size()
+    assert staging_bytes(one, 1) == one
+    assert staging_bytes(one, 2) == CHUNK_ALIGNMENT + one
+    for window_chunks in (1, 2, 3):
+        capacity = staging_bytes(one, window_chunks)
+        windows = plan_windows(chunks, capacity)
+        assert [len(group) for group in windows[:-1]] == [window_chunks] * len(
+            windows[:-1]
+        )
+        assert sum(len(group) for group in windows) == len(chunks)
+        assert Window.from_chunks(windows[0]).num_bytes <= capacity
+
+
+@pytest.mark.parametrize(("bytes_per_chunk", "window_chunks"), [(0, 1), (48, 0)])
+def test_staging_bytes_rejects_empty_windows(
+    bytes_per_chunk: int, window_chunks: int
+) -> None:
+    with pytest.raises(ValueError, match="at least one chunk"):
+        staging_bytes(bytes_per_chunk, window_chunks)
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [(10, 1), (48, 1), (48 + CHUNK_ALIGNMENT - 1, 1), (48 + CHUNK_ALIGNMENT, 2)],
+)
+def test_chunks_per_window_rounds_down_but_never_below_one(
+    target: int, expected: int
+) -> None:
+    assert chunks_per_window(target, 48) == expected
+    # The resulting window never exceeds the target unless one chunk already does.
+    assert staging_bytes(48, expected) <= max(target, 48)
+
+
+def test_chunk_bytes_follows_the_metadata_layout() -> None:
+    metadata = LMCacheMetadata(
+        model_name="test",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(61, 1, 256, 1, 576),
+        use_mla=True,
+    )
+    assert chunk_bytes(metadata, 256) == 61 * 576 * 2 * 256
+    assert chunk_bytes(metadata, 1024) == 4 * chunk_bytes(metadata, 256)

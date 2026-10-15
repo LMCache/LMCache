@@ -47,6 +47,70 @@ def _agree_retrieval(ready: bool, group: torch.distributed.ProcessGroup) -> bool
     return bool(flag.item())
 
 
+def kv_layout_from_vllm_config(
+    lmcache_config: LMCacheEngineConfig, vllm_config: "VllmConfig"
+) -> tuple[tuple[int, int, int, int, int], torch.dtype, bool]:
+    """Derive the per-worker KV chunk layout LMCache uses from vLLM's config.
+
+    Memory planning and worker initialization both call this, so a staging
+    buffer sized during planning is the one the worker reserves.
+
+    Args:
+        lmcache_config: LMCache configuration; supplies ``chunk_size`` and the
+            MLA compatibility checks.
+        vllm_config: Serving configuration.
+
+    Returns:
+        The ``kv_shape`` tuple ``(num_layers, kv, chunk_size, num_kv_heads,
+        head_size)`` as :class:`LMCacheMetadata` expects it, the KV dtype, and
+        whether the model uses MLA.
+
+    Raises:
+        ValueError: If the LMCache configuration is incompatible with MLA.
+    """
+    # First Party
+    from lmcache.integration.vllm.utils import (
+        calculate_draft_layers,
+        mla_enabled,
+        validate_mla_config,
+    )
+
+    try:
+        # Third Party
+        from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+    except ImportError:
+        # Third Party
+        from vllm.utils import get_kv_cache_torch_dtype
+
+    model_config = vllm_config.model_config
+    parallel_config = vllm_config.parallel_config
+    kv_dtype = get_kv_cache_torch_dtype(
+        vllm_config.cache_config.cache_dtype, model_config.dtype
+    )
+    use_mla = mla_enabled(model_config)
+    validate_mla_config(lmcache_config, use_mla)
+    num_draft_layers = calculate_draft_layers(vllm_config)
+    num_layer = model_config.get_num_layers(parallel_config) + num_draft_layers
+    chunk_size = lmcache_config.chunk_size
+    num_kv_head = model_config.get_num_kv_heads(parallel_config)
+    head_size = model_config.get_head_size()
+    kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
+    logger.info(
+        "num_layer: %d, chunk_size: %d, num_kv_head (per gpu): %d, "
+        "head_size: %d, hidden_dim (D) for KV (per gpu): %d, "
+        "use mla: %s, kv shape: %s, num_draft_layers: %d",
+        num_layer,
+        chunk_size,
+        num_kv_head,
+        head_size,
+        num_kv_head * head_size,
+        use_mla,
+        kv_shape,
+        num_draft_layers,
+    )
+    return kv_shape, kv_dtype, use_mla
+
+
 class VllmServiceFactory(BaseServiceFactory):
     """Creates LMCache service components for vLLM integration.
 
@@ -80,57 +144,12 @@ class VllmServiceFactory(BaseServiceFactory):
             return self.metadata
 
         # First Party
-        from lmcache.integration.vllm.utils import (
-            calculate_draft_layers,
-            calculate_local_rank_and_world_size,
-            mla_enabled,
-            validate_mla_config,
-        )
-
-        try:
-            # Third Party
-            from vllm.utils.torch_utils import get_kv_cache_torch_dtype
-        except ImportError:
-            # Third Party
-            from vllm.utils import get_kv_cache_torch_dtype
+        from lmcache.integration.vllm.utils import calculate_local_rank_and_world_size
 
         model_config = self.vllm_config.model_config
         parallel_config = self.vllm_config.parallel_config
-        cache_config = self.vllm_config.cache_config
-
-        kv_dtype = get_kv_cache_torch_dtype(
-            cache_config.cache_dtype, model_config.dtype
-        )
-
-        use_mla = mla_enabled(model_config)
-        validate_mla_config(self.lmcache_config, use_mla)
-
-        num_layer = model_config.get_num_layers(parallel_config)
-        num_draft_layers = calculate_draft_layers(self.vllm_config)
-        num_layer += num_draft_layers
-        chunk_size = self.lmcache_config.chunk_size
-        num_kv_head = model_config.get_num_kv_heads(parallel_config)
-        head_size = model_config.get_head_size()
-        kv_shape = (
-            num_layer,
-            1 if use_mla else 2,
-            chunk_size,
-            num_kv_head,
-            head_size,
-        )
-
-        logger.info(
-            "num_layer: %d, chunk_size: %d, num_kv_head (per gpu): %d, "
-            "head_size: %d, hidden_dim (D) for KV (per gpu): %d, "
-            "use mla: %s, kv shape: %s, num_draft_layers: %d",
-            num_layer,
-            chunk_size,
-            num_kv_head,
-            head_size,
-            num_kv_head * head_size,
-            use_mla,
-            kv_shape,
-            num_draft_layers,
+        kv_shape, kv_dtype, use_mla = kv_layout_from_vllm_config(
+            self.lmcache_config, self.vllm_config
         )
 
         # Extract engine_id and kv_connector_extra_config from vllm_config

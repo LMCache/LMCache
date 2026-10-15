@@ -14,15 +14,18 @@ Configuration
 
 .. code-block:: yaml
 
-   retrieve_buffer_size: 67108864  # 64 MiB, the default
+   retrieve_window_bytes: 67108864  # 64 MiB, the default
    extra_config:
      save_only_first_rank: true
 
-``LMCACHE_RETRIEVE_BUFFER_SIZE`` is the equivalent environment override. The
-value must be positive, must hold at least one KV chunk (``chunk_size`` tokens
-of KV data, checked when the engine is created), and must be identical on all
-ranks. The buffer never grows: it is the hard upper bound on the device memory
-a retrieval stages. With a single rank the setting is unused.
+``LMCACHE_RETRIEVE_WINDOW_BYTES`` is the equivalent environment override. The
+window holds as many whole KV chunks as fit in the target, so its effective
+size is a chunk multiple at or below the target (three 17 MiB chunks for a
+DeepSeek-V3 class model at ``chunk_size`` 256). A target smaller than one chunk
+is raised to one chunk, with a warning, because a chunk is the unit the
+exchange moves. The effective size is logged when the engine starts. The value
+must be positive and identical on all ranks. The buffer never grows. With a
+single rank the setting is unused.
 
 How a retrieval proceeds
 ------------------------
@@ -56,7 +59,7 @@ Memory
 The buffer is allocated when the worker's engine is created and stays resident
 for the life of the engine. Compared with the previous implementation, which
 allocated device copies per cache hit, this bounds the worst case of a large
-hit but adds ``retrieve_buffer_size`` of resident device memory even when
+hit but adds one staging window of resident device memory even when
 nothing is retrieved.
 
 vLLM creates the KV connector after it has sized its KV pages and before it
@@ -64,7 +67,7 @@ allocates them, so the buffer is part of the plan only when vLLM asks the
 connector for its device memory requirement first:
 
 - With a vLLM that provides the connector memory hook, LMCache reports
-  ``retrieve_buffer_size`` through ``get_required_device_memory`` using the
+  the window's byte size through ``get_required_device_memory`` using the
   same configuration and ``lmcache.*`` overrides as the worker, and vLLM
   subtracts it from the memory available for KV pages.
 - With an explicit ``kv_cache_memory_bytes`` budget, the deployment leaves room

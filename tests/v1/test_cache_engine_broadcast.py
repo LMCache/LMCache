@@ -28,7 +28,7 @@ from lmcache.utils import (
     mock_up_broadcast_fn,
     mock_up_broadcast_object_fn,
 )
-from lmcache.v1.broadcast_transfer import CHUNK_ALIGNMENT
+from lmcache.v1.broadcast_transfer import staging_bytes
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus, EventType
@@ -49,8 +49,6 @@ CHUNK_BYTES = 1 * 2 * CHUNK_TOKENS * 3 * 4
 NUM_CHUNKS = 5
 NUM_TOKENS = NUM_CHUNKS * CHUNK_TOKENS
 TOKENS = list(range(NUM_TOKENS))
-# Chunks start on aligned offsets, so two chunks need one alignment step plus one.
-TWO_CHUNK_BUDGET = CHUNK_ALIGNMENT + CHUNK_BYTES
 
 TwoRanks = Callable[..., tuple[list[LMCacheEngine], list["RecordingConnector"]]]
 Collectives = tuple[
@@ -180,13 +178,17 @@ def make_engine(
     connector: MockGPUConnector,
     *,
     world_size: int = 2,
-    budget: int = TWO_CHUNK_BUDGET,
+    window_chunks: int = 2,
+    window_bytes: int | None = None,
     async_loading: bool = False,
     use_mla: bool = True,
 ) -> LMCacheEngine:
+    """Build one rank's engine; ``window_bytes`` overrides the chunk-count window."""
+    if window_bytes is None:
+        window_bytes = staging_bytes(CHUNK_BYTES, window_chunks)
     config = LMCacheEngineConfig.from_defaults(
         chunk_size=CHUNK_TOKENS,
-        retrieve_buffer_size=budget,
+        retrieve_window_bytes=window_bytes,
         enable_async_loading=async_loading,
         py_enable_gc=True,
     )
@@ -267,9 +269,9 @@ def two_ranks() -> Generator[TwoRanks, None, None]:
         group: FakeTensorParallelGroup, **options: Any
     ) -> tuple[list[LMCacheEngine], list[RecordingConnector]]:
         fail_follower_write = options.pop("fail_follower_write", None)
-        budgets = (
-            options.pop("budgets", None)
-            or (options.pop("budget", TWO_CHUNK_BUDGET),) * 2
+        window_chunks = (
+            options.pop("window_chunks_per_rank", None)
+            or (options.pop("window_chunks", 2),) * 2
         )
         connectors = [
             RecordingConnector(fail_follower_write if rank else None)
@@ -280,7 +282,7 @@ def two_ranks() -> Generator[TwoRanks, None, None]:
                 rank,
                 group.bind(rank),
                 connectors[rank],
-                budget=budgets[rank],
+                window_chunks=window_chunks[rank],
                 **options,
             )
             for rank in range(2)
@@ -294,14 +296,16 @@ def two_ranks() -> Generator[TwoRanks, None, None]:
 
 @pytest.mark.parametrize("async_loading", [False, True])
 @pytest.mark.parametrize(
-    ("budget", "expected_windows"),
-    [(CHUNK_BYTES, NUM_CHUNKS), (TWO_CHUNK_BUDGET, 3), (64 * 1024, 1)],
+    ("window_chunks", "expected_windows"),
+    [(1, NUM_CHUNKS), (2, 3), (8, 1)],
 )
 def test_every_rank_receives_the_hit_in_bounded_windows(
-    two_ranks: TwoRanks, async_loading: bool, budget: int, expected_windows: int
+    two_ranks: TwoRanks, async_loading: bool, window_chunks: int, expected_windows: int
 ) -> None:
     group = FakeTensorParallelGroup(2)
-    engines, connectors = two_ranks(group, budget=budget, async_loading=async_loading)
+    engines, connectors = two_ranks(
+        group, window_chunks=window_chunks, async_loading=async_loading
+    )
     keys, sources = make_sources()
     storage = attach_storage(engines[0], keys, sources)
     if async_loading:
@@ -313,7 +317,7 @@ def test_every_rank_receives_the_hit_in_bounded_windows(
         assert mask.all()
         assert not connector.pending
         torch.testing.assert_close(connector.destination, expected_kv())
-    assert max(group.payload_sizes) <= budget
+    assert max(group.payload_sizes) <= staging_bytes(CHUNK_BYTES, window_chunks)
     assert len(group.payload_sizes) == expected_windows
     # Admission, one header per window, and the terminating header.
     assert group.object_count == expected_windows + 2
@@ -334,7 +338,7 @@ def test_missing_chunk_truncates_to_the_same_prefix_on_every_rank(
     two_ranks: TwoRanks,
 ) -> None:
     group = FakeTensorParallelGroup(2)
-    engines, connectors = two_ranks(group, budget=CHUNK_BYTES)
+    engines, connectors = two_ranks(group, window_chunks=1)
     keys, sources = make_sources()
     attach_storage(engines[0], keys, sources, missing=frozenset({2}))
 
@@ -355,7 +359,7 @@ def test_failed_write_is_fenced_before_the_buffer_is_reused(
     two_ranks: TwoRanks, caplog: pytest.LogCaptureFixture
 ) -> None:
     group = FakeTensorParallelGroup(2)
-    engines, connectors = two_ranks(group, budget=CHUNK_BYTES, fail_follower_write=2)
+    engines, connectors = two_ranks(group, window_chunks=1, fail_follower_write=2)
     keys, sources = make_sources()
     attach_storage(engines[0], keys, sources)
 
@@ -394,7 +398,7 @@ def test_unhealthy_rank_is_refused_at_admission(
     two_ranks: TwoRanks, unhealthy_rank: int
 ) -> None:
     group = FakeTensorParallelGroup(2)
-    engines, connectors = two_ranks(group, budget=CHUNK_BYTES)
+    engines, connectors = two_ranks(group, window_chunks=1)
     keys, sources = make_sources()
     storage = attach_storage(engines[0], keys, sources)
     engines[unhealthy_rank].mark_init_failed("test")
@@ -421,7 +425,7 @@ def test_rank_without_a_staging_buffer_is_refused_at_admission(
 
     with monkeypatch.context() as patch:
         patch.setattr(torch, "empty", empty_without_staging)
-        engines, _ = two_ranks(group, budget=CHUNK_BYTES)
+        engines, _ = two_ranks(group, window_chunks=1)
     keys, sources = make_sources()
     storage = attach_storage(engines[0], keys, sources)
 
@@ -433,14 +437,14 @@ def test_rank_without_a_staging_buffer_is_refused_at_admission(
 
 
 @pytest.mark.parametrize(
-    ("follower_budget", "admitted"),
-    [(CHUNK_BYTES, False), (TWO_CHUNK_BUDGET + CHUNK_ALIGNMENT, True)],
+    ("follower_chunks", "admitted"),
+    [(1, False), (3, True)],
 )
 def test_follower_must_hold_at_least_the_source_capacity(
-    two_ranks: TwoRanks, follower_budget: int, admitted: bool
+    two_ranks: TwoRanks, follower_chunks: int, admitted: bool
 ) -> None:
     group = FakeTensorParallelGroup(2)
-    engines, connectors = two_ranks(group, budgets=(TWO_CHUNK_BUDGET, follower_budget))
+    engines, connectors = two_ranks(group, window_chunks_per_rank=(2, follower_chunks))
     keys, sources = make_sources()
     attach_storage(engines[0], keys, sources)
 
@@ -449,7 +453,7 @@ def test_follower_must_hold_at_least_the_source_capacity(
     assert all(bool(mask.all()) == admitted for mask in masks)
     if admitted:
         torch.testing.assert_close(connectors[1].destination, expected_kv())
-        assert max(group.payload_sizes) <= TWO_CHUNK_BUDGET
+        assert max(group.payload_sizes) <= staging_bytes(CHUNK_BYTES, 2)
     else:
         assert not group.payload_sizes
 
@@ -458,7 +462,7 @@ def test_ranks_serving_different_requests_are_refused_at_admission(
     two_ranks: TwoRanks,
 ) -> None:
     group = FakeTensorParallelGroup(2)
-    engines, _ = two_ranks(group, budget=CHUNK_BYTES)
+    engines, _ = two_ranks(group, window_chunks=1)
     keys, sources = make_sources()
     attach_storage(engines[0], keys, sources)
 
@@ -472,7 +476,7 @@ def test_source_storage_failure_releases_peers_before_propagating(
     two_ranks: TwoRanks,
 ) -> None:
     group = FakeTensorParallelGroup(2)
-    engines, _ = two_ranks(group, budget=CHUNK_BYTES)
+    engines, _ = two_ranks(group, window_chunks=1)
     keys, sources = make_sources()
     storage = attach_storage(engines[0], keys, sources)
     storage.batched_get.side_effect = OSError("injected storage failure")
@@ -499,18 +503,12 @@ def test_multi_rank_engine_requires_an_agreement_callback() -> None:
         make_engine(0, (broadcast, broadcast_object, None), RecordingConnector())
 
 
-def test_budget_smaller_than_one_chunk_is_rejected_at_init() -> None:
-    group = FakeTensorParallelGroup(2)
-    with pytest.raises(ValueError, match="at least one KV chunk"):
-        make_engine(0, group.bind(0), RecordingConnector(), budget=CHUNK_BYTES - 1)
-
-
 def test_chunk_larger_than_the_buffer_fails_before_any_window(
     two_ranks: TwoRanks,
 ) -> None:
     """A layout change after init cannot grow the buffer; it fails loudly."""
     group = FakeTensorParallelGroup(2)
-    engines, _ = two_ranks(group, budget=CHUNK_BYTES)
+    engines, _ = two_ranks(group, window_chunks=1)
     keys, sources = make_sources(tokens_per_chunk=2 * CHUNK_TOKENS)
     attach_storage(engines[0], keys, sources, tokens_per_chunk=2 * CHUNK_TOKENS)
 
@@ -531,8 +529,7 @@ def test_single_rank_writes_its_chunks_without_staging_or_collectives(
     """One rank has nobody to broadcast to; it retrieves like any other model.
 
     The callbacks are the placeholders SGLang and TensorRT-LLM pass, which raise
-    if called, and a budget below one chunk is accepted because nothing is
-    reserved.
+    if called, and the window setting is irrelevant because nothing is reserved.
     """
     connector = RecordingConnector()
     engine = make_engine(
@@ -540,7 +537,7 @@ def test_single_rank_writes_its_chunks_without_staging_or_collectives(
         (mock_up_broadcast_fn, mock_up_broadcast_object_fn, None),
         connector,
         world_size=1,
-        budget=1,
+        window_chunks=1,
         async_loading=async_loading,
     )
     keys, sources = make_sources()
@@ -625,16 +622,36 @@ def test_fatal_transfer_failure_disables_the_engine(two_ranks: TwoRanks) -> None
     storage.batched_get.assert_called_once()
 
 
-@pytest.mark.parametrize("budget", [0, -1])
-def test_retrieval_budget_must_be_positive(budget: int) -> None:
-    config = LMCacheEngineConfig.from_defaults(retrieve_buffer_size=budget)
-    with pytest.raises(ValueError, match="retrieve_buffer_size"):
+@pytest.mark.parametrize("window_bytes", [0, -1])
+def test_window_bytes_must_be_positive(window_bytes: int) -> None:
+    config = LMCacheEngineConfig.from_defaults(retrieve_window_bytes=window_bytes)
+    with pytest.raises(ValueError, match="retrieve_window_bytes"):
         config.validate()
 
 
-def test_retrieval_budget_environment_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LMCACHE_RETRIEVE_BUFFER_SIZE", "4096")
-    assert LMCacheEngineConfig.from_env().retrieve_buffer_size == 4096
+def test_window_bytes_environment_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LMCACHE_RETRIEVE_WINDOW_BYTES", "4096")
+    assert LMCacheEngineConfig.from_env().retrieve_window_bytes == 4096
+
+
+def test_window_below_one_chunk_is_raised_to_one_chunk(
+    two_ranks: TwoRanks, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A target smaller than a chunk still moves whole chunks, one per window."""
+    group = FakeTensorParallelGroup(2)
+    with caplog.at_level(logging.WARNING, logger="lmcache.v1.cache_engine"):
+        engines, connectors = two_ranks(group, window_bytes=1)
+    keys, sources = make_sources()
+    attach_storage(engines[0], keys, sources)
+
+    masks = [future.result() for future in retrieve_on_all(engines)]
+
+    assert "below one KV chunk" in caplog.text
+    for mask, connector in zip(masks, connectors, strict=True):
+        assert mask.all()
+        torch.testing.assert_close(connector.destination, expected_kv())
+    assert len(group.payload_sizes) == NUM_CHUNKS
+    assert max(group.payload_sizes) == CHUNK_BYTES
 
 
 @pytest.mark.cuda
@@ -642,7 +659,7 @@ def test_retrieval_budget_environment_override(monkeypatch: pytest.MonkeyPatch) 
 def test_cuda_staging_does_not_grow_with_the_hit(two_ranks: TwoRanks) -> None:
     """Device memory used by a retrieval stays within the fixed staging buffer."""
     group = FakeTensorParallelGroup(2)
-    engines, connectors = two_ranks(group, budget=TWO_CHUNK_BUDGET)
+    engines, connectors = two_ranks(group, window_chunks=2)
     keys, sources = make_sources()
     attach_storage(engines[0], keys, sources)
     torch.cuda.synchronize()
@@ -655,4 +672,6 @@ def test_cuda_staging_does_not_grow_with_the_hit(two_ranks: TwoRanks) -> None:
         assert mask.all()
         torch.testing.assert_close(connector.destination, expected_kv())
     # The fake group clones one window per broadcast; nothing else may appear.
-    assert torch.cuda.max_memory_allocated() - baseline <= 2 * TWO_CHUNK_BUDGET
+    assert torch.cuda.max_memory_allocated() - baseline <= 2 * staging_bytes(
+        CHUNK_BYTES, 2
+    )

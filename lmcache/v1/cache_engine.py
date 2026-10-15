@@ -43,7 +43,15 @@ from lmcache.utils import (
     compress_slot_mapping,
     convert_tokens_to_list,
 )
-from lmcache.v1.broadcast_transfer import StagedChunk, Window, pack, plan_windows
+from lmcache.v1.broadcast_transfer import (
+    StagedChunk,
+    Window,
+    chunk_bytes,
+    chunks_per_window,
+    pack,
+    plan_windows,
+    staging_bytes,
+)
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
@@ -124,11 +132,12 @@ class LMCacheEngine:
             and metadata.use_mla
         )
 
-        # Fixed device staging for first-rank broadcast retrieval. Its capacity
-        # is the configured budget, checked to hold at least one chunk, and it
-        # never grows: every rank must be able to receive any window the first
-        # rank can send. A single rank has nobody to broadcast to and retrieves
-        # directly, like any other model, so it reserves nothing.
+        # Fixed device staging for first-rank broadcast retrieval: as many whole
+        # chunks as ``retrieve_window_bytes`` holds, never fewer than one, sized
+        # from the KV layout known now and never grown. Every rank must be able
+        # to receive any window the first rank can send. A single rank has nobody
+        # to broadcast to and retrieves directly, like any other model, so it
+        # reserves nothing.
         self._staging: Optional[torch.Tensor] = None
         if (
             self._retrieves_by_broadcast()
@@ -148,19 +157,24 @@ class LMCacheEngine:
                     "save_only_first_rank retrieval across ranks requires "
                     "all_ranks_agree_fn"
                 )
-            chunk_bytes = self._chunk_bytes()
-            if config.retrieve_buffer_size < chunk_bytes:
-                raise ValueError(
-                    f"retrieve_buffer_size={config.retrieve_buffer_size} must hold "
-                    f"at least one KV chunk of {chunk_bytes} bytes "
-                    f"(chunk_size={config.chunk_size})"
+            bytes_per_chunk = chunk_bytes(metadata, config.chunk_size)
+            window_chunks = chunks_per_window(
+                config.retrieve_window_bytes, bytes_per_chunk
+            )
+            capacity = staging_bytes(bytes_per_chunk, window_chunks)
+            if capacity > config.retrieve_window_bytes:
+                logger.warning(
+                    "retrieve_window_bytes=%d is below one KV chunk of %d bytes; "
+                    "the staging window is one chunk",
+                    config.retrieve_window_bytes,
+                    bytes_per_chunk,
                 )
             try:
                 # The device the serving engine made current for this worker.
                 # Rank ids do not identify it: under vLLM data parallelism every
                 # DP engine's TP world starts at rank 0.
                 self._staging = torch.empty(
-                    config.retrieve_buffer_size,
+                    capacity,
                     dtype=torch.uint8,
                     device=torch.device(torch_device_type, torch_dev.current_device()),
                 )
@@ -168,6 +182,13 @@ class LMCacheEngine:
                 # Peers learn about this at retrieval admission, before any
                 # tensor collective, so this rank never leaves them waiting.
                 logger.exception("Could not reserve the KV retrieval staging buffer")
+            else:
+                logger.info(
+                    "Reserved %d bytes of KV retrieval staging: %d chunks of %d bytes",
+                    capacity,
+                    window_chunks,
+                    bytes_per_chunk,
+                )
 
         self.enable_controller = config.enable_controller
 
@@ -2074,17 +2095,6 @@ class LMCacheEngine:
             for start, end in zip(window.starts, window.ends, strict=True):
                 ret_mask[start:end] = True
         return written
-
-    def _chunk_bytes(self) -> int:
-        """Return the size in bytes of one full KV chunk under the current layout."""
-        return sum(
-            shape.numel() * dtype.itemsize
-            for shape, dtype in zip(
-                self.metadata.get_shapes(self.config.chunk_size),
-                self.metadata.get_dtypes(),
-                strict=True,
-            )
-        )
 
     def _release_retrieval_chunk(
         self, key: CacheEngineKey, memory_obj: MemoryObj

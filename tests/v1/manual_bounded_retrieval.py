@@ -12,8 +12,8 @@ the same rendezvous on all::
 Results are JSON lines. ``fixed_reservation_bytes`` is the staging buffer the
 engine holds for its lifetime; ``extra_peak_bytes`` is the device memory a
 retrieval allocated beyond it and must stay within one buffer. One source chunk
-is ``LAYERS * CHUNK_TOKENS * WIDTH`` elements, i.e. 1 MiB at two bytes each, so
-every budget in the matrix is at least that. Recoverable failures are injected
+is ``LAYERS * CHUNK_TOKENS * WIDTH`` elements, i.e. 1 MiB at two bytes each; the
+matrix varies how many chunks one window holds. Recoverable failures are injected
 after real CUDA writes; a failed window may therefore be written but is not
 committed in the returned mask. No device fault is induced.
 """
@@ -33,6 +33,7 @@ import torch.distributed as dist
 
 # First Party
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.broadcast_transfer import staging_bytes
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
@@ -49,7 +50,7 @@ from lmcache.v1.token_database import TokenDatabase
 LAYERS, WIDTH, CHUNK_TOKENS, PAGE_TOKENS = 4, 128, 1024, 16
 VLLM_CACHED_TOKENS = 17
 MIB = 1024**2
-BUDGETS = (MIB, 4 * MIB, 16 * MIB)
+WINDOW_CHUNKS = (1, 4, 16)
 
 
 class FailingConnector(VLLMPagedMemGPUConnectorV2):
@@ -97,13 +98,15 @@ def build_engine(
     rank: int,
     world_size: int,
     host_group: Any,
-    budget: int,
+    window_chunks: int,
     dtype: torch.dtype,
     connector: VLLMPagedMemGPUConnectorV2,
 ) -> LMCacheEngine:
     """Create a first-rank retrieval engine wired to NCCL and Gloo."""
     config = LMCacheEngineConfig.from_defaults(
-        chunk_size=CHUNK_TOKENS, retrieve_buffer_size=budget, py_enable_gc=True
+        chunk_size=CHUNK_TOKENS,
+        retrieve_window_bytes=staging_bytes(MIB, window_chunks),
+        py_enable_gc=True,
     )
     metadata = LMCacheMetadata(
         model_name="manual",
@@ -198,7 +201,7 @@ def check_pages(
 
 
 def run_case(
-    budget: int,
+    window_chunks: int,
     num_chunks: int,
     dtype: torch.dtype,
     rank: int,
@@ -209,7 +212,7 @@ def run_case(
     """Retrieve one hit through the engine, verify the pages, measure staging.
 
     Args:
-        budget: ``retrieve_buffer_size`` in bytes; at least one chunk.
+        window_chunks: Chunks per staging window; sets ``retrieve_window_bytes``.
         num_chunks: Number of ``CHUNK_TOKENS``-token source chunks.
         dtype: KV element type.
         rank: This process's rank; rank zero owns the sources.
@@ -246,7 +249,8 @@ def run_case(
     connector = FailingConnector(WIDTH, LAYERS, use_mla=True, device=device)
     torch.cuda.synchronize()
     before_engine = torch.cuda.memory_allocated()
-    engine = build_engine(rank, world_size, host_group, budget, dtype, connector)
+    budget = staging_bytes(MIB, window_chunks)
+    engine = build_engine(rank, world_size, host_group, window_chunks, dtype, connector)
     torch.cuda.synchronize()
     fixed_reservation = torch.cuda.memory_allocated() - before_engine
     kwargs = {
@@ -319,6 +323,7 @@ def run_case(
         "dtype": str(dtype),
         "mode": failure,
         "hit_bytes": expected.numel() * expected.element_size(),
+        "window_chunks": window_chunks,
         "budget_bytes": budget,
         "fixed_reservation_bytes": fixed_reservation,
         "extra_peak_bytes": extra_peak,
@@ -351,15 +356,20 @@ def main() -> None:
     try:
         for dtype in (torch.float16, torch.bfloat16):
             for count in (1, 16, 128):
-                for budget in BUDGETS:
+                for window_chunks in WINDOW_CHUNKS:
                     result = run_case(
-                        budget, count, dtype, args.rank, args.world_size, host_group
+                        window_chunks,
+                        count,
+                        dtype,
+                        args.rank,
+                        args.world_size,
+                        host_group,
                     )
                     print(json.dumps(result), flush=True)
                     gc.collect()
         for failure in ("read", "write"):
             result = run_case(
-                4 * MIB,
+                4,
                 16,
                 torch.bfloat16,
                 args.rank,

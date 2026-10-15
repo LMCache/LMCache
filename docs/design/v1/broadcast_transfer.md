@@ -16,8 +16,15 @@ hit and could exhaust the device on any rank.
 
 ## Design
 
-One fixed staging buffer per engine (`retrieve_buffer_size`, default 64 MiB),
-allocated at engine creation and validated to hold at least one KV chunk. A
+One fixed staging buffer per engine, sized at engine creation from
+`retrieve_window_bytes` (default 64 MiB) and the KV layout known then: as many
+whole chunks as fit the target, never fewer than one. The target is a byte
+figure because that is how memory is planned, but a chunk is the unit the
+exchange moves, so the floor is one chunk and a smaller target is raised to it
+with a warning. Rounding down keeps the target a ceiling in every realizable
+case, and a byte target gives every model a similar amortization of per-window
+overhead. The effective size is logged at start-up and reported to vLLM's
+memory planning through the same formula. A
 retrieval is one admission agreement followed by a sequence of *windows*: runs
 of consecutive chunks that fit in the buffer. Each window costs one host object
 broadcast (the header), one tensor broadcast (the packed bytes), one connector
@@ -98,7 +105,7 @@ or remove collectives.
 
 | Failure | First rank | Other ranks |
 |---|---|---|
-| Buffer reservation failed at init, budgets differ, health monitor disabled a rank, or ranks serve different requests | Not admitted: all-false, no transfer | Same |
+| Buffer reservation failed at init, window sizes differ, health monitor disabled a rank, or ranks serve different requests | Not admitted: all-false, no transfer | Same |
 | Chunk missing in storage | Prefix truncated by `_process_tokens_internal`, as in single-rank retrieval | Same prefix (they only see the windows that were sent) |
 | Storage raises while acquiring, or a chunk cannot be sent (exceeds the buffer, no tensor storage) | Sends the terminator, then re-raises; the engine stays usable | All-false mask |
 | `batched_to_gpu` raises on a rank | That rank fences the work it queued, stops writing, keeps receiving, returns the prefix it committed, and logs the error | Unaffected |
@@ -152,19 +159,20 @@ does not force a vLLM upgrade. The warning is explicit that no whole-device
 budget guarantee exists in that mode. Note the trade-off against the previous
 implementation: it allocated per hit, so it had no resident cost with small or
 no hits but an unbounded worst case; the fixed buffer bounds the worst case and
-adds `retrieve_buffer_size` of resident memory.
+adds one staging window of resident memory.
 
 ## Deliberately not done
 
 - **Cross-rank agreement per window.** Costs two host all-reduces per window,
   only to turn a per-rank partial load into an all-rank miss. vLLM's
   load-failure recovery already covers partial loads.
-- **Slicing chunks along the token dimension.** Needed only when the budget is
-  smaller than one chunk. Rejecting such budgets at init is simpler and keeps
-  chunks as the unit of transfer everywhere else in the engine.
-- **Growing the buffer at runtime.** It would turn the configured budget into a
-  floor rather than a ceiling, and a rank that fails to grow after receiving a
-  header cannot join the tensor broadcast its peers are already in.
+- **Slicing chunks along the token dimension.** It only matters when the
+  staging window is smaller than one chunk. The window is floored at one chunk
+  instead, so that state cannot occur, and chunks stay the unit of transfer
+  everywhere else in the engine.
+- **Growing the buffer at runtime.** A rank that fails to grow after receiving
+  a header cannot join the tensor broadcast its peers are already in, and the
+  resident size would stop being the figure planned at start-up.
 - **A process-wide buffer registry.** vLLM creates one engine per worker
   process. Extra engines on one device pay one more buffer each.
 - **Retaining engines after a failed device fence.** A failed device fence is
