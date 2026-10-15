@@ -12,7 +12,6 @@ router = APIRouter()
 _REDACTED_ENV_VARS = frozenset(
     {
         "LMCACHE_HTTP_API_KEY",
-        "LMCACHE_HTTP_API_KEY_FILE",
     }
 )
 _REDACTED_VALUE = "<redacted>"

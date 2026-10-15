@@ -26,5 +26,5 @@ def test_http_authentication_environment_is_redacted(
     assert response.status_code == 200
     environment = response.json()
     assert environment["LMCACHE_HTTP_API_KEY"] == "<redacted>"
-    assert environment["LMCACHE_HTTP_API_KEY_FILE"] == "<redacted>"
+    assert environment["LMCACHE_HTTP_API_KEY_FILE"] == "/run/secrets/http-key"
     assert environment["LMCACHE_SAFE_TEST_VALUE"] == "visible"

@@ -88,22 +88,17 @@ class HTTPAuthenticationConfig:
 
         Raises:
             OSError: If a key file cannot be read.
-            ValueError: If an environment value or key file is empty, or a key
-                file contains more than one line.
+            ValueError: If a key file is empty or contains more than one line.
         """
         combined_key_files = list(key_files)
         environment_key_file = os.environ.get(HTTP_API_KEY_FILE_ENV_VAR)
-        if environment_key_file is not None:
-            if not environment_key_file:
-                raise ValueError(f"{HTTP_API_KEY_FILE_ENV_VAR} must not be empty")
+        if environment_key_file:
             combined_key_files.append(environment_key_file)
 
         config = cls.from_key_files(combined_key_files)
         api_keys = list(config._api_keys)
         environment_key = os.environ.get(HTTP_API_KEY_ENV_VAR)
-        if environment_key is not None:
-            if not environment_key:
-                raise ValueError(f"{HTTP_API_KEY_ENV_VAR} must not be empty")
+        if environment_key:
             api_keys.append(environment_key)
         return cls(api_keys)
 

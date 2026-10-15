@@ -122,11 +122,12 @@ def test_environment_key_and_file_are_combined_with_cli_files(
     "environment_variable",
     [HTTP_API_KEY_ENV_VAR, HTTP_API_KEY_FILE_ENV_VAR],
 )
-def test_empty_environment_source_is_rejected(
+def test_empty_environment_source_is_ignored(
     monkeypatch: pytest.MonkeyPatch, environment_variable: str
 ) -> None:
-    """An explicitly configured empty environment source fails closed."""
+    """An empty environment value behaves like an unset source."""
     monkeypatch.setenv(environment_variable, "")
 
-    with pytest.raises(ValueError, match=environment_variable):
-        HTTPAuthenticationConfig.from_sources([])
+    auth_config = HTTPAuthenticationConfig.from_sources([])
+
+    assert not auth_config.enabled

@@ -63,8 +63,8 @@ The environment variables ``LMCACHE_HTTP_API_KEY_FILE`` and
 ``LMCACHE_HTTP_API_KEY`` provide deployment-friendly alternatives for one key
 file or one key value. Environment sources and repeated
 ``--http-api-key-file`` options are cumulative, so old and new keys can overlap
-during rotation. The ``/env`` endpoint redacts both authentication environment
-variables.
+during rotation. The ``/env`` endpoint redacts ``LMCACHE_HTTP_API_KEY`` while
+leaving the non-secret key-file path visible.
 
 Example:
 
