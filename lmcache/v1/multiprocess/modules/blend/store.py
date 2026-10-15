@@ -34,9 +34,9 @@ CB_FINGERPRINTS_KIND = "cb_fingerprints"
 
 #: One fingerprint-registration job:
 #: (tokens_in_range, chunk_hashes, start_chunk_idx, position_offset,
-#: predecessor_hash, request_id). Also the msgspec decode type for the
+#: request_id, predecessor_hash). Also the msgspec decode type for the
 #: dispatcher payload.
-FpJob = tuple[list[int], list[bytes], int, int, bytes | None, str]
+FpJob = tuple[list[int], list[bytes], int, int, str, bytes | None]
 
 
 class StoreMixin:
@@ -143,8 +143,8 @@ class StoreMixin:
                             chunk_hashes[run_start:i],
                             run_sci,
                             key.start + run_start * chunk_size,
-                            predecessor_hash,
                             key.request_id,
+                            predecessor_hash,
                         )
                     )
                 run_start = None
@@ -203,8 +203,8 @@ class StoreMixin:
                 chunk_hashes,
                 start_chunk_idx,
                 position_offset,
-                predecessor_hash,
                 rid,
+                predecessor_hash,
             ) = job
             try:
                 n_new = self._token_range_matcher.on_new_token_hashes(
@@ -252,8 +252,8 @@ class StoreMixin:
                 chunk_hashes,
                 start_chunk_idx,
                 position_offset,
-                predecessor_hash,
                 rid,
+                predecessor_hash,
             ) = job
             try:
                 n_new = self._token_range_matcher.on_new_token_hashes(
