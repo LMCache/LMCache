@@ -75,13 +75,17 @@ undersized one it is 68% at 32 ms. **1536 MiB is the default** as the value
 whose worst column is best. A single slow device is the case most worth
 pinning a smaller value for.
 
-Three properties bound what the budget can do:
+Four properties bound what the budget can do:
 
 1. **Dispatch is quantised in whole objects.** Four workers and 192 MiB
    objects cannot dispatch less than 768 MiB.
 2. **The thread pool is a separate ceiling.** Bytes in flight never exceed
    `num_read_workers x object_size`, whatever the budget says.
-3. **A worker blocks on its own tile.** Objects are dispatched one at a
+3. **Two reads are always admitted.** The budget never holds fewer than
+   two objects in flight, so objects larger than half of it still overlap.
+   With 1536 MiB, 1 GiB objects read 39.4 GB/s one at a time and 49.2 two
+   at a time; a third adds 1 GB/s and doubles per-read latency.
+4. **A worker blocks on its own tile.** Objects are dispatched one at a
    time as the budget has room, so a large tile keeps every reader busy, but
    a batch smaller than the pool holds only its own objects in flight:
    four workers and 16-object batches keep at most 64 objects in flight

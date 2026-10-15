@@ -30,6 +30,11 @@ static constexpr size_t kDefaultReadMaxBytesInFlight = size_t{1536} << 20;
 // A worker blocked on a full budget is woken once 1/kReadBudgetWakeSlices of
 // it is free.
 static constexpr size_t kReadBudgetWakeSlices = 8;
+// Reads always admitted whatever the budget, so an object larger than half
+// of it still overlaps with the next one instead of draining the device
+// between them: one 1 GiB object alone reads ~40 GB/s on an array that
+// two in flight bring to ~49.
+static constexpr size_t kMinReadsInFlight = 2;
 
 // Per-worker connection state for the FS connector.
 // Each worker maintains its own I/O buffer for O_DIRECT.
@@ -109,6 +114,10 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // soon as the byte budget has room, and wait for all of them.
   void do_batch_get_pooled(const Request& req);
 
+  // Whether an object of `len` bytes may be dispatched now.  Requires
+  // read_mu_.
+  bool read_budget_admits(size_t len) const;
+
   void start_read_pool(int num_read_workers);
   void stop_read_pool();
   void read_thread_main(WorkerFSConn& conn);
@@ -135,6 +144,7 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   ReadTask* read_queue_head_ = nullptr;
   ReadTask* read_queue_tail_ = nullptr;
   size_t read_bytes_in_flight_ = 0;  // dispatched and not yet finished
+  size_t reads_in_flight_ = 0;       // objects behind read_bytes_in_flight_
   bool read_stop_ = false;
 };
 

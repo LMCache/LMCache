@@ -277,6 +277,11 @@ void FSConnector::do_batch_get(WorkerFSConn& conn, const Request& req) {
 
 void FSConnector::on_workers_stopped() { stop_read_pool(); }
 
+bool FSConnector::read_budget_admits(size_t len) const {
+  return reads_in_flight_ < kMinReadsInFlight ||
+         read_bytes_in_flight_ + len <= read_max_bytes_in_flight_;
+}
+
 void FSConnector::do_batch_get_pooled(const Request& req) {
   const size_t num_keys = req.keys.size();
   ReadTile tile;
@@ -290,18 +295,14 @@ void FSConnector::do_batch_get_pooled(const Request& req) {
     std::unique_lock<std::mutex> lk(read_mu_);
     for (size_t i = 0; i < num_keys; ++i) {
       const size_t len = req.buf_lens[i];
-      // An object larger than the whole budget goes when nothing else is
-      // in flight, or it could never be read.
-      if (read_bytes_in_flight_ != 0 &&
-          read_bytes_in_flight_ + len > read_max_bytes_in_flight_) {
+      if (!read_budget_admits(len)) {
         ++read_budget_waiters_;
-        read_budget_cv_.wait(lk, [this, len] {
-          return read_bytes_in_flight_ == 0 ||
-                 read_bytes_in_flight_ + len <= read_max_bytes_in_flight_;
-        });
+        read_budget_cv_.wait(lk,
+                             [this, len] { return read_budget_admits(len); });
         --read_budget_waiters_;
       }
       read_bytes_in_flight_ += len;
+      ++reads_in_flight_;
       tasks[i] = ReadTask{&req, i, &tile, nullptr};
       if (read_queue_tail_ != nullptr) {
         read_queue_tail_->next = &tasks[i];
@@ -392,12 +393,19 @@ void FSConnector::read_thread_main(WorkerFSConn& conn) {
     lk.lock();
     task->tile->ok[task->index] = ok;
     read_bytes_in_flight_ -= req.buf_lens[task->index];
+    --reads_in_flight_;
     if (--task->tile->remaining == 0) {
       task->tile->done_cv.notify_one();
     }
+    // Large objects can hold more than the budget, so the free bytes are
+    // computed without wrapping.
+    const size_t free_bytes =
+        read_bytes_in_flight_ < read_max_bytes_in_flight_
+            ? read_max_bytes_in_flight_ - read_bytes_in_flight_
+            : 0;
     if (read_budget_waiters_ != 0 &&
-        read_max_bytes_in_flight_ - read_bytes_in_flight_ >=
-            read_max_bytes_in_flight_ / kReadBudgetWakeSlices) {
+        (reads_in_flight_ < kMinReadsInFlight ||
+         free_bytes >= read_max_bytes_in_flight_ / kReadBudgetWakeSlices)) {
       read_budget_cv_.notify_all();
     }
   }
