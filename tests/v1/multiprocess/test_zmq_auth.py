@@ -2,6 +2,7 @@
 """Authentication tests for the multiprocess ZMQ transport."""
 
 # Standard
+from typing import Any
 import socket
 
 # Third Party
@@ -10,7 +11,7 @@ import zmq
 
 # First Party
 from lmcache.security.api_key import APIKeyVerifier
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     MessageQueueClient,
@@ -45,7 +46,9 @@ def _run_noop(
     endpoint = server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
     client = MessageQueueClient(endpoint, context, api_key=client_key)
     try:
-        future = client.submit_request("noop", [])
+        future: MessagingFuture[Any] | MessagingStream[Any] = client.submit_request(
+            "noop", []
+        )
         assert isinstance(future, MessagingFuture)
         try:
             outcome: str | BaseException = future.result(timeout=3)
