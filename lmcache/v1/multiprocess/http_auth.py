@@ -3,8 +3,8 @@
 
 # Standard
 from collections.abc import Sequence
-from hashlib import sha256
 from pathlib import Path
+import hmac
 import secrets
 
 # Third Party
@@ -12,17 +12,17 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-
 PUBLIC_HTTP_PATHS = frozenset({"/", "/healthcheck"})
 
 
 class HTTPAuthenticationConfig:
     """Pre-hashed API keys used by the HTTP authentication middleware.
 
-    Plaintext keys are hashed as soon as this object is created. The object
-    deliberately hides those hashes from its representation so neither the
-    original keys nor their digests are exposed by logs or the ``/config``
-    endpoint.
+    Plaintext keys are converted to keyed HMAC digests as soon as this object
+    is created. A per-process random secret prevents those digests from being
+    useful for offline key guessing. The object deliberately hides the secret
+    and digests from its representation so they are not exposed by logs or the
+    ``/config`` endpoint.
 
     Args:
         api_keys: Plaintext API keys accepted by the HTTP frontend.
@@ -34,8 +34,15 @@ class HTTPAuthenticationConfig:
     def __init__(self, api_keys: Sequence[str] = ()) -> None:
         if any(not api_key for api_key in api_keys):
             raise ValueError("HTTP API keys must not be empty")
-        self._api_key_hashes = tuple(
-            sha256(api_key.encode("utf-8")).digest() for api_key in api_keys
+        self._comparison_secret = secrets.token_bytes(32)
+        self._api_key_hashes = tuple(self._digest(api_key) for api_key in api_keys)
+
+    def _digest(self, api_key: str) -> bytes:
+        """Return a fixed-length, process-bound comparison value."""
+        return hmac.digest(
+            self._comparison_secret,
+            api_key.encode("utf-8"),
+            "sha256",
         )
 
     @classmethod
@@ -90,7 +97,7 @@ class HTTPAuthenticationConfig:
         if not separator or scheme.lower() != "bearer" or not token:
             return False
 
-        candidate_hash = sha256(token.encode("utf-8")).digest()
+        candidate_hash = self._digest(token)
         matched = False
         for expected_hash in self._api_key_hashes:
             matched |= secrets.compare_digest(candidate_hash, expected_hash)
