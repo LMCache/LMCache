@@ -8,7 +8,10 @@ from typing import Any, NamedTuple
 import pytest
 
 # First Party
-from lmcache.integration.vllm.token_drop import TokenDropSpec, parse_token_drop_spec
+from lmcache.integration.vllm.experimental.token_drop import (
+    TokenDropSpec,
+    parse_token_drop_spec,
+)
 from lmcache.integration.vllm.utils import extract_request_configs_from_request
 
 
