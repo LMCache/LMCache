@@ -292,10 +292,15 @@ void FSConnector::do_batch_get_pooled(const Request& req) {
       const size_t len = req.buf_lens[i];
       // An object larger than the whole budget goes when nothing else is
       // in flight, or it could never be read.
-      read_done_cv_.wait(lk, [this, len] {
-        return read_bytes_in_flight_ == 0 ||
-               read_bytes_in_flight_ + len <= read_max_bytes_in_flight_;
-      });
+      if (read_bytes_in_flight_ != 0 &&
+          read_bytes_in_flight_ + len > read_max_bytes_in_flight_) {
+        ++read_budget_waiters_;
+        read_budget_cv_.wait(lk, [this, len] {
+          return read_bytes_in_flight_ == 0 ||
+                 read_bytes_in_flight_ + len <= read_max_bytes_in_flight_;
+        });
+        --read_budget_waiters_;
+      }
       read_bytes_in_flight_ += len;
       tasks[i] = ReadTask{&req, i, &tile, nullptr};
       if (read_queue_tail_ != nullptr) {
@@ -306,7 +311,7 @@ void FSConnector::do_batch_get_pooled(const Request& req) {
       read_queue_tail_ = &tasks[i];
       read_cv_.notify_one();
     }
-    read_done_cv_.wait(lk, [&tile] { return tile.remaining == 0; });
+    tile.done_cv.wait(lk, [&tile] { return tile.remaining == 0; });
   }
 
   for (size_t i = 0; i < num_keys; ++i) {
@@ -348,21 +353,21 @@ void FSConnector::stop_read_pool() {
 }
 
 void FSConnector::read_thread_main(WorkerFSConn& conn) {
+  // The lock taken to record a completion is kept to pop the next task, so
+  // a busy reader takes read_mu_ once per object, not twice.
+  std::unique_lock<std::mutex> lk(read_mu_);
   for (;;) {
-    ReadTask* task = nullptr;
-    {
-      std::unique_lock<std::mutex> lk(read_mu_);
-      read_cv_.wait(
-          lk, [this] { return read_stop_ || read_queue_head_ != nullptr; });
-      if (read_queue_head_ == nullptr) {
-        return;  // the predicate admits an empty queue only on stop
-      }
-      task = read_queue_head_;
-      read_queue_head_ = task->next;
-      if (read_queue_head_ == nullptr) {
-        read_queue_tail_ = nullptr;
-      }
+    read_cv_.wait(
+        lk, [this] { return read_stop_ || read_queue_head_ != nullptr; });
+    if (read_queue_head_ == nullptr) {
+      return;  // the predicate admits an empty queue only on stop
     }
+    ReadTask* task = read_queue_head_;
+    read_queue_head_ = task->next;
+    if (read_queue_head_ == nullptr) {
+      read_queue_tail_ = nullptr;
+    }
+    lk.unlock();
 
     uint8_t ok = 1;
     const Request& req = *task->req;
@@ -382,13 +387,18 @@ void FSConnector::read_thread_main(WorkerFSConn& conn) {
 
     // The submitting worker may destroy `task` and its tile as soon as it
     // takes read_mu_ and sees remaining == 0, so nothing touches them
-    // after this block.
-    {
-      std::lock_guard<std::mutex> lk(read_mu_);
-      task->tile->ok[task->index] = ok;
-      --task->tile->remaining;
-      read_bytes_in_flight_ -= req.buf_lens[task->index];
-      read_done_cv_.notify_all();
+    // after the notify below; notifying under the lock keeps the tile
+    // alive until then.
+    lk.lock();
+    task->tile->ok[task->index] = ok;
+    read_bytes_in_flight_ -= req.buf_lens[task->index];
+    if (--task->tile->remaining == 0) {
+      task->tile->done_cv.notify_one();
+    }
+    if (read_budget_waiters_ != 0 &&
+        read_max_bytes_in_flight_ - read_bytes_in_flight_ >=
+            read_max_bytes_in_flight_ / kReadBudgetWakeSlices) {
+      read_budget_cv_.notify_all();
     }
   }
 }

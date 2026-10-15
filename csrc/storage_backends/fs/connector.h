@@ -27,6 +27,9 @@ static constexpr const char* TMP_EXT = ".tmp";
 // is best; the sweep is in
 // docs/design/v1/distributed/l2_adapters/fs_native_read_depth.md.
 static constexpr size_t kDefaultReadMaxBytesInFlight = size_t{1536} << 20;
+// A worker blocked on a full budget is woken once 1/kReadBudgetWakeSlices of
+// it is free.
+static constexpr size_t kReadBudgetWakeSlices = 8;
 
 // Per-worker connection state for the FS connector.
 // Each worker maintains its own I/O buffer for O_DIRECT.
@@ -88,6 +91,9 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   struct ReadTile {
     std::vector<uint8_t> ok;  // one flag per object
     size_t remaining = 0;
+    // Signalled once, by the reader that finishes the last object, so a
+    // completion does not wake every worker waiting on some other tile.
+    std::condition_variable done_cv;
   };
 
   // One object to read, owned by the submitting worker's stack and linked
@@ -120,8 +126,12 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   std::vector<WorkerFSConn> read_conns_;
   std::vector<std::thread> read_threads_;
   std::mutex read_mu_;
-  std::condition_variable read_cv_;       // a task was queued, or stop
-  std::condition_variable read_done_cv_;  // a read finished
+  std::condition_variable read_cv_;  // a task was queued, or stop
+  // Budget room opened.  Signalled only once a slice of the budget is
+  // free, so a worker blocked on a full budget wakes once per slice and
+  // dispatches a run of objects, not once per finished read.
+  std::condition_variable read_budget_cv_;
+  size_t read_budget_waiters_ = 0;
   ReadTask* read_queue_head_ = nullptr;
   ReadTask* read_queue_tail_ = nullptr;
   size_t read_bytes_in_flight_ = 0;  // dispatched and not yet finished
