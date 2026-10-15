@@ -792,10 +792,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         if error == L1Error.OUT_OF_MEMORY
                     ]
                     if allocation_failures:
-                        raise RuntimeError(
-                            "Failed to reserve all store objects: "
-                            f"{len(allocation_failures)} allocation failure(s)"
+                        logger.debug(
+                            "Skipping STORE request %s after %d L1 allocation "
+                            "failure(s) in object group %d",
+                            key.request_id,
+                            len(allocation_failures),
+                            obj_group_id,
                         )
+                        break
                     if reserved_dict:
                         total_bytes += next(
                             iter(reserved_dict.values())
@@ -827,11 +831,18 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             )
                         )
                         if current_completion != group_completion:
-                            raise RuntimeError(
-                                "L1 reservation owner changed during store copy"
+                            logger.error(
+                                "Skipping STORE request %s because L1 reservation "
+                                "ownership changed in object group %d: expected=%s "
+                                "current=%s",
+                                key.request_id,
+                                obj_group_id,
+                                group_completion,
+                                current_completion,
                             )
-
-                store_succeeded = True
+                            break
+                else:
+                    store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
             finally:
