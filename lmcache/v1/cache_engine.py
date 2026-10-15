@@ -46,11 +46,10 @@ from lmcache.utils import (
 from lmcache.v1.broadcast_transfer import (
     StagedChunk,
     Window,
-    chunk_bytes,
-    chunks_per_window,
+    StagingPlan,
     pack,
     plan_windows,
-    staging_bytes,
+    plan_staging,
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
@@ -133,17 +132,13 @@ class LMCacheEngine:
         )
 
         # Fixed device staging for first-rank broadcast retrieval: as many whole
-        # chunks as ``retrieve_window_bytes`` holds, never fewer than one, sized
-        # from the KV layout known now and never grown. Every rank must be able
-        # to receive any window the first rank can send. A single rank has nobody
-        # to broadcast to and retrieves directly, like any other model, so it
-        # reserves nothing.
+        # chunks as ``retrieve_window_bytes`` holds, never fewer than one. Every
+        # rank must be able to receive any window the first rank can send. A
+        # single rank has nobody to broadcast to and retrieves directly, like
+        # any other model, so it reserves nothing.
         self._staging: Optional[torch.Tensor] = None
-        if (
-            self._retrieves_by_broadcast()
-            and not config.use_layerwise
-            and self.gpu_connector is not None
-        ):
+        if self._stages_retrievals():
+            assert self.gpu_connector is not None, "checked by _stages_retrievals"
             self.broadcast_stream = (
                 self.gpu_connector.load_stream
                 if hasattr(self.gpu_connector, "load_stream")
@@ -157,38 +152,7 @@ class LMCacheEngine:
                     "save_only_first_rank retrieval across ranks requires "
                     "all_ranks_agree_fn"
                 )
-            bytes_per_chunk = chunk_bytes(metadata, config.chunk_size)
-            window_chunks = chunks_per_window(
-                config.retrieve_window_bytes, bytes_per_chunk
-            )
-            capacity = staging_bytes(bytes_per_chunk, window_chunks)
-            if capacity > config.retrieve_window_bytes:
-                logger.warning(
-                    "retrieve_window_bytes=%d is below one KV chunk of %d bytes; "
-                    "the staging window is one chunk",
-                    config.retrieve_window_bytes,
-                    bytes_per_chunk,
-                )
-            try:
-                # The device the serving engine made current for this worker.
-                # Rank ids do not identify it: under vLLM data parallelism every
-                # DP engine's TP world starts at rank 0.
-                self._staging = torch.empty(
-                    capacity,
-                    dtype=torch.uint8,
-                    device=torch.device(torch_device_type, torch_dev.current_device()),
-                )
-            except (RuntimeError, MemoryError):
-                # Peers learn about this at retrieval admission, before any
-                # tensor collective, so this rank never leaves them waiting.
-                logger.exception("Could not reserve the KV retrieval staging buffer")
-            else:
-                logger.info(
-                    "Reserved %d bytes of KV retrieval staging: %d chunks of %d bytes",
-                    capacity,
-                    window_chunks,
-                    bytes_per_chunk,
-                )
+            self._reserve_staging(self._plan_staging())
 
         self.enable_controller = config.enable_controller
 
@@ -1970,11 +1934,15 @@ class LMCacheEngine:
     ) -> bool:
         """Agree, once and before any tensor collective, that every rank can join.
 
-        A rank is ready when it is healthy, holds a staging buffer at least as
-        large as the first rank's, and serves the same request as the first
-        rank. Readiness is agreed rather than decided per rank because a rank
-        that cannot join the tensor broadcasts would stall its peers; with the
-        capacity check, any window the first rank sends fits on every rank.
+        The first rank plans the staging window from the KV layout its
+        metadata describes now, reserves it, and announces the plan with the
+        request; every other rank reserves the announced plan, because the
+        chunks it will receive are the first rank's. A rank is ready when it
+        is healthy, holds that buffer, and serves the same request as the
+        first rank. Readiness is agreed rather than decided per rank because
+        a rank that cannot join the tensor broadcasts would stall its peers;
+        with every rank holding the announced plan, any window the first rank
+        sends fits everywhere.
 
         Args:
             num_tokens: Length of the requested token sequence.
@@ -1984,18 +1952,21 @@ class LMCacheEngine:
             Whether every rank is ready; identical on every rank.
         """
         assert self.all_ranks_agree_fn is not None, "required at engine creation"
-        capacity = self._staging.numel() if self._staging is not None else 0
-        reservation = (capacity, num_tokens, request_id)
-        source = self.broadcast_object_fn(
-            reservation if self.metadata.is_first_rank() else None,
-            self.metadata.first_rank,
-        )
+        reservation = None
+        if self.metadata.is_first_rank():
+            plan = self._plan_staging()
+            if self.is_healthy():
+                self._reserve_staging(plan)
+            reservation = (plan, num_tokens, request_id)
+        source = self.broadcast_object_fn(reservation, self.metadata.first_rank)
+        if source is not None and reservation is None and self.is_healthy():
+            self._reserve_staging(source[0])
         ready = (
-            self._staging is not None
+            source is not None
+            and self._staging is not None
+            and self._staging.numel() >= source[0].capacity
+            and (num_tokens, request_id) == source[1:]
             and self.is_healthy()
-            and source is not None
-            and capacity >= source[0]
-            and reservation[1:] == source[1:]
         )
         if self.all_ranks_agree_fn(ready):
             return True
@@ -2134,6 +2105,81 @@ class LMCacheEngine:
         rank has no peers, so it retrieves directly like any other model.
         """
         return self.save_only_first_rank and self.metadata.world_size > 1
+
+    def _stages_retrievals(self) -> bool:
+        """Return whether this engine holds a staging buffer for broadcasts.
+
+        Layerwise retrieval goes through :meth:`retrieve_layer`, and without
+        a GPU connector there is nothing to write windows into.
+        """
+        return (
+            self._retrieves_by_broadcast()
+            and not self.config.use_layerwise
+            and self.gpu_connector is not None
+        )
+
+    def _plan_staging(self) -> StagingPlan:
+        """Plan the staging window from the KV layout the metadata describes now."""
+        return plan_staging(
+            self.metadata, self.config.chunk_size, self.config.retrieve_window_bytes
+        )
+
+    def _reserve_staging(self, plan: StagingPlan) -> None:
+        """Hold a staging buffer of exactly ``plan.capacity`` bytes.
+
+        A matching buffer is kept. Any other is replaced, which happens at
+        creation and otherwise only at admission, before the vote and so
+        before any collective: the first rank re-plans from the layout its
+        metadata describes then, since a serving engine may register the real
+        KV layout after the engine exists (vLLM's V3 connector does so at the
+        first transfer), and every other rank reserves the plan it announced.
+        A reservation that fails leaves the engine without a buffer, and it
+        votes not ready.
+
+        Args:
+            plan: The chunk size and chunks per window to hold.
+        """
+        capacity = plan.capacity
+        if self._staging is not None:
+            if self._staging.numel() == capacity:
+                return
+            logger.warning(
+                "Retrieval staging changes from %d to %d bytes (%d chunks of %d "
+                "bytes); memory planning saw the earlier figure",
+                self._staging.numel(),
+                capacity,
+                plan.window_chunks,
+                plan.bytes_per_chunk,
+            )
+            # Give the old buffer back before asking for its replacement.
+            self._staging = None
+        if capacity > self.config.retrieve_window_bytes:
+            logger.warning(
+                "retrieve_window_bytes=%d is below one KV chunk of %d bytes; "
+                "the staging window is one chunk",
+                self.config.retrieve_window_bytes,
+                plan.bytes_per_chunk,
+            )
+        try:
+            # The device the serving engine made current for this worker. Rank
+            # ids do not identify it: under vLLM data parallelism every DP
+            # engine's TP world starts at rank 0.
+            self._staging = torch.empty(
+                capacity,
+                dtype=torch.uint8,
+                device=torch.device(torch_device_type, torch_dev.current_device()),
+            )
+        except (RuntimeError, MemoryError):
+            # Peers learn about this at retrieval admission, before any tensor
+            # collective, so this rank never leaves them waiting.
+            logger.exception("Could not reserve the KV retrieval staging buffer")
+        else:
+            logger.info(
+                "Reserved %d bytes of KV retrieval staging: %d chunks of %d bytes",
+                capacity,
+                plan.window_chunks,
+                plan.bytes_per_chunk,
+            )
 
     def _is_sync_pd_backend(self) -> bool:
         """Check if the PD backend is the sync variant.

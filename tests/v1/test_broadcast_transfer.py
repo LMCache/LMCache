@@ -16,6 +16,7 @@ from lmcache.v1.broadcast_transfer import (
     chunk_bytes,
     chunks_per_window,
     pack,
+    plan_staging,
     plan_windows,
     staging_bytes,
 )
@@ -220,8 +221,9 @@ def test_chunks_per_window_rounds_down_but_never_below_one(
     assert staging_bytes(48, expected) <= max(target, 48)
 
 
-def test_chunk_bytes_follows_the_metadata_layout() -> None:
-    metadata = LMCacheMetadata(
+def deepseek_metadata() -> LMCacheMetadata:
+    """A DeepSeek-V3 class MLA layout: 61 layers of 576-wide bf16 latents."""
+    return LMCacheMetadata(
         model_name="test",
         world_size=1,
         local_world_size=1,
@@ -231,5 +233,23 @@ def test_chunk_bytes_follows_the_metadata_layout() -> None:
         kv_shape=(61, 1, 256, 1, 576),
         use_mla=True,
     )
+
+
+def test_chunk_bytes_follows_the_metadata_layout() -> None:
+    metadata = deepseek_metadata()
     assert chunk_bytes(metadata, 256) == 61 * 576 * 2 * 256
     assert chunk_bytes(metadata, 1024) == 4 * chunk_bytes(metadata, 256)
+
+
+def test_plan_staging_is_plain_data_sized_by_the_metadata_layout() -> None:
+    """The plan crosses ranks at admission, so it must pickle and be exact."""
+    metadata = deepseek_metadata()
+    target = 64 * 1024 * 1024
+
+    plan = plan_staging(metadata, 256, target)
+
+    assert plan.bytes_per_chunk == chunk_bytes(metadata, 256)
+    assert plan.window_chunks == chunks_per_window(target, plan.bytes_per_chunk)
+    assert plan.capacity == staging_bytes(plan.bytes_per_chunk, plan.window_chunks)
+    assert plan.capacity <= target
+    assert pickle.loads(pickle.dumps(plan)) == plan

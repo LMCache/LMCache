@@ -16,9 +16,19 @@ hit and could exhaust the device on any rank.
 
 ## Design
 
-One fixed staging buffer per engine, sized at engine creation from
-`retrieve_window_bytes` (default 64 MiB) and the KV layout known then: as many
-whole chunks as fit the target, never fewer than one. The target is a byte
+One staging buffer per engine, sized from `retrieve_window_bytes` (default
+64 MiB) and the KV layout: as many whole chunks as fit the target, never fewer
+than one, captured as a plain `StagingPlan`. It is reserved at engine
+creation from the layout the serving engine derives from its model
+configuration. The layout chunks really have can be registered later (vLLM's
+V3 connector builds its KV layer groups at the first transfer, after
+`post_init`, and only on ranks that transfer), so at every admission the first
+rank re-plans from the layout its metadata describes then, reserves that plan,
+and announces it; every other rank reserves the announced plan, because the
+chunks it will receive are the first rank's. A plan that differs from the
+buffer replaces it before the vote, with a warning that memory planning saw
+the earlier figure; a matching plan, the common case, costs one integer
+comparison. The target is a byte
 figure because that is how memory is planned, but a chunk is the unit the
 exchange moves, so the floor is one chunk and a smaller target is raised to it
 with a warning. Rounding down keeps the target a ceiling in every realizable
@@ -40,6 +50,7 @@ The module is deliberately pure:
 
 | Piece | Responsibility |
 |---|---|
+| `plan_staging(metadata, chunk_size, target)` | Size the window for the layout `metadata` describes: as many whole chunks as fit `target`, never fewer than one, as plain `StagingPlan` data that the first rank announces at admission. |
 | `plan_windows(chunks, capacity)` | Split token-ordered chunks into runs whose packed layout fits `capacity`. Rejects a chunk it cannot send (larger than `capacity`, or without tensor storage) before returning any window. |
 | `Window.from_chunks(group)` | Lay the chunks out back to back on `CHUNK_ALIGNMENT` boundaries and record their token ranges and metadata as plain data. |
 | `Window.views(buffer)` | Rebuild identical `TensorMemoryObj` views over any rank's buffer. Views own nothing. |
@@ -62,9 +73,10 @@ the engine, next to the single-rank retrieval it mirrors.
 - Every chunk starts on a `CHUNK_ALIGNMENT` boundary so transfer kernels see the
   same alignment as a standalone device allocation and `Tensor.view(dtype)`
   stays valid for every dtype.
-- The staging capacity is fixed for the life of the engine. Admission checks
-  that every rank's capacity is at least the first rank's, so any window the
-  first rank can send fits everywhere.
+- The staging buffer only changes at admission, before the vote, and every
+  rank then holds the first rank's announced plan, so any window the first
+  rank can send fits everywhere. `StagingPlan` must stay pickle-safe: it
+  crosses ranks through the integration's object broadcast.
 - The staging buffer lives on the device the serving engine made current for
   the worker, never on a device derived from `worker_id` or `local_worker_id`:
   under vLLM data parallelism every DP engine's TP world starts at rank 0, so
@@ -156,7 +168,11 @@ and served by a vLLM with the matching hook). Without the hook and without an
 explicit `kv_cache_memory_bytes`, the buffer comes out of the utilization
 headroom; the worker logs a warning rather than refusing to start, so the fix
 does not force a vLLM upgrade. The warning is explicit that no whole-device
-budget guarantee exists in that mode. Note the trade-off against the previous
+budget guarantee exists in that mode. The hook can only measure the layout
+derived from the model configuration, since vLLM asks before it builds its KV
+caches; a model whose registered layout plans a different window is logged at
+the first retrieval after registration, and that difference is outside the
+plan. Note the trade-off against the previous
 implementation: it allocated per hit, so it had no resident cost with small or
 no hits but an unbounded worst case; the fixed buffer bounds the worst case and
 adds one staging window of resident memory.
@@ -170,9 +186,11 @@ adds one staging window of resident memory.
   staging window is smaller than one chunk. The window is floored at one chunk
   instead, so that state cannot occur, and chunks stay the unit of transfer
   everywhere else in the engine.
-- **Growing the buffer at runtime.** A rank that fails to grow after receiving
-  a header cannot join the tensor broadcast its peers are already in, and the
-  resident size would stop being the figure planned at start-up.
+- **Resizing the buffer during an exchange.** A rank that fails to grow after
+  receiving a header cannot join the tensor broadcast its peers are already
+  in. The admission-time reservation is not that: it precedes the vote, every
+  rank reserves the one announced plan, and a rank it fails on votes not
+  ready.
 - **A process-wide buffer registry.** vLLM creates one engine per worker
   process. Extra engines on one device pay one more buffer each.
 - **Retaining engines after a failed device fence.** A failed device fence is

@@ -258,7 +258,11 @@ def get_required_device_memory(vllm_config: "VllmConfig") -> int:
     Returns:
         The staging buffer size the worker will reserve, or zero when first-rank
         retrieval is disabled or a single worker has no peers to broadcast to.
-        This function does not initialize an engine or allocate device memory.
+        The size follows the KV layout derived from the model configuration,
+        the only one known before vLLM builds its KV caches; a worker whose
+        registered layout plans a different window logs the change at the
+        first retrieval after registration. This function does not initialize
+        an engine or allocate device memory.
 
     Raises:
         ValueError: If the LMCache configuration is invalid.
@@ -276,11 +280,7 @@ def get_required_device_memory(vllm_config: "VllmConfig") -> int:
     from lmcache.integration.vllm.vllm_service_factory import (
         kv_layout_from_vllm_config,
     )
-    from lmcache.v1.broadcast_transfer import (
-        chunk_bytes,
-        chunks_per_window,
-        staging_bytes,
-    )
+    from lmcache.v1.broadcast_transfer import plan_staging
     from lmcache.v1.metadata import LMCacheMetadata
 
     # The worker builds its metadata from the same layout function, so the chunk
@@ -298,11 +298,9 @@ def get_required_device_memory(vllm_config: "VllmConfig") -> int:
         use_mla=use_mla,
         chunk_size=config.chunk_size,
     )
-    bytes_per_chunk = chunk_bytes(layout, config.chunk_size)
-    return staging_bytes(
-        bytes_per_chunk,
-        chunks_per_window(config.retrieve_window_bytes, bytes_per_chunk),
-    )
+    return plan_staging(
+        layout, config.chunk_size, config.retrieve_window_bytes
+    ).capacity
 
 
 def validate_retrieval_memory_budget(vllm_config: "VllmConfig") -> None:

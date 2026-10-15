@@ -24,16 +24,19 @@ size is a chunk multiple at or below the target (three 17 MiB chunks for a
 DeepSeek-V3 class model at ``chunk_size`` 256). A target smaller than one chunk
 is raised to one chunk, with a warning, because a chunk is the unit the
 exchange moves. The effective size is logged when the engine starts. The value
-must be positive and identical on all ranks. The buffer never grows. With a
-single rank the setting is unused.
+must be positive and identical on all ranks: the first rank's window governs,
+and a rank whose buffer differs adjusts it when a retrieval is admitted, with
+a warning. The buffer never changes during a retrieval. With a single rank the
+setting is unused.
 
 How a retrieval proceeds
 ------------------------
 
-1. All ranks agree to admit the retrieval with one host collective: every rank
-   must hold a staging buffer at least as large as the first rank's, be
-   healthy, and be serving the same request. Otherwise every rank returns an
-   all-false mask without transferring anything.
+1. All ranks agree to admit the retrieval with one host collective. The first
+   rank plans the window from the KV layout it holds now and announces the
+   plan; every rank must hold that buffer, be healthy, and be serving the same
+   request. Otherwise every rank returns an all-false mask without
+   transferring anything.
 2. The first rank acquires the hit chunks exactly as single-rank retrieval
    does: from prefetch results or storage, with contiguous-prefix semantics
    and the usual pinning.
@@ -57,10 +60,16 @@ Memory
 ------
 
 The buffer is allocated when the worker's engine is created and stays resident
-for the life of the engine. Compared with the previous implementation, which
-allocated device copies per cache hit, this bounds the worst case of a large
-hit but adds one staging window of resident device memory even when
-nothing is retrieved.
+for the life of the engine. Its size is checked again whenever a retrieval is
+admitted, against the KV layout the first rank holds then: a model whose
+registered layout differs from the one derived from its configuration (an
+extra KV group, for example; vLLM's V3 connector registers the layout at the
+first KV transfer) gets a buffer of the right size on every rank at the first
+retrieval after that, with a warning, and the difference is not part of the
+memory plan described below. Compared with the previous
+implementation, which allocated device copies per cache hit, this bounds the
+worst case of a large hit but adds one staging window of resident device memory
+even when nothing is retrieved.
 
 vLLM creates the KV connector after it has sized its KV pages and before it
 allocates them, so the buffer is part of the plan only when vLLM asks the

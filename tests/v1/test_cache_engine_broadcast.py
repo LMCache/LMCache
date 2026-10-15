@@ -32,11 +32,14 @@ from lmcache.v1.broadcast_transfer import staging_bytes
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus, EventType
+from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 from lmcache.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.token_database import TokenDatabase
+import lmcache.lmcache_native as lmcache_native
 
 # Local
 from .test_broadcast_transfer import make_object
@@ -45,7 +48,8 @@ pytestmark = pytest.mark.no_shared_allocator
 
 TIMEOUT = 20.0
 CHUNK_TOKENS = 4
-CHUNK_BYTES = 1 * 2 * CHUNK_TOKENS * 3 * 4
+HIDDEN = 3
+CHUNK_BYTES = 1 * 2 * CHUNK_TOKENS * HIDDEN * 4
 NUM_CHUNKS = 5
 NUM_TOKENS = NUM_CHUNKS * CHUNK_TOKENS
 TOKENS = list(range(NUM_TOKENS))
@@ -123,9 +127,11 @@ class RecordingConnector(MockGPUConnector):
     flight. Reads that run after the staging buffer was reused land wrong data.
     """
 
-    def __init__(self, fail_on_write: int | None = None) -> None:
-        super().__init__((2, 1, CHUNK_TOKENS, 1, 3))
-        self.destination = torch.full((1, 2, NUM_TOKENS, 3), -1.0)
+    def __init__(
+        self, fail_on_write: int | None = None, *, hidden: int = HIDDEN
+    ) -> None:
+        super().__init__((2, 1, CHUNK_TOKENS, 1, hidden))
+        self.destination = torch.full((1, 2, NUM_TOKENS, hidden), -1.0)
         self.fail_on_write = fail_on_write
         self.write_count = 0
         self.pending: list[tuple[MemoryObj, int, int]] = []
@@ -151,21 +157,21 @@ class RecordingConnector(MockGPUConnector):
         self.pending.clear()
 
 
-def expected_kv() -> torch.Tensor:
-    return torch.arange(2 * NUM_TOKENS * 3, dtype=torch.float32).reshape(
-        1, 2, NUM_TOKENS, 3
+def expected_kv(hidden: int = HIDDEN) -> torch.Tensor:
+    return torch.arange(2 * NUM_TOKENS * hidden, dtype=torch.float32).reshape(
+        1, 2, NUM_TOKENS, hidden
     )
 
 
 def make_sources(
-    tokens_per_chunk: int = CHUNK_TOKENS,
+    tokens_per_chunk: int = CHUNK_TOKENS, hidden: int = HIDDEN
 ) -> tuple[list[CacheEngineKey], list[MemoryObj]]:
     starts = range(0, NUM_TOKENS, tokens_per_chunk)
     keys = [
         CacheEngineKey("test", 1, 0, index, torch.float32)
         for index in range(len(starts))
     ]
-    kv = expected_kv()
+    kv = expected_kv(hidden)
     sources = [
         make_object([kv[:, :, start : start + tokens_per_chunk]]) for start in starts
     ]
@@ -183,7 +189,11 @@ def make_engine(
     async_loading: bool = False,
     use_mla: bool = True,
 ) -> LMCacheEngine:
-    """Build one rank's engine; ``window_bytes`` overrides the chunk-count window."""
+    """Build one rank's engine; ``window_bytes`` overrides the chunk-count window.
+
+    The metadata carries the layout a serving engine derives from its model
+    configuration, ``HIDDEN`` wide; what it registers later may differ.
+    """
     if window_bytes is None:
         window_bytes = staging_bytes(CHUNK_BYTES, window_chunks)
     config = LMCacheEngineConfig.from_defaults(
@@ -246,6 +256,23 @@ def retrieve_on_all(
     return futures
 
 
+def register_kv_layout(engine: LMCacheEngine, hidden: int) -> None:
+    """Install the layout a serving engine registers after the engine exists.
+
+    vLLM's V3 connector builds it at the first KV transfer, so only a rank
+    that has transferred carries it. The layout has ``hidden`` columns per
+    token, in the MLA format, over the two layers the configured one describes.
+    """
+    kv_caches: DiscoverableKVCache = [
+        torch.zeros(1, CHUNK_TOKENS, hidden) for _ in range(2)
+    ]
+    engine.metadata.kv_layer_groups_manager = KVLayerGroupsManager(
+        kv_caches,
+        engine_kv_formats=[lmcache_native.EngineKVFormat.NL_X_NB_BS_HS] * 2,
+        lmcache_tokens_per_chunk=CHUNK_TOKENS,
+    )
+
+
 def prefetch(
     engine: LMCacheEngine,
     keys: list[CacheEngineKey],
@@ -269,12 +296,13 @@ def two_ranks() -> Generator[TwoRanks, None, None]:
         group: FakeTensorParallelGroup, **options: Any
     ) -> tuple[list[LMCacheEngine], list[RecordingConnector]]:
         fail_follower_write = options.pop("fail_follower_write", None)
+        hidden = options.pop("hidden", HIDDEN)
         window_chunks = (
             options.pop("window_chunks_per_rank", None)
             or (options.pop("window_chunks", 2),) * 2
         )
         connectors = [
-            RecordingConnector(fail_follower_write if rank else None)
+            RecordingConnector(fail_follower_write if rank else None, hidden=hidden)
             for rank in range(2)
         ]
         engines.extend(
@@ -415,6 +443,8 @@ def test_unhealthy_rank_is_refused_at_admission(
 def test_rank_without_a_staging_buffer_is_refused_at_admission(
     two_ranks: TwoRanks, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A reservation that failed at creation is retried at admission; when
+    that fails as well, every rank refuses the retrieval."""
     group = FakeTensorParallelGroup(2)
     real_empty = torch.empty
 
@@ -423,9 +453,8 @@ def test_rank_without_a_staging_buffer_is_refused_at_admission(
             raise torch.OutOfMemoryError("injected staging reservation failure")
         return real_empty(*args, **kwargs)
 
-    with monkeypatch.context() as patch:
-        patch.setattr(torch, "empty", empty_without_staging)
-        engines, _ = two_ranks(group, window_chunks=1)
+    monkeypatch.setattr(torch, "empty", empty_without_staging)
+    engines, _ = two_ranks(group, window_chunks=1)
     keys, sources = make_sources()
     storage = attach_storage(engines[0], keys, sources)
 
@@ -436,26 +465,26 @@ def test_rank_without_a_staging_buffer_is_refused_at_admission(
     assert not group.payload_sizes
 
 
-@pytest.mark.parametrize(
-    ("follower_chunks", "admitted"),
-    [(1, False), (3, True)],
-)
-def test_follower_must_hold_at_least_the_source_capacity(
-    two_ranks: TwoRanks, follower_chunks: int, admitted: bool
+@pytest.mark.parametrize("follower_chunks", [1, 3])
+def test_follower_adopts_the_source_plan_at_admission(
+    two_ranks: TwoRanks, follower_chunks: int, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """A rank whose buffer differs from the announced plan replaces it first."""
     group = FakeTensorParallelGroup(2)
     engines, connectors = two_ranks(group, window_chunks_per_rank=(2, follower_chunks))
     keys, sources = make_sources()
     attach_storage(engines[0], keys, sources)
 
-    masks = [future.result() for future in retrieve_on_all(engines)]
+    with caplog.at_level(logging.WARNING, logger="lmcache.v1.cache_engine"):
+        masks = [future.result() for future in retrieve_on_all(engines)]
 
-    assert all(bool(mask.all()) == admitted for mask in masks)
-    if admitted:
-        torch.testing.assert_close(connectors[1].destination, expected_kv())
-        assert max(group.payload_sizes) <= staging_bytes(CHUNK_BYTES, 2)
-    else:
-        assert not group.payload_sizes
+    before = staging_bytes(CHUNK_BYTES, follower_chunks)
+    after = staging_bytes(CHUNK_BYTES, 2)
+    assert caplog.text.count(f"staging changes from {before} to {after} bytes") == 1
+    for mask, connector in zip(masks, connectors, strict=True):
+        assert mask.all()
+        torch.testing.assert_close(connector.destination, expected_kv())
+    assert max(group.payload_sizes) <= after
 
 
 def test_ranks_serving_different_requests_are_refused_at_admission(
@@ -506,7 +535,7 @@ def test_multi_rank_engine_requires_an_agreement_callback() -> None:
 def test_chunk_larger_than_the_buffer_fails_before_any_window(
     two_ranks: TwoRanks,
 ) -> None:
-    """A layout change after init cannot grow the buffer; it fails loudly."""
+    """A chunk no window can carry fails loudly, before any peer is committed."""
     group = FakeTensorParallelGroup(2)
     engines, _ = two_ranks(group, window_chunks=1)
     keys, sources = make_sources(tokens_per_chunk=2 * CHUNK_TOKENS)
@@ -520,6 +549,59 @@ def test_chunk_larger_than_the_buffer_fails_before_any_window(
     assert not group.payload_sizes
     assert all(source.get_ref_count() == 0 for source in sources)
     assert engines[0].is_healthy()
+
+
+def test_layout_registered_on_the_source_resizes_every_rank_at_admission(
+    two_ranks: TwoRanks, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The first rank re-plans from its registered layout; peers follow it.
+
+    The engines were sized for two configured chunks. Only the first rank has
+    transferred KV, so only its metadata carries the registered layout, which
+    doubles the chunk: each window now carries one chunk of the new size, which
+    the original buffer could not have held, on both ranks. A second retrieval
+    finds the buffers already right.
+    """
+    wide = 2 * HIDDEN
+    group = FakeTensorParallelGroup(2)
+    engines, connectors = two_ranks(group, window_chunks=2, hidden=wide)
+    register_kv_layout(engines[0], wide)
+    keys, sources = make_sources(hidden=wide)
+    attach_storage(engines[0], keys, sources)
+
+    with caplog.at_level(logging.WARNING, logger="lmcache.v1.cache_engine"):
+        masks = [future.result() for future in retrieve_on_all(engines)]
+        attach_storage(engines[0], keys, sources)
+        again = [future.result() for future in retrieve_on_all(engines)]
+
+    before, after = staging_bytes(CHUNK_BYTES, 2), 2 * CHUNK_BYTES
+    assert caplog.text.count(f"staging changes from {before} to {after} bytes") == 2
+    for mask, connector in zip(masks + again, connectors * 2, strict=True):
+        assert mask.all()
+        torch.testing.assert_close(connector.destination, expected_kv(wide))
+    assert group.payload_sizes == [2 * CHUNK_BYTES] * (2 * NUM_CHUNKS)
+    assert all(source.get_ref_count() == 0 for source in sources)
+
+
+def test_registering_the_configured_layout_keeps_the_staging(
+    two_ranks: TwoRanks, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A registered layout equal to the configured one is not reallocated."""
+    group = FakeTensorParallelGroup(2)
+    engines, connectors = two_ranks(group, window_chunks=2)
+    register_kv_layout(engines[0], HIDDEN)
+    keys, sources = make_sources()
+    attach_storage(engines[0], keys, sources)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="lmcache.v1.cache_engine"):
+        masks = [future.result() for future in retrieve_on_all(engines)]
+
+    assert "staging" not in caplog.text
+    for mask, connector in zip(masks, connectors, strict=True):
+        assert mask.all()
+        torch.testing.assert_close(connector.destination, expected_kv())
+    assert max(group.payload_sizes) == staging_bytes(CHUNK_BYTES, 2)
 
 
 @pytest.mark.parametrize("async_loading", [False, True])

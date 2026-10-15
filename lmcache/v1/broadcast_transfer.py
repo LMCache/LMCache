@@ -103,6 +103,45 @@ def chunks_per_window(target_bytes: int, bytes_per_chunk: int) -> int:
 
 
 @dataclass(frozen=True)
+class StagingPlan:
+    """How a staging buffer is laid out: whole chunks of one size per window.
+
+    Plain data: the first rank announces its plan at admission and every
+    other rank reserves the same buffer from it.
+    """
+
+    bytes_per_chunk: int
+    window_chunks: int
+
+    @property
+    def capacity(self) -> int:
+        """Bytes the staging buffer must hold."""
+        return staging_bytes(self.bytes_per_chunk, self.window_chunks)
+
+
+def plan_staging(
+    metadata: LMCacheMetadata, chunk_size: int, target_bytes: int
+) -> StagingPlan:
+    """Plan the staging window for ``metadata``'s current layout.
+
+    Args:
+        metadata: Engine metadata, as :func:`chunk_bytes` reads it.
+        chunk_size: Tokens per chunk.
+        target_bytes: Configured window size in bytes; positive.
+
+    Returns:
+        A plan of as many whole chunks as fit ``target_bytes``, at least one.
+
+    Raises:
+        ValueError: If ``target_bytes`` is not positive.
+    """
+    bytes_per_chunk = chunk_bytes(metadata, chunk_size)
+    return StagingPlan(
+        bytes_per_chunk, chunks_per_window(target_bytes, bytes_per_chunk)
+    )
+
+
+@dataclass(frozen=True)
 class Window:
     """Layout of one broadcast: consecutive chunks packed into the staging buffer.
 
