@@ -171,6 +171,7 @@ For example, with the checkout importable:
 .. code-block:: bash
 
     lmcache server \
+      --l1-size-gb 1 --eviction-policy LRU \
       --l2-store-policy examples.external_policies.policies:KeepL1Only \
       --l2-prefetch-policy examples.external_policies.policies:RetainLoaded
 

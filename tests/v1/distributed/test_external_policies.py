@@ -15,6 +15,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.cli.commands.server import ServerCommand
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     add_storage_manager_args,
@@ -226,6 +227,30 @@ def test_cli_preserves_external_selections_through_config(
         type(create_prefetch_policy(config.prefetch_policy)).__name__
         == "ExternalPrefetch"
     )
+
+
+def test_documented_server_command_loads_example_policies() -> None:
+    """The complete documented server arguments produce usable selectors."""
+    parser = argparse.ArgumentParser()
+    ServerCommand().add_arguments(parser)
+    config = parse_args_to_config(
+        parser.parse_args(
+            [
+                "--l1-size-gb",
+                "1",
+                "--eviction-policy",
+                "LRU",
+                "--l2-store-policy",
+                "examples.external_policies.policies:KeepL1Only",
+                "--l2-prefetch-policy",
+                "examples.external_policies.policies:RetainLoaded",
+            ]
+        )
+    )
+    store = create_store_policy(config.store_policy)
+    assert store.select_store_targets([], []) == {}
+    assert store.select_l1_deletions([]) == []
+    assert isinstance(create_prefetch_policy(config.prefetch_policy), RetainPrefetchPolicy)
 
 
 @pytest.mark.no_shared_allocator
