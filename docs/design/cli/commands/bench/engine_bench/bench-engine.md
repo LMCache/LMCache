@@ -621,8 +621,12 @@ token-overlap F1, best over the gold answers.
 The shared `quality/scoring.py` also exports `answer_match` for answer-quality
 comparisons. References with numeric figures must pass its numeric value check;
 punctuation-stripped phrase equality cannot bypass it (`1.5` differs from `15`).
-Its existing rounding tolerance, scale conversion and nonnumeric phrase rules
-are unchanged. This does not change the token-overlap F1 used by this workload.
+When both figures have explicit scale suffixes, their quantities must agree:
+`3 million` matches `0.003 billion`, but not `3 billion` or `3000 million`.
+If a scale is unspecified on one side, the existing power-of-1000 tolerance
+remains available when either answer names a scale. Rounding tolerance and
+nonnumeric phrase rules are unchanged. This does not change the token-overlap
+F1 used by this workload.
 
 `f1_mean` covers **parsed samples only** and is always reported beside
 `parse_rate`: a high F1 over a third of the samples is a different result from
