@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock
+import socket
 
 # Third Party
 import grpc
@@ -34,7 +35,7 @@ from lmcache.v1.memory_orchestrator.api import (
     WriteStatus,
 )
 from lmcache.v1.memory_orchestrator.client import MemoryOrchestratorClient
-from lmcache.v1.memory_orchestrator.server import OrchestratorConfig, parse_args
+from lmcache.v1.memory_orchestrator.server import OrchestratorConfig, parse_args, serve
 from lmcache.v1.memory_orchestrator.service import OrchestratorServicer
 from lmcache.v1.memory_orchestrator.state import RegionState
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_pb2
@@ -386,6 +387,29 @@ def test_unreachable_orchestrator_raises_unavailable():
     with pytest.raises(OrchestratorUnavailableError):
         client.describe_region()
     assert client.close() is None
+
+
+def test_bind_failure_leaves_no_startup_marker(tmp_path: Path) -> None:
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        config = parse_args(
+            [
+                "--region-id",
+                REGION_ID,
+                "--capacity-bytes",
+                str(CAPACITY),
+                "--alignment",
+                str(ALIGN),
+                "--state-dir",
+                str(tmp_path),
+                "--listen",
+                f"127.0.0.1:{occupied.getsockname()[1]}",
+            ]
+        )
+        with pytest.raises(RuntimeError, match="Failed to bind"):
+            serve(config)
+    assert not (tmp_path / f"{REGION_ID}.marker").exists()
 
 
 def test_second_orchestrator_on_the_same_state_dir_exits_2(shared, spawn):
