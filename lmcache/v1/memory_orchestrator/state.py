@@ -315,6 +315,8 @@ class RegionState:
         token and becomes a WRITING object owned by this client incarnation.
         An expired WRITING record is consumed before checking the key; a new
         reservation always uses a fresh extent and does not renew the old token.
+        Live keys must match the recorded shapes, dtypes and payload size;
+        a mismatch rejects the whole batch without changing state.
 
         Args:
             env: Envelope of a registered client incarnation.
@@ -335,12 +337,26 @@ class RegionState:
             seen: set[WireObjectKey] = set()
             for index, entry in enumerate(entries):
                 shapes, dtypes = entry.layout.shapes, entry.layout.dtypes
+                # Rejected batches must not expire writes or change the index.
+                record = self._objects.get(entry.key)
                 if entry.payload_bytes <= 0:
                     problem = f"payload_bytes must be > 0, got {entry.payload_bytes}"
                 elif not shapes or len(shapes) != len(dtypes):
                     problem = "layout needs at least one shape and one dtype per shape"
                 elif entry.key in seen:
                     problem = "duplicate key in batch"
+                elif (
+                    record is not None
+                    and (
+                        record.layout != entry.layout
+                        or record.payload_bytes != entry.payload_bytes
+                    )
+                    and (
+                        record.state is _ObjectState.VALID
+                        or monotonic() < record.write_deadline
+                    )
+                ):
+                    problem = "layout or payload size differs from existing object"
                 else:
                     seen.add(entry.key)
                     continue

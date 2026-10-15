@@ -43,6 +43,11 @@ capped by `max_batch_entries`; the client splits larger ones, and a split
 `ReserveWrite` or `ReserveRead` that fails part-way aborts or releases what its
 earlier parts were granted.
 
+`ReserveWrite` rejects a batch with `INVALID_ARGUMENT` if a live key's stored
+shapes, dtypes or payload size differ from the request, before changing any
+state. Reads still return the stored layout for the client to verify; this
+write-side check does not replace precision-aware cache keys.
+
 `RegionContract` describes the region before a client registers:
 
 | Field | Meaning |

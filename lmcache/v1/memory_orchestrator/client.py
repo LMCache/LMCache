@@ -200,6 +200,8 @@ class MemoryOrchestratorClient:
         A failed split batch first aborts, best effort, its earlier RPCs' grants.
         Reservations expire after the orchestrator's write TTL; replaying a
         cached grant does not renew it.
+        Live keys must match the recorded layout and payload size, otherwise
+        the RPC is rejected with ``RequestRejectedError``.
 
         Args:
             entries: Objects to reserve; distinct keys.

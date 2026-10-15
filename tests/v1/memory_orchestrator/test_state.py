@@ -146,6 +146,33 @@ class TestWrites:
         assert second == [WriteGrantResult(WriteStatus.BUSY_WRITING, None, None)]
         assert state.usage().writing == 1
 
+    @pytest.mark.parametrize("phase", ["writing", "valid"])
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            WriteRequest(key("k"), ALIGN, WireLayout(((4, 2, 16),), LAYOUT.dtypes)),
+            WriteRequest(key("k"), ALIGN, WireLayout(LAYOUT.shapes, ("float16",))),
+            write("k", ALIGN + 1),
+        ],
+        ids=["shape", "dtype", "payload-size"],
+    )
+    def test_existing_key_rejects_incompatible_metadata(
+        self, state: RegionState, env: Envelope, phase: str, entry: WriteRequest
+    ) -> None:
+        grant = state.reserve_write(env, [write("k")])[0]
+        assert grant.token is not None
+        if phase == "valid":
+            state.finish_write(env, [grant.token])
+        other = register(state, "b")
+        before = state.usage()
+        error = assert_refused(
+            "INVALID_ARGUMENT", state.reserve_write, other, [write("new"), entry]
+        )
+        assert "layout or payload size" in error.message
+        assert state.usage() == before
+        assert state.finish_write(env, [grant.token]) == [TokenStatus.OK]
+        assert state.reserve_read(other, [read("k")])[0].layout == LAYOUT
+
     def test_out_of_space_is_all_or_nothing_for_absent_keys(self, state, env):
         commit(state, env, "valid")
         busy = state.reserve_write(env, [write("busy")])[0]
@@ -293,11 +320,26 @@ class TestWriteExpiry:
             1,
         )
 
+    def test_expired_key_can_receive_a_different_layout(
+        self, state: RegionState, env: Envelope, clock: Mock
+    ) -> None:
+        state.reserve_write(env, [write("k")])
+        clock.return_value = 700.0
+        layout = WireLayout(((3, 8),), ("uint8",))
+        grant = state.reserve_write(env, [WriteRequest(key("k"), 24, layout)])[0]
+        assert grant.status is WriteStatus.WRITE_GRANTED
+        assert grant.handle is not None and grant.handle.offset == ALIGN
+        assert grant.token is not None
+        assert state.finish_write(env, [grant.token]) == [TokenStatus.OK]
+        result = state.reserve_read(env, [read("k")])[0]
+        assert (result.layout, result.payload_bytes) == (layout, 24)
+
     def test_rejected_batches_do_not_expire_writes(
         self, state: RegionState, env: Envelope, clock: Mock
     ) -> None:
         grant = state.reserve_write(env, [write("k")])[0]
         assert grant.token is not None
+        commit(state, env, "valid")
         before = state.usage()
         clock.return_value = 700.0
         assert_refused(
@@ -311,6 +353,12 @@ class TestWriteExpiry:
             state.finish_write,
             env,
             [grant.token] * (MAX_BATCH + 1),
+        )
+        assert_refused(
+            "INVALID_ARGUMENT",
+            state.reserve_write,
+            env,
+            [write("k"), write("valid", ALIGN + 1)],
         )
         assert state.usage() == before
 

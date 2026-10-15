@@ -205,7 +205,7 @@ def test_write_finish_read_flow_in_split_batches(clients):
     assert reader.finish_read(leases) == [TokenStatus.OK] * 2 * count
     assert reader.finish_read(leases[:1]) == [TokenStatus.OK]
     assert reader.usage().read_leases == leased - 2 * count
-    again = reader.reserve_write([write(name) for name in names])
+    again = reader.reserve_write([write(name, 100 + i) for i, name in enumerate(names)])
     assert [g.status for g in again] == [WriteStatus.EXISTS_VALID] * count
 
 
