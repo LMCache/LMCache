@@ -72,6 +72,10 @@ Commonly used flags include:
      - gRPC server implementation (used only with ``--transport grpc``).
        Default is ``sync``. ``native`` needs the ``pygrpc-native``
        package.
+   * - ``--api-key-file PATH``
+     - Read an API key accepted by the request transport. Repeat during key
+       rotation; supported by gRPC. See
+       :doc:`/mp/request_transport`.
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
        ``http://coordinator:9300``). Opt-in; enables fleet registration. See

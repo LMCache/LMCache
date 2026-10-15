@@ -21,6 +21,9 @@ import grpc
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
+    GrpcClientAuthenticationInterceptor,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
@@ -135,10 +138,15 @@ ClientRpcCallable = Callable[..., MessagingFuture[Any] | MessagingStream[Any]]
 class GrpcMultiprocessClient(RequestClient):
     """Expose generated unary and server-streaming RPCs as client methods."""
 
-    def __init__(self, server_url: str) -> None:
+    def __init__(self, server_url: str, api_key: str | None = None) -> None:
         target = parse_grpc_target(server_url)
         self._server_url = server_url
-        self._channel = grpc.insecure_channel(target, options=_GRPC_OPTIONS)
+        channel: grpc.Channel = grpc.insecure_channel(target, options=_GRPC_OPTIONS)
+        if api_key is not None:
+            channel = grpc.intercept_channel(
+                channel, GrpcClientAuthenticationInterceptor(api_key)
+            )
+        self._channel = channel
         # Calls wait for the server to come up (wait_for_ready), so a ZMQ
         # server on the port would otherwise look like one that never starts.
         self._wrong_transport: str | None = None
