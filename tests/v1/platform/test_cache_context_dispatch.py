@@ -16,6 +16,7 @@ reuse with device calls mocked.
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from types import ModuleType, SimpleNamespace
 from typing import Any, List
 from unittest.mock import MagicMock
@@ -275,7 +276,7 @@ def test_gds_context_event_reuse_and_close_lease(
         assert leased.wait(5)
         closer = executor.submit(context.close)
         try:
-            with pytest.raises(TimeoutError):
+            with pytest.raises(FutureTimeoutError):
                 closer.result(timeout=0.05)
             deregister.assert_not_called()
             wrapper.close.assert_not_called()

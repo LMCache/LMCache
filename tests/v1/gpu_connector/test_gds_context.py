@@ -12,6 +12,7 @@ unless the corresponding stack is available.
 # Standard
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -797,7 +798,7 @@ def test_async_scope_prevents_slab_teardown(
         with context.io_scope():
             context.transfer_async(_memory(4096), buffer, SlabDirection.WRITE)
             closing = executor.submit(context.close)
-            with pytest.raises(TimeoutError):
+            with pytest.raises(FutureTimeoutError):
                 closing.result(timeout=0.05)
             handle.close.assert_not_called()
             backend.deregister_buffer.assert_not_called()

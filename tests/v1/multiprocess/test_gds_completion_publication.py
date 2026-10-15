@@ -4,6 +4,7 @@
 # Standard
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import cast
@@ -482,7 +483,7 @@ def test_async_failure_drains_another_owner(async_transfer: SimpleNamespace) -> 
         )
         try:
             assert entered.wait(5)
-            with pytest.raises(TimeoutError):
+            with pytest.raises(FutureTimeoutError):
                 future.result(timeout=0.05)
         finally:
             release.set()
