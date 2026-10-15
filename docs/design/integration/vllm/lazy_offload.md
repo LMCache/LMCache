@@ -290,7 +290,7 @@ Free queue (LRU order): block3, block17, block0, block22, block1, ...
 
 | Aspect | vLLM SimpleCPUOffload | LMCache MP Connector |
 |--------|------------------|-------------------|
-| CPU storage | Local pinned tensors (same process) | Remote LMCache server (separate process via ZMQ + CUDA IPC) |
+| CPU storage | Local pinned tensors (same process) | Remote LMCache server (separate process via request RPC + CUDA IPC) |
 | Copy mechanism | `cuMemcpyBatchAsync` (direct DMA) | Server-side `transfer_kv_per_object_group` (IPC + kernel + D2H) |
 | Latency | same-process | cross-process IPC |
 | Block pool access | Direct (scheduler owns it) | Indirect (scheduler has access, but worker/server do not) |

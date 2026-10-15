@@ -29,14 +29,14 @@ pytest --maxfail=1 \
     tests/v1/lookup_client \
     tests/v1/plugin \
     tests/v1/cli \
-    --ignore=tests/v1/platform/test_cuda_ipc_wrapper.py \
-    --ignore=tests/v1/platform/test_timeline_semaphore_event_ipc.py \
-    --ignore=tests/v1/platform/test_vmm_ipc_wrapper.py \
+    --ignore=tests/v1/platform/devices/cuda/test_cuda_ipc_wrapper.py \
+    --ignore=tests/v1/platform/devices/cuda/test_timeline_semaphore_event_ipc.py \
+    --ignore=tests/v1/platform/devices/cuda/test_vmm_ipc_wrapper.py \
     --deselect="tests/v1/shm_allocator/test_shm_allocator.py::TestShmFileConnector"
 
 # Whole files ignored -- all three depend on NVIDIA's `cuda.bindings`
 # (cuda-python) package for raw driver-level IPC calls
-# (lmcache/v1/platform/cuda/utils.py's _import_cuda_bindings()), which isn't
+# (lmcache/v1/platform/devices/cuda/utils.py's _import_cuda_bindings()), which isn't
 # installed on MACA and isn't expected to work there even if it were -- it
 # binds to NVIDIA's own driver ABI. All three already skip this area for
 # ROCm for the same reason; MACA just isn't covered by that check since it's

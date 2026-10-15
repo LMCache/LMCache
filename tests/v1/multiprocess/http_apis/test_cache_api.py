@@ -9,7 +9,7 @@ services resolved from the app context, so these inject a fake engine via
 """
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 # Third Party
@@ -18,7 +18,15 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
+    AttnWindowDesc,
+    KeyEntry,
+    KeyListPage,
+    ObjectKey,
+    PrefetchResult,
+)
 from lmcache.v1.multiprocess.cache_control.object_service import MAX_DELETE_BATCH
 from lmcache.v1.multiprocess.http_apis.cache_api import router as cache_router
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
@@ -427,12 +435,22 @@ class TestListObjectsEndpoint:
 
 @dataclass
 class _FakeLayoutRegistry:
-    layout: Optional[object] = None
-    find_calls: list[tuple[str, int]] = field(default_factory=list)
+    """One full-attention object group per pair, as ``LayoutDescRegistry``
+    registers a model that does not separate its object groups."""
 
-    def find(self, model_name: str, world_size: int) -> Optional[object]:
-        self.find_calls.append((model_name, world_size))
-        return self.layout
+    layout: Optional[object] = None
+    lookup_calls: list[tuple[str, int]] = field(default_factory=list)
+
+    def find_group_layout_descs(
+        self, model_name: str, world_size: int
+    ) -> Optional[dict[int, object]]:
+        self.lookup_calls.append((model_name, world_size))
+        return None if self.layout is None else {0: self.layout}
+
+    def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
+        if self.layout is None:
+            raise ValueError(f"no attention-window descriptor for {model_name!r}")
+        return replace(DEFAULT_ATTN_WINDOW_DESC, world_size=world_size)
 
 
 class _PrefetchHandle:
@@ -440,24 +458,23 @@ class _PrefetchHandle:
         self.total_requested_keys = total
 
 
-class _PrefetchBitmap:
-    def __init__(self, n: int) -> None:
-        self._n = n
-
-    def popcount(self) -> int:
-        return self._n
-
-
 @dataclass
 class _PrefetchStorageManager:
     submit_calls: list[dict] = field(default_factory=list)
 
     def submit_prefetch_task(self, spec, **_) -> _PrefetchHandle:
-        self.submit_calls.append({"keys": list(spec.keys), "mode": spec.mode})
-        return _PrefetchHandle(len(spec.keys))
+        keys = [key for row in spec.key_groups for key in row.keys]
+        self.submit_calls.append({"keys": keys, "lock_mode": spec.lock_mode})
+        return _PrefetchHandle(len(keys))
 
-    def query_prefetch_status(self, handle) -> _PrefetchBitmap:
-        return _PrefetchBitmap(handle.total_requested_keys)
+    def query_prefetch_status(self, handle) -> PrefetchResult:
+        # Every requested key was loaded from L2: one all-set row.
+        n = handle.total_requested_keys
+        return PrefetchResult(
+            hit_cells=[Bitmap(n, n)],
+            l1_hit_cells=[Bitmap(n)],
+            l2_hit_cells=[Bitmap(n, n)],
+        )
 
 
 @dataclass
@@ -520,7 +537,7 @@ class TestPrefetchEndpoint:
         assert body["status"] == "submitted"
         assert body["chunks"] == 2
         assert body["request_id"]
-        assert ("m", 2) in ctx.layout_desc_registry.find_calls
+        assert ("m", 2) in ctx.layout_desc_registry.lookup_calls
 
     def test_status_poll_completes_then_404(self):
         ctx = _ctx(layout=object())

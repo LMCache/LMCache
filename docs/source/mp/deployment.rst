@@ -73,9 +73,9 @@ really provides:
 
 The **isolated IPC** setting removes both: KV-cache registration switches
 to raw CUDA IPC memory handles
-(``docs/design/v1/platform/cuda/ipc_wrapper.md``) and event ordering to
+(``docs/design/v1/platform/devices/cuda/ipc_wrapper.md``) and event ordering to
 timeline-semaphore events carried over CUDA IPC memory handles
-(``docs/design/v1/platform/cuda/timeline_semaphore_event_ipc.md``). Both
+(``docs/design/v1/platform/devices/cuda/timeline_semaphore_event_ipc.md``). Both
 rendezvous in the kernel driver, so they work across containers that
 share nothing -- no host IPC namespace, no common ``/dev/shm``, no
 ``--ipc host``. It must be enabled on **both** sides of a deployment:
@@ -153,6 +153,12 @@ Step-by-Step
 .. code-block:: bash
 
     kubectl apply -f examples/multi_process/lmcache-daemonset.yaml
+
+.. note::
+   The LMCache server in the DaemonSet binds the transport port only to
+   ``127.0.0.1`` on the host network. vLLM pods reach the server on the same
+   node through the loopback interface, so the transport port is never
+   exposed beyond the node.
 
 **Step 3: Deploy vLLM**
 

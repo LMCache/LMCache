@@ -15,7 +15,7 @@ one.
 
 The extension is built as ``lmcache.cuda_ops`` -- the same module name the
 CUDA profile uses -- because MACA reports ``device_type == "cuda"`` to
-torch/vLLM and :class:`~lmcache.v1.platform.cuda.device_ops.CudaDeviceOps`
+torch/vLLM and :class:`~lmcache.v1.platform.devices.cuda.device_ops.CudaDeviceOps`
 looks up native ops by importing exactly that name; a differently-named
 extension would silently never be picked up, leaving MACA on the pure
 Python fallback.
@@ -104,7 +104,7 @@ class MacaProfile(BuildProfile):
                 sources=cuda_sources,
                 include_dirs=[CSRC_DIR],
                 extra_compile_args={
-                    "cxx": ["-std=c++17", "-DLMCACHE_DISABLE_STREAMING_IO=1"]
+                    "cxx": ["-DLMCACHE_DISABLE_STREAMING_IO=1"]
                     + half_precision_undefs
                     + abi_flag,
                     "nvcc": ["-DLMCACHE_DISABLE_STREAMING_IO=1"]

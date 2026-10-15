@@ -55,8 +55,9 @@ class Header(msgspec.Struct, tag="header", omit_defaults=True):
     """File format version; readers reject unknown values."""
 
     level: str
-    """Trace level — currently ``"storage"``.  Future levels (``"mq"``,
-    ``"gpu"``) will share this format."""
+    """Trace level: ``"storage"`` (StorageManager calls) or ``"events"``
+    (the cache-event stream an MP server emits for the coordinator).
+    Future levels (``"mq"``, ``"gpu"``) will share this format."""
 
     trace_schema_version: int
     """:data:`TRACE_SCHEMA_VERSION` at record time.  Replay drivers may
@@ -78,6 +79,11 @@ class Header(msgspec.Struct, tag="header", omit_defaults=True):
     sm_config_digest: str
     """SHA-256 hex digest of :attr:`sm_config_json`.  Replay drivers
     use this to detect mismatched configurations."""
+    level_meta: dict[str, Any] = msgspec.field(default_factory=dict)
+    """Level-specific metadata; empty for ``"storage"``.  The ``"events"``
+    level records ``instance_id``, ``cache_event_schema_version`` and
+    ``lmcache_version`` here.  Defaulted so files written before the field
+    existed still decode."""
 
 
 class Record(msgspec.Struct, tag="record", omit_defaults=True):

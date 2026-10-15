@@ -757,6 +757,9 @@ class LMCacheConnectorV1Impl:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
 
+        Non-layerwise synchronous loads release each request's lookup pins
+        before loading the next request, allowing CPU cache space to be reused.
+
         Args:
             forward_context (ForwardContext): the forward context.
             **kwargs: additional arguments for the load operation
@@ -858,6 +861,11 @@ class LMCacheConnectorV1Impl:
                     request_configs=request.request_configs,
                     req_id=request.req_id,
                 )
+                if not self.async_loading:
+                    # Blocking retrieve releases get references, not lookup pins.
+                    # Release this request's pins before the next load may need
+                    # CPU staging space; wait_for_save cleanup is idempotent.
+                    self.lmcache_engine.lookup_unpin(request.req_id)
 
                 # Check the result
                 num_retrieved_tokens = ret_token_mask.sum().item()
@@ -1254,9 +1262,9 @@ class LMCacheConnectorV1Impl:
         """Query the decoder's cache to check which blocks are already cached.
 
         This is the bidirectional NIXL cache probe: the prefiller queries the
-        decoder via ZMQ to find out which KV blocks are already in the
-        decoder's GPU memory. This validates the cache query channel works
-        E2E through the real inference path.
+        decoder through the configured request transport to find out which KV
+        blocks are already in the decoder's GPU memory. This validates the
+        cache query channel works E2E through the real inference path.
 
         In the future, this information can be used to skip prefill
         computation for cached blocks.
@@ -1375,7 +1383,8 @@ class LMCacheConnectorV1Impl:
         # 1. lookup_client caches a result
         #     uncached in `update_state_after_alloc` if this request can be scheduled
         # 2. cache engine will pin the KV caches for the request
-        #     unpinned in `wait_for_save` if this request can be scheduled
+        #     unpinned after a synchronous non-layerwise load in `start_load_kv`,
+        #     with remaining scheduled-request cleanup in `wait_for_save`
         if self.kv_role == "kv_producer" and not hasattr(
             self.lookup_client, "supports_producer_reuse"
         ):

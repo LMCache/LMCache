@@ -4,6 +4,9 @@ from gate-admitted cache events, lookup, listing, and fencing cleanup.
 Stream admission itself (seq dedup, gap detection, incarnation
 comparison) is the gate's job -- see ``test_event_gate.py``."""
 
+# Standard
+from dataclasses import FrozenInstanceError
+
 # Third Party
 import numpy as np
 import pytest
@@ -531,6 +534,222 @@ def test_stats_counts_keys_and_placements():
     assert stats.l1_keys_by_instance["node-b"] == 0
 
 
+def test_stats_placement_count_follows_deletes_and_fencing():
+    directory = KeyDirectory()
+    directory.consume(_batch(instance_id="node-a", seq=1, keys=[_key(1), _key(2)]))
+    directory.consume(_batch(instance_id="node-b", seq=1, keys=[_key(1)]))
+    directory.consume(
+        _batch(instance_id="node-b", seq=2, tier=Tier.L2, backend="fs", keys=[_key(2)])
+    )
+    directory.consume(
+        _batch(
+            instance_id="node-b",
+            seq=3,
+            event_type=CacheEventType.DELETE,
+            keys=[_key(1)],
+        )
+    )
+    directory.fence_instance("node-a")
+
+    stats = directory.stats()
+    placements = directory.lookup([_key(1), _key(2)])
+    assert stats.num_placements == sum(len(p) for p in placements) == 1
+    assert stats.num_keys == 1
+
+
+# -- Placement stats ---------------------------------------------------------
+
+
+def test_empty_directory_stats_have_zero_placement_aggregates() -> None:
+    stats = KeyDirectory().stats()
+
+    assert stats.l1_count == 0
+    assert stats.l1_size_bytes == 0
+    assert stats.l2_count == 0
+    assert stats.l2_size_bytes == 0
+    with pytest.raises(FrozenInstanceError):
+        stats.l1_count = 1  # type: ignore[misc]
+
+
+def test_placement_aggregates_count_every_current_placement() -> None:
+    directory = KeyDirectory()
+    directory.consume(_batch(instance_id="node-a", keys=[_key(1)], size_bytes=100))
+    directory.consume(_batch(instance_id="node-b", keys=[_key(1)], size_bytes=200))
+    directory.consume(
+        _batch(
+            instance_id="node-a",
+            seq=2,
+            keys=[_key(1)],
+            backend="cxl",
+            size_bytes=300,
+        )
+    )
+    directory.consume(
+        _batch(
+            instance_id="node-a",
+            seq=3,
+            keys=[_key(1)],
+            tier=Tier.L2,
+            backend="fs",
+            size_bytes=400,
+        )
+    )
+
+    stats = directory.stats()
+    assert stats.l1_count == 3
+    assert stats.l1_size_bytes == 600
+    assert stats.l2_count == 1
+    assert stats.l2_size_bytes == 400
+
+
+def test_placement_aggregates_follow_upsert_and_delete() -> None:
+    directory = KeyDirectory()
+    directory.consume(_batch(seq=1, keys=[_key(1)], size_bytes=100))
+    directory.consume(_batch(seq=2, keys=[_key(1)], size_bytes=100))
+    directory.consume(_batch(seq=3, keys=[_key(1)], size_bytes=250))
+
+    stats = directory.stats()
+    assert stats.l1_count == 1
+    assert stats.l1_size_bytes == 250
+
+    directory.consume(
+        _batch(
+            seq=4,
+            event_type=CacheEventType.DELETE,
+            keys=[_key(1)],
+            backend="missing",
+        )
+    )
+    directory.consume(_batch(seq=5, event_type=CacheEventType.DELETE, keys=[_key(9)]))
+    assert directory.stats().l1_size_bytes == 250
+
+    directory.consume(
+        _batch(
+            seq=6,
+            event_type=CacheEventType.DELETE,
+            keys=[_key(1)],
+            size_bytes=999,
+        )
+    )
+    stats = directory.stats()
+    assert stats.l1_count == 0
+    assert stats.l1_size_bytes == 0
+    assert stats.l2_count == 0
+    assert stats.l2_size_bytes == 0
+
+
+def test_placement_aggregates_follow_instance_fencing() -> None:
+    directory = KeyDirectory()
+    directory.consume(
+        _batch(instance_id="node-a", seq=1, keys=[_key(1)], size_bytes=100)
+    )
+    directory.consume(
+        _batch(instance_id="node-b", seq=1, keys=[_key(1)], size_bytes=200)
+    )
+    directory.consume(
+        _batch(
+            instance_id="node-a",
+            seq=2,
+            keys=[_key(1)],
+            tier=Tier.L2,
+            backend="fs",
+            size_bytes=300,
+        )
+    )
+
+    directory.fence_instance("node-a")
+
+    stats = directory.stats()
+    assert stats.l1_count == 1
+    assert stats.l1_size_bytes == 200
+    assert stats.l2_count == 1
+    assert stats.l2_size_bytes == 300
+
+
+def test_shared_l1_stats_follow_reporter_replacement_and_fencing() -> None:
+    directory = KeyDirectory()
+    directory.consume(
+        _batch(
+            instance_id="node-a",
+            seq=1,
+            keys=[_key(1)],
+            backend="cxl",
+            size_bytes=100,
+            shared=True,
+        )
+    )
+    directory.consume(
+        _batch(
+            instance_id="node-b",
+            seq=1,
+            keys=[_key(1)],
+            backend="cxl",
+            size_bytes=160,
+            shared=True,
+        )
+    )
+    stats = directory.stats()
+    assert stats.l1_count == 1
+    assert stats.l1_size_bytes == 160
+    assert stats.l2_count == 0
+    assert stats.l2_size_bytes == 0
+
+    directory.fence_instance("node-a")
+    stats = directory.stats()
+    assert stats.l1_count == 1
+    assert stats.l1_size_bytes == 160
+    assert stats.l2_count == 0
+    assert stats.l2_size_bytes == 0
+
+    directory.fence_instance("node-b")
+    stats = directory.stats()
+    assert stats.l1_count == 0
+    assert stats.l1_size_bytes == 0
+    assert stats.l2_count == 0
+    assert stats.l2_size_bytes == 0
+
+
+def test_placement_aggregates_are_rebuilt_from_a_capture() -> None:
+    live = KeyDirectory()
+    live.consume(_batch(seq=1, keys=[_key(1), _key(2)], size_bytes=100))
+    live.consume(
+        _batch(
+            seq=2,
+            keys=[_key(1)],
+            tier=Tier.L2,
+            backend="fs",
+            size_bytes=250,
+        )
+    )
+
+    restarted = KeyDirectory()
+    restarted.restore(live.capture())
+
+    restarted_stats = restarted.stats()
+    live_stats = live.stats()
+    assert restarted_stats.l1_count == live_stats.l1_count
+    assert restarted_stats.l1_size_bytes == live_stats.l1_size_bytes
+    assert restarted_stats.l2_count == live_stats.l2_count
+    assert restarted_stats.l2_size_bytes == live_stats.l2_size_bytes
+
+
+def test_failed_restore_keeps_existing_placement_aggregates() -> None:
+    source = KeyDirectory()
+    source.consume(_batch(keys=[_key(1)], size_bytes=100))
+    target = KeyDirectory()
+    target.consume(_batch(keys=[_key(2)], size_bytes=300))
+    before = target.stats()
+
+    with pytest.raises(ValueError, match="requires an empty directory"):
+        target.restore(source.capture())
+
+    after = target.stats()
+    assert after.l1_count == before.l1_count
+    assert after.l1_size_bytes == before.l1_size_bytes
+    assert after.l2_count == before.l2_count
+    assert after.l2_size_bytes == before.l2_size_bytes
+
+
 # -- Shared locations ----------------------------------------------------------
 
 
@@ -749,3 +968,70 @@ def test_same_backend_private_and_shared_are_distinct_placements():
     )
     [placements] = directory.lookup([_key(1)])
     assert sorted(p.shared for p in placements) == [False, True]
+
+
+# -- Object groups ------------------------------------------------------------
+
+
+def _grouped_key(hash_byte: int, group: int, rank: int = 0) -> ObjectKey:
+    return ObjectKey(
+        chunk_hash=bytes([hash_byte]) * 4,
+        model_name="m",
+        kv_rank=rank,
+        object_group_id=group,
+    )
+
+
+def test_a_key_expands_to_its_stored_copies_in_other_groups():
+    directory = KeyDirectory()
+    directory.consume(
+        _batch(keys=[_grouped_key(1, 0), _grouped_key(1, 2), _grouped_key(1, 1)])
+    )
+
+    assert directory.get_keys_across_object_groups([_grouped_key(1, 0)]) == [
+        _grouped_key(1, 0),
+        _grouped_key(1, 1),
+        _grouped_key(1, 2),
+    ]
+
+
+def test_expansion_reaches_only_groups_this_chunk_is_stored_in():
+    """Exact, not inferred: another chunk's groups say nothing about this one."""
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[_grouped_key(1, 0), _grouped_key(1, 1)]))
+    directory.consume(_batch(seq=2, keys=[_grouped_key(2, 0)]))
+
+    assert directory.get_keys_across_object_groups([_grouped_key(2, 0)]) == [
+        _grouped_key(2, 0)
+    ]
+
+
+def test_expansion_keeps_rank_and_namespace_apart():
+    """Only the object group may differ: another rank of the same chunk is a
+    different key, not another group of this one."""
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[_grouped_key(1, 1, rank=1)]))
+
+    assert directory.get_keys_across_object_groups([_grouped_key(1, 0)]) == [
+        _grouped_key(1, 0)
+    ]
+
+
+def test_an_unstored_key_expands_to_itself():
+    """A lookup of content nobody holds still answers for the key it asked
+    about, with no placements, as it did before."""
+    assert KeyDirectory().get_keys_across_object_groups([_grouped_key(9, 0)]) == [
+        _grouped_key(9, 0)
+    ]
+
+
+def test_expansion_drops_groups_once_their_copies_are_deleted():
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[_grouped_key(1, 0), _grouped_key(1, 1)]))
+    directory.consume(
+        _batch(seq=2, event_type=CacheEventType.DELETE, keys=[_grouped_key(1, 1)])
+    )
+
+    assert directory.get_keys_across_object_groups([_grouped_key(1, 0)]) == [
+        _grouped_key(1, 0)
+    ]

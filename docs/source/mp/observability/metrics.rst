@@ -191,9 +191,6 @@ L2 Metrics
      - Counter (attr: ``cache_salt``)
      - Number of chunks submitted for L2 prefetch lookup, grouped by
        tenant.
-   * - ``lmcache_mp.l2_prefetch_hit``
-     - Counter
-     - Number of prefix chunks found in L2 lookup.
    * - ``lmcache_mp.l2_prefetch_load_submitted``
      - Counter
      - Number of L2 prefetch load requests submitted.
@@ -295,6 +292,13 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Of ``lookup_hit``: tokens L2 added beyond the L1-servable prefix.
        ``l1 + l2 == lookup_hit`` per event.
+   * - ``lmcache_mp.lookup_hit_l1_keys``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Hit keys L1 already held. One key per object group, kv rank and
+       chunk, so the count is not divided by the TP world size.
+   * - ``lmcache_mp.lookup_hit_l2_keys``
+     - Counter (attrs: ``model_name``, ``cache_salt``)
+     - Hit keys loaded from L2 into L1.
    * - ``lmcache_mp.lookups``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Completed lookups (denominator for ``lookup_early_exit``).
@@ -305,7 +309,8 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
 
 All lookup counters are driven by the same event (``MP_LOOKUP_PREFETCH_END``),
 so they always advance together per completed lookup. Early-exit lookups
-contribute ``0`` tokens to all four token counters and ``+1`` to
+contribute ``0`` tokens to all four token counters, ``0`` keys to both
+key counters, and ``+1`` to
 ``lookups`` / ``lookup_early_exit``, and abandoned lookups contribute to neither.
 
 The ``model_name`` and ``cache_salt`` attributes are captured at lookup
@@ -333,6 +338,20 @@ per tenant or isolation domain); drop it at scrape time with
     # Fraction of lookups that early-exited, by reason:
     sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)
     / sum(rate(lmcache_mp_lookups_requests_total[5m]))
+
+    # Share of hit keys L1 already held:
+    rate(lmcache_mp_lookup_hit_l1_keys_total[5m])
+    / (rate(lmcache_mp_lookup_hit_l1_keys_total[5m])
+       + rate(lmcache_mp_lookup_hit_l2_keys_total[5m]))
+
+**Tokens vs. keys on hybrid models.** The token split credits L1 only with
+the prefix L1 could serve without L2. On a hybrid model (full attention plus
+sliding-window or linear-attention layers), L1 may hold every full-attention
+key while L2 supplies only the few sliding-window keys that complete the
+prefix. The token counters then report the whole hit as L2, while the key
+counters show that most of the data came from L1. Use the token counters for
+"how much of the hit depends on L2" and the key counters for "how much data
+L2 actually moved".
 
 L0 (GPU) Block Lifecycle Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -766,6 +785,64 @@ For the full design rationale and the in-process accessors that back
 each metric see ``docs/design/v1/mp_observability/METRICS.md`` and
 ``docs/design/v1/mp_observability/event-bus.md`` in the source tree.
 
+gRPC Runtime Metrics
+~~~~~~~~~~~~~~~~~~~~
+
+When metrics are enabled and the MP request transport is gRPC, LMCache also
+registers gRPC Python's OpenTelemetry observability plugin against the same
+OTel ``MeterProvider``. ZMQ mode does not register this plugin, so the
+existing LMCache EventBus metrics remain unchanged. The plugin is provided by
+``grpcio-observability`` and is installed only on Linux, which is the platform
+currently supported by that upstream package. On non-Linux developer hosts the
+integration is skipped unless the package is available locally. Use
+``--disable-grpc-metrics`` to suppress the integration explicitly while
+keeping LMCache's EventBus metrics enabled.
+
+These metrics describe the gRPC transport itself, not cache hit/miss behavior.
+They use the upstream ``grpc.*`` namespace. On Prometheus, ``.`` is converted
+to ``_`` and counters get a ``_total`` suffix.
+
+.. list-table:: gRPC Runtime Metrics
+   :header-rows: 1
+   :widths: 34 34 16 16
+
+   * - OTel metric name
+     - Prometheus name
+     - Type
+     - Unit
+   * - ``grpc.client.attempt.started``
+     - ``grpc_client_attempt_started_total``
+     - Counter
+     - ``{attempt}``
+   * - ``grpc.client.attempt.duration``
+     - ``grpc_client_attempt_duration_seconds``
+     - Histogram
+     - seconds
+   * - ``grpc.client.attempt.sent_total_compressed_message_size``
+     - ``grpc_client_attempt_sent_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+   * - ``grpc.client.attempt.rcvd_total_compressed_message_size``
+     - ``grpc_client_attempt_rcvd_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+   * - ``grpc.server.call.started``
+     - ``grpc_server_call_started_total``
+     - Counter
+     - ``{call}``
+   * - ``grpc.server.call.duration``
+     - ``grpc_server_call_duration_seconds``
+     - Histogram
+     - seconds
+   * - ``grpc.server.call.sent_total_compressed_message_size``
+     - ``grpc_server_call_sent_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+   * - ``grpc.server.call.rcvd_total_compressed_message_size``
+     - ``grpc_server_call_rcvd_total_compressed_message_size_bytes``
+     - Histogram
+     - bytes
+
 Prometheus Scrape Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -784,3 +861,124 @@ In **push mode** (``--otlp-endpoint`` set), the server does not expose
 ``/metrics`` itself; scrape the OpenTelemetry Collector's Prometheus exporter
 instead. The bundled stack in ``examples/observability/`` wires this up for
 you — see :doc:`index`.
+
+Coordinator Metrics
+~~~~~~~~~~~~~~~~~~~
+
+Coordinator metrics use the ``lmcache_coordinator.`` prefix, so a series'
+origin is clear from its name even when the coordinator and the MP servers
+share one Prometheus.  The coordinator's resource carries
+``service.name=lmcache-mp-coordinator`` and ``service.instance.id`` set to the
+host name (the pod name under Kubernetes).
+
+The Key Directory gauges always emit one observation for each ``tier`` value,
+``l1`` and ``l2``, including zero-valued observations for an empty tier.  A
+placement is one place a key is stored: L1 on one server, or one L2 backend.
+Placement bytes are the sum of the logical object sizes reported for those
+placements, not unique-object bytes, physical allocation, or storage capacity.
+The same object is therefore included once for every placement recorded for
+it.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.key_directory.placements``
+     - ObservableGauge (attr: ``tier``)
+     - Placements currently recorded in the Key Directory for each cache
+       tier.
+   * - ``lmcache_coordinator.key_directory.placement_bytes``
+     - ObservableGauge (attr: ``tier``)
+     - Reported logical object bytes summed across the placements currently
+       recorded in each cache tier.
+
+The same two gauges are also emitted under their previous names,
+``lmcache_mp.key_directory_placement_count`` and
+``lmcache_mp.key_directory_placement_size_bytes``, for one release so
+dashboards can migrate.  The previous names will be removed in the next
+release.
+
+The ingest metrics say whether the coordinator's view of the fleet is
+complete.  Two kinds of loss are counted separately: batches that never
+arrived (a skipped ``seq``), and events an MP server reports it dropped
+before sending (each batch carries the server's running count in
+``dropped_events``).  The first batch of a stream the coordinator was not
+already tracking counts no missing batches: earlier batches were sent before
+it was listening.  Fleet-wide counters drive alerts; the per-server gauges,
+one series per ``instance_id`` the coordinator currently tracks, show which
+server, and cover that server's current run.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.ingest.event_batches_received``
+     - ObservableCounter (attr: ``result``)
+     - Cache-event batches received from MP servers: ``applied``,
+       ``duplicate`` (seq already seen) or ``stale`` (older incarnation).
+   * - ``lmcache_coordinator.ingest.event_batches_missing``
+     - ObservableCounter
+     - Batches that never arrived: skipped ``seq`` values.
+   * - ``lmcache_coordinator.ingest.events_dropped_by_servers``
+     - ObservableCounter
+     - Cache events the MP servers reported dropping before they reached the
+       coordinator.
+   * - ``lmcache_coordinator.ingest.server_event_batches_missing``
+     - ObservableGauge (attr: ``instance_id``)
+     - Missing batches for one server's current run.
+   * - ``lmcache_coordinator.ingest.server_events_dropped``
+     - ObservableGauge (attr: ``instance_id``)
+     - Dropped events for one server's current run.
+   * - ``lmcache_coordinator.ingest.server_view_incomplete``
+     - ObservableGauge (attr: ``instance_id``)
+     - ``1`` while the coordinator knows it is missing part of this server's
+       cache.  Clears when the server restarts or leaves.
+   * - ``lmcache_coordinator.ingest.batch_apply_failures``
+     - ObservableCounter (attrs: ``consumer``, ``op``)
+     - A view or controller failed to apply a batch (``op="consume"``) or a
+       fence (``op="fence"``); it now disagrees with the others.
+   * - ``lmcache_coordinator.ingest.batches_delivered``
+     - ObservableCounter (attr: ``consumer``)
+     - Admitted batches handed to each view or controller.
+   * - ``lmcache_coordinator.ingest.batch_apply_time_seconds``
+     - ObservableCounter (attr: ``consumer``)
+     - Time each view or controller spent applying those batches.  Divide its
+       rate by the rate of ``batches_delivered`` for the average apply time
+       per batch.
+
+The freshness metrics say how old the coordinator's view is.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 45
+
+   * - Metric
+     - Type
+     - Description
+   * - ``lmcache_coordinator.ingest.server_seconds_since_last_event``
+     - ObservableGauge (attr: ``instance_id``)
+     - Seconds since this server's last batch was applied.  High while the
+       server still heartbeats means it has stopped sending events.
+   * - ``lmcache_coordinator.ingest.server_event_delivery_delay_seconds``
+     - ObservableGauge (attr: ``instance_id``)
+     - For this server's last applied batch, time from the server sending it
+       to the coordinator applying it.  Measured across the two hosts' clocks,
+       so clock skew shows up here.
+   * - ``lmcache_coordinator.kafka.records_read``
+     - ObservableCounter (attr: ``result``)
+     - Records read from the Kafka topic: ``applied``, ``undecodable`` or
+       ``failed``.  Only with ``--event-transport kafka``.
+   * - ``lmcache_coordinator.kafka.partitions_assigned``
+     - ObservableGauge
+     - Topic partitions this coordinator holds.  Fewer than the topic has
+       means another member of the consumer group holds the rest.
+   * - ``lmcache_coordinator.kafka.unread_records``
+     - ObservableGauge (attr: ``partition``)
+     - Records not yet read per partition.  Kafka's own lag tools cannot report
+       this, because the coordinator never commits offsets.

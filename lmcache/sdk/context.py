@@ -270,7 +270,7 @@ class LMCacheSDKContext:
         return self._transfer_ctx
 
     def close(self) -> None:
-        """Close the request client and ZMQ context."""
+        """Close the request client and release its transport resources."""
         self._req_client.close()
 
     def maybe_submit_lookup_request(

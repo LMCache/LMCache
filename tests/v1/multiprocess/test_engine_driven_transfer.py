@@ -2,6 +2,7 @@
 # Standard
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
 import os
@@ -14,17 +15,18 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.multiprocess.custom_types import (
+    PrepareRetrieveResponse,
+    PrepareStoreResponse,
+    RegisterEngineDrivenContextResponse,
+)
 from lmcache.v1.multiprocess.posix_shm import (
     shm_create_readwrite,
     shm_munmap,
     shm_open_pool_as_mmap,
     shm_unlink,
-)
-from lmcache.v1.multiprocess.protocols.engine import (
-    PrepareRetrieveResponse,
-    PrepareStoreResponse,
-    RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
@@ -389,7 +391,7 @@ def test_create_transfer_context_force_lmcache_driven_mode() -> None:
     )
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory.
-    import lmcache.v1.platform.cpu  # noqa: F401
+    import lmcache.v1.platform.devices.cpu  # noqa: F401
 
     context = create_transfer_context(
         {"layer_0": torch.randn(2, 2)},
@@ -447,6 +449,67 @@ def test_auto_non_cuda_context_does_not_require_event_ipc(
     )
 
     assert isinstance(context, worker_transfer.EngineDrivenTransferContext)
+
+
+def test_auto_npu_context_routes_to_lmcache_driven(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AUTO on NPU must route to LMCacheDrivenTransferContext.
+
+    AUTO resolves to the device spec's declared default; NpuDeviceSpec
+    declares lmcache-driven, so an unconfigured NPU worker pairs with the
+    default-configured server (``--supported-transfer-mode lmcache_driven``).
+    """
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+
+    class NpuDevice:
+        type = "npu"
+
+    monkeypatch.setattr(worker_transfer, "get_device", lambda _t: NpuDevice())
+    monkeypatch.setattr(worker_transfer, "get_device_spec", lambda _dt: NpuDeviceSpec())
+    # The npu wrapper factory is only discoverable where the npu platform
+    # imports cleanly; stub it so the routing assertion holds on any host.
+    monkeypatch.setattr(
+        worker_transfer,
+        "resolve_kv_wrapper_factory",
+        lambda _dt: (lambda tensor: tensor),
+    )
+
+    context = worker_transfer.create_transfer_context(
+        {"layer_0": MagicMock()},
+        instance_id=1,
+        req_client=MagicMock(),
+    )
+
+    assert isinstance(context, worker_transfer.LMCacheDrivenTransferContext)
+
+
+def test_default_mp_transfer_mode_declarations() -> None:
+    """AUTO routing defaults must stay pinned per device spec.
+
+    The base default derives from ``is_lmcache_driven_available``:
+    cuda and npu (capability ``True``) default to lmcache-driven; the
+    fallback spec and opt-in-only stacks (cpu SHM, musa handles) stay
+    engine-driven.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
+    from lmcache.v1.platform.base.device_spec import DeviceSpec
+    from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
+    from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
+    from lmcache.v1.platform.devices.musa import MusaDeviceSpec
+    from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+
+    assert DeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
+    assert CudaDeviceSpec().is_lmcache_driven_available() is True
+    assert CudaDeviceSpec().default_mp_transfer_mode() is MPTransferMode.LMCACHE_DRIVEN
+    assert NpuDeviceSpec().is_lmcache_driven_available() is True
+    assert NpuDeviceSpec().default_mp_transfer_mode() is MPTransferMode.LMCACHE_DRIVEN
+    # Available but opt-in-only stacks keep the portable data path as AUTO.
+    assert CpuDeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
+    assert MusaDeviceSpec().default_mp_transfer_mode() is MPTransferMode.ENGINE_DRIVEN
 
 
 def test_create_transfer_context_invalid_mode_raises() -> None:
@@ -691,7 +754,7 @@ def test_create_transfer_context_env_var_overrides_default(
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory,
     # which is required by the lmcache-driven (handle) path.
-    import lmcache.v1.platform.cpu  # noqa: F401
+    import lmcache.v1.platform.devices.cpu  # noqa: F401
 
     monkeypatch.setenv(ENV_MP_TRANSFER_MODE, "lmcache_driven")
     context = create_transfer_context(
@@ -904,6 +967,32 @@ def test_engine_driven_register_sends_num_physical_slots(
     req_client.unregister_kv_cache_engine_driven_context.assert_called_once_with(1)
 
 
+def test_engine_driven_register_rejects_multiple_transfer_groups() -> None:
+    """Engine-driven registration fails before any server RPC for multiple groups."""
+    # First Party
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    from lmcache.v1.multiprocess.transfer_context import EngineDrivenTransferContext
+
+    req_client = MagicMock()
+    context = EngineDrivenTransferContext(1, req_client)
+    groups = [
+        EngineGroupInfo(engine_group_id=0, layer_indices=(0,)),
+        EngineGroupInfo(engine_group_id=1, layer_indices=(1,)),
+    ]
+
+    with pytest.raises(ValueError, match="does not support multiple KV transfer"):
+        context.register(
+            kv_caches=_make_kv_caches(),
+            model_name="m",
+            world_size=1,
+            blocks_in_chunk=2,
+            mq_timeout=1.0,
+            engine_group_infos=groups,
+        )
+
+    req_client.register_kv_cache_engine_driven_context.assert_not_called()
+
+
 def test_engine_driven_context_unregister_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1020,6 +1109,62 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="kv_caches is empty"):
         compute_kv_layout({})
+
+
+def test_sglang_unified_gather_scatter_roundtrip() -> None:
+    """Engine-driven copies preserve SGLang's independent K/V components."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context.base import (
+        compute_kv_layout,
+        gather_paged_kv_to_cpu,
+        scatter_cpu_to_paged_kv,
+    )
+
+    shape = (8, 4, 2, 3)
+    numel = 8 * 4 * 2 * 3
+    source = {
+        "k_0": torch.arange(numel, dtype=torch.float32)
+        .reshape(shape)
+        .to(torch_device_type),
+        "v_0": torch.arange(numel, dtype=torch.float32)
+        .add(numel)
+        .reshape(shape)
+        .to(torch_device_type),
+    }
+    layout_hints: LayoutHints = {"kv_list_layout": "unified"}
+    block_size, num_layers, hidden_dim, _, engine_kv_format, kv_size = (
+        compute_kv_layout(
+            source,
+            layout_hints=layout_hints,
+            engine_type=EngineType.SGLANG,
+        )
+    )
+
+    assert (block_size, num_layers, hidden_dim, kv_size) == (4, 2, 6, 1)
+    assert engine_kv_format == lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS
+
+    gathered = gather_paged_kv_to_cpu(
+        source,
+        [0, 1],
+        blocks_per_chunk=2,
+        layout_hints=layout_hints,
+        engine_kv_format=engine_kv_format,
+        engine_type=EngineType.SGLANG,
+    )
+    destination = {name: torch.zeros_like(tensor) for name, tensor in source.items()}
+    scatter_cpu_to_paged_kv(
+        destination,
+        [4, 5],
+        gathered,
+        blocks_per_chunk=2,
+        layout_hints=layout_hints,
+        engine_kv_format=engine_kv_format,
+        engine_type=EngineType.SGLANG,
+    )
+
+    for name in source:
+        assert torch.equal(source[name][0], destination[name][4])
+        assert torch.equal(source[name][1], destination[name][5])
 
 
 @pytest.mark.parametrize(
@@ -1188,6 +1333,12 @@ def stub_lmcache_native() -> Any:
     module.PeriodicEventNotifier = type(  # type: ignore[attr-defined]
         "PeriodicEventNotifier", (), {}
     )
+
+    class TransferDirection(IntEnum):
+        H2D = 0
+        D2H = 1
+
+    module.TransferDirection = TransferDirection  # type: ignore[attr-defined]
     with patch.dict(
         sys.modules,
         {
@@ -1368,7 +1519,7 @@ def test_server_store_and_retrieve_cpu_chunks(
     mock_storage.reserve_write.return_value = {"obj": mock_memory_obj}
 
     @contextmanager
-    def _read_prefetched_results(_keys: Any) -> Any:
+    def _read_prefetched_results(_keys: Any, l1_owners: Any = None) -> Any:
         yield [mock_memory_obj]
 
     mock_storage.read_prefetched_results.side_effect = _read_prefetched_results
@@ -1439,7 +1590,7 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
 ) -> None:
     """Ensure SHM prepare_store releases reserved keys that have no writable tensor."""
     # First Party
-    from lmcache.v1.multiprocess.protocols.engine import PrepareStoreResponse
+    from lmcache.v1.multiprocess.custom_types import PrepareStoreResponse
 
     mock_storage = MagicMock()
     memory_obj = MagicMock()
