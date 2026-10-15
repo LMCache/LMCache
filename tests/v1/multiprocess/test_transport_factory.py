@@ -41,6 +41,21 @@ def test_factory_selects_zmq_by_scheme(
     create.assert_called_once_with(normalized_url, context=context)
 
 
+def test_factory_rejects_zmq_api_key_until_supported() -> None:
+    """A configured credential cannot be silently ignored on another transport."""
+    with pytest.raises(ValueError, match="not yet supported by ZMQ"):
+        RequestClientFactory.create("tcp://localhost:5555", api_key="secret")
+
+
+def test_request_server_factory_rejects_zmq_api_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ZMQ server cannot appear protected by this gRPC-only integration."""
+    monkeypatch.setenv("LMCACHE_API_KEY", "secret")
+    with pytest.raises(ValueError, match="not yet supported by ZMQ"):
+        create_request_server([], MPServerConfig(transport="zmq"))
+
+
 @pytest.mark.parametrize(
     ("server_url", "normalized_url"),
     [
@@ -61,7 +76,23 @@ def test_factory_selects_grpc_by_scheme(
     result = RequestClientFactory.create(server_url, context=context)
 
     assert result is client
-    create.assert_called_once_with(normalized_url, context=context)
+    create.assert_called_once_with(normalized_url, context=context, api_key=None)
+
+
+def test_factory_passes_explicit_grpc_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programmatic gRPC clients can provide a request credential."""
+    client = MagicMock(name="grpc_request_client")
+    create = MagicMock(return_value=client)
+    monkeypatch.setattr(grpc_impl, "create_request_client", create)
+
+    result = RequestClientFactory.create("grpc://localhost:5555", api_key="secret")
+
+    assert result is client
+    create.assert_called_once_with(
+        "grpc://localhost:5555", context=None, api_key="secret"
+    )
 
 
 @pytest.mark.parametrize("server_url", ["", "grpc://", "http://localhost:5555"])

@@ -5,6 +5,7 @@
 from typing import Any
 
 # First Party
+from lmcache.v1.multiprocess.transport.auth import load_request_client_api_key
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
 _ZMQ_SCHEMES = frozenset({"inproc", "ipc", "tcp"})
@@ -33,6 +34,7 @@ class RequestClientFactory:
         server_url: str,
         *,
         context: Any | None = None,
+        api_key: str | None = None,
     ) -> RequestClient:
         """Create a request client selected by ``server_url`` scheme.
 
@@ -45,6 +47,7 @@ class RequestClientFactory:
                 scheme for the legacy ZMQ TCP default.
             context: Optional transport context. ZMQ accepts a ``zmq.Context``;
                 transports that do not need a context may ignore it.
+            api_key: Optional request-transport API key.
 
         Returns:
             A method-oriented request client for the selected transport.
@@ -55,6 +58,10 @@ class RequestClientFactory:
         """
         scheme, normalized_url = _normalize_server_url(server_url)
         if scheme in _ZMQ_SCHEMES:
+            if load_request_client_api_key(api_key) is not None:
+                raise ValueError(
+                    "Request API-key authentication is not yet supported by ZMQ"
+                )
             # First Party
             from lmcache.v1.multiprocess.transport import zmq_impl
 
@@ -69,6 +76,7 @@ class RequestClientFactory:
             return grpc_impl.create_request_client(
                 normalized_url,
                 context=context,
+                api_key=api_key,
             )
 
         supported = sorted(_ZMQ_SCHEMES | _GRPC_SCHEMES)

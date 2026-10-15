@@ -13,6 +13,7 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
@@ -26,7 +27,11 @@ from lmcache.v1.multiprocess.request_handler import (
     HandlerType,
     iter_request_handlers,
 )
+from lmcache.v1.multiprocess.transport.auth import load_request_authentication
 from lmcache.v1.multiprocess.transport.base import RequestServer
+from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
+    GrpcAuthenticationInterceptor,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     ServiceBinding,
@@ -185,6 +190,7 @@ class GrpcMultiprocessServer(RequestServer):
         max_cpu_workers: int,
         max_gpu_workers: int,
         grpc_server_workers: int,
+        authentication: APIKeyVerifier | None = None,
     ) -> None:
         self._bind_url = bind_url
         self._handlers: dict[str, _GrpcRequestHandler] = {}
@@ -203,7 +209,12 @@ class GrpcMultiprocessServer(RequestServer):
             max_workers=grpc_server_workers,
             thread_name_prefix="grpc-server",
         )
-        self._server = grpc.server(self._executor, options=_GRPC_OPTIONS)
+        self._authentication = authentication or APIKeyVerifier()
+        self._server = grpc.server(
+            self._executor,
+            options=_GRPC_OPTIONS,
+            interceptors=(GrpcAuthenticationInterceptor(self._authentication),),
+        )
         self._bound_port = self._server.add_insecure_port(parse_grpc_target(bind_url))
         if self._bound_port == 0:
             raise RuntimeError(f"Failed to bind gRPC multiprocess server: {bind_url}")
@@ -327,6 +338,7 @@ def build_grpc_request_server(
         max_gpu_workers=mp_config.max_gpu_workers,
         max_cpu_workers=mp_config.max_cpu_workers,
         grpc_server_workers=mp_config.grpc_server_workers,
+        authentication=load_request_authentication(mp_config.api_key_files),
     )
     server.add_modules(modules, service_registrars=service_registrars)
     return server

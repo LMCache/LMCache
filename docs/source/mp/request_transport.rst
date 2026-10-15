@@ -70,6 +70,30 @@ Start the server with the matching request transport:
    lmcache server --transport zmq --host localhost --port 5555
    lmcache server --transport grpc --host localhost --port 5555
 
+gRPC API-key authentication
+---------------------------
+
+gRPC authentication is optional. Accepted server keys come from repeated
+``--api-key-file``, ``LMCACHE_API_KEY_FILE``, and
+``LMCACHE_API_KEY``. Sources are cumulative for rotation. Clients send
+one explicit key or use one of the environment sources. A server interceptor checks
+Bearer metadata before protobuf request deserialization and handler dispatch;
+a client interceptor injects it for unary and server-streaming calls. Missing
+or incorrect credentials return gRPC ``UNAUTHENTICATED``. Authentication stays
+disabled when the server has no keys.
+
+.. code-block:: bash
+
+   lmcache server --transport grpc --host 0.0.0.0 --port 5555 \
+       --api-key-file /run/secrets/lmcache-request-key
+
+   export LMCACHE_API_KEY_FILE=/run/secrets/lmcache-request-key
+
+The default gRPC channel is insecure, so the token and payload are not
+encrypted. Use TLS when traffic crosses an untrusted network. Mutual TLS can
+later add transport encryption and certificate-based peer identity without
+replacing the API-key verifier.
+
 For multiple servers, specify the scheme on every entry in
 ``lmcache.mp.server_urls``, for example
 ``tcp://host1:5555,tcp://host2:5555`` or
@@ -87,5 +111,6 @@ opaque SDK objects require an explicit codec and are rejected.
 
 This closes the device-wrapper deserialization path in CVE-2026-105192. The
 engine-driven tensor-data path uses a separate typed inline codec that shares
-the descriptor dtype allowlist. Neither change adds RPC authentication; keep MP
-endpoints restricted to trusted clients.
+the descriptor dtype allowlist. API-key authentication is optional and does
+not replace transport encryption; keep unauthenticated or insecure endpoints
+restricted to trusted networks.

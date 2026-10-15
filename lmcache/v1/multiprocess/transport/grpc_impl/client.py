@@ -17,6 +17,9 @@ import grpc
 # First Party
 from lmcache.v1.multiprocess.futures import MessagingFuture, MessagingStream
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
+    GrpcClientAuthenticationInterceptor,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
     client_method_name,
     iter_methods,
@@ -75,10 +78,15 @@ ClientRpcCallable = Callable[..., MessagingFuture[Any] | MessagingStream[Any]]
 class GrpcMultiprocessClient(RequestClient):
     """Expose generated unary and server-streaming RPCs as client methods."""
 
-    def __init__(self, server_url: str) -> None:
-        self._channel = grpc.insecure_channel(
+    def __init__(self, server_url: str, api_key: str | None = None) -> None:
+        channel: grpc.Channel = grpc.insecure_channel(
             parse_grpc_target(server_url), options=_GRPC_OPTIONS
         )
+        if api_key is not None:
+            channel = grpc.intercept_channel(
+                channel, GrpcClientAuthenticationInterceptor(api_key)
+            )
+        self._channel = channel
         stubs: dict[str, Any] = {}
         self._rpc_methods: dict[str, _ClientRpc] = {}
         codec_registry = get_method_codec_registry()
