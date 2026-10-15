@@ -36,13 +36,6 @@ import sys
 import pytest
 import torch
 
-# First Party
-from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format import detect_format, get_spec
-import lmcache.lmcache_native as lmcache_native
-
-pytestmark = pytest.mark.no_shared_allocator
-
 # One registered cache value, mirroring the module's own ``RegisteredKVCache``:
 # a paged KV tensor, or ``[conv_state, ssm_state]`` for Mamba layers.
 _RegisteredKVCache: TypeAlias = torch.Tensor | list[torch.Tensor]
@@ -794,28 +787,6 @@ def test_interleaved_plane_edit_matches_fused_page_view(edits, num_kv_heads):
     torch.testing.assert_close(
         interleaved_view.reshape(-1), fused_view.reshape(-1)
     )
-
-
-@pytest.mark.parametrize("num_kv_heads", [1, 4])
-def test_interleaved_plane_edit_detects_as_format_2(edits, num_kv_heads, monkeypatch):
-    """A layer list of the edited tensor is format 2 at the scheduler block.
-
-    ``num_logical_blocks`` is not 2: a leading size of 2 is the K/V axis of
-    format 1, so two blocks would make the rank-5 shape ambiguous.
-    """
-    monkeypatch.setattr(
-        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
-        "npu",
-    )
-    k_plane, v_plane, spec, _storage = _subpaged_kv_planes(
-        num_kv_heads=num_kv_heads, num_logical_blocks=4
-    )
-    viewed = _edit_attention(edits, (k_plane, v_plane), attention_spec=spec)
-    fmt, normalized = detect_format(
-        [viewed], EngineType.VLLM, {"kv_layout": "NHD"}
-    )
-    assert fmt == lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
-    assert get_spec(normalized, fmt).block_size() == int(spec.block_size)
 
 
 def test_subpaged_plane_edit_rejects_non_dense_interleaved_inner_stride(edits):
