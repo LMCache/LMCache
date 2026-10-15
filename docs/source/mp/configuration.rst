@@ -86,7 +86,9 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Port to bind the selected request server.
    * - ``--chunk-size``
      - ``256``
-     - Chunk size for KV cache operations (in tokens).
+     - Minimum chunk size for KV cache operations (in tokens). The vLLM MP
+       connector may negotiate it upward to satisfy the model's KV geometry;
+       see :doc:`chunk_size_negotiation`.
    * - ``--null-block-id``
      - ``0``
      - Engine block ID that denotes absent KV data. Keep the default for
@@ -752,13 +754,13 @@ by one interleave layout from being loaded by another. It does not change the
 model name served by vLLM, but the decorated cache model name is visible in MP
 metric labels so operators can distinguish incompatible cache layouts.
 
-One configuration change is required: the LMCache chunk size must be a
-multiple of vLLM's resolved scheduler block size. For a single attention
-group, that is ``block_size * decode_context_parallel_size``. For a hybrid
-model, it is the least common multiple of every attention group's DCP-scaled
-block span and every recurrent-state group's unscaled physical block span. If
-the chunk size is incompatible, vLLM fails at connector startup with the
-required multiple in the message (the LMCache server itself starts fine).
+The vLLM MP connector automatically negotiates a compatible chunk size. For a
+single attention group, the required alignment is
+``block_size * decode_context_parallel_size``. For a hybrid model, it is the
+least common multiple of every attention group's DCP-scaled block span and
+every recurrent-state group's unscaled physical block span. The server treats
+``--chunk-size`` as a minimum and rounds it up to the smallest compatible
+multiple; see :doc:`chunk_size_negotiation`.
 
 The example model also needs a vLLM build that can run it under DCP:
 Kimi-Linear DCP support landed after v0.27.1 (vLLM commit ``63ac04a61e``,
@@ -767,8 +769,8 @@ PR #50484). On stock v0.27.1 the command below fails at startup with
 
 .. code-block:: bash
 
-    # block_size 1024 x dcp 2 -> chunk size must be a multiple of 2048
-    lmcache server --host localhost --port 6000 --chunk-size 2048 \
+    # block_size 1024 x dcp 2 -> a configured minimum of 256 negotiates to 2048
+    lmcache server --host localhost --port 6000 --chunk-size 256 \
         --l1-size-gb 20 --eviction-policy LRU
 
     vllm serve moonshotai/Kimi-Linear-48B-A3B-Instruct \
