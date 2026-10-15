@@ -1153,7 +1153,7 @@ CPU mode (no GPU)
 runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates regular
 CPU KV tensors and exercises the full RPC path through ``TransferContext``.
 The engine-driven context uses server-owned SHM staging when available and
-falls back to pickle transport. In ``lmcache_driven`` mode, the CPU wrapper
+falls back to typed inline tensor transport. In ``lmcache_driven`` mode, the CPU wrapper
 migrates the tensors to POSIX SHM during registration.
 
 By default ``--mode cpu`` uses the engine-driven gather/scatter path

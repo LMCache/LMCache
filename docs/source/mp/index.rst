@@ -176,7 +176,7 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
        ``--supported-transfer-mode`` is ``engine_driven`` or ``auto``.
        Returns a ``RegisterEngineDrivenContextResponse`` carrying the
        SHM segment name and pool size when the SHM path is in use
-       (empty for the pickle path).
+       (empty for the inline path).
    * - ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
      - SYNC
      - Unregister an engine-driven KV cache context.
@@ -198,12 +198,12 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
    * - ``COMMIT_STORE``
      - BLOCKING
      - (Engine-driven path) Worker commits the chunk's serialized bytes
-       (pickle path) or releases the prepared SHM slot (SHM path) so the
+       (typed inline path) or releases the prepared SHM slot (SHM path) so the
        server can persist into L1 storage.
    * - ``PREPARE_RETRIEVE``
      - BLOCKING
      - (Engine-driven path) Worker asks the server to prepare the
-       retrieval payload for a key. The pickle path returns the bytes
+       retrieval payload for a key. The typed inline path returns the bytes
        inline; the SHM path returns slot info so the worker can read
        from shared memory.
    * - ``COMMIT_RETRIEVE``

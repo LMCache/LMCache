@@ -174,7 +174,7 @@ Source: ``lmcache/v1/multiprocess/config.py``
        non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
        ``auto`` or ``engine_driven``).
        ``""`` (empty string, default): SHM disabled; KV transfer uses
-       the pickle path.  Any other value: create a SHM pool and use
+       the typed inline path.  Any other value: create a SHM pool and use
        that exact name for its segment.
    * - ``--kv-event-log-size``
      - ``32768``

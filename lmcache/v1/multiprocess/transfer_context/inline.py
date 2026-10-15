@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pickle-based EngineDrivenContext implementation for multiprocess mode."""
-
-# Standard
-import pickle
+"""Inline EngineDrivenContext implementation for multiprocess mode."""
 
 # Third Party
 import torch
@@ -13,19 +10,23 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
+from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
+    decode_tensors,
+    encode_tensors,
+)
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
 
-class EngineDrivenContextPickle(EngineDrivenContext):
-    """Pickle-based implementation of :class:`EngineDrivenContext`.
+class EngineDrivenContextInline(EngineDrivenContext):
+    """Safe inline implementation of :class:`EngineDrivenContext`.
 
     Transport mechanism:
     - **Store**: ``prepare_store`` sends ``PREPARE_STORE`` (returns empty slots
-      for pickle mode); ``commit_store`` serialises chunks and sends
+      for inline mode); ``commit_store`` serialises chunks and sends
       ``COMMIT_STORE``.
     - **Retrieve**: ``prepare_retrieve`` sends ``PREPARE_RETRIEVE`` and
       deserialises the returned bytes; ``commit_retrieve`` sends
-      ``COMMIT_RETRIEVE`` (no-op for pickle).
+      ``COMMIT_RETRIEVE`` (no-op for inline transfer).
     """
 
     def __init__(
@@ -39,7 +40,7 @@ class EngineDrivenContextPickle(EngineDrivenContext):
     def prepare_store(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
-        """Send PREPARE_STORE RPC. For pickle, returns no pre-allocated buffers."""
+        """Send PREPARE_STORE RPC and return no pre-allocated buffers."""
         future = self.req_client.prepare_store(key, instance_id)
         try:
             future.result(timeout=self.mq_timeout)
@@ -55,7 +56,7 @@ class EngineDrivenContextPickle(EngineDrivenContext):
         Returns:
             ``True`` on success, ``False`` on failure or timeout.
         """
-        serialised = pickle.dumps(chunks)
+        serialised = encode_tensors(chunks)
         future = self.req_client.commit_store(key, instance_id, serialised)
         try:
             return bool(future.result(timeout=self.mq_timeout))
@@ -63,9 +64,15 @@ class EngineDrivenContextPickle(EngineDrivenContext):
             return False
 
     def prepare_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int, expected_count: int
     ) -> list[torch.Tensor] | None:
         """Send PREPARE_RETRIEVE and deserialize the response data.
+
+        Args:
+            key: Cache key to retrieve.
+            instance_id: Worker instance identifier.
+            expected_count: Number of LMCache chunks derived from the worker's
+                block IDs and blocks-per-chunk geometry.
 
         Returns:
             Chunks on hit, or None on miss/timeout.
@@ -77,11 +84,15 @@ class EngineDrivenContextPickle(EngineDrivenContext):
             return None
         if not response.success or not response.data:
             return None
-        chunks: list[torch.Tensor] = pickle.loads(response.data)
-        return chunks
+        return decode_tensors(
+            response.data,
+            expected_shape=self.metadata.layout_desc.shapes[0],
+            expected_dtype=self.metadata.layout_desc.dtypes[0],
+            expected_count=expected_count,
+        )
 
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
-        """Send COMMIT_RETRIEVE (no-op for pickle path)."""
+        """Send COMMIT_RETRIEVE (no-op for inline path)."""
         future = self.req_client.commit_retrieve(key, instance_id)
         try:
             future.result(timeout=self.mq_timeout)
@@ -90,4 +101,4 @@ class EngineDrivenContextPickle(EngineDrivenContext):
         return True
 
     def close(self) -> None:
-        """No-op: the pickle path holds no persistent resources."""
+        """No-op: the inline path holds no persistent resources."""

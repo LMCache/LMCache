@@ -61,7 +61,7 @@ vLLM connector endpoint must match the server's ``--transport`` setting.
 To enable shared-memory transfer, pass ``--shm-name`` and disable lazy
 L1 allocation with ``--no-l1-use-lazy``. If shared memory is
 unavailable and these flags are not specified, the SDK falls back to
-pickle.
+the typed inline tensor codec.
 To transfer query tensors, add ``--enable transfer_query`` flag.
 
 .. code-block:: bash
