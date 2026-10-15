@@ -1288,8 +1288,7 @@ class LMCacheMPSchedulerAdapter:
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
-                the IPC key. The APC-covered chunk count (if any) is carried
-                here under ``COVERED_CHUNKS_CONFIG_KEY``.
+                the IPC key.
 
         Returns:
             IPCCacheServerKey: The constructed key.

@@ -53,9 +53,6 @@ def resolve_prefetched_obj_keys(
     ``key.worker_id=None`` resolves every KV rank for scheduler-owned cleanup.
     A worker-specific key resolves only that worker's shard (or one MLA reader
     share), which is required for per-instance RETRIEVE failure cleanup.
-
-    Every per-group range start is clamped to ``covered_chunks`` (the prefix
-    the lookup skipped), so a release never drops a lock it never took.
     """
     chunk_hashes = ctx.token_hasher.compute_chunk_hashes(
         list(key.token_ids), start=key.start, end=key.end
