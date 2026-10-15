@@ -40,14 +40,12 @@ msgid ""
 "Redis is an in-memory key-value store and is a supported option for "
 "remote KV Cache offloading in LMCache. Some other remote backends are "
 ":doc:`Mooncake <./mooncake>`, :doc:`Valkey <./valkey>`, and "
-":doc:`InfiniStore <./infinistore>`. This guide will mainly focus on "
-"single-node Redis but also shows you how to set up Redis Sentinels and an"
-" LMCache Server."
+":doc:`InfiniStore <./infinistore>`. This guide mainly focuses on single-"
+"node Redis and also shows how to set up Redis Sentinels."
 msgstr ""
 "Redis 是一个内存中的键值存储，是 LMCache 中支持的远程 KV Cache 卸载选项之一。其他一些远程后端包括 "
 ":doc:`Mooncake <./mooncake>`、:doc:`Valkey <./valkey>` 和 :doc:`InfiniStore"
-" <./infinistore>`。本指南将主要集中于单节点 Redis，但也会向您展示如何设置 Redis Sentinel 和 LMCache"
-" 服务器。"
+" <./infinistore>`。本指南主要介绍单节点 Redis，并展示如何设置 Redis Sentinel。"
 
 #: ../../source/kv_cache/storage_backends/redis.rst:19
 msgid "Two ways to configure LMCache Redis Offloading:"
@@ -183,22 +181,6 @@ msgstr "**步骤 1e. 验证一切是否正常运行:**"
 msgid "You should see something like this (without the comments):"
 msgstr "您应该看到类似这样的内容（不包括注释）："
 
-#: ../../source/kv_cache/storage_backends/redis.rst:195
-msgid "**Alternative: Starting an LMCache Server:**"
-msgstr "**替代方案：启动 LMCache 服务器：**"
-
-#: ../../source/kv_cache/storage_backends/redis.rst:197
-msgid ""
-"The ``lmcache_server`` CLI entrypoint starts a remote LMCache server and "
-"comes with the ``lmcache`` package."
-msgstr "``lmcache_server`` CLI 入口点启动一个远程 LMCache 服务器，并附带 ``lmcache`` 包。"
-
-#: ../../source/kv_cache/storage_backends/redis.rst:206
-msgid ""
-"Currently, the only supported device is \"cpu\" (which is the default, so"
-" you don't need to specify it)."
-msgstr "目前，唯一支持的设备是“cpu”（这是默认值，因此您无需指定它）。"
-
 #: ../../source/kv_cache/storage_backends/redis.rst:209
 msgid "**Step 2. Start a vLLM server with remote offloading enabled:**"
 msgstr "**步骤 2. 启动一个启用远程卸载的 vLLM 服务器：**"
@@ -225,16 +207,6 @@ msgid ""
 "Create a an lmcache configuration file called: ``redis-sentinel-"
 "offload.yaml``"
 msgstr "创建一个名为 ``redis-sentinel-offload.yaml`` 的 lmcache 配置文件"
-
-#: ../../source/kv_cache/storage_backends/redis.rst:265
-msgid "**Alternative: LMCache Server**"
-msgstr "**替代方案：LMCache 服务器**"
-
-#: ../../source/kv_cache/storage_backends/redis.rst:267
-msgid ""
-"Create a an lmcache configuration file called: ``lmcache-server-"
-"offload.yaml``"
-msgstr "创建一个名为 ``lmcache-server-offload.yaml`` 的 lmcache 配置文件"
 
 #: ../../source/kv_cache/storage_backends/redis.rst:290
 msgid "**Step 3. Viewing and Managing LMCache Entries in Redis:**"
@@ -372,4 +344,3 @@ msgstr ""
 #: ../../source/kv_cache/storage_backends/redis.rst:433
 msgid "**Step 4. Clean up:**"
 msgstr "**步骤 4. 清理：**"
-

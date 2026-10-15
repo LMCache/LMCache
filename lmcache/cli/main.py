@@ -54,17 +54,5 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         sys.exit(1)
 
 
-def legacy_server_main() -> None:
-    """Run the multiprocess server through the deprecated command name.
-
-    Command-line arguments are forwarded unchanged to ``lmcache server``.
-    """
-    print(
-        "'lmcache_server' is deprecated; use 'lmcache server' instead.",
-        file=sys.stderr,
-    )
-    main(["server", *sys.argv[1:]])
-
-
 if __name__ == "__main__":
     main()

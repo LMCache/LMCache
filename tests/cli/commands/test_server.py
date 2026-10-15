@@ -4,14 +4,12 @@
 # Standard
 from unittest.mock import patch
 import argparse
-import sys
 
 # Third Party
 import pytest
 
 # First Party
 from lmcache.cli.commands.server import ServerCommand
-from lmcache.cli.main import legacy_server_main
 
 
 @pytest.fixture
@@ -171,14 +169,3 @@ class TestServerCommandExecute:
             assert "storage_manager_config" in kwargs
             assert "obs_config" in kwargs
             assert "http_authentication" in kwargs
-
-
-def test_legacy_server_entrypoint_forwards_to_server_command(monkeypatch, capsys):
-    """The deprecated command name should run the multiprocess server CLI."""
-    monkeypatch.setattr(sys, "argv", ["lmcache_server", "--port", "6000"])
-
-    with patch("lmcache.cli.main.main") as mock_main:
-        legacy_server_main()
-
-    mock_main.assert_called_once_with(["server", "--port", "6000"])
-    assert "deprecated" in capsys.readouterr().err
