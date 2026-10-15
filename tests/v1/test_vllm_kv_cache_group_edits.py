@@ -784,9 +784,7 @@ def test_interleaved_plane_edit_matches_fused_page_view(edits, num_kv_heads):
         interleaved_view.untyped_storage().data_ptr()
         == fused_view.untyped_storage().data_ptr()
     )
-    torch.testing.assert_close(
-        interleaved_view.reshape(-1), fused_view.reshape(-1)
-    )
+    torch.testing.assert_close(interleaved_view.reshape(-1), fused_view.reshape(-1))
 
 
 def test_subpaged_plane_edit_rejects_non_dense_interleaved_inner_stride(edits):
