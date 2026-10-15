@@ -19,11 +19,18 @@ Multiple accepted keys support rotation:
 API keys authenticate callers but do not encrypt traffic. Deploy TLS at a
 trusted reverse proxy when credentials cross an untrusted network.
 
-The MP HTTP server uses the common loader and verifier through
-`lmcache.v1.multiprocess.http_auth`. Its existing CLI options, environment
-variables, public `/` and `/healthcheck` routes, and disabled-auth behavior
-remain unchanged. Key-file validation uses common error messages, and token
-comparisons use UTF-8 bytes so non-ASCII input does not raise a comparison error.
+Service entry points use repeated `--api-key-file`, `LMCACHE_API_KEY_FILE`,
+and `LMCACHE_API_KEY` as one cumulative set of accepted credentials. The MP
+HTTP server and request-transport adapters use the same loader. Clients send
+one key, explicitly or through the shared environment variables.
+
+The MP HTTP server uses the common verifier through
+`lmcache.v1.multiprocess.http_auth`. `--http-api-key-file` remains a CLI alias;
+legacy HTTP environment variables are fallbacks when their corresponding
+unified variables are unset or empty. Its public `/` and `/healthcheck`
+routes and disabled-auth behavior remain unchanged. Key-file validation uses
+common error messages, and comparisons use UTF-8 bytes so non-ASCII input
+does not raise a comparison error.
 
 `lmcache.v1.multiprocess.transport.auth` supplies request-transport key loading
 for ZMQ and gRPC adapters. Accepted server keys are cumulative, while a client

@@ -53,18 +53,24 @@ Server Configuration
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
-   * - ``--http-api-key-file``
+   * - ``--api-key-file``
      - unset
      - Read a bearer API key from a file. Repeat the option to accept multiple
        keys during rotation. Authentication is disabled when no CLI or
        environment key source is configured.
 
-The environment variables ``LMCACHE_HTTP_API_KEY_FILE`` and
-``LMCACHE_HTTP_API_KEY`` provide deployment-friendly alternatives for one key
+The environment variables ``LMCACHE_API_KEY_FILE`` and
+``LMCACHE_API_KEY`` provide deployment-friendly alternatives for one key
 file or one key value. Environment sources and repeated
-``--http-api-key-file`` options are cumulative, so old and new keys can overlap
-during rotation. The ``/env`` endpoint redacts ``LMCACHE_HTTP_API_KEY`` while
+``--api-key-file`` options are cumulative, so old and new keys can overlap
+during rotation. The ``/env`` endpoint redacts ``LMCACHE_API_KEY`` while
 leaving the non-secret key-file path visible.
+
+``--http-api-key-file`` remains a compatibility alias. The legacy
+``LMCACHE_HTTP_API_KEY`` and ``LMCACHE_HTTP_API_KEY_FILE`` variables are used
+when their corresponding ``LMCACHE_API_KEY`` variables are unset or empty.
+The unified key sources are shared by authentication-enabled HTTP and request
+transport adapters; separate per-protocol keys are not configured.
 
 Example:
 
@@ -73,7 +79,7 @@ Example:
     lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
         --http-host 0.0.0.0 --http-port 8080 \
-        --http-api-key-file /run/secrets/lmcache-http-api-key
+        --api-key-file /run/secrets/lmcache-http-api-key
 
 All examples below assume the server is reachable at
 ``http://localhost:8080``. When authentication is enabled, include the key as

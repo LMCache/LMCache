@@ -12,8 +12,8 @@ from typing_extensions import Self
 # First Party
 from lmcache.security.api_key import (
     APIKeyVerifier,
-    load_api_keys,
     load_api_keys_from_files,
+    load_service_api_keys,
 )
 from lmcache.security.http import (
     HTTPBearerAuthenticationMiddleware,
@@ -60,13 +60,7 @@ class HTTPAuthenticationConfig(APIKeyVerifier):
             OSError: If a key file cannot be read.
             ValueError: If a key file is empty or contains more than one line.
         """
-        return cls(
-            load_api_keys(
-                key_files,
-                api_key_env_var=HTTP_API_KEY_ENV_VAR,
-                api_key_file_env_var=HTTP_API_KEY_FILE_ENV_VAR,
-            )
-        )
+        return cls(load_service_api_keys(key_files))
 
     def accepts_authorization_header(self, authorization: str | None) -> bool:
         """Validate one HTTP Bearer authorization header.

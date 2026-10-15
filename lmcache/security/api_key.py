@@ -4,11 +4,66 @@
 # Standard
 from collections.abc import Sequence
 from pathlib import Path
+import argparse
 import os
 import secrets
 
 # Third Party
 from typing_extensions import Self
+
+API_KEY_ENV_VAR = "LMCACHE_API_KEY"
+API_KEY_FILE_ENV_VAR = "LMCACHE_API_KEY_FILE"
+LEGACY_HTTP_API_KEY_ENV_VAR = "LMCACHE_HTTP_API_KEY"
+LEGACY_HTTP_API_KEY_FILE_ENV_VAR = "LMCACHE_HTTP_API_KEY_FILE"
+
+
+def add_api_key_args(parser: argparse.ArgumentParser) -> None:
+    """Register the shared authentication option on a service parser.
+
+    Args:
+        parser: Service command-line parser receiving the repeatable file option.
+    """
+    group = parser.add_argument_group("Authentication")
+    group.add_argument(
+        "--api-key-file",
+        "--http-api-key-file",
+        dest="api_key_file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Read an accepted service API key from PATH. Repeat during rotation. "
+        "Environment alternatives are LMCACHE_API_KEY_FILE and LMCACHE_API_KEY. "
+        "--http-api-key-file is a compatibility alias.",
+    )
+
+
+def load_service_api_keys(key_files: Sequence[str | Path]) -> tuple[str, ...]:
+    """Load the shared service keys, with legacy HTTP environment fallbacks.
+
+    Args:
+        key_files: CLI files accepted by every authentication-enabled entry point.
+
+    Returns:
+        CLI keys plus the environment file and value. Each new environment
+        variable takes precedence over its legacy HTTP equivalent.
+
+    Raises:
+        OSError: If a configured file cannot be read.
+        ValueError: If a configured file is empty or contains multiple lines.
+    """
+    return load_api_keys(
+        key_files,
+        api_key_env_var=(
+            API_KEY_ENV_VAR
+            if os.environ.get(API_KEY_ENV_VAR)
+            else LEGACY_HTTP_API_KEY_ENV_VAR
+        ),
+        api_key_file_env_var=(
+            API_KEY_FILE_ENV_VAR
+            if os.environ.get(API_KEY_FILE_ENV_VAR)
+            else LEGACY_HTTP_API_KEY_FILE_ENV_VAR
+        ),
+    )
 
 
 def load_api_keys_from_files(
