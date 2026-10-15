@@ -29,6 +29,16 @@ def create_request_server(
     """
     if mp_config.transport == "grpc":
         # First Party
+        from lmcache.v1.multiprocess.transport.auth import (
+            load_request_authentication,
+        )
+
+        if load_request_authentication(mp_config.api_key_files).enabled:
+            raise ValueError(
+                "Request API-key authentication is not yet supported by gRPC"
+            )
+
+        # First Party
         from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
             build_grpc_request_server,
         )

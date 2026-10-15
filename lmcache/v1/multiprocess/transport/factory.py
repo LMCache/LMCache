@@ -33,6 +33,7 @@ class RequestClientFactory:
         server_url: str,
         *,
         context: Any | None = None,
+        api_key: str | None = None,
     ) -> RequestClient:
         """Create a request client selected by ``server_url`` scheme.
 
@@ -45,6 +46,7 @@ class RequestClientFactory:
                 scheme for the legacy ZMQ TCP default.
             context: Optional transport context. ZMQ accepts a ``zmq.Context``;
                 transports that do not need a context may ignore it.
+            api_key: Optional request-transport API key.
 
         Returns:
             A method-oriented request client for the selected transport.
@@ -61,8 +63,19 @@ class RequestClientFactory:
             return zmq_impl.create_request_client(
                 normalized_url,
                 context=context,
+                api_key=api_key,
             )
         if scheme in _GRPC_SCHEMES:
+            # First Party
+            from lmcache.v1.multiprocess.transport.auth import (
+                load_request_client_api_key,
+            )
+
+            if load_request_client_api_key(api_key) is not None:
+                raise ValueError(
+                    "Request API-key authentication is not yet supported by gRPC"
+                )
+
             # First Party
             from lmcache.v1.multiprocess.transport import grpc_impl
 

@@ -70,6 +70,36 @@ Start the server with the matching request transport:
    lmcache server --transport zmq --host localhost --port 5555
    lmcache server --transport grpc --host localhost --port 5555
 
+ZMQ API-key authentication
+--------------------------
+
+ZMQ authentication is optional. In this version it applies only to ZMQ; gRPC
+startup rejects configured request keys instead of silently running without
+authentication. When enabled, ZMQ clients send a credential in a
+dedicated versioned frame and the server validates it before decoding the RPC
+operation or payload. The server accepts multiple keys during rotation, while
+each client sends one key:
+
+.. code-block:: bash
+
+   # Server: repeat --api-key-file to overlap old and new keys.
+   lmcache server --transport zmq --host 0.0.0.0 --port 5555 \
+       --api-key-file /run/secrets/lmcache-request-key
+
+   # Client process, including vLLM or another engine integration.
+   export LMCACHE_API_KEY_FILE=/run/secrets/lmcache-request-key
+
+The environment can alternatively carry the value directly in
+``LMCACHE_API_KEY``. Servers also read both environment sources in
+addition to repeated CLI files. Authentication is disabled when no server key
+source is configured, preserving existing deployments.
+
+API keys do not encrypt ZMQ traffic. Use a trusted network or encrypted tunnel
+when the request transport crosses an untrusted network. CURVE can be added as
+a future transport-security adapter. Enabling authentication requires clients
+that understand the versioned frame; upgrade servers before enabling keys and
+then update clients.
+
 For multiple servers, specify the scheme on every entry in
 ``lmcache.mp.server_urls``, for example
 ``tcp://host1:5555,tcp://host2:5555`` or
