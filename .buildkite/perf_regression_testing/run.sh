@@ -25,6 +25,10 @@ if [[ -z "${PYTHON:-}" ]]; then
   echo "run.sh: no Python >= 3.11 on $(hostname); set PYTHON in the Buildkite env" >&2
   exit 64
 fi
+# Mooncake's nightly wheel is a GitHub Actions artifact: gh needs a token.
+if [[ $PRT_SUITE == weekly && -z "${GH_TOKEN:-}" ]]; then
+  GH_TOKEN=$(buildkite-agent secret get GH_TOKEN) && export GH_TOKEN
+fi
 out=$PRT_ROOT/prt-suites/buildkite-${BUILDKITE_BUILD_NUMBER:-local}-$PRT_SUITE-$(date -u +%Y%m%d-%H%M%S)
 "$PYTHON" -m perf_regression_testing.suite --suite "$PRT_SUITE" --out "$out"
 rc=$?
