@@ -34,6 +34,9 @@ must not emit buffered stores. In-flight source blocks must have exact positive
 reference counts and cannot be handed to a competing allocation. Completion
 must leave every original block at reference count zero, not just a matching
 free-queue length. Reset cases must emit nothing.
+The request-finished return must transfer delayed-free ownership as configured;
+tracker removal and exactly-once session release are checked before/after the
+worker receipt, as is adapter shutdown.
 
 CUDA cases initialize real paged GPU tensors, copy the selected metadata
 ranges into a real StorageManager's L1 reservations. Write keys are derived

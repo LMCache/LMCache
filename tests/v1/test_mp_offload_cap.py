@@ -83,9 +83,11 @@ class PlannedStores:
 
     def complete(self) -> None:
         """Apply the worker receipt or release the eager request's ownership."""
+        adapter = cast(MagicMock, self.connector.scheduler_adapter)
         if not self.connector.lazy_offload:
             self.pool.free_blocks(self.blocks)
         elif self.stores:
+            adapter.end_session.assert_not_called()
             assert self.connector.has_pending_push_work()
             self.connector.update_connector_output(
                 KVConnectorOutput(
@@ -94,10 +96,13 @@ class PlannedStores:
                     )
                 )
             )
+        adapter.end_session.assert_called_once_with("prefix-cap")
+        assert "prefix-cap" not in self.connector.request_trackers
         assert not self.connector.has_pending_push_work()
         assert all(block.ref_cnt == 0 for block in self.blocks)
         assert self.pool.get_num_free_blocks() == self.pool.num_gpu_blocks - 1
         self.connector.shutdown()
+        adapter.shutdown.assert_called_once_with()
 
 
 def scheduler_step(
@@ -221,7 +226,12 @@ def plan_stores(
     if reset:
         request.status = RequestStatus.PREEMPTED
         assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
-    connector.request_finished(request, [block.block_id for block in blocks])
+    retain_for_worker, return_params = connector.request_finished(
+        request, [block.block_id for block in blocks]
+    )
+    assert retain_for_worker is (mode == "eager")
+    assert return_params is None
+    assert request.request_id not in connector.request_trackers
     if connector.lazy_offload:
         pool.free_blocks(blocks)
         idle_output = connector.build_connector_meta(scheduler_step(0))
@@ -230,6 +240,10 @@ def plan_stores(
         drain_output = connector.build_connector_meta(scheduler_step())
         assert isinstance(drain_output, LMCacheMPConnectorMetadata)
         stores = drain_output.requests
+    if connector.lazy_offload and stores:
+        adapter.end_session.assert_not_called()
+    else:
+        adapter.end_session.assert_called_once_with(request.request_id)
     assert sum(meta.op.end - meta.op.start for meta in stores) == (
         0 if reset else admitted_tokens
     )
@@ -279,8 +293,9 @@ def test_cap_controls_actual_cuda_and_storage_manager_payload(
 ) -> None:
     """Only the selected prefix crosses CUDA/L1; the excluded suffix is untouched.
 
-    The scheduler objects and StorageManager are real. Torch copies stand in
-    for the MP worker/IPC executor; this is not a model-serving benchmark.
+    The connector, Request, BlockPool and StorageManager are real, with mocked
+    configuration/scheduler envelopes and adapter transport. Torch copies
+    replace the MP worker/IPC executor; this is not a serving benchmark.
     """
     if not torch.cuda.is_available():
         pytest.skip("Requires actual CUDA transfers")
