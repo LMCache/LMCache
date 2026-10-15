@@ -310,8 +310,9 @@ class TestFingerprintJobTuple:
         assert _bind(eng, "store")(key, 0, [[0, 1]], b"evt") == (b"handle", True)
 
         job = eng._fingerprint_queue.get_nowait()
-        assert len(job) == 5, "job tuple must carry the request id"
+        assert len(job) == 6, "job tuple must carry request_id and predecessor_hash"
         assert job[4] == "req-store"
+        assert job[5] is None
         assert job[2] == 1, "chunk 0 of a position-0 store is skipped"
 
 
