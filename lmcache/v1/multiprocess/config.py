@@ -35,7 +35,8 @@ class MPServerConfig:
     """Request server port."""
 
     chunk_size: int = 256
-    """Chunk size for KV cache operations."""
+    """Minimum chunk size for KV cache operations. vLLM connector startup may
+    negotiate this upward to satisfy model-specific KV geometry."""
 
     max_workers: int = 1
     """Base number of worker threads. Sets default for both GPU and CPU pools."""
@@ -102,7 +103,8 @@ class MPServerConfig:
 
     shm_name: str | None = ""
     """SHM segment name for engine-driven KV transfer.
-    "" (default): force pickle. None: auto-allocate. Other: use that name."""
+    "" (default): force safe inline transfer. None: auto-allocate. Other: use
+    that name."""
 
     script_allowed_imports: list[str] = field(default_factory=list)
     """Modules that /run_script endpoint is allowed to import."""
@@ -159,15 +161,18 @@ class MPServerConfig:
     """Out-of-tree server-module factories to load after built-in modules."""
 
     def __post_init__(self) -> None:
-        """Validate the worker-reaping timeouts.
+        """Validate the chunk size and worker-reaping timeouts.
 
         Raises:
-            ValueError: If a timeout is non-finite, the reap timeout is
-                negative or a non-zero value below the 30 s floor, or the
-                registration grace is below the reap timeout.
+            ValueError: If the chunk size is not positive, a timeout is
+                non-finite, the reap timeout is negative or a non-zero value
+                below the 30 s floor, or the registration grace is below the
+                reap timeout.
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
+        if self.chunk_size < 1:
+            raise ValueError(f"chunk size must be positive; got {self.chunk_size}")
         if self.grpc_server_workers < 1:
             raise ValueError(
                 f"grpc server workers must be >= 1; got {self.grpc_server_workers}"
@@ -388,7 +393,9 @@ def add_mp_server_args(
         "--chunk-size",
         type=int,
         default=256,
-        help="Chunk size for KV cache operations. Default is 256.",
+        help="Minimum chunk size for KV cache operations. The vLLM connector "
+        "may negotiate this upward to satisfy model-specific KV geometry. "
+        "Default is 256.",
     )
     mp_group.add_argument(
         "--null-block-id",
@@ -738,15 +745,23 @@ def add_http_frontend_args(
         "--http-host",
         type=str,
         default="127.0.0.1",
-        help="Host to bind the HTTP server. Default is 127.0.0.1; the admin "
-        "API has no authentication, so only bind a non-loopback address on a "
-        "trusted network.",
+        help="Host to bind the HTTP server. Default is 127.0.0.1.",
     )
     http_group.add_argument(
         "--http-port",
         type=int,
         default=8080,
         help="Port to bind the HTTP server. Default is 8080.",
+    )
+    http_group.add_argument(
+        "--http-api-key-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Read an HTTP bearer API key from PATH. Repeat this option to "
+        "accept multiple keys during rotation. The environment alternatives "
+        "are LMCACHE_HTTP_API_KEY_FILE and LMCACHE_HTTP_API_KEY. "
+        "Authentication is disabled when no key source is configured.",
     )
     return parser
 

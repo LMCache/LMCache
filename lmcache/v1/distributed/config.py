@@ -143,6 +143,10 @@ def _parse_l1_common(
 # pre-allocated 2 MiB pool rather than regular 4 KiB pinned memory.
 HUGEPAGE_SIZE_BYTES = 2 * 1024 * 1024
 
+# mlock keeps pages off the evictable LRU; compaction migrates them anyway
+# unless this sysctl is 0.
+_COMPACT_UNEVICTABLE_ALLOWED = "/proc/sys/vm/compact_unevictable_allowed"
+
 
 _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS = {
     "nixl_store",
@@ -342,6 +346,9 @@ class L1MemoryManagerConfig:
     """ ``registered`` pins anonymous memory; ``gtt`` (ROCm, lazy L1 only)
     uses non-migratable GTT segments and needs HSA_USERPTR_FOR_PAGED_MEM=0. """
 
+    mlock: bool = False
+    """ mlock the L1 buffer so compaction cannot migrate it (ROCm only). """
+
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
 
@@ -381,6 +388,19 @@ class L1MemoryManagerConfig:
                 "incompatible with lazy allocation. Please set "
                 "--no-l1-use-lazy when enabling hugepages."
             )
+        if self.mlock:
+            if current_device_spec.backend_name != "rocm":
+                raise ValueError("l1-mlock is only supported on ROCm.")
+            if self.devdax_path:
+                raise ValueError("l1-mlock cannot be used with l1-devdax-path.")
+            if self.host_memory_backend == "gtt":
+                raise ValueError("l1-mlock cannot be used with the gtt L1 backend.")
+            with open(_COMPACT_UNEVICTABLE_ALLOWED) as f:
+                if f.read().strip() != "0":
+                    raise RuntimeError(
+                        "l1-mlock requires sysctl vm.compact_unevictable_allowed=0 "
+                        "on the node."
+                    )
 
         # LazyMemoryAllocator requires pinned memory support.
         # Auto-disable on platforms that don't support it to avoid a RuntimeError.
@@ -556,7 +576,8 @@ class DRAML1ManagerConfig(L1ManagerConfig):
 
         Raises:
             ValueError: A field is unknown, malformed, or incompatible.
-            RuntimeError: The requested hugepage pool is unavailable.
+            RuntimeError: The requested hugepage pool is unavailable, or
+                mlock is requested and the node allows compacting mlocked pages.
         """
         config = _parse_l1_common(
             cls,
@@ -570,6 +591,7 @@ class DRAML1ManagerConfig(L1ManagerConfig):
                 "shm_name",
                 "use_hugepages",
                 "host_memory_backend",
+                "mlock",
             },
         )
         use_lazy = _l1_bool(values, "use_lazy", True)
@@ -588,6 +610,7 @@ class DRAML1ManagerConfig(L1ManagerConfig):
             host_memory_backend=cast(
                 L1HostMemoryBackend, values.get("host_memory_backend", "registered")
             ),
+            mlock=_l1_bool(values, "mlock", False),
         )
         if hugepages:
             _check_hugepage_availability(config.memory_config.size_in_bytes)
@@ -924,6 +947,15 @@ def add_storage_manager_args(
             "in the server environment."
         ),
     )
+    memory_group.add_argument(
+        "--l1-mlock",
+        action="store_true",
+        help=(
+            "ROCm only: mlock the L1 buffer so memory compaction cannot migrate "
+            "it. Requires sysctl vm.compact_unevictable_allowed=0 and an "
+            "unlimited memlock ulimit (or CAP_IPC_LOCK)."
+        ),
+    )
 
     # GDS L1 tier (optional, opt-in via --gds-l1-path)
     gds_group = parser.add_argument_group(
@@ -1174,6 +1206,7 @@ def parse_args_to_config(
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
             host_memory_backend=getattr(args, "l1_host_memory_backend", "registered"),
+            mlock=args.l1_mlock,
         )
     else:
         memory_config = L1MemoryManagerConfig(
@@ -1185,6 +1218,7 @@ def parse_args_to_config(
             use_hugepages=use_hugepages,
             devdax_path=args.l1_devdax_path,
             host_memory_backend=getattr(args, "l1_host_memory_backend", "registered"),
+            mlock=args.l1_mlock,
         )
 
     gds_l1_config: GdsL1Config | None = None

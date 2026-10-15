@@ -64,7 +64,8 @@ TTLs must be positive integers. Unknown fields are rejected.
      - Backend fields
    * - ``DRAM``
      - ``use_lazy`` (true), ``init_size_gb`` (20, capped at capacity),
-       ``shm_name`` (empty), ``use_hugepages`` (false). Shared memory and
+       ``shm_name`` (empty), ``use_hugepages`` (false), ``mlock`` (false,
+       see :doc:`configuration`). Shared memory and
        hugepages require eager allocation. Shared-memory names must be unique.
        ``host_memory_backend`` (``registered``; ``gtt`` see
        :doc:`configuration`).
