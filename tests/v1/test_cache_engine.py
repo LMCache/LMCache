@@ -336,7 +336,7 @@ def test_paged_store_offset(
     """ Store is async. Need to wait for the store to finish """
     if backend == "cpu":
         timeout = 1
-    elif backend == "local_disk":
+    elif backend in ("local_disk", "remote"):
         timeout = 30
     start_time = time.time()
     while engine.lookup(tokens[: num_tokens + num_suffix_tokens]) < expected_length:
