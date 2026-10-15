@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# coordinator-controllers <-> LMCache compatibility check, run on the host agent.
+# Coordinator integration tests, run on the host agent, CPU-only:
+#   1. this LMCache's MP servers against its coordinator, end to end;
+#   2. the coordinator-controllers suite against this LMCache, its end-to-end
+#      tests included.
+# Both run; the step fails if either does.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -28,6 +32,12 @@ uv pip install -r requirements/common.txt
 NO_GPU_EXT=1 SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0+ci \
     uv pip install -e . --no-build-isolation
 python -c "import lmcache; print('lmcache', lmcache.__version__)"
+uv pip install pytest pytest-asyncio
+
+status=0
+echo "+++ :satellite: MP servers against the coordinator, end to end"
+RUN_MP_E2E=1 LMCACHE_TRACK_USAGE=false python -m pytest -q -rs -o log_cli=false \
+    tests/v1/mp_coordinator/test_mp_server_e2e.py || status=$?
 
 # Clone the controllers at the newest release tag (or CC_REF), using only our
 # token: the agent's own git credential is scoped to LMCache and 403s here.
@@ -44,7 +54,9 @@ git_ clone --depth 1 --branch "${CC_REF}" "${url}" "${CC_DIR}"
 echo "--- :python: Installing coordinator-controllers"
 SETUPTOOLS_SCM_PRETEND_VERSION_FOR_COORDINATOR_CONTROLLERS=0.0.0+ci \
     uv pip install -e "${CC_DIR}" --no-deps --no-build-isolation
-uv pip install pytest pytest-asyncio
 
 echo "+++ :electric_plug: coordinator-controllers suite against this LMCache"
-cd "${CC_DIR}" && python -m pytest -q -rs
+# RUN_E2E=1 includes its end-to-end tests, real MP servers with its
+# controllers loaded; a ref without them simply has none to run.
+(cd "${CC_DIR}" && RUN_E2E=1 python -m pytest -q -rs) || status=$?
+exit "${status}"

@@ -40,8 +40,8 @@ class ManagementModule:
             0 disables reaping (no thread is started).
         worker_registration_grace_seconds: Silence budget for a worker that
             registered but never pinged.
-        experimental_transfer: Types of experimental intermediate tensor
-            transfer built in the server.
+        experimental_transfer: Enabled experimental transfer types and server
+            capability flags.
     """
 
     def __init__(
@@ -145,17 +145,28 @@ class ManagementModule:
         Returns:
             The chunk size.
         """
-        return self._ctx.chunk_size
+        return self._ctx.finalize_chunk_size()
+
+    @request_handler()
+    def negotiate_chunk_size(self, required_chunk_alignment: int) -> int:
+        """Negotiate the server chunk size against model geometry.
+
+        Args:
+            required_chunk_alignment: The least common multiple of cacheable
+                engine group ``tokens_per_block`` values.
+
+        Returns:
+            The concrete server chunk size.
+
+        Raises:
+            ValueError: If the context cannot bind or validate the requested
+                geometry.
+        """
+        return self._ctx.negotiate_chunk_size(required_chunk_alignment)
 
     @request_handler()
     def get_experimental(self) -> list[str]:
-        """Return the experimental intermediate tensor transfer built in the
-        server.
-
-        Returns:
-            The enabled experimental intermediate tensor transfer types.
-            See ``lmcache.v1.multiprocess.modules.experimental.__init__``.
-        """
+        """Return the server's enabled experimental transfers and capabilities."""
         return list(self._experimental_transfer)
 
     @request_handler(HandlerType.BLOCKING)

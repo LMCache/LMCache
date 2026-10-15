@@ -450,6 +450,17 @@ runtime, see :doc:`compatibility` before installing.
 
                             docker pull lmcache/vllm-openai:latest-nightly-cu129
 
+            .. tab-item:: SGLang
+
+                .. code-block:: bash
+
+                    docker pull lmcache/sglang
+
+                The official SGLang release image with the matching LMCache
+                wheel installed (CUDA 13.0). SGLang supports only MP mode, so
+                run it with ``--enable-lmcache`` against a separate LMCache
+                server, such as ``lmcache/standalone``.
+
             .. tab-item:: ROCm
 
                 .. code-block:: bash
@@ -461,6 +472,11 @@ runtime, see :doc:`compatibility` before installing.
                 .. code-block:: bash
 
                     docker pull vllm/vllm-openai-xpu:v0.26.0
+
+        The official CUDA vLLM and standalone images default to the non-root
+        ``lmcache`` user (uid 1000). Mount the Hugging Face cache at
+        ``/home/lmcache/.cache/huggingface``; existing volumes and bind mounts
+        must be writable by that uid.
 
         See :ref:`docker_deployment` for running the container and ROCm images.
 

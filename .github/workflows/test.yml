@@ -113,7 +113,7 @@ jobs:
 
       - name: "CPU only unit tests"
         run: |
-          pytest -m "not (cuda or musa or xpu or npu or neuron)"
+          pytest -m "not (cuda or musa or xpu or npu or neuron or rbln)"
 
   rust-unit-tests:
     needs: changes

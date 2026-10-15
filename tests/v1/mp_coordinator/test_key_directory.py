@@ -367,6 +367,21 @@ def test_binding_records_the_chunks_token_offset():
     assert match.old_st == 512
 
 
+def test_chunk_size_binding_reindexes_existing_token_bindings():
+    directory = KeyDirectory()
+    directory.enable_blend_lookup(chunk_size=2, probe_stride=1)
+    tokens = np.asarray([1, 2, 3, 4], dtype=np.uint64)
+    directory.consume(
+        _batch(seq=1, keys=[_key(1)], token_ids=tokens.tolist(), token_offset=64)
+    )
+    assert directory.blend_match(tokens, NS) == []
+
+    directory.bind_chunk_size(4)
+
+    (match,) = directory.blend_match(tokens, NS)
+    assert match.old_st == 64
+
+
 def test_unknown_chunk_yields_empty_tokens():
     directory = KeyDirectory()
 
@@ -532,6 +547,29 @@ def test_stats_counts_keys_and_placements():
     # node-b reported only an L2 placement: absent from the L1 fencing
     # index (its placement stays visible via lookup / the keys listing).
     assert stats.l1_keys_by_instance["node-b"] == 0
+
+
+def test_stats_placement_count_follows_deletes_and_fencing():
+    directory = KeyDirectory()
+    directory.consume(_batch(instance_id="node-a", seq=1, keys=[_key(1), _key(2)]))
+    directory.consume(_batch(instance_id="node-b", seq=1, keys=[_key(1)]))
+    directory.consume(
+        _batch(instance_id="node-b", seq=2, tier=Tier.L2, backend="fs", keys=[_key(2)])
+    )
+    directory.consume(
+        _batch(
+            instance_id="node-b",
+            seq=3,
+            event_type=CacheEventType.DELETE,
+            keys=[_key(1)],
+        )
+    )
+    directory.fence_instance("node-a")
+
+    stats = directory.stats()
+    placements = directory.lookup([_key(1), _key(2)])
+    assert stats.num_placements == sum(len(p) for p in placements) == 1
+    assert stats.num_keys == 1
 
 
 # -- Placement stats ---------------------------------------------------------

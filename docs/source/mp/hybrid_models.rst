@@ -165,9 +165,9 @@ is identical across models.
 Step 1 — find the model's unified block size ``N``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-``N`` is the **single number** that drives every other setting: the LMCache
-server's ``--chunk-size`` and vLLM's ``--max-num-batched-tokens`` are both
-derived from it (step 2). Get it wrong and LMCache raises at engine startup.
+``N`` is the **single number** that drives every other setting: LMCache uses it
+to negotiate a compatible chunk size, and vLLM's
+``--max-num-batched-tokens`` is derived from it (step 2).
 
 For a Mamba / GDN hybrid, vLLM forces **one** block size across all KV cache
 groups, chosen large enough that an attention page is at least as big as a
@@ -230,15 +230,18 @@ example:
 Step 2 — derive the required flags from ``N``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-#. **LMCache server** ``--chunk-size`` **= N** (or any multiple of ``N``) **and**
-   ``--separate-object-groups``. The chunk-size rule is enforced by the
-   connector (it must be a multiple of vLLM's unified block size, or
-   registration fails); ``--separate-object-groups`` gives the
-   linear-attention layers their own cache objects and is required for these
-   hybrids::
+#. **LMCache server** uses ``--chunk-size`` as a minimum and requires
+   ``--separate-object-groups``. The connector automatically negotiates the
+   smallest multiple of ``N`` that is at least the configured minimum;
+   ``--separate-object-groups`` gives the linear-attention layers their own
+   cache objects and is required for these hybrids::
 
-       lmcache server --chunk-size 784 --separate-object-groups \
+       lmcache server --chunk-size 256 --separate-object-groups \
            --l1-size-gb 100 --eviction-policy LRU
+
+   For example, ``N = 784`` resolves this minimum to 784, while ``N = 544``
+   resolves it to 544. See :doc:`chunk_size_negotiation` for the full
+   lifecycle and mixed-model constraints.
 
 #. **vLLM** ``--max-num-batched-tokens`` **≥ N** — a scheduler step must advance
    at least one whole block (``align`` snapshots the Mamba state only at the
@@ -259,9 +262,10 @@ Step 2 — derive the required flags from ``N``
            --kv-transfer-config \
            '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
-So for a freshly-probed model the whole derivation is: read ``N`` (step 1), then
-pass ``--chunk-size N --separate-object-groups`` to the server and
-``--max-num-batched-tokens N`` to vLLM.
+So for a freshly-probed model the whole derivation is: read ``N`` (step 1),
+pass ``--separate-object-groups`` to the server, and use
+``--max-num-batched-tokens N`` for the simplest vLLM configuration. The
+server's configured chunk-size minimum can stay at its default.
 
 No ``--no-disable-hybrid-kv-cache-manager`` or attention-backend flag is needed;
 ``LMCacheMPConnector`` advertises hybrid support and vLLM auto-selects the GDN
