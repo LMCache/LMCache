@@ -42,3 +42,10 @@ does not raise a comparison error.
 for ZMQ and gRPC adapters. Accepted server keys are cumulative, while a client
 sends one explicit key or one environment-supplied key. This helper does not
 enable authentication on any transport by itself.
+
+gRPC carries a credential as Bearer metadata. A server interceptor rejects
+invalid metadata before protobuf deserialization and handler dispatch; a
+client interceptor injects the key into unary and server-streaming calls.
+The default insecure channel does not encrypt tokens. Use TLS on untrusted
+networks; mTLS can add certificate-based peer identity independently of the
+API-key verifier.
