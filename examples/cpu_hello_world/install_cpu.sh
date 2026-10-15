@@ -25,10 +25,11 @@
 #
 # Usage (run from anywhere inside the LMCache repo, inside an activated venv):
 #   examples/cpu_hello_world/install_cpu.sh
-#   PIP_BIN="uv pip" examples/cpu_hello_world/install_cpu.sh
 #
 # Environment (all optional):
-#   PIP_BIN                 pip front-end (default: "pip"; e.g. "uv pip")
+#   PIP_BIN                 pip front-end (default: "pip"). Keep pip unless you
+#                           have a reason not to: uv's resolver rejects the vLLM
+#                           CPU nightly's dependency set, and CI installs with pip.
 #   VLLM_CPU_NIGHTLY_SPEC   vLLM CPU package spec (default: "vllm-cpu-nightly").
 #                           Pin a known-good build for reproducibility, e.g.
 #                           VLLM_CPU_NIGHTLY_SPEC="vllm-cpu-nightly==<version>".
@@ -110,6 +111,34 @@ MSG
   exit 1
 fi
 echo "==> System libraries present (FFmpeg/libavutil)"
+
+# ------------------------------------------------------------------ #
+# Preflight 3: the pip front-end actually exists
+# ------------------------------------------------------------------ #
+# `uv venv` creates an environment without pip unless you pass --seed, so
+# the default PIP_BIN=pip is absent in exactly the setup many people use.
+# Check here, because the delegated scripts otherwise die several lines in
+# with a bare "pip: command not found".
+PIP_BIN="${PIP_BIN:-pip}"
+export PIP_BIN
+if ! command -v "${PIP_BIN%% *}" >/dev/null 2>&1; then
+  cat >&2 <<MSG
+!! pip front-end '${PIP_BIN}' not found in this environment.
+
+   'uv venv' does not install pip unless you ask it to. Re-create the
+   environment with pip included:
+
+       uv venv --seed --python 3.12 && source .venv/bin/activate
+       # or: python3 -m venv .venv && source .venv/bin/activate
+
+   Note that PIP_BIN="uv pip" is not a workaround: uv's resolver rejects
+   the vLLM CPU nightly's dependency set (it reads the pin as both
+   setuptools>=77.0.3 and setuptools==77.0.3), while pip resolves it. CI
+   installs this stack with pip.
+MSG
+  exit 1
+fi
+echo "==> pip front-end available: ${PIP_BIN}"
 
 # ------------------------------------------------------------------ #
 # 1. vLLM CPU build  2. LMCache CPU build

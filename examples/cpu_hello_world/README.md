@@ -29,21 +29,33 @@ minutes.
 
 ```bash
 # from anywhere inside the repo, in an activated virtual environment
-uv venv --python 3.12 && source .venv/bin/activate
+uv venv --seed --python 3.12 && source .venv/bin/activate
 # or: python3 -m venv .venv && source .venv/bin/activate
 
-source .venv/bin/activate   # the install step above
 examples/cpu_hello_world/install_cpu.sh
-# or, with uv as the pip front-end:
-PIP_BIN="uv pip" examples/cpu_hello_world/install_cpu.sh
 ```
 
-This installs a CPU vLLM build and LMCache in CPU-only mode (`NO_GPU_EXT=1`) by
-delegating to the same two scripts LMCache's CPU CI runs
+`--seed` matters: a plain `uv venv` ships without pip, and this stack installs
+with pip — uv's own resolver rejects the vLLM CPU nightly's dependency set.
+The script checks for a virtualenv, a working pip front-end, and the system
+libraries vLLM needs before it starts, so you get a clear message rather than a
+failure part-way through.
+
+It then delegates to the same two scripts LMCache's CPU CI runs
 (`.github/scripts/install_vllm_cpu.sh` and `install_lmcache_cpu.sh`), so the
-demo installs exactly what CI validates. The script refuses to run outside a
-virtualenv and checks for the system libraries vLLM needs before starting. See
-its header for what each step does and why.
+demo installs exactly what CI validates, in CPU-only mode (`NO_GPU_EXT=1`). See
+the script header for what each step does and why.
+
+To reproduce a known-good build rather than today's nightly, pin it:
+
+```bash
+VLLM_CPU_NIGHTLY_SPEC="vllm-cpu-nightly==<version>" \
+  examples/cpu_hello_world/install_cpu.sh
+```
+
+CI publishes the versions it has verified, per OS, on the
+[`github_nightly_tested_vllm`](https://github.com/LMCache/LMCache/tree/github_nightly_tested_vllm)
+branch.
 
 ## The three tiers
 
