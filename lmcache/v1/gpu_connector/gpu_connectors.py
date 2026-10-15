@@ -464,6 +464,15 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert device is not None
         return cls(metadata, device, use_gpu, layout_hints=layout_hints)
 
+    def initialize_kvcaches_ptr(self, **kwargs):
+        """Override to eagerly build kv_layer_groups_manager when kvcaches
+        are first available, ensuring metadata.get_shapes() returns correct
+        per-group shapes before any store/retrieve operation.
+        """
+        super().initialize_kvcaches_ptr(**kwargs)
+        if self.kvcaches is not None and not self.init:
+            self._initialize_kv_cache_pointers()
+
     def _initialize_kv_cache_pointers(self):
         """Discover KV-cache layout, build the layer-groups manager, and
         capture per-group GPU pointer tensors.
