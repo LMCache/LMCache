@@ -355,7 +355,7 @@ Debugging checklist:
 - [ ] Set ``DEVICE_TYPE=foo`` to force the torch-facing device category if not
   picked up automatically.
 - [ ] Engine-driven transfer works end-to-end (check the LMCache logs
-  to confirm whether the SHM or Pickle sub-path is chosen — both
+  to confirm whether the SHM or inline sub-path is chosen — both
   should succeed).
 - [ ] Store/retrieve correctness is verified.
 - [ ] TP>1 / multi-worker behavior is verified.

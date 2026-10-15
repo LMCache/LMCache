@@ -108,3 +108,7 @@ def test_rpc_types_come_from_request_client_annotations() -> None:
     assert stream.payload_types == (int, str, int, int)
     assert stream.response_type is KVEventBatch
     assert stream.streaming
+
+    negotiate = get_rpc_spec("negotiate_chunk_size")
+    assert negotiate.payload_types == (int,)
+    assert negotiate.response_type is int

@@ -170,6 +170,8 @@ class KeyDirectory(View):
         # enable_blend_lookup() swaps in one sized to the fleet's chunk size.
         self._blend_index = BlendIndex()
         self._blend_lookup_enabled = False
+        self._blend_chunk_size: int | None = None
+        self._blend_probe_stride = 1
 
     @classmethod
     def from_config(
@@ -214,8 +216,41 @@ class KeyDirectory(View):
         Raises:
             ValueError: If ``chunk_size`` or ``probe_stride`` is < 1.
         """
-        self._blend_index = BlendIndex(chunk_size=chunk_size, probe_stride=probe_stride)
-        self._blend_lookup_enabled = True
+        with self._lock:
+            self._blend_index = BlendIndex(
+                chunk_size=chunk_size, probe_stride=probe_stride
+            )
+            self._blend_lookup_enabled = True
+            self._blend_chunk_size = chunk_size
+            self._blend_probe_stride = probe_stride
+
+    def bind_chunk_size(self, chunk_size: int) -> None:
+        """Rebuild the optional blend index for the fleet's finalized size."""
+        with self._lock:
+            if not self._blend_lookup_enabled or self._blend_chunk_size == chunk_size:
+                return
+
+            blend_index = BlendIndex(
+                chunk_size=chunk_size, probe_stride=self._blend_probe_stride
+            )
+            for chunk_hash, binding in self._token_bindings.items():
+                if (
+                    not binding.token_ids.size
+                    or binding.token_offset == UNKNOWN_TOKEN_OFFSET
+                ):
+                    continue
+                namespaces = {
+                    BlendNamespace.from_object_key(key) for key in binding.keys
+                }
+                for namespace in namespaces:
+                    blend_index.add(
+                        binding.token_ids,
+                        chunk_hash,
+                        binding.token_offset,
+                        namespace,
+                    )
+            self._blend_index = blend_index
+            self._blend_chunk_size = chunk_size
 
     def consume(self, batch: CacheEventBatch) -> None:
         """Apply one gate-admitted batch, idempotently: re-storing

@@ -176,7 +176,7 @@ steps:
         retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
-        artifact_paths: ["*.log"]
+        artifact_paths: ["*.log", "ci_results_*/long_doc_qa/**/*"]
 
       - label: ":compression: {{matrix.inference_engine}} / long_doc_qa_l2 / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa_l2
@@ -188,7 +188,10 @@ steps:
         retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
-        artifact_paths: ["*.log"]
+        # The /metrics snapshot and per-check summary are the evidence a flaky
+        # threshold verdict needs; cleanup.sh stages RESULTS_DIR as
+        # ci_results_<build>.
+        artifact_paths: ["*.log", "ci_results_*/long_doc_qa_l2/*.txt"]
 
       - label: ":compression: {{matrix.inference_engine}} / deadlock / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh deadlock
@@ -460,7 +463,7 @@ steps:
         command: |
           case "{{matrix.mode}}" in
             shm) ;;  # rely on script defaults (engine-driven + shm transport)
-            pickle) export LMCACHE_SHM_NAME="" ;;
+            inline) export LMCACHE_SHM_NAME="" ;;
             server_copy) export LMCACHE_MP_TRANSFER_MODE="lmcache_driven" ;;
           esac
           bash .github/scripts/run-cpu-e2e-validation.sh
@@ -468,7 +471,7 @@ steps:
           setup:
             mode:
               - "shm"
-              - "pickle"
+              - "inline"
               - "server_copy"
             request_transport:
               - "zmq"

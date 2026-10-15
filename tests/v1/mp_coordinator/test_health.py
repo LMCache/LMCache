@@ -106,3 +106,47 @@ def test_reaped_instance_loses_its_l1_usage_but_not_its_l2():
         assert not client.get("/instances").json()["instances"]
         # L2 bytes outlive the reporter and leave only via DELETE events.
         assert _total_gb(client, "l2") > 0.0
+
+
+def test_reaped_instance_drops_its_capacity_declaration():
+    """A heartbeat timeout forgets the instance's capacity declaration, as
+    ``DELETE /instances`` does, so a crashed server leaves the fleet
+    memory view."""
+    config = MPCoordinatorConfig(
+        health_check_interval=0.05,
+        instance_timeout=0.5,
+        eviction_check_interval=0.0,
+    )
+    with TestClient(create_app(config)) as client:
+        client.post(
+            "/instances",
+            json={"instance_id": "node-a", "ip": "127.0.0.1", "http_port": 8080},
+        )
+        client.post(
+            "/events",
+            json={
+                "batches": [
+                    {
+                        "instance_id": "node-a",
+                        "incarnation": 1,
+                        "seq": 1,
+                        "event_type": "config",
+                        "tier": "l1",
+                        "backend": "dram",
+                        "entries": [],
+                        "capacity_bytes": 1 << 30,
+                        "capacity_revision": 1,
+                    }
+                ]
+            },
+        )
+        assert client.get("/instances/node-a/usage").json()["declared_capacity"]
+
+        deadline = time.monotonic() + 10.0
+        while (
+            time.monotonic() < deadline and client.get("/instances").json()["instances"]
+        ):
+            time.sleep(0.05)
+
+        assert not client.get("/instances").json()["instances"]
+        assert client.get("/instances/node-a/usage").status_code == 404

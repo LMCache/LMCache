@@ -147,15 +147,24 @@ class ServerBenchClient:
         self,
         config: BenchConfig,
         log: Callable[[str], None],
+        client_index: int = 0,
     ) -> None:
         """Create a client without connecting to the Server.
 
         Args:
             config: Benchmark configuration.
             log: Progress logger.
+            client_index: Position among concurrent clients. Each client
+                registers its Workers under its own block of instance IDs.
+
+        Raises:
+            ValueError: If ``client_index`` is negative.
         """
+        if client_index < 0:
+            raise ValueError(f"client_index must be non-negative, got {client_index}")
         self._config = config
         self._log = log
+        self._client_index = client_index
         self._zmq_context: Any | None = None
         self._req_client: "RequestClient | None" = None
         self._workers: list[WorkerContext] = []
@@ -835,7 +844,7 @@ class ServerBenchClient:
         self._kv_world_size = 1 if use_mla else config.tp_size
 
         for rank in range(config.tp_size):
-            instance_id = _INSTANCE_ID_BASE + rank
+            instance_id = _INSTANCE_ID_BASE + self._client_index * config.tp_size + rank
             kv_worker_id = 0 if use_mla else rank
             tensors = _allocate_kv_cache(
                 groups=layer_groups,
