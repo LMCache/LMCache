@@ -152,9 +152,7 @@ from K, in the original dtype, as
 (format 2, `NL_X_NB_TWO_BS_NH_HS`). That is the same opaque rank-5 page as
 `_SubpagedAttentionViewEdit`. Axis 1 is the first and second half of each
 logical page, not semantic K and V; physical heads are folded into
-`head_size`. Format 17 remains the detector result for real plane tuples
-such as MLA/DSA and slice-strided Mamba, not for this attention edit. The
-fused rank-4/5 rule is registered before the plane rules; among
+`head_size`. The fused rank-4/5 rule is registered before the plane rules; among
 those, the interleaved rule is registered first. A pair that matches neither
 layout is left unchanged. Matching uses strides and contiguity, not the
 vLLM-Ascend version string — the table rows are the layouts those releases
@@ -226,16 +224,10 @@ vLLM-Ascend adds two sub-paged attention edits on top of that contract. A
 v0.30 interleaved `(K, V)` pair is re-paged as the same original-dtype rank-5
 opaque page as the fused edit (format 2, `NL_X_NB_TWO_BS_NH_HS`). Its axis 1
 mixes true K and V at kernel-page granularity: each synthetic plane is one
-half of the logical page, not a pure K or V plane. Format 17 remains for
-actual plane tuples (MLA/DSA and slice-strided Mamba). The v0.29 contiguous
+half of the logical page, not a pure K or V plane. The v0.29 contiguous
 reshape keeps K, V, dtype, and heads, and only changes the block axis
-(format 16).
-
-Pre-change format-17 attention objects and post-change format-2 objects have
-different LMCache object layouts. Do not mix them; purge or version existing
-cached hybrid-attention entries when deploying the format-2 edit. The
-synthetic output is NHD-shaped, like `_SubpagedAttentionViewEdit`, and is not
-an HND layout.
+(format 16). The synthetic output is NHD-shaped, like
+`_SubpagedAttentionViewEdit`, and is not an HND layout.
 
 Byte transport round-trips correctly because store and retrieve share the same
 bijective block-id → bytes mapping. Consequences:
