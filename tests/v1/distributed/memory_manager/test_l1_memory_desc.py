@@ -72,6 +72,7 @@ def test_anonymous_mixed_allocator_exposes_full_stable_range() -> None:
     try:
         desc = manager.get_l1_memory_desc()
 
+        assert desc is not None
         assert desc.size == _FINAL_SIZE
         assert desc.stable_registration_size == _FINAL_SIZE
     finally:
@@ -83,6 +84,7 @@ def test_shm_mixed_allocator_exposes_no_stable_range() -> None:
     try:
         desc = manager.get_l1_memory_desc()
 
+        assert desc is not None
         assert desc.size == _FINAL_SIZE
         assert desc.stable_registration_size is None
     finally:
@@ -105,6 +107,7 @@ def test_lazy_allocator_exposes_bounded_heap_snapshot(
     try:
         desc = manager.get_l1_memory_desc()
 
+        assert desc is not None
         assert desc.size == _FINAL_SIZE
         assert desc.stable_registration_size == expected_stable_size
     finally:

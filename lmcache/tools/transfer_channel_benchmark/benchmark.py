@@ -140,9 +140,11 @@ def server_main(cfg: BenchmarkConfig) -> None:
             for index, obj in enumerate(source_objs)
         ]
 
+        l1_memory_desc = manager.get_l1_memory_desc()
+        assert l1_memory_desc is not None
         initialize_transfer_channel_context(
             cfg.transfer_channel_type,
-            l1_memory_desc=manager.get_l1_memory_desc(),
+            l1_memory_desc=l1_memory_desc,
             listen_url=cfg.url,
             advertise_url=cfg.url,
             backends=[cfg.nixl_backend],
@@ -237,9 +239,11 @@ def client_main(cfg: BenchmarkConfig) -> bool:
                 f"Failed to allocate {cfg.num_objects} destination objects: {error}."
             )
 
+        l1_memory_desc = manager.get_l1_memory_desc()
+        assert l1_memory_desc is not None
         ctx = initialize_transfer_channel_context(
             cfg.transfer_channel_type,
-            l1_memory_desc=manager.get_l1_memory_desc(),
+            l1_memory_desc=l1_memory_desc,
             listen_url=cfg.listen_url,
             advertise_url=cfg.listen_url,
             backends=[cfg.nixl_backend],
