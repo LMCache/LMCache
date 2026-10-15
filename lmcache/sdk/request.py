@@ -23,7 +23,9 @@ from lmcache.sdk.context import (
     LMCacheSDKCacheKind,
     LMCacheSDKContext,
     ModifyFnType,
+    ModifyTensors,
 )
+from lmcache.sdk.wrapper.paged_pool import RecurrentState
 
 logger = init_logger(__name__)
 
@@ -136,7 +138,7 @@ class LMCacheRequestStream:
 
         Beyond the constructor args, sets up: tokens (the live sequence backing
         the KV, starting as the prompt), done (the EOS flag), and internal
-        output history / suffix-token bookkeeping.
+        output history / suffix-token / cached-prefix bookkeeping.
         """
         self._contexts: dict[LMCacheSDKCacheKind, LMCacheSDKContext] = {}
         for ctx in contexts:
@@ -149,6 +151,7 @@ class LMCacheRequestStream:
         self._text_parts: list[str] = []
         self._request_stream_id: str = str(uuid.uuid4())
         self._suffix_tokens: list[int] = []
+        self._segment_start_token_id: int = 0
 
     @property
     def request_stream_id(self) -> str:
@@ -200,6 +203,14 @@ class LMCacheRequestStream:
         self._suffix_tokens = []
         if pending:
             self.tokens.extend(pending)
+
+        # The engine computes query rows only for the tokens it does not load
+        # from the KV cache, so this pass's query chunks are keyed from the
+        # cached prefix.
+        # So modify_kv() can read the query tensors correctly by using the key
+        # origin (from the cached prefix), read this first before generate().
+        self._segment_start_token_id = self._cached_prefix_len()
+
         events = self.post_completion(self.tokens, sampling_params, self.cache_salt)
 
         input_tokens = len(self.tokens)
@@ -241,11 +252,43 @@ class LMCacheRequestStream:
             ttft=time_between_tokens[0] if time_between_tokens else 0.0,
         )
 
+    def _cached_prefix_len(self) -> int:
+        """Chunk-aligned tokens the next pass will load instead of computing.
+
+        Returns:
+            The cached prefix length in tokens, or 0 when the stream has no KV
+            context (nothing is cached, so the pass computes from token 0).
+        """
+        ctx = self._contexts.get(LMCacheSDKCacheKind.KV)
+        if ctx is None:
+            return 0
+        return ctx.lookup(self.tokens, self.cache_salt)
+
+    def _key_origin(self, kind: LMCacheSDKCacheKind) -> int:
+        """First token of the chain ``kind``'s cache keys are built from.
+
+        Args:
+            kind: The cache kind whose key chain is being addressed.
+
+        Returns:
+            The chunk-aligned token index the chain starts at (see
+            LMCacheSDKCacheKind.key_origin).
+
+        Raises:
+            LMCacheRequestStreamError: If the stream has no context for kind.
+        """
+        if kind not in self._contexts:
+            raise LMCacheRequestStreamError(
+                f"no context available for cache kind {kind}"
+            )
+        return kind.key_origin(self._segment_start_token_id)
+
     def retrieve(
         self,
         kind: LMCacheSDKCacheKind,
         timeout: float = 30.0,
         poll_interval: float = 0.2,
+        start_token_id: int = 0,
     ) -> torch.Tensor:
         """Retrieve the cached tensor for the current tokens, polling until
         ready.
@@ -254,6 +297,8 @@ class LMCacheRequestStream:
             kind: The type of cache to retrieve.
             timeout: Max seconds to wait for the cached tensor to appear.
             poll_interval: Seconds between retrieve attempts.
+            start_token_id: The first token index to retrieve, aligned to
+                chunk_size.
 
         Returns:
             The cached tensor (chunk-aligned).
@@ -267,22 +312,94 @@ class LMCacheRequestStream:
             raise LMCacheRequestStreamError(
                 f"no context available for cache kind {kind}"
             )
+
+        # resolve the origin, might be different for different kinds (KV will
+        # start from 0, Q can start from cached prefix).
+        origin = self._key_origin(kind)
+        window = self.tokens[origin:]
+        relative_start = start_token_id - origin
+
         deadline = time.perf_counter() + timeout
-        tensor = ctx.retrieve(self.tokens, self.cache_salt)
+        tensor = ctx.retrieve(window, self.cache_salt, relative_start)
         while tensor is None and time.perf_counter() < deadline:
             time.sleep(poll_interval)
-            tensor = ctx.retrieve(self.tokens, self.cache_salt)
+            tensor = ctx.retrieve(window, self.cache_salt, relative_start)
         if tensor is None:
             raise LMCacheRequestStreamError(
-                f"no cached {kind} for {self.request_stream_id} after {timeout:.0f}s"
+                f"no cached {kind} for {self.request_stream_id} "
+                f"[{start_token_id}, {len(self.tokens)}) after {timeout:.0f}s"
             )
         return tensor
+
+    def _retrieve_until(
+        self,
+        kind: LMCacheSDKCacheKind,
+        origin: int,
+        window_tokens: int,
+        start_offset: int,
+        expected_rows: int,
+        timeout: float,
+        poll_interval: float,
+    ) -> torch.Tensor:
+        """Retrieve a kind's window, retrying while the stores drain.
+        Check if the retrieved tensor has the expected rows.
+        Retries until timeout.
+
+        Args:
+            kind: The cache kind to retrieve.
+            origin: First token of this kind's key chain (see _key_origin).
+                The range is addressed relative to it.
+            window_tokens: Tokens of the addressable window from ``origin``.
+            start_offset: First token of the range, as a chunk-aligned offset
+                into the window that starts at ``origin``.
+            expected_rows: Rows the kind's window returns (see
+                ``LMCacheSDKContext.windowed_range``).
+            timeout: Max seconds to wait for the range to be complete.
+            poll_interval: Seconds between attempts.
+
+        Returns:
+            The tensor holding ``expected_rows`` rows from
+            ``origin + start_offset``.
+
+        Raises:
+            LMCacheRequestStreamError: If the window is empty, or if the range
+                is still short at timeout.
+        """
+        ctx = self._contexts.get(kind)
+        if not ctx:
+            raise LMCacheRequestStreamError(
+                f"no context available for cache kind {kind}"
+            )
+        start_token_id = origin + start_offset
+        if expected_rows <= 0:
+            raise LMCacheRequestStreamError(
+                f"empty {kind} window at token {start_token_id} for "
+                f"{self.request_stream_id}: the cached KV ends where the last "
+                f"generate() started computing, so this kind has nothing to "
+                f"read (a modify without an intervening generate?)"
+            )
+        window = self.tokens[origin : origin + window_tokens]
+        deadline = time.perf_counter() + timeout
+        while True:
+            tensor = ctx.retrieve(window, self.cache_salt, start_offset)
+            if tensor is not None and tensor.shape[-2] == expected_rows:
+                return tensor
+            if time.perf_counter() >= deadline:
+                got = 0 if tensor is None else tensor.shape[-2]
+                raise LMCacheRequestStreamError(
+                    f"{kind} for {self.request_stream_id} returned {got} rows "
+                    f"from token {start_token_id} but its window expects "
+                    f"{expected_rows} after {timeout:.0f}s "
+                    f"(keys chained from token {origin})"
+                )
+            time.sleep(poll_interval)
 
     def update(
         self,
         kind: LMCacheSDKCacheKind,
         kv: torch.Tensor,
         tokens: Sequence[int],
+        recurrent_state: RecurrentState | None = None,
     ) -> None:
         """Store an edited KV and reset the stream to back it.
 
@@ -290,15 +407,19 @@ class LMCacheRequestStream:
         if the store reports the KV was already cached.
 
         Args:
-            kv: The edited KV tensor to store, shape [2, L, T, D].
+            kv: The edited KV tensor to store, shape [2, L, T, D] (for a
+                hybrid model, its attention layers).
             tokens: Token ids the KV corresponds to (T must match kv.shape[2]).
+            recurrent_state: Hybrid models only: the recurrent state to store
+                at the end of the chunk-aligned tokens.
         """
         ctx = self._contexts.get(kind)
         if not ctx:
             raise LMCacheRequestStreamError(
                 f"no context available for cache kind {kind}"
             )
-        if not ctx.store(kv, tokens, self.cache_salt):
+        stored = ctx.store(kv, tokens, self.cache_salt, recurrent_state=recurrent_state)
+        if not stored:
             logger.warning(
                 "store reported edited KV already cached for stream %s",
                 self.request_stream_id,
@@ -306,10 +427,17 @@ class LMCacheRequestStream:
         self.tokens = list(tokens)
         self.done = False
 
+        # Query tensors are indexed relative to the cached prefix, and cache is
+        # stored in chunk-aligned blocks, so the next generate() will compute from the
+        # cached prefix (which may be shorter than the new tokens). Record the
+        # segment start token ID so that modify_kv() can read the query tensors
+        # correctly by using the key origin (from the cached prefix).
+        self._segment_start_token_id = (len(tokens) // ctx.chunk_size) * ctx.chunk_size
+
     def modify_kv(
         self,
         fn: ModifyFnType,
-        timeout: float = 30.0,
+        timeout: float = 5.0,
         poll_interval: float = 0.2,
     ) -> None:
         """Edit the cached KV via a caller-supplied function.
@@ -319,21 +447,102 @@ class LMCacheRequestStream:
         applies fn to the cached prefix, and stores the result via update_kv.
 
         Args:
-            fn: KV editor given Mapping[LMCacheSDKCacheKind, torch.Tensor]
-                for each cache kind used in the modification algorithm,
-                returning (new_kv, new_tokens) for the edited prefix.
+            fn: KV editor given a ModifyTensors (a dict of the tensor for
+                each cache kind used in the modification algorithm, plus
+                ``segment_start_token_id``, where the latest decoded segment
+                begins) and the cached tokens, returning (new_kv, new_tokens)
+                for the edited prefix.
         """
-        cached_len = len(self.tokens)
-        tensors: dict[LMCacheSDKCacheKind, torch.Tensor] = {}
-        for ctx in self._contexts.values():
-            tensors[ctx.kind] = self.retrieve(
-                kind=ctx.kind, timeout=timeout, poll_interval=poll_interval
+        # Wait for the store to finish storing generate()'d KV before decoding
+        # again.
+        kv_ctx = self._contexts[LMCacheSDKCacheKind.KV]
+        expected = (len(self.tokens) // kv_ctx.chunk_size) * kv_ctx.chunk_size
+        deadline = time.perf_counter() + timeout
+        while kv_ctx.lookup(self.tokens, self.cache_salt) < expected:
+            if time.perf_counter() >= deadline:
+                raise LMCacheRequestStreamError(
+                    f"KV for {self.request_stream_id} still incomplete after "
+                    f"{timeout:.0f}s; expected {expected} tokens"
+                )
+            time.sleep(poll_interval)
+
+        # KV first
+        state: RecurrentState | None = None
+        if kv_ctx.is_hybrid:
+            kv, state = self._retrieve_hybrid_kv(kv_ctx, timeout, poll_interval)
+        else:
+            kv = self.retrieve(
+                kind=LMCacheSDKCacheKind.KV,
+                timeout=timeout,
+                poll_interval=poll_interval,
             )
-            if ctx.kind == LMCacheSDKCacheKind.KV:
-                cached_len = tensors[ctx.kind].shape[2]
+
+        cached_len = kv.shape[2]
+        if cached_len > len(self.tokens):
+            raise LMCacheRequestStreamError(
+                f"KV covers {cached_len} tokens but the stream has "
+                f"{len(self.tokens)}; the stream was rewound without a "
+                f"generate() in between"
+            )
+
+        tensors = ModifyTensors(
+            {LMCacheSDKCacheKind.KV: kv},
+            segment_start_token_id=self._segment_start_token_id,
+        )
+        for kind, ctx in self._contexts.items():
+            if kind is LMCacheSDKCacheKind.KV:
+                continue
+            # The kind decides what is addressable
+            origin = self._key_origin(kind)
+            window_tokens = cached_len - origin
+            start_offset, expected_rows = ctx.windowed_range(window_tokens)
+            tensors[kind] = self._retrieve_until(
+                kind,
+                origin,
+                window_tokens,
+                start_offset,
+                expected_rows,
+                timeout,
+                poll_interval,
+            )
 
         # Tokens past the cached KV: the remainder of chunks that retrieve()
         # (chunk-aligned) didn't return.
         self._suffix_tokens = list(self.tokens[cached_len:]) + self._suffix_tokens
         new_kv, new_tokens = fn(tensors, self.tokens[:cached_len])
-        self.update(kind=LMCacheSDKCacheKind.KV, kv=new_kv, tokens=new_tokens)
+        self.update(
+            kind=LMCacheSDKCacheKind.KV,
+            kv=new_kv,
+            tokens=new_tokens,
+            recurrent_state=state,
+        )
+
+    def _retrieve_hybrid_kv(
+        self, ctx: LMCacheSDKContext, timeout: float, poll_interval: float
+    ) -> tuple[torch.Tensor, RecurrentState]:
+        """Retrieve a hybrid model's KV and recurrent state, polling until ready.
+
+        Args:
+            ctx: The stream's (hybrid) KV context.
+            timeout: Max seconds to wait for the cache to appear.
+            poll_interval: Seconds between retrieve attempts.
+
+        Returns:
+            The attention layers' K/V ``[2, L_attn, T, D]`` and the recurrent
+            state at token ``T``.
+
+        Raises:
+            LMCacheRequestStreamError: If nothing is retrieved within timeout.
+        """
+        deadline = time.perf_counter() + timeout
+        while True:
+            result = ctx.retrieve_with_state(self.tokens, self.cache_salt)
+            if result is not None and result[1] is not None:
+                return result[0], result[1]
+            if time.perf_counter() >= deadline:
+                raise LMCacheRequestStreamError(
+                    f"no cached {LMCacheSDKCacheKind.KV} for "
+                    f"{self.request_stream_id} [0, {len(self.tokens)}) after "
+                    f"{timeout:.0f}s"
+                )
+            time.sleep(poll_interval)
