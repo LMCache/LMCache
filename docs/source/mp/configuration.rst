@@ -222,6 +222,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - ``--engine-type blend`` only: skip fingerprint registration for a chunk
        whose content is already indexed, so the same text stored behind two
        prefixes is indexed once. No effect for other engines.
+   * - ``--enable-blend-reorder``
+     - ``False``
+     - ``--engine-type blend`` only: answer the ``cb_reorder_plan`` RPC, which
+       orders a prompt so it starts with an exact copy of a cached prompt so
+       more of it becomes an exact-prefix hit. The client decides whether to
+       serve the reordered prompt. Ignored when a coordinator is configured
+       (``--coordinator-url``): a per-server plan sees only this server's
+       prompts, so fleet deployments defer the plan to the coordinator.
    * - ``--separate-object-groups`` / ``--no-separate-object-groups``
      - ``False``
      - Split a hybrid model's kernel groups into one object group per
