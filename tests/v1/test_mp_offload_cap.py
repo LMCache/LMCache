@@ -101,7 +101,9 @@ class PlannedStores:
 
 
 def scheduler_step(
-    tokens: int = BLOCK, path: Literal["idle", "new", "cached"] = "idle"
+    tokens: int = BLOCK,
+    path: Literal["idle", "new", "cached"] = "idle",
+    block_ids: tuple[list[int], ...] = (),
 ) -> SchedulerOutput:
     """Supply the scheduler fields consumed by the real connector entry point."""
     return cast(
@@ -109,7 +111,9 @@ def scheduler_step(
         SimpleNamespace(
             total_num_scheduled_tokens=tokens,
             scheduled_new_reqs=(
-                [SimpleNamespace(req_id="prefix-cap")] if path == "new" else []
+                [SimpleNamespace(req_id="prefix-cap", block_ids=block_ids)]
+                if path == "new"
+                else []
             ),
             scheduled_cached_reqs=SimpleNamespace(
                 req_ids=["prefix-cap"] if path == "cached" else [],
@@ -193,7 +197,9 @@ def plan_stores(
         [first_step, *[value for value in (16, TOKENS) if value > first_step]]
     ):
         step = scheduler_step(
-            computed - previous_computed, path="new" if index == 0 else "cached"
+            computed - previous_computed,
+            path="new" if index == 0 else "cached",
+            block_ids=([block.block_id for block in blocks],),
         )
         output = connector.build_connector_meta(step)
         assert isinstance(output, LMCacheMPConnectorMetadata)
