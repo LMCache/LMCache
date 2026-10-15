@@ -230,6 +230,8 @@ class CBMatchResult:
         cur_st: Start position in the query sequence where the match was found.
         cur_ed: End position in the query sequence where the match was found.
         hash: Token hash bytes (from registration) used as the storage key.
+        predecessor_hash: Token hash of the chunk immediately preceding this
+            chunk in the stored sequence, or ``None`` when unknown.
     """
 
     old_st: int
@@ -237,6 +239,7 @@ class CBMatchResult:
     cur_st: int
     cur_ed: int
     hash: bytes
+    predecessor_hash: bytes | None = None
 
 
 @dataclass

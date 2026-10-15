@@ -46,6 +46,8 @@ class BlendTokenRangeMatcher:
         self._lock = threading.Lock()
         # compact_chunk_id -> full poly hash, for collision reject.
         self._chunk_poly_hash: list[int] = []
+        # compact_chunk_id -> hash of the chunk preceding the indexed chunk.
+        self._chunk_predecessor_hash: list[bytes | None] = []
 
     def on_new_token_hashes(
         self,
@@ -53,6 +55,7 @@ class BlendTokenRangeMatcher:
         token_hashes: list[bytes],
         start_chunk_idx: int = 0,
         position_offset: int = 0,
+        predecessor_hash: bytes | None = None,
     ) -> int:
         """Index a stored sequence's non-overlapping chunks. Thread-safe.
 
@@ -65,6 +68,8 @@ class BlendTokenRangeMatcher:
             token_hashes: Per-chunk content hashes (dedup/eviction key).
             start_chunk_idx: First chunk to index.
             position_offset: Added to each recorded start position.
+            predecessor_hash: Hash of the chunk immediately before the first
+                chunk in ``token_hashes`` when indexing a sequence slice.
 
         Returns:
             Number of chunks newly indexed (0 if all registered, no full
@@ -122,6 +127,13 @@ class BlendTokenRangeMatcher:
                 slot = poly_hash & int(self._mask)
                 self._chunk_token_hash.append(th)
                 self._chunk_poly_hash.append(poly_hash)
+                if orig_i == start_chunk_idx:
+                    prior_hash = (
+                        token_hashes[orig_i - 1] if orig_i > 0 else predecessor_hash
+                    )
+                else:
+                    prior_hash = token_hashes[orig_i - 1]
+                self._chunk_predecessor_hash.append(prior_hash)
                 self._token_hash_to_start[th] = (
                     position_offset + orig_i * self.chunk_size
                 )
@@ -193,6 +205,7 @@ class BlendTokenRangeMatcher:
                         cur_st=pos,
                         cur_ed=pos + self.chunk_size,
                         hash=th,
+                        predecessor_hash=self._chunk_predecessor_hash[cid],
                     )
                 )
             logger.info(
