@@ -14,6 +14,11 @@ export LM_EVAL_VERIFY_MODE_DEFAULT="score"
 export LM_EVAL_SCORE_MIN_DEFAULT="0.30"
 export BK_SETUP_ENV_SCRIPT=".buildkite/k3_harness/setup-lmcache-only-env.sh"
 
+if [[ "${1:-}" == "lm_eval" ]]; then
+    export BATCH_INVARIANT_DEFAULT="1"
+    export LM_EVAL_VERIFY_MODE_DEFAULT="samples"
+fi
+
 # The shared vLLM harness defaults to FLASH_ATTN when this is unset.
 # Use vLLM's automatic XPU selection unless the caller specifies a backend.
 export ATTENTION_BACKEND="${ATTENTION_BACKEND:-auto}"
