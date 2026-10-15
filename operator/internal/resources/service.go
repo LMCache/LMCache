@@ -21,6 +21,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 )
@@ -66,6 +67,8 @@ func buildLookupServiceCore(name, namespace string, spec *lmcachev1alpha1.LMCach
 }
 
 // BuildMetricsService creates a headless Service for Prometheus scraping.
+// The server serves /metrics on its HTTP frontend, so the Service targets the
+// "http" container port regardless of spec.prometheus.port.
 func BuildMetricsService(engine *lmcachev1alpha1.LMCacheEngine) *corev1.Service {
 	return buildMetricsServiceCore(engine.Name, engine.Namespace, &engine.Spec)
 }
@@ -89,9 +92,10 @@ func buildMetricsServiceCore(name, namespace string, spec *lmcachev1alpha1.LMCac
 			Selector:  SelectorLabels(name),
 			Ports: []corev1.ServicePort{
 				{
-					Name:     "metrics",
-					Port:     promPort,
-					Protocol: corev1.ProtocolTCP,
+					Name:       "metrics",
+					Port:       promPort,
+					TargetPort: intstr.FromString("http"),
+					Protocol:   corev1.ProtocolTCP,
 				},
 			},
 		},
