@@ -100,3 +100,21 @@ def test_only_regions_this_run_created_are_removed(
 
 def test_no_log_removes_nothing(tmp_path: Path) -> None:
     assert run.remove_shm_regions(tmp_path) == []
+
+
+def test_heartbeat_reports_the_latest_aiperf_phase(tmp_path: Path) -> None:
+    log = tmp_path / "aiperf.log"
+    log.write_text("21:47:41.852 INFO     Starting AIPerf System (_single_run.py:81)\n")
+    assert run.aiperf_phase(log) == "loading the trace"
+    with log.open("a") as f:
+        f.write(
+            "21:53:22.097 NOTICE   Phase agentic.warmup (warmup) started"
+            " | target: 207 requests (runner.py:660)\n"
+        )
+    assert run.aiperf_phase(log) == "agentic.warmup started | target: 207 requests"
+    with log.open("a") as f:
+        f.write(
+            "Warmup: 3/207 |   1% [00:33<38:31]21:54:22.111 INFO     Phase warmup"
+            " progress | returned=4/207 | errors=0 (runner.py:1318)\n"
+        )
+    assert run.aiperf_phase(log) == "warmup progress | returned=4/207 | errors=0"

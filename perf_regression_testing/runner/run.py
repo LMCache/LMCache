@@ -52,6 +52,8 @@ SHM_DIR = Path("/dev/shm")
 # AIPerf runs for up to hours; log that it is alive this often.
 _HEARTBEAT_S = 300.0
 SHM_REGION = re.compile(r"Created mmap file /dev/shm/(vllm_offload_[0-9a-f-]+\.mmap)")
+# "Phase <name> [(<kind>)] <event> | <fields> (<file>.py:<line>)"
+AIPERF_PHASE = re.compile(r"Phase (\S+) (?:\(\S+\) )?([^(\r\n]+?) \(\w+\.py:\d+\)")
 
 
 def _idle_gpus() -> list[int]:
@@ -168,6 +170,26 @@ def remove_shm_regions(out: Path) -> list[str]:
     for n in names:
         (SHM_DIR / n).unlink(missing_ok=True)
     return names
+
+
+def aiperf_phase(log: Path) -> str:
+    """Return AIPerf's latest phase event, for the heartbeat.
+
+    AIPerf logs each phase's start and end, and warmup progress every 30 s.
+    Profiling logs no progress, so during it this stays at its start line.
+
+    Args:
+        log: AIPerf's stdout log.
+
+    Returns:
+        E.g. ``"warmup progress | returned=41/207 | ... | errors=0"``, or
+        ``"loading the trace"`` before the first phase starts.
+    """
+    hits = AIPERF_PHASE.findall(log.read_text(errors="replace"))
+    if not hits:
+        return "loading the trace"
+    name, event = hits[-1]
+    return f"{name} {event}"
 
 
 def start_servers(
@@ -409,7 +431,8 @@ def run(spec: RunSpec, out: Path, image: str, aiperf_image: str) -> int:
                 rc = aiperf.wait(timeout=min(_HEARTBEAT_S, left))
             except subprocess.TimeoutExpired:
                 mins = (time.monotonic() - t0) / 60
-                logger.info("AIPerf still running, %.0f min", mins)
+                phase = aiperf_phase(out / "aiperf.log")
+                logger.info("AIPerf %.0f min: %s", mins, phase)
         summary["aiperf_rc"] = rc
         if rc != 0:
             summary["invalid"].append(f"aiperf rc={rc}")
