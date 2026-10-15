@@ -49,11 +49,14 @@ Server Configuration
      - Description
    * - ``--http-host``
      - ``127.0.0.1``
-     - Host to bind the HTTP server. The admin API has no authentication;
-       only bind a non-loopback address on a trusted network.
+     - Host to bind the HTTP server.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
+   * - ``--http-api-key-file``
+     - unset
+     - Read a bearer API key from a file. Repeat the option to accept multiple
+       keys during rotation. Authentication is disabled when unset.
 
 Example:
 
@@ -61,10 +64,24 @@ Example:
 
     lmcache server \
         --l1-size-gb 100 --eviction-policy LRU \
-        --http-host 0.0.0.0 --http-port 8080
+        --http-host 0.0.0.0 --http-port 8080 \
+        --http-api-key-file /run/secrets/lmcache-http-api-key
 
 All examples below assume the server is reachable at
-``http://localhost:8080``.
+``http://localhost:8080``. When authentication is enabled, include the key as
+``Authorization: Bearer <api-key>``. The ``/`` and ``/healthcheck`` routes
+remain public for liveness and readiness probes; every other route requires a
+valid key. For example:
+
+.. code-block:: bash
+
+    curl -H "Authorization: Bearer $(cat /run/secrets/lmcache-http-api-key)" \
+        http://localhost:8080/status
+
+Use a high-entropy value such as ``openssl rand -hex 32`` and restrict the key
+file so only the LMCache server process can read it. API-key authentication
+does not encrypt traffic; use TLS at a trusted reverse proxy when requests
+cross an untrusted network.
 
 Endpoint Overview
 -----------------

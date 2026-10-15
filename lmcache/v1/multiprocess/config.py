@@ -738,15 +738,22 @@ def add_http_frontend_args(
         "--http-host",
         type=str,
         default="127.0.0.1",
-        help="Host to bind the HTTP server. Default is 127.0.0.1; the admin "
-        "API has no authentication, so only bind a non-loopback address on a "
-        "trusted network.",
+        help="Host to bind the HTTP server. Default is 127.0.0.1.",
     )
     http_group.add_argument(
         "--http-port",
         type=int,
         default=8080,
         help="Port to bind the HTTP server. Default is 8080.",
+    )
+    http_group.add_argument(
+        "--http-api-key-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Read an HTTP bearer API key from PATH. Repeat this option to "
+        "accept multiple keys during rotation. Authentication is disabled "
+        "when no key file is configured.",
     )
     return parser
 

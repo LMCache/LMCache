@@ -281,12 +281,15 @@ The HTTP frontend is included when running ``lmcache server``.
      - Description
    * - ``--http-host``
      - ``127.0.0.1``
-     - Host to bind the HTTP (FastAPI/uvicorn) server. The admin API has
-       no authentication; only bind a non-loopback address on a trusted
-       network.
+     - Host to bind the HTTP (FastAPI/uvicorn) server.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
+   * - ``--http-api-key-file``
+     - unset
+     - Read a bearer API key from a file. Repeat the option to accept multiple
+       keys during rotation. When unset, authentication is disabled. ``/`` and
+       ``/healthcheck`` remain public when authentication is enabled.
 
 P2P
 ---
