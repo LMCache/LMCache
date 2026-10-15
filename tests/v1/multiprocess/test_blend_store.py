@@ -571,25 +571,52 @@ def test_classify_read_groups_recurrent_first_layout():
 # ---------------------------------------------------------------------------
 
 
-def _store_hook_engine(stored_mask):
+class _StoreGpuContext:
+    """A registered GPU context as the store sees it: its object-group
+    layout, and no CUDA stream (fingerprint jobs land on the plain queue).
+    A class, not a namespace, so the read-set cache can weakly key it."""
+
+    def __init__(self, attn_desc):
+        self.kv_layer_groups_manager = MagicMock()
+        self.kv_layer_groups_manager.get_attn_desc.return_value = attn_desc
+        self.cupy_stream = None
+
+
+def _store_hook_engine(committed, group_kinds=()):
     """Engine with the real ``store`` bound; transfer and session mocked.
-    No GPU context -> fingerprint jobs land on the plain queue."""
+    ``committed[g][i]`` is what the transfer reports per object group;
+    ``group_kinds`` labels the registered object groups (empty: one fused
+    group)."""
     # Standard
     from queue import Queue
+    import weakref
+
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
 
     eng = MagicMock(spec=BlendModule)
     eng.store = BlendModule.store.__get__(eng)
+    eng._cb_store_read_groups = BlendModule._cb_store_read_groups.__get__(eng)
+    eng._record_prompt = BlendModule._record_prompt.__get__(eng)
+    eng._cb_store_read_sets = weakref.WeakKeyDictionary()
     eng._transfer_module = MagicMock()
     eng._transfer_module.store_with_chunk_mask.return_value = (
         b"evt",
         True,
-        stored_mask,
+        committed,
     )
-    eng._transfer_module.get_and_touch_context_entry.return_value = None
+    eng.gpu_ctx = _StoreGpuContext(
+        AttnWindowDesc(
+            num_chunks_in_sw=[-1] * len(committed), group_kinds=tuple(group_kinds)
+        )
+    )
+    eng._transfer_module.get_and_touch_context_entry.return_value = SimpleNamespace(
+        cache_context=eng.gpu_ctx
+    )
     eng._ctx = MagicMock()
     eng._ctx.chunk_size = 4
     session = MagicMock()
-    session.get_hashes.return_value = list(range(100, 100 + len(stored_mask)))
+    session.get_hashes.return_value = list(range(100, 100 + len(committed[0])))
     eng._ctx.session_manager.get_or_create.return_value = session
     eng._pending_fp_lock = threading.Lock()
     eng._pending_fp_hashes = set()
@@ -614,6 +641,15 @@ def _store_hook_key(num_chunks: int, chunk_size: int = 4):
     )
 
 
+def _store_hook_jobs(eng):
+    """Drain the queued fingerprint jobs as ``(start_chunk_idx,
+    position_offset, num_hashes)``."""
+    jobs = []
+    while not eng._fingerprint_queue.empty():
+        jobs.append(eng._fingerprint_queue.get_nowait())
+    return [(j[2], j[3], len(j[1])) for j in jobs]
+
+
 def test_store_registers_fingerprints_only_for_committed_chunks():
     """A chunk the storage manager skipped (hole in the stored mask) gets no
     fingerprint: one registration job per contiguous stored run, offsets
@@ -621,17 +657,14 @@ def test_store_registers_fingerprints_only_for_committed_chunks():
     # First Party
     from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
-    eng = _store_hook_engine([True, True, False, True])
+    eng = _store_hook_engine([[True, True, False, True]])
     key = _store_hook_key(4)
 
     result = eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
 
     assert result == (b"evt", True)
-    jobs = []
-    while not eng._fingerprint_queue.empty():
-        jobs.append(eng._fingerprint_queue.get_nowait())
     # Runs: chunks [0,2) with chunk 0 skipped (prefix leg), and chunk [3,4).
-    assert [(j[2], j[3], len(j[1])) for j in jobs] == [(1, 0, 2), (0, 12, 1)]
+    assert _store_hook_jobs(eng) == [(1, 0, 2), (0, 12, 1)]
     expected = {TokenHasher.hash_to_bytes(101), TokenHasher.hash_to_bytes(103)}
     assert eng._pending_fp_hashes == expected
 
@@ -639,7 +672,7 @@ def test_store_registers_fingerprints_only_for_committed_chunks():
 def test_store_registers_nothing_when_no_chunk_committed():
     """A store whose every chunk was skipped (or that failed) must not
     advertise any fingerprint -- those entries could never be served."""
-    eng = _store_hook_engine([False, False, False])
+    eng = _store_hook_engine([[False, False, False]])
     key = _store_hook_key(3)
 
     result = eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
@@ -647,3 +680,221 @@ def test_store_registers_nothing_when_no_chunk_committed():
     assert result == (b"evt", True)
     assert eng._fingerprint_queue.empty()
     assert eng._pending_fp_hashes == set()
+
+
+def test_store_registers_nothing_for_a_rejected_store():
+    """A rejected store reports no group at all; nothing is registered and
+    the read set is never resolved."""
+    eng = _store_hook_engine([[True]])
+    eng._transfer_module.store_with_chunk_mask.return_value = (b"", False, [])
+
+    result = eng.store(
+        _store_hook_key(1), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    assert result == (b"", False)
+    assert eng._fingerprint_queue.empty()
+    eng.gpu_ctx.kv_layer_groups_manager.get_attn_desc.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "group_kinds",
+    [("attention", "recurrent", "aux"), ("recurrent", "attention", "aux")],
+)
+def test_store_registers_chunks_without_a_recurrent_state(group_kinds):
+    """Separated object groups under vLLM's align mode: the recurrent group
+    commits a state only at a step's last chunk (chunk 3 here), while the
+    attention and aux groups commit every chunk. The blend leg never reads
+    recurrent state, so every chunk is blendable, not just the step end."""
+    # First Party
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
+    rec = group_kinds.index("recurrent")
+    committed = [[True] * 4 for _ in group_kinds]
+    committed[rec] = [False, False, False, True]
+    eng = _store_hook_engine(committed, group_kinds)
+
+    eng.store(
+        _store_hook_key(4), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    # One run over all four chunks; chunk 0 still belongs to the prefix leg.
+    assert _store_hook_jobs(eng) == [(1, 0, 4)]
+    assert eng._pending_fp_hashes == {
+        TokenHasher.hash_to_bytes(h) for h in (101, 102, 103)
+    }
+
+
+def test_store_skips_chunks_a_blend_read_group_did_not_commit():
+    """The aux group is part of the blend read set: a chunk it did not
+    commit is not blendable even though attention and recurrent state did."""
+    committed = [
+        [True, True, True, True],  # attention
+        [True, True, True, True],  # recurrent ("all" mode: every chunk)
+        [True, True, False, True],  # aux
+    ]
+    eng = _store_hook_engine(committed, ("attention", "recurrent", "aux"))
+
+    eng.store(
+        _store_hook_key(4), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    assert _store_hook_jobs(eng) == [(1, 0, 2), (0, 12, 1)]
+
+
+def test_store_shared_hybrid_object_needs_its_state():
+    """Without separated groups the state shares the attention object, which
+    is the blend read group: a chunk whose shared object was not committed
+    stays unregistered."""
+    eng = _store_hook_engine([[True, False, False, True]])
+
+    eng.store(
+        _store_hook_key(4), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    assert _store_hook_jobs(eng) == [(0, 12, 1)]
+
+
+def test_store_registers_nothing_without_a_blend_read_set(monkeypatch):
+    """A layout the blend leg cannot read (two attention groups) registers no
+    fingerprint and logs no error on the store path."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend import store as store_mod
+
+    logger = MagicMock()
+    monkeypatch.setattr(store_mod, "logger", logger)
+    eng = _store_hook_engine([[True] * 3, [True] * 3], ("attention", "attention"))
+
+    result = eng.store(
+        _store_hook_key(3), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    assert result == (b"evt", True)
+    assert eng._fingerprint_queue.empty()
+    assert eng._pending_fp_hashes == set()
+    logger.exception.assert_not_called()
+
+
+def test_chunks_available_reads_only_the_reader_s_groups():
+    """The rule itself: a chunk is available to a reader iff every group that
+    reader reads committed it; groups it does not read never gate it."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend.read_set import _cb_chunks_available
+
+    read = _classify_cb_read_groups(3, ("attention", "recurrent", "aux"))
+    committed = [
+        [True, True, False],  # attention
+        [False, True, True],  # recurrent
+        [True, False, True],  # aux
+    ]
+    assert _cb_chunks_available(committed, read.blend_gids) == [True, False, False]
+    assert _cb_chunks_available(committed, read.prefix_gids) == [False, True, False]
+    assert _cb_chunks_available([], read.blend_gids) == []
+    fused = _classify_cb_read_groups(1, ())
+    assert _cb_chunks_available([[False, True]], fused.blend_gids) == [False, True]
+
+
+def test_store_resolves_the_read_set_once_per_context():
+    """The read set is resolved on a context's first store and reused; a new
+    context (a re-registration) resolves its own."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+
+    eng = _store_hook_engine([[True] * 3, [True] * 3], ("attention", "aux"))
+    for _ in range(3):
+        eng.store(
+            _store_hook_key(3), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+        )
+    assert eng.gpu_ctx.kv_layer_groups_manager.get_attn_desc.call_count == 1
+
+    # Re-registered as a fused layout: the new context is classified afresh.
+    fresh = _StoreGpuContext(AttnWindowDesc(num_chunks_in_sw=[-1]))
+    eng._transfer_module.get_and_touch_context_entry.return_value = SimpleNamespace(
+        cache_context=fresh
+    )
+    eng._transfer_module.store_with_chunk_mask.return_value = (
+        b"evt",
+        True,
+        [[True, True, True]],
+    )
+    eng.store(
+        _store_hook_key(3), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+    assert fresh.kv_layer_groups_manager.get_attn_desc.call_count == 1
+    assert eng._cb_store_read_sets[fresh].blend_gids == (0,)
+
+
+# ---------------------------------------------------------------------------
+# STORE hook with the reorder planner: which stores record their prompt
+# ---------------------------------------------------------------------------
+
+
+def _reorder_store_engine(committed, group_kinds=()):
+    """A store-hook engine with the reorder planner's real PromptStore."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend.reorder import PromptStore
+
+    eng = _store_hook_engine(committed, group_kinds)
+    eng._prompt_store = PromptStore()
+    return eng
+
+
+def _recorded_prompts(eng):
+    """The (namespace, request id) -> prompt token ids the store recorded."""
+    return {k: list(e[1]) for k, e in eng._prompt_store._entries.items()}
+
+
+def test_reorder_store_records_the_prompt_of_a_committed_store():
+    """With the planner enabled, a store that committed KV records its prompt
+    under the key's namespace; one that committed nothing records nothing."""
+    eng = _reorder_store_engine([[True, True, False]])
+    key = _store_hook_key(3)
+
+    eng.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
+
+    assert _recorded_prompts(eng) == {
+        (("m", 1, ""), "req-store-mask"): list(key.token_ids)
+    }
+    assert eng._prompt_store.resolve("m", 1, "") == ("m", 1, "")
+
+    nothing = _reorder_store_engine([[False, False, False]])
+    nothing.store(key, instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b"")
+    assert _recorded_prompts(nothing) == {}
+
+
+def test_reorder_store_records_once_a_prefix_hit_can_end_in_it():
+    """Separated groups: the planner's copies are served as exact-prefix
+    hits, which read attention + recurrent state at the chunk they end on.
+    A store whose recurrent group committed a state somewhere records the
+    prompt; one with attention and aux but no state anywhere records nothing,
+    though its chunks are still blendable."""
+    kinds = ("attention", "recurrent", "aux")
+    with_state = _reorder_store_engine(
+        [[True] * 4, [False, False, False, True], [True] * 4], kinds
+    )
+    with_state.store(
+        _store_hook_key(4), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+    assert list(_recorded_prompts(with_state)) == [(("m", 1, ""), "req-store-mask")]
+
+    no_state = _reorder_store_engine([[True] * 4, [False] * 4, [True] * 4], kinds)
+    no_state.store(
+        _store_hook_key(4), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+    assert _recorded_prompts(no_state) == {}
+    assert _store_hook_jobs(no_state) == [(1, 0, 4)]
+
+
+def test_reorder_store_record_ignores_the_aux_group():
+    """The prefix leg never reads the aux group, so a chunk with attention
+    and state but no aux object is still one a prefix hit can end on: the
+    store records the prompt although that chunk is not blendable."""
+    eng = _reorder_store_engine(
+        [[True] * 4, [False, False, False, True], [True, True, True, False]],
+        ("attention", "recurrent", "aux"),
+    )
+    eng.store(
+        _store_hook_key(4), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+    assert list(_recorded_prompts(eng)) == [(("m", 1, ""), "req-store-mask")]
+    assert _store_hook_jobs(eng) == [(1, 0, 3)]

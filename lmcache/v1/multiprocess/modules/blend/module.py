@@ -24,6 +24,7 @@ from lmcache.v1.multiprocess.modules.blend.lookup import (
     _CBUnifiedJob,
 )
 from lmcache.v1.multiprocess.modules.blend.matcher import BlendTokenRangeMatcher
+from lmcache.v1.multiprocess.modules.blend.read_set import _BlendReadGroups
 from lmcache.v1.multiprocess.modules.blend.registration import RegistrationMixin
 from lmcache.v1.multiprocess.modules.blend.retrieve import (
     RetrieveMixin,
@@ -117,6 +118,9 @@ class BlendModule(
         self._cb_plan_invariants: "weakref.WeakKeyDictionary[Any, tuple]" = (
             weakref.WeakKeyDictionary()
         )
+        # Store-side read sets per GPU context, resolved on its first store; a
+        # re-registration is a new context and resolves again.
+        self._cb_store_read_sets: "weakref.WeakKeyDictionary[Any, _BlendReadGroups | None]" = weakref.WeakKeyDictionary()  # noqa: E501
         # Pinned + device slot-mapping staging per GPU context, grown on demand.
         self._cb_slot_staging: "weakref.WeakKeyDictionary[Any, tuple]" = (
             weakref.WeakKeyDictionary()

@@ -90,8 +90,23 @@ success)`**
   (`submit_callback_to_stream`, kind `"cb_fingerprints"`) — stream-ordered
   after the L1 commit, so a fingerprint becomes matchable only once its
   chunk is readable. Fingerprint failures are logged, never raised.
-- Side effect (reorder enabled, worker 0, a store that committed KV): the
-  request's prompt is recorded in the `PromptStore` (below).
+- Availability, the one rule every reader of a store applies: a chunk is
+  available to a reader iff every object group that reader reads committed a
+  valid object for it. `store_with_chunk_mask` reports `committed[g][i]` per
+  object group, and the transfer commits only valid objects (a chunk whose
+  pages are all null, or whose recurrent-state page is null, is skipped; see
+  `sparse_null_policy.md`). The store applies the rule for two readers, over
+  read sets resolved once per registered GPU context:
+  - Fingerprints: a chunk is registered when every group of the blend read
+    set (attention + aux, see the table below) committed it. Recurrent-state
+    groups do not gate it: the blend leg never reads them, and under vLLM's
+    `--mamba-cache-mode align` they commit only the last chunk of each
+    scheduler step. A layout with no blend read set registers nothing.
+  - Reorder (enabled): the request's prompt is recorded in the `PromptStore`
+    (below) when the store committed a chunk a prefix hit can end on, i.e.
+    every group of the prefix read set (attention + recurrent) committed it.
+    The planner's copies are served as exact-prefix hits, so a store that
+    gives the prefix leg nothing to end on records nothing.
 
 ## Unified lookup (submit-once, poll-on-recall)
 
@@ -170,8 +185,9 @@ the engine's own prefix-cache hit, which stays in place.
 
 **`PromptStore`** (`reorder.py`) holds the token ids of stored prompts:
 
-- Recorded by `store`: a request's first committed store records its token
-  ids (the prompt); every store maps the chunk chain hashes it committed to
+- Recorded by `store` (only a store with a chunk a prefix hit can end on,
+  see `store` above): a request's first recorded store records its token ids
+  (the prompt); every recorded store maps the chunk chain hashes it covers to
   the newest prompt that stored them (the owner map).
 - Namespaced by `(model_name, world_size, cache_salt)`; `resolve` picks the
   caller's (the salt must be equal; an empty model name / zero world size

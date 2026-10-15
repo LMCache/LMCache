@@ -15,6 +15,7 @@ import ast
 import inspect
 import threading
 import time
+import weakref
 
 # First Party
 from lmcache.v1.distributed.api import AttnWindowDesc
@@ -278,9 +279,18 @@ class TestFingerprintJobTuple:
         eng._transfer_module.store_with_chunk_mask.return_value = (
             b"handle",
             True,
-            [True, True],
+            [[True, True]],
         )
-        eng._transfer_module.get_and_touch_context_entry.return_value = None
+        gpu_ctx = MagicMock()  # a registered fused layout, no CUDA stream
+        gpu_ctx.kv_layer_groups_manager.get_attn_desc.return_value = AttnWindowDesc(
+            num_chunks_in_sw=[-1]
+        )
+        gpu_ctx.cupy_stream = None
+        eng._transfer_module.get_and_touch_context_entry.return_value = SimpleNamespace(
+            cache_context=gpu_ctx
+        )
+        eng._cb_store_read_sets = weakref.WeakKeyDictionary()
+        eng._cb_store_read_groups = _bind(eng, "_cb_store_read_groups")
         eng._pending_fp_lock = threading.Lock()
         eng._pending_fp_hashes = set()
         eng._coordinator = None
@@ -294,6 +304,8 @@ class TestFingerprintJobTuple:
         eng._fingerprint_queue = Queue()
         key = SimpleNamespace(
             request_id="req-store",
+            model_name="m",
+            world_size=1,
             worker_id=0,
             token_ids=list(range(512)),
             start=0,

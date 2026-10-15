@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     # Standard
     from queue import Queue
     import threading
+    import weakref
 
     # First Party
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -23,6 +24,11 @@ if TYPE_CHECKING:
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.modules.blend.read_set import (
+    _BlendReadGroups,
+    _cb_chunks_available,
+    _classify_cb_read_groups,
+)
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -53,6 +59,7 @@ class StoreMixin:
         _pending_fp_hashes: set[bytes]
         _pending_fp_lock: "threading.Lock"
         _prompt_store: Any
+        _cb_store_read_sets: "weakref.WeakKeyDictionary[Any, _BlendReadGroups | None]"
 
     @request_handler(
         HandlerType.BLOCKING,
@@ -69,14 +76,19 @@ class StoreMixin:
 
         Delegates the KV write to ``LMCacheDrivenTransfer.store``, then
         (worker 0 only) enqueues chunk hashes for async fingerprint
-        registration ordered after the L1 commit. Fingerprint failures are
-        logged, never raised — they do not affect store correctness.
+        registration ordered after the L1 commit. Each reader of the store
+        applies one rule (``_cb_chunks_available``): a chunk is available to
+        a reader iff every object group that reader reads committed a valid
+        object for it. Fingerprints follow the blend read set; the reorder
+        planner's prompt record follows the prefix read set. Fingerprint
+        failures are logged, never raised — they do not affect store
+        correctness.
 
         Returns:
             The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
-        handle, store_ok, stored_mask = self._transfer_module.store_with_chunk_mask(
+        handle, store_ok, committed = self._transfer_module.store_with_chunk_mask(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
         result = (handle, store_ok)
@@ -100,19 +112,33 @@ class StoreMixin:
                 TokenHasher.hash_to_bytes(h)
                 for h in session.get_hashes(key.start, key.end)
             ]
-            if not chunk_hashes:
+            if not chunk_hashes or not any(any(group) for group in committed):
                 return result
-            # Record prompts whose KV was stored, for the reorder planner.
-            if getattr(self, "_prompt_store", None) is not None and any(stored_mask):
+            entry = self._transfer_module.get_and_touch_context_entry(instance_id)
+            if entry is None:
+                # Unregistered since the store: its layout is gone with it.
+                return result
+            gpu_ctx = entry.cache_context
+            read = self._cb_store_read_groups(gpu_ctx)
+            if read is None:
+                return result
+            # The reorder planner's copies are served as exact-prefix hits, so
+            # it records a prompt only once a store committed a chunk a prefix
+            # hit can end on.
+            if getattr(self, "_prompt_store", None) is not None and any(
+                _cb_chunks_available(committed, read.prefix_gids)
+            ):
                 self._record_prompt(key, session)
             tokens_in_range = list(key.token_ids)[key.start : key.end]
             # Chunk 0 is owned by the prefix lookup leg; skip its fingerprint.
             start_chunk_idx = 0 if key.start != 0 else 1
 
-            # Register only committed chunks: a fingerprint for a skipped
-            # chunk would advertise content that was never persisted.
+            # A fingerprint for a chunk the blend leg cannot read back would
+            # advertise content the sparse lookup never finds.
+            blendable = _cb_chunks_available(committed, read.blend_gids)
+
             def _stored(i: int) -> bool:
-                return stored_mask[i] if i < len(stored_mask) else False
+                return blendable[i] if i < len(blendable) else False
 
             jobs: list[FpJob] = []
             chunk_size = self._ctx.chunk_size
@@ -142,10 +168,8 @@ class StoreMixin:
             with self._pending_fp_lock:
                 for _, hashes, sci, _, _ in jobs:
                     self._pending_fp_hashes.update(hashes[sci:])
-            entry = self._transfer_module.get_and_touch_context_entry(instance_id)
-            gpu_ctx = entry.cache_context if entry is not None else None
             for job in jobs:
-                if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
+                if gpu_ctx.cupy_stream is not None:
                     submit_callback_to_stream(
                         gpu_ctx.cupy_stream, CB_FINGERPRINTS_KIND, job
                     )
@@ -159,6 +183,30 @@ class StoreMixin:
             )
 
         return result
+
+    def _cb_store_read_groups(self, gpu_ctx: Any) -> "_BlendReadGroups | None":
+        """The read sets of a registered GPU context, resolved on its first
+        store and reused after. Keyed by the context, so a re-registration
+        (a new context) resolves again.
+
+        Returns:
+            The read sets, or ``None`` when the layout has no blend read set
+            (the lookup reports why): no chunk of it is available to either
+            blend leg.
+        """
+        if gpu_ctx in self._cb_store_read_sets:
+            return self._cb_store_read_sets[gpu_ctx]
+        attn_desc = gpu_ctx.kv_layer_groups_manager.get_attn_desc()
+        read: _BlendReadGroups | None
+        try:
+            read = _classify_cb_read_groups(
+                attn_desc.num_object_groups, attn_desc.group_kinds
+            )
+        except RuntimeError:
+            logger.debug("CB store: no blend read set", exc_info=True)
+            read = None
+        self._cb_store_read_sets[gpu_ctx] = read
+        return read
 
     def _record_prompt(self, key: IPCCacheServerKey, session: Any) -> None:
         """Remember a stored prompt for the reorder planner. The chain starts
