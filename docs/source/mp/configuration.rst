@@ -288,8 +288,10 @@ The HTTP frontend is included when running ``lmcache server``.
    * - ``--http-api-key-file``
      - unset
      - Read a bearer API key from a file. Repeat the option to accept multiple
-       keys during rotation. When unset, authentication is disabled. ``/`` and
-       ``/healthcheck`` remain public when authentication is enabled.
+       keys during rotation. ``LMCACHE_HTTP_API_KEY_FILE`` and
+       ``LMCACHE_HTTP_API_KEY`` provide environment alternatives. All sources
+       are cumulative. When none are set, authentication is disabled. ``/``
+       and ``/healthcheck`` remain public when authentication is enabled.
 
 P2P
 ---

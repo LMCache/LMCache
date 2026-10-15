@@ -4,6 +4,7 @@
 # Standard
 from collections.abc import Sequence
 from pathlib import Path
+import os
 import secrets
 
 # Third Party
@@ -12,6 +13,8 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 PUBLIC_HTTP_PATHS = frozenset({"/", "/healthcheck"})
+HTTP_API_KEY_ENV_VAR = "LMCACHE_HTTP_API_KEY"
+HTTP_API_KEY_FILE_ENV_VAR = "LMCACHE_HTTP_API_KEY_FILE"
 
 
 class HTTPAuthenticationConfig:
@@ -47,7 +50,7 @@ class HTTPAuthenticationConfig:
             key_files: Paths containing plaintext API keys.
 
         Returns:
-            Authentication configuration containing the hashed keys.
+            Authentication configuration containing the loaded keys.
 
         Raises:
             OSError: If a key file cannot be read.
@@ -64,6 +67,44 @@ class HTTPAuthenticationConfig:
                     f"HTTP API key file must contain exactly one line: {path}"
                 )
             api_keys.append(value)
+        return cls(api_keys)
+
+    @classmethod
+    def from_sources(
+        cls, key_files: Sequence[str | Path]
+    ) -> "HTTPAuthenticationConfig":
+        """Load API keys from CLI files and environment variables.
+
+        ``LMCACHE_HTTP_API_KEY_FILE`` adds one key file and
+        ``LMCACHE_HTTP_API_KEY`` adds one key value. All configured sources are
+        accepted together, which allows a deployment to overlap old and new
+        keys during rotation.
+
+        Args:
+            key_files: Key files supplied through command-line options.
+
+        Returns:
+            Authentication configuration containing all loaded keys.
+
+        Raises:
+            OSError: If a key file cannot be read.
+            ValueError: If an environment value or key file is empty, or a key
+                file contains more than one line.
+        """
+        combined_key_files = list(key_files)
+        environment_key_file = os.environ.get(HTTP_API_KEY_FILE_ENV_VAR)
+        if environment_key_file is not None:
+            if not environment_key_file:
+                raise ValueError(f"{HTTP_API_KEY_FILE_ENV_VAR} must not be empty")
+            combined_key_files.append(environment_key_file)
+
+        config = cls.from_key_files(combined_key_files)
+        api_keys = list(config._api_keys)
+        environment_key = os.environ.get(HTTP_API_KEY_ENV_VAR)
+        if environment_key is not None:
+            if not environment_key:
+                raise ValueError(f"{HTTP_API_KEY_ENV_VAR} must not be empty")
+            api_keys.append(environment_key)
         return cls(api_keys)
 
     @property

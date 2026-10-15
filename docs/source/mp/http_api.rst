@@ -56,7 +56,15 @@ Server Configuration
    * - ``--http-api-key-file``
      - unset
      - Read a bearer API key from a file. Repeat the option to accept multiple
-       keys during rotation. Authentication is disabled when unset.
+       keys during rotation. Authentication is disabled when no CLI or
+       environment key source is configured.
+
+The environment variables ``LMCACHE_HTTP_API_KEY_FILE`` and
+``LMCACHE_HTTP_API_KEY`` provide deployment-friendly alternatives for one key
+file or one key value. Environment sources and repeated
+``--http-api-key-file`` options are cumulative, so old and new keys can overlap
+during rotation. The ``/env`` endpoint redacts both authentication environment
+variables.
 
 Example:
 

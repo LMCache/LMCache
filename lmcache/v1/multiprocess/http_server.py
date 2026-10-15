@@ -290,9 +290,7 @@ if __name__ == "__main__":
     storage_manager_config = parse_args_to_config(args)
     obs_config = parse_args_to_observability_config(args)
     coordinator_config = parse_args_to_coordinator_config(args)
-    http_authentication = HTTPAuthenticationConfig.from_key_files(
-        args.http_api_key_file
-    )
+    http_authentication = HTTPAuthenticationConfig.from_sources(args.http_api_key_file)
     run_http_server(
         http_config=http_config,
         mp_config=mp_config,

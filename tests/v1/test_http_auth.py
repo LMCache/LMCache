@@ -8,6 +8,8 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.http_auth import (
+    HTTP_API_KEY_ENV_VAR,
+    HTTP_API_KEY_FILE_ENV_VAR,
     HTTPAuthenticationConfig,
     HTTPAuthenticationMiddleware,
 )
@@ -97,3 +99,34 @@ def test_invalid_key_file_is_rejected(tmp_path, contents: str) -> None:
 
     with pytest.raises(ValueError, match="HTTP API key file"):
         HTTPAuthenticationConfig.from_key_files([key_file])
+
+
+def test_environment_key_and_file_are_combined_with_cli_files(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every supported source contributes an accepted key for rotation."""
+    cli_key_file = tmp_path / "cli-key"
+    cli_key_file.write_text("cli-secret\n", encoding="utf-8")
+    environment_key_file = tmp_path / "environment-key"
+    environment_key_file.write_text("file-secret\n", encoding="utf-8")
+    monkeypatch.setenv(HTTP_API_KEY_FILE_ENV_VAR, str(environment_key_file))
+    monkeypatch.setenv(HTTP_API_KEY_ENV_VAR, "environment-secret")
+
+    auth_config = HTTPAuthenticationConfig.from_sources([cli_key_file])
+
+    for api_key in ("cli-secret", "file-secret", "environment-secret"):
+        assert auth_config.accepts_authorization_header(f"Bearer {api_key}")
+
+
+@pytest.mark.parametrize(
+    "environment_variable",
+    [HTTP_API_KEY_ENV_VAR, HTTP_API_KEY_FILE_ENV_VAR],
+)
+def test_empty_environment_source_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, environment_variable: str
+) -> None:
+    """An explicitly configured empty environment source fails closed."""
+    monkeypatch.setenv(environment_variable, "")
+
+    with pytest.raises(ValueError, match=environment_variable):
+        HTTPAuthenticationConfig.from_sources([])

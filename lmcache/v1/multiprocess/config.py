@@ -752,8 +752,9 @@ def add_http_frontend_args(
         default=[],
         metavar="PATH",
         help="Read an HTTP bearer API key from PATH. Repeat this option to "
-        "accept multiple keys during rotation. Authentication is disabled "
-        "when no key file is configured.",
+        "accept multiple keys during rotation. The environment alternatives "
+        "are LMCACHE_HTTP_API_KEY_FILE and LMCACHE_HTTP_API_KEY. "
+        "Authentication is disabled when no key source is configured.",
     )
     return parser
 
