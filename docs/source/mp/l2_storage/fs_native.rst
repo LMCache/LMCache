@@ -80,3 +80,32 @@ drains them to disk; nothing is retained in L1 once a store completes:
         --eviction-policy noop \
         --l2-store-policy skip_l1 \
         --l2-adapter '{"type": "fs_native", "base_path": "/data/lmcache/l2", "num_workers": 32, "use_odirect": true}'
+
+**Kubernetes (operator) example.**  Mount a PersistentVolumeClaim on the
+engine pod and point ``base_path`` at it; the cache then survives engine
+pod restarts and is dropped with the PVC.  The storage class has to bind on
+the GPU node that runs the engine pod.  A complete manifest with a local
+NVMe PVC, ``use_odirect`` and L2 eviction is in
+``operator/config/samples/lmcache_v1alpha1_lmcacheengine_l2_fs_native.yaml``:
+
+.. code-block:: yaml
+
+    l2Backend:
+      raw:
+        type: fs_native
+        config:
+          base_path: /l2
+          num_workers: 16
+          use_odirect: true
+          max_capacity_gb: 400
+          eviction:
+            eviction_policy: LRU
+            trigger_watermark: 0.95
+            eviction_ratio: 0.2
+    volumes:
+      - name: l2
+        persistentVolumeClaim:
+          claimName: lmcache-l2
+    volumeMounts:
+      - name: l2
+        mountPath: /l2
