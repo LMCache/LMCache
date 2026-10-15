@@ -39,6 +39,20 @@ logger = init_logger(__name__)
 DEFAULT_NUM_READ_WORKERS = 256
 
 
+def _validate_non_negative_int(name: str, raw: object) -> int:
+    """Return ``raw`` if it is a non-negative ``int``.
+
+    ``bool`` is rejected although it subclasses ``int``: ``true`` in a
+    config would otherwise mean one.
+
+    Raises:
+        ValueError: If ``raw`` is a bool, not an int, or negative.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise ValueError(f"{name} must be a non-negative integer, got {raw!r}")
+    return raw
+
+
 class FSNativeL2AdapterConfig(L2AdapterConfigBase):
     """
     Config for an L2 adapter backed by the native C++
@@ -78,14 +92,30 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         num_read_workers: int = DEFAULT_NUM_READ_WORKERS,
         read_max_bytes_in_flight: int = 0,
     ):
+        """Build the config; see the class docstring for each field.
+
+        Raises:
+            ValueError: If ``num_read_workers`` or
+                ``read_max_bytes_in_flight`` is not a non-negative integer.
+        """
         self.base_path = base_path
         self.num_workers = num_workers
         self.relative_tmp_dir = relative_tmp_dir
         self.use_odirect = use_odirect
         self.read_ahead_size = read_ahead_size
         self.max_capacity_gb = max_capacity_gb
-        self.num_read_workers = num_read_workers
-        self.read_max_bytes_in_flight = read_max_bytes_in_flight
+        self.num_read_workers = _validate_non_negative_int(
+            "num_read_workers", num_read_workers
+        )
+        self.read_max_bytes_in_flight = _validate_non_negative_int(
+            "read_max_bytes_in_flight", read_max_bytes_in_flight
+        )
+        if num_read_workers == 0 and read_max_bytes_in_flight > 0:
+            logger.warning(
+                "fs_native: read_max_bytes_in_flight=%d is ignored because "
+                "num_read_workers=0 selects the legacy read path.",
+                read_max_bytes_in_flight,
+            )
 
     @classmethod
     def from_dict(cls, d: dict) -> "FSNativeL2AdapterConfig":
@@ -124,23 +154,6 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
                 base_path,
             )
 
-        num_read_workers = d.get("num_read_workers", DEFAULT_NUM_READ_WORKERS)
-        if not isinstance(num_read_workers, int) or num_read_workers < 0:
-            raise ValueError("num_read_workers must be a non-negative integer")
-
-        read_max_bytes_in_flight = d.get("read_max_bytes_in_flight", 0)
-        if (
-            not isinstance(read_max_bytes_in_flight, int)
-            or read_max_bytes_in_flight < 0
-        ):
-            raise ValueError("read_max_bytes_in_flight must be a non-negative integer")
-        if num_read_workers == 0 and read_max_bytes_in_flight > 0:
-            logger.warning(
-                "fs_native: read_max_bytes_in_flight=%d is ignored because "
-                "num_read_workers=0 selects the legacy read path.",
-                read_max_bytes_in_flight,
-            )
-
         return cls(
             base_path=base_path,
             num_workers=num_workers,
@@ -148,8 +161,8 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             use_odirect=use_odirect,
             read_ahead_size=read_ahead_size,
             max_capacity_gb=float(max_capacity_gb),
-            num_read_workers=num_read_workers,
-            read_max_bytes_in_flight=read_max_bytes_in_flight,
+            num_read_workers=d.get("num_read_workers", DEFAULT_NUM_READ_WORKERS),
+            read_max_bytes_in_flight=d.get("read_max_bytes_in_flight", 0),
         )
 
     @classmethod
