@@ -18,6 +18,13 @@ _TORCH_TO_AT_SCALAR = {
     torch.bfloat16: 15,  # at::ScalarType::BFloat16
 }
 
+# Declared fp8 flavor -> at::ScalarType (vLLM's uint8 KV can't name its own
+# bit layout). Values pinned by a static_assert in csrc/cuda/pos_kernels.cu.
+_FP8_FLAVOR_TO_AT_SCALAR = {
+    "fp8_e4m3": 24,  # at::ScalarType::Float8_e4m3fn
+    "fp8_e5m2": 23,  # at::ScalarType::Float8_e5m2
+}
+
 
 @dataclass
 class _CBRopeState:
@@ -37,6 +44,8 @@ class _CBRopeState:
     # Required for MLA: inference would rotate the latent's content dims.
     group_rot: "list[tuple[int, int] | None]" = field(default_factory=list)
     group_head_size: list[int] = field(default_factory=list)
+    # fp8 flavor of the paged KV ("fp8_e4m3"/"fp8_e5m2"); "" = unquantized.
+    kv_quant: str = ""
 
     def head_size_for_group(self, engine_group_idx: int) -> int:
         """The scatter head size for one engine group.

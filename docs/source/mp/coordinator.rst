@@ -255,9 +255,9 @@ created:
 Set ``--otlp-endpoint http://collector:4317`` to push metrics to an
 OpenTelemetry Collector instead. In OTLP push mode, and when
 ``--disable-metrics`` is set, ``GET /metrics`` returns 404. The Coordinator
-exports Key Directory placement-count and reported-logical-byte gauges for the
-``l1`` and ``l2`` tiers. See :doc:`observability/metrics` for their exact names
-and semantics.
+exports Key Directory placement and reported-logical-byte gauges for the
+``l1`` and ``l2`` tiers, under the ``lmcache_coordinator.`` prefix. See
+:doc:`observability/metrics` for their exact names and semantics.
 
 Connecting MP servers
 ---------------------
@@ -309,7 +309,8 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - Kafka event topic (default ``lmcache-cache-events``).
    * - ``--coordinator-kafka-delivery-timeout``
      - (none)
-     - Seconds to wait for Kafka broker acknowledgement (default ``10``).
+     - Seconds the Kafka producer retries a record before dropping it
+       (default ``300``).
 
 With the Kafka transport, start the coordinator with
 ``--event-transport kafka`` and the same topic so it consumes the stream
@@ -1162,9 +1163,10 @@ pinned keys from quota-based eviction. L2 pins are fleet-wide (per
 Local resolution requires the coordinator's ``chunk_size`` and
 ``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
 / ``--hash-algorithm``; otherwise the resolved keys will not match what was
-stored and the pin protects nothing. It also requires the MP servers to be
-launched with ``--no-separate-object-groups`` (the coordinator resolves keys in
-a single object group).
+stored and the pin protects nothing. Under ``--separate-object-groups`` a chunk
+is stored once per object group; a pin covers the chunk in every group,
+including groups it is not stored in yet, so ``GET /cache/pins`` lists one entry
+per chunk and rank rather than per group.
 
 ``POST /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 import threading
 
@@ -170,6 +170,8 @@ class KeyDirectory(View):
         # enable_blend_lookup() swaps in one sized to the fleet's chunk size.
         self._blend_index = BlendIndex()
         self._blend_lookup_enabled = False
+        self._blend_chunk_size: int | None = None
+        self._blend_probe_stride = 1
 
     @classmethod
     def from_config(
@@ -214,8 +216,41 @@ class KeyDirectory(View):
         Raises:
             ValueError: If ``chunk_size`` or ``probe_stride`` is < 1.
         """
-        self._blend_index = BlendIndex(chunk_size=chunk_size, probe_stride=probe_stride)
-        self._blend_lookup_enabled = True
+        with self._lock:
+            self._blend_index = BlendIndex(
+                chunk_size=chunk_size, probe_stride=probe_stride
+            )
+            self._blend_lookup_enabled = True
+            self._blend_chunk_size = chunk_size
+            self._blend_probe_stride = probe_stride
+
+    def bind_chunk_size(self, chunk_size: int) -> None:
+        """Rebuild the optional blend index for the fleet's finalized size."""
+        with self._lock:
+            if not self._blend_lookup_enabled or self._blend_chunk_size == chunk_size:
+                return
+
+            blend_index = BlendIndex(
+                chunk_size=chunk_size, probe_stride=self._blend_probe_stride
+            )
+            for chunk_hash, binding in self._token_bindings.items():
+                if (
+                    not binding.token_ids.size
+                    or binding.token_offset == UNKNOWN_TOKEN_OFFSET
+                ):
+                    continue
+                namespaces = {
+                    BlendNamespace.from_object_key(key) for key in binding.keys
+                }
+                for namespace in namespaces:
+                    blend_index.add(
+                        binding.token_ids,
+                        chunk_hash,
+                        binding.token_offset,
+                        namespace,
+                    )
+            self._blend_index = blend_index
+            self._blend_chunk_size = chunk_size
 
     def consume(self, batch: CacheEventBatch) -> None:
         """Apply one gate-admitted batch, idempotently: re-storing
@@ -255,6 +290,43 @@ class KeyDirectory(View):
                     )
                 )
             return results
+
+    def get_keys_across_object_groups(self, keys: list[ObjectKey]) -> list[ObjectKey]:
+        """Return each key with its stored copies in other object groups.
+
+        Token-addressed lookups and deletes resolve object group ``0``; under
+        ``--separate-object-groups`` the same chunk is also stored in other
+        groups, and this reaches them through the chunk-hash index.
+
+        Args:
+            keys: The resolved keys.
+
+        Returns:
+            Each key with the stored keys that differ from it only in
+            ``object_group_id``, in ascending group order.
+        """
+        with self._lock:
+            expanded_keys: list[ObjectKey] = []
+            for key in keys:
+                key_in_each_group = [key, *self._get_stored_keys_in_other_groups(key)]
+                key_in_each_group.sort(key=lambda group_key: group_key.object_group_id)
+                expanded_keys.extend(key_in_each_group)
+            return expanded_keys
+
+    def _get_stored_keys_in_other_groups(self, key: ObjectKey) -> list[ObjectKey]:
+        """Return the stored keys that differ from ``key`` only in object group.
+
+        Call under the directory lock.
+        """
+        chunk_binding = self._token_bindings.get(key.chunk_hash)
+        if chunk_binding is None:
+            return []
+        return [
+            stored_key
+            for stored_key in chunk_binding.keys
+            if stored_key.object_group_id != key.object_group_id
+            and replace(stored_key, object_group_id=key.object_group_id) == key
+        ]
 
     def get_token_ids(self, chunk_hashes: list[bytes]) -> list[tuple[int, ...]]:
         """Return the known token ids for each requested chunk hash.
@@ -525,17 +597,18 @@ class KeyDirectory(View):
                 }
 
     def stats(self) -> DirectoryStats:
-        """Return a point-in-time summary of directory contents."""
+        """Return a point-in-time summary of directory contents.
+
+        Reads running totals, so its cost does not grow with the number of
+        keys: a metrics scrape calls it while ingest waits on the same lock.
+        """
         blend = self._blend_index.stats()
         with self._lock:
             l1_stats = self._placement_stats[Tier.L1]
             l2_stats = self._placement_stats[Tier.L2]
-            num_placements = sum(
-                len(record.placements) for record in self._directory.values()
-            )
             return DirectoryStats(
                 num_keys=len(self._directory),
-                num_placements=num_placements,
+                num_placements=l1_stats.count + l2_stats.count,
                 l1_keys_by_instance={
                     instance_id: len(keys)
                     for instance_id, keys in self._l1_keys_by_instance.items()

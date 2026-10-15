@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
+import functools
 import math
 import time
 
@@ -54,6 +55,11 @@ logger = init_logger(__name__)
 
 _DEFAULT_FLUSH_INTERVAL = 1.0
 
+# Seconds closing the Kafka sink waits for queued records.
+_KAFKA_SHUTDOWN_FLUSH_TIMEOUT = 10.0
+# Kafka producer buffer cap in KiB (64 MiB).
+_KAFKA_MAX_BUFFER_KBYTES = 64 * 1024
+
 # Token-binding cache bound: covers the window between a chunk's
 # token-binding event and its last (async L2) store event.
 _TOKEN_BINDING_CACHE_SIZE = 65536
@@ -87,6 +93,16 @@ class CacheEventSink(ABC):
         """
         raise NotImplementedError
 
+    @property
+    def dropped_events(self) -> int:
+        """Return the cache events (entries) this sink has dropped so far.
+
+        The subscriber stamps it on every batch it builds, so the
+        coordinator learns how much was lost from the next batch that gets
+        through. A sink that never drops reports ``0``.
+        """
+        return 0
+
     def close(self) -> None:  # noqa: B027
         """Release transport resources. Called once at shutdown."""
         pass
@@ -107,6 +123,7 @@ class HttpCacheEventSink(CacheEventSink):
     def __init__(self, coordinator_url: str, timeout: float = 2.0) -> None:
         self._base_url = coordinator_url.rstrip("/")
         self._client = httpx.Client(timeout=timeout)
+        self._dropped_events = 0
 
     def publish(self, batches: list[CacheEventBatch]) -> None:
         """Deliver ``batches`` via one ``POST /events`` request.
@@ -126,10 +143,18 @@ class HttpCacheEventSink(CacheEventSink):
             )
             resp.raise_for_status()
         except httpx.HTTPError as e:
+            # A timed-out request the coordinator still applied is counted
+            # too: the sink cannot tell, so this is an upper bound.
+            self._dropped_events += _entry_count(batches)
             raise CacheEventPublishError(
                 f"failed to publish {len(batches)} cache-event batches to "
                 f"{self._base_url}: {e}"
             ) from e
+
+    @property
+    def dropped_events(self) -> int:
+        """Return the entries of every batch in a failed request so far."""
+        return self._dropped_events
 
     def close(self) -> None:
         """Close the HTTP client."""
@@ -142,7 +167,11 @@ class KafkaCacheEventSink(CacheEventSink):
     Each :class:`CacheEventBatch` becomes one JSON record keyed by
     ``instance_id``. Kafka therefore assigns every batch from one emitter to
     the same partition, preserving the per-instance order required by the
-    coordinator. Publishing blocks until the broker acknowledges every record.
+    coordinator.
+
+    :meth:`publish` does not wait for the broker; the producer retries in
+    order for up to ``delivery_timeout``. A record that does not fit the
+    buffer or is never delivered is dropped and counted, leaving a seq gap.
 
     ``confluent-kafka`` is the optional ``lmcache[kafka]`` extra and is
     imported only here, so deployments on the HTTP transport never load it.
@@ -165,7 +194,8 @@ class KafkaCacheEventSink(CacheEventSink):
             ) from e
         self._kafka_exception: type[Exception] = KafkaException
         self._topic = config.topic
-        self._delivery_timeout = config.delivery_timeout
+        self._dropped_batches = 0
+        self._dropped_events = 0
         self._producer = Producer(
             {
                 "bootstrap.servers": config.bootstrap_servers,
@@ -173,59 +203,56 @@ class KafkaCacheEventSink(CacheEventSink):
                 "enable.idempotence": True,
                 "acks": "all",
                 "message.timeout.ms": math.ceil(config.delivery_timeout * 1000),
+                "queue.buffering.max.kbytes": _KAFKA_MAX_BUFFER_KBYTES,
             }
         )
 
+    @property
+    def dropped_batches(self) -> int:
+        """Return how many batches were dropped so far."""
+        return self._dropped_batches
+
+    @property
+    def dropped_events(self) -> int:
+        """Return the entries of every refused or undelivered batch so far."""
+        return self._dropped_events
+
     def publish(self, batches: list[CacheEventBatch]) -> None:
-        """Publish batches in list order and wait for broker acknowledgement.
+        """Queue batches in list order without waiting for the broker.
 
         Args:
             batches: Batches to publish. Each becomes one keyed Kafka record.
 
         Raises:
-            CacheEventPublishError: If enqueueing, flushing, or delivery fails.
+            CacheEventPublishError: If the producer refused a batch; it and
+                the rest of the list are dropped.
         """
-        delivery_errors: list["KafkaError"] = []
-
-        def _on_delivery(error: "KafkaError | None", message: "Message") -> None:
-            del message
-            if error is not None:
-                delivery_errors.append(error)
-
-        try:
-            for batch in batches:
-                payload = CacheEventsRequest(batches=[batch]).model_dump_json().encode()
+        for queued, batch in enumerate(batches):
+            payload = CacheEventsRequest(batches=[batch]).model_dump_json().encode()
+            try:
                 self._producer.produce(
                     topic=self._topic,
                     key=batch.instance_id.encode(),
                     value=payload,
-                    on_delivery=_on_delivery,
+                    on_delivery=functools.partial(
+                        self._on_delivery, len(batch.entries)
+                    ),
                 )
-            remaining = self._producer.flush(self._delivery_timeout)
-        except (BufferError, self._kafka_exception) as e:
-            raise CacheEventPublishError(
-                f"failed to publish {len(batches)} cache-event batches to "
-                f"Kafka topic {self._topic!r}: {e}"
-            ) from e
-
-        if remaining:
-            raise CacheEventPublishError(
-                f"{remaining} of {len(batches)} cache-event batches were not "
-                f"acknowledged by Kafka topic {self._topic!r} within "
-                f"{self._delivery_timeout}s"
-            )
-        if delivery_errors:
-            errors = "; ".join(str(error) for error in delivery_errors)
-            raise CacheEventPublishError(
-                f"Kafka topic {self._topic!r} rejected "
-                f"{len(delivery_errors)} of {len(batches)} cache-event "
-                f"batches: {errors}"
-            )
+            except (BufferError, self._kafka_exception) as e:
+                dropped = len(batches) - queued
+                self._dropped_batches += dropped
+                self._dropped_events += _entry_count(batches[queued:])
+                raise CacheEventPublishError(
+                    f"Kafka producer refused {dropped} of {len(batches)} "
+                    f"cache-event batches for topic {self._topic!r}: {e}"
+                ) from e
+            finally:
+                self._producer.poll(0)
 
     def close(self) -> None:
-        """Flush any records still queued during shutdown."""
+        """Flush queued records, waiting at most 10 seconds."""
         try:
-            remaining = self._producer.flush(self._delivery_timeout)
+            remaining = self._producer.flush(_KAFKA_SHUTDOWN_FLUSH_TIMEOUT)
         except self._kafka_exception as e:
             logger.warning(
                 "Failed to flush Kafka cache-event producer during shutdown: %s",
@@ -237,6 +264,28 @@ class KafkaCacheEventSink(CacheEventSink):
                 "%d Kafka cache-event record(s) remained queued at shutdown",
                 remaining,
             )
+
+    def _on_delivery(
+        self, entry_count: int, error: "KafkaError | None", message: "Message"
+    ) -> None:
+        """Count and log a record the producer gave up on.
+
+        Args:
+            entry_count: Cache events the record's batch carries.
+            error: Why delivery failed, or ``None`` on success.
+            message: The reported record.
+        """
+        if error is None:
+            return
+        self._dropped_batches += 1
+        self._dropped_events += entry_count
+        logger.warning(
+            "Kafka did not deliver a cache-event record for instance %r "
+            "(%d dropped so far): %s",
+            message.key(),
+            self._dropped_batches,
+            error,
+        )
 
 
 #: ``Record.qualname`` of one cache-event batch in an ``events``-level trace.
@@ -383,6 +432,11 @@ class MultiCacheEventSink(CacheEventSink):
                 + "; ".join(failures)
             )
 
+    @property
+    def dropped_events(self) -> int:
+        """Return the events every sink has dropped so far, summed."""
+        return sum(sink.dropped_events for sink in self._sinks)
+
     def close(self) -> None:
         """Close every sink, in order."""
         for sink in self._sinks:
@@ -501,9 +555,10 @@ class CacheEventSubscriber(EventSubscriber):
         capacity = self._pending_capacity
         self._pending_capacity = None
         ts = time.time()
+        dropped_events = self._sink.dropped_events
         # Declaration first, so a flush that also carries placements gives
         # the coordinator its denominator before the bytes it divides.
-        batches = self._capacity_batches(capacity, ts)
+        batches = self._capacity_batches(capacity, ts, dropped_events)
         batches += [
             CacheEventBatch(
                 instance_id=self._instance_id,
@@ -515,6 +570,7 @@ class CacheEventSubscriber(EventSubscriber):
                 entries=pending.entries,
                 shared=pending.shared,
                 ts=ts,
+                dropped_events=dropped_events,
             )
             for offset, pending in enumerate(pending_batches)
         ]
@@ -528,14 +584,14 @@ class CacheEventSubscriber(EventSubscriber):
             if capacity is not None and self._pending_capacity is None:
                 self._pending_capacity = capacity
             logger.warning(
-                "Dropping %d cache-event batches (instance %s): %s",
-                len(batches),
+                "Cache-event publish failed (instance %s); unsent batches "
+                "are dropped and leave a seq gap: %s",
                 self._instance_id,
                 e,
             )
 
     def _capacity_batches(
-        self, capacity: "CapacitySnapshot | None", ts: float
+        self, capacity: "CapacitySnapshot | None", ts: float, dropped_events: int
     ) -> list[CacheEventBatch]:
         """Expand one declaration into a ``config`` batch per compartment.
 
@@ -547,6 +603,7 @@ class CacheEventSubscriber(EventSubscriber):
             capacity: The declaration to expand, or ``None`` for no
                 declaration this flush.
             ts: Emitter wall-clock seconds to stamp the batches with.
+            dropped_events: The sink's dropped-event count to stamp.
 
         Returns:
             One batch per compartment, seq-numbered from the current
@@ -567,6 +624,7 @@ class CacheEventSubscriber(EventSubscriber):
                 ts=ts,
                 capacity_bytes=module.capacity_bytes,
                 capacity_revision=self._capacity_revision,
+                dropped_events=dropped_events,
             )
             for offset, module in enumerate(capacity.modules)
         ]
@@ -804,3 +862,8 @@ def maybe_create_cache_event_subscriber(
         incarnation=incarnation,
         flush_interval=coordinator_config.event_flush_interval,
     )
+
+
+def _entry_count(batches: Sequence[CacheEventBatch]) -> int:
+    """Return the cache events (entries) carried by ``batches``."""
+    return sum(len(batch.entries) for batch in batches)

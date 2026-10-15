@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 # First Party
+from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.multiprocess.http_apis.dependencies import get_context
 from lmcache.v1.utils.json_utils import make_json_safe, safe_asdict
 
@@ -57,6 +58,14 @@ async def config(request: Request) -> Any:
             result[name] = safe_asdict(cfg)
         else:
             result[name] = make_json_safe(cfg)
+        if isinstance(cfg, StorageManagerConfig):
+            result[name]["l2_adapter_config"]["adapters"] = [
+                {
+                    **(safe_asdict(a) if is_dataclass(a) else make_json_safe(vars(a))),
+                    "affinity_tag": a.affinity_tag,
+                }
+                for a in cfg.l2_adapter_config.adapters
+            ]
     return _IndentedJSONResponse(content=result)
 
 

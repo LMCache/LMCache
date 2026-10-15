@@ -26,8 +26,11 @@ spec:
             - /opt/venv/bin/python3
             - -m
             - lmcache.v1.multiprocess.server
+            # Bind only to the loopback interface. vLLM pods on the same node
+            # reach the server via 127.0.0.1, so the transport port is never
+            # exposed beyond the node (see CVE-2026-105192).
             - --host
-            - "0.0.0.0"
+            - "127.0.0.1"
             - --port
             - "6555"
             - --l1-size-gb
