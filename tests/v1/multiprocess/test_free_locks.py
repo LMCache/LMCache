@@ -123,6 +123,30 @@ def _make_free_locks_ctx(
     session = ctx.session_manager.get_or_create.return_value
     session.prefetch_hit_chunks = hit_chunks
     session.prefetch_locked_gids = tuple(locked_gids)
+    session.prefetch_covered_chunks = 0
+    session.prefetch_released = False
+    session.lookup_ipc_key = _free_locks_key(1024, start=0, end=1024)
+
+    # Model the real release bookkeeping: a FREE marks the result released
+    # but leaves the lock model in place (several disjoint FREEs can share
+    # it), while the abandoned-lookup settle claims it only once and only if
+    # no FREE got there first.
+    def _mark_prefetch_released():
+        session.prefetch_released = True
+
+    def _take_prefetch_release():
+        if session.prefetch_released or session.prefetch_hit_chunks < 0:
+            return None
+        session.prefetch_released = True
+        return (
+            session.lookup_ipc_key,
+            session.prefetch_hit_chunks,
+            session.prefetch_locked_gids,
+            session.prefetch_covered_chunks,
+        )
+
+    session.mark_prefetch_released.side_effect = _mark_prefetch_released
+    session.take_prefetch_release.side_effect = _take_prefetch_release
     return ctx
 
 
@@ -503,3 +527,108 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
     # Group 0 (recurrent, window 1): only the boundary chunk. Group 1
     # (attention): the whole hit prefix. Group 2 (standalone aux): NOTHING.
     assert released == ["g0-h2", "g1-h0", "g1-h1", "g1-h2"]
+
+
+def _drive_relookup(module: LookupModule, ctx: MagicMock) -> None:
+    """Send a second LOOKUP for the same request, as a re-lookup would.
+
+    ``lookup`` settles any abandoned result before ``begin_lookup`` resets
+    it, which is early enough that an empty group layout lets the call exit
+    right afterwards -- so this drives the settle without a real prefetch.
+    """
+    ctx.layout_desc_registry.find_group_layout_descs.return_value = {}
+    module.lookup(_free_locks_key(512, start=0, end=512), 1)
+
+
+def test_relookup_settles_the_abandoned_lookups_locks():
+    """A re-lookup releases the locks of the lookup it replaces.
+
+    A request can look up twice -- preemption/resume, or a covered-skip
+    fallback. FREE_LOOKUP_LOCKS carries no range; it reconstructs one from
+    the session's hit length and lock model, which ``begin_lookup`` resets.
+    If the replacement lands first and nothing settles the old result, those
+    locks survive only until the read-lock TTL, and a FREE arriving later
+    resolves against the *new* lookup's state instead.
+    """
+    ctx = _make_free_locks_ctx([b"h0", b"h1"], windows=[-1], hit_chunks=2)
+    module = LookupModule(ctx)
+
+    _drive_relookup(module, ctx)
+
+    ctx.storage_manager.finish_read_prefetched.assert_called_once()
+
+
+def test_relookup_leaves_an_in_flight_prefetch_to_its_controller():
+    """Locks of a running prefetch belong to the prefetch controller.
+
+    Releasing them here would double-decrement when the controller settles
+    the same prefetch in ``_finish_request``.
+    """
+    ctx = _make_free_locks_ctx([b"h0", b"h1"], windows=[-1], hit_chunks=2)
+    module = LookupModule(ctx)
+    with module._prefetch_job_lock:
+        module._prefetch_jobs["req-sw"] = MagicMock()
+
+    _drive_relookup(module, ctx)
+
+    ctx.storage_manager.finish_read_prefetched.assert_not_called()
+
+
+def test_take_prefetch_release_is_one_shot():
+    """``Session.take_prefetch_release`` hands the lock model to one caller.
+
+    A re-lookup settles the abandoned result and a late FREE_LOOKUP_LOCKS
+    tries to settle the same one. Releases are anonymous refcount
+    decrements, so the second must get nothing rather than strip a
+    concurrent prefix-sharing request's lock.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.session import Session
+
+    session = Session(request_id="r", hasher=MagicMock())
+    key = _free_locks_key(1024, start=0, end=1024)
+    session.begin_lookup(key, (-1,), covered_chunks=2)
+    session.record_prefetch_result(4, (0,), None)
+
+    first = session.take_prefetch_release()
+    assert first is not None
+    _, hit_chunks, locked_gids, covered_chunks = first
+    # All four come from the same lookup: a release built from a mix of two
+    # would resolve to the wrong keys.
+    assert hit_chunks == 4 and locked_gids == (0,) and covered_chunks == 2
+
+    assert session.take_prefetch_release() is None
+
+
+def test_disjoint_frees_for_one_lookup_both_land():
+    """One lookup can be released by several disjoint FREEs.
+
+    A multi-L1 hit mismatch frees the over-hit tail via
+    ``_free_inconsistent_lookup_locks``; ``update_state_after_alloc`` then
+    frees the head on every server. Both rebuild their range from the same
+    lock model, so neither may consume it.
+    """
+    ctx = _make_free_locks_ctx([b"h0", b"h1", b"h2", b"h3"], windows=[-1], hit_chunks=4)
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(_free_locks_key(1024, start=512, end=1024), 1)
+    module.free_lookup_locks(_free_locks_key(1024, start=0, end=512), 1)
+
+    assert ctx.storage_manager.finish_read_prefetched.call_count == 2
+
+
+def test_relookup_does_not_re_release_what_a_free_already_released():
+    """A FREE and a re-lookup must not both settle the same locks.
+
+    Read locks are anonymous refcounts, so a second decrement strips a
+    concurrent prefix-sharing request's lock rather than this request's.
+    """
+    ctx = _make_free_locks_ctx([b"h0", b"h1"], windows=[-1], hit_chunks=2)
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(_free_locks_key(512, start=0, end=512), 1)
+    released_by_free = ctx.storage_manager.finish_read_prefetched.call_count
+    _drive_relookup(module, ctx)
+
+    assert released_by_free == 1
+    assert ctx.storage_manager.finish_read_prefetched.call_count == 1

@@ -35,6 +35,7 @@ from lmcache.utils import (
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
+    COVERED_CHUNKS_CONFIG_KEY,
     KV_EVENT_CAPABILITY,
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
@@ -785,6 +786,14 @@ class LMCacheMPSchedulerAdapter:
             )
         self.blocks_in_chunk = self.lmcache_tokens_per_chunk // vllm_block_size
 
+        # Intersect: a capability is only usable if every server honors it.
+        self.experimental: set[str] = set.intersection(
+            *(
+                get_experimental(client, timeout=self._mq_timeout)
+                for client in self.req_clients.values()
+            )
+        )
+
         # Health state: one Event per server. The adapter is considered healthy
         # only if ALL per-server events are set (any unhealthy server taints
         # the whole adapter, matching the min() semantics used for lookups).
@@ -850,7 +859,8 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         reserve_last_token: bool = False,
-    ) -> None:
+        covered_chunks: int = 0,
+    ) -> int | None:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
 
@@ -868,9 +878,13 @@ class LMCacheMPSchedulerAdapter:
                 the IPC key.
             reserve_last_token: Whether to exclude the final token before
                 aligning the lookup range.
+            covered_chunks: Leading chunks the engine's prefix cache already
+                covers; the server touches but does not lock or prefetch them.
 
         Returns:
-            None
+            The ``covered_chunks`` actually sent, clamped to the aligned
+            range, or ``None`` when no LOOKUP went out. Key per-lookup state
+            off this so it cannot drift from what the server received.
 
         Notes:
             This function will have a side-effect: submitting a look up request to
@@ -882,16 +896,27 @@ class LMCacheMPSchedulerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
-            return
+            return None
 
         if request_id in self._pending_lookups:
             # Skip if there is already a lookup request
-            return
+            return None
 
         lookup_tokens = max(0, len(token_ids) - int(reserve_last_token))
         aligned_end = (
             lookup_tokens // self.lmcache_tokens_per_chunk
         ) * self.lmcache_tokens_per_chunk
+
+        # Clamp covered_chunks to the aligned lookup range (server clamps too).
+        covered_chunks = max(
+            0, min(covered_chunks, aligned_end // self.lmcache_tokens_per_chunk)
+        )
+        # Carried in request_configs to avoid a proto change; copy, not mutate.
+        if covered_chunks > 0:
+            request_configs = {
+                **(request_configs or {}),
+                COVERED_CHUNKS_CONFIG_KEY: covered_chunks,
+            }
 
         key = self._create_key(
             token_ids,
@@ -915,6 +940,7 @@ class LMCacheMPSchedulerAdapter:
         )
         self._pending_lookups.add(request_id)
         self._lookup_params[request_id] = (token_ids, cache_salt, request_configs)
+        return covered_chunks
 
     def _free_inconsistent_lookup_locks(
         self,
@@ -1262,7 +1288,8 @@ class LMCacheMPSchedulerAdapter:
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
-                the IPC key.
+                the IPC key. The APC-covered chunk count (if any) is carried
+                here under ``COVERED_CHUNKS_CONFIG_KEY``.
 
         Returns:
             IPCCacheServerKey: The constructed key.

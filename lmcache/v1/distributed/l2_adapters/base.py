@@ -380,6 +380,14 @@ class L2AdapterInterface(ABC):
         self._backend_name = name
         self._shared = shared
 
+    def touch_keys(self, keys: list[ObjectKey]) -> None:
+        """Mark ``keys`` accessed for eviction without moving any bytes.
+
+        Args:
+            keys: The object keys to mark as accessed.
+        """
+        self._notify_keys_accessed(keys)
+
     def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         """Update byte accounting and notify listeners that ``keys`` were
         stored. ``sizes[i]`` is the byte size of ``keys[i]``.

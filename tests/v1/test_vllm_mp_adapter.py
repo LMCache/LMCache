@@ -52,6 +52,15 @@ class FakeMQClient:
     def __init__(self, *_args, **_kwargs) -> None:
         self.closed = False
 
+    def get_experimental(self):
+        """Advertise no optional server capabilities."""
+        # First Party
+        from lmcache.v1.multiprocess.futures import MessagingFuture
+
+        future: MessagingFuture = MessagingFuture()
+        future.set_result([])
+        return future
+
     def close(self) -> None:
         """Record that the client was closed."""
         self.closed = True

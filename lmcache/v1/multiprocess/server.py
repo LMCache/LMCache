@@ -47,7 +47,10 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_coordinator_config,
     parse_args_to_mp_server_config,
 )
-from lmcache.v1.multiprocess.custom_types import KV_EVENT_CAPABILITY
+from lmcache.v1.multiprocess.custom_types import (
+    KV_EVENT_CAPABILITY,
+    SKIP_APC_LOOKUP_CAPABILITY,
+)
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import EngineModule, InstanceLivenessTarget
 from lmcache.v1.multiprocess.ext_server_module import (
@@ -312,7 +315,9 @@ def _build_server_components(
         None,
     )
     enabled_modules = set(mp_config.enable)
-    experimental_transfer: list[str] = []
+    # Always honored; advertised so an engine talking to an older server
+    # that cannot skip the covered prefix never sends a covered count.
+    experimental_transfer: list[str] = [SKIP_APC_LOOKUP_CAPABILITY]
     experimental_modules: list[EngineModule] = []
     for enabled_module in enabled_modules:
         if enabled_module not in EXPERIMENTAL_TRANSFER:

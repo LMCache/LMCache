@@ -21,7 +21,10 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import (
+    COVERED_CHUNKS_CONFIG_KEY,
+    IPCCacheServerKey,
+)
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.kv_load_policy import (
     DefaultKVLoadPolicy,
@@ -43,12 +46,16 @@ def resolve_prefetched_obj_keys(
     hit_chunks: int,
     locked_gids: tuple,
     group_windows: tuple[int, ...] | None = None,
+    covered_chunks: int = 0,
 ) -> list[ObjectKey]:
     """Resolve the subset of a request range that lookup actually locked.
 
     ``key.worker_id=None`` resolves every KV rank for scheduler-owned cleanup.
     A worker-specific key resolves only that worker's shard (or one MLA reader
     share), which is required for per-instance RETRIEVE failure cleanup.
+
+    Every per-group range start is clamped to ``covered_chunks`` (the prefix
+    the lookup skipped), so a release never drops a lock it never took.
     """
     chunk_hashes = ctx.token_hasher.compute_chunk_hashes(
         list(key.token_ids), start=key.start, end=key.end
@@ -79,6 +86,8 @@ def resolve_prefetched_obj_keys(
             lo = 0 if window < 0 else max(0, hit_chunks - window)
             lo = max(lo, start_chunk)
             hi = min(hit_chunks, end_chunk)
+        # The APC-covered prefix was never locked -- never release into it.
+        lo = max(lo, covered_chunks)
         if lo >= hi:
             continue
         group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
@@ -101,6 +110,8 @@ class _PrefetchJob:
     requested_tokens: int
     num_object_groups: int = 1
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
+    # APC-covered leading chunks skipped from the prefetch (offset applied at status).
+    covered_chunks: int = 0
     # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
     # carry them as labels.  ``model_name`` lets dashboards slice hit rate
     # per model in multi-model deployments; ``cache_salt`` slices per
@@ -173,6 +184,10 @@ class LookupModule:
         and registers the job under ``key.request_id`` for later polling
         via query_prefetch_status. When the KV load policy declines the
         request, no prefetch is submitted and the job reports zero hits.
+
+        ``request_configs[COVERED_CHUNKS_CONFIG_KEY]`` marks a leading prefix
+        the serving engine already has: it is touched but not locked or
+        prefetched, and the prefetch covers only the chunks after it.
 
         Args:
             key: Cache key with request_id embedded.
@@ -275,7 +290,43 @@ class LookupModule:
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.set_tokens(list(key.token_ids))
-        session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
+
+        requested_covered = int(
+            (key.request_configs or {}).get(COVERED_CHUNKS_CONFIG_KEY, 0)
+        )
+        # Leave one chunk for the prefetch so there is always a sub-range;
+        # an all-covered request then re-fetches a single covered chunk.
+        covered_chunks = min(max(0, requested_covered), len(chunk_hashes) - 1)
+        # Settle the abandoned lookup before begin_lookup resets the model
+        # it resolves from. A running prefetch is the controller's to settle.
+        with self._prefetch_job_lock:
+            prefetch_in_flight = key.request_id in self._prefetch_jobs
+        abandoned = None if prefetch_in_flight else session.take_prefetch_release()
+        if abandoned is not None:
+            stale_key, stale_hit, stale_gids, stale_covered = abandoned
+            stale_keys = resolve_prefetched_obj_keys(
+                self._ctx,
+                stale_key,
+                stale_hit,
+                stale_gids,
+                covered_chunks=stale_covered,
+            )
+            if stale_keys:
+                logger.info(
+                    "Releasing %d read locks from an abandoned lookup for request %s",
+                    len(stale_keys),
+                    key.request_id,
+                )
+                self._ctx.storage_manager.finish_read_prefetched(
+                    stale_keys,
+                    read_locks=stale_key.require_num_kv_readers(),
+                    l1_owners=self._ctx.get_read_owners(key.request_id),
+                )
+        session.begin_lookup(
+            key,
+            tuple(attn_desc.num_chunks_in_sw),
+            covered_chunks=covered_chunks,
+        )
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
             model_name, world_size
@@ -338,10 +389,28 @@ class LookupModule:
             )
             return
 
+        # Keep the covered prefix's recency without locking or prefetching
+        # it. After the load policy, so a declined lookup leaves no trace.
+        if covered_chunks:
+            self._ctx.storage_manager.touch_cached_keys(
+                [
+                    obj_key
+                    for group_keys in ipc_key_to_object_keys(
+                        key,
+                        chunk_hashes[:covered_chunks],
+                        list(range(attn_desc.num_object_groups)),
+                    )
+                    for obj_key in group_keys
+                ]
+            )
+
+        # Prefetch only the uncovered sub-range; status offsets hits to absolute.
+        sub_hashes = chunk_hashes[covered_chunks:]
+
         spec = PrefetchTaskSpec(
             key_groups=ipc_key_to_grouped_object_keys(
                 key,
-                chunk_hashes,
+                sub_hashes,
                 list(range(attn_desc.num_object_groups)),
                 group_layout_descs,
                 attn_desc,
@@ -360,6 +429,7 @@ class LookupModule:
                 requested_tokens=requested_tokens,
                 num_object_groups=attn_desc.num_object_groups,
                 attn_desc=attn_desc,
+                covered_chunks=covered_chunks,
                 model_name=model_name,
                 cache_salt=key.cache_salt,
             )
@@ -491,12 +561,19 @@ class LookupModule:
                 key.request_id,
             )
             return
+        # Mark, not claim: disjoint FREEs share one lookup's model. The mark
+        # only stops a re-lookup from settling these locks a second time.
+        session.mark_prefetch_released()
 
         # Release exactly the groups the prefetch locked (std lookup: all;
         # CB prefix leg: its prefix set) -- releasing an unlocked group
         # would drop another request's lock on the shared object key.
         obj_keys = resolve_prefetched_obj_keys(
-            self._ctx, key, hit_chunks, session.prefetch_locked_gids
+            self._ctx,
+            key,
+            hit_chunks,
+            session.prefetch_locked_gids,
+            covered_chunks=session.prefetch_covered_chunks,
         )
         if not obj_keys:
             return
@@ -543,7 +620,9 @@ class LookupModule:
         # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
         #  and will be deleted after finish_read_prefetched, when we touch all keys,
         #  these keys has been deleted and will not be touched.
-        self._ctx.storage_manager.touch_l1_keys(obj_keys)
+        # L2 too: the covered prefix is touched at lookup and the retrieved
+        # tail when read, so an L1-only refresh ages the prefix out of L2.
+        self._ctx.storage_manager.touch_cached_keys(obj_keys)
 
     # -----------------------------------------------------------------
     # Internal helpers
@@ -606,6 +685,10 @@ class LookupModule:
             found_count = 0
             l1_found_count = 0
 
+        # The fold covers only the uncovered sub-range; shift back to absolute.
+        found_count += job.covered_chunks
+        l1_found_count += job.covered_chunks
+
         # Record the model-wide hit length on the session so a later
         # free_lookup_locks can reconstruct which keys the prefetch
         # read-locked (see ``unfold``: full-attention groups lock the whole
@@ -628,6 +711,8 @@ class LookupModule:
                 metadata={
                     "found_count": found_count,
                     "requested_tokens": job.requested_tokens,
+                    # Folded into the *_tokens counts but not the *_keys ones.
+                    "covered_chunks": job.covered_chunks,
                     "hit_tokens": found_count * self._ctx.chunk_size,
                     "l1_hit_tokens": l1_chunks * self._ctx.chunk_size,
                     "l2_hit_tokens": l2_chunks * self._ctx.chunk_size,

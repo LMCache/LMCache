@@ -78,6 +78,10 @@ class Client:
         """Advertise the fixed chunk64 test geometry."""
         return ready(64)
 
+    def get_experimental(self) -> MessagingFuture[Any]:
+        """Advertise no optional server capabilities."""
+        return ready([])
+
     def lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
         """Record submission and return its controllable acknowledgement."""
         assert key.world_size == 1 and tp_size == 1

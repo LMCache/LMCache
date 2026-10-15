@@ -321,7 +321,7 @@ def test_server_builds_q_store_module(stub_server_modules) -> None:
 
     assert any(isinstance(m, _FakeQStore) for m in modules)
     kwargs = stub_server_modules.call_args.kwargs
-    assert kwargs["experimental_transfer"] == [TRANSFER_QUERY]
+    assert TRANSFER_QUERY in kwargs["experimental_transfer"]
     assert any(isinstance(t, _FakeQStore) for t in kwargs["liveness_targets"])
 
 
@@ -332,7 +332,8 @@ def test_server_builds_nothing_when_no_feature_is_enabled(
     modules = _build(stub_server_modules)
 
     assert not any(isinstance(m, _FakeQStore) for m in modules)
-    assert stub_server_modules.call_args.kwargs["experimental_transfer"] == []
+    kwargs = stub_server_modules.call_args.kwargs
+    assert TRANSFER_QUERY not in kwargs["experimental_transfer"]
 
 
 @pytest.mark.parametrize("log_size", [0, 3])

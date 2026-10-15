@@ -39,6 +39,10 @@ class _RecordingPolicy(KVLoadPolicy):
 
 def _ctx() -> MagicMock:
     ctx = MagicMock()
+    # No previous lookup to settle: ``lookup`` claims any unreleased
+    # result before ``begin_lookup`` resets it.
+    _sess = ctx.session_manager.get_or_create.return_value
+    _sess.take_prefetch_release.return_value = None
     ctx.chunk_size = CHUNK_SIZE
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
