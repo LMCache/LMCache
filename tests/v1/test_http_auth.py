@@ -97,7 +97,7 @@ def test_invalid_key_file_is_rejected(tmp_path, contents: str) -> None:
     key_file = tmp_path / "api-key"
     key_file.write_text(contents, encoding="utf-8")
 
-    with pytest.raises(ValueError, match="HTTP API key file"):
+    with pytest.raises(ValueError, match="API key file"):
         HTTPAuthenticationConfig.from_key_files([key_file])
 
 
