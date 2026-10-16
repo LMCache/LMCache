@@ -475,13 +475,45 @@ class PinnedAllocFree:
     alloc_args: tuple
     free_fn: Any
     free_args: tuple
+    # FreeKind (see csrc/cuda/mem_alloc.h), buffer size and optional shm_name so
+    # the free can be routed through the DMA-completion-safe deferred free
+    # instead of the synchronous free_fn. -1 = always free synchronously.
+    defer_kind: int = -1
+    defer_size: int = 0
+    defer_shm: str = ""
 
     def alloc(self) -> int:
         """Allocate pinned memory and return the raw pointer."""
         return self.alloc_fn(*self.alloc_args)
 
     def free(self, ptr: int) -> None:
-        """Free a previously allocated pinned-memory pointer."""
+        """Free a previously allocated pinned-memory pointer.
+
+        When the native extension provides ``defer_free_pinned``, hand the
+        buffer to the background reaper, gated on a CUDA event recorded on the
+        current (transfer) stream, so eviction never unregisters or unmaps a
+        staging buffer whose D2H copy is still in flight. Falls back to the
+        synchronous free when the symbol is absent, or when
+        ``LMCACHE_DISABLE_DEFERRED_FREE`` is set.
+        """
+        disabled = os.environ.get("LMCACHE_DISABLE_DEFERRED_FREE", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if (
+            self.defer_kind >= 0
+            and not disabled
+            and hasattr(device_ops, "defer_free_pinned")
+        ):
+            try:
+                stream_ptr = torch_dev.current_stream().cuda_stream
+            except Exception:
+                stream_ptr = 0
+            device_ops.defer_free_pinned(
+                self.defer_kind, ptr, self.defer_size, self.defer_shm, stream_ptr
+            )
+            return
         self.free_fn(ptr, *self.free_args)
 
 
@@ -505,6 +537,9 @@ def _resolve_pinned_alloc_free(
             alloc_args=(size, shm_name),
             free_fn=device_ops.free_shm_pinned_ptr,
             free_args=(size, shm_name),
+            defer_kind=5,  # FreeKind::SHM_PINNED
+            defer_size=size or 0,
+            defer_shm=shm_name,
         )
     elif numa_mapping:
         if torch_dev.is_available():
@@ -522,6 +557,8 @@ def _resolve_pinned_alloc_free(
                 alloc_args=(size, numa_id),
                 free_fn=device_ops.free_hugepage_pinned_numa_ptr,
                 free_args=(size,),
+                defer_kind=4,  # FreeKind::HUGEPAGE_PINNED_NUMA
+                defer_size=size or 0,
             )
         else:
             return PinnedAllocFree(
@@ -529,6 +566,8 @@ def _resolve_pinned_alloc_free(
                 alloc_args=(size, numa_id),
                 free_fn=device_ops.free_pinned_numa_ptr,
                 free_args=(size,),
+                defer_kind=2,  # FreeKind::PINNED_NUMA
+                defer_size=size or 0,
             )
     else:
         flags = 0
@@ -538,6 +577,8 @@ def _resolve_pinned_alloc_free(
                 alloc_args=(size, flags),
                 free_fn=device_ops.free_hugepage_pinned_ptr,
                 free_args=(size,),
+                defer_kind=3,  # FreeKind::HUGEPAGE_PINNED
+                defer_size=size or 0,
             )
         else:
             return PinnedAllocFree(
@@ -545,6 +586,8 @@ def _resolve_pinned_alloc_free(
                 alloc_args=(size, flags),
                 free_fn=device_ops.free_pinned_ptr,
                 free_args=(),
+                defer_kind=0,  # FreeKind::PINNED
+                defer_size=size or 0,
             )
 
 
