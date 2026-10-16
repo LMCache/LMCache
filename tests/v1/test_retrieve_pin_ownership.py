@@ -570,6 +570,7 @@ def test_passive_retrieve_keeps_received_object_cleanup(
     device = MagicMock()
     device.stream.return_value = nullcontext()
     device.device_count.return_value = 1
+    device.current_device.return_value = 0
     monkeypatch.setattr(cache_engine_module, "torch_dev", device)
     monkeypatch.setattr(cache_engine_module, "torch_device_type", "cpu")
     metadata = cache_case.memory_objs[0].metadata.to_dict()
