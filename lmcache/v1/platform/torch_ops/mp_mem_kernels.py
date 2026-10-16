@@ -14,8 +14,8 @@ from lmcache.lmcache_native import (
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.torch_ops._kv_format import (
+    _blocked_scale_views,
     _format_spec,
-    _is_blocked_scale_format,
 )
 from lmcache.v1.platform.torch_ops._tensor_from_ptr import _tensor_from_ptr
 
@@ -413,7 +413,7 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
-    elif _is_blocked_scale_format(engine_kv_format):
+    elif format_spec.requires_blocked_scale_repacking:
         _transfer_per_layer_blocked_scale(
             normalized,
             object_tensors,
@@ -421,7 +421,7 @@ def multi_layer_block_kv_transfer(
             n_block_ids,
             blocks_per_object,
             block_size,
-            engine_kv_format,
+            format_spec,
             is_d2h,
             skip_prefix_n_blocks,
         )
@@ -917,39 +917,6 @@ def _transfer_per_layer_mla(
                     layer.index_copy_(0, eff_idx, src_blocks)
 
 
-def _blocked_scale_raw_page(
-    layer: torch.Tensor,
-    block_size: int,
-    row_width: int,
-) -> torch.Tensor:
-    """View a blocked-scale layer as ``[NB, physical_block_bytes]``."""
-    if layer.ndim == 3:
-        if layer.shape[1] != block_size or layer.shape[2] != row_width:
-            raise ValueError(
-                "blocked-scale layer shape must be [NB, BS, row_width], got "
-                f"{tuple(layer.shape)}"
-            )
-        block_stride = int(layer.stride(0))
-        if block_stride < block_size * row_width:
-            raise ValueError(
-                "blocked-scale layer stride is smaller than one physical block"
-            )
-        return layer.as_strided(
-            (layer.shape[0], block_stride),
-            (block_stride, 1),
-        )
-    if layer.ndim == 2:
-        if layer.shape[1] < block_size * row_width:
-            raise ValueError(
-                "blocked-scale raw page is smaller than one physical block"
-            )
-        return layer
-    raise ValueError(
-        "blocked-scale layer must be a [NB, BS, row_width] or raw [NB, stride] "
-        f"tensor, got {tuple(layer.shape)}"
-    )
-
-
 def _transfer_per_layer_blocked_scale(
     layer_tensors: list[torch.Tensor],
     object_tensors: list[torch.Tensor],
@@ -957,7 +924,7 @@ def _transfer_per_layer_blocked_scale(
     n_block_ids: int,
     blocks_per_object: int,
     block_size: int,
-    engine_kv_format: EngineKVFormat,
+    format_spec: "type[KVFormatSpec]",
     is_d2h: bool,
     skip_prefix_n_blocks: int,
 ) -> None:
@@ -965,17 +932,13 @@ def _transfer_per_layer_blocked_scale(
     if not layer_tensors or not object_tensors:
         return
 
-    spec = _format_spec(engine_kv_format)
-    value_width = int(spec.blocked_value_width)
-    scale_width = int(spec.blocked_scale_width)
-    row_width = value_width + scale_width
-    if value_width <= 0 or scale_width <= 0:
-        raise ValueError("blocked-scale format must declare positive region widths")
+    if not format_spec.requires_blocked_scale_repacking:
+        raise ValueError("format does not require blocked-scale repacking")
     if any(tensor.element_size() != 1 for tensor in layer_tensors + object_tensors):
         raise ValueError("blocked-scale transfer requires byte tensors")
 
     target_device = layer_tensors[0].device
-    block_id_list = _to_block_id_list(block_ids)
+    block_ids_dev = torch.as_tensor(block_ids, dtype=torch.long, device=target_device)
     if is_d2h:
         objects_on_device = object_tensors
     else:
@@ -996,41 +959,34 @@ def _transfer_per_layer_blocked_scale(
         idx_start, idx_end, offset_in_object = valid
         n_valid = idx_end - idx_start
         token_end = offset_in_object + n_valid * block_size
-        selected_block_ids = block_id_list[idx_start:idx_end]
+        selected_block_ids = block_ids_dev[idx_start:idx_end]
         obj_device = objects_on_device[object_idx]
         if obj_device.ndim != 3 or obj_device.shape[0] != len(layer_tensors):
             raise ValueError(
                 "blocked-scale staging must have shape [NL, tokens, row_width]"
             )
-        if obj_device.shape[2] != row_width:
-            raise ValueError(
-                "blocked-scale staging row width does not match format spec: "
-                f"expected {row_width}, got {obj_device.shape[2]}"
-            )
+        row_width = int(obj_device.shape[2])
+        scale_width = 4
+        value_width = row_width - scale_width
+        if value_width <= 0:
+            raise ValueError("blocked-scale staging row width is too small")
 
         for layer_idx, layer in enumerate(layer_tensors):
-            raw_page = _blocked_scale_raw_page(layer, block_size, row_width)
+            values, scales = _blocked_scale_views(
+                layer,
+                block_size=block_size,
+                row_width=row_width,
+            )
             if is_d2h:
-                rows = torch.empty(
-                    n_valid * block_size,
-                    row_width,
-                    dtype=layer.dtype,
-                    device=target_device,
+                rows = torch.cat(
+                    (
+                        values.index_select(0, selected_block_ids),
+                        scales.index_select(0, selected_block_ids),
+                    ),
+                    dim=-1,
                 )
-                for block_pos, block_id in enumerate(selected_block_ids):
-                    page = raw_page[block_id]
-                    values = page[: block_size * value_width].view(
-                        block_size, value_width
-                    )
-                    scales = page[
-                        block_size * value_width : block_size
-                        * (value_width + scale_width)
-                    ].view(block_size, scale_width)
-                    rows[block_pos * block_size : (block_pos + 1) * block_size].copy_(
-                        torch.cat((values, scales), dim=1)
-                    )
                 obj[layer_idx, offset_in_object:token_end].copy_(
-                    rows,
+                    rows.reshape(n_valid * block_size, row_width),
                     non_blocking=True,
                 )
             else:
@@ -1039,17 +995,8 @@ def _transfer_per_layer_blocked_scale(
                     block_size,
                     row_width,
                 )
-                for block_pos, block_id in enumerate(selected_block_ids):
-                    page = raw_page[block_id]
-                    page[: block_size * value_width].view(
-                        block_size, value_width
-                    ).copy_(rows[block_pos, :, :value_width])
-                    page[
-                        block_size * value_width : block_size
-                        * (value_width + scale_width)
-                    ].view(block_size, scale_width).copy_(
-                        rows[block_pos, :, value_width:]
-                    )
+                values.index_copy_(0, selected_block_ids, rows[..., :value_width])
+                scales.index_copy_(0, selected_block_ids, rows[..., value_width:])
 
 
 def _transfer_per_layer_hnd(
@@ -1355,12 +1302,3 @@ def _transfer_per_layer_nhd(
                     layer.index_copy_(
                         0, eff_idx, torch.stack([k_blocks, v_blocks], dim=1)
                     )
-
-
-def _to_block_id_list(block_ids: torch.Tensor | list[int]) -> list[int]:
-    """Convert block IDs from tensor/list form into a Python ``list[int]``."""
-    if isinstance(block_ids, torch.Tensor):
-        return [int(x) for x in block_ids.to(dtype=torch.int64).cpu().tolist()]
-    if isinstance(block_ids, list):
-        return [int(x) for x in block_ids]
-    raise TypeError("block_ids must be a torch.Tensor or list[int]")

@@ -1,15 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Protocol and types for pluggable engine modules."""
+"""Protocol and construction contract for pluggable engine modules."""
 
 # Future
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Protocol
+from collections.abc import Mapping
+from graphlib import CycleError, TopologicalSorter
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeGuard, TypeVar, cast
+import abc
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+
+# Method set that makes up the InstanceLivenessTarget contract. A module that
+# defines all four is driven by the periodic reaper.
+_LIVENESS_TARGET_METHODS = (
+    "touch_instance",
+    "reap_stale_instances",
+    "tracked_instance_count",
+    "drop_instance_state",
+)
+
+DiscoverableModuleT = TypeVar("DiscoverableModuleT", bound="DiscoverableModule")
 
 
 class EngineModule(Protocol):
@@ -95,3 +110,170 @@ class InstanceLivenessTarget(Protocol):
             instance_id: The reaped worker's instance ID.
         """
         return
+
+
+class ModuleBuildContext:
+    """Shared configuration and constructed dependencies for module factories."""
+
+    def __init__(
+        self,
+        engine_context: MPCacheServerContext,
+        mp_config: MPServerConfig,
+        coordinator_config: CoordinatorConfig,
+        module_configs: Mapping[type[DiscoverableModule], Mapping[str, Any]]
+        | None = None,
+    ) -> None:
+        self.engine_context = engine_context
+        self.mp_config = mp_config
+        self.coordinator_config = coordinator_config
+        self.liveness_targets: list[InstanceLivenessTarget] = []
+        self.experimental_transfer = list(mp_config.enable)
+        self._module_configs = {
+            module_type: dict(config)
+            for module_type, config in (module_configs or {}).items()
+        }
+        self._built: dict[type[DiscoverableModule], EngineModule] = {}
+
+    @property
+    def built(self) -> list[EngineModule]:
+        """Return modules in build order for dependent handler overrides."""
+        return list(self._built.values())
+
+    @property
+    def built_types(self) -> tuple[type[DiscoverableModule], ...]:
+        """Return constructed module classes in build order."""
+        return tuple(self._built)
+
+    def config_for(self, module_type: type[DiscoverableModule]) -> Mapping[str, Any]:
+        """Return ``--server-module`` configuration for a module class."""
+        return self._module_configs.get(module_type, {})
+
+    def require(self, module_type: type[DiscoverableModuleT]) -> DiscoverableModuleT:
+        """Return an already-built module dependency."""
+        module = self._built.get(module_type)
+        if module is None:
+            raise ValueError(
+                f"Module {module_type.module_name!r} is not built yet; built so "
+                f"far: {[cls.module_name for cls in self._built]}"
+            )
+        return cast(DiscoverableModuleT, module)
+
+    def register(
+        self,
+        module_type: type[DiscoverableModule],
+        module: EngineModule,
+    ) -> None:
+        """Record a module and collect its optional liveness contract."""
+        if module_type in self._built:
+            raise ValueError(f"Module {module_type.module_name!r} is already built")
+        self._built[module_type] = module
+        if _is_liveness_target(module):
+            self.liveness_targets.append(module)
+
+    def add_experimental_transfer(self, capability: str) -> None:
+        """Advertise a capability contributed by a constructed module."""
+        if capability not in self.experimental_transfer:
+            self.experimental_transfer.append(capability)
+
+
+class DiscoverableModule(abc.ABC):
+    """Construction contract shared by built-in and external modules.
+
+    Dependencies are module class references. ``deferred`` modules are built
+    after normal modules, and ``create`` returns ``None`` when disabled.
+    """
+
+    module_name: ClassVar[str] = ""
+    module_dependencies: ClassVar[tuple[type[DiscoverableModule], ...]] = ()
+    deferred: ClassVar[bool] = False
+
+    @classmethod
+    @abc.abstractmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Construct this module, or return ``None`` if it does not apply."""
+        raise NotImplementedError
+
+
+def _is_liveness_target(module: EngineModule) -> TypeGuard[InstanceLivenessTarget]:
+    """Return whether a module exposes the instance-liveness target contract."""
+    return all(
+        callable(getattr(module, name, None)) for name in _LIVENESS_TARGET_METHODS
+    )
+
+
+def order_modules(
+    module_classes: list[type[DiscoverableModule]],
+    known_modules: "set[type[DiscoverableModule]] | None" = None,
+) -> list[type[DiscoverableModule]]:
+    """Return one build phase in deterministic dependency order.
+
+    Dependencies outside this phase must still appear in ``known_modules``;
+    this supports a deferred phase whose dependencies were already built.
+    """
+    if known_modules is None:
+        known_modules = set(module_classes)
+
+    names: dict[str, type[DiscoverableModule]] = {}
+    for module_type in sorted(
+        known_modules,
+        key=_module_sort_key,
+    ):
+        name = module_type.module_name
+        if not name:
+            raise ValueError(f"{module_type.__name__} does not define module_name")
+        previous = names.get(name)
+        if previous is not None and previous is not module_type:
+            raise ValueError(
+                f"Duplicate module_name {name!r}: {previous.__name__} and "
+                f"{module_type.__name__}"
+            )
+        names[name] = module_type
+
+    module_set = set(module_classes)
+    graph: dict[type[DiscoverableModule], set[type[DiscoverableModule]]] = {}
+    for module_type in sorted(module_classes, key=_module_sort_key):
+        unknown = set(module_type.module_dependencies) - known_modules
+        if unknown:
+            dependency = min(unknown, key=_module_sort_key)
+            raise ValueError(
+                f"{module_type.__name__} depends on {dependency.__name__}, "
+                "which is not a discoverable module."
+            )
+        graph[module_type] = set(module_type.module_dependencies) & module_set
+
+    try:
+        return list(TopologicalSorter(graph).static_order())
+    except CycleError as exc:
+        raise ValueError("Module dependency cycle") from exc
+
+
+def _module_sort_key(
+    module_type: type[DiscoverableModule],
+) -> tuple[str, str, str]:
+    return (
+        module_type.module_name,
+        module_type.__module__,
+        module_type.__qualname__,
+    )
+
+
+def discover_modules() -> list[type[DiscoverableModule]]:
+    """Discover concrete modules under the built-in modules package."""
+    # First Party
+    from lmcache.v1.utils.subclass_discovery import discover_subclasses
+
+    return list(
+        discover_subclasses(
+            "lmcache.v1.multiprocess.modules",
+            DiscoverableModule,  # type: ignore[type-abstract]
+            module_filter=lambda name: not name.startswith("_"),
+            require_defined_in_module=False,
+            on_import_error=_raise_import_error,
+            levels=[],
+        )
+    )
+
+
+def _raise_import_error(module_name: str, exc: Exception) -> None:
+    """Turn a module import failure into a loud startup error."""
+    raise ImportError(f"Failed to import engine module {module_name}: {exc}") from exc

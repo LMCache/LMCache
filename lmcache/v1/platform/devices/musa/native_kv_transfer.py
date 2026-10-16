@@ -156,7 +156,7 @@ def _try_strided_native_block_transfer(
         obj.element_size() != elem for obj in object_tensors
     ):
         return None
-    is_blocked = bool(getattr(format_spec, "is_blocked_scale", False))
+    is_blocked = bool(getattr(format_spec, "requires_blocked_scale_repacking", False))
     value_bytes = scale_bytes = 0
     if is_blocked:
         mode = 1

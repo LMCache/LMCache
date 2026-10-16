@@ -22,8 +22,9 @@ import zmq
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
-from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
 from lmcache.v1.multiprocess.custom_types import KV_EVENT_CAPABILITY
+from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
 from lmcache.v1.multiprocess.modules import engine_driven_transfer as non_gpu_mod
 from lmcache.v1.multiprocess.modules import kv_events as kv_events_mod
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as gpu_mod
@@ -39,6 +40,24 @@ from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
+
+
+@pytest.mark.parametrize("mode", ["lmcache_driven", "engine_driven", "auto"])
+def test_transfer_factories_gate_modules(
+    mode: Literal["lmcache_driven", "engine_driven", "auto"],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_ctx = ModuleBuildContext(
+        MagicMock(), MPServerConfig(supported_transfer_mode=mode), CoordinatorConfig()
+    )
+    for module_type, supported in (
+        (LMCacheDrivenTransferModule, ("lmcache_driven", "auto")),
+        (EngineDrivenTransferModule, ("engine_driven", "auto")),
+    ):
+        monkeypatch.setattr(module_type, "__init__", MagicMock(return_value=None))
+        assert isinstance(module_type.create(build_ctx), module_type) == (
+            mode in supported
+        )
 
 
 def _event_module(

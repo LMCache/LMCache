@@ -23,7 +23,7 @@ def _is_regular_per_layer_layout(spec: type[KVFormatSpec]) -> bool:
         and not spec.is_fused_packed
         and not spec.is_pbs_fused
         and not spec.is_kv_second_tuple
-        and not spec.is_blocked_scale
+        and not spec.requires_blocked_scale_repacking
     )
 
 
@@ -59,7 +59,7 @@ def is_supported_musa_mp_block_transfer_spec(
         ``TWO_NB`` per-layer layouts, and the current SGLang K/V-list layout.
         ``False`` for all other physical contracts.
     """
-    if spec.is_blocked_scale:
+    if spec.requires_blocked_scale_repacking:
         return (
             spec.is_layer_list
             and spec.is_mla
@@ -73,7 +73,7 @@ def is_supported_musa_mp_block_transfer_spec(
         and not spec.is_mla
         and not spec.is_pbs_fused
         and not spec.is_kv_second_tuple
-        and not spec.is_blocked_scale
+        and not spec.requires_blocked_scale_repacking
     )
 
 

@@ -164,8 +164,8 @@ def test_staging_shape_uses_kv_axis_geometry(
 
 def test_blocked_scale_is_distinct_from_regular_mla() -> None:
     """Keep blocked-scale physical encoding distinct from ordinary MLA."""
-    assert get_spec_class(F.NL_X_NB_BS_HS).is_blocked_scale is False
-    assert get_spec_class(F.NL_X_NB_BSV_BSS).is_blocked_scale is True
+    assert get_spec_class(F.NL_X_NB_BS_HS).requires_blocked_scale_repacking is False
+    assert get_spec_class(F.NL_X_NB_BSV_BSS).requires_blocked_scale_repacking is True
 
 
 def test_blocked_scale_spec_declares_pointer_regions() -> None:
@@ -229,6 +229,15 @@ def test_single_kv_fact_is_unique() -> None:
         fmt for fmt in _all_formats() if get_spec_class(fmt).is_single_kv
     }
     assert component_formats == {F.NL_X_NB_BS_NH_HS}
+
+
+def test_blocked_scale_repacking_fact_is_unique() -> None:
+    repacked_formats = {
+        fmt
+        for fmt in _all_formats()
+        if get_spec_class(fmt).requires_blocked_scale_repacking
+    }
+    assert repacked_formats == {F.NL_X_NB_BSV_BSS}
 
 
 def test_every_format_is_pinned():

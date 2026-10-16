@@ -2,8 +2,10 @@
 """Tests for MP coordinator metrics initialization."""
 
 # Standard
+from typing import cast
 from unittest.mock import patch
 import socket
+import time
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey, Tier
@@ -16,6 +18,10 @@ from lmcache.v1.mp_coordinator.api import (
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
+from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
+    KafkaCacheEventSource,
+    KafkaSourceStats,
+)
 from lmcache.v1.mp_coordinator.observability import init_coordinator_metrics
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
@@ -50,7 +56,7 @@ def _batch(
 
 
 def _stream_batch(
-    instance_id: str, seq: int, dropped_events: int = 0
+    instance_id: str, seq: int, dropped_events: int = 0, ts: float = 0.0
 ) -> CacheEventBatch:
     return CacheEventBatch(
         instance_id=instance_id,
@@ -61,6 +67,7 @@ def _stream_batch(
         backend="dram",
         entries=[CacheEventEntry(key=_key(1).to_encoded_object_key(), size_bytes=1)],
         dropped_events=dropped_events,
+        ts=ts,
     )
 
 
@@ -262,4 +269,57 @@ def test_broadcaster_counters_report_each_consumer() -> None:
         labels(consumer="_FailingConsumer", op="fence"): 1,
         labels(consumer="KeyDirectory", op="consume"): 0,
         labels(consumer="KeyDirectory", op="fence"): 0,
+    }
+
+
+def test_event_gate_freshness_gauges_report_each_server() -> None:
+    gate = EventGate(CacheEventBroadcaster(), QuiesceLock())
+    gate.ingest(_stream_batch("node-a", seq=1, ts=time.time() - 5.0))
+    gate.ingest(_stream_batch("node-b", seq=1))  # no send time
+    meter, reader = private_meter()
+
+    observability.register_event_gate_metrics(gate, meter)
+
+    values = read_values(reader)
+    since = values["lmcache_coordinator.ingest.server_seconds_since_last_event"]
+    assert set(since) == {labels(instance_id="node-a"), labels(instance_id="node-b")}
+    delay = values["lmcache_coordinator.ingest.server_event_delivery_delay_seconds"]
+    assert set(delay) == {labels(instance_id="node-a")}
+    assert 5.0 <= delay[labels(instance_id="node-a")] < 10.0
+
+
+class _StubKafkaSource:
+    def __init__(self, stats: KafkaSourceStats) -> None:
+        self.current = stats
+
+    def stats(self) -> KafkaSourceStats:
+        return self.current
+
+
+def test_kafka_source_metrics_report_reads_partitions_and_lag() -> None:
+    source = _StubKafkaSource(
+        KafkaSourceStats(
+            records_applied=7,
+            records_undecodable=1,
+            records_failed=2,
+            partitions_assigned=2,
+            unread_records={0: 0, 1: 40},
+        )
+    )
+    meter, reader = private_meter()
+
+    observability.register_kafka_source_metrics(
+        cast(KafkaCacheEventSource, source), meter
+    )
+
+    values = read_values(reader)
+    assert values["lmcache_coordinator.kafka.records_read"] == {
+        labels(result="applied"): 7,
+        labels(result="undecodable"): 1,
+        labels(result="failed"): 2,
+    }
+    assert values["lmcache_coordinator.kafka.partitions_assigned"] == {labels(): 2}
+    assert values["lmcache_coordinator.kafka.unread_records"] == {
+        labels(partition="0"): 0,
+        labels(partition="1"): 40,
     }

@@ -23,6 +23,6 @@ class NL_X_NB_BSV_BSS_Spec(NL_X_NB_BS_HS_Spec):
     attention_backends = ("vLLM MLA",)
     is_layer_list = True
     is_mla = True
-    is_blocked_scale = True
+    requires_blocked_scale_repacking = True
     blocked_value_width = 128
     blocked_scale_width = 4
