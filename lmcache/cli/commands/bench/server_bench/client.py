@@ -169,6 +169,8 @@ class ServerBenchClient:
         self._req_client: "RequestClient | None" = None
         self._workers: list[WorkerContext] = []
         self._started = False
+        # All Workers use the same device and resolved transfer mode.
+        self._uses_handle_transfer = False
 
         self._chunk_size = 0
         self._block_size = 0
@@ -511,7 +513,7 @@ class ServerBenchClient:
     ) -> None:
         """Clear an engine-driven destination range before RETRIEVE.
 
-        This is a no-op in handle mode.
+        This is a no-op when the created transfer context uses handles.
 
         Args:
             request: Request to clear.
@@ -523,7 +525,7 @@ class ServerBenchClient:
             ValueError: If a non-empty data-mode range is invalid.
         """
         self._require_started()
-        if token_count == 0 or self._config.uses_handle_transfer:
+        if token_count == 0 or self._uses_handle_transfer:
             return
         self._validate_token_range(request, start_token, token_count)
 
@@ -550,7 +552,8 @@ class ServerBenchClient:
     ) -> list[str] | None:
         """Compute checksums for a request range.
 
-        Data mode hashes local tensors; handle mode queries the Server.
+        Engine-driven contexts hash local tensors; handle contexts query
+        the Server, including when the mode was selected by ``auto``.
 
         Args:
             request: Request to hash.
@@ -578,7 +581,7 @@ class ServerBenchClient:
         block_offset = request.block_offset + (start_token // self._block_size)
         num_blocks = token_count // self._block_size
         checksums: list[str] | None
-        if self._config.uses_handle_transfer:
+        if self._uses_handle_transfer:
             if not self._config.http_url or not self._workers:
                 return None
             checksums = _query_checksum(
@@ -711,16 +714,16 @@ class ServerBenchClient:
         from lmcache.v1.multiprocess.group_view import EngineGroupInfo
         from lmcache.v1.multiprocess.transfer_context import (
             EngineDrivenTransferContext,
+            LMCacheDrivenTransferContext,
             create_transfer_context,
         )
         from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
         config = self._config
         use_gpu = config.is_gpu
-        use_handle = config.uses_handle_transfer
         if use_gpu and not torch_dev.is_available():
             raise RuntimeError("--mode gpu requires CUDA")
-        if use_handle and not use_gpu:
+        if config.transfer_mode == "lmcache_driven" and not use_gpu:
             self._log(
                 "  [info] --transfer-mode=lmcache_driven on cpu mode: "
                 "using REGISTER_KV_CACHE + STORE/RETRIEVE over POSIX SHM"
@@ -873,6 +876,10 @@ class ServerBenchClient:
                     instance_id=instance_id,
                     req_client=self._req_client,
                 )
+
+            self._uses_handle_transfer = isinstance(
+                transfer_context, LMCacheDrivenTransferContext
+            )
 
             worker = WorkerContext(
                 spec=WorkerSpec(

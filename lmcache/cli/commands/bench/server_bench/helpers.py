@@ -378,12 +378,11 @@ def _compute_client_checksums(
         for t in tensors:
             # Block axis is dim 0 for MLA rank-3 tensors ``(NB, BS, hidden)``
             # and dim 1 for classical rank-5 ``(kv, NB, BS, NH, HS)``.
-            # ``contiguous().numpy().tobytes()`` survives non-contiguous
-            # slices and dtype quirks (bfloat16 has no numpy view, but
-            # uint8 reinterpret works after slice).
+            # NumPy needs host memory; the byte view also supports dtypes
+            # such as bfloat16 that have no NumPy equivalent.
             block_dim = 0 if _tensor_is_mla(t) else 1
             view = t.narrow(block_dim, start_b, end_b - start_b).contiguous()
-            h.update(view.view(torch.uint8).numpy().tobytes())
+            h.update(view.view(torch.uint8).cpu().numpy().tobytes())
         checksums.append(h.hexdigest())
     return checksums
 
