@@ -11,7 +11,7 @@ import torch
 class PagedKVSequenceView:
     """Read a request's K/V in token order.
 
-    Returns contiguous [tokens, kv_heads, head_dim] tensors.
+    Returns [tokens, kv_heads, head_dim] tensors.
     """
 
     def __init__(self, cache: torch.Tensor, slots: torch.Tensor):
@@ -21,7 +21,7 @@ class PagedKVSequenceView:
         self._offsets = slots % block_size
 
     def _read(self, kv_index: int) -> torch.Tensor:
-        return self._cache[:, kv_index][self._blocks, self._offsets].contiguous()
+        return self._cache[:, kv_index][self._blocks, self._offsets]
 
     def get_keys(self) -> torch.Tensor:
         return self._read(0)
@@ -35,6 +35,9 @@ class PagedKVSequenceView:
         Example: [A B C D], keep [1, 3] -> [B D _ _].
         Positions are [kept_tokens, kv_heads] valid resident indices in output
         order. Caller guarantees exclusive block ownership.
+
+        In-place writes are not rolled back on failure. The caller can only
+        fall back if the original KV and request state are still intact.
         """
         if kept_positions.ndim != 2 or kept_positions.shape[1] != self._cache.shape[3]:
             raise ValueError("Expected [kept_tokens, kv_heads] positions")
