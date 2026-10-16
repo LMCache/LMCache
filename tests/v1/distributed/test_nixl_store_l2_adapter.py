@@ -153,7 +153,12 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
 
 
 @pytest.fixture
-def adapter():
+def pages_per_file():
+    return 1
+
+
+@pytest.fixture
+def adapter(pages_per_file):
     """Create a NixlStoreL2Adapter with POSIX backend and an initialized
     memory buffer.
 
@@ -173,7 +178,11 @@ def adapter():
 
     config = NixlStoreL2AdapterConfig(
         backend="POSIX",
-        backend_params={"file_path": tmp_dir, "use_direct_io": "false"},
+        backend_params={
+            "file_path": tmp_dir,
+            "file_size": str(PAGE_SIZE * pages_per_file),
+            "use_direct_io": "false",
+        },
         pool_size=POOL_SIZE,
     )
     adapter = NixlStoreL2Adapter(config, l1_memory)
@@ -1128,6 +1137,32 @@ class TestReportStatus:
         assert status["event_loop_alive"] is False
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    @pytest.mark.parametrize("pages_per_file", [1, 4])
+    def test_report_status_counts_slots_for_multi_page_files(
+        self, pages_per_file, adapter
+    ):
+        """pool_free_slots should be no larger than pool_size"""
+        adpt, buffer = adapter
+
+        # Fresh adapter
+        status = adpt.report_status()
+        assert status["pool_size"] == status["pool_free_slots"]
+
+        obj_size_pages = 2
+        key = create_object_key(42)
+        obj = create_memory_obj(buffer, page_index=0, num_pages=obj_size_pages)
+
+        # Adapter after storing one object occupying two pages
+        _store_and_wait(adpt, key, obj)
+
+        status = adpt.report_status()
+        assert status["pool_size"] == status["pool_free_slots"] + obj_size_pages
+
+        # Adapter after deleting the objects
+        adpt.delete([key])
+        status = adpt.report_status()
+        assert status["pool_size"] == status["pool_free_slots"]
 
 
 # =============================================================================
