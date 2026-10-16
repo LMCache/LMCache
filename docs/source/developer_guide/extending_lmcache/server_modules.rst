@@ -20,7 +20,7 @@ site-local observability/control modules that reuse LMCache's shared
 For new extension protocols, prefer a transport-specific service when the
 extension owns a real client protocol. A plugin can register its own generated
 gRPC service or its own ZMQ service during LMCache server startup, while the
-same package also returns server modules for status, cleanup, and shared
+same module also provides status, cleanup, and shared
 ``MPCacheServerContext`` access.
 
 For small control-plane calls that do not need a first-class service, plugins
@@ -49,15 +49,13 @@ Pass one JSON object per ``--server-module`` flag:
    lmcache server \
        --server-module '{
          "module_path": "my_package.server_module",
-         "factory_name": "build_server_modules",
          "config": {
            "mode": "shadow"
          }
        }'
 
-``factory_name`` defaults to ``build_server_modules`` and ``config`` defaults
-to an empty object. The flag can be repeated, and a single flag may contain a
-JSON list of module specs.
+``config`` defaults to an empty object. The flag can be repeated, and a single
+flag may contain a JSON list of module specs.
 
 .. list-table:: Server module spec fields
    :header-rows: 1
@@ -68,98 +66,32 @@ JSON list of module specs.
      - Description
    * - ``module_path``
      - yes
-     - Dotted Python import path containing the module factory.
-   * - ``factory_name``
-     - no
-     - Callable name inside ``module_path``. Defaults to
-       ``build_server_modules``.
+     - Dotted Python import path defining one or more concrete
+       ``DiscoverableModule`` subclasses.
    * - ``config``
      - no
-     - Plugin-specific JSON object passed to the factory.
-
-Factory contract
-----------------
-
-The factory receives one ``ExtServerModuleBuildContext`` and returns
-``ExtServerModuleComponents``. For backwards compatibility, returning one
-module, a sequence of modules, or ``None`` is also accepted:
-
-.. code-block:: python
-
-   from lmcache.v1.multiprocess.ext_server_module import (
-       ExtServerModuleBuildContext,
-       ExtServerModuleComponents,
-   )
-
-
-   def build_server_modules(
-       ctx: ExtServerModuleBuildContext,
-   ) -> ExtServerModuleComponents:
-       module = MyServerModule(ctx.server_context, ctx.config)
-       return ExtServerModuleComponents(
-           modules=[module],
-           grpc_service_registrars=[module.register_grpc_services],
-           zmq_service_registrars=[module.register_zmq_services],
-       )
-
-A service-only package can return no modules:
-
-.. code-block:: python
-
-   def build_server_modules(
-       ctx: ExtServerModuleBuildContext,
-   ) -> ExtServerModuleComponents:
-       return ExtServerModuleComponents(
-           grpc_service_registrars=[build_echo_grpc_service(ctx)],
-       )
-
-``ExtServerModuleBuildContext`` contains:
-
-- ``server_context``: the shared ``MPCacheServerContext``.
-- ``mp_config``: parsed ``MPServerConfig``.
-- ``coordinator_config``: parsed coordinator configuration.
-- ``modules``: built-in modules, plus modules returned by earlier plugin
-  factories in command-line order.
-- ``config``: the JSON object from this plugin's server-module spec.
+     - Plugin-specific JSON object available through
+       ``ModuleBuildContext.config_for()``.
 
 Module contract
 ---------------
 
-A returned module must expose the regular server module contract:
+External modules use the same discovery, dependency, construction, and runtime
+contract as built-ins. LMCache imports ``module_path``, finds its concrete
+``DiscoverableModule`` subclasses, merges them into the built-in dependency
+graph, and calls ``create(build_ctx)``. There is no external-only base class or
+factory contract: follow the existing ``DiscoverableModule`` implementations
+under ``lmcache.v1.multiprocess.modules``. Plugin-specific configuration is
+available from ``build_ctx.config_for(module_class)``.
 
-.. code-block:: python
-
-   @property
-   def context(self): ...
-
-   def report_status(self) -> dict: ...
-
-   def close(self) -> None: ...
-
-Request handlers are ordinary transport-neutral handlers decorated with
-``@request_handler``:
-
-.. code-block:: python
-
-   from lmcache.v1.multiprocess.request_handler import request_handler
-   from lmcache.v1.multiprocess.protocol import RequestType
-   from lmcache.v1.multiprocess.protocols.base import HandlerType
-
-
-   class MyServerModule:
-       def __init__(self, ctx, config):
-           self._ctx = ctx
-           self._config = config
-
-       @property
-       def context(self):
-           return self._ctx
-
-       def report_status(self) -> dict:
-           return {"my_module": {"is_healthy": True}}
-
-       def close(self) -> None:
-           return None
+Dependencies are class references, just as for built-ins. An external module
+may depend on a built-in class or on another explicitly loaded external class.
+Every dependency must be included in the discovered/configured class set.
+At startup, LMCache logs every constructed module and its declared
+dependencies as ``name(dependencies=[...])``.
+Handlers are registered in construction order, so a dependent module can
+override its dependency's handler. Modules close in reverse construction order;
+``ManagementModule`` stops its reaper before liveness targets release their state.
 
 Plugin modules can also expose extension protocol methods with
 ``@server_module_handler``:
@@ -179,7 +111,7 @@ Plugin modules can also expose extension protocol methods with
        text: str
 
 
-   class MyServerModule:
+   class MyServerModule(DiscoverableModule):
        # context/report_status/close omitted for brevity
 
        @server_module_handler("my_package.echo")
@@ -187,17 +119,15 @@ Plugin modules can also expose extension protocol methods with
            request = msgspec.msgpack.decode(payload, type=EchoRequest)
            return msgspec.msgpack.encode(EchoResponse(text=request.text))
 
-Plugin modules are appended after built-in modules. If two modules register
-the same existing request type, the later module wins for transport handler
-registration. If two plugin modules register the same ``SERVER_MODULE_CALL``
-method name, startup fails.
+If two modules register the same ``SERVER_MODULE_CALL`` method name, startup
+fails.
 
 Transport-specific services
 ---------------------------
 
-When an extension owns its protocol, return transport registrars in
-``ExtServerModuleComponents``. LMCache calls the registrar that matches the
-configured transport before the request server starts.
+When an extension owns its protocol, expose the registrar matching the
+configured transport as a method on the module. LMCache calls it before the
+request server starts.
 
 For gRPC, register generated services against the concrete ``grpc.Server``:
 
@@ -206,35 +136,35 @@ For gRPC, register generated services against the concrete ``grpc.Server``:
    from my_package.protos import echo_pb2_grpc
 
 
-   def register_echo_grpc_service(server) -> None:
-       echo_pb2_grpc.add_EchoServiceServicer_to_server(
-           MyEchoServicer(),
-           server,
-       )
+   class MyServerModule(DiscoverableModule):
+       # regular module contract omitted
+
+       def register_grpc_services(self, server) -> None:
+           echo_pb2_grpc.add_EchoServiceServicer_to_server(
+               MyEchoServicer(),
+               server,
+           )
 
 For ZMQ, register or start a package-owned ZMQ service against the concrete
 ``MessageQueueServer``:
 
 .. code-block:: python
 
-   def register_echo_zmq_service(server) -> None:
-       echo_service = MyZmqEchoService(
-           context=server.ctx,
-           bind_url="tcp://127.0.0.1:6001",
-       )
-       echo_service.start()
+   class MyServerModule(DiscoverableModule):
+       # regular module contract omitted
 
-If a ZMQ registrar starts a sidecar socket, the plugin should also return a
-module whose ``close()`` method stops that sidecar. Do not use
+       def register_zmq_services(self, server) -> None:
+           self.echo_service = MyZmqEchoService(
+               context=server.ctx,
+               bind_url="tcp://127.0.0.1:6001",
+           )
+           self.echo_service.start()
+
+If a ZMQ registrar starts a sidecar socket, the module's ``close()`` method
+must stop that sidecar. Do not use
 ``register_zmq_services`` to add ``HandlerType.BLOCKING`` handlers to the core
 ``MessageQueueServer`` unless the registrar also assigns an executor with
 ``add_normal_thread_pool`` or ``add_affinity_thread_pool`` before startup.
-
-For compatibility with simple module-shaped plugins, LMCache also calls
-``register_grpc_services(server)`` and ``register_zmq_services(server)``
-methods when a returned module exposes them. New packages should prefer the
-explicit ``ExtServerModuleComponents`` fields so modules and transport services
-stay separate.
 
 Envelope client calls
 ---------------------

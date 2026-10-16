@@ -111,17 +111,16 @@ it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
 instances assembled by ``_build_modules()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
-**``server.py``** -- The transport-neutral server compositor. Creates an
-``MPCacheServer``, assembles the engine modules
-(``LookupModule`` + ``ManagementModule`` + ``KVEventModule`` + ``LMCacheDrivenTransferModule``
-and/or ``EngineDrivenTransferModule`` depending on
-``--supported-transfer-mode`` — ``lmcache_driven`` (default) or
-``engine_driven`` loads just one,
-``auto`` loads both — plus the blend module when
-``--engine-type blend`` is set). It calls ``create_request_server()`` to build
-the ZMQ or gRPC request server selected by ``--transport``, discovers the
-annotated operations exposed by the loaded modules, and blocks in a keep-alive
-loop.
+**``server.py``** -- The transport-neutral server compositor. It discovers
+``DiscoverableModule`` classes under the ``modules`` package, orders their
+class-referenced ``module_dependencies``, and calls ``create()`` with a shared
+``ModuleBuildContext``. Out-of-tree ``--server-module`` paths explicitly add
+classes to the same graph and lifecycle; their configuration comes from
+``ModuleBuildContext.config_for()``. This includes ``KVEventModule`` and the
+transfer, lookup, management, P2P, blend, and experimental modules. The
+compositor then creates the ZMQ or gRPC request server selected by
+``--transport``, registers module handlers and optional transport services,
+and blocks in a keep-alive loop.
 
 **``modules/blend.py``** -- Defines ``BlendModule``, the paged-aware
 blend pipeline that enables non-prefix KV cache reuse (e.g. across

@@ -2,7 +2,6 @@
 # Standard
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable, cast
-from unittest.mock import MagicMock
 import multiprocessing as mp
 import socket
 import sys
@@ -112,7 +111,6 @@ def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
 def test_zmq_server_registers_out_of_tree_services() -> None:
     """Server modules may attach package-owned ZMQ services before start."""
     registered_servers: list[MessageQueueServer] = []
-    explicit_registrar = MagicMock(name="explicit_registrar")
 
     class ServiceModule:
         def register_zmq_services(self, server: MessageQueueServer) -> None:
@@ -121,11 +119,9 @@ def test_zmq_server_registers_out_of_tree_services() -> None:
     server = build_zmq_request_server(
         [cast(Any, ServiceModule())],
         MPServerConfig(port=_unused_tcp_port()),
-        service_registrars=[explicit_registrar],
     )
     try:
         assert registered_servers == [server]
-        explicit_registrar.assert_called_once_with(server)
     finally:
         server.close()
 
