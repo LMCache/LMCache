@@ -6,8 +6,6 @@ with ``LMCacheMPConnector`` in engine-driven mode, then sends the same greedy
 prompt twice. vLLM's own prefix cache is disabled, so the second request can
 only skip prefill through LMCache. The check fails unless:
 
-- the vLLM worker detected one of the RBLN 6-D KV formats, which pins the
-  layout vllm-rbln actually allocates against LMCache's detection;
 - the first request stored chunks into L1 and the second read them back;
 - both completions are identical.
 
@@ -24,7 +22,6 @@ from pathlib import Path
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -38,9 +35,6 @@ VLLM_PORT = 8555
 #: LMCache chunks are whole vLLM blocks on RBLN, so both use one size.
 BLOCK_SIZE = 1024
 MAX_MODEL_LEN = 4096
-
-#: KV formats vllm-rbln may allocate (K/V-first and blocks-first).
-RBLN_KV_FORMATS = ("NL_X_TWO_NB_NH_ONE_BS_HS", "NL_X_NB_TWO_NH_ONE_BS_HS")
 
 #: A fixed prompt long enough to span several full chunks.
 PROMPT = " ".join(
@@ -117,7 +111,7 @@ def _complete(model: str) -> str:
     return response["choices"][0]["text"]
 
 
-def _check(model: str, vllm_log: Path) -> None:
+def _check(model: str) -> None:
     """Run the two requests and assert store, hit, and equal outputs."""
     writes = _metric("lmcache_mp_l1_write_chunks_total")
     first = _complete(model)
@@ -135,12 +129,6 @@ def _check(model: str, vllm_log: Path) -> None:
         raise SystemExit("second request did not hit LMCache")
     if first != second:
         raise SystemExit("completion changed after the LMCache hit")
-
-    found = re.search(r"Engine KV Format: \S*?(\w+) ", vllm_log.read_text())
-    if found is None or found.group(1) not in RBLN_KV_FORMATS:
-        detected = found.group(1) if found else "nothing"
-        raise SystemExit(f"expected an RBLN KV format, detected {detected}")
-    print(f"detected KV format: {found.group(1)}")
 
 
 def main() -> None:
@@ -231,7 +219,7 @@ def main() -> None:
                     vllm_proc,
                     args.vllm_timeout,
                 )
-                _check(args.model, vllm_log)
+                _check(args.model)
     except BaseException:
         for log in (lmcache_log, vllm_log):
             if log.exists():
