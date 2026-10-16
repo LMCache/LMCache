@@ -91,14 +91,13 @@ class DefaultKVLoadPolicy(KVLoadPolicy):
     """
 
     def should_load(self, ctx: KVLoadContext) -> bool:
-        """Return whether this lookup is worth serving.
+        """Return False only when the request asked to skip loading.
 
         Args:
             ctx: The lookup being decided.
 
         Returns:
-            False when the request asked to skip loading, or when at most
-            one chunk beyond the engine's prefix-cache hit could load.
+            Whether the request did not set ``lmcache.skip_load``.
         """
         configs = ctx.request_configs or {}
         if configs.get("lmcache.skip_load", False):
