@@ -45,8 +45,8 @@ class ManagementModule(DiscoverableModule):
             0 disables reaping (no thread is started).
         worker_registration_grace_seconds: Silence budget for a worker that
             registered but never pinged.
-        experimental_transfer: Enabled experimental transfer types and server
-            capability flags.
+        experimental: Experimental features advertised to clients through
+            ``get_experimental`` (e.g. ``transfer_query``).
     """
 
     module_name = "management"
@@ -65,7 +65,7 @@ class ManagementModule(DiscoverableModule):
             worker_registration_grace_seconds=(
                 mp_config.worker_registration_grace_seconds
             ),
-            experimental_transfer=build_ctx.experimental_transfer,
+            experimental=build_ctx.experimental,
         )
 
     def __init__(
@@ -74,14 +74,14 @@ class ManagementModule(DiscoverableModule):
         liveness_targets: Sequence[InstanceLivenessTarget] = (),
         worker_reap_timeout_seconds: float = 0.0,
         worker_registration_grace_seconds: float = 0.0,
-        experimental_transfer: Sequence[str] = (),
+        experimental: Sequence[str] = (),
     ) -> None:
         self._ctx = ctx
         self._clear_lock = threading.Lock()
         self._liveness_targets = tuple(liveness_targets)
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
-        self._experimental_transfer = tuple(experimental_transfer)
+        self._experimental = tuple(experimental)
 
         # Periodic reaper, started only when reaping is enabled and there is
         # something to scan. Scans every reap_timeout/4, so an instance is
@@ -190,8 +190,8 @@ class ManagementModule(DiscoverableModule):
 
     @request_handler()
     def get_experimental(self) -> list[str]:
-        """Return the server's enabled experimental transfers and capabilities."""
-        return list(self._experimental_transfer)
+        """Return the experimental features enabled on this server."""
+        return list(self._experimental)
 
     @request_handler(HandlerType.BLOCKING)
     def clear(self, force: bool = False) -> None:
