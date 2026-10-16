@@ -26,6 +26,7 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.mp_coordinator.registrar import bind_coordinator_chunk_size
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     add_observability_args,
@@ -55,6 +56,7 @@ from lmcache.v1.multiprocess.ext_server_module import (
     build_server_module_router,
     load_server_module_components,
 )
+from lmcache.v1.multiprocess.kv_load_policy import create_kv_load_policy
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
@@ -135,7 +137,7 @@ class MPCacheServer:
             "is_healthy": sm["is_healthy"],
             "engine_type": self.__class__.__name__,
             "chunk_size": self._context.chunk_size,
-            "hash_algorithm": self._context.token_hasher.hash_algorithm_name,
+            "hash_algorithm": self._context.hash_algorithm_name,
             "active_sessions": self._context.session_manager.active_count(),
             "storage_manager": sm,
         }
@@ -216,7 +218,12 @@ def _build_server_components(
         ValueError: If blend engine is requested with
         supported_transfer_mode="engine_driven".
     """
-    lookup_module = LookupModule(ctx)
+    lookup_module = LookupModule(
+        ctx,
+        create_kv_load_policy(
+            mp_config.kv_load_policy, mp_config.runtime_plugin_config.extra_config
+        ),
+    )
     p2p_controller = P2PController(
         ctx,
         mp_config.p2p_config,
@@ -448,7 +455,7 @@ def run_cache_server(
                 if free_bytes < mem_cfg.size_in_bytes:
                     logger.warning(
                         "Insufficient /dev/shm capacity: need %d bytes, have %d bytes. "
-                        "Disabling SHM, falling back to pickle.",
+                        "Disabling SHM, falling back to safe inline transfer.",
                         mem_cfg.size_in_bytes,
                         free_bytes,
                     )
@@ -480,7 +487,15 @@ def run_cache_server(
     engine = MPCacheServer(ctx, components.modules)
 
     InitializeMPUsageContext(mp_config, storage_manager_config)
-    InitializeMPContinuousUsage(event_bus, mp_config.chunk_size)
+    continuous_usage = InitializeMPContinuousUsage(event_bus, ctx.chunk_size)
+    if continuous_usage is not None:
+        ctx.add_chunk_size_bind_listener(continuous_usage.update_chunk_size)
+    if coordinator_config.url:
+
+        def bind_chunk_size_to_coordinator(chunk_size: int) -> None:
+            bind_coordinator_chunk_size(coordinator_config.url, chunk_size)
+
+        ctx.add_chunk_size_bind_listener(bind_chunk_size_to_coordinator)
     InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
     InitializeL1Usage(event_bus, ctx.storage_manager)
 

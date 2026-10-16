@@ -199,6 +199,11 @@ def test_server_module_flag_rejects_invalid_json():
         _parse_mp(["--server-module", "{"])
 
 
+def test_mp_config_rejects_non_positive_chunk_size() -> None:
+    with pytest.raises(ValueError, match="chunk size must be positive"):
+        MPServerConfig(chunk_size=0)
+
+
 @pytest.mark.parametrize("workers", ["0", "-1"])
 def test_grpc_server_workers_must_be_positive(workers):
     with pytest.raises(ValueError, match="grpc server workers must be >= 1"):
@@ -420,3 +425,12 @@ def test_session_ttl_seconds_default_and_flag():
     """Session TTL defaults to 600 s and is settable for deep queueing."""
     assert _parse_mp([]).session_ttl_seconds == 600.0
     assert _parse_mp(["--session-ttl-seconds", "7200"]).session_ttl_seconds == 7200.0
+
+
+def test_kv_load_policy_default_and_flag():
+    """The KV load policy defaults to DEFAULT and accepts a module path."""
+    assert _parse_mp([]).kv_load_policy == "DEFAULT"
+    assert (
+        _parse_mp(["--kv-load-policy", "my_pkg.policies:Custom"]).kv_load_policy
+        == "my_pkg.policies:Custom"
+    )

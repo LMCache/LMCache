@@ -29,6 +29,9 @@ if TYPE_CHECKING:
         EventGate,
         InstanceStreamStats,
     )
+    from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
+        KafkaCacheEventSource,
+    )
     from lmcache.v1.mp_coordinator.views.key_directory import (
         DirectoryStats,
         KeyDirectory,
@@ -196,6 +199,27 @@ def register_event_gate_metrics(
         description="1 while the coordinator knows it is missing part of this "
         "server's cache.",
     )
+    meter.create_observable_gauge(
+        "lmcache_coordinator.ingest.server_seconds_since_last_event",
+        callbacks=[
+            _make_server_gauge_callback(
+                event_gate, lambda stream: stream.seconds_since_last_event
+            )
+        ],
+        description="Seconds since this server's last cache-event batch was applied.",
+    )
+    meter.create_observable_gauge(
+        "lmcache_coordinator.ingest.server_event_delivery_delay_seconds",
+        callbacks=[
+            _make_server_gauge_callback(
+                event_gate, lambda stream: stream.event_delivery_delay_seconds
+            )
+        ],
+        unit="s",
+        description="For this server's last applied batch, time from the "
+        "server sending it to the coordinator applying it, across the two "
+        "hosts' clocks.",
+    )
 
 
 def register_broadcaster_metrics(
@@ -256,6 +280,61 @@ def register_broadcaster_metrics(
     )
 
 
+def register_kafka_source_metrics(
+    source: "KafkaCacheEventSource", meter: "Meter | None" = None
+) -> None:
+    """Register the Kafka source's read and lag metrics.
+
+    All read :meth:`KafkaCacheEventSource.stats`: records read by outcome
+    (a counter for this process's lifetime), and the partitions held and
+    records not yet read per partition (gauges).
+
+    Args:
+        source: The Kafka source feeding the gate.
+        meter: Meter to register on. Defaults to the global provider's
+            coordinator meter; tests pass one from a private provider.
+    """
+    if meter is None:
+        meter = metrics.get_meter(_METER_NAME)
+
+    def read_records_read() -> list[tuple[float, dict[str, str]]]:
+        stats = source.stats()
+        return [
+            (stats.records_applied, {"result": "applied"}),
+            (stats.records_undecodable, {"result": "undecodable"}),
+            (stats.records_failed, {"result": "failed"}),
+        ]
+
+    def read_unread_records() -> list[tuple[float, dict[str, str]]]:
+        return [
+            (unread, {"partition": str(partition)})
+            for partition, unread in source.stats().unread_records.items()
+        ]
+
+    meter.create_observable_counter(
+        "lmcache_coordinator.kafka.records_read",
+        callbacks=[_make_observation_callback(read_records_read)],
+        description="Cache-event records read from Kafka, by outcome: applied, "
+        "or skipped as undecodable or failed.",
+    )
+    meter.create_observable_gauge(
+        "lmcache_coordinator.kafka.partitions_assigned",
+        callbacks=[
+            _make_observation_callback(
+                lambda: [(source.stats().partitions_assigned, {})]
+            )
+        ],
+        description="Partitions of the cache-event topic this coordinator "
+        "holds; fewer than the topic has means another consumer-group member "
+        "holds the rest.",
+    )
+    meter.create_observable_gauge(
+        "lmcache_coordinator.kafka.unread_records",
+        callbacks=[_make_observation_callback(read_unread_records)],
+        description="Cache-event records not yet read, per partition.",
+    )
+
+
 def _make_observation_callback(
     read_points: Callable[[], list[tuple[float, dict[str, str]]]],
 ) -> Callable[["CallbackOptions"], list["Observation"]]:
@@ -304,23 +383,29 @@ def _make_tier_gauge_callback(
 
 def _make_server_gauge_callback(
     event_gate: "EventGate",
-    read_value: Callable[["InstanceStreamStats"], int],
+    read_value: Callable[["InstanceStreamStats"], float | None],
 ) -> Callable[["CallbackOptions"], list["Observation"]]:
     """Return a gauge callback that reports one value per mp server.
 
     Args:
         event_gate: The gate whose stream cursors the callback reads.
-        read_value: Picks the value to report out of one server's cursor.
+        read_value: Picks the value to report out of one server's cursor;
+            ``None`` when that server has no value yet.
 
     Returns:
         A callback observing each tracked server's value under its
-        ``instance_id``; a server the gate stopped tracking is not reported.
+        ``instance_id``. A server the gate stopped tracking, or one with no
+        value yet, is not reported.
     """
 
     def _observe_servers(_options: "CallbackOptions") -> list["Observation"]:
-        return [
-            metrics.Observation(read_value(stream), {"instance_id": instance_id})
-            for instance_id, stream in event_gate.stats().streams.items()
-        ]
+        observations = []
+        for instance_id, stream in event_gate.stats().streams.items():
+            value = read_value(stream)
+            if value is not None:
+                observations.append(
+                    metrics.Observation(value, {"instance_id": instance_id})
+                )
+        return observations
 
     return _observe_servers

@@ -473,6 +473,11 @@ runtime, see :doc:`compatibility` before installing.
 
                     docker pull vllm/vllm-openai-xpu:v0.26.0
 
+        The official CUDA vLLM and standalone images default to the non-root
+        ``lmcache`` user (uid 1000). Mount the Hugging Face cache at
+        ``/home/lmcache/.cache/huggingface``; existing volumes and bind mounts
+        must be writable by that uid.
+
         See :ref:`docker_deployment` for running the container and ROCm images.
 
     .. tab-item:: CLI Only  

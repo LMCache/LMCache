@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import cast
 import threading
+import time
 
 # First Party
 from lmcache.logging import init_logger
@@ -72,6 +73,13 @@ class InstanceStreamStats:
             counts none, since earlier batches were sent before it listened.
         events_dropped: Events the emitter reported dropping before they
             reached the coordinator (the increases of ``dropped_events``).
+        seconds_since_last_event: Seconds since the gate last admitted a
+            batch from this emitter, or since it restored the cursor from a
+            checkpoint if none was admitted since.
+        event_delivery_delay_seconds: For the last admitted batch, the
+            emitter's send time (``ts``) to admission, measured across the
+            two hosts' clocks; ``None`` until a batch carrying ``ts``
+            arrives.
     """
 
     incarnation: int
@@ -79,6 +87,8 @@ class InstanceStreamStats:
     gap_detected: bool
     missing_batches: int = 0
     events_dropped: int = 0
+    seconds_since_last_event: float = 0.0
+    event_delivery_delay_seconds: float | None = None
 
 
 @dataclass
@@ -114,6 +124,8 @@ class _StreamCursor:
 
     ``last_dropped_events`` is the ``dropped_events`` of the last admitted
     batch, or ``None`` until the gate knows it (a stream joined midway).
+    ``last_admitted_monotonic`` is when the cursor last admitted a batch, or
+    when it was created or restored.
     """
 
     incarnation: int
@@ -122,6 +134,8 @@ class _StreamCursor:
     last_dropped_events: int | None = None
     missing_batches: int = 0
     events_dropped: int = 0
+    last_admitted_monotonic: float = field(default_factory=time.monotonic)
+    event_delivery_delay_seconds: float | None = None
 
 
 class EventGate:
@@ -289,6 +303,7 @@ class EventGate:
 
     def stats(self) -> EventGateStats:
         """Return a snapshot of the totals and every emitter's cursor."""
+        now = time.monotonic()
         with self._lock:
             return replace(
                 self._stats,
@@ -299,6 +314,10 @@ class EventGate:
                         gap_detected=cursor.gap_detected,
                         missing_batches=cursor.missing_batches,
                         events_dropped=cursor.events_dropped,
+                        seconds_since_last_event=now - cursor.last_admitted_monotonic,
+                        event_delivery_delay_seconds=(
+                            cursor.event_delivery_delay_seconds
+                        ),
                     )
                     for instance_id, cursor in self._cursors.items()
                 },
@@ -353,6 +372,9 @@ class EventGate:
                 self._stats.events_dropped += dropped
         cursor.last_dropped_events = batch.dropped_events
         cursor.last_seq = batch.seq
+        cursor.last_admitted_monotonic = time.monotonic()
+        if batch.ts > 0:
+            cursor.event_delivery_delay_seconds = time.time() - batch.ts
         self._broadcaster.broadcast(batch)
         return IngestResult.ADMITTED
 

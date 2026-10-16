@@ -174,6 +174,15 @@ def test_single_kv_fact_is_unique() -> None:
     assert component_formats == {F.NL_X_NB_BS_NH_HS}
 
 
+def test_blocked_scale_repacking_fact_is_unique() -> None:
+    repacked_formats = {
+        fmt
+        for fmt in _all_formats()
+        if get_spec_class(fmt).requires_blocked_scale_repacking
+    }
+    assert repacked_formats == {F.NL_X_NB_BSV_BSS}
+
+
 def test_every_format_is_pinned():
     # A new EngineKVFormat must be added to EXPECTED (and classified) deliberately.
     assert set(_all_formats()) == set(EXPECTED)

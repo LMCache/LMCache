@@ -282,7 +282,7 @@ def test_build_modules_loads_plugin_and_registers_liveness_target(
         return plugin_module
 
     module_name = _install_fake_factory(monkeypatch, factory)
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
+    monkeypatch.setattr(server_mod, "LookupModule", lambda *a, **kw: MagicMock())
     monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
     monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
     monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
@@ -310,7 +310,7 @@ def test_build_modules_adds_server_module_router(
         return plugin_module
 
     module_name = _install_fake_factory(monkeypatch, factory)
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
+    monkeypatch.setattr(server_mod, "LookupModule", lambda *a, **kw: MagicMock())
     monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
     monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
     monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
@@ -341,7 +341,7 @@ def test_build_server_components_collects_transport_service_registrars(
         )
 
     module_name = _install_fake_factory(monkeypatch, factory)
-    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
+    monkeypatch.setattr(server_mod, "LookupModule", lambda *a, **kw: MagicMock())
     monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
     monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
     monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
