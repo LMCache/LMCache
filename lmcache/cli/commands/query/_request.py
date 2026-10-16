@@ -195,7 +195,10 @@ def _stream(
             t1 = time.time()
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
-        _raise_json_blob_error(err_body)
+        try:
+            _raise_json_blob_error(err_body)
+        except RuntimeError as json_err:
+            err_body = str(json_err)
         raise RuntimeError(
             _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
         ) from e
@@ -206,7 +209,7 @@ def _stream(
     _raise_json_blob_error(misc_text)
     joined = "".join(pieces)
     if not joined and usage is None:
-        raise RuntimeError(
+        raise _EmptyCompletionError(
             _clip(f"No completion output from engine. Captured response:\n{misc_text}")
             if misc_text
             else "Empty response from engine (no SSE chunks parsed)."
@@ -254,22 +257,14 @@ def _missing_chat_template(exc: BaseException) -> bool:
     )
 
 
-def _weak_completions_error(msg: str) -> bool:
-    msg = msg.lower()
-    return any(
-        s in msg
-        for s in (
-            "empty response from engine",
-            "no completion output from engine",
-            "no sse chunks parsed",
-        )
-    )
-
-
 def _missing_completions_endpoint(exc: BaseException) -> bool:
-    """Return whether *exc* indicates that completions are unsupported."""
-    msg = str(exc).lower()
-    return "(http 404)" in msg or "(http 405)" in msg
+    """Check the original HTTP status, never server-provided message text."""
+    cause = exc.__cause__
+    return isinstance(cause, urllib.error.HTTPError) and cause.code in (404, 405)
+
+
+class _EmptyCompletionError(RuntimeError):
+    """The stream ended without completion text or usage."""
 
 
 class Request:
@@ -339,7 +334,10 @@ class Request:
         return str(first["id"])
 
     def _query_with_fallback(self, request_data: dict[str, Any]) -> dict[str, Any]:
-        """Send one query and fallback between completions/chat endpoints."""
+        """Retry chat only for HTTP 404/405 or an empty completion stream.
+
+        Chat-first requests retain the missing-chat-template fallback.
+        """
         if request_data["completions_only"]:
             return self._query(request_data, chat=False)
         try:
@@ -353,7 +351,7 @@ class Request:
                 )
                 return self._query(request_data, chat=False)
             if not (
-                _weak_completions_error(str(first_err))
+                isinstance(first_err, _EmptyCompletionError)
                 or _missing_completions_endpoint(first_err)
             ):
                 raise
@@ -361,9 +359,9 @@ class Request:
             try:
                 return self._query(request_data, chat=True)
             except RuntimeError as second_err:
-                if _weak_completions_error(str(first_err)) and _missing_chat_template(
-                    second_err
-                ):
+                if isinstance(
+                    first_err, _EmptyCompletionError
+                ) and _missing_chat_template(second_err):
                     _info(
                         "base / completion-only models: try `--completions` or "
                         "an instruct model with a chat template."
