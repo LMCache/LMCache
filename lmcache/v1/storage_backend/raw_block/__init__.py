@@ -6,6 +6,7 @@ from lmcache.v1.storage_backend.raw_block.core import (
     RAW_BLOCK_IO_ENGINES,
     RawBlockCore,
     RawBlockCoreConfig,
+    RawBlockDeleteResult,
     RawBlockPutManyResult,
     normalize_raw_block_io_engine,
     normalize_raw_block_placement_ids,
@@ -26,6 +27,7 @@ from lmcache.v1.storage_backend.raw_block.key_codec import (
 __all__ = [
     "RawBlockCore",
     "RawBlockCoreConfig",
+    "RawBlockDeleteResult",
     "RAW_BLOCK_IO_ENGINES",
     "DEFAULT_IOURING_QUEUE_DEPTH",
     "RawBlockKeyNamespace",
