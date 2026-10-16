@@ -287,6 +287,9 @@ class ReqMeta:
     disagg_spec: Optional[DisaggSpec] = None
     # the configs of the request
     request_configs: Optional[dict] = None
+    # vLLM block ids allocated to the request, used to report failed loads
+    # for token ranges the (chunk-truncated) slot mapping does not cover
+    block_ids: Optional[list[int]] = None
 
     @staticmethod
     def from_request_tracker(
@@ -426,6 +429,7 @@ class ReqMeta:
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
             request_configs=tracker.request_configs,
+            block_ids=list(tracker.allocated_block_ids),
         )
 
 
@@ -587,6 +591,9 @@ class LMCacheConnectorV1Impl:
             )
         )
         self._invalid_block_ids: set[int] = set()
+        # Scheduler side: requests whose KV load from LMCache failed. They
+        # recompute instead of being promised the same chunks again.
+        self._load_failed_req_ids: set[str] = set()
 
     def _check_legacy_register_kv_caches(self) -> None:
         """Check for legacy connector without register_kv_caches implementation."""
@@ -893,7 +900,36 @@ class LMCacheConnectorV1Impl:
                         ret_token_mask,
                         slot_mapping[:lmcache_cached_tokens],
                     )
+                    if not missing_blocks and request.block_ids:
+                        # The promised range lies beyond the load token list
+                        # (truncated to whole saved chunks), so the masks and
+                        # the slot mapping cannot name its blocks. Report them
+                        # from the request's block ids so vLLM recomputes them.
+                        missing_blocks = self._blocks_in_token_range(
+                            request.block_ids,
+                            request.load_spec.vllm_cached_tokens,
+                            lmcache_cached_tokens,
+                        )
+                        logger.warning(
+                            "Request %s: promised tokens [%d, %d) are past the "
+                            "%d-token load list; marking %d block(s) invalid",
+                            request.req_id,
+                            request.load_spec.vllm_cached_tokens,
+                            lmcache_cached_tokens,
+                            len(tokens),
+                            len(missing_blocks),
+                        )
                     self._invalid_block_ids.update(missing_blocks)
+
+    def _blocks_in_token_range(
+        self, block_ids: list[int], start: int, end: int
+    ) -> set[int]:
+        """vLLM block ids holding tokens [start, end) of a request."""
+        if end <= start:
+            return set()
+        first = start // self._block_size
+        last = cdiv(end, self._block_size)
+        return set(block_ids[first:last])
 
     def record_failed_blocks(
         self,
@@ -1398,6 +1434,16 @@ class LMCacheConnectorV1Impl:
         if self.lookup_client is None:
             return 0
 
+        if req_id in self._load_failed_req_ids:
+            # A resumed request must have a load spec: record one that loads
+            # nothing.
+            self.load_specs[req_id] = LoadSpec(
+                vllm_cached_tokens=num_computed_tokens,
+                lmcache_cached_tokens=num_computed_tokens,
+                can_load=False,
+            )
+            return 0
+
         if (
             num_external_hit_tokens := self.lookup_client.lookup_cache(lookup_id=req_id)
         ) != -1:
@@ -1854,11 +1900,25 @@ class LMCacheConnectorV1Impl:
         return meta
 
     @_lmcache_nvtx_annotate
+    def record_load_failures(self, invalid_block_ids: set[int]) -> None:
+        """Scheduler side: mark the requests whose blocks failed to load."""
+        for req_id, tracker in self._request_trackers.items():
+            if req_id in self._load_failed_req_ids:
+                continue
+            if not invalid_block_ids.isdisjoint(tracker.allocated_block_ids):
+                self._load_failed_req_ids.add(req_id)
+                logger.warning(
+                    "Request %s: KV load from LMCache failed, recomputing "
+                    "instead of loading it again",
+                    req_id,
+                )
+
     def request_finished(
         self,
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
+        self._load_failed_req_ids.discard(request.request_id)
         # Layerwise save uses request-scoped generators. If request finishes
         # without entering wait_for_save (abort/error/evict path), make sure
         # we release the generator entry to avoid leaking state.

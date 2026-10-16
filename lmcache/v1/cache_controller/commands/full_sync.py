@@ -39,6 +39,12 @@ class FullSyncCommand(HeartbeatCommand, tag="full_sync"):
         )
 
         sender = worker._get_full_sync_sender()
+        if sender is None:
+            # Storage is not created yet, so nothing is cached. The controller
+            # requests the sync again on later heartbeats while it still needs
+            # one, and incremental events are applied in the meantime.
+            logger.info("Storage is not initialized yet, skipping full sync")
+            return
 
         # Check if full sync is already in progress
         if sender.is_syncing:
