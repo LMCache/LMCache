@@ -264,6 +264,7 @@ class TestRdmaTransfers:
             }
         )
         adapter = create_l2_adapter_from_registry(config, arena.desc)
+        assert isinstance(adapter, ValkeyL2Adapter)
         try:
             key = _key(6)
             assert _store(adapter, [key], [arena.alloc()]).is_successful()
