@@ -654,3 +654,38 @@ class TestSubmitPutTask:
         memory_obj.get_physical_size.assert_not_called()
         memory_obj.ref_count_up.assert_not_called()
         callback.assert_not_called()
+
+
+class TestInternalEvictionCachePolicyUpdate:
+    """Internal evictions must keep the cache policy in sync with the dict."""
+
+    def test_lfu_selects_next_candidate_after_internal_eviction(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ) -> None:
+        config = create_test_config(temp_disk_path)
+        config.cache_policy = "LFU"
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device=f"{torch_device_type}:0",
+        )
+        keys = [create_test_key(key_id) for key_id in range(2)]
+
+        with backend.disk_lock:
+            for key_id, key in enumerate(keys):
+                path = os.path.join(temp_disk_path, f"evict_{key_id}.pt")
+                with open(path, "wb") as f:
+                    f.write(b"\0")
+                backend.dict[key] = DiskCacheMetadata(path=path, size=1)
+                backend.cache_policy.update_on_put(key)
+
+            evict_keys = backend.cache_policy.get_evict_candidates(
+                backend.dict, num_candidates=1
+            )
+            assert evict_keys == [keys[0]]
+            backend.batched_remove(evict_keys, force=False)
+
+            assert backend.cache_policy.get_evict_candidates(
+                backend.dict, num_candidates=1
+            ) == [keys[1]]
