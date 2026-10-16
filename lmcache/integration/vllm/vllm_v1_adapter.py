@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections.abc import Iterable
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import math
 import os
 import sys
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 
 # Third Party
 from vllm.config import (
@@ -31,11 +31,12 @@ import torch
 from lmcache import utils
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.utils import (
-    ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
+    ENGINE_NAME,
     extract_mm_features,
     extract_request_configs_from_sampling_params,
     lmcache_get_or_create_config,
+    set_dp_rank_controller_identity,
 )
 from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.logging import init_logger
@@ -468,6 +469,7 @@ class LMCacheConnectorV1Impl:
             "LMCache v1 configuration is should be passed for vLLM v1."
         )
         self._apply_extra_config(config, vllm_config)
+        set_dp_rank_controller_identity(config, vllm_config)
         self.config = config
 
         service_factory = VllmServiceFactory(config, vllm_config, role.name.lower())
