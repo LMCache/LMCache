@@ -84,22 +84,40 @@ class KVLoadPolicy(ABC):
 
 
 class DefaultKVLoadPolicy(KVLoadPolicy):
-    """Serves every lookup unless the request sets ``lmcache.skip_load``.
+    """Serves every lookup worth serving.
 
-    The engine integration forwards the flag from the client request, e.g.
-    ``{"lmcache.skip_load": true}`` in the request's transfer params.
+    Declines when the request sets ``lmcache.skip_load`` (forwarded from the
+    client's transfer params), or when the engine's own prefix cache leaves
+    at most one chunk to load: the engine recomputes such a tail faster than
+    the server can look it up, lock it, and deliver it. The possible load is
+    bounded by ``num_lookup_tokens`` minus the engine's prefix-cache hit
+    (``lmcache.hint.engine_computed_tokens``, floored to chunks); a request
+    without the hint is always served.
+
+    A fully covered lookup (nothing could load) is also served: it fetches
+    nothing anyway, and its reported hit keeps the engine's stored-token
+    accounting from re-offloading the prompt.
     """
 
     def should_load(self, ctx: KVLoadContext) -> bool:
-        """Return False only when the request asked to skip loading.
+        """Return whether this lookup is worth serving.
 
         Args:
             ctx: The lookup being decided.
 
         Returns:
-            Whether the request did not set ``lmcache.skip_load``.
+            False when the request asked to skip loading, or when at most
+            one chunk beyond the engine's prefix-cache hit could load.
         """
-        return not (ctx.request_configs or {}).get("lmcache.skip_load", False)
+        configs = ctx.request_configs or {}
+        if configs.get("lmcache.skip_load", False):
+            return False
+        hint = int(configs.get("lmcache.hint.engine_computed_tokens", 0))
+        covered = hint // ctx.chunk_size * ctx.chunk_size
+        if covered <= 0:
+            return True
+        remaining = ctx.num_lookup_tokens - covered
+        return remaining <= 0 or remaining > ctx.chunk_size
 
 
 _BUILTIN_POLICIES: dict[str, type[KVLoadPolicy]] = {
