@@ -7,7 +7,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 import hashlib
 import time
 
@@ -547,18 +547,26 @@ class ServerBenchClient:
         request: RequestContext,
         start_token: int,
         token_count: int,
-    ) -> list[str] | None:
-        """Compute checksums for a request range.
+        *,
+        operation: Literal["store", "retrieve"],
+    ) -> dict[int, list[str]] | None:
+        """Compute per-receiver checksums for a request range.
 
         Data mode hashes local tensors; handle mode queries the Server.
+        Store checksums provide the reference for a subsequent retrieve:
+        MLA receivers share rank 0's reference, while other TP ranks use
+        their own writer's reference.
 
         Args:
             request: Request to hash.
             start_token: Start offset in the request.
             token_count: Number of tokens.
+            operation: ``"store"`` hashes writers before STORE;
+                ``"retrieve"`` hashes receivers after RETRIEVE.
 
         Returns:
-            One digest per chunk, or ``None`` if unavailable.
+            Receiver rank to per-chunk digests, or ``None`` for an empty
+            range or if any required checksum is unavailable.
 
         Raises:
             RuntimeError: If the client is not started.
@@ -577,46 +585,65 @@ class ServerBenchClient:
 
         block_offset = request.block_offset + (start_token // self._block_size)
         num_blocks = token_count // self._block_size
-        checksums: list[str] | None
-        if self._config.uses_handle_transfer:
-            if not self._config.http_url or not self._workers:
-                return None
-            checksums = _query_checksum(
-                self._config.http_url.rstrip("/"),
-                block_offset,
-                num_blocks,
-                self._block_size,
-                self._chunk_size,
-                instance_id=self._workers[0].spec.instance_id,
+        workers = [
+            worker
+            for worker in self._workers
+            if (
+                worker.spec.store_enabled
+                if operation == "store"
+                else worker.spec.retrieve_enabled
             )
-        else:
-            parts: list[str] = []
-            for worker in self._workers:
-                if not worker.spec.store_enabled:
-                    continue
-                parts.extend(
-                    _compute_client_checksums(
-                        list(worker.kv_caches.values()),
-                        block_offset,
-                        num_blocks,
-                        self._block_size,
-                        self._chunk_size,
-                    )
+        ]
+        checksums: dict[int, list[str]] = {}
+        for worker in workers:
+            if self._config.uses_handle_transfer:
+                if not self._config.http_url:
+                    return None
+                parts = _query_checksum(
+                    self._config.http_url.rstrip("/"),
+                    block_offset,
+                    num_blocks,
+                    self._block_size,
+                    self._chunk_size,
+                    instance_id=worker.spec.instance_id,
                 )
-            checksums = parts or None
+            else:
+                parts = _compute_client_checksums(
+                    list(worker.kv_caches.values()),
+                    block_offset,
+                    num_blocks,
+                    self._block_size,
+                    self._chunk_size,
+                )
+            if not parts:
+                return None
+            checksums[worker.spec.rank] = parts
+
+        if operation == "store":
+            writer_checksums = {
+                worker.spec.kv_worker_id: checksums[worker.spec.rank]
+                for worker in workers
+            }
+            checksums = {
+                worker.spec.rank: writer_checksums[worker.spec.kv_worker_id]
+                for worker in self._workers
+                if worker.spec.retrieve_enabled
+            }
 
         if checksums:
-            digest = hashlib.md5("".join(checksums).encode()).hexdigest()[:16]
+            all_chunks = [digest for parts in checksums.values() for digest in parts]
+            digest = hashlib.md5("".join(all_chunks).encode()).hexdigest()[:16]
             self._log(
-                "  [seq %d/%s] CHECKSUM: %s (%d chunks)"
+                "  [seq %d/%s] CHECKSUM: %s (%d ranks, %d chunks)"
                 % (
                     request.sequence_id,
                     request.request_kind,
                     digest,
                     len(checksums),
+                    len(all_chunks),
                 )
             )
-        return checksums
+        return checksums or None
 
     def end_session(self, request: RequestContext) -> None:
         """End the request's Server-side session."""

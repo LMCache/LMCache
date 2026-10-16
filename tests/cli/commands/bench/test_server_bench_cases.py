@@ -57,7 +57,7 @@ def _client(cold_checksum: str, warm_checksum: str) -> MagicMock:
         LookupResult(0, 1, 1.0),
         LookupResult(1, 1, 1.5),
     ]
-    client.compute_checksums.side_effect = [[cold_checksum], [warm_checksum]]
+    client.compute_checksums.side_effect = [{0: [cold_checksum]}, {0: [warm_checksum]}]
     client.retrieve.side_effect = [None, _transfer("retrieve")]
     client.store.side_effect = [_transfer("store"), None]
     return client
@@ -86,14 +86,16 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
     assert meaningful_calls == [
         call.create_request(0, request_id="req-0-cold", request_kind="cold"),
         call.lookup(cold),
-        call.compute_checksums(cold, start_token=0, token_count=2),
+        call.compute_checksums(cold, start_token=0, token_count=2, operation="store"),
         call.store(cold, start_token=0, token_count=2),
         call.end_session(cold),
         call.create_request(0, request_id="req-0-warm", request_kind="warm"),
         call.lookup(warm),
         call.zero_destination(warm, start_token=0, token_count=2),
         call.retrieve(warm, start_token=0, token_count=2),
-        call.compute_checksums(warm, start_token=0, token_count=2),
+        call.compute_checksums(
+            warm, start_token=0, token_count=2, operation="retrieve"
+        ),
         call.end_session(warm),
     ]
     assert result.completed_runs == 1

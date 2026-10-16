@@ -1286,10 +1286,11 @@ Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
        --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
        --tp-size 2
 
-The bench's client-side checksum aggregates writer-rank bytes only,
-so a cold-vs-warm mismatch pinpoints the exact rank whose round trip
-went wrong -- useful for verifying that a new server-side change
-handles per-rank ``instance_id`` routing correctly.
+The bench checks every receiving rank against the data captured before
+``STORE``. For MLA, all ranks use rank 0's checksum as the reference;
+for non-MLA, each rank uses its own shard's checksum. Engine-driven mode
+hashes local tensors, while handle mode queries each worker's checksum
+through its ``instance_id``. Mismatch output includes the rank and chunk.
 
 See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
