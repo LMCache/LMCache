@@ -347,6 +347,7 @@ def run_cache_server(
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
         session_ttl_seconds=mp_config.session_ttl_seconds,
+        trace_collect=obs_config.trace_collect,
     )
 
     components = _build_server_components(ctx, mp_config, coordinator_config)

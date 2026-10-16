@@ -7,6 +7,7 @@ from unittest.mock import patch
 import time
 
 # Third Party
+from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -882,3 +883,111 @@ class TestTierAttributionAttributes:
         assert root.attributes["early_exit_reason"] == reason
         assert root.attributes["l1_hit_rate"] == 0.0
         assert root.attributes["l2_hit_rate"] == 0.0
+
+
+class TestRequestTraceSpan:
+    """With trace collection enabled, an ``MP_LOOKUP`` whose ``token_ids`` is
+    non-empty becomes a zero-duration ``mp.request.trace`` span under the
+    root request span."""
+
+    _TOKEN_IDS = (5, 6, 7, 8)
+
+    def test_not_subscribed_by_default(self, registry):
+        subs = MPServerTracingSubscriber(registry).get_subscriptions()
+        assert EventType.MP_LOOKUP not in subs
+
+    def test_subscribed_when_trace_collect(self, registry):
+        subs = MPServerTracingSubscriber(registry, trace_collect=True)
+        assert EventType.MP_LOOKUP in subs.get_subscriptions()
+
+    @staticmethod
+    def _drive(
+        exporter,
+        sid: str,
+        token_ids: tuple[int, ...],
+        *,
+        registry: SpanRegistry | None = None,
+        plain_request: bool = True,
+    ) -> dict:
+        """Publish one lookup for *sid* and return finished spans by name.
+
+        Args:
+            registry: Shared registry; pass one to pre-open a root span.
+            plain_request: Bracket the lookup with ``MP_REQUEST_START`` and
+                ``MP_REQUEST_END`` as the plain lookup path does.
+        """
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = registry if registry is not None else SpanRegistry()
+        bus.register_subscriber(MPServerTracingSubscriber(registry, trace_collect=True))
+        bus.start()
+        try:
+            if plain_request:
+                bus.publish(
+                    Event(event_type=EventType.MP_REQUEST_START, session_id=sid)
+                )
+            bus.publish(
+                Event(
+                    event_type=EventType.MP_LOOKUP,
+                    session_id=sid,
+                    metadata={
+                        "request_id": sid,
+                        "chunk_hashes": [b"h"],
+                        "model_name": "m",
+                        "chunk_size": 256,
+                        "seq_len": len(token_ids),
+                        "dtypes": [],
+                        "shapes": [],
+                        "token_ids": token_ids,
+                    },
+                )
+            )
+            if plain_request:
+                bus.publish(Event(event_type=EventType.MP_REQUEST_END, session_id=sid))
+            time.sleep(0.2)
+        finally:
+            bus.stop()
+        return {s.name: s for s in exporter.get_finished_spans()}
+
+    def test_blend_lookup_nests_under_cb_root_without_creating_request(self, exporter):
+        """A blend request's root is ``cb.request``; no ``request`` root may
+        be opened for it, since nothing on the blend path would close it."""
+        sid = "req-blend"
+        registry = SpanRegistry()
+        cb_root = mp_server_module._tracer.start_span("cb.request")
+        registry.open(sid, "cb.request", cb_root, trace.set_span_in_context(cb_root))
+
+        spans = self._drive(
+            exporter, sid, self._TOKEN_IDS, registry=registry, plain_request=False
+        )
+
+        assert registry.get(sid, "request") is None
+        assert spans["mp.request.trace"].parent.span_id == cb_root.context.span_id
+        cb_root.end()
+
+    def test_lookup_without_any_root_is_parentless(self, exporter):
+        sid = "req-orphan"
+        registry = SpanRegistry()
+
+        spans = self._drive(
+            exporter, sid, self._TOKEN_IDS, registry=registry, plain_request=False
+        )
+
+        assert registry.get(sid, "request") is None
+        assert spans["mp.request.trace"].parent is None
+
+    def test_empty_token_ids_emits_no_span(self, exporter):
+        spans = self._drive(exporter, "req-repeat", ())
+        assert "request" in spans
+        assert "mp.request.trace" not in spans
+
+    def test_span_carries_prompt_under_root(self, exporter):
+        sid = "req-trace"
+        spans = self._drive(exporter, sid, self._TOKEN_IDS)
+        trace_span = spans["mp.request.trace"]
+        root = spans["request"]
+        assert trace_span.parent.span_id == root.context.span_id
+        assert trace_span.attributes["session_id"] == sid
+        assert trace_span.attributes["lmcache.model"] == "m"
+        assert trace_span.attributes["lmcache.input_ids"] == self._TOKEN_IDS
+        assert trace_span.start_time == trace_span.end_time
+        assert root.start_time <= trace_span.start_time

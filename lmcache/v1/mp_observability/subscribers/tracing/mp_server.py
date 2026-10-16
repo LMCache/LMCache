@@ -69,7 +69,15 @@ class MPServerTracingSubscriber(EventSubscriber):
         EventType.MP_LOOKUP_PREFETCH_START: "lookup_prefetch",
     }
 
-    def __init__(self, registry: SpanRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: SpanRegistry | None = None,
+        trace_collect: bool = False,
+    ) -> None:
+        # Prompt token ids leave the server only when the operator asked for
+        # them: ``MP_LOOKUP`` carries them when trace collection is on.
+        self._trace_collect = trace_collect
+
         # Shared span registry.  When a registry is provided, other subscribers
         # that share the same instance can look up the root "request" span or
         # any child span ("store", "retrieve", "lookup_prefetch") as a parent
@@ -98,7 +106,7 @@ class MPServerTracingSubscriber(EventSubscriber):
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         """Return the event-to-callback mapping for this subscriber."""
-        return {
+        subscriptions: dict[EventType, EventCallback] = {
             EventType.MP_REQUEST_START: self._on_request_start,
             EventType.MP_STORE_SUBMITTED: self._on_store_submitted,
             EventType.MP_RETRIEVE_SUBMITTED: self._on_retrieve_submitted,
@@ -110,6 +118,9 @@ class MPServerTracingSubscriber(EventSubscriber):
             EventType.MP_LOOKUP_PREFETCH_START: self._on_start,
             EventType.MP_LOOKUP_PREFETCH_END: self._on_end,
         }
+        if self._trace_collect:
+            subscriptions[EventType.MP_LOOKUP] = self._on_lookup
+        return subscriptions
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -149,6 +160,43 @@ class MPServerTracingSubscriber(EventSubscriber):
         if not _HAS_OTEL:
             return
         self._get_or_create_request_span(event.session_id, event.timestamp)
+
+    def _on_lookup(self, event: Event) -> None:
+        """Emit the request's prompt as a zero-duration child of the root span.
+
+        Only lookups whose ``token_ids`` is non-empty produce a span: the
+        producer leaves it empty on repeat lookups of the same request.
+        The span starts and ends at the event timestamp so it exports on the
+        next batch instead of holding the prompt until the request finishes.
+        ``lmcache.input_ids`` carries the prompt token ids and
+        ``lmcache.model`` the model name; the timestamp is the span's own
+        start time.
+
+        The span nests under whichever root the request already has: the
+        ``"request"`` root of a plain lookup or the ``"cb.request"`` root of
+        a blend lookup. No root is created here, since only the owning
+        subscriber closes it.
+
+        Args:
+            event: ``MP_LOOKUP`` event with ``token_ids`` and ``model_name``
+                metadata.
+        """
+        if not _HAS_OTEL or not event.metadata["token_ids"]:
+            return
+        sid = event.session_id
+        root_ctx = self._registry.get_context(sid, "request")
+        if root_ctx is None:
+            root_ctx = self._registry.get_context(sid, "cb.request")
+        ts = int(event.timestamp * 1e9)
+        span = _tracer.start_span(
+            "mp.request.trace",
+            context=root_ctx,
+            start_time=ts,
+        )
+        span.set_attribute("session_id", sid)
+        span.set_attribute("lmcache.model", event.metadata["model_name"])
+        span.set_attribute("lmcache.input_ids", event.metadata["token_ids"])
+        span.end(end_time=ts)
 
     def _on_store_submitted(self, event: Event) -> None:
         """Increment the in-flight store counter for the session.

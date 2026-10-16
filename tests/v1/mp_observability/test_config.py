@@ -127,3 +127,30 @@ class TestExtraLoggingRegistration:
         )
         messages = self._drive_bus(config)
         assert messages == []
+
+
+class TestTraceCollectArgs:
+    def test_default_off(self):
+        config = _parse([])
+        assert config.trace_collect is False
+        assert config.tracing_enabled is False
+
+    def test_implies_tracing(self):
+        config = _parse(["--trace-collect", "--otlp-endpoint", "http://c:4317"])
+        assert config.trace_collect is True
+        assert config.tracing_enabled is True
+
+    def test_requires_otlp_endpoint(self):
+        with pytest.raises(ValueError, match="trace-collect requires --otlp"):
+            _parse(["--trace-collect"])
+
+    def test_conflicts_with_disabled_observability(self):
+        with pytest.raises(ValueError, match="trace-collect requires the"):
+            _parse(
+                [
+                    "--trace-collect",
+                    "--otlp-endpoint",
+                    "http://c:4317",
+                    "--disable-observability",
+                ]
+            )
