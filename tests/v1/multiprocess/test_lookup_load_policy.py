@@ -194,8 +194,6 @@ def test_default_policy_skips_single_chunk_loads(
     ctx = _ctx()
     module = LookupModule(ctx)
 
-    module.lookup(
-        _key({"lmcache.hint.engine_computed_tokens": hint_tokens}), tp_size=1
-    )
+    module.lookup(_key({"lmcache.hint.engine_computed_tokens": hint_tokens}), tp_size=1)
 
     assert ctx.storage_manager.submit_prefetch_task.called is prefetched
