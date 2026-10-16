@@ -8,6 +8,7 @@ C++ IStorageConnector interface, so no Redis or C++ build is needed.
 
 # Standard
 from types import ModuleType
+from unittest.mock import MagicMock
 import ctypes
 import os
 import select
@@ -20,6 +21,7 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
     _obj_to_memoryview,
@@ -1238,6 +1240,25 @@ class TestDeleteInterface:
     def test_delete_nonexistent_key(self, adapter):
         key = create_object_key(999)
         adapter.delete([key])  # should not raise
+
+    def test_delete_reports_keys_stored_by_another_process(self):
+        """In a shared pool, a key this adapter never stored can still be
+        deleted through it; listeners, including the coordinator's event
+        stream, must hear of it."""
+        client = MockNativeConnector()
+        key = create_object_key(1)
+        client.submit_batch_set(
+            [_object_key_to_string(key)], [memoryview(bytearray(16))]
+        )
+        client.drain_completions()
+        adp = NativeConnectorL2Adapter(client)
+        listener = MagicMock(spec=L2AdapterListener)
+        adp.register_listener(listener)
+        try:
+            adp.delete([key])
+        finally:
+            adp.close()
+        listener.on_l2_keys_deleted.assert_called_once_with([key])
 
     def test_delete_empty_keys(self, adapter):
         adapter.delete([])  # should not raise
