@@ -7,12 +7,29 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
 
 **Required fields:**
 
-- ``s3_endpoint``: Bucket URL -- either ``"s3://<bucket>"`` or the bare host form
-  (used for non-AWS endpoints).
+- ``s3_endpoint``: Bucket URL, optionally prefixed with ``s3://``. The form
+  depends on ``s3_addressing_style``:
+
+  - virtual-hosted (default): ``"<bucket>.<host>[:port]"``, e.g.
+    ``"my-bucket.s3.us-west-2.amazonaws.com"``
+  - path-style: ``"<host>[:port]/<bucket>"``, e.g. ``"minio.local:9000/kv-cache"``
+
+  Requests are sent to the host part of this value, so it must name a
+  reachable server.
 - ``s3_region``: AWS region string (e.g. ``"us-west-2"``).
 
 **Optional fields:**
 
+- ``s3_addressing_style`` (``"virtual"`` or ``"path"``, default ``"virtual"``):
+  Where the bucket goes in each request. ``"virtual"`` puts it in the Host
+  header; ``"path"`` puts it in the URL path (``/<bucket>/<object>``). AWS
+  accepts both. MinIO only routes virtual-hosted requests when the server
+  sets ``MINIO_DOMAIN`` to the endpoint's base domain; without it, MinIO
+  reads the first path segment of the object name as the bucket and every
+  store fails with ``NoSuchBucket`` (or ``InvalidBucketName`` when the model
+  name has no ``/``; lookups just miss). Use ``"path"`` for MinIO, Ceph RGW,
+  and other S3-compatible servers unless they are set up for virtual
+  hosting. Incompatible with ``s3_enable_s3express``.
 - ``s3_num_io_threads`` (int, default ``64``): Number of CRT I/O threads.
 - ``s3_prefer_http2`` (bool, default ``true``): Negotiate HTTP/2 via ALPN.
 - ``s3_enable_s3express`` (bool, default ``false``): Enable S3 Express signing
@@ -31,10 +48,46 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
 .. code-block:: bash
 
     # AWS S3 with default credentials
-    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2"}'
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket.s3.us-west-2.amazonaws.com", "s3_region": "us-west-2"}'
 
     # Static credentials, HTTP/2 disabled
-    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2", "s3_prefer_http2": false, "aws_access_key_id": "AKIA...", "aws_secret_access_key": "..."}'
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket.s3.us-west-2.amazonaws.com", "s3_region": "us-west-2", "s3_prefer_http2": false, "aws_access_key_id": "AKIA...", "aws_secret_access_key": "..."}'
 
-    # Local MinIO over plain HTTP
-    --l2-adapter '{"type": "s3", "s3_endpoint": "minio.local:9000", "s3_region": "us-east-1", "disable_tls": true, "aws_access_key_id": "minio", "aws_secret_access_key": "minio123"}'
+    # Local MinIO over plain HTTP, bucket "kv-cache" (path-style)
+    --l2-adapter '{"type": "s3", "s3_endpoint": "minio.local:9000/kv-cache", "s3_addressing_style": "path", "s3_region": "us-east-1", "disable_tls": true, "aws_access_key_id": "minio", "aws_secret_access_key": "minio123"}'
+
+**Troubleshooting:**
+
+Failures that point at a bad configuration are logged with the HTTP status
+and S3 error code, e.g.
+``PutObject HTTP 404 NoSuchBucket: The specified bucket does not exist``.
+
+The adapter disables itself after three consecutive connection errors or
+misconfigured stores, and logs an ERROR with a remediation hint; restart
+the server after fixing the config. A store counts as misconfigured when
+S3 rejects the PUT with ``NoSuchBucket``, ``InvalidBucketName``,
+``InvalidAccessKeyId`` or ``SignatureDoesNotMatch``. Only PUTs are checked: lookups use HEAD
+requests, whose responses carry no error code, so a missing bucket looks
+like a cache miss to a lookup and is only caught once a store runs.
+
+Other client errors (e.g. ``AccessDenied``, ``ExpiredToken``,
+``RequestTimeTooSkewed``) do not disable the adapter. Each distinct one is
+logged once at WARNING, and repeats at DEBUG. Server errors and throttling
+(5xx, ``SlowDown``) are logged at DEBUG only.
+
+- ``NoSuchBucket`` naming a bucket you did not configure (e.g. the model
+  name's prefix), or ``InvalidBucketName``: the server is treating the
+  request as path-style. Set ``"s3_addressing_style": "path"``, or
+  ``MINIO_DOMAIN`` on MinIO. For objects large enough to be uploaded in
+  parts, MinIO reports this case as HTTP 400 ``BadRequest`` on
+  ``CreateMultipartUpload`` instead; that code is too generic to disable
+  the adapter, so it is only logged as a WARNING.
+- ``InvalidAccessKeyId`` or ``SignatureDoesNotMatch``: check
+  ``aws_access_key_id``, ``aws_secret_access_key`` and ``s3_region``.
+- HTTP 403 on ``HeadObject``: S3 returns 403 instead of 404 for a missing
+  key when the credentials lack ``s3:ListBucket``. Lookups treat it as a
+  miss, so the adapter keeps working; grant ``s3:ListBucket`` to silence
+  the warning. If stores also fail with a credentials error, the
+  credentials themselves are wrong.
+- ``AccessDenied`` on ``PutObject`` or ``GetObject``: check the bucket
+  policy and the credentials' IAM permissions.

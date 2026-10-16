@@ -8,6 +8,7 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 
 # Standard
 from concurrent.futures import Future as ConcurrentFuture
+import logging
 import select
 import threading
 import time
@@ -48,6 +49,16 @@ class _FakeBackend:
         # When non-None, every request raises with this message
         # (used to simulate network failures for the circuit-breaker test).
         self._inject_error: str | None = None
+        # When non-None, every request fails the way awscrt reports a
+        # non-2xx response: ``S3ResponseError`` carrying status + body.
+        # (status, S3 error code, raw body or None to build an XML body,
+        # operation name reported for failed PUTs).
+        self._inject_response: tuple[int, str, bytes | None, str] | None = None
+        # Bucket path segment the adapter is expected to send under
+        # path-style addressing ("" for virtual-hosted).
+        self.path_prefix = ""
+        # (method, path, Host header) of every request, in order.
+        self.requests: list[tuple[str, str, str]] = []
         self._put_count = 0
         self._get_count = 0
         self._delete_count = 0
@@ -57,6 +68,9 @@ class _FakeBackend:
         with self._lock:
             self._data.clear()
             self._inject_error = None
+            self._inject_response = None
+            self.path_prefix = ""
+            self.requests = []
             self._put_count = self._get_count = 0
             self._delete_count = self._head_count = 0
 
@@ -80,6 +94,23 @@ class _FakeBackend:
         with self._lock:
             self._inject_error = msg
 
+    def set_response_error(
+        self,
+        status: int | None,
+        code: str = "",
+        body: bytes | None = None,
+        put_operation: str = "PutObject",
+    ):
+        """Fail every request with HTTP ``status`` and S3 error ``code``
+        (``None`` clears the injection). ``body`` replaces the XML error
+        body, e.g. to mimic a proxy's HTML error page. ``put_operation`` is
+        the operation awscrt names for a failed PUT; large objects are
+        uploaded in parts and fail as e.g. ``CreateMultipartUpload``."""
+        with self._lock:
+            self._inject_response = (
+                None if status is None else (status, code, body, put_operation)
+            )
+
     def counts(self) -> dict[str, int]:
         with self._lock:
             return {
@@ -95,11 +126,39 @@ _BACKEND = _FakeBackend()
 
 def _path_to_key(path: str) -> str:
     # Adapter uses url-encoded key in path; "@" is %-encoded. Reverse by
-    # unquoting.  Simpler: path always starts with "/", strip it, unquote.
+    # stripping the bucket segment (path-style only) and the leading "/",
+    # then unquoting.
     # Standard
     from urllib.parse import unquote
 
-    return unquote(path.lstrip("/"))
+    assert path.startswith(_BACKEND.path_prefix + "/"), path
+    return unquote(path[len(_BACKEND.path_prefix) + 1 :])
+
+
+def _make_response_error(
+    status: int, code: str, operation_name: str, raw_body: bytes | None = None
+) -> "s3mod.s3.S3ResponseError":
+    """Build the exception awscrt sets on ``finished_future`` for a non-2xx
+    response. HEAD responses have no body, mirroring real S3."""
+    body = None
+    if operation_name == "HeadObject":
+        pass
+    elif raw_body is not None:
+        body = raw_body
+    elif code:
+        body = (
+            f'<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>{code}</Code>'
+            f"<Message>mock {code}</Message></Error>"
+        ).encode()
+    return s3mod.s3.S3ResponseError(
+        code=14343,
+        name="AWS_ERROR_S3_INVALID_RESPONSE_STATUS",
+        message="Invalid response status from request",
+        status_code=status,
+        headers=[],
+        body=body,
+        operation_name=operation_name,
+    )
 
 
 def _build_list_objects_v2_response(
@@ -182,6 +241,20 @@ class _FakeS3Request:
         # Extract method + path from the HttpRequest
         method = request.method
         path = request.path
+        with _BACKEND._lock:
+            _BACKEND.requests.append((method, path, request.headers.get("Host")))
+
+        inject_response = _BACKEND._inject_response
+        if inject_response is not None:
+            status, code, raw_body, put_operation = inject_response
+            if operation_name is None:
+                operation_name = {"PUT": put_operation, "GET": "GetObject"}[method]
+            if on_headers is not None:
+                on_headers(status, [])
+            self.finished_future.set_exception(
+                _make_response_error(status, code, operation_name, raw_body)
+            )
+            return
 
         # ListObjectsV2 is dispatched as GET on the bucket root with a
         # ``?list-type=2&...`` query string — intercept before the
@@ -190,7 +263,7 @@ class _FakeS3Request:
         if (
             method == "GET"
             and operation_name == "ListObjectsV2"
-            and path.startswith("/?")
+            and path.startswith((_BACKEND.path_prefix or "/") + "?")
         ):
             prefix, max_keys, cont = _parse_list_query(path)
             xml = _build_list_objects_v2_response(_BACKEND, prefix, max_keys, cont)
@@ -668,6 +741,166 @@ class TestCircuitBreaker:
         bm = adapter.query_load_result(tid)
         assert bm is not None and bm.test(0) is False
 
+    @pytest.mark.parametrize(
+        "status, code",
+        [
+            (404, "NoSuchBucket"),
+            (400, "InvalidBucketName"),
+            (403, "InvalidAccessKeyId"),
+        ],
+    )
+    def test_trips_after_three_misconfigured_puts(self, adapter, status, code):
+        # A wrong bucket, addressing style, or credentials fails every
+        # PUT; the breaker should stop the adapter rather than keep
+        # uploading payloads that cannot land.
+        _BACKEND.set_response_error(status, code)
+        for i in range(3):
+            assert adapter.report_status()["connection_disabled"] is False
+            assert not _store_one(adapter, i)
+
+        assert adapter.report_status()["connection_disabled"] is True
+
+    def test_trips_on_misconfigured_multipart_upload(self, adapter):
+        # Objects above awscrt's multipart threshold (~8 MB, e.g. the
+        # ~15 MB KV chunks in LM-908) fail as CreateMultipartUpload rather
+        # than PutObject; they must still count as misconfigured PUTs.
+        _BACKEND.set_response_error(
+            404, "NoSuchBucket", put_operation="CreateMultipartUpload"
+        )
+        for i in range(3):
+            assert not _store_one(adapter, i)
+
+        assert adapter.report_status()["connection_disabled"] is True
+
+    @pytest.mark.parametrize("status, code", [(503, "SlowDown"), (403, "AccessDenied")])
+    def test_other_put_errors_do_not_trip(self, adapter, status, code):
+        # Throttling, and 403s that can be scoped to some keys or clear on
+        # their own, must not disable the adapter.
+        _BACKEND.set_response_error(status, code)
+        for i in range(5):
+            assert not _store_one(adapter, i)
+
+        assert adapter.report_status()["connection_disabled"] is False
+
+    @pytest.mark.parametrize("status", [403, 404])
+    def test_lookup_errors_are_misses_and_do_not_trip(self, adapter, status):
+        # HEAD responses carry no body: a 404 may be a missing bucket or a
+        # missing key, and S3 answers a missing key with 403 when the
+        # credentials lack s3:ListBucket. Both must read as plain misses.
+        _BACKEND.set_response_error(status)
+        for i in range(5):
+            tid = adapter.submit_lookup_and_lock_task(
+                [create_object_key(i)], {0: _EMPTY_LAYOUT}
+            )
+            wait_for_event_fd(adapter.get_lookup_and_lock_event_fd(), timeout=2.0)
+            bm = adapter.query_lookup_and_lock_result(tid)
+            assert bm is not None and bm.test(0) is False
+
+        assert adapter.report_status()["connection_disabled"] is False
+
+    def test_success_resets_failure_count(self, adapter):
+        _BACKEND.set_response_error(404, "NoSuchBucket")
+        assert not _store_one(adapter, 0)
+        assert not _store_one(adapter, 1)
+        assert adapter.report_status()["connection_failures"] == 2
+
+        _BACKEND.set_response_error(None)
+        assert _store_one(adapter, 2)
+        assert adapter.report_status()["connection_failures"] == 0
+
+        _BACKEND.set_response_error(404, "NoSuchBucket")
+        assert not _store_one(adapter, 3)
+        assert not _store_one(adapter, 4)
+        assert adapter.report_status()["connection_disabled"] is False
+
+
+def _store_one(adapter: S3L2Adapter, chunk_id: int) -> bool:
+    """Store one object and return whether the store task succeeded."""
+    tid = adapter.submit_store_task(
+        [create_object_key(chunk_id)], [create_memory_obj()]
+    )
+    wait_for_event_fd(adapter.get_store_event_fd(), timeout=2.0)
+    return adapter.pop_completed_store_tasks()[tid].is_successful()
+
+
+# =============================================================================
+# Error reporting
+# =============================================================================
+
+
+@pytest.fixture
+def adapter_log():
+    """Capture the adapter module's log records (its logger does not
+    propagate to the root logger, so pytest's caplog misses them)."""
+    records: list[logging.LogRecord] = []
+
+    class _Handler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Handler(level=logging.WARNING)
+    s3mod.logger.addHandler(handler)
+    yield records
+    s3mod.logger.removeHandler(handler)
+
+
+class TestErrorReporting:
+    def test_misconfigured_put_logs_status_code_and_hint(self, adapter, adapter_log):
+        _BACKEND.set_response_error(404, "NoSuchBucket")
+        assert not _store_one(adapter, 0)
+
+        errors = [r.getMessage() for r in adapter_log if r.levelno == logging.ERROR]
+        assert any("PutObject" in m for m in errors), errors
+        assert any("HTTP 404" in m for m in errors), errors
+        assert any("NoSuchBucket" in m for m in errors), errors
+        # The breaker log names the likely fix.
+        assert any("MINIO_DOMAIN" in m for m in errors), errors
+
+    def test_client_error_warns_once(self, adapter, adapter_log):
+        key = create_object_key(1)
+        assert _store_one(adapter, 1)
+
+        _BACKEND.set_response_error(403, "AccessDenied")
+        for _ in range(3):
+            tid = adapter.submit_load_task([key], [create_memory_obj()])
+            wait_for_event_fd(adapter.get_load_event_fd())
+            bm = adapter.query_load_result(tid)
+            assert bm is not None and bm.test(0) is False
+
+        warnings = [r.getMessage() for r in adapter_log]
+        assert len(warnings) == 1, warnings
+        assert "GetObject" in warnings[0]
+        assert "HTTP 403" in warnings[0]
+        assert "AccessDenied" in warnings[0]
+
+    def test_head_403_warning_explains_possible_causes(self, adapter, adapter_log):
+        _BACKEND.set_response_error(403)
+        adapter.submit_lookup_and_lock_task([create_object_key(1)], {0: _EMPTY_LAYOUT})
+        wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+
+        warnings = [r.getMessage() for r in adapter_log]
+        assert len(warnings) == 1, warnings
+        assert "HeadObject" in warnings[0]
+        assert "s3:ListBucket" in warnings[0]
+        assert "credentials may be invalid" in warnings[0]
+
+    def test_server_error_is_not_warned(self, adapter, adapter_log):
+        _BACKEND.set_response_error(503, "SlowDown")
+        assert not _store_one(adapter, 0)
+        assert adapter_log == []
+
+    def test_non_xml_error_body_reports_status_only(self, adapter):
+        # Proxies can answer with an HTML page instead of an S3 XML error;
+        # the message should still carry the operation and status.
+        _BACKEND.set_response_error(502, body=b"<html><body>Bad Gateway</body>")
+        with pytest.raises(RuntimeError, match=r"ListObjectsV2 HTTP 502$"):
+            adapter.list_l2_keys()
+
+    def test_list_failure_raises_runtime_error_with_status(self, adapter):
+        _BACKEND.set_response_error(403, "AccessDenied")
+        with pytest.raises(RuntimeError, match="HTTP 403 AccessDenied"):
+            adapter.list_l2_keys()
+
 
 # =============================================================================
 # Listener notifications
@@ -747,6 +980,73 @@ class TestConfig:
     def test_help_nonempty(self):
         assert isinstance(S3L2AdapterConfig.help(), str)
         assert "s3_endpoint" in S3L2AdapterConfig.help()
+        assert "s3_addressing_style" in S3L2AdapterConfig.help()
+
+    @pytest.mark.parametrize(
+        "fields, style, host, path_prefix",
+        [
+            ({"s3_endpoint": "s3://b.host"}, "virtual", "b.host", ""),
+            (
+                {
+                    "s3_endpoint": "s3://minio.local:9000/kv-cache",
+                    "s3_addressing_style": "path",
+                },
+                "path",
+                "minio.local:9000",
+                "/kv-cache",
+            ),
+        ],
+    )
+    def test_addressing_style_parses(self, fields, style, host, path_prefix):
+        # Omitting s3_addressing_style selects virtual-hosted; the s3://
+        # prefix is stripped from the endpoint the adapter reports.
+        cfg = S3L2AdapterConfig.from_dict(
+            {
+                "s3_region": "us-east-1",
+                "s3_num_io_threads": 1,
+                "s3_prefer_http2": False,
+                **fields,
+            }
+        )
+        assert cfg.s3_addressing_style == style
+        a = S3L2Adapter(cfg)
+        try:
+            status = a.report_status()
+        finally:
+            a.close()
+        assert status["addressing_style"] == style
+        assert status["endpoint"] == host + path_prefix
+
+    @pytest.mark.parametrize(
+        "endpoint, style, match",
+        [
+            ("minio.local:9000/kv-cache", "virtual", "s3_addressing_style"),
+            ("minio.local:9000", "path", "path-style"),
+            ("minio.local:9000/", "path", "path-style"),
+            ("minio.local:9000/a/b", "path", "path-style"),
+            ("b.host", "auto", "s3_addressing_style"),
+        ],
+    )
+    def test_endpoint_must_match_addressing_style(self, endpoint, style, match):
+        with pytest.raises(ValueError, match=match):
+            S3L2AdapterConfig.from_dict(
+                {
+                    "s3_endpoint": endpoint,
+                    "s3_region": "us-east-1",
+                    "s3_addressing_style": style,
+                }
+            )
+
+    def test_s3express_requires_virtual_hosted(self):
+        with pytest.raises(ValueError, match="s3_enable_s3express"):
+            S3L2AdapterConfig.from_dict(
+                {
+                    "s3_endpoint": "host/bucket",
+                    "s3_region": "us-east-1",
+                    "s3_addressing_style": "path",
+                    "s3_enable_s3express": True,
+                }
+            )
 
 
 # =============================================================================
@@ -902,3 +1202,78 @@ class TestS3L2AdapterListKeys:
             page.entries[0].key
             == create_object_key(0, model_name="m").to_encoded_object_key()
         )
+
+
+# =============================================================================
+# Addressing style
+# =============================================================================
+
+
+def _make_adapter(endpoint: str, addressing_style: str) -> S3L2Adapter:
+    return S3L2Adapter(
+        S3L2AdapterConfig(
+            s3_endpoint=endpoint,
+            s3_region="us-east-1",
+            s3_addressing_style=addressing_style,
+            s3_prefer_http2=False,
+            s3_num_io_threads=1,
+        )
+    )
+
+
+def _roundtrip(adapter: S3L2Adapter, key: ObjectKey) -> None:
+    adapter.submit_store_task([key], [create_memory_obj(fill_value=7.0)])
+    wait_for_event_fd(adapter.get_store_event_fd())
+    assert all(r.is_successful() for r in adapter.pop_completed_store_tasks().values())
+
+    tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
+    wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+    bm = adapter.query_lookup_and_lock_result(tid)
+    assert bm is not None and bm.test(0)
+
+    dst = create_memory_obj(fill_value=0.0)
+    tid = adapter.submit_load_task([key], [dst])
+    wait_for_event_fd(adapter.get_load_event_fd())
+    bm = adapter.query_load_result(tid)
+    assert bm is not None and bm.test(0)
+    assert torch.allclose(dst.tensor, torch.full((16,), 7.0))
+
+
+class TestAddressingStyle:
+    def test_virtual_hosted_puts_bucket_in_host(self):
+        a = _make_adapter("s3://kv-cache.minio.local:9000", "virtual")
+        try:
+            key = create_object_key(1, model_name="org/model")
+            _roundtrip(a, key)
+            page = a.list_l2_keys(model_name="org/model")
+        finally:
+            a.close()
+
+        assert [e.key for e in page.entries] == [key.to_encoded_object_key()]
+        assert {host for _, _, host in _BACKEND.requests} == {
+            "kv-cache.minio.local:9000"
+        }
+        object_paths = [p for _, p, _ in _BACKEND.requests[:-1]]
+        assert all(p.startswith("/org/model%40") for p in object_paths), object_paths
+        assert _BACKEND.requests[-1][1].startswith("/?list-type=2")
+
+    def test_path_style_puts_bucket_in_path(self):
+        _BACKEND.path_prefix = "/kv-cache"
+        a = _make_adapter("s3://minio.local:9000/kv-cache", "path")
+        try:
+            key = create_object_key(1, model_name="org/model")
+            _roundtrip(a, key)
+            page = a.list_l2_keys(model_name="org/model")
+            status = a.report_status()
+        finally:
+            a.close()
+
+        assert status["addressing_style"] == "path"
+        assert status["endpoint"] == "minio.local:9000/kv-cache"
+        assert [e.key for e in page.entries] == [key.to_encoded_object_key()]
+        assert {host for _, _, host in _BACKEND.requests} == {"minio.local:9000"}
+        object_paths = [p for _, p, _ in _BACKEND.requests[:-1]]
+        assert all(p.startswith("/kv-cache/org/model%40") for p in object_paths), (
+            object_paths
+        )
+        assert _BACKEND.requests[-1][1].startswith("/kv-cache?list-type=2")
