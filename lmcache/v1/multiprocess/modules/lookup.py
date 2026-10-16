@@ -283,7 +283,7 @@ class LookupModule(DiscoverableModule):
                         "seq_len": len(key.token_ids),
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],
-                        "token_ids": self._ctx.trace_token_ids(key),
+                        "token_ids": key.token_ids,
                     },
                 )
             )

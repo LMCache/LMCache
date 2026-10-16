@@ -55,8 +55,8 @@ class ObservabilityConfig:
     tracing_enabled: bool = False
     """Register span subscribers (OTel traces)."""
 
-    trace_collect: bool = False
-    """Emit one ``mp.request.trace`` span per request carrying its prompt
+    token_trace_enabled: bool = False
+    """Emit one ``mp.request.trace`` span per lookup carrying the prompt
     token ids, for offline workload analysis.  Requires
     :attr:`tracing_enabled` and :attr:`otlp_endpoint`."""
 
@@ -166,11 +166,11 @@ def add_observability_args(
         help="Enable span subscribers (OTel traces). Disabled by default.",
     )
     group.add_argument(
-        "--trace-collect",
+        "--enable-token-trace",
         action="store_true",
         default=False,
         help=(
-            "Emit one mp.request.trace span per request carrying its prompt "
+            "Emit one mp.request.trace span per lookup carrying the prompt "
             "token ids, for offline workload analysis. Implies "
             "--enable-tracing and requires --otlp-endpoint."
         ),
@@ -341,8 +341,8 @@ def parse_args_to_observability_config(
         metrics_enabled=not args.disable_metrics,
         grpc_metrics_enabled=False if args.disable_grpc_metrics else None,
         logging_enabled=not args.disable_logging,
-        tracing_enabled=args.enable_tracing or args.trace_collect,
-        trace_collect=args.trace_collect,
+        tracing_enabled=args.enable_tracing or args.enable_token_trace,
+        token_trace_enabled=args.enable_token_trace,
         otlp_endpoint=args.otlp_endpoint,
         prometheus_port=args.prometheus_port,
         metrics_sample_rate=args.metrics_sample_rate,
@@ -363,14 +363,16 @@ def parse_args_to_observability_config(
         trace_output=args.trace_output,
     )
 
-    if config.trace_collect and not config.enabled:
+    if config.token_trace_enabled and not config.enabled:
         raise ValueError(
-            "--trace-collect requires the observability EventBus; "
+            "--enable-token-trace requires the observability EventBus; "
             "remove --disable-observability."
         )
 
     if config.tracing_enabled and config.otlp_endpoint is None:
-        flag = "--trace-collect" if config.trace_collect else "--enable-tracing"
+        flag = (
+            "--enable-token-trace" if config.token_trace_enabled else "--enable-tracing"
+        )
         raise ValueError(
             f"{flag} requires --otlp-endpoint to be set. "
             "Tracing needs an OTLP gRPC endpoint to export spans."
@@ -546,7 +548,9 @@ def init_observability(
         # MPServerTracingSubscriber must register first: the transfer-phase
         # subscriber reads the store/retrieve span it opens on the same event.
         bus.register_subscriber(
-            MPServerTracingSubscriber(registry, trace_collect=obs_config.trace_collect)
+            MPServerTracingSubscriber(
+                registry, token_trace_enabled=obs_config.token_trace_enabled
+            )
         )
         bus.register_subscriber(BlendTracingSubscriber(registry))
         bus.register_subscriber(TimeoutTracingSubscriber(registry))

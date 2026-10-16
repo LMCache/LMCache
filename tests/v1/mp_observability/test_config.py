@@ -129,26 +129,26 @@ class TestExtraLoggingRegistration:
         assert messages == []
 
 
-class TestTraceCollectArgs:
+class TestTokenTraceArgs:
     def test_default_off(self):
         config = _parse([])
-        assert config.trace_collect is False
+        assert config.token_trace_enabled is False
         assert config.tracing_enabled is False
 
     def test_implies_tracing(self):
-        config = _parse(["--trace-collect", "--otlp-endpoint", "http://c:4317"])
-        assert config.trace_collect is True
+        config = _parse(["--enable-token-trace", "--otlp-endpoint", "http://c:4317"])
+        assert config.token_trace_enabled is True
         assert config.tracing_enabled is True
 
     def test_requires_otlp_endpoint(self):
-        with pytest.raises(ValueError, match="trace-collect requires --otlp"):
-            _parse(["--trace-collect"])
+        with pytest.raises(ValueError, match="token-trace requires --otlp"):
+            _parse(["--enable-token-trace"])
 
     def test_conflicts_with_disabled_observability(self):
-        with pytest.raises(ValueError, match="trace-collect requires the"):
+        with pytest.raises(ValueError, match="token-trace requires the"):
             _parse(
                 [
-                    "--trace-collect",
+                    "--enable-token-trace",
                     "--otlp-endpoint",
                     "http://c:4317",
                     "--disable-observability",

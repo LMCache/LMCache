@@ -72,11 +72,9 @@ class MPServerTracingSubscriber(EventSubscriber):
     def __init__(
         self,
         registry: SpanRegistry | None = None,
-        trace_collect: bool = False,
+        token_trace_enabled: bool = False,
     ) -> None:
-        # Prompt token ids leave the server only when the operator asked for
-        # them: ``MP_LOOKUP`` carries them when trace collection is on.
-        self._trace_collect = trace_collect
+        self._token_trace_enabled = token_trace_enabled
 
         # Shared span registry.  When a registry is provided, other subscribers
         # that share the same instance can look up the root "request" span or
@@ -118,7 +116,7 @@ class MPServerTracingSubscriber(EventSubscriber):
             EventType.MP_LOOKUP_PREFETCH_START: self._on_start,
             EventType.MP_LOOKUP_PREFETCH_END: self._on_end,
         }
-        if self._trace_collect:
+        if self._token_trace_enabled:
             subscriptions[EventType.MP_LOOKUP] = self._on_lookup
         return subscriptions
 
@@ -162,26 +160,20 @@ class MPServerTracingSubscriber(EventSubscriber):
         self._get_or_create_request_span(event.session_id, event.timestamp)
 
     def _on_lookup(self, event: Event) -> None:
-        """Emit the request's prompt as a zero-duration child of the root span.
+        """Emit the lookup's prompt as a zero-duration child of the root span.
 
-        Only lookups whose ``token_ids`` is non-empty produce a span: the
-        producer leaves it empty on repeat lookups of the same request.
         The span starts and ends at the event timestamp so it exports on the
         next batch instead of holding the prompt until the request finishes.
         ``lmcache.input_ids`` carries the prompt token ids and
-        ``lmcache.model`` the model name; the timestamp is the span's own
-        start time.
-
-        The span nests under whichever root the request already has: the
-        ``"request"`` root of a plain lookup or the ``"cb.request"`` root of
-        a blend lookup. No root is created here, since only the owning
-        subscriber closes it.
+        ``lmcache.model`` the model name. A request the engine looks up again
+        emits one span per lookup; consumers that want one prompt per request
+        key on ``session_id``.
 
         Args:
             event: ``MP_LOOKUP`` event with ``token_ids`` and ``model_name``
                 metadata.
         """
-        if not _HAS_OTEL or not event.metadata["token_ids"]:
+        if not _HAS_OTEL:
             return
         sid = event.session_id
         root_ctx = self._registry.get_context(sid, "request")

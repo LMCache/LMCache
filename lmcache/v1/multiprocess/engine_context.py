@@ -198,8 +198,6 @@ class MPCacheServerContext:
             False.
         null_block_id: Engine block ID that denotes absent KV data.
         session_ttl_seconds: Idle seconds before a request session is reaped.
-        trace_collect: Whether ``MP_LOOKUP`` events carry each request's
-            prompt token ids for offline workload analysis. Default False.
     """
 
     def __init__(
@@ -211,14 +209,12 @@ class MPCacheServerContext:
         full_sw_kv: bool = False,
         null_block_id: int = 0,
         session_ttl_seconds: float = SessionManager.DEFAULT_SESSION_TTL,
-        trace_collect: bool = False,
     ) -> None:
         self._configured_chunk_size = chunk_size
         self._chunk_size = chunk_size
         self._null_block_id = null_block_id
         self._hash_algorithm = hash_algorithm
         self._session_ttl_seconds = session_ttl_seconds
-        self._trace_collect = trace_collect
         self._chunk_size_lock = threading.Lock()
         self._chunk_size_selected = False
         self._chunk_size_finalized = False
@@ -251,33 +247,6 @@ class MPCacheServerContext:
     def chunk_size(self) -> int:
         """Chunk size for KV cache operations."""
         return self._chunk_size
-
-    @property
-    def trace_collect(self) -> bool:
-        """Whether ``MP_LOOKUP`` events carry each request's prompt token ids."""
-        return self._trace_collect
-
-    def trace_token_ids(self, key: IPCCacheServerKey) -> tuple[int, ...]:
-        """Prompt token ids for a lookup's ``MP_LOOKUP`` event.
-
-        Returns ``key.token_ids``, shared by reference, on a request's first
-        lookup while trace collection is enabled; an empty tuple otherwise.
-        A session that already carries a lookup key belongs to a request the
-        engine re-submitted. The session is read, not created, so a lookup
-        that exits early leaves none behind.
-
-        Args:
-            key: The lookup's IPC key.
-
-        Returns:
-            The prompt token ids to attach, or an empty tuple.
-        """
-        if not self._trace_collect:
-            return ()
-        session = self._session_manager.get(key.request_id)
-        if session is None or session.lookup_ipc_key is None:
-            return key.token_ids
-        return ()
 
     @property
     def finalized_chunk_size(self) -> int | None:

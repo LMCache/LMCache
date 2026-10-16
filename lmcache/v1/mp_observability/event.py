@@ -84,11 +84,7 @@ class EventType(Enum):
     MP_LOOKUP_PREFETCH_START = "mp.lookup_prefetch.start"
     MP_LOOKUP_PREFETCH_END = "mp.lookup_prefetch.end"
 
-    # Chunk hash logging events. Metadata: request_id, chunk_hashes,
-    # model_name, chunk_size, seq_len, dtypes, shapes, and token_ids
-    # (tuple[int, ...]): the IPC key's prompt tokens, shared by reference
-    # and never mutated, on a request's first lookup when trace collection
-    # is enabled; an empty tuple otherwise.
+    # Chunk hash logging events
     MP_LOOKUP = "mp.lookup"
 
     # Per-chunk token bindings. Metadata (parallel lists):

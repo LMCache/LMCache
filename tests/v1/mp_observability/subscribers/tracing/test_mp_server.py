@@ -886,9 +886,8 @@ class TestTierAttributionAttributes:
 
 
 class TestRequestTraceSpan:
-    """With trace collection enabled, an ``MP_LOOKUP`` whose ``token_ids`` is
-    non-empty becomes a zero-duration ``mp.request.trace`` span under the
-    root request span."""
+    """With the token trace enabled, every ``MP_LOOKUP`` becomes a
+    zero-duration ``mp.request.trace`` span under the root request span."""
 
     _TOKEN_IDS = (5, 6, 7, 8)
 
@@ -896,8 +895,8 @@ class TestRequestTraceSpan:
         subs = MPServerTracingSubscriber(registry).get_subscriptions()
         assert EventType.MP_LOOKUP not in subs
 
-    def test_subscribed_when_trace_collect(self, registry):
-        subs = MPServerTracingSubscriber(registry, trace_collect=True)
+    def test_subscribed_when_token_trace_enabled(self, registry):
+        subs = MPServerTracingSubscriber(registry, token_trace_enabled=True)
         assert EventType.MP_LOOKUP in subs.get_subscriptions()
 
     @staticmethod
@@ -908,39 +907,44 @@ class TestRequestTraceSpan:
         *,
         registry: SpanRegistry | None = None,
         plain_request: bool = True,
+        lookups: int = 1,
     ) -> dict:
-        """Publish one lookup for *sid* and return finished spans by name.
+        """Publish *lookups* lookups for *sid* and return finished spans by name.
 
         Args:
             registry: Shared registry; pass one to pre-open a root span.
-            plain_request: Bracket the lookup with ``MP_REQUEST_START`` and
+            plain_request: Bracket the lookups with ``MP_REQUEST_START`` and
                 ``MP_REQUEST_END`` as the plain lookup path does.
+            lookups: Number of ``MP_LOOKUP`` events to publish.
         """
         bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
         registry = registry if registry is not None else SpanRegistry()
-        bus.register_subscriber(MPServerTracingSubscriber(registry, trace_collect=True))
+        bus.register_subscriber(
+            MPServerTracingSubscriber(registry, token_trace_enabled=True)
+        )
         bus.start()
         try:
             if plain_request:
                 bus.publish(
                     Event(event_type=EventType.MP_REQUEST_START, session_id=sid)
                 )
-            bus.publish(
-                Event(
-                    event_type=EventType.MP_LOOKUP,
-                    session_id=sid,
-                    metadata={
-                        "request_id": sid,
-                        "chunk_hashes": [b"h"],
-                        "model_name": "m",
-                        "chunk_size": 256,
-                        "seq_len": len(token_ids),
-                        "dtypes": [],
-                        "shapes": [],
-                        "token_ids": token_ids,
-                    },
+            for _ in range(lookups):
+                bus.publish(
+                    Event(
+                        event_type=EventType.MP_LOOKUP,
+                        session_id=sid,
+                        metadata={
+                            "request_id": sid,
+                            "chunk_hashes": [b"h"],
+                            "model_name": "m",
+                            "chunk_size": 256,
+                            "seq_len": len(token_ids),
+                            "dtypes": [],
+                            "shapes": [],
+                            "token_ids": token_ids,
+                        },
+                    )
                 )
-            )
             if plain_request:
                 bus.publish(Event(event_type=EventType.MP_REQUEST_END, session_id=sid))
             time.sleep(0.2)
@@ -975,10 +979,16 @@ class TestRequestTraceSpan:
         assert registry.get(sid, "request") is None
         assert spans["mp.request.trace"].parent is None
 
-    def test_empty_token_ids_emits_no_span(self, exporter):
-        spans = self._drive(exporter, "req-repeat", ())
-        assert "request" in spans
-        assert "mp.request.trace" not in spans
+    def test_repeat_lookup_emits_one_span_per_lookup(self, exporter):
+        """The subscriber keeps no per-request state; a re-looked-up request
+        produces a span per lookup, all carrying the same session id."""
+        sid = "req-repeat"
+        self._drive(exporter, sid, self._TOKEN_IDS, lookups=2)
+        traces = [
+            s for s in exporter.get_finished_spans() if s.name == "mp.request.trace"
+        ]
+        assert len(traces) == 2
+        assert {s.attributes["session_id"] for s in traces} == {sid}
 
     def test_span_carries_prompt_under_root(self, exporter):
         sid = "req-trace"
