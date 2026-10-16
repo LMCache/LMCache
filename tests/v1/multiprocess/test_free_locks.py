@@ -113,6 +113,7 @@ def _make_free_locks_ctx(
         The configured MagicMock context.
     """
     ctx = MagicMock()
+    ctx.lookup_expired.return_value = False
     ctx.get_read_owners.return_value = None
     ctx.chunk_size = 256
     ctx.token_hasher.chunk_size = 256
