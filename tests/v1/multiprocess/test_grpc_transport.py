@@ -6,7 +6,6 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock
 import importlib
 import subprocess
 import sys
@@ -34,7 +33,6 @@ from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
 from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -42,6 +40,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
+from lmcache.v1.multiprocess.plugin_modules.qstore import QStoreModule
 from lmcache.v1.multiprocess.protocols.server_module import (
     ServerModuleCallRequest,
     ServerModuleCallResponse,
@@ -111,6 +110,7 @@ class _Calls:
     lookup: tuple[IPCCacheServerKey, int] | None = None
     allocation: tuple[int, str, list[BlockAllocationRecord]] | None = None
     clear_force: bool | None = None
+    chunk_negotiation: int | None = None
 
 
 @pytest.fixture
@@ -180,6 +180,11 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
         @request_handler(HandlerType.BLOCKING)
         def clear(self, force: bool = False) -> None:
             calls.clear_force = force
+
+        @request_handler()
+        def negotiate_chunk_size(self, required_chunk_alignment: int) -> int:
+            calls.chunk_negotiation = required_chunk_alignment
+            return 640
 
         @request_handler(operation="noop")
         def debug(self) -> str:
@@ -287,6 +292,13 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
     assert clear_codec.request_decoder(
         clear_codec.request_encoder((), {"force": True})
     ) == (True,)
+
+    negotiate_codec = registry.by_full_name[
+        "lmcache.mp.ManagementService.NegotiateChunkSize"
+    ]
+    assert negotiate_codec.operation == "negotiate_chunk_size"
+    assert negotiate_codec.payload_types == (int,)
+    assert negotiate_codec.response_type is int
 
     registration_codec = registry.by_full_name[
         "lmcache.mp.EngineDrivenService.RegisterKvCacheEngineDrivenContext"
@@ -431,11 +443,9 @@ def test_build_grpc_request_server_uses_configured_server_workers(
                 grpc_server_workers,
             )
             self.modules: Any = None
-            self.service_registrars: Any = None
 
-        def add_modules(self, modules: Any, *, service_registrars: Any = ()) -> None:
+        def add_modules(self, modules: Any) -> None:
             self.modules = modules
-            self.service_registrars = service_registrars
 
     monkeypatch.setattr(
         grpc_server_module,
@@ -451,26 +461,18 @@ def test_build_grpc_request_server_uses_configured_server_workers(
         grpc_server_workers=7,
     )
 
-    service_registrars = (MagicMock(name="grpc_service_registrar"),)
-
     server = cast(
         Any,
-        build_grpc_request_server(
-            modules,
-            config,
-            service_registrars=service_registrars,
-        ),
+        build_grpc_request_server(modules, config),
     )
 
     assert server.args == ("grpc://127.0.0.1:6000", 2, 3, 7)
     assert server.modules is modules
-    assert server.service_registrars is service_registrars
 
 
 def test_grpc_server_registers_out_of_tree_services() -> None:
     """Server modules may attach package-owned gRPC services before start."""
     registered_servers: list[Any] = []
-    explicit_registrar = MagicMock(name="explicit_registrar")
 
     class ServiceModule:
         def register_grpc_services(self, server: Any) -> None:
@@ -483,15 +485,11 @@ def test_grpc_server_registers_out_of_tree_services() -> None:
         grpc_server_workers=1,
     )
     try:
-        server.add_modules(
-            [cast(Any, ServiceModule())],
-            service_registrars=[explicit_registrar],
-        )
+        server.add_modules([cast(Any, ServiceModule())])
     finally:
         server.close()
 
     assert len(registered_servers) == 1
-    explicit_registrar.assert_called_once()
 
 
 def test_service_message_codec_registry_round_trips_custom_types() -> None:
@@ -573,6 +571,8 @@ def test_generated_grpc_services_communicate_end_to_end(
     assert calls.clear_force is False
     assert client.clear(force=True).result(5) is None
     assert calls.clear_force is True
+    assert client.negotiate_chunk_size(640).result(5) == 640
+    assert calls.chunk_negotiation == 640
     assert client.noop().result(5) == "ok"
 
     records = [BlockAllocationRecord("request", [4], [5, 6])]

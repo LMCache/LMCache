@@ -798,6 +798,12 @@ integration is skipped unless the package is available locally. Use
 ``--disable-grpc-metrics`` to suppress the integration explicitly while
 keeping LMCache's EventBus metrics enabled.
 
+The plugin buffers its stats and flushes them from a Python thread, holding the
+GIL for the whole batch. With the upstream default of 0.5 seconds, each flush
+can stall requests for several milliseconds under load, so LMCache sets
+``GRPC_PYTHON_CENSUS_EXPORT_BATCH_INTERVAL_SECS`` to ``0.05`` unless you have
+already set it.
+
 These metrics describe the gRPC transport itself, not cache hit/miss behavior.
 They use the upstream ``grpc.*`` namespace. On Prometheus, ``.`` is converted
 to ``_`` and counters get a ``_total`` suffix.
