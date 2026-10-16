@@ -41,13 +41,16 @@ def create_transfer_strategy(
     storage_manager: "StorageManager",
     *,
     read_owner_resolver: Callable[[str], dict[ObjectKey, int] | None] | None = None,
+    read_lock_owner_resolver: Callable[[str], str] | None = None,
     shm_name: str,
     pool_size: int,
-    pending_writes: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
-    pending_reads: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
+    pending_writes: dict[tuple[int, str, IPCCacheServerKey], list[ObjectKey]],
+    pending_reads: dict[
+        tuple[int, str, IPCCacheServerKey], tuple[list[ObjectKey], str]
+    ],
     pending_lock: LockType,
     transfer_key_factory: Callable[
-        [IPCCacheServerKey, int], tuple[int, IPCCacheServerKey]
+        [IPCCacheServerKey, int], tuple[int, str, IPCCacheServerKey]
     ],
 ) -> "TransferStrategy":
     """Create the non-GPU transfer strategy for a registered context.
@@ -59,8 +62,9 @@ def create_transfer_strategy(
         pending_writes: Map of pending SHM write reservations keyed by transfer key.
         pending_reads: Map of pending SHM read reservations keyed by transfer key.
         pending_lock: Lock guarding shared pending SHM reservation state.
-        transfer_key_factory: Factory that builds the `(instance_id, key)` lookup key
-            used in the pending SHM reservation maps.
+        transfer_key_factory: Factory that builds the
+            `(instance_id, request_id, key)` lookup key used in the pending SHM
+            reservation maps.
 
     Returns:
         ``ShmTransferStrategy`` when SHM is configured with a non-empty pool name and
@@ -75,12 +79,15 @@ def create_transfer_strategy(
             pending_lock=pending_lock,
             transfer_key_factory=transfer_key_factory,
             fallback_strategy=InlineTransferStrategy(
-                storage_manager, read_owner_resolver
+                storage_manager, read_owner_resolver, read_lock_owner_resolver
             ),
+            read_lock_owner_resolver=read_lock_owner_resolver,
         )
 
     logger.info("Using safe inline non-GPU transfer strategy")
-    return InlineTransferStrategy(storage_manager, read_owner_resolver)
+    return InlineTransferStrategy(
+        storage_manager, read_owner_resolver, read_lock_owner_resolver
+    )
 
 
 class TransferStrategy(abc.ABC):
@@ -181,6 +188,7 @@ class InlineTransferStrategy(TransferStrategy):
         self,
         storage_manager: "StorageManager",
         read_owner_resolver: Callable[[str], dict[ObjectKey, int] | None] | None = None,
+        read_lock_owner_resolver: Callable[[str], str] | None = None,
     ) -> None:
         """Initialize the safe inline transfer strategy.
 
@@ -189,6 +197,7 @@ class InlineTransferStrategy(TransferStrategy):
         """
         self._storage_manager = storage_manager
         self._read_owner_resolver = read_owner_resolver
+        self._read_lock_owner_resolver = read_lock_owner_resolver
 
     def prepare_store(
         self,
@@ -299,9 +308,19 @@ class InlineTransferStrategy(TransferStrategy):
             if self._read_owner_resolver is not None
             else None
         )
+        read_owner = (
+            self._read_lock_owner_resolver(key.request_id)
+            if self._read_lock_owner_resolver is not None
+            else ""
+        )
+        if not isinstance(read_owner, str):
+            read_owner = ""
         try:
+            read_kwargs: dict[str, Any] = {"l1_owners": owners}
+            if read_owner:
+                read_kwargs["read_owner"] = read_owner
             read_ctx = self._storage_manager.read_prefetched_results(
-                obj_keys, l1_owners=owners
+                obj_keys, **read_kwargs
             )
             with read_ctx as maybe_memory_objs:
                 if not maybe_memory_objs or len(maybe_memory_objs) != len(obj_keys):
@@ -319,8 +338,11 @@ class InlineTransferStrategy(TransferStrategy):
                 )
         finally:
             if prefetched_keys:
+                finish_kwargs: dict[str, Any] = {"l1_owners": owners}
+                if read_owner:
+                    finish_kwargs["read_owner"] = read_owner
                 self._storage_manager.finish_read_prefetched(
-                    prefetched_keys, l1_owners=owners
+                    prefetched_keys, **finish_kwargs
                 )
 
     def commit_retrieve(
@@ -344,13 +366,16 @@ class ShmTransferStrategy(TransferStrategy):
     def __init__(
         self,
         storage_manager: "StorageManager",
-        pending_writes: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
-        pending_reads: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
+        pending_writes: dict[tuple[int, str, IPCCacheServerKey], list[ObjectKey]],
+        pending_reads: dict[
+            tuple[int, str, IPCCacheServerKey], tuple[list[ObjectKey], str]
+        ],
         pending_lock: LockType,
         transfer_key_factory: Callable[
-            [IPCCacheServerKey, int], tuple[int, IPCCacheServerKey]
+            [IPCCacheServerKey, int], tuple[int, str, IPCCacheServerKey]
         ],
         fallback_strategy: InlineTransferStrategy,
+        read_lock_owner_resolver: Callable[[str], str] | None = None,
     ) -> None:
         """Initialize SHM transfer strategy.
 
@@ -359,7 +384,8 @@ class ShmTransferStrategy(TransferStrategy):
             pending_writes: Shared pending SHM write reservations map.
             pending_reads: Shared pending SHM read reservations map.
             pending_lock: Lock guarding shared pending SHM maps.
-            transfer_key_factory: Factory to build `(instance_id, key)` transfer keys.
+            transfer_key_factory: Factory to build
+                `(instance_id, request_id, key)` transfer keys.
             fallback_strategy: Safe inline fallback for non-empty ``cpu_data``
                 payloads.
         """
@@ -369,6 +395,7 @@ class ShmTransferStrategy(TransferStrategy):
         self._pending_lock = pending_lock
         self._transfer_key_factory = transfer_key_factory
         self._fallback_strategy = fallback_strategy
+        self._read_lock_owner_resolver = read_lock_owner_resolver
 
     def prepare_store(
         self,
@@ -456,8 +483,18 @@ class ShmTransferStrategy(TransferStrategy):
     ) -> PrepareRetrieveResponse:
         """Read SHM objects and return slot descriptors for worker access."""
         obj_keys = resolve_obj_keys(key)
+        read_owner = (
+            self._read_lock_owner_resolver(key.request_id)
+            if self._read_lock_owner_resolver is not None
+            else ""
+        )
+        if not isinstance(read_owner, str):
+            read_owner = ""
+        read_kwargs: dict[str, Any] = {}
+        if read_owner:
+            read_kwargs["read_owner"] = read_owner
         shm_prefetched_keys, shm_memory_objs = self._storage_manager.unsafe_read(
-            obj_keys
+            obj_keys, **read_kwargs
         )
         if (
             not shm_memory_objs
@@ -465,12 +502,22 @@ class ShmTransferStrategy(TransferStrategy):
             or len(shm_memory_objs) != len(obj_keys)
         ):
             if shm_prefetched_keys:
-                self._storage_manager.finish_read_prefetched(shm_prefetched_keys)
+                finish_kwargs: dict[str, Any] = {}
+                if read_owner:
+                    finish_kwargs["read_owner"] = read_owner
+                self._storage_manager.finish_read_prefetched(
+                    shm_prefetched_keys, **finish_kwargs
+                )
             return PrepareRetrieveResponse(success=False, data=b"", context={})
         slots: list[dict[str, Any]] = []
         for memory_obj in shm_memory_objs:
             if memory_obj.tensor is None:
-                self._storage_manager.finish_read_prefetched(shm_prefetched_keys)
+                finish_kwargs: dict[str, Any] = {}
+                if read_owner:
+                    finish_kwargs["read_owner"] = read_owner
+                self._storage_manager.finish_read_prefetched(
+                    shm_prefetched_keys, **finish_kwargs
+                )
                 return PrepareRetrieveResponse(success=False, data=b"", context={})
             slots.append(
                 ShmSlotDescriptor(
@@ -482,7 +529,7 @@ class ShmTransferStrategy(TransferStrategy):
             )
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:
-            self._pending_reads[transfer_key] = shm_prefetched_keys
+            self._pending_reads[transfer_key] = (shm_prefetched_keys, read_owner)
         return PrepareRetrieveResponse(success=True, data=b"", context={"slots": slots})
 
     def commit_retrieve(
@@ -493,7 +540,13 @@ class ShmTransferStrategy(TransferStrategy):
         """Release pending SHM read locks for the completed retrieve request."""
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:
-            prefetched_keys = self._pending_reads.pop(transfer_key, [])
-        if prefetched_keys:
-            self._storage_manager.finish_read_prefetched(prefetched_keys)
+            pending_read = self._pending_reads.pop(transfer_key, None)
+        if pending_read:
+            prefetched_keys, read_owner = pending_read
+            finish_kwargs: dict[str, Any] = {}
+            if read_owner:
+                finish_kwargs["read_owner"] = read_owner
+            self._storage_manager.finish_read_prefetched(
+                prefetched_keys, **finish_kwargs
+            )
         return True

@@ -2,6 +2,7 @@
 """P2PController: peer discovery, adapter lifecycle, and lookup serving."""
 
 # Standard
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
@@ -154,6 +155,9 @@ class _P2PLookupJob:
     """ ``time.monotonic()`` when the lookup was submitted; a job older than
     the lookup timeout is treated as abandoned by its requester """
 
+    read_owner: str = ""
+    requested_read_owner: str = ""
+
 
 class P2PController(DiscoverableModule):
     """Serves lookup requests from peers and maintains one L2 adapter per peer.
@@ -199,6 +203,7 @@ class P2PController(DiscoverableModule):
         self._request_scheme = "grpc" if request_transport == "grpc" else "tcp"
         self._next_task_id = 0
         self._jobs: dict[int, _P2PLookupJob] = {}
+        self._remote_read_owners: dict[ObjectKey, deque[str]] = {}
         self._job_lock = threading.Lock()
         # Last abandoned-job scan time; unlocked, as a race only adds a scan.
         self._last_drop_time = time.monotonic()
@@ -289,6 +294,7 @@ class P2PController(DiscoverableModule):
         self,
         keys: list[ObjectKey],
         group_layout_descs: dict[int, MemoryLayoutDesc],
+        read_owner: str = "",
     ) -> int:
         """Submit a lookup and lock.
 
@@ -317,7 +323,11 @@ class P2PController(DiscoverableModule):
             # NOTE: skip_l2=True -- only objects already resident in L1 are
             # locked; "full" keeps every resident key, gaps allowed.
             handle = self._ctx.storage_manager.submit_prefetch_task(
-                PrefetchTaskSpec(key_groups=key_groups, fetching_policy="full"),
+                PrefetchTaskSpec(
+                    key_groups=key_groups,
+                    fetching_policy="full",
+                    read_owner=read_owner,
+                ),
                 external_request_id=f"p2p-{task_id}",
                 skip_l2=True,
             )
@@ -336,6 +346,7 @@ class P2PController(DiscoverableModule):
                 keys=keys,
                 key_groups=key_groups,
                 submitted_at=time.monotonic(),
+                requested_read_owner=read_owner,
             )
 
         logger.debug(
@@ -383,6 +394,15 @@ class P2PController(DiscoverableModule):
             # Still in progress (only possible once L2 prefetch is enabled).
             return None
 
+        job.read_owner = result.read_owner
+        if not job.requested_read_owner and len(job.key_groups) == len(
+            result.hit_cells
+        ):
+            for row, found in zip(job.key_groups, result.hit_cells, strict=True):
+                for found_key in found.gather(row.keys):
+                    self._remote_read_owners.setdefault(found_key, deque()).append(
+                        job.read_owner
+                    )
         addresses = self._build_addresses(job, result.hit_cells)
 
         with self._job_lock:
@@ -393,6 +413,7 @@ class P2PController(DiscoverableModule):
     def p2p_unlock_objects(
         self,
         keys: list[ObjectKey],
+        read_owner: str = "",
     ) -> None:
         """Unlock the specified object keys.
 
@@ -401,7 +422,25 @@ class P2PController(DiscoverableModule):
         """
         if not keys:
             return
-        self._ctx.storage_manager.finish_read_prefetched(keys)
+        if read_owner:
+            self._ctx.storage_manager.finish_read_prefetched(
+                keys, read_owner=read_owner
+            )
+        else:
+            grouped: dict[str, list[ObjectKey]] = {}
+            for key in keys:
+                owners = self._remote_read_owners.get(key)
+                owner = owners.popleft() if owners else ""
+                if owners is not None and not owners:
+                    self._remote_read_owners.pop(key, None)
+                grouped.setdefault(owner, []).append(key)
+            for owner, owner_keys in grouped.items():
+                if owner:
+                    self._ctx.storage_manager.finish_read_prefetched(
+                        owner_keys, read_owner=owner
+                    )
+                else:
+                    self._ctx.storage_manager.finish_read_prefetched(owner_keys)
 
     # -----------------------------------------------------------------
     # Internal helpers
@@ -453,7 +492,7 @@ class P2PController(DiscoverableModule):
         are returned in ``job.keys`` (request) order.
         """
         addresses = [_INVALID_ADDRESS] * len(job.keys)
-        if not job.key_groups:
+        if not job.key_groups or len(job.key_groups) != len(found_rows):
             return addresses
         found_keys = [
             key
@@ -463,7 +502,12 @@ class P2PController(DiscoverableModule):
         if not found_keys:
             return addresses
 
-        good_keys, good_objs = self._ctx.storage_manager.unsafe_read(found_keys)
+        if job.read_owner:
+            good_keys, good_objs = self._ctx.storage_manager.unsafe_read(
+                found_keys, read_owner=job.read_owner
+            )
+        else:
+            good_keys, good_objs = self._ctx.storage_manager.unsafe_read(found_keys)
         obj_by_key = dict(zip(good_keys, good_objs, strict=True))
 
         positions: dict[ObjectKey, list[int]] = {}

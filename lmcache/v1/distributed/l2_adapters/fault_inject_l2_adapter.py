@@ -314,6 +314,16 @@ class FaultInjectL2Adapter(L2AdapterInterface):
         """Delegate the lookup-and-lock task to the inner adapter (not faulted)."""
         return self._inner.submit_lookup_and_lock_task(keys, group_layout_descs)
 
+    def submit_lookup_and_lock_task_with_owner(
+        self,
+        keys: list[ObjectKey],
+        group_layout_descs: dict[int, MemoryLayoutDesc],
+        read_owner: str,
+    ) -> L2TaskId:
+        return self._inner.submit_lookup_and_lock_task_with_owner(
+            keys, group_layout_descs, read_owner
+        )
+
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
         """Delegate to the inner adapter; lookup results are passed through.
 
@@ -325,6 +335,9 @@ class FaultInjectL2Adapter(L2AdapterInterface):
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         """Delegate the unlock to the inner adapter."""
         self._inner.submit_unlock(keys)
+
+    def submit_unlock_with_owner(self, keys: list[ObjectKey], read_owner: str) -> None:
+        self._inner.submit_unlock_with_owner(keys, read_owner)
 
     # -- load (intercept for 'error') -----------------------------------------
 

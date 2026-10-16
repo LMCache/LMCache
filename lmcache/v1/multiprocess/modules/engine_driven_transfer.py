@@ -93,10 +93,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # _pending_shm_lock.
         self._lock = threading.Lock()
         self._pending_shm_writes: dict[
-            tuple[int, IPCCacheServerKey], list[ObjectKey]
+            tuple[int, str, IPCCacheServerKey], list[ObjectKey]
         ] = {}
         self._pending_shm_reads: dict[
-            tuple[int, IPCCacheServerKey], list[ObjectKey]
+            tuple[int, str, IPCCacheServerKey], tuple[list[ObjectKey], str]
         ] = {}
         self._pending_shm_lock = threading.Lock()
         self._shm_pool_info: ShmPoolInfo = self._ctx.shm_pool_info
@@ -244,22 +244,24 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             stale_writes = [k for k in self._pending_shm_writes if k[0] == instance_id]
             stale_reads = [k for k in self._pending_shm_reads if k[0] == instance_id]
             write_obj_keys = [self._pending_shm_writes.pop(k) for k in stale_writes]
-            read_obj_keys = [self._pending_shm_reads.pop(k) for k in stale_reads]
+            read_reservations = [self._pending_shm_reads.pop(k) for k in stale_reads]
 
         for obj_keys in write_obj_keys:
             if obj_keys:
                 self._ctx.storage_manager.finish_write(obj_keys)
-        for obj_keys in read_obj_keys:
+        for obj_keys, read_owner in read_reservations:
             if obj_keys:
-                self._ctx.storage_manager.finish_read_prefetched(obj_keys)
+                self._ctx.storage_manager.finish_read_prefetched(
+                    obj_keys, read_owner=read_owner
+                )
 
         self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
 
     @staticmethod
     def _make_transfer_key(
         key: IPCCacheServerKey, instance_id: int
-    ) -> tuple[int, IPCCacheServerKey]:
-        return (instance_id, key)
+    ) -> tuple[int, str, IPCCacheServerKey]:
+        return (instance_id, key.request_id, key)
 
     def _resolve_single_group_obj_keys(self, key: IPCCacheServerKey) -> list[ObjectKey]:
         """Resolve object keys for the single object group used by
@@ -344,6 +346,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         strategy: TransferStrategy = create_transfer_strategy(
             self._ctx.storage_manager,
             read_owner_resolver=self._ctx.get_read_owners,
+            read_lock_owner_resolver=self._ctx.get_read_lock_owner,
             shm_name=shm_name,
             pool_size=pool_size,
             pending_writes=self._pending_shm_writes,

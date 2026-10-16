@@ -484,6 +484,8 @@ class PrefetchTaskSpec:
             reader that will retrieve it. Ignored under ``NO_LOCK``.
         fetching_policy: See :data:`FetchingPolicy`.
         lock_mode: See :class:`PrefetchLockMode`.
+        read_owner: Optional owner token for the L1 read locks retained by this
+            request. Empty preserves the legacy anonymous behavior.
 
     Note:
         Every key group holds the same number of keys (``group_size``). The
@@ -495,6 +497,7 @@ class PrefetchTaskSpec:
     num_kv_readers: int = 1
     fetching_policy: FetchingPolicy = "prefix"
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
+    read_owner: str = ""
 
     def __post_init__(self) -> None:
         if not self.key_groups:
@@ -582,6 +585,8 @@ class PrefetchResult:
     they are not persisted. Tags name configured L1s for affinity and reporting
     and are the appropriate identity at process boundaries.
     """
+    read_owner: str = ""
+    """Owner token for the retained L1 read locks in this result."""
     _l1_hit_count: int = field(init=False, repr=False, compare=False)
     _l2_hit_count: int = field(init=False, repr=False, compare=False)
 

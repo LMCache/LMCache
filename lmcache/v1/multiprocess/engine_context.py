@@ -377,6 +377,13 @@ class MPCacheServerContext:
             raise ValueError("Multi-L1 retrieve requires a live prefetch session")
         return session.get_prefetch_owners()
 
+    def get_read_lock_owner(self, request_id: str) -> str:
+        """Return the read-lock owner token for a live request session."""
+        session = self._session_manager.get(request_id)
+        if session is None:
+            raise ValueError("Read-lock owner requires a live prefetch session")
+        return session.get_prefetch_read_owner()
+
     @property
     def token_hasher(self) -> TokenHasher:
         """The token hasher for computing chunk hashes."""

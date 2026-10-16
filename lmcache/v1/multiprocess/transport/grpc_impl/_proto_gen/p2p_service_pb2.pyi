@@ -47,7 +47,7 @@ class TransferChannelAddress(_message.Message):
     def __init__(self, offset: _Optional[int] = ..., size: _Optional[int] = ...) -> None: ...
 
 class P2pLookupAndLockRequest(_message.Message):
-    __slots__ = ("keys", "group_layout_descs")
+    __slots__ = ("keys", "group_layout_descs", "read_owner")
     class GroupLayoutDescsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -57,9 +57,11 @@ class P2pLookupAndLockRequest(_message.Message):
         def __init__(self, key: _Optional[int] = ..., value: _Optional[_Union[MemoryLayoutDesc, _Mapping]] = ...) -> None: ...
     KEYS_FIELD_NUMBER: _ClassVar[int]
     GROUP_LAYOUT_DESCS_FIELD_NUMBER: _ClassVar[int]
+    READ_OWNER_FIELD_NUMBER: _ClassVar[int]
     keys: _containers.RepeatedCompositeFieldContainer[ObjectKey]
     group_layout_descs: _containers.MessageMap[int, MemoryLayoutDesc]
-    def __init__(self, keys: _Optional[_Iterable[_Union[ObjectKey, _Mapping]]] = ..., group_layout_descs: _Optional[_Mapping[int, MemoryLayoutDesc]] = ...) -> None: ...
+    read_owner: str
+    def __init__(self, keys: _Optional[_Iterable[_Union[ObjectKey, _Mapping]]] = ..., group_layout_descs: _Optional[_Mapping[int, MemoryLayoutDesc]] = ..., read_owner: _Optional[str] = ...) -> None: ...
 
 class P2pLookupAndLockResponse(_message.Message):
     __slots__ = ("task_id",)
@@ -86,10 +88,12 @@ class P2pQueryLookupResultsResponse(_message.Message):
     def __init__(self, addresses: _Optional[_Union[TransferChannelAddressList, _Mapping]] = ...) -> None: ...
 
 class P2pUnlockObjectsRequest(_message.Message):
-    __slots__ = ("keys",)
+    __slots__ = ("keys", "read_owner")
     KEYS_FIELD_NUMBER: _ClassVar[int]
+    READ_OWNER_FIELD_NUMBER: _ClassVar[int]
     keys: _containers.RepeatedCompositeFieldContainer[ObjectKey]
-    def __init__(self, keys: _Optional[_Iterable[_Union[ObjectKey, _Mapping]]] = ...) -> None: ...
+    read_owner: str
+    def __init__(self, keys: _Optional[_Iterable[_Union[ObjectKey, _Mapping]]] = ..., read_owner: _Optional[str] = ...) -> None: ...
 
 class P2pUnlockObjectsResponse(_message.Message):
     __slots__ = ()

@@ -31,6 +31,7 @@ message TransferChannelAddress {
 message P2pLookupAndLockRequest {
   repeated ObjectKey keys = 1;
   map<int64, MemoryLayoutDesc> group_layout_descs = 2;
+  string read_owner = 3;
 }
 
 message P2pLookupAndLockResponse {
@@ -51,6 +52,7 @@ message P2pQueryLookupResultsResponse {
 
 message P2pUnlockObjectsRequest {
   repeated ObjectKey keys = 1;
+  string read_owner = 2;
 }
 
 message P2pUnlockObjectsResponse {}

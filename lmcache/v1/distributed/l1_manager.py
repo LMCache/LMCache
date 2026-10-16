@@ -30,6 +30,7 @@ from lmcache.v1.distributed.memory_manager import (
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
+from lmcache.v1.distributed.read_lock import ReadLock
 from lmcache.v1.gpu_connector.gds_context import (
     close_l1_gds_context,
     initialize_l1_gds_context,
@@ -99,7 +100,7 @@ class L1ObjectState:
     write_lock: TTLLock
     """ The writer's reservation; held while the object is staged. """
 
-    read_lock: TTLLock
+    read_lock: ReadLock
     """ The read lock with TTL for the object. """
 
     is_temporary: bool
@@ -292,6 +293,7 @@ class L1Manager(L1ManagerInterface):
         self,
         keys: list[ObjectKey],
         read_locks: int = 1,
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve read access for the given keys.
 
@@ -302,6 +304,7 @@ class L1Manager(L1ManagerInterface):
                 one per worker that consumes a read lock
                 for the same key (e.g. MLA models with
                 TP > 1).
+            read_owner: Reservation owner, unique across independent readers.
 
         Returns:
             A dictionary mapping each object key to a tuple
@@ -323,11 +326,7 @@ class L1Manager(L1ManagerInterface):
                 ret[key] = (L1Error.KEY_NOT_EXIST, None)
                 continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.lock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.lock()
+            entry.read_lock.lock(read_owner, total)
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 
@@ -338,6 +337,7 @@ class L1Manager(L1ManagerInterface):
     def unsafe_read(
         self,
         keys: list[ObjectKey],
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1OperationResult]:
         """Unsafe read the read-locked objects without adding new read locks.
 
@@ -347,6 +347,7 @@ class L1Manager(L1ManagerInterface):
 
         Args:
             keys: The list of object keys to read.
+            read_owner: Owner of the read reservation to validate.
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -364,7 +365,12 @@ class L1Manager(L1ManagerInterface):
                 ret[key] = (L1Error.KEY_NOT_EXIST, None)
                 continue
 
-            if not entry.read_lock.is_locked():
+            locked = (
+                entry.read_lock.is_locked(read_owner)
+                if read_owner
+                else entry.read_lock.legacy_owner() is not None
+            )
+            if not locked:
                 ret[key] = (L1Error.KEY_NOT_READABLE, None)
                 continue
 
@@ -377,6 +383,7 @@ class L1Manager(L1ManagerInterface):
         self,
         keys: list[ObjectKey],
         read_locks: int = 1,
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1Error]:
         """Finish read access for the given keys.
 
@@ -391,6 +398,7 @@ class L1Manager(L1ManagerInterface):
                 default); the reservation owner releasing the
                 whole reservation passes the ``reserve_read``
                 total.
+            read_owner: Owner of the read reservation to release.
 
         Returns:
             A dictionary mapping each object key to an
@@ -418,7 +426,8 @@ class L1Manager(L1ManagerInterface):
                 ret[key] = L1Error.KEY_NOT_EXIST
                 continue
 
-            if not entry.read_lock.is_locked():
+            owner = read_owner or entry.read_lock.legacy_owner()
+            if owner is None or not entry.read_lock.unlock(owner, total):
                 logger.warning(
                     "L1Manager: finish read on non-read-locked key %s, "
                     "potential inconsistent data might be read",
@@ -427,11 +436,6 @@ class L1Manager(L1ManagerInterface):
                 ret[key] = L1Error.KEY_IN_WRONG_STATE
                 continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.unlock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.unlock()
             if entry.is_temporary and not entry.read_lock.is_locked():
                 need_to_free.append(entry.memory_obj)
                 need_to_free_keys.append(key)
@@ -560,7 +564,7 @@ class L1Manager(L1ManagerInterface):
                 entry = L1ObjectState(
                     memory_obj=mem_obj,
                     write_lock=TTLLock(self._write_ttl_seconds),
-                    read_lock=TTLLock(self._read_ttl_seconds),
+                    read_lock=ReadLock(self._read_ttl_seconds),
                     is_temporary=is_temp,
                 )
                 entry.write_lock.lock()
@@ -662,6 +666,7 @@ class L1Manager(L1ManagerInterface):
         keys: list[ObjectKey],
         read_locks: int = 1,
         tag: str = "",
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1OperationResult]:
         """Atomically finish write and acquire read lock for the given keys.
 
@@ -676,6 +681,7 @@ class L1Manager(L1ManagerInterface):
                 worker that consumes a read lock for the same key
                 (e.g. MLA models with TP > 1).
             tag: The writer's tag passed to ``reserve_write``.
+            read_owner: Owner of the new read reservation.
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -720,8 +726,7 @@ class L1Manager(L1ManagerInterface):
                 discarded.append(entry.memory_obj)
                 resident_keys.append(key)
                 entry = resident
-            for _ in range(total):
-                entry.read_lock.lock()
+            entry.read_lock.lock(read_owner, total)
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
 
         self._memory_manager.free(discarded)

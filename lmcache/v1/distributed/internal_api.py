@@ -269,19 +269,21 @@ class L1ManagerInterface(Protocol):
         ...
 
     def reserve_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self, keys: list[ObjectKey], read_locks: int = 1, read_owner: str = ""
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Take ``read_locks`` read locks on each resident key."""
+        """Take ``read_locks`` read locks for ``read_owner`` on each key."""
         ...
 
-    def unsafe_read(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1OperationResult]:
-        """Return already read-locked objects without new locks."""
+    def unsafe_read(
+        self, keys: list[ObjectKey], read_owner: str = ""
+    ) -> dict[ObjectKey, L1OperationResult]:
+        """Return objects whose read lock belongs to ``read_owner``."""
         ...
 
     def finish_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self, keys: list[ObjectKey], read_locks: int = 1, read_owner: str = ""
     ) -> dict[ObjectKey, L1Error]:
-        """Release ``read_locks`` read locks on each key."""
+        """Release ``read_locks`` read locks owned by ``read_owner``."""
         ...
 
     def reserve_write(
@@ -301,9 +303,13 @@ class L1ManagerInterface(Protocol):
         ...
 
     def finish_write_and_reserve_read(
-        self, keys: list[ObjectKey], read_locks: int = 1, tag: str = ""
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        tag: str = "",
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Commit ``tag``'s buffers and read-lock the resident objects."""
+        """Commit ``tag``'s buffers and lock them for ``read_owner``."""
         ...
 
     def finish_write_and_delete(

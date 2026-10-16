@@ -18,7 +18,10 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
-from lmcache.v1.distributed.storage_manager import L1WriteCompletion
+from lmcache.v1.distributed.storage_manager import (
+    L1ReadCompletion,
+    L1WriteCompletion,
+)
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
@@ -217,7 +220,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._device_host_func_dispatcher.register(
             "finish_read_by_owner",
             self._ctx.storage_manager.finish_read_by_owner,
-            payload_type=L1WriteCompletion,
+            payload_type=L1ReadCompletion,
         )
         self._device_host_func_dispatcher.register(
             "release_imported_event",
@@ -311,11 +314,19 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             # particular, do not release the scheduler's whole MLA
             # reservation here: the remaining TP workers and concurrent
             # requests still own their independent read locks.
-            self._ctx.storage_manager.finish_read_prefetched(
-                obj_keys,
-                read_locks=1,
-                l1_owners=self._ctx.get_read_owners(key.request_id),
+            finish_kwargs: dict[str, Any] = {
+                "read_locks": 1,
+                "l1_owners": self._ctx.get_read_owners(key.request_id),
+            }
+            read_lock_owner_getter = getattr(self._ctx, "get_read_lock_owner", None)
+            read_lock_owner = (
+                read_lock_owner_getter(key.request_id)
+                if callable(read_lock_owner_getter)
+                else ""
             )
+            if isinstance(read_lock_owner, str) and read_lock_owner:
+                finish_kwargs["read_owner"] = read_lock_owner
+            self._ctx.storage_manager.finish_read_prefetched(obj_keys, **finish_kwargs)
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
@@ -1034,6 +1045,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
             prefetched_keys: list[ObjectKey] = []
             read_owners = self._ctx.get_read_owners(key.request_id)
+            read_lock_owner_getter = getattr(self._ctx, "get_read_lock_owner", None)
+            read_lock_owner = (
+                read_lock_owner_getter(key.request_id)
+                if callable(read_lock_owner_getter)
+                else ""
+            )
+            if not isinstance(read_lock_owner, str):
+                read_lock_owner = ""
             retained_keys = [
                 obj_key
                 for group, keys in enumerate(obj_keys_per_obj_group)
@@ -1042,9 +1061,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ]
             # Capture every retained lock before enqueuing GPU work, including
             # groups that a later transfer failure may leave unvisited.
-            read_completion = self._ctx.storage_manager.prepare_read_completion(
-                retained_keys, read_owners
-            )
+            if read_lock_owner:
+                read_completion = self._ctx.storage_manager.prepare_read_completion(
+                    retained_keys, read_owners, read_lock_owner
+                )
+            else:
+                read_completion = self._ctx.storage_manager.prepare_read_completion(
+                    retained_keys, read_owners
+                )
             total_bytes = 0
             retrieve_succeeded = True
             try:
@@ -1053,8 +1077,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         continue
                     skip = group_skips[obj_group_id]
                     in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
+                    read_kwargs: dict[str, Any] = {"l1_owners": read_owners}
+                    if read_lock_owner:
+                        read_kwargs["read_owner"] = read_lock_owner
                     found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
-                        in_window_keys, l1_owners=read_owners
+                        in_window_keys, **read_kwargs
                     )
                     if not window_objs or found_keys != in_window_keys:
                         logger.error("Some keys not found during retrieve!")

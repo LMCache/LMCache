@@ -47,6 +47,7 @@ class Session:
     prefetch_locked_gids: tuple = ()
     prefetch_group_windows: tuple[int, ...] = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
+    _prefetch_read_owner: str = field(default="", repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
     _lookup_generation: int = field(default=0, repr=False)
     _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
@@ -157,23 +158,31 @@ class Session:
             self._lookup_generation += 1
             self._failed_retrieve_releases.clear()
             self._prefetch_owners.clear()
+            self._prefetch_read_owner = ""
 
     def record_prefetch_result(
         self,
         hit_chunks: int,
         locked_gids: tuple[int, ...],
         l1_owners: dict[ObjectKey, int] | None = None,
+        read_owner: str = "",
     ) -> None:
         """Record the lock set acquired by the current lookup."""
         with self._lock:
             self.prefetch_hit_chunks = hit_chunks
             self.prefetch_locked_gids = locked_gids
             self._prefetch_owners = dict(l1_owners) if l1_owners is not None else {}
+            self._prefetch_read_owner = read_owner
 
     def get_prefetch_owners(self) -> dict[ObjectKey, int]:
         """Snapshot the L1 owners whose read locks this session's lookup retained."""
         with self._lock:
             return self._prefetch_owners.copy()
+
+    def get_prefetch_read_owner(self) -> str:
+        """Return the owner token for this session's retained read locks."""
+        with self._lock:
+            return self._prefetch_read_owner
 
     def prepare_failed_retrieve_release(
         self,

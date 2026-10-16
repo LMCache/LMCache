@@ -218,10 +218,12 @@ def grpc_client() -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
             self,
             keys: list[ObjectKey],
             group_layout_descs: dict[int, MemoryLayoutDesc],
+            read_owner: str = "",
         ) -> int:
             assert keys[0].cache_salt == "tenant"
             assert group_layout_descs[0].shapes == [torch.Size([2, 4])]
             assert group_layout_descs[0].dtypes == [torch.float16]
+            assert read_owner == "reader-5669"
             return 41
 
         @request_handler(HandlerType.BLOCKING)
@@ -588,6 +590,7 @@ def test_generated_grpc_services_communicate_end_to_end(
     task_id = client.p2p_lookup_and_lock(
         [ObjectKey(b"chunk", "model", 0, cache_salt="tenant")],
         {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])},
+        "reader-5669",
     ).result(5)
     assert task_id == 41
     assert client.p2p_query_lookup_results(task_id).result(5) == [

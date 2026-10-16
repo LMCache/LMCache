@@ -216,6 +216,14 @@ class P2PL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> L2TaskId:
+        return self.submit_lookup_and_lock_task_with_owner(keys, group_layout_descs, "")
+
+    def submit_lookup_and_lock_task_with_owner(
+        self,
+        keys: list[ObjectKey],
+        group_layout_descs: dict[int, MemoryLayoutDesc],
+        read_owner: str,
+    ) -> L2TaskId:
         task_id = self._next_task_id
         self._next_task_id += 1
 
@@ -225,7 +233,12 @@ class P2PL2Adapter(L2AdapterInterface):
             )
             return task_id
 
-        future = self._req_client.p2p_lookup_and_lock(keys, group_layout_descs)
+        if read_owner:
+            future = self._req_client.p2p_lookup_and_lock(
+                keys, group_layout_descs, read_owner
+            )
+        else:
+            future = self._req_client.p2p_lookup_and_lock(keys, group_layout_descs)
         failed = False
         remote_task_id = -1
         try:
@@ -275,9 +288,15 @@ class P2PL2Adapter(L2AdapterInterface):
         return bitmap
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
+        self.submit_unlock_with_owner(keys, "")
+
+    def submit_unlock_with_owner(self, keys: list[ObjectKey], read_owner: str) -> None:
         if not keys:
             return
-        self._req_client.p2p_unlock_objects(keys)
+        if read_owner:
+            self._req_client.p2p_unlock_objects(keys, read_owner)
+        else:
+            self._req_client.p2p_unlock_objects(keys)
         for key in keys:
             self._remote_addresses.pop(key, None)
 

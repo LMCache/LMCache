@@ -288,9 +288,13 @@ class BlendModule(
             return
         keys = [key for hash_keys in stash["per_hash"].values() for key in hash_keys]
         # No retrieve consumed anything, so the full reservation is still held.
-        self._ctx.storage_manager.finish_read_prefetched(
-            keys, read_locks=stash["read_locks"], l1_owners=stash.get("l1_owners")
-        )
+        finish_kwargs: dict[str, Any] = {
+            "read_locks": stash["read_locks"],
+            "l1_owners": stash.get("l1_owners"),
+        }
+        if stash.get("read_owner"):
+            finish_kwargs["read_owner"] = stash["read_owner"]
+        self._ctx.storage_manager.finish_read_prefetched(keys, **finish_kwargs)
         logger.info(
             "Released %d unretrieved read lock(s) for ended request %s",
             len(keys),
