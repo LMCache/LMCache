@@ -363,12 +363,12 @@ class LookupModule:
             )
 
         # Prefetch only [start, end); status offsets hits back to absolute.
-        sub_hashes = chunk_hashes[start_chunk:]
+        suffix_hashes = chunk_hashes[start_chunk:]
 
         spec = PrefetchTaskSpec(
             key_groups=ipc_key_to_grouped_object_keys(
                 key,
-                sub_hashes,
+                suffix_hashes,
                 list(range(attn_desc.num_object_groups)),
                 group_layout_descs,
                 attn_desc,
