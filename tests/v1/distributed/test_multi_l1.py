@@ -391,7 +391,7 @@ def test_read_release_trace_redacts_owners_and_replays_on_single_l1(
         recorder.close()
         trace_decorator.set_tracing_enabled(saved_gate)
 
-    release.assert_called_once_with(keys, 2, owners)
+    release.assert_called_once_with(keys, 2, owners, read_generations=None)
     assert release.call_args.args[0] is keys
     assert release.call_args.args[2] is owners
     assert source_l1.report_status()["read_locked_count"] == 0

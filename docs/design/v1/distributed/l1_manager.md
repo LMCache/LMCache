@@ -98,3 +98,9 @@ That window is the L2 lookup latency, not the L2 load time as before; see
 
 `tests/v1/distributed/test_l1_manager.py` (`TestStaging*` classes) and
 `tests/v1/distributed/test_prefetch_controller.py::TestConcurrentPrefetchSameKeys`.
+
+## Lookup read-lock cleanup
+
+Each shared read-lock lifetime has a process-local generation. Acquisition after expiry or after the reader count reaches zero creates a fresh generation, including when the same object key is recreated. Prefetch captures this value at L1 acquisition or L2 admission; its cleanup and the session's `free_lookup_locks` release only matching generations. A missing session cannot authorize key-only cleanup.
+
+Readers within a live lifetime retain the existing shared count and TTL refresh behavior. Normal key-only read/completion and P2P APIs are unchanged; delayed completions on those paths and reuse of one request ID across lookup attempts are outside this cleanup fix. Storage traces record successful releases without serializing process-local generations; rejected releases remain visible in the completion event's `failed_keys`.

@@ -45,6 +45,7 @@ class Session:
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
+    prefetch_read_generations: dict[ObjectKey, int] = field(default_factory=dict)
     prefetch_group_windows: tuple[int, ...] = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
@@ -153,6 +154,7 @@ class Session:
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
+            self.prefetch_read_generations = {}
             self.prefetch_group_windows = group_windows
             self._lookup_generation += 1
             self._failed_retrieve_releases.clear()
@@ -163,12 +165,24 @@ class Session:
         hit_chunks: int,
         locked_gids: tuple[int, ...],
         l1_owners: dict[ObjectKey, int] | None = None,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> None:
-        """Record the lock set acquired by the current lookup."""
+        """Record the lookup's retained L1 owners and acquired lock generations."""
         with self._lock:
             self.prefetch_hit_chunks = hit_chunks
             self.prefetch_locked_gids = locked_gids
             self._prefetch_owners = dict(l1_owners) if l1_owners is not None else {}
+            self.prefetch_read_generations = read_generations or {}
+
+    def get_read_generations(self, keys: list[ObjectKey]) -> dict[ObjectKey, int]:
+        """Snapshot the lookup's original lock generations for cleanup."""
+        with self._lock:
+            return {
+                k: self.prefetch_read_generations[k]
+                for k in keys
+                if k in self.prefetch_read_generations
+            }
 
     def get_prefetch_owners(self) -> dict[ObjectKey, int]:
         """Snapshot the L1 owners whose read locks this session's lookup retained."""

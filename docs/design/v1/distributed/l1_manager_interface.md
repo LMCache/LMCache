@@ -16,6 +16,10 @@ without changes on the caller side.
   `memory_region_count`, `memcheck`, `close`. An implementation that cannot
   honour a call answers with the documented `L1Error` codes instead of
   raising, so the callers keep one code path.
+- Read acquisition methods optionally populate `read_generations` with the
+  acquired generation per key. `finish_read` checks that captured map before
+  releasing a lock; absent or stale entries cannot release a newer generation.
+  Omitting the map retains ordinary key-only completion.
 - It is `runtime_checkable`; `L1Manager` declares it explicitly
   (`class L1Manager(L1ManagerInterface)`) so the contract is visible at the
   implementation site, not only at the call sites.

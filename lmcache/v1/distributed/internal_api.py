@@ -269,9 +269,13 @@ class L1ManagerInterface(Protocol):
         ...
 
     def reserve_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Take ``read_locks`` read locks on each resident key."""
+        """Take read locks and optionally record acquired generations by key."""
         ...
 
     def unsafe_read(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1OperationResult]:
@@ -279,9 +283,16 @@ class L1ManagerInterface(Protocol):
         ...
 
     def finish_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1Error]:
-        """Release ``read_locks`` read locks on each key."""
+        """Release read locks only if supplied acquisition generations match.
+
+        With no generation map, retain the ordinary key-only completion path.
+        """
         ...
 
     def reserve_write(
@@ -301,9 +312,14 @@ class L1ManagerInterface(Protocol):
         ...
 
     def finish_write_and_reserve_read(
-        self, keys: list[ObjectKey], read_locks: int = 1, tag: str = ""
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        tag: str = "",
+        *,
+        read_generations: dict[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Commit ``tag``'s buffers and read-lock the resident objects."""
+        """Commit tagged buffers, take read locks and optionally record generations."""
         ...
 
     def finish_write_and_delete(
