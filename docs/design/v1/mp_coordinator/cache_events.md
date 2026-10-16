@@ -147,7 +147,7 @@ listener plumbing or a dedicated flush task:
   indexes tokens by the chunk hash already in every key). Only
   worker 0 reports: bindings depend on token content alone, so one
   report covers every rank's keys. Other store paths (engine-driven
-  transfer, blend pre-computed docs, experimental qstore) do not emit
+  transfer, blend pre-computed docs, the qstore plugin module) do not emit
   bindings yet — the engine-driven path can publish the same event from
   its ``commit_store`` when it needs directory tokens.
 - **`CacheEventSubscriber`** maps those events onto the directory

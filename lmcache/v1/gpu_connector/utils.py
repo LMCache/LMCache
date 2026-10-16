@@ -182,7 +182,7 @@ def legible_print_engine_kv_format(engine_kv_format: "lmcache_native.EngineKVFor
     shape = get_engine_kv_shape_description(engine_kv_format)
     backend = get_attention_backend(engine_kv_format)
     if shape.startswith("Unknown"):
-        logger.warning(f"Unknown Engine KV Format: {engine_kv_format}")
+        logger.warning("Unknown Engine KV Format: %s", engine_kv_format)
     else:
         logger.info("Engine KV Format: %s", shape)
         logger.info("Currently used by:\n  - %s", backend)
