@@ -1,7 +1,7 @@
 name: Build SGLang Image
 
 # Reusable workflow that builds lmcache/sglang (docker/Dockerfile.sglang): the
-# official SGLang release image plus the LMCache wheel from PyPI. Kept out of
+# newest official SGLang release image plus the LMCache wheel from PyPI. Kept out of
 # publish-image so a failure here never blocks the vLLM / standalone images.
 # With push: false it only builds (the Dockerfile runs the smoke checks), which
 # is how changes to the Dockerfile can be validated before a release.
@@ -39,8 +39,33 @@ permissions:
     contents: read
 
 jobs:
+    # Resolved once so both architectures build on the same SGLang release and
+    # the image label names it. Reads the release tag lmsysorg/sglang:latest
+    # points to rather than SGLang's GitHub release, whose image is pushed later.
+    resolve-sglang-version:
+        name: Resolve the newest SGLang release image
+        runs-on: ubuntu-latest
+        outputs:
+            version: ${{ steps.resolve.outputs.version }}
+
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Resolve lmsysorg/sglang:latest to its release tag
+              id: resolve
+              run: |
+                VERSION=$(curl -fsSL "https://hub.docker.com/v2/repositories/lmsysorg/sglang/tags?page_size=100&ordering=last_updated" \
+                  | python3 -c 'import json, re, sys; tags = json.load(sys.stdin)["results"]; latest = next(t["digest"] for t in tags if t["name"] == "latest"); print(next(t["name"] for t in tags if t["digest"] == latest and re.fullmatch(r"v\d+\.\d+\.\d+(\.post\d+)?", t["name"])))')
+                echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+                echo "Building on lmsysorg/sglang:${VERSION}"
+
     build-sglang-image:
         name: Build lmcache/sglang (${{ matrix.arch }})
+        needs: [resolve-sglang-version]
         strategy:
             fail-fast: false
             matrix:
@@ -108,6 +133,7 @@ jobs:
               run: |
                 docker buildx build \
                   --platform linux/${{ matrix.arch }} \
+                  --build-arg SGLANG_VERSION=${{ needs.resolve-sglang-version.outputs.version }} \
                   --build-arg LMCACHE_VERSION=${{ inputs.lmcache_version }} \
                   --build-arg "EXPECTED_TORCH=${EXPECTED_TORCH}" \
                   --tag "${IMAGE}" \

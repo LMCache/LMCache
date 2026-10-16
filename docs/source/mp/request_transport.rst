@@ -85,6 +85,7 @@ transports. Legacy pickle descriptors are rejected; upgrade workers and servers
 together. MUSA handles must use MessagePack scalars, lists and string-keyed maps;
 opaque SDK objects require an explicit codec and are rejected.
 
-This closes the device-wrapper deserialization path in CVE-2026-105192. It does
-not add RPC authentication or replace engine-driven tensor-data pickle payloads.
-Keep MP endpoints restricted to trusted clients.
+This closes the device-wrapper deserialization path in CVE-2026-105192. The
+engine-driven tensor-data path uses a separate typed inline codec that shares
+the descriptor dtype allowlist. Neither change adds RPC authentication; keep MP
+endpoints restricted to trusted clients.

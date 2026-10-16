@@ -219,10 +219,12 @@ def _same_number(
 def answer_match(prediction: str, references: list[str]) -> bool:
     """Whether *prediction* states one of the gold *references*.
 
-    A reference matches when, after :func:`normalize_answer`, it equals the
-    prediction or appears in it as a whole-word phrase ("Paris" in "the
-    capital is Paris").  A reference containing numbers also matches when
-    every one of its numbers appears in the prediction, up to 0.5% rounding.
+    A reference without numeric figures matches when, after
+    :func:`normalize_answer`, it equals the prediction or appears in it as
+    a whole-word phrase ("Paris" in "the capital is Paris"). References with
+    numeric figures require every figure to appear in the prediction, up
+    to 0.5% rounding. They cannot match by a punctuation-stripped phrase:
+    removing a decimal point would equate different values ("1.5", "15").
     When either side names a scale ("million", "billion", "5B", …), a rescale
     by a power of 1000 is also accepted, so "$11588.00" (in millions) matches
     "$11,588 million" and "$11.588 billion", but not "$3,033 million"; and a
@@ -265,9 +267,9 @@ def answer_match(prediction: str, references: list[str]) -> bool:
         gold = _phrase(reference)
         if abstains and not (_NEGATIVE.search(gold) or is_abstention(reference)):
             continue
-        if gold and (gold == normalized or f" {gold} " in padded):
-            return True
         gold_numbers = _numbers(reference)
+        if not gold_numbers and gold and (gold == normalized or f" {gold} " in padded):
+            return True
         scales = (
             _UNIT_SCALES
             if _SCALE_WORD.search(prediction) or _SCALE_WORD.search(reference)

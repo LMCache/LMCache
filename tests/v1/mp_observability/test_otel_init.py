@@ -4,6 +4,7 @@
 # Standard
 from types import ModuleType
 from unittest.mock import MagicMock, patch
+import os
 import sys
 
 # Third Party
@@ -117,6 +118,24 @@ def test_init_grpc_otel_metrics_registers_official_plugin(monkeypatch):
 
     assert len(registered_plugins) == 1
     assert registered_plugins[0].meter_provider is provider
+
+
+@pytest.mark.parametrize("user_value", [None, "1.0"])
+def test_init_grpc_otel_metrics_defaults_export_interval(monkeypatch, user_value):
+    env_var = "GRPC_PYTHON_CENSUS_EXPORT_BATCH_INTERVAL_SECS"
+    if user_value is None:
+        monkeypatch.delenv(env_var, raising=False)
+    else:
+        monkeypatch.setenv(env_var, user_value)
+    module = ModuleType("grpc_observability")
+    module.OpenTelemetryPlugin = MagicMock()
+    monkeypatch.setitem(sys.modules, "grpc_observability", module)
+    monkeypatch.setattr(otel_init.sys, "platform", "linux")
+    monkeypatch.setattr(otel_init, "_GRPC_OTEL_PLUGIN", None)
+
+    init_grpc_otel_metrics(object())
+
+    assert os.environ[env_var] == (user_value or "0.05")
 
 
 def test_init_grpc_otel_metrics_is_idempotent(monkeypatch):
