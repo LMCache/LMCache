@@ -785,14 +785,6 @@ class LMCacheMPSchedulerAdapter:
             )
         self.blocks_in_chunk = self.lmcache_tokens_per_chunk // vllm_block_size
 
-        # Intersect: a capability is only usable if every server honors it.
-        self.experimental: set[str] = set.intersection(
-            *(
-                get_experimental(client, timeout=self._mq_timeout)
-                for client in self.req_clients.values()
-            )
-        )
-
         # Health state: one Event per server. The adapter is considered healthy
         # only if ALL per-server events are set (any unhealthy server taints
         # the whole adapter, matching the min() semantics used for lookups).
