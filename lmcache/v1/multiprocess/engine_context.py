@@ -377,6 +377,20 @@ class MPCacheServerContext:
             raise ValueError("Multi-L1 retrieve requires a live prefetch session")
         return session.get_prefetch_owners()
 
+    def lookup_expired(self, request_id: str) -> bool:
+        """Check a request's lookup age against the configured L1 read TTL.
+
+        Args:
+            request_id: Request whose cached lookup would be consumed.
+
+        Returns:
+            Whether the lookup is too old to consume or release safely; unknown sessions are rejected.
+        """
+        session = self._session_manager.get(request_id)
+        return session is None or session.lookup_expired(
+            self._storage_manager.read_ttl_seconds
+        )
+
     @property
     def token_hasher(self) -> TokenHasher:
         """The token hasher for computing chunk hashes."""

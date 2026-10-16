@@ -49,6 +49,7 @@ class Session:
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
     _lookup_generation: int = field(default=0, repr=False)
+    _lookup_started_at: float | None = field(default=None, repr=False)
     _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
         default_factory=set, repr=False
     )
@@ -151,12 +152,21 @@ class Session:
         """Record a new lookup and reset its per-lookup release state."""
         with self._lock:
             self.lookup_ipc_key = key
+            self._lookup_started_at = time.monotonic()
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
             self.prefetch_group_windows = group_windows
             self._lookup_generation += 1
             self._failed_retrieve_releases.clear()
             self._prefetch_owners.clear()
+
+    def lookup_expired(self, read_ttl_seconds: float) -> bool:
+        """Return whether the lookup has reached the configured read-lock TTL."""
+        with self._lock:
+            return (
+                self._lookup_started_at is None
+                or time.monotonic() - self._lookup_started_at >= read_ttl_seconds
+            )
 
     def record_prefetch_result(
         self,

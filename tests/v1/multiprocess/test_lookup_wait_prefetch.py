@@ -34,6 +34,7 @@ def _make_ctx(wait_result=True, found=None):
     storage_manager.wait_prefetch_status.return_value = wait_result
     storage_manager.query_prefetch_status.return_value = _result(found)
     ctx = mock.Mock()
+    ctx.lookup_expired.return_value = False
     ctx.storage_manager = storage_manager
     ctx.event_bus = mock.Mock()
     ctx.chunk_size = 256

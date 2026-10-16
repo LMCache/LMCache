@@ -480,6 +480,11 @@ class LookupModule(DiscoverableModule):
         if key.start >= key.end:
             return
 
+        if self._ctx.lookup_expired(key.request_id):
+            # Anonymous counts may now belong to a newer reader. Let the
+            # original reservation expire instead of decrementing that reader.
+            return
+
         session = self._ctx.session_manager.get_or_create(key.request_id)
         if session.prefetch_hit_chunks < 0:
             # The lookup result has not reached the session yet (no
