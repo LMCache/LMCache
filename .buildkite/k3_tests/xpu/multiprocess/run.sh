@@ -6,14 +6,11 @@ export TORCH_DEVICE_TYPE="xpu"
 export VLLM_TARGET_DEVICE="xpu"
 export DEVICE_AFFINITY_VAR="ZE_AFFINITY_MASK"
 export GPU_MEMORY_PROBE_ENABLED="0"
-export BATCH_INVARIANT_DEFAULT="0"
 export DEFAULT_MODEL="Qwen/Qwen3-8B"
 export LM_EVAL_NUM_CONCURRENT_DEFAULT="8"
 export BK_SETUP_ENV_SCRIPT=".buildkite/k3_harness/setup-lmcache-only-env.sh"
 
 if [[ "${1:-}" == "lm_eval" ]]; then
-    # turn on batch invariant as CUDA
-    export BATCH_INVARIANT_DEFAULT="1"
     # Batch-invariant evaluation is slower; use fewer samples to save CI resources.
     export LIMIT="${LIMIT:-150}"
 fi

@@ -66,7 +66,7 @@ unset VLLM_PORT
 
 echo "=== Launching vLLM TP=2 with LMCache MP autostart enabled ==="
 VLLM_SERVER_DEV_MODE=1 \
-VLLM_BATCH_INVARIANT=1 \
+VLLM_BATCH_INVARIANT=0 \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --tensor-parallel-size 2 \

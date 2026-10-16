@@ -34,6 +34,13 @@ LMCACHE_REQUEST_TRANSPORT=zmq \
 .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
 ```
 
+The vLLM adapter defaults `VLLM_BATCH_INVARIANT` to `0`. The shared launcher
+keeps it enabled for `lm_eval` when comparing samples,
+`preemption_correctness`, and `gds_smoke`, preserving their previous behavior.
+The self-contained `kimi_linear_tp` and `dsv4_flash_tp` tests compare generated
+text exactly but retain their original launches without explicitly enabling
+batch invariance.
+
 The request transport can be `zmq` or `grpc`. The harness maps these values to
 the `tcp://` and `grpc://` connector addresses respectively.
 

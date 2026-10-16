@@ -92,7 +92,7 @@ env -u VLLM_PORT \
     CUDA_VISIBLE_DEVICES="${GPU_DEVICE}" \
     VLLM_ENABLE_V1_MULTIPROCESSING=0 \
     VLLM_SERVER_DEV_MODE=1 \
-    VLLM_BATCH_INVARIANT=1 \
+    VLLM_BATCH_INVARIANT=0 \
     PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \

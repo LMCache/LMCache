@@ -16,7 +16,7 @@ engine_setup_environment() {
     local setup_script="${BK_SETUP_ENV_SCRIPT:-${repo_root}/.buildkite/k3_harness/setup-env.sh}"
     export VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-${TORCH_DEVICE_TYPE:-cuda}}"
     export GPU_MEMORY_PROBE_ENABLED="${GPU_MEMORY_PROBE_ENABLED:-1}"
-    export BATCH_INVARIANT_DEFAULT="${BATCH_INVARIANT_DEFAULT:-1}"
+    export BATCH_INVARIANT_DEFAULT="${BATCH_INVARIANT_DEFAULT:-0}"
     source "$setup_script"
 }
 
@@ -24,7 +24,7 @@ engine_configure_defaults() {
     export VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-${TORCH_DEVICE_TYPE:-cuda}}"
     export DEVICE_AFFINITY_VAR="${DEVICE_AFFINITY_VAR:-CUDA_VISIBLE_DEVICES}"
     export GPU_MEMORY_PROBE_ENABLED="${GPU_MEMORY_PROBE_ENABLED:-1}"
-    export BATCH_INVARIANT_DEFAULT="${BATCH_INVARIANT_DEFAULT:-1}"
+    export BATCH_INVARIANT_DEFAULT="${BATCH_INVARIANT_DEFAULT:-0}"
 
     export ENGINE_PORT="${ENGINE_PORT:-${VLLM_PORT:-8000}}"
     export ENGINE_BASELINE_PORT="${ENGINE_BASELINE_PORT:-${VLLM_BASELINE_PORT:-9000}}"
@@ -38,6 +38,21 @@ engine_configure_defaults() {
 
     export ENGINE_LOG_FILE="${ENGINE_LOG_FILE:-/tmp/build_${BUILD_ID:-local_$$}_vllm.log}"
     export ENGINE_BASELINE_LOG_FILE="${ENGINE_BASELINE_LOG_FILE:-/tmp/build_${BUILD_ID:-local_$$}_vllm_baseline.log}"
+}
+
+engine_configure_workload() {
+    local test_name="$1"
+
+    case "$test_name" in
+        lm_eval)
+            if [[ "${LM_EVAL_VERIFY_MODE:-${LM_EVAL_VERIFY_MODE_DEFAULT:-samples}}" == "samples" ]]; then
+                export BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
+            fi
+            ;;
+        preemption_correctness | gds_smoke)
+            export BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
+            ;;
+    esac
 }
 
 engine_prepare_launch() {
@@ -295,6 +310,7 @@ _engine_launch_deadlock_profile() {
     env -u VLLM_PORT \
         FLASHINFER_DISABLE_VERSION_CHECK=1 \
         VLLM_SERVER_DEV_MODE=1 \
+        VLLM_BATCH_INVARIANT=0 \
         vllm serve "$MODEL" \
             --tensor-parallel-size 2 \
             --distributed-executor-backend mp \
