@@ -1322,26 +1322,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # APC-covered lookup start (0 = none; stays 0 after a shrink):
         # the vLLM hit floored to every group's paged-chunk boundary and the
-        # LMCache chunk size, leaving at least one chunk to look up.
+        # LMCache chunk size. It never exceeds the aligned lookup end since
+        # vLLM caps the APC hit at num_prompt_tokens - 1; an all-covered
+        # lookup is served by the server's empty prefetch job.
         lookup_start = 0
         if not tracker.need_full_lookup:
             tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
-            aligned_end = (
-                max(
-                    0,
-                    len(tracker.get_token_ids())
-                    - int(self._reserve_last_token_for_lookup),
-                )
-                // tokens_per_chunk
-                * tokens_per_chunk
-            )
-            lookup_start = min(
+            lookup_start = (
                 num_computed_tokens
                 // self._hit_alignment_tokens
                 * self._hit_alignment_tokens
                 // tokens_per_chunk
-                * tokens_per_chunk,
-                max(0, aligned_end - tokens_per_chunk),
+                * tokens_per_chunk
             )
 
         if tracker.lookup_started_at is None:

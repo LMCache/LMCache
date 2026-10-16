@@ -298,11 +298,7 @@ class LookupModule(DiscoverableModule):
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.set_tokens(list(key.token_ids))
 
-        # Leave one chunk for the prefetch so there is always a sub-range;
-        # an all-covered request then re-fetches a single covered chunk.
-        start_chunk = min(
-            max(0, key.start // self._ctx.chunk_size), len(chunk_hashes) - 1
-        )
+        start_chunk = min(max(0, key.start // self._ctx.chunk_size), len(chunk_hashes))
         session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw))
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
@@ -383,6 +379,28 @@ class LookupModule(DiscoverableModule):
 
         # Prefetch only [start, end); status offsets hits back to absolute.
         suffix_hashes = chunk_hashes[start_chunk:]
+        if not suffix_hashes:
+            # Everything is engine-covered: nothing to lock or prefetch. The
+            # empty job still reports the covered prefix as the hit.
+            self._register_prefetch_job(
+                _PrefetchJob(
+                    handle=PrefetchHandle(
+                        prefetch_request_id=-1,
+                        external_request_id=key.request_id,
+                        total_requested_keys=0,
+                        submit_time=time.monotonic(),
+                    ),
+                    row_windows=(),
+                    request_id=key.request_id,
+                    requested_tokens=requested_tokens,
+                    num_object_groups=attn_desc.num_object_groups,
+                    attn_desc=attn_desc,
+                    start_chunk=start_chunk,
+                    model_name=model_name,
+                    cache_salt=key.cache_salt,
+                )
+            )
+            return
 
         spec = PrefetchTaskSpec(
             key_groups=ipc_key_to_grouped_object_keys(

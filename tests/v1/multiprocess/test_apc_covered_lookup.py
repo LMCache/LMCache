@@ -303,6 +303,28 @@ def _lookup_ctx(n_chunks: int) -> MagicMock:
     return ctx
 
 
+def test_all_covered_lookup_touches_and_submits_no_prefetch():
+    """A key whose ``start`` reaches the aligned end locks and fetches nothing.
+
+    The empty job still resolves: its hit is the covered prefix, offset from
+    ``start_chunk``, so the engine's accounting (``num_stored_tokens``) stays
+    absolute without a single chunk being re-fetched.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    ctx = _lookup_ctx(4)
+    module = LookupModule(ctx)
+    module.lookup(_make_key(4, start_chunks=4), 1)
+
+    ctx.storage_manager.touch_cached_keys.assert_called_once()
+    ctx.storage_manager.submit_prefetch_task.assert_not_called()
+    with module._prefetch_job_lock:
+        job = module._prefetch_jobs["r"]
+    assert job.handle.prefetch_request_id == -1
+    assert job.start_chunk == 4
+
+
 def test_server_honors_the_lookup_key_start():
     """A lookup key with ``start > 0`` skips the lock and the prefetch below it.
 

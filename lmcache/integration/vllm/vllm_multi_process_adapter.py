@@ -935,9 +935,9 @@ class LMCacheMPSchedulerAdapter:
                 aligning the lookup range.
             start: Chunk-aligned start token index of the lookup; tokens
                 below it are covered by the engine's prefix cache, so the
-                server touches but does not lock or prefetch them. The
-                caller keeps it below the aligned end so at least one chunk
-                is looked up (the server clamps as a final guard).
+                server touches but does not lock or prefetch them. A start
+                at the aligned end is valid: the server submits no prefetch
+                and reports the covered prefix as the hit.
 
         Returns:
             Whether a LOOKUP actually went out. Key per-lookup state off
