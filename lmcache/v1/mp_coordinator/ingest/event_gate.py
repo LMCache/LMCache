@@ -24,7 +24,7 @@ import time
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.ingest.event_broadcaster import CacheEventBroadcaster
-from lmcache.v1.mp_coordinator.metric_sources import track_metric_source
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.persistence.durable_component import PersistenceType
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 
@@ -164,7 +164,7 @@ class EventGate:
         # The totals; ``streams`` stays empty here and is filled from the
         # cursors when stats() takes a snapshot.
         self._stats = EventGateStats()
-        track_metric_source(self)
+        register_metric_source(self)
 
     def ingest(self, batch: CacheEventBatch) -> IngestResult:
         """Offer one batch to the consumers, applying incarnation

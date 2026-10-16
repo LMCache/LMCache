@@ -4,8 +4,8 @@
 Metric names are part of the coordinator's versioned contract: dashboards and
 alerts depend on them. Every metric is defined here, read at scrape time from
 a component's ``stats()`` snapshot. A component opts in by calling
-``track_metric_source(self)`` (see :mod:`.metric_sources`); this module maps
-each tracked component to its metrics. See
+``register_metric_source(self)`` (see :mod:`.metric_sources`); this module maps
+each registered component to its metrics. See
 ``docs/design/v1/mp_coordinator/observability.md``.
 """
 
@@ -80,9 +80,9 @@ def init_coordinator_metrics(config: MPCoordinatorConfig) -> None:
 def register_coordinator_metrics(
     controllers_up: Mapping[str, bool], meter: "Meter | None" = None
 ) -> None:
-    """Register the metrics of every tracked component, and of the controllers.
+    """Register the metrics of every registered component, and the controllers'.
 
-    Takes every component tracked so far (see :mod:`.metric_sources`), so
+    Takes every component registered so far (see :mod:`.metric_sources`), so
     call it after the app has built them all. Each instrument is
     observable: it reads a component's ``stats()`` at scrape time, so
     nothing in the components records into OTel.
@@ -94,7 +94,7 @@ def register_coordinator_metrics(
             coordinator meter; tests pass one from a private provider.
 
     Raises:
-        TypeError: If a tracked component has no metrics defined here.
+        TypeError: If a registered component has no metrics defined here.
     """
     if meter is None:
         meter = metrics.get_meter("lmcache.mp_coordinator")
@@ -137,7 +137,7 @@ class _MetricSpec:
 
 
 def _specs_for(component: object) -> list[_MetricSpec]:
-    """Return the metrics of one tracked component."""
+    """Return the metrics of one registered component."""
     match component:
         case KeyDirectory():
             return _key_directory_specs(component)

@@ -43,7 +43,7 @@ from lmcache.v1.mp_coordinator.ingest.event_source import (
     EventReplayCapability,
 )
 from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
-from lmcache.v1.mp_coordinator.metric_sources import track_metric_source
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest
 
 if TYPE_CHECKING:
@@ -149,7 +149,7 @@ class KafkaCacheEventSource(CacheEventSource):
             name="lmcache-kafka-cache-events",
             daemon=True,
         )
-        track_metric_source(self)
+        register_metric_source(self)
 
     async def start(self) -> None:
         """Subscribe to the topic and start the poll thread."""

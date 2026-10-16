@@ -146,7 +146,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # Whether each controller's run() was entered; the lifespan flips it.
     controllers_up = {type(c).__name__: False for c in controllers.all()}
     if config.metrics_enabled:
-        # Every component with metrics tracked itself as it was built.
+        # Every component with metrics registered itself as it was built.
         register_coordinator_metrics(controllers_up)
 
     ctx = CoordinatorContext(

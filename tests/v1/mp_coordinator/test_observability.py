@@ -29,7 +29,7 @@ from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
     KafkaCacheEventSource,
     KafkaSourceStats,
 )
-from lmcache.v1.mp_coordinator.metric_sources import track_metric_source
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.observability import init_coordinator_metrics
 from lmcache.v1.mp_coordinator.persistence.quiesce import QuiesceLock
 from lmcache.v1.mp_coordinator.views.instance_registry import (
@@ -303,7 +303,7 @@ def test_event_gate_freshness_gauges_report_each_server() -> None:
 class _StubKafkaSource(KafkaCacheEventSource):
     def __init__(self, stats: KafkaSourceStats) -> None:
         self.current = stats
-        track_metric_source(self)
+        register_metric_source(self)
 
     def stats(self) -> KafkaSourceStats:
         return self.current
@@ -339,7 +339,7 @@ def test_kafka_source_metrics_report_reads_partitions_and_lag() -> None:
 class _StubLoops(BackgroundLoops):
     def __init__(self, stats: dict[str, BackgroundLoopStats]) -> None:
         self.current = stats
-        track_metric_source(self)
+        register_metric_source(self)
 
     def stats(self) -> dict[str, BackgroundLoopStats]:
         return self.current
@@ -442,8 +442,8 @@ def test_a_component_s_metrics_are_registered_once() -> None:
     assert set(read_values(second_reader)) == {"lmcache_coordinator.controller.up"}
 
 
-def test_a_tracked_component_without_metrics_is_rejected() -> None:
-    track_metric_source(object())
+def test_a_registered_component_without_metrics_is_rejected() -> None:
+    register_metric_source(object())
     meter, _reader = private_meter()
 
     with pytest.raises(TypeError, match="object"):

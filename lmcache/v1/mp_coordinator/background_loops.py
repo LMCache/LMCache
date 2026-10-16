@@ -19,7 +19,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.metric_sources import track_metric_source
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 
 logger = init_logger(__name__)
 
@@ -53,7 +53,7 @@ class BackgroundLoops:
 
     def __init__(self) -> None:
         self._stats: dict[str, BackgroundLoopStats] = {}
-        track_metric_source(self)
+        register_metric_source(self)
 
     def start(
         self,
@@ -120,7 +120,7 @@ class EventLoopMonitor:
 
     def __init__(self) -> None:
         self._blocked_seconds = 0.0
-        track_metric_source(self)
+        register_metric_source(self)
 
     @property
     def blocked_seconds(self) -> float:
